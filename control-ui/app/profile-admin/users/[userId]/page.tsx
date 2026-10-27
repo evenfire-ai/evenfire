@@ -11,6 +11,7 @@ import {
 } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { GfsUserHomeBlock } from '@components/GfsUserHomeBlock'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
@@ -46,6 +47,7 @@ import {
   getAdminUserContexts,
   getAdminUserTeams,
   getContexts,
+  getGfsUserHome,
   getHosts,
   updateAdminMemberRole,
   updateAdminUserAgents,
@@ -95,6 +97,7 @@ export default function UserDetailsPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
+  const [deletedUser, setDeletedUser] = useState(false)
   const [approvalDmsRefreshDisabled, setApprovalDmsRefreshDisabled] = useState(true)
   const [refreshApprovalDms, setRefreshApprovalDms] = useState<(() => void) | null>(null)
   const [editingContact, setEditingContact] = useState(false)
@@ -281,9 +284,20 @@ export default function UserDetailsPage() {
   async function loadData() {
     setBusy(true)
     setError('')
+    setDeletedUser(false)
     try {
+      let context: Awaited<ReturnType<typeof getAdminUserContext>>
+      try {
+        context = await getAdminUserContext(userId)
+      } catch (contextError) {
+        if ((contextError as { status?: number })?.status !== 404) throw contextError
+        const { home } = await getGfsUserHome(userId)
+        if (home.state !== 'retired' || home.email !== null || home.name !== null)
+          throw contextError
+        setDeletedUser(true)
+        return
+      }
       const [
-        context,
         contexts,
         contextAccess,
         teamsData,
@@ -292,7 +306,6 @@ export default function UserDetailsPage() {
         userAgentAccess,
         communicationChannelsData,
       ] = await Promise.all([
-        getAdminUserContext(userId),
         getContexts(),
         getAdminUserContexts(userId),
         getAdminTeams(),
@@ -755,6 +768,22 @@ export default function UserDetailsPage() {
     )
   }
 
+  if (deletedUser) {
+    return (
+      <DetailPageShell
+        backLabel="Back to home folders"
+        contentMode="plain"
+        icon={<IconUsers />}
+        onBack={() => router.push(CONTROL_ROUTES.gfsUserHomes)}
+        subtitle="The account was deleted, but its home folder is retained."
+        title="Deleted user"
+      >
+        <p>User ID: {userId}</p>
+        <GfsUserHomeBlock key={userId} userId={userId} />
+      </DetailPageShell>
+    )
+  }
+
   return (
     <DetailPageShell<UserTab>
       activeTab={activeTab}
@@ -815,6 +844,8 @@ export default function UserDetailsPage() {
               <strong>{telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}</strong>
             </div>
           </div>
+
+          <GfsUserHomeBlock key={userId} userId={userId} />
 
           {!initialLoading && (
             <div
