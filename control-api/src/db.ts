@@ -3209,6 +3209,70 @@ async function applyControlAdminReplaceInviterAcceptGuard(db: DbClient): Promise
   `)
 }
 
+async function applyGfsUserHomesSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE gfs_user_homes (
+      user_id UUID PRIMARY KEY,
+      drive TEXT,
+      storage_username TEXT,
+      resource_id UUID REFERENCES gfs_resources(resource_id) ON DELETE RESTRICT,
+      state TEXT NOT NULL CHECK (state IN ('pending','ready','conflict','retired')),
+      conflict_code TEXT CHECK (conflict_code IN ('path_conflict','ancestor_grant_conflict','ownership_conflict')),
+      conflict_detail JSONB,
+      naming_policy_version SMALLINT NOT NULL DEFAULT 1,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT gfs_user_homes_drive_shape CHECK (state IN ('pending','retired') OR drive IS NOT NULL),
+      CONSTRAINT gfs_user_homes_resource_drive CHECK (resource_id IS NULL OR drive IS NOT NULL),
+      CONSTRAINT gfs_user_homes_ready_shape CHECK (state <> 'ready' OR (resource_id IS NOT NULL AND storage_username IS NOT NULL)),
+      CONSTRAINT gfs_user_homes_conflict_shape CHECK ((state = 'conflict') = (conflict_code IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX gfs_user_homes_name_uniq
+      ON gfs_user_homes (drive, lower(storage_username)) WHERE storage_username IS NOT NULL;
+    CREATE UNIQUE INDEX gfs_user_homes_resource_uniq
+      ON gfs_user_homes (resource_id) WHERE resource_id IS NOT NULL;
+    CREATE INDEX gfs_user_homes_pending_idx
+      ON gfs_user_homes (last_attempt_at NULLS FIRST, user_id) WHERE state = 'pending';
+
+    CREATE FUNCTION gfs_user_home_enroll() RETURNS trigger
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    BEGIN
+      INSERT INTO public.gfs_user_homes (user_id, state) VALUES (NEW.id, 'pending')
+      ON CONFLICT (user_id) DO NOTHING;
+      RETURN NEW;
+    END $$;
+    REVOKE ALL ON FUNCTION gfs_user_home_enroll() FROM PUBLIC;
+    CREATE TRIGGER users_gfs_home_enroll AFTER INSERT ON users
+      FOR EACH ROW EXECUTE FUNCTION gfs_user_home_enroll();
+
+    CREATE FUNCTION gfs_governed_root_guard() RETURNS trigger
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    DECLARE governed boolean;
+    BEGIN
+      SELECT EXISTS (SELECT 1 FROM public.gfs_user_homes h WHERE h.resource_id = OLD.resource_id)
+          OR (OLD.name = 'Users' AND OLD.kind = 'directory' AND EXISTS (
+                SELECT 1 FROM public.gfs_resources p WHERE p.resource_id = OLD.parent_resource_id AND p.parent_resource_id IS NULL))
+        INTO governed;
+      IF governed AND (TG_OP = 'DELETE'
+            OR NEW.parent_resource_id IS DISTINCT FROM OLD.parent_resource_id
+            OR NEW.name IS DISTINCT FROM OLD.name
+            OR (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL)) THEN
+        RAISE EXCEPTION 'governed root is immutable' USING ERRCODE = '23514', CONSTRAINT = 'gfs_governed_root_immutable';
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END $$;
+    REVOKE ALL ON FUNCTION gfs_governed_root_guard() FROM PUBLIC;
+    CREATE TRIGGER gfs_resources_governed_root BEFORE UPDATE OR DELETE ON gfs_resources
+      FOR EACH ROW EXECUTE FUNCTION gfs_governed_root_guard();
+
+    GRANT SELECT, INSERT, UPDATE ON TABLE gfs_user_homes TO control_api_runtime;
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE gfs_user_homes FROM control_api_runtime;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6376,6 +6440,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0129_workflow_schedules_concurrency_policy',
     apply: applyWorkflowScheduleConcurrencyPolicyMigration,
+  },
+  {
+    version: '0130_gfs_user_homes',
+    apply: applyGfsUserHomesSchema,
   },
 ]
 
