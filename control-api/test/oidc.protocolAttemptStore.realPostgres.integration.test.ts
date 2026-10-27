@@ -14,6 +14,8 @@ import './realPostgres.requirement.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
+const CLAIM_TEST_APPLICATION_NAME = 'oidc-protocol-attempt-claim-test'
+const CLAIM_CONCURRENCY = 12
 const ENCRYPTION_KEY = 'ab'.repeat(32)
 const BINDING: OidcProtocolAttemptBinding = {
   registrationId: 'company-login',
@@ -34,6 +36,28 @@ function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
+async function waitForBlockedClaimers(
+  adminPool: Pool,
+  database: string,
+  expected: number
+): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    const result = await adminPool.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count
+         FROM pg_stat_activity
+        WHERE datname = $1
+          AND application_name = $2
+          AND wait_event_type = 'Lock'
+          AND query ILIKE '%WITH candidate AS%'`,
+      [database, CLAIM_TEST_APPLICATION_NAME]
+    )
+    if (result.rows[0]?.count === expected) return
+    await new Promise<void>(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error(`Expected ${expected} OIDC claim queries blocked on the attempt row`)
+}
+
 describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
   const database = `oidc_attempts_${randomBytes(6).toString('hex')}`
   let adminPool: Pool | undefined
@@ -43,7 +67,11 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
     if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
-    pool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
+    pool = new Pool({
+      connectionString: databaseUrl(adminUrl, database),
+      max: CLAIM_CONCURRENCY + 1,
+      application_name: CLAIM_TEST_APPLICATION_NAME,
+    })
     await initDb({ connect: () => pool!.connect() })
   }, 60_000)
 
@@ -82,11 +110,27 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
     expect(stored.rows[0]?.pkce_verifier_encrypted).not.toContain('secret-pkce-verifier')
     expect(stored.rows[0]?.nonce_encrypted).not.toContain('secret-nonce')
 
-    const claims = await Promise.all(
-      Array.from({ length: 12 }, () =>
-        claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, state, BINDING)
+    const blocker = await pool!.connect()
+    let claimsPromise: Promise<Awaited<ReturnType<typeof claimOidcProtocolAttempt>>[]> | undefined
+    let claims: Awaited<ReturnType<typeof claimOidcProtocolAttempt>>[] = []
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM oidc_protocol_attempts WHERE id = $1 FOR UPDATE', [
+        created.id,
+      ])
+      claimsPromise = Promise.all(
+        Array.from({ length: CLAIM_CONCURRENCY }, () =>
+          claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, state, BINDING)
+        )
       )
-    )
+      await waitForBlockedClaimers(adminPool!, database, CLAIM_CONCURRENCY)
+      await blocker.query('COMMIT')
+      claims = await claimsPromise
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined)
+      blocker.release()
+      if (claimsPromise) await Promise.allSettled([claimsPromise])
+    }
     const winners = claims.filter((claim): claim is NonNullable<typeof claim> => claim !== null)
     expect(winners).toHaveLength(1)
     expect(winners[0]).toMatchObject({
