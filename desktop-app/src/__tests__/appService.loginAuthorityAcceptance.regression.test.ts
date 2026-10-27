@@ -429,6 +429,254 @@ describe('Stage 4 public login candidate acceptance', () => {
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalled()
   })
 
+  it('blocks environment selection when transient restore failure leaves A durably active', async () => {
+    const h = await harness()
+    const { second } = await addSecondEnvironment(h)
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeUser,
+    })
+    await h.service.passwordLogin('owner-a@example.test', 'fixture-password')
+
+    const restoring = await restartHarness()
+    vi.spyOn(restoring.state.authClient, 'getMe').mockRejectedValueOnce(
+      Object.assign(new Error('synthetic identity lookup is temporarily unavailable'), {
+        code: 'EMFILE',
+      })
+    )
+    await expect(restoring.service.initialize()).resolves.toMatchObject({ authenticated: false })
+    expect(restoring.state.sessionToken).toBeNull()
+    expect(restoring.state.me).toBeNull()
+    const runtimeBefore = restoring.config.getDesktopRuntimeConfigState()
+    const selectedA = await restoring.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: restoring.tokenStore,
+      envKey: restoring.envKey,
+    })
+    expect(selectedA.status).toBe('accepted')
+    if (selectedA.status !== 'accepted') throw new Error('Expected accepted A to remain selected')
+
+    await expect(
+      restoring.service.selectRuntimeConfigForHandoff(
+        second.id,
+        restoring.service.getSessionGeneration()
+      )
+    ).rejects.toThrow('desktop_setup_requires_signout')
+    expect(restoring.config.getDesktopRuntimeConfigState()).toEqual(runtimeBefore)
+    expect(
+      await restoring.acceptance.readSessionAuthoritySourceSelection({
+        tokenStore: restoring.tokenStore,
+        envKey: restoring.envKey,
+      })
+    ).toMatchObject({ status: 'accepted', session: { token: homeToken } })
+  })
+
+  it('blocks selection while accepted A restore is held before a transient identity failure', async () => {
+    const h = await harness()
+    const { second } = await addSecondEnvironment(h)
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeUser,
+    })
+    await h.service.passwordLogin('owner-a@example.test', 'fixture-password')
+
+    const restoring = await restartHarness()
+    const identityValidationStarted = deferred<void>()
+    const releaseIdentityValidation = deferred<typeof homeUser>()
+    vi.spyOn(restoring.state.authClient, 'getMe').mockImplementation(async token => {
+      expect(token).toBe(homeToken)
+      identityValidationStarted.resolve()
+      return releaseIdentityValidation.promise
+    })
+    const restore = restoring.service.initialize()
+    try {
+      await expectPhaseEntered(
+        identityValidationStarted.promise,
+        restore,
+        'accepted A identity validation'
+      )
+      const runtimeBefore = restoring.config.getDesktopRuntimeConfigState()
+
+      await expect(
+        restoring.service.selectRuntimeConfigForHandoff(
+          second.id,
+          restoring.service.getSessionGeneration()
+        )
+      ).rejects.toThrow('desktop_setup_requires_signout')
+      expect(restoring.config.getDesktopRuntimeConfigState()).toEqual(runtimeBefore)
+    } finally {
+      releaseIdentityValidation.reject(
+        Object.assign(new Error('synthetic identity lookup is temporarily unavailable'), {
+          code: 'EMFILE',
+        })
+      )
+    }
+
+    await expect(restore).resolves.toMatchObject({ authenticated: false })
+    expect(restoring.state.sessionToken).toBeNull()
+    expect(
+      await restoring.acceptance.readSessionAuthoritySourceSelection({
+        tokenStore: restoring.tokenStore,
+        envKey: restoring.envKey,
+      })
+    ).toMatchObject({ status: 'accepted', session: { token: homeToken } })
+  })
+
+  it('fails closed when the durable profile selector is unreadable during environment selection', async () => {
+    const h = await harness()
+    const { second } = await addSecondEnvironment(h)
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeUser,
+    })
+    await h.service.passwordLogin('owner-a@example.test', 'fixture-password')
+
+    const restoring = await restartHarness()
+    vi.spyOn(restoring.state.authClient, 'getMe').mockRejectedValueOnce(
+      Object.assign(new Error('synthetic identity lookup is temporarily unavailable'), {
+        code: 'EMFILE',
+      })
+    )
+    await expect(restoring.service.initialize()).resolves.toMatchObject({ authenticated: false })
+    const runtimeBefore = restoring.config.getDesktopRuntimeConfigState()
+    const failedRead = await failNextProfileAuthorityRead(restoring.tokenStore)
+
+    await expect(
+      restoring.service.selectRuntimeConfigForHandoff(
+        second.id,
+        restoring.service.getSessionGeneration()
+      )
+    ).rejects.toThrow('session_authority_unavailable')
+    expect(failedRead()).toBe(true)
+    expect(restoring.config.getDesktopRuntimeConfigState()).toEqual(runtimeBefore)
+    expect(
+      await restoring.acceptance.readSessionAuthoritySourceSelection({
+        tokenStore: restoring.tokenStore,
+        envKey: restoring.envKey,
+      })
+    ).toMatchObject({ status: 'accepted', session: { token: homeToken } })
+  })
+
+  it('allows ordinary environment selection when no profile session is accepted', async () => {
+    const h = await harness()
+    const { second } = await addSecondEnvironment(h)
+
+    await expect(
+      h.service.selectRuntimeConfigForHandoff(second.id, h.service.getSessionGeneration())
+    ).resolves.toMatchObject({
+      runtimeConfigState: { activeOptionId: second.id },
+    })
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.state.me).toBeNull()
+  })
+
+  it('rejects stale environment selection after a newer login is accepted', async () => {
+    const h = await harness()
+    const { second } = await addSecondEnvironment(h)
+    const staleGeneration = h.service.getSessionGeneration()
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeUser,
+    })
+    await expect(
+      h.service.passwordLogin('owner-a@example.test', 'fixture-password')
+    ).resolves.toMatchObject({ authenticated: true, me: homeUser })
+    const runtimeBefore = h.config.getDesktopRuntimeConfigState()
+
+    await expect(
+      h.service.selectRuntimeConfigForHandoff(second.id, staleGeneration)
+    ).rejects.toThrow('stale_session_generation')
+    expect(h.config.getDesktopRuntimeConfigState()).toEqual(runtimeBefore)
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeUser)
+    const selected = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Stale selection displaced accepted A')
+    expect(selected.session.token).toBe(homeToken)
+  })
+
+  it('does not complete desktop setup over an unresolved durable session owner', async () => {
+    const h = await harness()
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeUser,
+    })
+    await h.service.passwordLogin('owner-a@example.test', 'fixture-password')
+
+    const restoring = await restartHarness()
+    vi.spyOn(restoring.state.authClient, 'getMe').mockRejectedValueOnce(
+      Object.assign(new Error('synthetic identity lookup is temporarily unavailable'), {
+        code: 'EMFILE',
+      })
+    )
+    await expect(restoring.service.initialize()).resolves.toMatchObject({ authenticated: false })
+    const runtimeBefore = restoring.config.getDesktopRuntimeConfigState()
+    const registration = (
+      restoring.service as unknown as {
+        memberRegistrationServiceClient: {
+          completeDesktopSetup: (...args: unknown[]) => Promise<unknown>
+        }
+      }
+    ).memberRegistrationServiceClient
+    const completeSetup = vi.spyOn(registration, 'completeDesktopSetup')
+
+    await expect(
+      restoring.service.completeDesktopSetup('owner-a@example.test', 'fixture-setup-token')
+    ).rejects.toThrow('desktop_setup_requires_signout')
+    expect(completeSetup).not.toHaveBeenCalled()
+    expect(restoring.config.getDesktopRuntimeConfigState()).toEqual(runtimeBefore)
+    expect(
+      await restoring.acceptance.readSessionAuthoritySourceSelection({
+        tokenStore: restoring.tokenStore,
+        envKey: restoring.envKey,
+      })
+    ).toMatchObject({ status: 'accepted', session: { token: homeToken } })
+  })
+
+  it('does not apply discovered RPC configuration over an unresolved durable owner', async () => {
+    const h = await harness()
+    const restBaseUrl = h.config.config.externalRestApiBaseUrl
+    await h.config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restBaseUrl,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+
+    const configured = await restartHarness()
+    vi.spyOn(configured.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeUser,
+    })
+    await configured.service.passwordLogin('owner-a@example.test', 'fixture-password')
+
+    const restoring = await restartHarness()
+    vi.spyOn(restoring.state.authClient, 'getMe').mockRejectedValueOnce(
+      Object.assign(new Error('synthetic identity lookup is temporarily unavailable'), {
+        code: 'EMFILE',
+      })
+    )
+    await expect(restoring.service.initialize()).resolves.toMatchObject({ authenticated: false })
+    const runtimeBefore = restoring.config.getDesktopRuntimeConfigState()
+    vi.spyOn(restoring.state.authClient, 'getDesktopEnvironment').mockResolvedValueOnce({
+      externalRestApiBaseUrl: restBaseUrl,
+      rpcProxyBaseUrl: 'https://rpc.discovered.example.test',
+      appName: 'Environment A',
+    })
+
+    await restoring.service.getDependenciesHealth()
+
+    expect(restoring.state.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
+    expect(restoring.config.getDesktopRuntimeConfigState()).toEqual(runtimeBefore)
+    expect(
+      await restoring.acceptance.readSessionAuthoritySourceSelection({
+        tokenStore: restoring.tokenStore,
+        envKey: restoring.envKey,
+      })
+    ).toMatchObject({ status: 'accepted', session: { token: homeToken } })
+  })
+
   it('accepts fresh V1 authentication without importing an old safeStorage credential', async () => {
     const h = await harness()
     const oldToken = 'fixture-cp-s-previous-user'

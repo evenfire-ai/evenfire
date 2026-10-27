@@ -4972,6 +4972,24 @@ export class AppService {
     }
   }
 
+  private async assertProfileSelectionAllowsEnvironment(
+    targetEnvKey: string | null,
+    expectedSessionGeneration: number
+  ): Promise<void> {
+    if (this.quitPreparationStarted) throw new QuitAdmissionClosedError()
+    let selectedEnvKey: string | null
+    try {
+      selectedEnvKey = await this.sessionAuthority.getProfileSelectedEnvironmentKey()
+    } catch {
+      // An unreadable or recovery-fenced selector is unknown, never permission to switch.
+      throw new Error('session_authority_unavailable')
+    }
+    this.assertSessionGeneration(expectedSessionGeneration)
+    if (selectedEnvKey !== null && selectedEnvKey !== targetEnvKey) {
+      throw new Error('desktop_setup_requires_signout')
+    }
+  }
+
   private applyRuntimeEnvironmentChange(
     operation: () => Promise<void>,
     expectedSessionGeneration?: number
@@ -5080,6 +5098,10 @@ export class AppService {
       const selected = state.options.find(option => option.id === String(optionId || '').trim())
       if (!selected) throw new Error('runtime configuration not found')
       const nextEnvKey = resolveEnvKey(selected.externalRestApiBaseUrl, selected.rpcProxyBaseUrl)
+      await this.assertProfileSelectionAllowsEnvironment(
+        nextEnvKey,
+        expectedSessionGeneration ?? this.sessionGeneration
+      )
       const sameUploadBoundary =
         nextEnvKey === state.envKey &&
         normalizeDesktopUploadBaseUrl(selected.externalRestApiBaseUrl) ===
@@ -5111,6 +5133,7 @@ export class AppService {
   async clearRuntimeConfigSelection() {
     return this.withNativeAuthEnvironmentCommit(async () => {
       this.assertProfileHandoffSessionIsSignedOut()
+      await this.assertProfileSelectionAllowsEnvironment(null, this.sessionGeneration)
       await this.applyRuntimeEnvironmentChange(clearDesktopRuntimeConfigSelection)
       return getDesktopRuntimeConfigState()
     })
@@ -5126,6 +5149,10 @@ export class AppService {
       }
       this.assertProfileHandoffSessionIsSignedOut()
       const nextEnvKey = resolveEnvKey(next.externalRestApiBaseUrl, next.rpcProxyBaseUrl || '')
+      await this.assertProfileSelectionAllowsEnvironment(
+        nextEnvKey,
+        expectedSessionGeneration ?? this.sessionGeneration
+      )
       const sameUploadBoundary =
         nextEnvKey === getActiveEnvKey() &&
         normalizeDesktopUploadBaseUrl(next.externalRestApiBaseUrl) ===
@@ -5150,6 +5177,10 @@ export class AppService {
       const normalizedOptionId = String(optionId || '').trim()
       const selected = state.options.find(option => option.id === normalizedOptionId)
       if (!selected) throw new Error('runtime configuration not found')
+      await this.assertProfileSelectionAllowsEnvironment(
+        state.activeOptionId === normalizedOptionId ? null : state.envKey,
+        this.sessionGeneration
+      )
       if (state.activeOptionId === normalizedOptionId)
         await this.applyRuntimeEnvironmentChange(() => deleteDesktopRuntimeConfigOption(optionId))
       else await deleteDesktopRuntimeConfigOption(optionId)
@@ -5317,6 +5348,7 @@ export class AppService {
     }
     const setupGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
       this.assertProfileHandoffSessionIsSignedOut()
+      await this.assertProfileSelectionAllowsEnvironment(null, this.sessionGeneration)
       return this.sessionAuthority.advanceSessionGeneration(this.sessionGeneration)
     })
     let setupRequest:
@@ -5339,6 +5371,7 @@ export class AppService {
 
       const committedGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
         this.assertSessionGeneration(setupGeneration)
+        await this.assertProfileSelectionAllowsEnvironment(null, setupGeneration)
         await saveDesktopRuntimeConfig({
           externalRestApiBaseUrl: activation.externalRestApiBaseUrl,
           rpcProxyBaseUrl: '',
@@ -5592,6 +5625,11 @@ export class AppService {
       return
     }
 
+    const discoveredEnvKey = resolveEnvKey(
+      discovery.externalRestApiBaseUrl,
+      discovery.rpcProxyBaseUrl
+    )
+    await this.assertProfileSelectionAllowsEnvironment(discoveredEnvKey, this.sessionGeneration)
     const previousEnvKey = getActiveEnvKey()
     await saveDesktopRuntimeConfig({
       // Discovery only enriches the selected profile. Commit it while signed
