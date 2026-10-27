@@ -188,24 +188,6 @@ async function harness() {
   }
 }
 
-async function expectAcceptedLegacyKeytarToken(
-  tokenStore: Awaited<ReturnType<typeof harness>>['tokenStore'],
-  envKey: string,
-  token: string
-) {
-  const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
-  const selection = await readSessionAuthoritySourceSelection({ tokenStore, envKey })
-  expect(selection.status).toBe('accepted')
-  if (selection.status !== 'accepted') throw new Error('Expected an accepted session source')
-  expect(selection.session.token).toBe(token)
-  expect(selection.session.accepted.record.frame.source).toMatchObject({
-    format: 'v0',
-    kind: 'keytar',
-    legacyLocator: { kind: 'keytar-account', account: `session-token::${envKey}` },
-  })
-  await expect(tokenStore.getKeytarSessionToken(envKey)).resolves.toBe(token)
-}
-
 async function readAuthorityRecord(
   tokenStore: Awaited<ReturnType<typeof harness>>['tokenStore'],
   envKey: string

@@ -212,7 +212,7 @@ describe('RPC discovery lifecycle through native producers', () => {
   })
 
   it('does not change the selected profile when restore-held discovery would replace its selector', async () => {
-    const { service, config, store, discovery, AuthClient, rpc, sessionToken } = await fixture()
+    const { service, config, store, discovery, AuthClient, sessionToken } = await fixture()
     const key = config.getActiveEnvKey()
     await persistAcceptedPasswordSession({
       tokenStore: store,

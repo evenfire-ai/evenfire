@@ -62,11 +62,6 @@ function tokenFromKeytarValue(value: string): string {
   }
 }
 
-function keytarValueForSource(source: { kind: string; sourceRef: string } | null) {
-  if (source?.kind !== 'keytar') return null
-  return runtime.keychain.get(keyOf('Evenfire', `session-v1:${source.sourceRef}`)) ?? null
-}
-
 beforeEach(async () => {
   vi.resetModules()
   vi.clearAllMocks()

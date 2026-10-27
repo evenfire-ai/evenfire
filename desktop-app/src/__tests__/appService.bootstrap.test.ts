@@ -366,10 +366,7 @@ describe('AppService invitation configuration lookup', () => {
 
     let now = 1_000
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
-    const [{ AppService }, { getActiveEnvKey }] = await Promise.all([
-      import('../appService.js'),
-      import('../config.js'),
-    ])
+    const [{ AppService }] = await Promise.all([import('../appService.js'), import('../config.js')])
     credentialFixture.safeStorageAvailable = true
     const tokenStore = await createIsolatedTokenStore(configPath)
     credentialFixture.safeStorageAvailable = true
@@ -433,10 +430,7 @@ describe('AppService invitation configuration lookup', () => {
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     vi.resetModules()
 
-    const [{ AppService }, { getActiveEnvKey }] = await Promise.all([
-      import('../appService.js'),
-      import('../config.js'),
-    ])
+    const [{ AppService }] = await Promise.all([import('../appService.js'), import('../config.js')])
     const getMe = vi.fn()
     const tokenStore = await createIsolatedTokenStore(configPath)
     credentialFixture.safeStorageAvailable = true
@@ -574,7 +568,7 @@ describe('AppService invitation configuration lookup', () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
     process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
     vi.resetModules()
-    const [{ AppService }, chatStoreBinding, { getActiveEnvKey }] = await Promise.all([
+    const [{ AppService }, chatStoreBinding] = await Promise.all([
       import('../appService.js'),
       import('../chatStoreBinding.js'),
       import('../config.js'),

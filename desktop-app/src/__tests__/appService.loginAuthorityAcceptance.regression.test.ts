@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import fsSync from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
@@ -943,8 +943,6 @@ describe('Stage 4 public login candidate acceptance', () => {
     await expect(h.service.initialize()).resolves.toEqual({ authenticated: false, me: null })
     await expect(h.service.logout()).resolves.toMatchObject({ kind: 'not-committed' })
     expect(boundary.keychain.get(keyOf('Evenfire', legacyAccount))).toBe(homeToken)
-    const markers = await import('../pendingExternalLogout.js')
-
     h.chatBinding.unbindChatStore()
     const restarted = await restartHarness()
     await expect(restarted.service.initialize()).resolves.toEqual({

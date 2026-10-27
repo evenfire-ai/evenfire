@@ -443,8 +443,9 @@ describe('AppService native auth and environment commit ordering', () => {
   })
 
   it('keeps generic selection blocked until explicit logout and restart remains signed out', async () => {
-    const { service, runtimeConfig, restA, restB, optionA, optionB } =
-      await createNativeCommitTestHarness({ keytarAvailable: true })
+    const { service, runtimeConfig, restA, restB, optionB } = await createNativeCommitTestHarness({
+      keytarAvailable: true,
+    })
     const tokenA = sessionTokenFor('user-a')
     const userA = { id: 'user-a' }
     const passwordLogin = vi.fn().mockResolvedValue({ token: tokenA, me: userA })

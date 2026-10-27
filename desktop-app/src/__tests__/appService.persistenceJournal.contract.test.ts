@@ -52,49 +52,6 @@ const userFor = (token: string) =>
   token === freshToken
     ? freshMe
     : { ...homeMe, teamId: token === teamToken ? 'fixture-team' : homeMe.teamId }
-const releases = new Set<() => void>()
-const operations = new Set<Promise<unknown>>()
-
-function gate() {
-  let resolve!: () => void
-  const promise = new Promise<void>(done => {
-    resolve = () => {
-      releases.delete(resolve)
-      done()
-    }
-  })
-  releases.add(resolve)
-  return { promise, resolve }
-}
-
-function own<T>(operation: Promise<T>): Promise<T> {
-  operations.add(operation)
-  void operation.then(
-    () => operations.delete(operation),
-    () => operations.delete(operation)
-  )
-  return operation
-}
-
-async function entered(phase: Promise<void>, producer: Promise<unknown>) {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    const result = await Promise.race([
-      phase.then(() => 'entered'),
-      producer.then(
-        () => 'settled',
-        () => 'settled'
-      ),
-      new Promise<string>(resolve => {
-        timer = setTimeout(() => resolve('deadline'), 5_000)
-      }),
-    ])
-    expect(result, 'The real migration must reach authentication validation').toBe('entered')
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
 beforeEach(async () => {
   vi.resetModules()
   vi.clearAllMocks()
@@ -119,9 +76,6 @@ beforeEach(async () => {
   vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
 })
 afterEach(async () => {
-  for (const release of releases) release()
-  await Promise.allSettled([...operations])
-  releases.clear()
   vi.restoreAllMocks()
   await fs.rm(boundary.directory, { recursive: true, force: true })
   boundary.directory = ''
