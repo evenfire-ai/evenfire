@@ -187,6 +187,7 @@ function fixture(
     tokenAuthMethodsSupported?: unknown
     codeChallengeMethodsSupported?: unknown
     issuerBindingCapability?: unknown
+    initialKeyBits?: number
     tokenStatus?: number
     tokenTimeout?: boolean
     temporaryTokenEndpointDnsFailure?: boolean
@@ -195,7 +196,9 @@ function fixture(
   } = {}
 ) {
   const issuer = options.issuer ?? GENERIC_ISSUER
-  const initialKey = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const initialKey = generateKeyPairSync('rsa', {
+    modulusLength: options.initialKeyBits ?? 2048,
+  })
   let signingKey = { privateKey: initialKey.privateKey, kid: 'key-1' }
   let publicKeys = [jwk(initialKey.publicKey, 'key-1')]
   let nonce = ''
@@ -766,6 +769,18 @@ describe('generic OIDC protocol foundation', () => {
   })
 
   it('rejects private key material and oversized key sets in JWKS', async () => {
+    const undersized = fixture({ initialKeyBits: 1024 })
+    expect((await undersized.engine.validateProvider()).status).toBe('incompatible')
+    const { params } = await begin(undersized)
+    await expect(
+      undersized.engine.completeIdentityProofAttempt({
+        state: params.get('state')!,
+        code: 'fixture-code',
+        issuer: GENERIC_ISSUER,
+      })
+    ).rejects.toBeInstanceOf(OidcProviderIncompatibleError)
+    expect([...undersized.db.rows.values()][0]?.status).toBe('failed')
+
     const privateJwk = fixture({
       jwksBody: JSON.stringify({
         keys: [{ kty: 'RSA', kid: 'key-1', n: 'n', e: 'AQAB', d: 'private' }],

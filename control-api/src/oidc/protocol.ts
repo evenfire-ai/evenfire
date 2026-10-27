@@ -39,6 +39,7 @@ import {
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 15_000
 const MAX_JWKS_KEYS = 64
+const MIN_RSA_MODULUS_BITS = 2048
 const OIDC_ID_TOKEN_ALGORITHM = 'RS256'
 const PROOF_PURPOSE = 'oidc-identity-proof-v1' as const
 
@@ -888,6 +889,7 @@ function validateJwks(body: string): void {
       !isRecord(key) ||
       key.kty !== 'RSA' ||
       typeof key.n !== 'string' ||
+      !hasMinimumRsaModulus(key.n) ||
       typeof key.e !== 'string' ||
       typeof key.kid !== 'string' ||
       key.kid.length === 0 ||
@@ -903,6 +905,23 @@ function validateJwks(body: string): void {
   if (new Set(keyIds).size !== keyIds.length) {
     throw new OidcProviderIncompatibleError('OIDC JWKS response contains duplicate key identifiers')
   }
+}
+
+function hasMinimumRsaModulus(value: string): boolean {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return false
+  const modulus = Buffer.from(value, 'base64url')
+  if (modulus.length === 0 || modulus.toString('base64url') !== value) return false
+
+  let firstSignificantByte = 0
+  while (firstSignificantByte < modulus.length && modulus[firstSignificantByte] === 0) {
+    firstSignificantByte += 1
+  }
+  if (firstSignificantByte === modulus.length) return false
+
+  const significantLength = modulus.length - firstSignificantByte
+  const leadingByte = modulus[firstSignificantByte] ?? 0
+  const leadingBits = 32 - Math.clz32(leadingByte)
+  return (significantLength - 1) * 8 + leadingBits >= MIN_RSA_MODULUS_BITS
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
