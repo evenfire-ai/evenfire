@@ -2537,9 +2537,17 @@ export function FilesPage({
         expectedSourceSnapshot,
         false
       )
-      if (!pageActiveRef.current || !ownsDialogGeneration()) return
+      if (!pageActiveRef.current) return
       if (!contextStillMatches()) {
         closeOwnedDialog()
+        return
+      }
+      if (!ownsDialogGeneration()) {
+        // Closing the dialog ends its local presentation, not a Move already
+        // dispatched to the server. Report that operation's settled outcome
+        // through the page toast channel without reopening or mutating dialog
+        // state.
+        toastMoveOutcome(pushToast, outcome, target.name, destinationName, target.kind)
         return
       }
       if (!ownsDialog()) {
