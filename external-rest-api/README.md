@@ -38,7 +38,12 @@
 
 Team management is authorized by Control API from the caller's current team
 membership, not from the role in the session token, so a role change applies
-immediately. A refused request returns `403`.
+immediately. A request the caller's role does not allow returns `403`; a
+missing team or member returns `404`; changing or removing your own membership
+returns `400`. Other Control API failures return their client error status, or
+`502`, with a fixed message.
+
+Accepting an invitation never lowers the role of an existing team member.
 
 ## Environment
 
