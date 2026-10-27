@@ -185,9 +185,10 @@ There is no "deactivate" for members. The options are:
   pending invitations and its agent and Context grants.
 - **Delete admin** (Admins tab). This removes the admin's Control UI access
   immediately: their sessions end and their EvenDrive operator link is
-  revoked. The record is kept as `disabled` for audit and is hidden from the
-  list. You cannot delete your own admin account. Deleting an admin does
-  not delete a member account they also hold.
+  revoked. It also revokes their pending or opened Control Admin invitations
+  and any pending paired Desktop invitations. The record is kept as `disabled`
+  for audit and is hidden from the list. You cannot delete your own admin
+  account. Deleting an admin does not delete a member account they also hold.
 
 ## Related
 
