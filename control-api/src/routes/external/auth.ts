@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
 import {
   passwordLoginSourceAdmission,
@@ -42,6 +43,11 @@ const PASSWORD_RESET_RATE_LIMIT_PER_MINUTE = 5
 
 export function createExternalAuthRouter(gateway: K8sGateway): Router {
   const router = Router()
+  const externalAuthRateLimits = createExternalClientRateLimiters(
+    'authentication',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
   const rejectLegacyLoginAfterCutover: RequestHandler = (_req, res, next) => {
     if (config.authProtocolCutoverEnabled) {
       res.status(426).json({ error: 'supported_client_upgrade_required' })
@@ -90,8 +96,13 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return next(error)
       }
     }
-  router.post('/external/auth/v2/google-login', googleLogin(2))
-  router.post('/external/auth/google-login', rejectLegacyLoginAfterCutover, googleLogin(1))
+  router.post('/external/auth/v2/google-login', ...externalAuthRateLimits, googleLogin(2))
+  router.post(
+    '/external/auth/google-login',
+    ...externalAuthRateLimits,
+    rejectLegacyLoginAfterCutover,
+    googleLogin(1)
+  )
 
   const passwordLogin =
     (protocolVersion: 1 | 2) => async (req: Request, res: Response, next: NextFunction) => {

@@ -1012,6 +1012,70 @@ describe('routes/profile', () => {
     })
   })
 
+  it('shares the configured source and session rate limits across Google login versions', async () => {
+    const priorClientIpLimit = config.approvalRlExternalClientIpPerMin
+    const priorEdgeLimit = config.approvalRlExternalEdgePerMin
+    const priorCutover = config.authProtocolCutoverEnabled
+    config.approvalRlExternalClientIpPerMin = 10
+    config.approvalRlExternalEdgePerMin = 1
+    config.authProtocolCutoverEnabled = false
+    googleAuthMock.verifyGoogleIdToken.mockResolvedValue({
+      email: 'user@example.com',
+      name: 'User',
+      picture: 'https://example.com/avatar.png',
+    })
+    svc.googleLoginData.mockResolvedValue({
+      isNewUser: false,
+      user: {
+        id: 'u1',
+        email: 'user@example.com',
+        name: 'User',
+        picture: 'https://example.com/avatar.png',
+      },
+      membership: { team_id: 't1', team_name: 'team', role: 'member' },
+      authGeneration: 1,
+    })
+
+    try {
+      const app = express()
+      app.use(express.json())
+      mountInternalRoutes(app, { listResource: vi.fn() })
+
+      await withInternalServiceAuth(request(app).post('/external/auth/google-login'))
+        .send({ idToken: 'google-id-token' })
+        .expect(200)
+      await withInternalServiceAuth(request(app).post('/external/auth/v2/google-login'))
+        .send({ idToken: 'google-id-token' })
+        .expect(429)
+
+      expect(googleAuthMock.verifyGoogleIdToken).toHaveBeenCalledOnce()
+      expect(svc.googleLoginData).toHaveBeenCalledOnce()
+
+      config.approvalRlExternalClientIpPerMin = 1
+      config.approvalRlExternalEdgePerMin = 10
+      const rotatingSessionApp = express()
+      rotatingSessionApp.use(express.json())
+      mountInternalRoutes(rotatingSessionApp, { listResource: vi.fn() })
+      await withInternalServiceAuth(request(rotatingSessionApp).post('/external/auth/google-login'))
+        .set('x-user-session-token', 'fixture-session-a')
+        .send({ idToken: 'google-id-token' })
+        .expect(200)
+      await withInternalServiceAuth(
+        request(rotatingSessionApp).post('/external/auth/v2/google-login')
+      )
+        .set('x-user-session-token', 'fixture-session-b')
+        .send({ idToken: 'google-id-token' })
+        .expect(429)
+
+      expect(googleAuthMock.verifyGoogleIdToken).toHaveBeenCalledTimes(2)
+      expect(svc.googleLoginData).toHaveBeenCalledTimes(2)
+    } finally {
+      config.approvalRlExternalClientIpPerMin = priorClientIpLimit
+      config.approvalRlExternalEdgePerMin = priorEdgeLimit
+      config.authProtocolCutoverEnabled = priorCutover
+    }
+  })
+
   it('mints a protocol-v2 session from the v2 Google login producer at cutover', async () => {
     const priorCutover = config.authProtocolCutoverEnabled
     config.authProtocolCutoverEnabled = true
