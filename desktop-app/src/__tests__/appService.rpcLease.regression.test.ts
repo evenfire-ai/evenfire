@@ -633,6 +633,123 @@ describe('temporary AppService RPC lease', () => {
     )
   })
 
+  it('rejects a persistent GFS stream bearer held before logout at the fetch dispatch boundary', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = sessionToken(secondUser.id)
+    let loginNumber = 0
+    const proxyCalls: Array<{ url: string; authorization: string | null }> = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return credentialResponse(
+          loginNumber === 1 ? firstToken : secondToken,
+          loginNumber === 1 ? me : secondUser
+        )
+      }
+      if (url.endsWith('/api/v1/me')) return meResponse(loginNumber === 1 ? me : secondUser)
+      if (url.includes('/api/v1/me/gfs/resolve?uri=')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              drive: 'main',
+              resourceId: 'resource-1',
+              parentResourceId: null,
+              gfsUri: 'gfs://main/resource-1',
+              name: 'file.bin',
+              kind: 'file',
+              version: 1,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+      }
+      if (url.includes('/api/v1/me/gfs/proxy/')) {
+        proxyCalls.push({
+          url,
+          authorization: new Headers(init?.headers).get('authorization'),
+        })
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 })
+      }
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const entered = deferred<string>()
+    const release = deferred<void>()
+    const transport = (service as any).gfsClient.transport as {
+      fetchByteStream: (
+        url: string,
+        token: string,
+        opts: { maxBytes: number; signal?: AbortSignal },
+        onChunk: (chunk: Uint8Array) => Promise<void>
+      ) => Promise<number>
+    }
+    const fetchByteStream = transport.fetchByteStream.bind(transport)
+    let heldA = false
+    transport.fetchByteStream = async (url, token, opts, onChunk) => {
+      if (token === firstToken && !heldA) {
+        heldA = true
+        entered.resolve(token)
+        await release.promise
+      }
+      return fetchByteStream(url, token, opts, onChunk)
+    }
+
+    const pendingA = service.downloadGfsUriInto(
+      'gfs://main/resource-1',
+      1024,
+      undefined,
+      async () => {}
+    )
+    await expect(entered.promise).resolves.toBe(firstToken)
+    expect(proxyCalls).toHaveLength(0)
+
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    const bytesB: Uint8Array[] = []
+    await expect(
+      service.downloadGfsUriInto('gfs://main/resource-1', 1024, undefined, async chunk => {
+        bytesB.push(chunk)
+      })
+    ).resolves.toMatchObject({ bytes: 3 })
+    expect(bytesB).toHaveLength(1)
+    expect(proxyCalls).toHaveLength(1)
+    expect(proxyCalls[0]?.authorization).toBe(`Bearer ${secondToken}`)
+
+    const callsBeforeRelease = fetchMock.mock.calls.length
+    release.resolve()
+    await expect(pendingA).rejects.toThrow(
+      'The credential is not owned by the current authenticated session'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeRelease)
+    expect(proxyCalls).toHaveLength(1)
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+  })
+
   it('rejects invokeHostMessage from A held before dispatch after logout and a fresh B login', async () => {
     const firstToken = sessionToken('rpc-lease-user-a')
     const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }

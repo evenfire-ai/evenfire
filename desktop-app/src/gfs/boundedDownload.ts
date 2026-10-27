@@ -38,6 +38,7 @@ export async function streamBoundedBytes(
 ): Promise<number> {
   const maxBytes = opts.maxBytes
   const controller = new AbortController()
+  const requestOwner = assertSessionRequestAllowed(token)
   if (opts.signal) {
     if (opts.signal.aborted) controller.abort()
     else opts.signal.addEventListener('abort', () => controller.abort(), { once: true })
@@ -47,6 +48,7 @@ export async function streamBoundedBytes(
     signal: controller.signal,
   })
   if (!res.ok) {
+    reportSessionUnauthorized(token, res.status, requestOwner)
     throw new ApiError(
       `gfs download failed: ${res.status}`,
       res.status,
