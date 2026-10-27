@@ -118,10 +118,7 @@ describe('external member invitation producer contract', () => {
       .send(body)
       .expect(expected.status, expected.body)
 
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_member_mutation:user:manager-1',
-      10
-    )
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it.each([

@@ -3,7 +3,6 @@ import type { NextFunction, Request, Response } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
-import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   requireRpcTokenHostMatch,
   requireRpcTokenUserMatch,
@@ -22,10 +21,6 @@ import {
   authorizeRpcHostAccess,
 } from '../../services/access/rpcHostAccessAuthorizer.js'
 import { getUserAgents, getUserContexts } from '../../services/directory/index.js'
-import {
-  admitHostMessage,
-  respondHostMessageAdmissionFailure,
-} from '../../services/hostMessageAdmission.js'
 import {
   type DirectRunAttributionBindingService,
   DirectRunBindingConflictError,
@@ -55,9 +50,6 @@ const HOST_ACCESS_SCOPES = [
 ] as const
 
 type RpcAuthedRequest = Request & { rpcAuth?: RpcAccessClaims }
-type ArtifactReadRequest = RpcAuthedRequest & {
-  artifactReadConnection?: AuthorizedRpcHostAccess
-}
 type HostMessageResolutionRequest = RpcAuthedRequest & {
   messageResolutionBinding?: ParsedDirectRunBindingRequest | null
 }
@@ -149,12 +141,10 @@ async function bindDirectRunWithinBudget(
 
 /**
  * The single Host-message resolution path shared by the legacy strict POST and
- * the /message-resolution route. The cheap signed-selector checks and admission
- * live here, before the expensive live Host authorization, so a caller on
- * either route consumes the same verified-subject bucket during the rollout
- * window and a mismatched selector never charges it.
+ * the /message-resolution route. Signed selectors are checked before live
+ * Host authorization on both paths.
  */
-async function respondWithAdmittedHostConnection(
+async function respondWithAuthorizedHostConnection(
   req: RpcAuthedRequest,
   res: Response,
   gateway: K8sGateway,
@@ -171,19 +161,13 @@ async function respondWithAdmittedHostConnection(
     return
   }
   // Same order as /message-resolution's claim-match middleware: a signed
-  // selector that disagrees with the URL is a request-shape error, never a
-  // reason to consume the subject's message budget.
+  // selector that disagrees with the URL is a request-shape error.
   if (!userId || claims.sub !== userId) {
     denyHostAccess(req, res, 'subject_mismatch')
     return
   }
   if (!hostRef || !claims.hostRefs.includes(hostRef)) {
     denyHostAccess(req, res, 'host_claim_missing')
-    return
-  }
-  const admission = await admitHostMessage(claims.sub)
-  if (admission.status !== 'allowed') {
-    respondHostMessageAdmissionFailure(res, admission)
     return
   }
   const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
@@ -336,57 +320,18 @@ export function createRpcAccessUsersRouter(
     }
   )
 
-  // The subject-wide durable PG bucket protects the expensive live Host
-  // authorization below. Claim-match middleware runs first so malformed,
-  // mismatched, or unsigned Host selectors do not consume admission and
-  // caller-controlled Host refs cannot expand bucket cardinality.
   router.get(
     `${hostAccessPath}/artifact-read`,
     requireValidRpcAccessTokenAny(['host:task:read']),
     requireRpcTokenUserMatch(),
     requireRpcTokenHostMatch(),
-    rateLimitMiddleware({
-      bucketType: 'host_artifact_pre_admission',
-      maxPerMinute: config.hostArtifactReadRlPerMin,
-      onBackendUnavailable: 'closed',
-      getBucketKey: req => {
-        const subject = (req as ArtifactReadRequest).rpcAuth?.sub
-        // Auth middleware should always populate the subject before this
-        // limiter. Keep malformed composition attributable to a counted
-        // sentinel instead of silently bypassing the durable budget.
-        return subject
-          ? `host-artifact-pre-admission:${subject}`
-          : 'host-artifact-pre-admission:unauthenticated'
-      },
-    }),
-    async (req: ArtifactReadRequest, res, next) => {
+    async (req: RpcAuthedRequest, res, next) => {
       try {
         const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
-        if (!connection) return
-        req.artifactReadConnection = connection
-        next()
+        if (connection) res.status(200).json(connection)
       } catch (error) {
         next(error)
       }
-    },
-    // Preserve R29-H1: after live authorization establishes the canonical
-    // Host, consume its independent subject+Host budget before returning the
-    // artifact connection. Host wake capacity remains separate.
-    rateLimitMiddleware({
-      bucketType: 'host_artifact_read',
-      maxPerMinute: config.hostArtifactReadRlPerMin,
-      onBackendUnavailable: 'closed',
-      getBucketKey: req => {
-        const artifactRead = req as ArtifactReadRequest
-        const subject = artifactRead.rpcAuth?.sub
-        const hostRef = artifactRead.artifactReadConnection?.hostRef
-        return subject && hostRef
-          ? `host-artifact-read:${subject}:${hostRef}`
-          : 'host-artifact-read:unresolved'
-      },
-    }),
-    (req: ArtifactReadRequest, res) => {
-      res.status(200).json(req.artifactReadConnection)
     }
   )
 
@@ -407,7 +352,7 @@ export function createRpcAccessUsersRouter(
           return
         }
 
-        await respondWithAdmittedHostConnection(
+        await respondWithAuthorizedHostConnection(
           req,
           res,
           gateway,
@@ -422,9 +367,8 @@ export function createRpcAccessUsersRouter(
     }
   )
 
-  // A message-only operation so ordinary sends never charge unrelated shared Host reads.
-  // The empty object represents an ordinary send; the existing exact binding body is
-  // accepted for direct-run-bound sends. Both consume the same subject-wide bucket.
+  // The empty object represents an ordinary send; the existing exact binding
+  // body is accepted for direct-run-bound sends.
   router.post(
     `${hostAccessPath}/message-resolution`,
     requireValidRpcAccessToken('host:message:invoke'),
@@ -434,7 +378,7 @@ export function createRpcAccessUsersRouter(
     requireRpcTokenHostMatch('hostRef', (req, res, reason) => denyHostAccess(req, res, reason)),
     async (req: HostMessageResolutionRequest, res, next) => {
       try {
-        await respondWithAdmittedHostConnection(
+        await respondWithAuthorizedHostConnection(
           req,
           res,
           gateway,

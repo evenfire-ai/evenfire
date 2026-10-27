@@ -13,7 +13,6 @@ const issuance = vi.hoisted(() => ({
   issueExternalUserSession: vi.fn(),
   selectExternalSessionRepresentation: vi.fn(),
 }))
-const limiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 const database = vi.hoisted(() => ({ query: vi.fn() }))
 
 vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
@@ -25,7 +24,6 @@ vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
   return { ...actual, ...revocations }
 })
 vi.mock('../src/services/auth/externalSessionIssuance.js', () => issuance)
-vi.mock('../src/services/rateLimiterService.js', () => limiter)
 vi.mock('../src/db.js', () => ({ pool: { query: database.query } }))
 
 function app() {
@@ -48,13 +46,6 @@ describe('legacy external-session replacement exchange', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    limiter.checkAndIncrement.mockResolvedValue({
-      allowed: true,
-      remaining: 9,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      count: 1,
-    })
     sessions.authenticateExternalUserSession.mockResolvedValue({
       status: 'authenticated',
       contract: 'v1',

@@ -52,17 +52,10 @@ function buildApp() {
   return { app, gateway }
 }
 
-describe('artifact-read admission with real RPC auth and claim-match middleware', () => {
+describe('artifact-read authentication with real RPC auth and claim-match middleware', () => {
   beforeEach(() => {
     Object.values(directory).forEach(mock => mock.mockReset())
     rateLimiter.checkAndIncrement.mockReset()
-    rateLimiter.checkAndIncrement.mockResolvedValue({
-      allowed: true,
-      remaining: 29,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      count: 1,
-    })
   })
 
   it.each([
@@ -71,7 +64,7 @@ describe('artifact-read admission with real RPC auth and claim-match middleware'
     ['missing host:task:read scope', token({ scopes: ['host:status:read'] }), 403],
     ['subject mismatch', token({ sub: 'another-user' }), 403],
     ['Host absent from signed hostRefs', token({ hostRefs: ['another-host'] }), 403],
-  ])('%s fails before charging pre-admission', async (_case, accessToken, status) => {
+  ])('%s fails before protected work', async (_case, accessToken, status) => {
     const { app } = buildApp()
     let req = request(app).get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`)
     if (accessToken) req = req.set('x-rpc-access-token', accessToken)

@@ -59,42 +59,28 @@ describe('external session route error boundaries and renewal rate limiting', ()
     })
   })
 
-  it('stops a rate-limited authenticated renewal before rotating the session', async () => {
-    limiter.checkAndIncrement
-      .mockResolvedValueOnce({
-        allowed: true,
-        remaining: 9,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        count: 1,
-        backendAvailable: true,
-      })
-      .mockResolvedValueOnce({
-        allowed: false,
-        remaining: 0,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        count: 11,
-        backendAvailable: true,
-      })
+  it('renews an authenticated session without a lifecycle PG budget (dev parity)', async () => {
+    // A denying limiter would surface as 429 if renewal still charged a bucket.
+    limiter.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 11,
+      backendAvailable: true,
+    })
     const response = await request(app())
       .post('/external/auth/session/renew')
       .set('x-forwarded-for', '203.0.113.44')
       .send({ token: 'synthetic-session-token' })
 
-    expect(response.status).toBe(429)
-    expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
-    expect(response.headers['retry-after']).toBeDefined()
+    expect(response.status).toBe(200)
     expect(sessions.authenticateExternalUserSession).toHaveBeenCalledWith(
       'synthetic-session-token',
       expect.objectContaining({ purpose: 'renew' })
     )
-    expect(limiter.checkAndIncrement).toHaveBeenNthCalledWith(
-      2,
-      'external_session_lifecycle:user:user-1',
-      10
-    )
-    expect(sessions.renewExternalUserSession).not.toHaveBeenCalled()
+    expect(sessions.renewExternalUserSession).toHaveBeenCalledOnce()
+    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it('keeps an application authentication error on the sanitized 500 path', async () => {

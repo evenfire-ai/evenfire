@@ -312,47 +312,24 @@ describe('external workflow approval medium routes', () => {
     )
   })
 
-  it('rate limits medium reads before listing accounts', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 31,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const response = await request(makeApp()).get('/external/workflow-approval-mediums')
-
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_workflow_approval_medium_read:user:user-1',
-      30
-    )
-    expect(preferenceServiceMock.listVerifiedMediumAccountsWithPreference).not.toHaveBeenCalled()
+  it('lists medium accounts without an added user quota', async () => {
+    preferenceServiceMock.listVerifiedMediumAccountsWithPreference.mockResolvedValue([])
+    await request(makeApp()).get('/external/workflow-approval-mediums').expect(200)
+    expect(preferenceServiceMock.listVerifiedMediumAccountsWithPreference).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
-  it('rate limits medium mutations before creating challenges', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 11,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
+  it('creates medium challenges without an added user quota', async () => {
+    identityServiceMock.createMediumChallenge.mockResolvedValue({
+      id: 'challenge-parity',
+      nonce: '123456',
     })
-
-    const response = await request(makeApp())
+    await request(makeApp())
       .post('/external/workflow-approval-mediums/challenges')
-      .send({ medium: 'email', providerUserId: 'user@example.com' })
-
-    expect(response.status).toBe(429)
-    expect(response.headers['retry-after']).toBeDefined()
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_workflow_approval_medium_mutation:user:user-1',
-      10
-    )
-    expect(identityServiceMock.createMediumChallenge).not.toHaveBeenCalled()
+      .send({ medium: 'email', providerUserId: 'user@example.test' })
+      .expect(202)
+    expect(identityServiceMock.createMediumChallenge).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it('deletes workflow approval medium records through the Telegram association service', async () => {

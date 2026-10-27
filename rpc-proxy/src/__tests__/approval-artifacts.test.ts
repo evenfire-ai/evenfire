@@ -408,11 +408,11 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
 // Artifact Routes
 // =====================================================================
 describe('GET /rpc/hosts/:hostRef/artifacts', () => {
-  it('shares the approved artifact-read budget with downloads', async () => {
+  it('forwards more than 30 mixed artifact reads', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(mockFetchResponse(200, '[]'))
     const app = makeApp()
 
-    for (let requestNumber = 0; requestNumber < 30; requestNumber += 1) {
+    for (let requestNumber = 0; requestNumber < 35; requestNumber += 1) {
       const path =
         requestNumber % 2 === 0
           ? '/rpc/hosts/chatllm/artifacts'
@@ -420,16 +420,16 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
       await request(app).get(path).set('authorization', 'Bearer token').expect(200)
     }
 
-    const limited = await request(app)
+    await request(app)
       .get('/rpc/hosts/chatllm/artifacts/final.txt/download')
       .set('authorization', 'Bearer token')
-      .expect(429)
+      .expect(200)
 
-    expect(limited.body).toMatchObject({ error: 'Too Many Requests' })
-    expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0)
+    expect(serviceMock.resolveArtifactReadHostConnectionForUser).toHaveBeenCalledTimes(36)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(36)
   })
 
-  it('keys the shared budget by verified subject and canonical Host, not filename', async () => {
+  it('preserves access for different users, Hosts, and filenames', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(mockFetchResponse(200, '[]'))
     authTokenMock.verifyRpcToken.mockImplementation(token =>
       token === 'other-user-token' ? { ...VALID_CLAIMS, sub: 'other-user' } : { ...VALID_CLAIMS }
@@ -449,7 +449,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
     await request(app)
       .get('/rpc/hosts/chatllm/artifacts/different-filename.txt/download')
       .set('authorization', 'Bearer token')
-      .expect(429)
+      .expect(200)
 
     await request(app)
       .get('/rpc/hosts/otherhost/artifacts')
@@ -522,22 +522,18 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
       .expect(403)
   })
 
-  it('preserves the canonical Control API artifact-read 429', async () => {
+  it('does not forward an artifact read when Host resolution fails', async () => {
     globalThis.fetch = vi.fn()
-    const rateLimited = Object.assign(new Error('artifact read limited'), {
-      name: 'ControlApiArtifactReadRateLimitedError',
-      retryAfterSeconds: 17,
-    })
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockRejectedValue(rateLimited)
+    serviceMock.resolveArtifactReadHostConnectionForUser.mockRejectedValue(
+      new Error('Host resolution unavailable')
+    )
     const app = makeApp()
 
-    const response = await request(app)
+    await request(app)
       .get('/rpc/hosts/chatllm/artifacts')
       .set('authorization', 'Bearer token')
-      .expect(429)
+      .expect(500)
 
-    expect(response.headers['retry-after']).toBe('17')
-    expect(response.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 17 })
     expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 

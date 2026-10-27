@@ -115,27 +115,16 @@ const validAuth = () => {
 }
 
 describe('GET /external/contexts/:contextId/shared-filesystems', () => {
-  it('rate limits filesystem reads before resolving accessible contexts', async () => {
+  it('preserves context authorization without an added user quota', async () => {
     validAuth()
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 31,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const response = await request(buildApp({ getResource: vi.fn() }))
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    mockGetTeamContexts.mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    await request(buildApp({ getResource: vi.fn() }))
       .get('/external/contexts/ctx-a/shared-filesystems')
-      .set('x-user-session-token', 'dummy')
-
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_shared_filesystem_read:user:user-1',
-      30
-    )
-    expect(mockGetUserContexts).not.toHaveBeenCalled()
+      .set('x-user-session-token', 'synthetic-session')
+      .expect(403)
+    expect(mockGetUserContexts).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it('returns merged spec+status for an accessible context', async () => {

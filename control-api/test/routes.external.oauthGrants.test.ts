@@ -150,50 +150,17 @@ describe('/external/oauth/grants', () => {
     expect(storeMock.deleteOAuthGrant).not.toHaveBeenCalled()
   })
 
-  it('rate limits reads by authenticated user before listing grants', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 31,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const res = await request(makeApp()).get('/external/oauth/grants')
-
-    expect(res.status).toBe(429)
-    expect(res.headers['retry-after']).toBeDefined()
-    expect(res.headers['x-ratelimit-limit']).toBe('30')
-    expect(res.headers['x-ratelimit-remaining']).toBe('0')
-    expect(res.body).toMatchObject({ error: { code: 'rate_limited', retryable: true } })
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_oauth_grant_read:user:user-1',
-      30
-    )
-    expect(storeMock.listUserOAuthGrants).not.toHaveBeenCalled()
+  it('lists owned grants without an added user quota', async () => {
+    await request(makeApp()).get('/external/oauth/grants').expect(200)
+    expect(storeMock.listUserOAuthGrants).toHaveBeenCalledWith(expect.anything(), 'user-1', 'all')
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
-  it('rate limits revocation by authenticated user before deleting a grant', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      count: 11,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-    })
-
-    const res = await request(makeApp()).delete(
-      '/external/oauth/grants/sandbox-recipes/leadforge/google-gmail'
-    )
-
-    expect(res.status).toBe(429)
-    expect(res.headers['x-ratelimit-limit']).toBe('10')
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_oauth_grant_mutation:user:user-1',
-      10
-    )
-    expect(storeMock.deleteOAuthGrant).not.toHaveBeenCalled()
+  it('revokes owned grants without an added user quota', async () => {
+    await request(makeApp())
+      .delete('/external/oauth/grants/sandbox-recipes/leadforge/google-gmail')
+      .expect(204)
+    expect(storeMock.deleteOAuthGrant).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 })

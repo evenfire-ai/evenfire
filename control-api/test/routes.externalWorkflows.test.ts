@@ -292,19 +292,7 @@ describe('routes/external/workflows', () => {
   })
 
   describe('authenticated workflow admission ordering', () => {
-    it.each([
-      ['GET', '/external/workflows', 30],
-      ['GET', `/external/workflows/${RECIPE_NS}/test-recipe`, 30],
-      ['GET', `/external/workflows/${RECIPE_NS}/test-recipe/health`, 30],
-      ['GET', `/external/workflows/${RECIPE_NS}/test-recipe/runs`, 30],
-      ['GET', `/external/workflows/${RECIPE_NS}/test-recipe/runs/run-1/artifacts`, 30],
-      [
-        'GET',
-        `/external/workflows/${RECIPE_NS}/test-recipe/runs/run-1/artifacts/output/download`,
-        30,
-      ],
-      ['POST', `/external/workflows/${RECIPE_NS}/test-recipe/trigger`, 10],
-    ] as const)(
+    it.each([['POST', `/external/workflows/${RECIPE_NS}/test-recipe/trigger`, 10]] as const)(
       'limits %s %s before final authority or protected work',
       async (method, path, limit) => {
         mockRateLimitCheck.mockResolvedValue({
@@ -329,6 +317,24 @@ describe('routes/external/workflows', () => {
         expect(mockPoolQuery).not.toHaveBeenCalled()
       }
     )
+
+    it.each([
+      ['/external/workflows', 200],
+      [`/external/workflows/${RECIPE_NS}/test-recipe`, 403],
+      [`/external/workflows/${RECIPE_NS}/test-recipe/health`, 403],
+      [`/external/workflows/${RECIPE_NS}/test-recipe/runs`, 403],
+      [`/external/workflows/${RECIPE_NS}/test-recipe/runs/run-1/artifacts`, 403],
+      [`/external/workflows/${RECIPE_NS}/test-recipe/runs/run-1/artifacts/output/download`, 403],
+    ] as const)('authorizes read %s without a PG charge', async (path, status) => {
+      mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+      await request(makeApp(gateway))
+        .get(path)
+        .set('x-user-session-token', 'user-session-token')
+        .expect(status)
+      expect(mockAuthenticateExternalUserSession).toHaveBeenCalledTimes(2)
+      expect(mockPoolQuery).toHaveBeenCalled()
+      expect(mockRateLimitCheck).not.toHaveBeenCalled()
+    })
   })
 
   describe('Cross-user isolation (ensureRecipeAuthorized)', () => {

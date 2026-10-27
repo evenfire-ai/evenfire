@@ -10,10 +10,7 @@ import {
   requireExternalSessionRateLimitContext,
 } from '../../middleware/externalSessionAuth.js'
 import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
-import {
-  externalUserRateLimitOptions,
-  requireAuthenticatedExternalUserRateLimitContext,
-} from '../../middleware/externalUserRateLimitPolicy.js'
+import { requireAuthenticatedExternalUserRateLimitContext } from '../../middleware/externalUserRateLimitPolicy.js'
 import {
   passwordLoginSourceAdmission,
   sendPasswordAdmissionError,
@@ -133,57 +130,53 @@ async function requireLegacyRpcSessionRateLimitContext(
 export function createExternalAuthRouter(gateway: K8sGateway): Router {
   const router = Router()
 
-  router.post(
-    '/external/auth/google-login',
-    rateLimitMiddleware(externalUserRateLimitOptions('authentication_attempt', 'pre_auth')),
-    async (req, res, next) => {
-      try {
-        const idToken = String(req.body?.idToken || '').trim()
-        if (!idToken) return res.status(400).json({ error: 'idToken is required' })
-        const google = await verifyGoogleIdToken(idToken)
-        const policy = await resolveEffectiveUserAccessPolicy()
-        const login = await googleLoginData({
-          email: google.email,
-          name: google.name,
-          picture: google.picture,
-        })
-        if ('error' in login) return sendExternalLoginError(res, login.error)
-        const role = login.membership.role
-        const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
-        if (selection.status !== 'selected') {
-          return res.status(426).json({ error: 'upgrade_required' })
-        }
-        const issued = await issueExternalUserSession(
-          {
-            contract: selection.contract,
-            userId: login.user.id,
-            email: google.email,
-            teamId: login.membership.team_id || null,
-            role,
-            authGeneration: login.authGeneration,
-            authenticationMethods: ['google'],
-          },
-          { policy }
-        )
-        return res.status(200).json({
-          token: issued.token,
-          sessionContract: issued.contract,
-          me: {
-            id: login.user.id,
-            email: google.email,
-            name: login.user.name,
-            picture: login.user.picture,
-            teamId: login.membership.team_id,
-            teamName: login.membership.team_name,
-            role,
-          },
-          isNewUser: login.isNewUser,
-        })
-      } catch (error) {
-        return next(error)
+  router.post('/external/auth/google-login', async (req, res, next) => {
+    try {
+      const idToken = String(req.body?.idToken || '').trim()
+      if (!idToken) return res.status(400).json({ error: 'idToken is required' })
+      const google = await verifyGoogleIdToken(idToken)
+      const policy = await resolveEffectiveUserAccessPolicy()
+      const login = await googleLoginData({
+        email: google.email,
+        name: google.name,
+        picture: google.picture,
+      })
+      if ('error' in login) return sendExternalLoginError(res, login.error)
+      const role = login.membership.role
+      const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
+      if (selection.status !== 'selected') {
+        return res.status(426).json({ error: 'upgrade_required' })
       }
+      const issued = await issueExternalUserSession(
+        {
+          contract: selection.contract,
+          userId: login.user.id,
+          email: google.email,
+          teamId: login.membership.team_id || null,
+          role,
+          authGeneration: login.authGeneration,
+          authenticationMethods: ['google'],
+        },
+        { policy }
+      )
+      return res.status(200).json({
+        token: issued.token,
+        sessionContract: issued.contract,
+        me: {
+          id: login.user.id,
+          email: google.email,
+          name: login.user.name,
+          picture: login.user.picture,
+          teamId: login.membership.team_id,
+          teamName: login.membership.team_name,
+          role,
+        },
+        isNewUser: login.isNewUser,
+      })
+    } catch (error) {
+      return next(error)
     }
-  )
+  })
 
   router.post(
     '/external/auth/password-login',
@@ -270,42 +263,36 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     }
   )
 
-  router.post(
-    '/external/auth/verify',
-    rateLimitMiddleware(externalUserRateLimitOptions('session_verify', 'pre_auth')),
-    async (req, res, next) => {
-      try {
-        const token = String(req.body?.token || '').trim()
-        if (!token || token.length > 4096) {
-          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-          return
-        }
-        const authentication = await authenticateExternalUserSession(token, {
-          purpose: 'verify',
-          client: externalSessionClient(req),
-        })
-        if (authentication.status === 'upgrade_required') {
-          sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
-          return
-        }
-        if (authentication.status !== 'authenticated') {
-          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-          return
-        }
-        return res.status(200).json({ claims: authentication.claims })
-      } catch (error) {
-        handleExternalSessionBackendFailure(error, req, res, next)
+  router.post('/external/auth/verify', async (req, res, next) => {
+    try {
+      const token = String(req.body?.token || '').trim()
+      if (!token || token.length > 4096) {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
       }
+      const authentication = await authenticateExternalUserSession(token, {
+        purpose: 'verify',
+        client: externalSessionClient(req),
+      })
+      if (authentication.status === 'upgrade_required') {
+        sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+        return
+      }
+      if (authentication.status !== 'authenticated') {
+        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+        return
+      }
+      return res.status(200).json({ claims: authentication.claims })
+    } catch (error) {
+      handleExternalSessionBackendFailure(error, req, res, next)
     }
-  )
+  })
 
   router.post(
     '/external/auth/session-token',
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireLegacySessionTokenPayload,
     requireExternalSessionRateLimitContext({ purpose: 'switch', client: externalSessionClient }),
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const userId = String(req.body?.userId || '').trim()
@@ -390,10 +377,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/session/renew',
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireExternalSessionRateLimitContext({ purpose: 'renew', client: externalSessionClient }),
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
@@ -435,13 +420,11 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/session/logout',
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireExternalSessionRateLimitContext({
       purpose: 'revoke_cleanup',
       client: externalSessionClient,
     }),
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
@@ -476,10 +459,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/sessions/revoke-all',
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireExternalSessionRateLimitContext({ purpose: 'protected', client: externalSessionClient }),
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
         const token = sessionTokenFromRequest(req)
@@ -510,14 +491,12 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/sessions/:sid/revoke',
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'pre_auth')),
     requireExternalSessionRateLimitContext({
       purpose: 'protected',
       client: externalSessionClient,
       requireV2: true,
     }),
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('session_lifecycle', 'authenticated')),
     async (req: ExternalAuthedRequest, res) => {
       try {
         const authentication = req.externalSessionAuthentication!
@@ -544,11 +523,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/rpc/token',
-    rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'pre_auth')),
     attachAccessExecutionBudget,
     requireLegacyRpcSessionRateLimitContext,
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'authenticated')),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const authentication = req.externalSessionAuthentication!

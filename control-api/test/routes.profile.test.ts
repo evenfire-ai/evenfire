@@ -1207,15 +1207,24 @@ describe('routes/profile', () => {
       .expect(401, { error: 'Unauthorized' })
   })
 
-  it('rate limits external credential attempts before authentication work', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-      count: 6,
-    })
+  // dev has no per-IP or per-user limiter on these routes; a denying PG limiter
+  // must never be consulted, and the handler must reach its business work.
+  const denyingRateLimit = () => ({
+    allowed: false,
+    remaining: 0,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    backendAvailable: true,
+    count: 99,
+  })
+  const prOnlyLimiterKeys = () =>
+    rateLimitMock.checkAndIncrement.mock.calls
+      .map(call => String(call[0]))
+      .filter(key => key.startsWith('external_'))
+
+  it('reaches Google verification without a PR-only attempt limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    googleAuthMock.verifyGoogleIdToken.mockResolvedValue(null)
     const app = express()
     app.use(express.json())
     mountInternalRoutes(app, { listResource: vi.fn() })
@@ -1224,73 +1233,48 @@ describe('routes/profile', () => {
       request(app).post('/external/auth/google-login')
     ).send({ idToken: 'google-id-token' })
 
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      expect.stringMatching(/^external_authentication_attempt:ip:/),
-      5
-    )
-    expect(googleAuthMock.verifyGoogleIdToken).not.toHaveBeenCalled()
+    expect(response.status).not.toBe(429)
+    expect(googleAuthMock.verifyGoogleIdToken).toHaveBeenCalledWith('google-id-token')
+    expect(prOnlyLimiterKeys()).toEqual([])
   })
 
-  it('rate limits session verification before session authority work', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      count: 11,
-      backendAvailable: true,
-    })
+  it('verifies a session without a PR-only verification limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
     const app = express()
     app.use(express.json())
     mountInternalRoutes(app, { listResource: vi.fn() })
 
-    const response = await withInternalServiceAuth(request(app).post('/external/auth/verify')).send(
-      { token: userSessionToken }
-    )
-
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      expect.stringMatching(/^external_session_verify:ip:/),
-      10
-    )
+    await withInternalServiceAuth(request(app).post('/external/auth/verify'))
+      .send({ token: userSessionToken })
+      .expect(200)
+    expect(prOnlyLimiterKeys()).toEqual([])
   })
 
-  it('rate limits RPC token issuance by trusted authenticated user before minting', async () => {
-    rateLimitMock.checkAndIncrement
-      .mockResolvedValueOnce({
-        allowed: true,
-        remaining: 9,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        backendAvailable: true,
-        count: 1,
-      })
-      .mockResolvedValueOnce({
-        allowed: false,
-        remaining: 0,
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        backendAvailable: true,
-        count: 11,
-      })
+  it('issues RPC tokens without a PR-only issuance limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'synthetic-parity-rpc-token',
+      accessScope: 'user',
+      teamId: null,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+      expiresInSeconds: 300,
+    })
     const app = express()
     app.use(express.json())
     mountInternalRoutes(app, { listResource: vi.fn() })
 
     const response = await withInternalServiceAuth(request(app).post('/external/rpc/token')).send({
       sessionToken: userSessionToken,
-      scopes: ['mcp:servers:list'],
+      scopes: ['host:message:invoke'],
       hostRefs: ['agent-a'],
     })
 
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenNthCalledWith(
-      2,
-      'external_rpc_token:user:u1',
-      10
-    )
-    expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledOnce()
+    expect(prOnlyLimiterKeys()).toEqual([])
   })
 
   it('keeps legacy RPC issuance bound to the documented body session token', async () => {
@@ -1356,15 +1340,9 @@ describe('routes/profile', () => {
     )
   })
 
-  it('rate limits user-directory reads before listing teams', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-      count: 31,
-    })
+  it('lists user teams without a PR-only read limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    svc.listTeams.mockResolvedValue([])
     const app = express()
     app.use(express.json())
     mountInternalRoutes(app, { listResource: vi.fn() })
@@ -1373,23 +1351,14 @@ describe('routes/profile', () => {
       request(app).get('/external/users/u1/teams')
     )
 
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_team_user_read:user:u1',
-      30
-    )
-    expect(svc.listTeams).not.toHaveBeenCalled()
+    expect(response.status).not.toBe(429)
+    expect(svc.listTeams).toHaveBeenCalled()
+    expect(prOnlyLimiterKeys()).toEqual([])
   })
 
-  it('rate limits user profile mutations before updating profile data', async () => {
-    rateLimitMock.checkAndIncrement.mockResolvedValueOnce({
-      allowed: false,
-      remaining: 0,
-      resetMs: Date.now() + 60_000,
-      windowStartMs: Date.now(),
-      backendAvailable: true,
-      count: 11,
-    })
+  it('updates the user profile without a PR-only mutation limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    svc.updateProfile.mockResolvedValue({ userId: 'u1', displayName: 'New Name' })
     const app = express()
     app.use(express.json())
     mountInternalRoutes(app, { listResource: vi.fn() })
@@ -1398,11 +1367,8 @@ describe('routes/profile', () => {
       request(app).put('/external/users/u1/profile')
     ).send({ displayName: 'New Name' })
 
-    expect(response.status).toBe(429)
-    expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
-      'external_team_user_mutation:user:u1',
-      10
-    )
-    expect(svc.updateProfile).not.toHaveBeenCalled()
+    expect(response.status).not.toBe(429)
+    expect(svc.updateProfile).toHaveBeenCalled()
+    expect(prOnlyLimiterKeys()).toEqual([])
   })
 })

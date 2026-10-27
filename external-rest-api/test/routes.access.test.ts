@@ -65,6 +65,40 @@ describe('public access-contract forwarding', () => {
     )
   })
 
+  it('limits catalog per authenticated user while capabilities remain unrestricted', async () => {
+    const server = app()
+    mocks.controlApiRequest.mockResolvedValue({ items: [] })
+    for (let index = 0; index < 10; index += 1) {
+      await request(server)
+        .get('/me/access/catalog')
+        .set('authorization', 'Bearer session-token')
+        .expect(200)
+    }
+    const rejected = await request(server)
+      .get('/me/access/catalog')
+      .set('authorization', 'Bearer session-token')
+      .expect(429)
+    expect(rejected.headers['x-ratelimit-limit']).toBe('10')
+    expect(mocks.controlApiRequest).toHaveBeenCalledTimes(10)
+
+    for (let index = 0; index < 11; index += 1) {
+      await request(server)
+        .get('/me/access/capabilities')
+        .set('authorization', 'Bearer session-token')
+        .expect(200)
+    }
+    mocks.verifyToken.mockReturnValue({
+      userId: 'user-2',
+      email: 'other@example.test',
+      role: 'member',
+    })
+    await request(server)
+      .get('/me/access/catalog')
+      .set('authorization', 'Bearer other-session')
+      .expect(200)
+    expect(mocks.controlApiRequest).toHaveBeenCalledTimes(22)
+  })
+
   it('rebuilds a bounded public error instead of forwarding upstream fields', async () => {
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError('upstream', 503, {
@@ -125,7 +159,7 @@ describe('public access-contract forwarding', () => {
         },
         {
           'retry-after': '17',
-          'x-ratelimit-limit': '30',
+          'x-ratelimit-limit': '10',
           'x-ratelimit-remaining': '0',
           'x-ratelimit-reset': '1900000000',
           'x-internal-bucket': 'secret-bucket',
@@ -134,7 +168,7 @@ describe('public access-contract forwarding', () => {
     )
 
     const response = await request(app())
-      .get('/me/access/capabilities')
+      .get('/me/access/catalog')
       .set('authorization', 'Bearer session-token')
 
     expect(response.status).toBe(429)
@@ -144,7 +178,7 @@ describe('public access-contract forwarding', () => {
       details: { retryAfterSeconds: 17 },
     })
     expect(response.headers['retry-after']).toBe('17')
-    expect(response.headers['x-ratelimit-limit']).toBe('30')
+    expect(response.headers['x-ratelimit-limit']).toBe('10')
     expect(response.headers['x-ratelimit-remaining']).toBe('0')
     expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
     expect(response.headers['x-internal-bucket']).toBeUndefined()

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  ControlApiArtifactReadRateLimitedError,
   ControlApiHostAccessRejectedError,
   fetchArtifactReadHostConnectionFromControlApi,
   fetchHostConnectionFromControlApi,
@@ -14,7 +13,7 @@ const BINDING = {
 }
 
 describe('control-api canonical host access client', () => {
-  it('preserves the canonical artifact-read 429 and Retry-After', async () => {
+  it('treats an artifact-read upstream failure as a failed lookup', async () => {
     const fetchImpl = vi.fn(
       async () =>
         new Response(JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 17 }), {
@@ -28,8 +27,7 @@ describe('control-api canonical host access client', () => {
         fetchImpl: fetchImpl as typeof fetch,
       })
     ).rejects.toMatchObject({
-      name: ControlApiArtifactReadRateLimitedError.name,
-      retryAfterSeconds: 17,
+      message: 'Control API MCP host lookup failed (429)',
     })
 
     expect(String(fetchImpl.mock.calls[0]![0])).toMatch(

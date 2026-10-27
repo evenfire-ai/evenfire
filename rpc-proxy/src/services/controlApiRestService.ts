@@ -68,24 +68,6 @@ export class ControlApiHostAccessRejectedError extends Error {
   }
 }
 
-export class ControlApiArtifactReadRateLimitedError extends Error {
-  constructor(readonly retryAfterSeconds: number) {
-    super(`Control API rate limited artifact reads for ${retryAfterSeconds} seconds`)
-    this.name = 'ControlApiArtifactReadRateLimitedError'
-  }
-}
-
-export class ControlApiHostMessageAdmissionError extends Error {
-  constructor(
-    readonly status: 429 | 503,
-    readonly body: { error: string; retryAfterSeconds?: number },
-    readonly headers: Record<string, string>
-  ) {
-    super(`Control API Host-message admission returned ${status}`)
-    this.name = 'ControlApiHostMessageAdmissionError'
-  }
-}
-
 // Typed rejection for the connectors read-model, mirroring the host rail above.
 // A generic Error collapses to 500 in the app error handler, which the desktop
 // reads as non-refreshable — so an expired/rotated rpc access token (401) would
@@ -304,60 +286,6 @@ async function fetchHostConnectionForPath(
     }
   )
 
-  if (messageResolution && (response.status === 429 || response.status === 503)) {
-    const body = (await response.json().catch(() => null)) as {
-      error?: unknown
-      retryAfterSeconds?: unknown
-    } | null
-    if (response.status === 503 && body?.error === 'host_message_admission_unavailable') {
-      throw new ControlApiHostMessageAdmissionError(
-        503,
-        { error: 'host_message_admission_unavailable' },
-        {}
-      )
-    }
-    const headerNames = [
-      'retry-after',
-      'x-ratelimit-limit',
-      'x-ratelimit-remaining',
-      'x-ratelimit-reset',
-    ] as const
-    const headers = Object.fromEntries(
-      headerNames.map(name => [name, response.headers.get(name)])
-    ) as Record<string, string | null>
-    if (
-      response.status === 429 &&
-      body?.error === 'Too Many Requests' &&
-      typeof body.retryAfterSeconds === 'number' &&
-      Number.isSafeInteger(body.retryAfterSeconds) &&
-      body.retryAfterSeconds > 0 &&
-      headerNames.every(name => headers[name] !== null)
-    ) {
-      throw new ControlApiHostMessageAdmissionError(
-        429,
-        { error: 'Too Many Requests', retryAfterSeconds: body.retryAfterSeconds },
-        headers as Record<string, string>
-      )
-    }
-    throw new Error('Control API Host-message admission response was invalid')
-  }
-
-  if (options.artifactRead && response.status === 429) {
-    const retryAfterHeader = Number(response.headers.get('retry-after'))
-    let retryAfterBody = Number.NaN
-    try {
-      const body = (await response.json()) as { retryAfterSeconds?: unknown }
-      if (typeof body.retryAfterSeconds === 'number') retryAfterBody = body.retryAfterSeconds
-    } catch {
-      /* use the header below when the canonical JSON body is unavailable */
-    }
-    const retryAfterSeconds =
-      Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : retryAfterBody
-    if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
-      throw new Error('Control API artifact-read limit returned 429 without Retry-After')
-    }
-    throw new ControlApiArtifactReadRateLimitedError(retryAfterSeconds)
-  }
   if (response.status === 404) {
     await drainBody(response)
     throw new ControlApiHostVersionMismatchError(operation)

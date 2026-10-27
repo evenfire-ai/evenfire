@@ -8,7 +8,6 @@ import {
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
-import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
 import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { type Logger, rootLogger } from '../../observability/logger.js'
@@ -103,7 +102,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/users/:userId/teams',
-    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalUserParamMatch(),
     async (req, res, next) => {
       try {
@@ -220,7 +218,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/users/:userId/memberships/:teamId',
-    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalUserParamMatch(),
     async (req, res, next) => {
       try {
@@ -235,7 +232,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/users/:userId/me',
-    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalUserParamMatch(),
     async (req, res, next) => {
       try {
@@ -257,7 +253,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/users/:userId/contexts',
-    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalUserParamMatch(),
     async (req, res, next) => {
       try {
@@ -290,7 +285,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/users/:userId/agents',
-    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalUserParamMatch(),
     async (req, res, next) => {
       try {
@@ -356,7 +350,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
 
   router.put(
     '/external/users/:userId/profile',
-    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalUserParamMatch(),
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
