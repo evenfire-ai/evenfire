@@ -35,6 +35,33 @@ const invitationFlow = vi.hoisted(() => ({
   registerAndSendInvitation: vi.fn().mockResolvedValue(undefined),
   validateInvitationFlowToken: vi.fn(),
 }))
+const passwordAdmissionLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  trace: vi.fn(),
+}))
+vi.mock('../src/observability/logger.js', async importOriginal => {
+  const real = await importOriginal<typeof import('../src/observability/logger.js')>()
+  const rootLogger = new Proxy(real.rootLogger, {
+    get(target, property) {
+      if (property === 'child') {
+        return (bindings: Record<string, unknown>) => {
+          if (bindings.module === 'password-admission') return passwordAdmissionLogger
+          return Reflect.apply(
+            Reflect.get(target, property, target) as (...args: unknown[]) => unknown,
+            target,
+            [bindings]
+          )
+        }
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  return { ...real, rootLogger }
+})
 vi.mock('../src/services/invitationFlowRegistrationService.js', async importOriginal => {
   const real =
     await importOriginal<typeof import('../src/services/invitationFlowRegistrationService.js')>()
@@ -1121,6 +1148,127 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       releaseComparison()
       await verification.catch(() => undefined)
     }
+  })
+  it('keeps the supported credential diagnostic quiet for a quota-masked login', async () => {
+    passwordAdmissionLogger.info.mockClear()
+    for (let success = 0; success < 40; success++) {
+      await openPace()
+      const response = await withRuntime(() =>
+        login(' MEMBER@example.invalid ', password, `192.0.2.${success + 1}`)
+      )
+      expect(response.status).toBe(200)
+    }
+    const beforeMaskedRequest = (
+      await holder.pool.query(
+        'SELECT successes, failures FROM password_identifier_state WHERE identifier_key = $1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0]
+    expect(beforeMaskedRequest.successes).toHaveLength(40)
+    expect(beforeMaskedRequest.failures).toHaveLength(0)
+
+    await openPace()
+    const masked = await withRuntime(() => login('member@example.invalid', password, '192.0.3.41'))
+    expect({ status: masked.status, body: masked.body }).toEqual({
+      status: 401,
+      body: { error: 'invalid_credentials' },
+    })
+    expect(compare).toHaveBeenCalledTimes(41)
+    expect(compare.mock.calls[40][1]).toBe(PASSWORD_DUMMY_HASH)
+    const resetRequiredEvents = passwordAdmissionLogger.info.mock.calls.filter(
+      ([fields]) =>
+        (fields as { event?: unknown } | undefined)?.event === 'password_credential_reset_required'
+    )
+    expect(resetRequiredEvents).toHaveLength(0)
+
+    const unsupportedHash = await bcrypt.hash(password, 10)
+    await holder.pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [
+      unsupportedHash,
+      userId,
+    ])
+    passwordAdmissionLogger.info.mockClear()
+    await openPace()
+    const unsupportedMasked = await withRuntime(() =>
+      login('member@example.invalid', password, '192.0.3.42')
+    )
+    expect(unsupportedMasked.status).toBe(401)
+    expect(compare).toHaveBeenCalledTimes(42)
+    expect(compare.mock.calls[41][1]).toBe(PASSWORD_DUMMY_HASH)
+    expect(passwordAdmissionLogger.info).toHaveBeenCalledWith(
+      { event: 'password_credential_reset_required' },
+      'unsupported member credential'
+    )
+
+    const afterMaskedRequest = (
+      await holder.pool.query(
+        'SELECT successes, failures FROM password_identifier_state WHERE identifier_key = $1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0]
+    expect(afterMaskedRequest.successes).toHaveLength(40)
+    expect(afterMaskedRequest.failures).toHaveLength(1)
+  }, 60_000)
+  it('reports a genuinely unsupported stored credential without verifying it', async () => {
+    passwordAdmissionLogger.info.mockClear()
+    const unsupportedHash = await bcrypt.hash(password, 10)
+    await holder.pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [
+      unsupportedHash,
+      userId,
+    ])
+
+    const response = await withRuntime(() => login('member@example.invalid', password))
+
+    expect(response.status).toBe(401)
+    expect(compare).toHaveBeenCalledTimes(1)
+    expect(compare.mock.calls[0][1]).toBe(PASSWORD_DUMMY_HASH)
+    expect(passwordAdmissionLogger.info).toHaveBeenCalledWith(
+      { event: 'password_credential_reset_required' },
+      'unsupported member credential'
+    )
+  })
+  it('does not report reset-required for unknown, inactive, or passwordless identities', async () => {
+    await holder.pool.query(
+      "INSERT INTO users(email) VALUES ('no-password@example.invalid') ON CONFLICT DO NOTHING"
+    )
+    const controlAdminId = randomUUID()
+    await holder.pool.query(
+      `INSERT INTO control_admin_users(id, username, password_hash, role, status)
+       VALUES ($1, $2, 'synthetic-diagnostic-admin', 'admin', 'active')`,
+      [controlAdminId, `diagnostic-admin-${controlAdminId}`]
+    )
+    const retired = await withRuntime(() =>
+      retireDesktopUser(
+        { kind: 'control_admin', controlAdminId },
+        userId,
+        'Synthetic inactive identity diagnostic check',
+        `retirement-${randomBytes(12).toString('hex')}`,
+        null,
+        { retainWithoutLinkHistory: true }
+      )
+    )
+    expect(retired.outcome).toBe('retired')
+    passwordAdmissionLogger.info.mockClear()
+
+    for (const email of [
+      'unknown@example.invalid',
+      'member@example.invalid',
+      'no-password@example.invalid',
+    ]) {
+      await openPace()
+      const response = await withRuntime(() => login(email))
+      expect({ status: response.status, body: response.body }).toEqual({
+        status: 401,
+        body: { error: 'invalid_credentials' },
+      })
+      expect(compare.mock.calls.at(-1)?.[1]).toBe(PASSWORD_DUMMY_HASH)
+    }
+    expect(
+      passwordAdmissionLogger.info.mock.calls.filter(
+        ([fields]) =>
+          (fields as { event?: unknown } | undefined)?.event ===
+          'password_credential_reset_required'
+      )
+    ).toHaveLength(0)
   })
   it('fails closed before bcrypt when credential persistence is unavailable', async () => {
     // Real database producer: temporarily revoke table access by making its

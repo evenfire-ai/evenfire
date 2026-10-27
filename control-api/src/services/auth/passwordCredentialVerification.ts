@@ -713,8 +713,9 @@ export async function verifyMemberPassword(
     const user = capture.user
     // A quota-masked request still performs the same identity lookup and generation fence,
     // but it must never compare a real credential hash after the public success quota is full.
-    const supported = !capture.quotaMasked && supportedCredential(user)
-    if (user && user.lifecycle_state === 'active' && user.password_hash && !supported)
+    const hasSupportedCredential = supportedCredential(user)
+    const supported = !capture.quotaMasked && hasSupportedCredential
+    if (user && user.lifecycle_state === 'active' && user.password_hash && !hasSupportedCredential)
       logger.info({ event: 'password_credential_reset_required' }, 'unsupported member credential')
     bcryptStarted = true
     let match: boolean
