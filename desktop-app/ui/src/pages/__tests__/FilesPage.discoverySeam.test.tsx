@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { homeView } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FilesPage } from '../FilesPage'
 
 /**
@@ -67,6 +68,7 @@ describe('FilesPage against the real GFS browser controller', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -120,6 +122,7 @@ describe('FilesPage against the real GFS browser controller', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),

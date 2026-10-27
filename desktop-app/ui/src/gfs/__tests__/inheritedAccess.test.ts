@@ -107,7 +107,7 @@ describe('deriveGfsInheritedAccess', () => {
           : []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('complete')
     expect(result.items).toEqual([
@@ -183,7 +183,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => sharesListPage([])
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('read-boundary')
     expect(result.items).toEqual([
@@ -257,7 +257,7 @@ describe('deriveGfsInheritedAccess', () => {
           : sharesListPage([])
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('acl-limited')
     // The folder's SHARES survived its grants denial; the root was still
@@ -333,7 +333,7 @@ describe('deriveGfsInheritedAccess', () => {
           : []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('unavailable')
     expect(result.items).toEqual([
@@ -394,7 +394,7 @@ describe('deriveGfsInheritedAccess', () => {
         }
       )
 
-      await expect(deriveGfsInheritedAccess(FILE_ID)).rejects.toThrow('httpStatus=401')
+      await expect(deriveGfsInheritedAccess(FILE_ID, 'main')).rejects.toThrow('httpStatus=401')
     }
   )
 
@@ -429,7 +429,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('unavailable')
     expect(result.items).toHaveLength(1)
@@ -455,7 +455,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('unavailable')
     expect(result.items).toEqual([])
@@ -487,7 +487,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     // The cap is the honest terminal state: rows above it were never seen.
     expect(result.coverage).toBe('unavailable')
@@ -517,7 +517,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     // The vetted 500 is retryable; the body's 403 would have been a quiet
     // ACL boundary.
@@ -534,7 +534,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('read-boundary')
     expect(result.items).toEqual([])
@@ -570,7 +570,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('complete')
     expect(result.items).toHaveLength(1)
@@ -645,7 +645,7 @@ describe('deriveGfsInheritedAccess', () => {
           : []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('complete')
     expect(result.items).toHaveLength(1)

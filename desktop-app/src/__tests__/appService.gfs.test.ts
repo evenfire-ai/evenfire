@@ -1070,7 +1070,7 @@ describe('AppService GFS proxy read transport', () => {
     // only because this boundary strips every copy it did not write.
     const service = new AppService() as unknown as {
       sessionToken: string | null
-      listGfsChildren: (resourceId: string) => Promise<unknown>
+      listGfsChildren: (resourceId: string, drive: string) => Promise<unknown>
     }
     service.sessionToken = 'session-token'
 
@@ -1086,7 +1086,7 @@ describe('AppService GFS proxy read transport', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     try {
-      const error = await service.listGfsChildren(RESOURCE_ID).then(
+      const error = await service.listGfsChildren(RESOURCE_ID, 'main').then(
         () => {
           throw new Error('expected the failing children listing to reject')
         },

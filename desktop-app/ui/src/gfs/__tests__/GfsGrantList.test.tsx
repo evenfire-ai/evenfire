@@ -145,6 +145,121 @@ describe('GfsGrantList', () => {
     expect(screen.getAllByText(HIDDEN_ACCESS_NOTICE_TEXT)).toHaveLength(1)
   })
 
+  it('shows out-of-directory home identities and preserves each row type’s actions', () => {
+    const onChangeRole = vi.fn()
+    const onRevoke = vi.fn()
+    const onRevokeShare = vi.fn()
+    render(
+      <GfsGrantList
+        agents={agents}
+        subjects={subjects}
+        items={[
+          grantItem({
+            id: 'outside-grant',
+            subject: { type: 'user', id: 'outside' },
+            subjectProfile: { name: 'Outside User', email: 'outside@example.test' },
+          }),
+          grantItem({
+            id: 'outside-team',
+            subject: { type: 'team', id: 'outside-team' },
+            subjectProfile: { name: 'Outside Team' },
+          }),
+          grantItem({ id: 'still-hidden', subject: { type: 'user', id: 'no-profile' } }),
+        ]}
+        shares={[
+          shareItem({
+            id: 'outside-share',
+            subject: { type: 'user', id: 'outside-share-user' },
+            subjectProfile: { name: null, email: 'share@example.test' },
+          }),
+        ]}
+        onChangeRole={onChangeRole}
+        onRevoke={onRevoke}
+        onRevokeShare={onRevokeShare}
+      />
+    )
+    const grant = screen.getByTestId('gfs-access-row-grant-outside-grant')
+    expect(within(grant).getByText('Outside User')).toBeTruthy()
+    expect(within(grant).getByText('outside@example.test')).toBeTruthy()
+    expect(within(grant).getByRole('button', { name: 'Access role for Outside User' })).toBeTruthy()
+    expect(within(grant).getByRole('button', { name: 'Actions for Outside User' })).toBeTruthy()
+    expect(screen.getByText('Outside Team')).toBeTruthy()
+    const share = screen.getByTestId('gfs-access-row-share-outside-share')
+    expect(within(share).getAllByText('share@example.test')).toHaveLength(2)
+    expect(
+      within(share).queryByRole('button', { name: 'Access role for share@example.test' })
+    ).toBeNull()
+    fireEvent.click(within(share).getByRole('button', { name: 'Actions for share@example.test' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    expect(onRevokeShare).toHaveBeenCalledOnce()
+    expect(screen.queryByTestId('gfs-access-row-grant-still-hidden')).toBeNull()
+    expect(screen.getByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeTruthy()
+  })
+
+  it('protects the home owner grant while another grant retains its actions', () => {
+    render(
+      <GfsGrantList
+        agents={agents}
+        subjects={subjects}
+        protectedOwner={{ userId: 'owner', homeResourceId: 'home' }}
+        items={[
+          grantItem({
+            id: 'owner',
+            resourceId: 'home',
+            subject: { type: 'user', id: 'owner' },
+            subjectProfile: { name: 'Home Owner', email: 'owner@example.test' },
+            inherit: true,
+          }),
+          grantItem({ id: 'other', resourceId: 'home', subject: { type: 'user', id: 'user-2' } }),
+        ]}
+        onChangeRole={vi.fn()}
+        onRevoke={vi.fn()}
+      />
+    )
+    const owner = screen.getByTestId('gfs-access-row-grant-owner')
+    expect(within(owner).getByText('Owner')).toBeTruthy()
+    expect(within(owner).queryByRole('button', { name: 'Actions for Home Owner' })).toBeNull()
+    expect(within(owner).queryByRole('button', { name: 'Access role for Home Owner' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Actions for Test Two' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Access role for Test Two' })).toBeTruthy()
+  })
+
+  it('protects an owner grant inherited from the home on a descendant', () => {
+    const subject = { type: 'user', id: 'owner' }
+    const inherited = {
+      ...mergeInheritedAccessItem(
+        null,
+        {
+          subject,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+          grantId: 'owner-grant',
+          shareIds: [],
+        },
+        { resourceId: 'home', name: 'Home' }
+      ),
+      subjectProfile: { name: 'Owner', email: 'owner@example.test' },
+    }
+    render(
+      <GfsGrantList
+        agents={agents}
+        subjects={subjects}
+        items={[grantItem({ id: 'other', subject: { type: 'user', id: 'user-2' } })]}
+        inheritedItems={[inherited]}
+        mergeInherited
+        protectedOwner={{ userId: 'owner', homeResourceId: 'home' }}
+        onChangeInheritedRole={vi.fn()}
+        onRemoveInherited={vi.fn()}
+        onChangeRole={vi.fn()}
+        onRevoke={vi.fn()}
+      />
+    )
+    const row = screen.getByTestId('gfs-access-row-inherited-user:owner')
+    expect(within(row).getByText('owner@example.test')).toBeTruthy()
+    expect(within(row).queryByRole('button', { name: 'Actions for Owner' })).toBeNull()
+    expect(within(row).queryByRole('button', { name: 'Access role for Owner' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Actions for Test Two' })).toBeTruthy()
+  })
+
   it('never claims an empty folder when the filter removed every row', () => {
     render(
       <GfsGrantList

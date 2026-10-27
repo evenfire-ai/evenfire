@@ -21,6 +21,9 @@ vi.mock('@hooks/domain/useGfsBrowserController', () => ({
 
 function baseController() {
   return {
+    drive: 'main',
+    home: null,
+    homeOwnerId: null,
     current: null,
     crumbs: [],
     sessionScope: 'env-1:user-1:team-1',
@@ -85,6 +88,7 @@ function baseController() {
     mutating: false,
     reset: vi.fn(),
     refreshAffordances: vi.fn(),
+    refreshPermissionState: vi.fn(),
     discoveryFailure: null,
     retryDiscovery: vi.fn(),
     authorityPending: false,
@@ -147,6 +151,52 @@ describe('FilesPage', () => {
     cleanup()
     vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('shows live access inside the home and does not show it for an unrelated location', () => {
+    const home = {
+      resourceId: 'home',
+      gfsUri: 'gfs://private/home',
+      name: 'Home',
+      kind: 'directory',
+      version: 1,
+      bytes: 0,
+    }
+    const child = {
+      resourceId: 'child',
+      gfsUri: 'gfs://private/child',
+      name: 'Child',
+      kind: 'directory',
+      version: 1,
+      bytes: 0,
+    }
+    const base = {
+      ...baseController(),
+      drive: 'private',
+      current: child,
+      crumbs: [home, child],
+      home: { state: 'ready', drive: 'private', resourceId: 'home' },
+      affordances: {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(base)
+    const rendered = renderFilesPage()
+    expect(screen.getByLabelText('Your access').textContent).toBe('Your access: read, write')
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...base,
+      crumbs: [child],
+      affordances: { ...base.affordances, held: ['read'] },
+    })
+    rendered.rerender(
+      <QueryClientProvider client={new QueryClient()}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
+    expect(screen.queryByLabelText('Your access')).toBeNull()
   })
 
   it('renders unavailable automatic discovery as an info notice, not a technical error', () => {

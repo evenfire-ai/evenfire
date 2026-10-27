@@ -43,7 +43,7 @@ export function GfsFilePicker({
               autoFocus
               id="gfs-uri-input"
               aria-label="EvenDrive link"
-              placeholder="gfs://main/<rid>"
+              placeholder="gfs://drive/resource-id"
               value={uri}
               onChange={e => setUri(e.target.value)}
             />

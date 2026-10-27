@@ -176,6 +176,7 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    getHome: () => ipcRenderer.invoke('gfs:getHome'),
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
     download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
       cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
@@ -252,14 +253,14 @@ const clerum = Object.freeze({
         ifMatch,
         resumeUploadId,
       }),
-    getUploadSnapshot: (uploadId: string, drive = 'main') =>
+    getUploadSnapshot: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
-    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
-    pauseUpload: (uploadId: string, drive = 'main') =>
+    listUploadSessions: (drive?: string) => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
+    pauseUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
-    resumeUpload: (uploadId: string, drive = 'main') =>
+    resumeUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
-    cancelUpload: (uploadId: string, drive = 'main') =>
+    cancelUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),

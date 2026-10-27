@@ -625,6 +625,10 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.listTeamMembers()
   })
+  ipcMain.handle('gfs:getHome', async event => {
+    assertTrustedSender(event)
+    return service.getGfsHome()
+  })
   ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))

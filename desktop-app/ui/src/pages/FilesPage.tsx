@@ -33,7 +33,7 @@ import {
   IconShare,
   IconUpload,
 } from '@components/SidebarNav/icons'
-import { GFS_DRIVE_MAIN, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
+import { GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   GFS_UNAVAILABLE_LOCATION_MESSAGE,
@@ -448,7 +448,7 @@ export function FilesPage({
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
     scope: sessionScope,
-    drive: GFS_DRIVE_MAIN,
+    drive: ctrl.drive,
     resolve: useCallback((uri: string) => window.clerum.gfs.resolve(uri), []),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
@@ -534,7 +534,7 @@ export function FilesPage({
       .filter(item => item.kind === 'directory')
       .map(folder => ({
         folder,
-        key: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, 'main'),
+        key: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, folder.drive),
       }))
       .filter(({ key }) => {
         const state = queryClient.getQueryState(key)
@@ -561,7 +561,7 @@ export function FilesPage({
           .fetchInfiniteQuery({
             queryKey: key,
             queryFn: ({ pageParam }) =>
-              window.clerum.gfs.listChildren(folder.resourceId, 'main', pageParam),
+              window.clerum.gfs.listChildren(folder.resourceId, folder.drive, pageParam),
             initialPageParam: undefined as string | undefined,
           })
           .catch(() => {
@@ -910,7 +910,7 @@ export function FilesPage({
     for (const source of writable) {
       let folderAffordances: { canDelegate: boolean; grantableBits: string[] }
       try {
-        folderAffordances = await window.clerum.gfs.affordances(source.resourceId, GFS_DRIVE_MAIN)
+        folderAffordances = await window.clerum.gfs.affordances(source.resourceId, ctrl.drive)
       } catch (affordancesError) {
         if (failClosedOnAuthorizationError(affordancesError)) return
         pushToast?.(describeGfsGrantError(affordancesError).message, 'error')
@@ -1034,9 +1034,10 @@ export function FilesPage({
             source.resourceId,
             [subjectKey],
             bits,
-            GFS_DRIVE_MAIN,
+            ctrl.drive,
             source.grantInherit === true
           )
+          await ctrl.refreshPermissionState()
           updated += 1
         } catch (updateError) {
           await failPartially(
@@ -1152,7 +1153,7 @@ export function FilesPage({
     setZipJob({ folderName: folder.name, progress: initialProgress })
     try {
       const result = await createGfsFolderZip(
-        { resourceId: folder.resourceId, drive: folder.drive || GFS_DRIVE_MAIN, name: folder.name },
+        { resourceId: folder.resourceId, drive: folder.drive, name: folder.name },
         {
           onProgress: progress => setZipJob({ folderName: folder.name, progress }),
           signal: abortController.signal,
@@ -1375,7 +1376,7 @@ export function FilesPage({
     return {
       resourceId: resource.resourceId,
       gfsUri: resource.gfsUri,
-      drive: resource.drive || GFS_DRIVE_MAIN,
+      drive: resource.drive,
       kind: resource.kind === 'directory' ? 'directory' : 'file',
       name: resource.name,
       ...(Number.isSafeInteger(resource.version) ? { version: resource.version } : {}),
@@ -1394,7 +1395,7 @@ export function FilesPage({
     const source = dragSession.activeSource()
     return source &&
       dragSession.matchesScope(sessionScope ?? 'anonymous') &&
-      source.drive === GFS_DRIVE_MAIN
+      source.drive === ctrl.drive
       ? source
       : null
   }
@@ -1581,7 +1582,7 @@ export function FilesPage({
   /** Cached destination names for the suggested numbered-name candidate. */
   const cachedDestinationNames = (destinationId: string): Set<string> => {
     const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsDriveResource[] }> }>(
-      desktopQueryKeys.gfsChildren(sessionScope ?? 'anonymous', destinationId, GFS_DRIVE_MAIN)
+      desktopQueryKeys.gfsChildren(sessionScope ?? 'anonymous', destinationId, ctrl.drive)
     )
     return new Set((cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? []))
   }
@@ -1866,8 +1867,8 @@ export function FilesPage({
     const target = moveTarget
     const source: GfsDragSource = {
       resourceId: target.resourceId,
-      gfsUri: `gfs://${GFS_DRIVE_MAIN}/${target.resourceId.replace(/-/g, '').toLowerCase()}`,
-      drive: GFS_DRIVE_MAIN,
+      gfsUri: `gfs://${ctrl.drive}/${target.resourceId.replace(/-/g, '').toLowerCase()}`,
+      drive: ctrl.drive,
       kind: target.kind,
       name: target.name,
       ...(Number.isSafeInteger(target.version) ? { version: target.version } : {}),
@@ -1935,7 +1936,7 @@ export function FilesPage({
     resourceId: crumb.resourceId,
     rid: crumb.resourceId.replace(/-/g, '').toLowerCase(),
     gfsUri: crumb.gfsUri,
-    drive: GFS_DRIVE_MAIN,
+    drive: ctrl.drive,
     parentResourceId: null,
     name: crumb.name,
     kind: 'directory',
@@ -2245,6 +2246,14 @@ export function FilesPage({
               </div>
             ) : null}
           </div>
+
+          {current &&
+          ctrl.home?.state === 'ready' &&
+          ctrl.home.drive === ctrl.drive &&
+          crumbs.some(crumb => crumb.resourceId === ctrl.home?.resourceId) &&
+          affordances ? (
+            <p aria-label="Your access">Your access: {affordances.held.join(', ')}</p>
+          ) : null}
 
           {dragActive || droppedUploadCount > 0 ? (
             <div className="composer-drop-overlay da-gfs-drop-overlay" role="status">
@@ -2822,6 +2831,11 @@ export function FilesPage({
                   </div>
                   <GfsGrantList
                     agents={agentSubjects}
+                    protectedOwner={
+                      ctrl.homeOwnerId && ctrl.home?.resourceId
+                        ? { userId: ctrl.homeOwnerId, homeResourceId: ctrl.home.resourceId }
+                        : undefined
+                    }
                     derivationNotice={inheritedAccessNotice}
                     derivationNoticeHint={inheritedAccessNoticeHint}
                     error={grantsError}
@@ -2978,6 +2992,7 @@ export function FilesPage({
           onMove={handleMoveTarget}
           onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
           sessionScope={sessionScope}
+          drive={ctrl.drive}
           target={moveTarget}
         />
       ) : null}

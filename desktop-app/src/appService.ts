@@ -24,16 +24,16 @@ import {
 } from './desktopEnvironmentUrl.js'
 import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
+import { gfsUploadTransport, requestGfsJson } from './gfs/transport.js'
 import {
   DesktopGfsUploadJob,
   DesktopUploadCapabilityError,
   type DesktopUploadInput,
   type DesktopUploadSession,
-  type DesktopUploadTransport,
   formatGfsUploadLimit,
 } from './gfs/upload.js'
 import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
-import { ApiError, requestJson, withTimeout } from './httpClient.js'
+import { ApiError, requestJson } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
@@ -376,26 +376,6 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = 8000
 const RECONNECT_WAITING_FOR_OPEN_TIMEOUT_MS = 195_000
 const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
 
-const gfsUploadTransport: DesktopUploadTransport = {
-  requestJson,
-  requestPart: async (url, token, headers, body, timeoutMs, signal) => {
-    const response = await fetch(url, {
-      method: 'PUT',
-      headers: { authorization: `Bearer ${token}`, ...headers },
-      body: body as unknown as BodyInit,
-      // Node's fetch requires this opt-in for a streaming request body.
-      duplex: 'half',
-      signal: withTimeout(signal, timeoutMs),
-    } as RequestInit & { duplex: 'half' })
-    const text = await response.text()
-    return {
-      status: response.status,
-      text,
-      retryAfter: response.headers.get('retry-after') ?? undefined,
-    }
-  },
-}
-
 const LEGACY_GFS_MAX_FILE_BYTES = 16 * 1024 * 1024
 const LEGACY_GFS_READ_BUFFER_BYTES = 1024 * 1024
 
@@ -579,7 +559,7 @@ function desktopGfsUploadIdentity(me: SessionMe): DesktopGfsUploadIdentity {
 }
 
 function normalizeDesktopUploadDrive(value: string | undefined): string {
-  const drive = String(value ?? 'main').trim()
+  const drive = String(value ?? '').trim()
   if (!drive) throw new Error('drive_required: GFS uploads require a canonical drive')
   return drive
 }
@@ -889,7 +869,7 @@ export class AppService {
     get baseUrl() {
       return config.externalRestApiBaseUrl
     },
-    requestJson,
+    requestJson: requestGfsJson,
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
     fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
@@ -2754,6 +2734,10 @@ export class AppService {
       cursor,
       signal,
     })
+  }
+
+  async getGfsHome() {
+    return this.gfsClient.getHome(this.requireSessionToken())
   }
 
   /** List explicit gfs resources the current user can read through grants or shares. */

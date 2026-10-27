@@ -2,7 +2,11 @@ import { classifyGfsAclReadFailure, worstGfsCoverageClass } from '@clerum/gfs-in
 import type { GfsCoverageClass } from '@clerum/gfs-interaction-policy'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
 import { isGfsSessionAuthorityFailure, parseHttpStatus } from '@lib/gfsGrantErrors'
-import type { GfsInheritedAccessItem, GfsInheritedAccessResult } from './delegation.types'
+import type {
+  GfsInheritedAccessItem,
+  GfsInheritedAccessResult,
+  GfsSubjectProfile,
+} from './delegation.types'
 import { inheritedSubjectKey, mergeInheritedAccessItem } from './inheritedAccessMerge'
 
 /**
@@ -30,8 +34,6 @@ import { inheritedSubjectKey, mergeInheritedAccessItem } from './inheritedAccess
  * controller's existing fail-closed error path.
  */
 
-const DEFAULT_DRIVE = 'main'
-
 function ridOf(resourceId: string): string {
   return resourceId.replace(/-/g, '').toLowerCase()
 }
@@ -50,7 +52,7 @@ function ridOf(resourceId: string): string {
  */
 export async function deriveGfsInheritedAccess(
   resourceId: string,
-  drive: string = DEFAULT_DRIVE
+  drive: string
 ): Promise<GfsInheritedAccessResult> {
   const bySubject = new Map<string, GfsInheritedAccessItem>()
   const seenResourceIds = new Set<string>()
@@ -167,11 +169,27 @@ export async function deriveGfsInheritedAccess(
     const folderLabel = parent.name || drive
     for (const grant of grants ?? []) {
       if (!grant.inherit) continue
-      merge(grant.subject, grant.permissions, grant.id, [], parent.resourceId, folderLabel)
+      merge(
+        grant.subject,
+        grant.permissions,
+        grant.id,
+        [],
+        parent.resourceId,
+        folderLabel,
+        grant.subjectProfile
+      )
     }
     for (const share of shares ?? []) {
       if (!share.includeDescendants) continue
-      merge(share.subject, share.permissions, null, [share.id], parent.resourceId, folderLabel)
+      merge(
+        share.subject,
+        share.permissions,
+        null,
+        [share.id],
+        parent.resourceId,
+        folderLabel,
+        share.subjectProfile
+      )
     }
     if (mustStop) {
       stopped = true
@@ -212,16 +230,17 @@ export async function deriveGfsInheritedAccess(
     grantId: string | null,
     shareIds: string[],
     folderResourceId: string,
-    folderLabel: string
+    folderLabel: string,
+    subjectProfile?: GfsSubjectProfile
   ): void {
     const key = inheritedSubjectKey(subject)
-    bySubject.set(
-      key,
-      mergeInheritedAccessItem(
-        bySubject.get(key) ?? null,
-        { subject, permissions, grantId, shareIds },
-        { resourceId: folderResourceId, name: folderLabel }
-      )
+    const previous = bySubject.get(key) ?? null
+    const merged = mergeInheritedAccessItem(
+      previous,
+      { subject, permissions, grantId, shareIds },
+      { resourceId: folderResourceId, name: folderLabel }
     )
+    merged.subjectProfile = subjectProfile ?? previous?.subjectProfile
+    bySubject.set(key, merged)
   }
 }

@@ -123,6 +123,7 @@ declare global {
         switch: (teamId: string) => Promise<SessionState>
       }
       gfs: {
+        getHome: () => Promise<import('./gfs/uriHandler.js').GfsHome>
         resolve: (uri: string) => Promise<{
           drive: string
           resourceId: string
@@ -430,6 +431,7 @@ declare global {
             drive: string
             resourceId: string
             subject: { type: string; id?: string }
+            subjectProfile?: { name: string | null; email?: string }
             permissions: string[]
             inherit: boolean
           }>
@@ -444,6 +446,7 @@ declare global {
             drive: string
             resourceId: string
             subject: { type: string; id?: string }
+            subjectProfile?: { name: string | null; email?: string }
             permissions: string[]
             includeDescendants: boolean
           }>
