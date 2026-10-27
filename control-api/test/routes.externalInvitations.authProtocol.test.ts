@@ -61,6 +61,14 @@ function acceptedInvitation() {
       role: 'member',
       authGeneration: 4,
       lifecycleState: 'active',
+    },
+  }
+}
+
+function acceptedPasswordReset() {
+  return {
+    data: {
+      ...acceptedInvitation().data,
       sessionContext: {
         userId: 'user-1',
         email: 'user@example.com',
@@ -106,6 +114,7 @@ describe('unversioned invitation session producers', () => {
     })
     expect(claims).not.toHaveProperty('authProtocolVersion')
     expect(directory.acceptInvitationForEmail).toHaveBeenCalledOnce()
+    expect(response.body).not.toHaveProperty('sessionContext')
 
     config.authProtocolCutoverEnabled = true
     expect(verifyExternalSessionToken(response.body.token)).toBeNull()
@@ -119,7 +128,7 @@ describe('unversioned invitation session producers', () => {
       purpose: 'password_reset',
       status: 'pending',
     })
-    directory.setInvitationPasswordForEmail.mockResolvedValue(acceptedInvitation())
+    directory.setInvitationPasswordForEmail.mockResolvedValue(acceptedPasswordReset())
 
     const response = await request(buildApp())
       .post('/external/invitations/password-token')
