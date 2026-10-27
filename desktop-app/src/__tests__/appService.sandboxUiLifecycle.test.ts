@@ -104,7 +104,7 @@ const electronMocks = vi.hoisted(() => {
 const authMocks = vi.hoisted(() => ({
   getDesktopEnvironment: vi.fn(),
   getMe: vi.fn(),
-  googleLogin: vi.fn(),
+  passwordLogin: vi.fn(),
   health: vi.fn(),
 }))
 
@@ -145,6 +145,7 @@ vi.mock('../config.js', async importOriginal => {
     getActiveRuntimeConfigOptionId: () => null,
     getActiveEnvKey: () => 'test_env-000000000000',
     getActiveLegacyEnvKeys: () => [],
+    getActiveLegacyEnvKeyInventory: () => ({ keys: [], complete: true }),
     hydrateDesktopRuntimeConfig: () => undefined,
     isDesktopRuntimeConfigured: () => true,
     saveDesktopRuntimeConfig: vi.fn(),
@@ -182,7 +183,10 @@ vi.mock('../sandboxUiPartitionGc.js', () => ({
 // real RpcProxyClient below.
 vi.mock('../rpcTokenManager.js', () => ({
   RpcTokenManager: class {
-    getOrIssue = vi.fn(async (sessionToken: string) => ({ token: `fake-rpc-${sessionToken}` }))
+    getOrIssue = vi.fn(async (sessionToken: string) => ({
+      token: `fake-rpc-${sessionToken}`,
+      expiresInSeconds: 300,
+    }))
     clear = vi.fn()
     getMetadata = vi.fn(() => ({ expiresAtMs: null, scopes: [], hostRefs: [] }))
   },
@@ -192,7 +196,7 @@ vi.mock('../authClient.js', () => ({
   AuthClient: class {
     health = authMocks.health
     getMe = authMocks.getMe
-    googleLogin = authMocks.googleLogin
+    passwordLogin = authMocks.passwordLogin
     getDesktopEnvironment = authMocks.getDesktopEnvironment
   },
 }))
@@ -303,10 +307,12 @@ function mintCallsFor(recipeName: string): number {
 }
 
 function createService(): AppService {
-  return new AppService({
+  const service = new AppService({
     tokenStore: new TokenStore({ isolatedUserDataPath: userDataDir }),
     getUserDataDirectory: () => userDataDir,
   })
+  servicesForCleanup.add(service)
+  return service
 }
 
 function makeService(): AppService {
@@ -335,6 +341,7 @@ function openArgs(
 }
 
 let userDataDir = ''
+const servicesForCleanup = new Set<AppService>()
 
 beforeEach(async () => {
   vi.clearAllMocks()
@@ -342,7 +349,7 @@ beforeEach(async () => {
   config.rpcProxyBaseUrl = 'https://rpc.example'
   authMocks.health.mockResolvedValue({ status: 'ok' })
   authMocks.getMe.mockResolvedValue(null)
-  authMocks.googleLogin.mockReset()
+  authMocks.passwordLogin.mockReset()
   authMocks.getDesktopEnvironment.mockReset()
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   electronMocks.views.length = 0
@@ -361,9 +368,11 @@ afterEach(async () => {
   _resetSandboxUiRefreshForTests()
   _resetPluginSurfacesForTests()
   _resetPluginSdkRuntimeForTests()
+  await Promise.allSettled([...servicesForCleanup].map(service => service.prepareForQuit()))
+  servicesForCleanup.clear()
   vi.unstubAllGlobals()
   vi.useRealTimers()
-  await rm(userDataDir, { recursive: true, force: true })
+  await rm(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 })
 })
 
 async function setupWithLiveFirstApp(onClosed: () => void = vi.fn()) {
@@ -390,20 +399,23 @@ describe('AppService sandbox-ui effective RPC endpoint', () => {
         rpcProxyBaseUrl: discoveredRpcUrl,
         appName: 'Discovered environment',
       })
-    authMocks.googleLogin.mockResolvedValue({
+    const userA = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    authMocks.passwordLogin.mockResolvedValue({
       token: testSessionTokenWithExpiry(),
-      me: {
-        id: 'user-a',
-        email: 'user-a@example.test',
-        name: 'User A',
-        picture: null,
-        teamId: 'team-a',
-        teamName: 'Team A',
-        role: 'member',
-      },
+      me: userA,
     })
-    const service = new AppService()
-    await service.googleLogin('google-id-token')
+    authMocks.getMe.mockResolvedValueOnce(userA)
+    const service = createService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    await service.passwordLogin(userA.email, 'fixture-password')
     await service.getDependenciesHealth()
     expect(config.rpcProxyBaseUrl).toBe('')
 
@@ -752,12 +764,11 @@ describe('AppService sandbox-ui embed across a session clear', () => {
     await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(1), { timeout: 1_000 })
     await service.logout()
     __setChatStoreBaseDirForTests(userDataDir)
-    const authClient = (service as unknown as { authClient: Record<string, unknown> }).authClient
-    authClient.googleLogin = vi.fn().mockResolvedValue({
-      token: 'fake-session-token-b',
-      me: { id: 'user-b', teamId: 'team-b' },
-    })
-    await service.googleLogin('id-token-b')
+    const userB = { id: 'user-b', teamId: 'team-b' }
+    const tokenB = testSessionTokenWithExpiry()
+    authMocks.passwordLogin.mockResolvedValueOnce({ token: tokenB, me: userB })
+    authMocks.getMe.mockResolvedValueOnce(userB)
+    await service.passwordLogin('user-b@example.test', 'fixture-password')
     answerMint(mintOk('first-app'))
 
     const settled = await outcome
@@ -898,13 +909,11 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
     vi.mocked(app.getPath).mockImplementation(() => userDataDir)
   })
 
-  async function loginAs(service: AppService, token: string, userId: string): Promise<void> {
-    const authClient = (service as unknown as { authClient: Record<string, unknown> }).authClient
-    authClient.googleLogin = vi.fn().mockResolvedValue({
-      token,
-      me: { id: userId, teamId: `team-${userId}` },
-    })
-    await service.googleLogin(`id-token-${userId}`)
+  async function loginAs(service: AppService, userId: string): Promise<void> {
+    const me = { id: userId, teamId: `team-${userId}` }
+    authMocks.passwordLogin.mockResolvedValueOnce({ token: testSessionTokenWithExpiry(), me })
+    authMocks.getMe.mockResolvedValueOnce(me)
+    await service.passwordLogin(`${userId}@example.test`, 'fixture-password')
   }
 
   async function drainSandboxUiQueue(service: AppService): Promise<void> {
@@ -925,7 +934,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
   async function serviceLoggedInAsA(): Promise<AppService> {
     const service = createService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
-    await loginAs(service, 'fake-session-token-a', 'user-a')
+    await loginAs(service, 'user-a')
     return service
   }
 
@@ -940,7 +949,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
       (error: unknown) => error
     )
     await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(1), { timeout: 1_000 })
-    await loginAs(service, 'fake-session-token-b', 'user-b')
+    await loginAs(service, 'user-b')
     answerMint(mintOk('first-app'))
 
     const settled = await outcome
@@ -963,7 +972,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
     expect(first?.appRef).toBe('sandbox-recipes/first-app')
     const firstView = electronMocks.views[0]
 
-    await loginAs(service, 'fake-session-token-b', 'user-b')
+    await loginAs(service, 'user-b')
 
     await expectEmbedGoneWithoutRefresh(parentWindow, firstView, first!.webContentsId)
   })
@@ -978,7 +987,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
 
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1)
     await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(2), { timeout: 1_000 })
-    await loginAs(service, 'fake-session-token-b', 'user-b')
+    await loginAs(service, 'user-b')
     answerMint(mintOk('first-app'))
     await vi.waitFor(() => expect(getActiveSandboxUi()).toBeNull(), { timeout: 1_000 })
     await drainSandboxUiQueue(service)
@@ -995,7 +1004,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
     await service.openSandboxUi(openArgs('first-app', parentWindow))
     const firstView = electronMocks.views[0]
 
-    await loginAs(service, 'fake-session-token-b', 'user-b')
+    await loginAs(service, 'user-b')
     await service.openSandboxUi(openArgs('second-app', parentWindow))
 
     expect(getActiveSandboxUi()?.appRef).toBe('sandbox-recipes/second-app')

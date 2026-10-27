@@ -23,11 +23,10 @@ vi.mock('electron', () => ({
     decryptString: (value: Buffer) => value.toString().replace(/^encrypted:/, ''),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -47,6 +46,7 @@ const homeMe = {
   teamName: 'Fixture home',
   role: 'member',
 }
+let previousConfigPath: string | undefined
 const freshMe = { ...homeMe, id: 'fixture-journal-fresh-user' }
 const userFor = (token: string) =>
   token === freshToken
@@ -101,6 +101,8 @@ beforeEach(async () => {
   vi.doMock('keytar', () => boundary)
   boundary.keychain.clear()
   boundary.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-journal-producer-'))
+  previousConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
+  process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(boundary.directory, 'runtime-config.json')
   boundary.getPassword
     .mockReset()
     .mockImplementation(
@@ -115,6 +117,11 @@ beforeEach(async () => {
       boundary.keychain.delete(keyOf(service, account))
     )
   boundary.notifySessionChanged.mockReset()
+  const config = await import('../config.js')
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://auth.example.test/api',
+    rpcProxyBaseUrl: 'https://rpc.example.test',
+  })
   const { safeStorage } = await import('electron')
   vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
 })
@@ -126,6 +133,8 @@ afterEach(async () => {
   await fs.rm(boundary.directory, { recursive: true, force: true })
   boundary.directory = ''
   boundary.keychain.clear()
+  if (previousConfigPath === undefined) delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+  else process.env.CLERUM_DESKTOP_CONFIG_PATH = previousConfigPath
   vi.resetModules()
 })
 
@@ -144,6 +153,10 @@ async function harness() {
     getUserDataDirectory: () => boundary.directory,
     reportDeferredLogoutFailure: reportFailure,
   })
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://auth.example.test/api',
+    rpcProxyBaseUrl: 'https://rpc.example.test',
+  })
   const state = service as unknown as {
     sessionToken: string | null
     me: typeof homeMe | null
@@ -151,6 +164,10 @@ async function harness() {
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
       switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
     }
   }
   vi.spyOn(state.authClient, 'getMe').mockImplementation(async token => userFor(token))
@@ -171,43 +188,76 @@ async function harness() {
   }
 }
 
+async function loginWithPassword(
+  h: Awaited<ReturnType<typeof harness>>,
+  token: string,
+  me: typeof homeMe
+) {
+  vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({ token, me })
+  return h.service.passwordLogin(me.email, `fixture-password:${token}`)
+}
+
+async function expectSelectedSession(h: Awaited<ReturnType<typeof harness>>, token: string) {
+  const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+  const selected = await readSessionAuthoritySourceSelection({
+    tokenStore: h.tokenStore,
+    envKey: h.envKey,
+  })
+  expect(selected.status).toBe('accepted')
+  if (selected.status !== 'accepted') throw new Error('Expected accepted session authority')
+  expect(selected.session.token).toBe(token)
+  expect(selected.session.accepted.record.frame.source?.format).toBe('v1')
+  return selected.session.accepted.record
+}
+
 describe('R21-M13 selected-source ownership after asynchronous cleanup', () => {
-  it('preserves accepted Fresh when the older native source changes during cleanup', async () => {
-    const older = await harness()
+  it('keeps a newer accepted source when an older exact cleanup settles late', async () => {
+    const first = await harness()
+    await loginWithPassword(first, homeToken, homeMe)
+    const firstRecord = await expectSelectedSession(first, homeToken)
+    const replacement = await harness()
     const cleanupEntered = gate()
     const releaseCleanup = gate()
-    const clear = older.tokenStore.clearKeytarSessionTokensStrictly.bind(older.tokenStore)
-    vi.spyOn(older.tokenStore, 'clearKeytarSessionTokensStrictly').mockImplementationOnce(
-      async (...args) => {
-        const result = await clear(...args)
-        cleanupEntered.resolve()
-        await releaseCleanup.promise
-        return result
-      }
-    )
-    const installing = own(older.state.installAuthenticatedLogin({ token: homeToken, me: homeMe }))
-    const outcome = installing.then(
-      value => ({ status: 'fulfilled' as const, value }),
-      error => ({ status: 'rejected' as const, error })
-    )
-    await entered(cleanupEntered.promise, installing)
-    const fresh = await harness()
+    const cleanupSources: unknown[] = []
+    const deleteExact =
+      replacement.tokenStore.deleteSessionCredentialSourceIfUnselectedWithProof.bind(
+        replacement.tokenStore
+      )
+    vi.spyOn(
+      replacement.tokenStore,
+      'deleteSessionCredentialSourceIfUnselectedWithProof'
+    ).mockImplementation(async (...args) => {
+      cleanupSources.push(args[0])
+      const result = await deleteExact(...args)
+      cleanupEntered.resolve()
+      await releaseCleanup.promise
+      return result
+    })
+    const replacementMe = userFor(teamToken)
+    const replacementLogin = own(loginWithPassword(replacement, teamToken, replacementMe))
+    await entered(cleanupEntered.promise, replacementLogin)
+    expect(cleanupSources).toEqual([firstRecord.frame.source])
+    const replacementRecord = await expectSelectedSession(replacement, teamToken)
+    expect(replacementRecord.frame.source?.sourceRef).not.toBe(firstRecord.frame.source?.sourceRef)
+
+    const newest = await harness()
     try {
-      await expect(
-        fresh.state.installAuthenticatedLogin({ token: freshToken, me: freshMe })
-      ).resolves.toEqual({ authenticated: true, me: freshMe })
-      expect(await fresh.tokenStore.getKeytarSessionToken(fresh.envKey)).toBe(freshToken)
-      expect(
-        fresh.markers.readPendingExternalLogoutMarker(boundary.directory, fresh.envKey)
-      ).toBeNull()
+      await expect(loginWithPassword(newest, freshToken, freshMe)).resolves.toEqual({
+        authenticated: true,
+        me: freshMe,
+      })
+      const newestRecord = await expectSelectedSession(newest, freshToken)
+      expect(newestRecord.frame.source?.sourceRef).not.toBe(
+        replacementRecord.frame.source?.sourceRef
+      )
     } finally {
       releaseCleanup.resolve()
     }
-    const completed = await outcome
-    const markerAfterOlderCompletion = older.markers.readPendingExternalLogoutMarker(
-      boundary.directory,
-      older.envKey
-    )
+    await expect(replacementLogin).resolves.toEqual({
+      authenticated: true,
+      me: replacementMe,
+    })
+
     const restart = await harness()
     await expect(restart.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -215,89 +265,46 @@ describe('R21-M13 selected-source ownership after asynchronous cleanup', () => {
     })
     expect(restart.state.authClient.getMe).toHaveBeenCalledWith(freshToken)
     expect(restart.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
-    expect(await fresh.tokenStore.getKeytarSessionToken(fresh.envKey)).toBe(freshToken)
-    expect(fresh.state.sessionToken).toBe(freshToken)
-    expect(fresh.state.me).toEqual(freshMe)
-    expect(older.state.sessionToken).toBeNull()
-    expect(older.state.me).toBeNull()
-    expect(completed.status).toBe('rejected')
-    expect(markerAfterOlderCompletion).toBeNull()
+    expect(restart.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+    await expectSelectedSession(restart, freshToken)
   })
 })
 
 describe('R21-M13 original publication cannot adopt a newer identical accepted source', () => {
   it('keeps the accepted same-token publisher through an older required binding failure', async () => {
     const older = await harness()
-    const firstSetterEntered = gate()
-    const releaseFirstSetter = gate()
-    const newerSetterAdmitted = gate()
-    const releaseOlderBinding = gate()
-    let nativeWrites = 0
-    boundary.setPassword.mockImplementation(async (service, account, token) => {
-      boundary.keychain.set(keyOf(service, account), token)
-      if (token === homeToken && ++nativeWrites === 1) {
-        firstSetterEntered.resolve()
-        await releaseFirstSetter.promise
-      }
+    const fresh = await harness()
+    const preparedEntered = gate()
+    const releasePrepared = gate()
+    const { prepareChatStoreBindingForUser } = await import('../chatStoreBinding.js')
+    const prepare = vi.mocked(prepareChatStoreBindingForUser).getMockImplementation()
+    vi.mocked(prepareChatStoreBindingForUser).mockImplementationOnce(async (...args) => {
+      preparedEntered.resolve()
+      await releasePrepared.promise
+      if (!prepare) throw new Error('Staged chat binding fixture is unavailable')
+      return prepare(...args)
     })
-    const olderBinding = older.state as unknown as {
-      bindCurrentChatStore: (userId: string) => Promise<void>
-    }
-    const bind = olderBinding.bindCurrentChatStore.bind(olderBinding)
-    let olderBindingDispatch = false
-    const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
-    vi.mocked(bindChatStoreForUser).mockImplementation(async () => {
-      if (olderBindingDispatch) throw new Error('fixture-older required chat binding failed')
-    })
-    vi.spyOn(olderBinding, 'bindCurrentChatStore').mockImplementation(async (...args) => {
-      await releaseOlderBinding.promise
-      olderBindingDispatch = true
-      try {
-        return await bind(...args)
-      } finally {
-        olderBindingDispatch = false
-      }
-    })
-    const oldInstall = own(older.state.installAuthenticatedLogin({ token: homeToken, me: homeMe }))
-    const oldOutcome = oldInstall.then(
+    const oldLogin = own(loginWithPassword(older, homeToken, homeMe))
+    const oldOutcome = oldLogin.then(
       value => ({ status: 'fulfilled' as const, value }),
       error => ({ status: 'rejected' as const, error })
     )
-    await entered(firstSetterEntered.promise, oldInstall)
-    const fresh = await harness()
-    const setFresh = fresh.tokenStore.setSessionToken.bind(fresh.tokenStore)
-    vi.spyOn(fresh.tokenStore, 'setSessionToken').mockImplementationOnce((...args) => {
-      const pending = setFresh(...args)
-      newerSetterAdmitted.resolve()
-      return pending
-    })
-    const newInstall = own(fresh.state.installAuthenticatedLogin({ token: homeToken, me: homeMe }))
-    try {
-      await entered(newerSetterAdmitted.promise, newInstall)
-      // Drain one event-loop turn while the real first account operation remains held:
-      // the second accepted leaf call has joined that same account's actual FIFO.
-      await new Promise<void>(resolve => setImmediate(resolve))
-      releaseFirstSetter.resolve()
-      await expect(newInstall).resolves.toEqual({ authenticated: true, me: homeMe })
-      expect(nativeWrites).toBe(2)
-      expect(await fresh.tokenStore.getKeytarSessionToken(fresh.envKey)).toBe(homeToken)
-      expect(fresh.state.sessionToken).toBe(homeToken)
-      expect(fresh.state.me).toEqual(homeMe)
-      expect(
-        fresh.markers.readPendingExternalLogoutMarker(boundary.directory, fresh.envKey)
-      ).toBeNull()
-    } finally {
-      releaseFirstSetter.resolve()
-      releaseOlderBinding.resolve()
-    }
+    await entered(preparedEntered.promise, oldLogin)
+    const newLogin = await loginWithPassword(fresh, homeToken, homeMe)
+    expect(newLogin).toEqual({ authenticated: true, me: homeMe })
+    const freshRecord = await expectSelectedSession(fresh, homeToken)
+    releasePrepared.resolve()
     const rejected = await oldOutcome
+    expect(rejected.status).toBe('rejected')
+    expect(older.state.sessionToken).toBeNull()
+    expect(older.state.me).toBeNull()
+    expect(fresh.state.sessionToken).toBe(homeToken)
+    expect(fresh.state.me).toEqual(homeMe)
+
     const restart = await harness()
     await expect(restart.service.initialize()).resolves.toEqual({ authenticated: true, me: homeMe })
     expect(restart.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
-    expect(await fresh.tokenStore.getKeytarSessionToken(fresh.envKey)).toBe(homeToken)
-    expect(fresh.state.sessionToken).toBe(homeToken)
-    expect(fresh.state.me).toEqual(homeMe)
-    expect(rejected.status).toBe('rejected')
-    expect(older.state.sessionToken).toBeNull()
+    const restartedRecord = await expectSelectedSession(restart, homeToken)
+    expect(restartedRecord.frame.source?.sourceRef).toBe(freshRecord.frame.source?.sourceRef)
   })
 })

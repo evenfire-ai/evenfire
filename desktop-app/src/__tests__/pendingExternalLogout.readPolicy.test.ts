@@ -1,46 +1,130 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
+import { createHash } from 'node:crypto'
+import fsSync from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
   type PendingExternalLogoutIntent,
+  applyPendingExternalLogoutCas,
+  isPendingExternalLogoutWriteFailure,
   isTransientPendingLogoutReadError,
+  observePendingExternalLogoutRaw,
   pendingExternalLogoutMarkersMatch,
 } from '../pendingExternalLogout.js'
 
-const transientCodes = ['EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EINTR']
+const transientCodes = ['EIO', 'EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EINTR']
 
 describe('marker inspection error policy', () => {
-  it.each(transientCodes)('classifies %s as temporary, never confirmed corruption', code => {
-    expect(
-      isTransientPendingLogoutReadError(Object.assign(new Error('fixture-read'), { code }))
-    ).toBe(true)
+  it.each(transientCodes)('does not classify an unproven %s as a read failure', code => {
+    expect(isTransientPendingLogoutReadError(Object.assign(new Error('fixture'), { code }))).toBe(
+      false
+    )
   })
 
   it('never turns unknown, permanent, absent, or malformed errors into temporary I/O', () => {
     fc.assert(
       fc.property(fc.jsonValue(), value => {
-        const code =
-          value !== null && typeof value === 'object'
-            ? (value as { code?: unknown }).code
-            : undefined
-        expect(isTransientPendingLogoutReadError(value)).toBe(
-          typeof code === 'string' && transientCodes.includes(code)
-        )
+        expect(isTransientPendingLogoutReadError(value)).toBe(false)
       }),
       { numRuns: 20000 }
     )
-    for (const code of ['ENOENT', 'EACCES', 'ELOOP', 'EIO', 'EINVAL', 'ENOTDIR']) {
+    for (const code of ['ENOENT', 'EACCES', 'ELOOP', 'EINVAL', 'ENOTDIR']) {
       expect(isTransientPendingLogoutReadError({ code })).toBe(false)
     }
   })
 
-  it('depends only on an exact transient code, not misleading message text', () => {
-    fc.assert(
-      fc.property(fc.string(), fc.constantFrom(...transientCodes), (message, code) => {
-        expect(isTransientPendingLogoutReadError({ message, code })).toBe(true)
-        expect(isTransientPendingLogoutReadError(new Error(`${code}: ${message}`))).toBe(false)
-      }),
-      { numRuns: 20000 }
+  it('classifies an actual marker observation EIO as transient', () => {
+    const directory = fsSync.mkdtempSync(path.join(os.tmpdir(), 'evenfire-marker-read-eio-'))
+    const envKey = 'prod-012345abcdef'
+    const filePath = path.join(
+      directory,
+      `pending-external-logout-${createHash('sha256').update(envKey).digest('hex')}`
     )
+    const readFailure = Object.assign(new Error('fixture marker read failure'), { code: 'EIO' })
+    const originalOpen = fsSync.openSync.bind(fsSync)
+    const open = vi.spyOn(fsSync, 'openSync').mockImplementation((...args) => {
+      if (String(args[0]) === filePath) throw readFailure
+      return Reflect.apply(originalOpen, undefined, args) as ReturnType<typeof fsSync.openSync>
+    })
+    try {
+      expect(() => observePendingExternalLogoutRaw(directory, envKey)).toThrow(readFailure)
+      expect(isTransientPendingLogoutReadError(readFailure)).toBe(true)
+    } finally {
+      open.mockRestore()
+      fsSync.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a pre-publication marker reread EIO transient and leaves marker bytes unchanged', () => {
+    const directory = fsSync.mkdtempSync(path.join(os.tmpdir(), 'evenfire-marker-reread-eio-'))
+    const envKey = 'prod-012345abcdef'
+    const filePath = path.join(
+      directory,
+      `pending-external-logout-${createHash('sha256').update(envKey).digest('hex')}`
+    )
+    const readFailure = Object.assign(new Error('fixture marker reread failure'), { code: 'EIO' })
+    const originalOpen = fsSync.openSync.bind(fsSync)
+    let markerReads = 0
+    const open = vi.spyOn(fsSync, 'openSync').mockImplementation((...args) => {
+      if (String(args[0]) === filePath && ++markerReads === 3) throw readFailure
+      return Reflect.apply(originalOpen, undefined, args) as ReturnType<typeof fsSync.openSync>
+    })
+    try {
+      expect(() =>
+        applyPendingExternalLogoutCas(directory, envKey, {
+          expected: null,
+          next: {
+            intent: { intent: 'logout-pending' },
+            revision: '123e4567-e89b-42d3-a456-426614174000',
+          },
+        })
+      ).toThrow(readFailure)
+
+      expect(markerReads).toBe(3)
+      expect(isTransientPendingLogoutReadError(readFailure)).toBe(true)
+      expect(isPendingExternalLogoutWriteFailure(readFailure)).toBe(false)
+      expect(observePendingExternalLogoutRaw(directory, envKey).rawContents).toBeNull()
+      expect(fsSync.readdirSync(directory)).toEqual([])
+    } finally {
+      open.mockRestore()
+      fsSync.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('treats EIO after marker rename as an uncertain mutation, not a transient read', () => {
+    const directory = fsSync.mkdtempSync(path.join(os.tmpdir(), 'evenfire-marker-write-eio-'))
+    const envKey = 'prod-012345abcdef'
+    const writeFailure = Object.assign(new Error('fixture directory sync failure'), { code: 'EIO' })
+    const originalSync = fsSync.fsyncSync.bind(fsSync)
+    const sync = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
+      if (fsSync.fstatSync(descriptor).isDirectory()) throw writeFailure
+      return originalSync(descriptor)
+    })
+    try {
+      let failure: unknown
+      try {
+        applyPendingExternalLogoutCas(directory, envKey, {
+          expected: null,
+          next: {
+            intent: { intent: 'logout-pending' },
+            revision: '123e4567-e89b-42d3-a456-426614174000',
+          },
+        })
+      } catch (error) {
+        failure = error
+      }
+
+      expect(failure).toBe(writeFailure)
+      expect(isPendingExternalLogoutWriteFailure(writeFailure)).toBe(true)
+      expect(isTransientPendingLogoutReadError(writeFailure)).toBe(false)
+      expect(observePendingExternalLogoutRaw(directory, envKey).marker?.intent.intent).toBe(
+        'logout-pending'
+      )
+    } finally {
+      sync.mockRestore()
+      fsSync.rmSync(directory, { recursive: true, force: true })
+    }
   })
 })
 

@@ -147,14 +147,14 @@ describe('owner-approved secure authority for new production writes', () => {
     expect(fixture.deletePassword).not.toHaveBeenCalled()
   })
 
-  it('preserves historical plaintext read compatibility without permitting a new production overwrite', async () => {
+  it('requires fresh authentication for historical plaintext and preserves denied bytes', async () => {
     const { TokenStore } = await import('../tokenStore.js')
     await new TokenStore({ isolatedUserDataPath: fixture.directory }).setSessionToken(
       'fixture-old',
       ENV
     )
     const existing = await fs.readFile(path.join(fixture.directory, `session-token-${ENV}.json`))
-    expect(await new TokenStore().getSessionToken(ENV)).toBe('fixture-old')
+    expect(await new TokenStore().getSessionToken(ENV)).toBeNull()
     await expect(new TokenStore().setSessionToken('fixture-new', ENV)).rejects.toThrow(
       'safeStorage'
     )

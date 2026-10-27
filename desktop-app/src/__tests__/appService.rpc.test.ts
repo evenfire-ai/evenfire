@@ -24,6 +24,23 @@ vi.mock('electron', () => ({
   app: { isReady: () => true, getPath: () => credentialFixture.directory },
   safeStorage: { isEncryptionAvailable: () => false },
 }))
+vi.mock('../config.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../config.js')>()
+  return {
+    ...actual,
+    getActiveRuntimeConfigOptionId: () => null,
+    getActiveEnvKey: () => 'test_env-000000000000',
+    getActiveLegacyEnvKeys: () => [],
+    getActiveLegacyEnvKeyInventory: () => ({ keys: [], complete: true }),
+    hydrateDesktopRuntimeConfig: vi.fn(),
+    isDesktopRuntimeConfigured: () => true,
+    config: {
+      ...actual.config,
+      externalRestApiBaseUrl: 'http://rest.rpc.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc.test',
+    },
+  }
+})
 
 function imageAttachment(
   id: string,
@@ -63,6 +80,27 @@ describe('AppService.invokeHostMessage', () => {
     })
   }
 
+  function createTemporaryToken(userId: string, teamId: string | null): string {
+    const payload = Buffer.from(
+      JSON.stringify({
+        sub: userId,
+        teamId,
+        exp: Math.floor(Date.now() / 1000) + 60 * 60,
+        jti: `rpc-test-${userId}-${teamId ?? 'teamless'}`,
+      })
+    ).toString('base64url')
+    return `header.${payload}.signature`
+  }
+
+  async function acceptTemporaryTestSession(service: any, me: any): Promise<string> {
+    const token = createTemporaryToken(me.id, me.teamId ?? null)
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    vi.spyOn(service.authClient, 'passwordLogin').mockResolvedValue({ token, me })
+    vi.spyOn(service.authClient, 'getMe').mockResolvedValue(me)
+    await service.passwordLogin(me.email, 'fixture-password')
+    return token
+  }
+
   it('forces desktop host messages onto the authenticated rpc envelope', async () => {
     const service = createService() as any
     service.sessionToken = 'session-token'
@@ -76,7 +114,7 @@ describe('AppService.invokeHostMessage', () => {
       role: 'member',
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token', expiresInSeconds: 300 }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -136,7 +174,7 @@ describe('AppService.invokeHostMessage', () => {
       role: 'member',
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token', expiresInSeconds: 300 }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -194,7 +232,7 @@ describe('AppService.invokeHostMessage', () => {
       role: 'member',
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token', expiresInSeconds: 300 }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -246,7 +284,7 @@ describe('AppService.invokeHostMessage', () => {
       role: 'member',
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'test-token-rpc' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'test-token-rpc', expiresInSeconds: 300 }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -305,7 +343,7 @@ describe('AppService.invokeHostMessage', () => {
         role: 'member',
       }
       service.rpcTokenManager = {
-        getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+        getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token', expiresInSeconds: 300 }),
         clear: vi.fn(),
       }
       service.rpcClient = {
@@ -362,8 +400,7 @@ describe('AppService.invokeHostMessage', () => {
     service.desktopGfsUploadStatePath = vi
       .fn()
       .mockResolvedValue(path.join(chatStoreBaseDir, 'gfs-upload-state.json'))
-    service.sessionToken = 'teamless-token'
-    service.me = {
+    const teamlessMe = {
       id: 'user-1',
       email: 'test@clerum.io',
       name: 'Test User',
@@ -372,11 +409,13 @@ describe('AppService.invokeHostMessage', () => {
       teamName: null,
       role: 'member',
     }
+    const teamlessToken = await acceptTemporaryTestSession(service, teamlessMe)
     const teamMe = {
-      ...service.me,
+      ...teamlessMe,
       teamId: 'team-1',
       teamName: 'Team One',
     }
+    const teamToken = createTemporaryToken('user-1', 'team-1')
     service.accessCatalog = {
       userId: 'user-1',
       teamId: null,
@@ -403,12 +442,12 @@ describe('AppService.invokeHostMessage', () => {
     service.authClient = {
       getMe: vi.fn().mockResolvedValueOnce(service.me).mockResolvedValueOnce(teamMe),
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-test-token',
+        token: teamToken,
         team: { id: 'team-1', name: 'Team One', role: 'member' },
       }),
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token', expiresInSeconds: 300 }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -419,9 +458,9 @@ describe('AppService.invokeHostMessage', () => {
       service.invokeHostMessage('pro-agent', { content: 'hello' }, ['pro-agent'])
     ).resolves.toEqual({ success: true, response: 'ok' })
 
-    expect(service.authClient.switchTeam).toHaveBeenCalledWith('teamless-token', 'team-1')
+    expect(service.authClient.switchTeam).toHaveBeenCalledWith(teamlessToken, 'team-1')
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
-      'team-test-token',
+      teamToken,
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
       ['pro-agent'],
       expect.any(String)
@@ -433,8 +472,7 @@ describe('AppService.invokeHostMessage', () => {
     service.desktopGfsUploadStatePath = vi
       .fn()
       .mockResolvedValue(path.join(chatStoreBaseDir, 'gfs-upload-state.json'))
-    service.sessionToken = 'teamless-token'
-    service.me = {
+    const homeMe = {
       id: 'user-1',
       email: 'test@clerum.io',
       name: 'Test User',
@@ -443,6 +481,7 @@ describe('AppService.invokeHostMessage', () => {
       teamName: 'Team A',
       role: 'member',
     }
+    const homeToken = await acceptTemporaryTestSession(service, homeMe)
     const uploadJob = { suspendForAuth: vi.fn() }
     service.gfsUploadJobs = new Map([
       [
@@ -463,32 +502,39 @@ describe('AppService.invokeHostMessage', () => {
     ])
     service.gfsPendingUploadJobs = new Set()
     service.gfsPendingLegacyUploads = new Set()
+    const teamBToken = createTemporaryToken('user-1', 'team-b')
+    const teamAToken = createTemporaryToken('user-1', 'team-a')
     service.authClient = {
       getMe: vi
         .fn()
-        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
-        .mockResolvedValueOnce({ ...service.me }),
-      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
-        token: `${teamId}-test-token`,
-        team: { id: teamId, name: teamId === 'team-b' ? 'Team B' : 'Team A', role: 'member' },
-      })),
+        .mockResolvedValueOnce({ ...homeMe, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(homeMe),
+      switchTeam: vi
+        .fn()
+        .mockResolvedValueOnce({
+          token: teamBToken,
+          team: { id: 'team-b', name: 'Team B', role: 'member' },
+        })
+        .mockResolvedValueOnce({
+          token: teamAToken,
+          team: { id: 'team-a', name: 'Team A', role: 'member' },
+        }),
     }
 
     await expect(
       service.runWithTeamContext('team-b', async (token: string) => token)
-    ).resolves.toBe('team-b-test-token')
+    ).resolves.toBe(teamBToken)
 
     expect(uploadJob.suspendForAuth).not.toHaveBeenCalled()
     expect(service.gfsUploadJobs).toHaveProperty('size', 1)
     expect(service.me.teamId).toBe('team-a')
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, 'teamless-token', 'team-b')
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-test-token', 'team-a')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, homeToken, 'team-b')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, teamBToken, 'team-a')
   })
 
   it('blocks new GFS dispatches while a transient team token is installed', async () => {
     const service = createService() as any
-    service.sessionToken = 'team-a-token'
-    service.me = {
+    const homeMe = {
       id: 'user-1',
       email: 'test@clerum.io',
       name: 'Test User',
@@ -497,6 +543,9 @@ describe('AppService.invokeHostMessage', () => {
       teamName: 'Team A',
       role: 'member',
     }
+    const homeToken = await acceptTemporaryTestSession(service, homeMe)
+    const teamBToken = createTemporaryToken('user-1', 'team-b')
+    const teamAToken = createTemporaryToken('user-1', 'team-a')
     service.gfsScopeIdentity = {
       ownerId: 'user-1',
       teamId: 'team-a',
@@ -507,12 +556,18 @@ describe('AppService.invokeHostMessage', () => {
     service.authClient = {
       getMe: vi
         .fn()
-        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
-        .mockResolvedValueOnce(service.me),
-      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
-        token: `${teamId}-test-token`,
-        team: { id: teamId, name: teamId, role: 'member' },
-      })),
+        .mockResolvedValueOnce({ ...homeMe, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(homeMe),
+      switchTeam: vi
+        .fn()
+        .mockResolvedValueOnce({
+          token: teamBToken,
+          team: { id: 'team-b', name: 'Team B', role: 'member' },
+        })
+        .mockResolvedValueOnce({
+          token: teamAToken,
+          team: { id: 'team-a', name: 'Team A', role: 'member' },
+        }),
     }
 
     await expect(
@@ -524,8 +579,8 @@ describe('AppService.invokeHostMessage', () => {
       })
     ).resolves.toBe('team-b-operation')
 
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, 'team-a-token', 'team-b')
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-test-token', 'team-a')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, homeToken, 'team-b')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, teamBToken, 'team-a')
     expect(service.gfsTransientTeamHopDepth).toBe(0)
   })
 
@@ -578,8 +633,7 @@ describe('AppService.invokeHostMessage', () => {
       })
     )
     service.desktopGfsUploadStatePath = vi.fn().mockResolvedValue(statePath)
-    service.sessionToken = 'team-a-token'
-    service.me = {
+    const homeMe = {
       id: 'user-1',
       email: 'test@clerum.io',
       name: 'Test User',
@@ -588,6 +642,7 @@ describe('AppService.invokeHostMessage', () => {
       teamName: 'Team A',
       role: 'member',
     }
+    const homeToken = await acceptTemporaryTestSession(service, homeMe)
     service.gfsAuthEpoch = 1
     service.gfsDispatchBlocked = false
     service.gfsScopeIdentity = { ...scope, authEpoch: undefined }
@@ -598,15 +653,17 @@ describe('AppService.invokeHostMessage', () => {
       cancel: vi.fn(async () => undefined),
     }
     service.gfsUploadJobs = new Map([[uploadId, { job, promise: Promise.resolve(session), scope }]])
+    let acceptedTeamBToken: string | undefined
     service.authClient = {
       getMe: vi
         .fn()
-        .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
-        .mockResolvedValueOnce(service.me),
-      switchTeam: vi.fn(async (_token: string, teamId: string) => ({
-        token: `${teamId}-test-token`,
-        team: { id: teamId, name: teamId, role: 'member' },
-      })),
+        .mockResolvedValueOnce({ ...homeMe, teamId: 'team-b', teamName: 'Team B' })
+        .mockResolvedValueOnce(homeMe),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => {
+        const token = createTemporaryToken('user-1', teamId)
+        if (teamId === 'team-b') acceptedTeamBToken = token
+        return { token, team: { id: teamId, name: teamId, role: 'member' } }
+      }),
     }
 
     await service.runWithTeamContext('team-b', async () => {
@@ -628,14 +685,31 @@ describe('AppService.invokeHostMessage', () => {
     expect(job.resume).toHaveBeenCalledTimes(1)
     expect(job.cancel).toHaveBeenCalledTimes(1)
     expect(service.me.teamId).toBe('team-a')
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, 'team-a-token', 'team-b')
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-test-token', 'team-a')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, homeToken, 'team-b')
+    const returnHomeCall = vi.mocked(service.authClient.switchTeam).mock.calls[1]
+    expect(returnHomeCall?.[1]).toBe('team-a')
+    const returnHomeToken = returnHomeCall?.[0]
+    if (typeof returnHomeToken !== 'string') throw new Error('Expected the team-B session token')
+    expect(returnHomeToken).toBe(acceptedTeamBToken)
+    const payload = returnHomeToken.split('.')[1]
+    if (!payload) throw new Error('Expected a JWT payload for the team-B session token')
+    const tokenClaims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      sub?: string
+      teamId?: string | null
+      exp?: number
+      jti?: string
+    }
+    expect(tokenClaims).toMatchObject({
+      sub: 'user-1',
+      teamId: 'team-b',
+      jti: 'rpc-test-user-1-team-b',
+    })
+    expect(tokenClaims.exp).toBeGreaterThan(Math.floor(Date.now() / 1000))
   })
 
-  it('fences the old GFS scope if a replacement team token cannot be refreshed', async () => {
+  it('preserves accepted session A when team candidate identity validation fails', async () => {
     const service = createService() as any
-    service.sessionToken = 'team-a-token'
-    service.me = {
+    const homeMe = {
       id: 'user-1',
       email: 'test@clerum.io',
       name: 'Test User',
@@ -644,6 +718,7 @@ describe('AppService.invokeHostMessage', () => {
       teamName: 'Team A',
       role: 'member',
     }
+    const homeToken = await acceptTemporaryTestSession(service, homeMe)
     service.gfsScopeIdentity = {
       ownerId: 'user-1',
       teamId: 'team-a',
@@ -652,7 +727,7 @@ describe('AppService.invokeHostMessage', () => {
     }
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-b-test-token',
+        token: createTemporaryToken('user-1', 'team-b'),
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
       getMe: vi.fn().mockRejectedValue(new Error('replacement session rejected')),
@@ -661,27 +736,29 @@ describe('AppService.invokeHostMessage', () => {
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
     vi.spyOn(service, 'clearAuthenticatedSessionState')
 
-    await expect(service.switchSessionToTeam('team-b', 'team-a-token')).rejects.toThrow(
+    await expect(service.switchSessionToTeam('team-b', homeToken)).rejects.toThrow(
       'replacement session rejected'
     )
 
-    expect(service.suspendDesktopGfsUploadsForAuthBoundary).toHaveBeenCalledWith({
+    expect(service.suspendDesktopGfsUploadsForAuthBoundary).not.toHaveBeenCalled()
+    expect(service.clearAuthenticatedSessionState).not.toHaveBeenCalled()
+    expect(service.sessionToken).toBe(homeToken)
+    expect(service.me).toEqual(homeMe)
+    expect(service.gfsScopeIdentity).toEqual({
       ownerId: 'user-1',
       teamId: 'team-a',
       environmentKey: 'test-env',
       baseUrl: 'https://external.example',
     })
-    expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
     const restarted = createService() as any
     restarted.authClient.getMe = vi.fn()
     await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
     expect(restarted.authClient.getMe).not.toHaveBeenCalled()
   })
 
-  it('clears and revokes a replacement token even when GFS fence persistence fails', async () => {
+  it('preserves session A when its GFS fence cannot be persisted before team acceptance', async () => {
     const service = createService() as any
-    service.sessionToken = 'team-a-token'
-    service.me = {
+    const homeMe = {
       id: 'user-1',
       email: 'test@clerum.io',
       name: 'Test User',
@@ -690,6 +767,7 @@ describe('AppService.invokeHostMessage', () => {
       teamName: 'Team A',
       role: 'member',
     }
+    const homeToken = await acceptTemporaryTestSession(service, homeMe)
     service.gfsScopeIdentity = {
       ownerId: 'user-1',
       teamId: 'team-a',
@@ -698,10 +776,10 @@ describe('AppService.invokeHostMessage', () => {
     }
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-b-test-token',
+        token: createTemporaryToken('user-1', 'team-b'),
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
-      getMe: vi.fn().mockRejectedValue(new Error('replacement session rejected')),
+      getMe: vi.fn().mockResolvedValue({ ...homeMe, teamId: 'team-b', teamName: 'Team B' }),
     }
     service.rpcTokenManager = { clear: vi.fn() }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi
@@ -709,11 +787,12 @@ describe('AppService.invokeHostMessage', () => {
       .mockRejectedValue(new Error('state file is read-only'))
     vi.spyOn(service, 'clearAuthenticatedSessionState')
 
-    await expect(service.switchSessionToTeam('team-b', 'team-a-token')).rejects.toThrow(
-      'replacement session rejected'
-    )
+    await expect(service.switchTeam('team-b')).rejects.toThrow('state file is read-only')
 
-    expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
+    expect(service.suspendDesktopGfsUploadsForAuthBoundary).toHaveBeenCalledOnce()
+    expect(service.clearAuthenticatedSessionState).not.toHaveBeenCalled()
+    expect(service.sessionToken).toBe(homeToken)
+    expect(service.me).toEqual(homeMe)
     const restarted = createService() as any
     restarted.authClient.getMe = vi.fn()
     await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
@@ -722,8 +801,7 @@ describe('AppService.invokeHostMessage', () => {
 
   it('fences GFS uploads only after an explicit switchTeam succeeds', async () => {
     const service = createService() as any
-    service.sessionToken = 'team-a-token'
-    service.me = {
+    const homeMe = {
       id: 'user-1',
       email: 'test@clerum.io',
       name: 'Test User',
@@ -732,6 +810,7 @@ describe('AppService.invokeHostMessage', () => {
       teamName: 'Team A',
       role: 'member',
     }
+    const homeToken = await acceptTemporaryTestSession(service, homeMe)
     service.gfsScopeIdentity = {
       ownerId: 'user-1',
       teamId: 'team-a',
@@ -741,10 +820,10 @@ describe('AppService.invokeHostMessage', () => {
     service.gfsDispatchBlocked = false
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-b-test-token',
+        token: createTemporaryToken('user-1', 'team-b'),
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
-      getMe: vi.fn().mockResolvedValue({ ...service.me, teamId: 'team-b', teamName: 'Team B' }),
+      getMe: vi.fn().mockResolvedValue({ ...homeMe, teamId: 'team-b', teamName: 'Team B' }),
     }
     service.rpcTokenManager = { clear: vi.fn() }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {
@@ -772,10 +851,9 @@ describe('AppService.invokeHostMessage', () => {
     ).toBeGreaterThan(service.authClient.switchTeam.mock.invocationCallOrder[0])
   })
 
-  it('clears the replacement team session when explicit GFS fence persistence fails', async () => {
+  it('preserves session A when explicit team GFS fencing fails before acceptance', async () => {
     const service = createService() as any
-    service.sessionToken = 'team-a-token'
-    service.me = {
+    const homeMe = {
       id: 'user-1',
       email: 'test@clerum.io',
       name: 'Test User',
@@ -784,6 +862,7 @@ describe('AppService.invokeHostMessage', () => {
       teamName: 'Team A',
       role: 'member',
     }
+    const homeToken = await acceptTemporaryTestSession(service, homeMe)
     service.gfsScopeIdentity = {
       ownerId: 'user-1',
       teamId: 'team-a',
@@ -793,34 +872,40 @@ describe('AppService.invokeHostMessage', () => {
     service.gfsDispatchBlocked = false
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-b-test-token',
+        token: createTemporaryToken('user-1', 'team-b'),
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
-      getMe: vi.fn().mockResolvedValue({ ...service.me, teamId: 'team-b', teamName: 'Team B' }),
+      getMe: vi.fn().mockResolvedValue({ ...homeMe, teamId: 'team-b', teamName: 'Team B' }),
     }
     service.rpcTokenManager = { clear: vi.fn() }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi
       .fn()
       .mockRejectedValue(new Error('state file is read-only'))
-    const clearAuthenticatedSessionState = service.clearAuthenticatedSessionState.bind(service)
-    let depthDuringCleanup = 0
-    service.clearAuthenticatedSessionState = vi.fn(() => {
-      depthDuringCleanup = service.gfsTransientTeamHopDepth
-      clearAuthenticatedSessionState()
+    let depthDuringFence = 0
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {
+      depthDuringFence = service.gfsTransientTeamHopDepth
+      throw new Error('state file is read-only')
     })
+    vi.spyOn(service, 'clearAuthenticatedSessionState')
 
     await expect(service.switchTeam('team-b')).rejects.toThrow('state file is read-only')
 
-    expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
+    expect(service.clearAuthenticatedSessionState).not.toHaveBeenCalled()
+    expect(service.sessionToken).toBe(homeToken)
+    expect(service.me).toEqual(homeMe)
     const restarted = createService() as any
     restarted.authClient.getMe = vi.fn()
     await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
     expect(restarted.authClient.getMe).not.toHaveBeenCalled()
-    expect(depthDuringCleanup).toBeGreaterThan(0)
-    expect(service.sessionToken).toBeNull()
-    expect(service.me).toBeNull()
-    expect(service.gfsScopeIdentity).toBeNull()
-    expect(service.gfsDispatchBlocked).toBe(true)
+    expect(depthDuringFence).toBeGreaterThan(0)
+    expect(service.sessionToken).toBe(homeToken)
+    expect(service.me).toEqual(homeMe)
+    expect(service.gfsScopeIdentity).toEqual({
+      ownerId: 'user-1',
+      teamId: 'team-a',
+      environmentKey: 'test-env',
+      baseUrl: 'https://external.example',
+    })
     expect(service.gfsTransientTeamHopDepth).toBe(0)
   })
 
@@ -883,6 +968,7 @@ describe('AppService.invokeHostMessage', () => {
         token: 'user-rpc-test-token',
         accessScope: 'user',
         teamId: null,
+        expiresInSeconds: 300,
       }),
       clear: vi.fn(),
     }
@@ -928,7 +1014,7 @@ describe('AppService.invokeHostMessage', () => {
       getTeamAgents: vi.fn().mockResolvedValue({ agentNames: [], agents: [] }),
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token', expiresInSeconds: 300 }),
       clear: vi.fn(),
     }
     service.rpcClient = {

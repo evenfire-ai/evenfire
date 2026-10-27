@@ -25,11 +25,10 @@ vi.mock('electron', () => ({
     decryptString: vi.fn((value: Buffer) => value.toString()),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: vi.fn(),
@@ -71,45 +70,51 @@ async function createService(keytarAvailable: boolean) {
     import('../config.js'),
     import('../pendingExternalLogout.js'),
   ])
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://password-auth.example.test',
+    rpcProxyBaseUrl: 'https://password-rpc.example.test',
+    appName: 'Password authentication fixture',
+  })
   const tokenStore = new TokenStore()
   const service = new AppService({ tokenStore, getUserDataDirectory: () => runtime.directory })
   const state = service as unknown as {
-    authClient: { googleLogin: (idToken: string) => Promise<{ token: string; me: typeof me }> }
+    authClient: {
+      passwordLogin: (email: string, password: string) => Promise<{ token: string; me: typeof me }>
+      getMe: (token: string) => Promise<typeof me>
+    }
   }
   return { service, tokenStore, state, markers, envKey: config.getActiveEnvKey() }
 }
 
 describe('pending logout when an unavailable Keytar module returns', () => {
-  it('never authenticates stale Keytar after secure recovery and a subsequent UI logout', async () => {
+  it('requires password authentication and never restores stale Keytar after recovery', async () => {
     const staleToken = 'fixture-stale-logged-out-keytar'
     const seed = await createService(true)
     await seed.tokenStore.setSessionToken(staleToken, seed.envKey)
     await seed.service.prepareForQuit()
-    await expect(seed.service.logout()).rejects.toThrow('shutting down')
+    await expect(seed.service.logout()).resolves.toMatchObject({
+      kind: 'not-committed',
+      reason: 'deferred',
+    })
     expect(seed.markers.readPendingExternalLogoutIntent(runtime.directory, seed.envKey)).toEqual({
       intent: 'logout-pending',
     })
 
     const recovery = await createService(false)
-    vi.spyOn(recovery.state.authClient, 'googleLogin').mockResolvedValue({
-      token: 'fixture-fresh-safe-storage-session',
-      me,
-    })
-    await expect(recovery.service.googleLogin('fixture-google-id-token')).resolves.toEqual({
-      authenticated: true,
-      me,
-    })
-    expect(
-      recovery.markers.readPendingExternalLogoutIntent(runtime.directory, recovery.envKey)
-    ).toEqual({ intent: 'keytar-cleanup-pending', credentialSource: 'safe-storage' })
-    await expect(recovery.tokenStore.getSafeStorageSessionToken(recovery.envKey)).resolves.toBe(
-      'fixture-fresh-safe-storage-session'
-    )
-
-    await expect(recovery.service.logout()).resolves.toBeTypeOf('number')
+    const passwordLoginWithoutKeytar = vi
+      .spyOn(recovery.state.authClient, 'passwordLogin')
+      .mockResolvedValue({
+        token: 'fixture-fresh-safe-storage-session',
+        me,
+      })
+    const freshGetMe = vi.spyOn(recovery.state.authClient, 'getMe').mockResolvedValue(me)
     await expect(
-      recovery.tokenStore.getSafeStorageSessionToken(recovery.envKey)
-    ).resolves.toBeNull()
+      recovery.service.passwordLogin('user@example.test', 'fixture-password')
+    ).resolves.toMatchObject({ authenticated: true, me })
+    expect(recovery.service.sessionToken).toBe('fixture-fresh-safe-storage-session')
+    expect(passwordLoginWithoutKeytar).toHaveBeenCalledOnce()
+    expect(freshGetMe).toHaveBeenCalledWith('fixture-fresh-safe-storage-session')
+    expect(freshGetMe).not.toHaveBeenCalledWith(staleToken)
     expect([...runtime.keychain.values()]).toContain(staleToken)
 
     const restarted = await createService(true)
@@ -123,7 +128,25 @@ describe('pending logout when an unavailable Keytar module returns', () => {
     const restored = await restarted.service.initialize()
 
     expect(getMe).not.toHaveBeenCalledWith(staleToken)
-    expect(restored).toEqual({ authenticated: false, me: null })
-    await expect(restarted.tokenStore.getKeytarSessionToken(restarted.envKey)).resolves.toBeNull()
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: restarted.tokenStore,
+      envKey: restarted.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected the fresh V1 source to restore')
+    expect(selected.session.token).toBe('fixture-fresh-safe-storage-session')
+    expect(restored).toEqual({ authenticated: true, me })
+    expect(getMe).toHaveBeenCalledWith('fixture-fresh-safe-storage-session')
+
+    await expect(restarted.service.logout()).resolves.toMatchObject({ kind: 'committed' })
+
+    const afterLogout = await createService(true)
+    const getMeAfterLogout = vi.spyOn(afterLogout.state.authClient, 'getMe').mockResolvedValue(me)
+    await expect(afterLogout.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(getMeAfterLogout).not.toHaveBeenCalledWith('fixture-fresh-safe-storage-session')
   })
 })

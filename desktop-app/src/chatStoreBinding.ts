@@ -31,6 +31,111 @@ let activeUserId: string | null = null
 let activeEnvKey: string | null = null
 let bindInFlight: { key: string; promise: Promise<void> } | null = null
 let bindingGeneration = 0
+const pendingChatStoreMaintenance = new Set<Promise<void>>()
+
+function schedulePreEnvironmentCacheMigration(baseDir: string): void {
+  const migration = maybeWipePreEnvLegacyCache(baseDir).catch(error => {
+    console.warn('[chatStore] Failed to reconcile the pre-environment cache:', error)
+  })
+  pendingChatStoreMaintenance.add(migration)
+  void migration.then(() => pendingChatStoreMaintenance.delete(migration))
+}
+
+export interface PreparedChatStoreBinding {
+  /** Whether this unpublished binding still owns the current publication epoch. */
+  canPublish(): boolean
+  /** Reserve the current publication epoch before the durable auth CAS. */
+  reservePublication(): (() => number) | null
+  /** Synchronously publish this prepared store if no newer binding owner has won. */
+  publish(): number | null
+  /** Start best-effort cache maintenance after the authentication publication boundary. */
+  afterPublication(): void
+  /** Discard this unpublished handle. The private user directory is retained. */
+  discard(): void
+}
+
+/**
+ * Prepare an authenticated user's chat store without making it visible to IPC.
+ * Candidate session transactions use this before their durable acceptance CAS;
+ * the current store remains bound until `publish()` wins synchronously.
+ */
+export async function prepareChatStoreBindingForUser(
+  userId: string,
+  envKey: string,
+  options: { legacyEnvKeys?: readonly string[]; teamId?: string | null } = {}
+): Promise<PreparedChatStoreBinding> {
+  assertSafeFilesystemSegment('userId', userId)
+  assertSafeFilesystemSegment('envKey', envKey)
+  for (const legacyEnvKey of options.legacyEnvKeys ?? []) {
+    assertSafeFilesystemSegment('legacyEnvKey', legacyEnvKey)
+  }
+
+  const expectedGeneration = bindingGeneration
+  const authorityScope: ChatAuthorityScope = {
+    environmentKey: envKey,
+    userId,
+    teamId: String(options.teamId || '').trim() || null,
+  }
+  const baseDir = currentBaseDir()
+  const userDir = join(baseDir, envKey, userId)
+
+  // Preparation is private and non-publishing. It does not migrate or delete
+  // other users' data. Reconcile only this user's env-scoped cache before the
+  // acceptance boundary so publication itself remains synchronous.
+  await ensurePrivateDirectory(baseDir)
+  await maybeMigrateEnvScopedCache(baseDir, userId, envKey, options.legacyEnvKeys ?? [])
+  await ensurePrivateDirectory(join(baseDir, envKey))
+  await ensurePrivateDirectory(userDir)
+  await maybeWipeLegacyCache(userDir)
+  await sweepExpiredCorruptQuarantines(userDir)
+  const store = new ChatStore(userDir)
+  store.setAuthorityScope(authorityScope)
+  const schedulePostPublicationMaintenance = () => {
+    try {
+      schedulePreEnvironmentCacheMigration(baseDir)
+    } catch {
+      // Cache maintenance is best-effort and is not part of authentication publication.
+    }
+  }
+
+  let state: 'prepared' | 'reserved' | 'published' | 'discarded' = 'prepared'
+  const reservePublication = (): (() => number) | null => {
+    if (state !== 'prepared' || bindingGeneration !== expectedGeneration) return null
+    state = 'reserved'
+    return () => {
+      // The owning acceptance transaction rechecks canPublish immediately before its
+      // synchronous authority CAS. No event-loop turn occurs before this reserved publish.
+      state = 'published'
+      bindingGeneration += 1
+      activeChatStore = store
+      activeUserId = userId
+      activeEnvKey = envKey
+      bindInFlight = null
+      return bindingGeneration
+    }
+  }
+  return {
+    canPublish() {
+      return (
+        (state === 'prepared' || state === 'reserved') && bindingGeneration === expectedGeneration
+      )
+    },
+    reservePublication,
+    publish() {
+      const publishReserved = reservePublication()
+      if (!publishReserved) return null
+      const generation = publishReserved()
+      schedulePostPublicationMaintenance()
+      return generation
+    },
+    afterPublication() {
+      schedulePostPublicationMaintenance()
+    },
+    discard() {
+      if (state === 'prepared' || state === 'reserved') state = 'discarded'
+    },
+  }
+}
 
 /** Marker file (per base dir) that records the pre-`envKey` legacy wipe ran. */
 const PRE_ENV_MIGRATION_MARKER = '.env-scoped'
@@ -368,6 +473,48 @@ export function getChatStoreBindingGeneration(): number {
   return bindingGeneration
 }
 
+/** Commit a same-user team-scope change without opening an async binding window. */
+export function reserveBoundChatStoreTeamScope(
+  expectedGeneration: number,
+  userId: string,
+  envKey: string,
+  teamId: string | null
+): (() => number) | null {
+  if (
+    !Number.isSafeInteger(expectedGeneration) ||
+    bindingGeneration !== expectedGeneration ||
+    !activeChatStore ||
+    activeUserId !== userId ||
+    activeEnvKey !== envKey
+  )
+    return null
+  const store = activeChatStore
+  const authorityScope: ChatAuthorityScope = {
+    environmentKey: envKey,
+    userId,
+    teamId: String(teamId || '').trim() || null,
+  }
+  const publishAuthorityScope = store.prepareAuthorityScopePublication(authorityScope)
+  // The acceptance transaction rechecks the binding generation immediately before its
+  // synchronous durable CAS. This reserved closure performs only the prevalidated pointer/scope
+  // swap, so consumer publication cannot fail after the authority linearization point.
+  return () => {
+    publishAuthorityScope()
+    bindingGeneration += 1
+    return bindingGeneration
+  }
+}
+
+export function updateBoundChatStoreTeamScope(
+  expectedGeneration: number,
+  userId: string,
+  envKey: string,
+  teamId: string | null
+): number | null {
+  const publishReserved = reserveBoundChatStoreTeamScope(expectedGeneration, userId, envKey, teamId)
+  return publishReserved ? publishReserved() : null
+}
+
 export function requireChatStoreForBindingGeneration(expectedGeneration: number): ChatStore {
   if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration !== bindingGeneration) {
     throw new Error('Chat store binding changed')
@@ -378,4 +525,9 @@ export function requireChatStoreForBindingGeneration(expectedGeneration: number)
 /** Test-only helper. Do not call from production code. */
 export function __setChatStoreBaseDirForTests(base: string | null): void {
   baseDirOverride = base
+}
+
+/** Wait for accepted-binding maintenance before a test removes its temporary base directory. */
+export async function __waitForChatStoreMaintenanceForTests(): Promise<void> {
+  while (pendingChatStoreMaintenance.size > 0) await Promise.all([...pendingChatStoreMaintenance])
 }

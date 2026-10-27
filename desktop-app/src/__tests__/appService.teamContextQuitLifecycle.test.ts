@@ -27,10 +27,10 @@ vi.mock('keytar', () => ({
   ),
 }))
 
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(async () => undefined),
-  unbindChatStore: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 
 type TestSessionMe = {
   id: string
@@ -46,6 +46,7 @@ type HopService = {
   sessionToken: string | null
   me: TestSessionMe | null
   authClient: {
+    passwordLogin(email: string, password: string): Promise<{ token: string; me: TestSessionMe }>
     getMe(token: string): Promise<TestSessionMe>
     switchTeam(
       token: string,
@@ -56,6 +57,7 @@ type HopService = {
   switchTeam(teamId: string): Promise<unknown>
   prepareForQuit(): Promise<void>
   cancelQuitPreparation(): void
+  activateGfsAuthScope(): void
 }
 
 let scratchDirectory = ''
@@ -72,10 +74,15 @@ beforeEach(async () => {
   keychain.clear()
   vi.clearAllMocks()
   vi.resetModules()
-  const [{ AppService }, { TokenStore }] = await Promise.all([
+  const [{ AppService }, { TokenStore }, config] = await Promise.all([
     import('../appService.js'),
     import('../tokenStore.js'),
+    import('../config.js'),
   ])
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://api.example.test',
+    rpcProxyBaseUrl: 'https://rpc.example.test',
+  })
   AppServiceClass = AppService
   TokenStoreClass = TokenStore
 })
@@ -88,11 +95,10 @@ afterAll(async () => {
   vi.resetModules()
 })
 
-function createAuthenticatedService() {
+async function createAuthenticatedService() {
   const tokenStore = new TokenStoreClass()
   const service = new AppServiceClass({ tokenStore }) as unknown as HopService
-  service.sessionToken = 'team-home-token'
-  service.me = {
+  const home = {
     id: 'user-1',
     email: 'user@example.com',
     name: null,
@@ -101,6 +107,10 @@ function createAuthenticatedService() {
     teamName: 'Home team',
     role: 'member',
   }
+  vi.spyOn(service.authClient, 'passwordLogin').mockResolvedValue({
+    token: 'team-home-token',
+    me: home,
+  })
   vi.spyOn(service.authClient, 'switchTeam').mockImplementation(async (_token, teamId) => ({
     token: `${teamId}-token`,
     team: { id: teamId, name: teamId },
@@ -117,6 +127,7 @@ function createAuthenticatedService() {
       role: 'member',
     }
   })
+  await service.passwordLogin(home.email, 'fixture-password')
   return { service, tokenStore }
 }
 
@@ -136,7 +147,7 @@ describe('AppService team-context quit lifecycle', () => {
     const homeStarted = deferred<void>()
     const lateHomeOperation = deferred<void>()
     const lateHomeStarted = deferred<void>()
-    const { service, tokenStore } = createAuthenticatedService()
+    const { service, tokenStore } = await createAuthenticatedService()
     const prepareTokenStore = vi.spyOn(tokenStore, 'prepareForQuit')
 
     const hop = service.runWithTeamContext('team-a', async () => {
@@ -203,7 +214,7 @@ describe('AppService team-context quit lifecycle', () => {
   it('does not retain a hop rejected after a queued same-team request needs a switch', async () => {
     const sameTeamOperation = deferred<string>()
     const sameTeamStarted = deferred<void>()
-    const { service } = createAuthenticatedService()
+    const { service } = await createAuthenticatedService()
 
     const firstRead = service.runWithTeamContext('team-home', async () => {
       sameTeamStarted.resolve()
@@ -227,7 +238,7 @@ describe('AppService team-context quit lifecycle', () => {
   it('keeps a queued home read when an admitted hop is waiting on the team queue', async () => {
     const sameTeamOperation = deferred<string>()
     const sameTeamStarted = deferred<void>()
-    const { service, tokenStore } = createAuthenticatedService()
+    const { service, tokenStore } = await createAuthenticatedService()
     const prepareTokenStore = vi.spyOn(tokenStore, 'prepareForQuit')
 
     const currentTeamRead = service.runWithTeamContext('team-home', async () => {
@@ -247,10 +258,263 @@ describe('AppService team-context quit lifecycle', () => {
     expect(prepareTokenStore).toHaveBeenCalledOnce()
   })
 
+  it('rebinds queued home reads to the fresh JWT returned by a successful restore', async () => {
+    const hopOperation = deferred<void>()
+    const hopStarted = deferred<void>()
+    const { service } = await createAuthenticatedService()
+    vi.mocked(service.authClient.switchTeam).mockImplementation(async (_token, teamId) => ({
+      token: teamId === 'team-home' ? 'team-home-fresh-token' : `${teamId}-token`,
+      team: { id: teamId, name: teamId },
+    }))
+    vi.mocked(service.authClient.getMe).mockImplementation(async token => {
+      const teamId = token === 'team-home-fresh-token' ? 'team-home' : token.replace(/-token$/, '')
+      return {
+        id: 'user-1',
+        email: 'user@example.com',
+        name: null,
+        picture: null,
+        teamId,
+        teamName: teamId,
+        role: 'member',
+      }
+    })
+
+    const hop = service.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      await hopOperation.promise
+      return 'team-a-complete'
+    })
+    await hopStarted.promise
+    const queuedHomeRead = service.runWithTeamContext('team-home', async token => token)
+    hopOperation.resolve()
+
+    await expect(hop).resolves.toBe('team-a-complete')
+    await expect(queuedHomeRead).resolves.toBe('team-home-fresh-token')
+  })
+
+  it('rebinds a queued cross-team RPC producer after a same-lineage restore returns a new JWT', async () => {
+    const hopOperation = deferred<void>()
+    const hopStarted = deferred<void>()
+    const { service } = await createAuthenticatedService()
+    let homeRestoreCount = 0
+    const app = service as unknown as {
+      sessionToken: string | null
+      authClient: {
+        getMe(token: string): Promise<TestSessionMe>
+        switchTeam(
+          token: string,
+          teamId: string
+        ): Promise<{ token: string; team: { id: string; name: string } }>
+      }
+      rpcTokenManager: { getOrIssue: ReturnType<typeof vi.fn> }
+      rpcClient: { approveToolCall: ReturnType<typeof vi.fn> }
+      approveToolCall(
+        hostRef: string,
+        taskId: string,
+        toolCallId: string,
+        hostRefs: string[],
+        options: { teamId: string }
+      ): Promise<{ approved: boolean }>
+      runWithTeamContext<T>(teamId: string, operation: (token: string) => Promise<T>): Promise<T>
+    }
+    vi.mocked(app.authClient.switchTeam).mockImplementation(async (_token, teamId) => ({
+      token:
+        teamId === 'team-home' ? `team-home-fresh-token-${++homeRestoreCount}` : `${teamId}-token`,
+      team: { id: teamId, name: teamId },
+    }))
+    vi.mocked(app.authClient.getMe).mockImplementation(async token => {
+      const teamId = token.startsWith('team-home-fresh-token-')
+        ? 'team-home'
+        : token.replace(/-token$/, '')
+      return {
+        id: 'user-1',
+        email: 'user@example.com',
+        name: null,
+        picture: null,
+        teamId,
+        teamName: teamId,
+        role: 'member',
+      }
+    })
+    vi.spyOn(app.rpcTokenManager, 'getOrIssue').mockResolvedValue({
+      token: 'team-b-rpc-token',
+      expiresInSeconds: 300,
+    })
+    vi.spyOn(app.rpcClient, 'approveToolCall').mockResolvedValue({ approved: true })
+
+    const hop = app.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      await hopOperation.promise
+      return 'team-a-complete'
+    })
+    const rpc = app.approveToolCall('chatllm', 'task-1', 'call-1', ['chatllm'], {
+      teamId: 'team-b',
+    })
+    await hopStarted.promise
+    hopOperation.resolve()
+
+    await expect(hop).resolves.toBe('team-a-complete')
+    await expect(rpc).resolves.toEqual({ approved: true })
+    expect(app.sessionToken).toBe('team-home-fresh-token-2')
+    expect(app.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
+      'team-b-token',
+      expect.any(Array),
+      ['chatllm'],
+      expect.any(String)
+    )
+    expect(app.rpcClient.approveToolCall).toHaveBeenCalledWith(
+      'team-b-rpc-token',
+      'chatllm',
+      'task-1',
+      'call-1'
+    )
+  })
+
+  it('admits a cross-team RPC producer started during an active same-lineage hop', async () => {
+    const hopOperation = deferred<void>()
+    const hopStarted = deferred<void>()
+    const { service } = await createAuthenticatedService()
+    let homeRestoreCount = 0
+    const app = service as unknown as {
+      sessionToken: string | null
+      authClient: {
+        getMe(token: string): Promise<TestSessionMe>
+        switchTeam(
+          token: string,
+          teamId: string
+        ): Promise<{ token: string; team: { id: string; name: string } }>
+      }
+      rpcTokenManager: { getOrIssue: ReturnType<typeof vi.fn> }
+      rpcClient: { approveToolCall: ReturnType<typeof vi.fn> }
+      approveToolCall(
+        hostRef: string,
+        taskId: string,
+        toolCallId: string,
+        hostRefs: string[],
+        options: { teamId: string }
+      ): Promise<{ approved: boolean }>
+      runWithTeamContext<T>(teamId: string, operation: (token: string) => Promise<T>): Promise<T>
+    }
+    vi.mocked(app.authClient.switchTeam).mockImplementation(async (_token, teamId) => ({
+      token:
+        teamId === 'team-home' ? `team-home-fresh-token-${++homeRestoreCount}` : `${teamId}-token`,
+      team: { id: teamId, name: teamId },
+    }))
+    vi.mocked(app.authClient.getMe).mockImplementation(async token => {
+      const teamId = token.startsWith('team-home-fresh-token-')
+        ? 'team-home'
+        : token.replace(/-token$/, '')
+      return {
+        id: 'user-1',
+        email: 'user@example.com',
+        name: null,
+        picture: null,
+        teamId,
+        teamName: teamId,
+        role: 'member',
+      }
+    })
+    vi.spyOn(app.rpcTokenManager, 'getOrIssue').mockResolvedValue({
+      token: 'team-b-rpc-token',
+      expiresInSeconds: 300,
+    })
+    vi.spyOn(app.rpcClient, 'approveToolCall').mockResolvedValue({ approved: true })
+
+    const hop = app.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      await hopOperation.promise
+      return 'team-a-complete'
+    })
+    await hopStarted.promise
+    const rpc = app.approveToolCall('chatllm', 'task-1', 'call-1', ['chatllm'], {
+      teamId: 'team-b',
+    })
+    hopOperation.resolve()
+
+    await expect(hop).resolves.toBe('team-a-complete')
+    await expect(rpc).resolves.toEqual({ approved: true })
+    expect(app.sessionToken).toBe('team-home-fresh-token-2')
+    expect(app.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
+      'team-b-token',
+      expect.any(Array),
+      ['chatllm'],
+      expect.any(String)
+    )
+  })
+
+  it('refreshes a home-target RPC producer queued during an active same-lineage hop', async () => {
+    const hopOperation = deferred<void>()
+    const hopStarted = deferred<void>()
+    const { service } = await createAuthenticatedService()
+    const app = service as unknown as {
+      sessionToken: string | null
+      authClient: {
+        getMe(token: string): Promise<TestSessionMe>
+        switchTeam(
+          token: string,
+          teamId: string
+        ): Promise<{ token: string; team: { id: string; name: string } }>
+      }
+      rpcTokenManager: { getOrIssue: ReturnType<typeof vi.fn> }
+      rpcClient: { approveToolCall: ReturnType<typeof vi.fn> }
+      approveToolCall(
+        hostRef: string,
+        taskId: string,
+        toolCallId: string,
+        hostRefs: string[],
+        options: { teamId: string }
+      ): Promise<{ approved: boolean }>
+      runWithTeamContext<T>(teamId: string, operation: (token: string) => Promise<T>): Promise<T>
+    }
+    vi.mocked(app.authClient.switchTeam).mockImplementation(async (_token, teamId) => ({
+      token: teamId === 'team-home' ? 'team-home-restored-token' : `${teamId}-token`,
+      team: { id: teamId, name: teamId },
+    }))
+    vi.mocked(app.authClient.getMe).mockImplementation(async token => {
+      const teamId =
+        token === 'team-home-restored-token' ? 'team-home' : token.replace(/-token$/, '')
+      return {
+        id: 'user-1',
+        email: 'user@example.com',
+        name: null,
+        picture: null,
+        teamId,
+        teamName: teamId,
+        role: 'member',
+      }
+    })
+    vi.spyOn(app.rpcTokenManager, 'getOrIssue').mockResolvedValue({
+      token: 'home-rpc-token',
+      expiresInSeconds: 300,
+    })
+    vi.spyOn(app.rpcClient, 'approveToolCall').mockResolvedValue({ approved: true })
+
+    const hop = app.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      await hopOperation.promise
+      return 'team-a-complete'
+    })
+    await hopStarted.promise
+    const rpc = app.approveToolCall('chatllm', 'task-1', 'call-1', ['chatllm'], {
+      teamId: 'team-home',
+    })
+    hopOperation.resolve()
+
+    await expect(hop).resolves.toBe('team-a-complete')
+    await expect(rpc).resolves.toEqual({ approved: true })
+    expect(app.sessionToken).toBe('team-home-restored-token')
+    expect(app.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
+      'team-home-restored-token',
+      expect.any(Array),
+      ['chatllm'],
+      expect.any(String)
+    )
+  })
+
   it('restores queued home joins after the first team restoration fails', async () => {
     const teamSwitch = deferred<void>()
     const teamSwitchStarted = deferred<void>()
-    const { service } = createAuthenticatedService()
+    const { service } = await createAuthenticatedService()
     let failFirstHomeRestore = true
     vi.mocked(service.authClient.switchTeam).mockImplementation(async (_token, teamId) => {
       if (teamId === 'team-a') {
@@ -278,7 +542,7 @@ describe('AppService team-context quit lifecycle', () => {
   it('rejects a queued home hop after quit closes, then allows a retry after cancellation', async () => {
     const hopOperation = deferred<void>()
     const hopStarted = deferred<void>()
-    const { service } = createAuthenticatedService()
+    const { service } = await createAuthenticatedService()
     let failHomeRestore = true
     vi.mocked(service.authClient.switchTeam).mockImplementation(async (_token, teamId) => {
       if (teamId === 'team-home' && failHomeRestore) {
@@ -327,7 +591,7 @@ describe('AppService team-context quit lifecycle', () => {
   it('reserves a queued hop against the stable home team while another hop is active', async () => {
     const hopOperation = deferred<void>()
     const hopStarted = deferred<void>()
-    const { service } = createAuthenticatedService()
+    const { service } = await createAuthenticatedService()
 
     const firstHop = service.runWithTeamContext('team-a', async () => {
       hopStarted.resolve()
@@ -347,7 +611,7 @@ describe('AppService team-context quit lifecycle', () => {
   it('runs a queued home read when the initial team switch fails before leaving home', async () => {
     const switchStarted = deferred<void>()
     const finishFailedSwitch = deferred<void>()
-    const { service } = createAuthenticatedService()
+    const { service } = await createAuthenticatedService()
     vi.mocked(service.authClient.switchTeam).mockImplementation(async (_token, teamId) => {
       if (teamId === 'team-a') {
         switchStarted.resolve()
@@ -369,7 +633,7 @@ describe('AppService team-context quit lifecycle', () => {
   it('rejects a quit-time team hop promptly while an earlier team operation is queued', async () => {
     const operation = deferred<void>()
     const operationStarted = deferred<void>()
-    const { service } = createAuthenticatedService()
+    const { service } = await createAuthenticatedService()
     const earlierOperation = service.runWithTeamContext('team-home', async () => {
       operationStarted.resolve()
       await operation.promise
@@ -403,7 +667,7 @@ describe('AppService team-context quit lifecycle', () => {
     const firstStarted = deferred<void>()
     const queuedOperation = deferred<void>()
     const queuedStarted = deferred<void>()
-    const { service, tokenStore } = createAuthenticatedService()
+    const { service, tokenStore } = await createAuthenticatedService()
     const prepareTokenStore = vi.spyOn(tokenStore, 'prepareForQuit')
     const firstRead = service.runWithTeamContext('team-home', async () => {
       firstStarted.resolve()
@@ -433,7 +697,7 @@ describe('AppService team-context quit lifecycle', () => {
     const hopOperation = deferred<void>()
     const hopStarted = deferred<void>()
     const nestedHomeReadCompleted = deferred<void>()
-    const { service } = createAuthenticatedService()
+    const { service } = await createAuthenticatedService()
     let nestedHomeRead: Promise<string> | undefined
 
     const hop = service.runWithTeamContext('team-a', async () => {
@@ -468,7 +732,7 @@ describe('AppService team-context quit lifecycle', () => {
   it('does not keep quit open for a same-team operation with no credential switch', async () => {
     const operation = deferred<string>()
     const operationStarted = deferred<void>()
-    const { service, tokenStore } = createAuthenticatedService()
+    const { service, tokenStore } = await createAuthenticatedService()
     const prepareTokenStore = vi.spyOn(tokenStore, 'prepareForQuit')
     const sameTeamRead = service.runWithTeamContext('team-home', async () => {
       operationStarted.resolve()

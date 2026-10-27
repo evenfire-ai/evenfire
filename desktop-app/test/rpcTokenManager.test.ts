@@ -93,12 +93,14 @@ describe('RpcTokenManager — getOrIssue()', () => {
     expect(authClient.issueRpcToken).toHaveBeenCalledOnce()
   })
 
-  it('re-fetches when token is expired (expiresInSeconds = 0)', async () => {
-    const authClient = makeAuthClient('rpc-expired', 0)
-    const manager = new RpcTokenManager(authClient)
+  it('re-fetches when a valid token enters the expiry safety window', async () => {
+    const authClient = makeAuthClient('rpc-expiring', 6)
+    let now = 0
+    const manager = new RpcTokenManager(authClient, () => now)
 
-    // First call populates cache with 0s TTL (expired immediately)
+    // Keep the issued interval valid, then advance into the five-second renewal window.
     await manager.getOrIssue('sess-token', ['host:message:invoke'], undefined, 'sess-token')
+    now = 1_000
 
     // Override to return fresh token
     vi.mocked(authClient.issueRpcToken).mockResolvedValueOnce({

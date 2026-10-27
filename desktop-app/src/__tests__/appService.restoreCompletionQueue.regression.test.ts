@@ -23,11 +23,10 @@ vi.mock('electron', () => ({
   },
   shell: { openExternal: boundary.openExternal },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -46,6 +45,15 @@ const homeMe = {
   teamName: 'Fixture home',
   role: 'member',
 }
+let previousConfigPath: string | undefined
+
+function candidateEnvelopeContains(value: string, token: string): boolean {
+  try {
+    return (JSON.parse(value) as { sessionToken?: unknown }).sessionToken === token
+  } catch {
+    return value === token
+  }
+}
 
 beforeEach(async () => {
   vi.resetModules()
@@ -54,6 +62,8 @@ beforeEach(async () => {
   vi.doMock('keytar', () => boundary)
   runtime.keychain.clear()
   runtime.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-r21-marker-'))
+  previousConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
+  process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(runtime.directory, 'runtime-config.json')
   boundary.getPassword
     .mockReset()
     .mockImplementation(
@@ -67,6 +77,11 @@ beforeEach(async () => {
     .mockImplementation(async (service, account) =>
       runtime.keychain.delete(keyOf(service, account))
     )
+  const config = await import('../config.js')
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://auth.example.test/api',
+    rpcProxyBaseUrl: 'https://rpc.example.test',
+  })
   const { safeStorage } = await import('electron')
   vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
 })
@@ -76,6 +91,8 @@ afterEach(async () => {
   await fs.rm(runtime.directory, { recursive: true, force: true })
   runtime.directory = ''
   runtime.keychain.clear()
+  if (previousConfigPath === undefined) delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+  else process.env.CLERUM_DESKTOP_CONFIG_PATH = previousConfigPath
   vi.resetModules()
 })
 
@@ -95,6 +112,10 @@ async function harness(options: { isolated?: boolean } = {}) {
     getUserDataDirectory: () => runtime.directory,
     reportDeferredLogoutFailure: reportFailure,
   })
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://auth.example.test/api',
+    rpcProxyBaseUrl: 'https://rpc.example.test',
+  })
   const state = service as unknown as {
     sessionToken: string | null
     me: typeof homeMe | null
@@ -104,6 +125,10 @@ async function harness(options: { isolated?: boolean } = {}) {
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
       switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
       issueRpcToken: (
         token: string,
         scopes: string[],
@@ -132,6 +157,27 @@ async function harness(options: { isolated?: boolean } = {}) {
   return { service, tokenStore, markers, envKey, state, reportFailure }
 }
 
+async function loginWithPassword(
+  h: Awaited<ReturnType<typeof harness>>,
+  token: string,
+  me: typeof homeMe
+) {
+  vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({ token, me })
+  return h.service.passwordLogin(me.email, `fixture-password:${token}`)
+}
+
+async function expectSelectedSession(h: Awaited<ReturnType<typeof harness>>, token: string) {
+  const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+  const selected = await readSessionAuthoritySourceSelection({
+    tokenStore: h.tokenStore,
+    envKey: h.envKey,
+  })
+  expect(selected.status).toBe('accepted')
+  if (selected.status !== 'accepted') throw new Error('Expected accepted session authority')
+  expect(selected.session.token).toBe(token)
+  expect(selected.session.accepted.record.frame.source?.format).toBe('v1')
+}
+
 function deferred() {
   let resolve!: () => void
   const promise = new Promise<void>(done => {
@@ -140,15 +186,24 @@ function deferred() {
   return { promise, resolve }
 }
 
-async function enteredWithin(promise: Promise<void>, label: string) {
+async function enteredWithin(promise: Promise<void>, label: string, producer?: Promise<unknown>) {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const entered = await Promise.race([
+    const outcomes: Promise<boolean>[] = [
       promise.then(() => true),
       new Promise<boolean>(resolve => {
         timer = setTimeout(() => resolve(false), 2000)
       }),
-    ])
+    ]
+    if (producer) {
+      outcomes.push(
+        producer.then(
+          () => false,
+          error => Promise.reject(error)
+        )
+      )
+    }
+    const entered = await Promise.race(outcomes)
     expect(entered, `producer reached ${label}`).toBe(true)
   } finally {
     clearTimeout(timer)
@@ -158,7 +213,7 @@ async function enteredWithin(promise: Promise<void>, label: string) {
 describe('R21-M12 admitted login survives older asynchronous restore completion', () => {
   it('does not grant an older cold Home OAuth scope while admitted Fresh owns persistence', async () => {
     const previous = await harness()
-    await previous.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    await loginWithPassword(previous, homeToken, homeMe)
     const h = await harness()
     expect(h.state.sessionToken).toBeNull()
     expect(h.state.me).toBeNull()
@@ -173,6 +228,9 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
     const freshMe = { ...homeMe, id: 'fixture-admitted-fresh-user' }
     const homeConsent = 'https://fixture.example/oauth/consent?owner=Home'
     let completingGetMe = false
+    vi.mocked(h.state.authClient.getMe).mockImplementation(async token =>
+      token === fresh ? freshMe : homeMe
+    )
     const persistence = h.state.runSessionPersistence.bind(h.state)
     vi.spyOn(h.state, 'runSessionPersistence').mockImplementation(operation => {
       const pending = persistence(operation)
@@ -207,7 +265,7 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
       }
     )
     boundary.setPassword.mockImplementation(async (service, account, token) => {
-      if (token === fresh) {
+      if (candidateEnvelopeContains(token, fresh)) {
         setterStarted.resolve()
         await releaseSetter.promise
       }
@@ -218,8 +276,8 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
     let consent: Promise<unknown> | undefined
     try {
       await enteredWithin(getMeStarted.promise, 'cold Home getMe')
-      login = h.state.installAuthenticatedLogin({ token: fresh, me: freshMe })
-      await enteredWithin(setterStarted.promise, 'admitted Fresh native setter')
+      login = loginWithPassword(h, fresh, freshMe)
+      await enteredWithin(setterStarted.promise, 'admitted Fresh native setter', login)
       releaseGetMe.resolve()
       await enteredWithin(
         Promise.race([acceptanceQueued.promise, restore.then(() => undefined)]),
@@ -250,14 +308,15 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
     })
     expect(h.state.sessionToken).toBe(fresh)
     expect(h.state.me).toEqual(freshMe)
-    await expect(h.tokenStore.getKeytarSessionToken(h.envKey)).resolves.toBe(fresh)
+    await expectSelectedSession(h, fresh)
     expect(boundary.openExternal).not.toHaveBeenCalledWith(homeConsent)
   })
   it.each([401, 500])(
     'preserves admitted Fresh when an older getMe %s settles during its native write',
     async status => {
+      const seed = await harness()
+      await loginWithPassword(seed, homeToken, homeMe)
       const h = await harness()
-      await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
       const { ApiError } = await import('../httpClient.js')
       const getMeStarted = deferred()
       const rejectGetMe = deferred()
@@ -267,6 +326,9 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
       const fresh = 'fixture-same-runtime-fresh-login'
       const freshMe = { ...homeMe, id: 'fixture-same-runtime-fresh-user' }
       let rejecting = false
+      vi.mocked(h.state.authClient.getMe).mockImplementation(async token =>
+        token === fresh ? freshMe : homeMe
+      )
       const persistence = h.state.runSessionPersistence.bind(h.state)
       vi.spyOn(h.state, 'runSessionPersistence').mockImplementation(operation => {
         const result = persistence(operation)
@@ -280,7 +342,7 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
         throw new ApiError('fixture-older Home request failure', status, 'fixture_request_failure')
       })
       boundary.setPassword.mockImplementation(async (service, account, token) => {
-        if (token === fresh) {
+        if (candidateEnvelopeContains(token, fresh)) {
           setterStarted.resolve()
           await releaseSetter.promise
         }
@@ -290,13 +352,13 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
       let login: Promise<unknown> | undefined
       let loginOutcome: unknown
       try {
-        await enteredWithin(getMeStarted.promise, 'older getMe(Home)')
-        login = h.state.installAuthenticatedLogin({ token: fresh, me: freshMe })
+        await enteredWithin(getMeStarted.promise, 'older getMe(Home)', restore)
+        login = loginWithPassword(h, fresh, freshMe)
         const observedLogin = login.then(
           result => ({ status: 'fulfilled' as const, result }),
           error => ({ status: 'rejected' as const, error })
         )
-        await enteredWithin(setterStarted.promise, 'admitted Fresh native setter')
+        await enteredWithin(setterStarted.promise, 'admitted Fresh native setter', login)
         rejectGetMe.resolve()
         await enteredWithin(
           Promise.race([rejectionQueued.promise, restore.then(() => undefined)]),
@@ -323,7 +385,7 @@ describe('R21-M12 admitted login survives older asynchronous restore completion'
       })
       expect(h.state.sessionToken).toBe(fresh)
       expect(h.state.me).toEqual(freshMe)
-      await expect(h.tokenStore.getKeytarSessionToken(h.envKey)).resolves.toBe(fresh)
+      await expectSelectedSession(h, fresh)
     }
   )
 })

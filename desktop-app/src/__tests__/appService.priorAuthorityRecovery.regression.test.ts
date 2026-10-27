@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createHash } from 'node:crypto'
-import fsSync from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -24,11 +22,14 @@ vi.mock('electron', () => ({
     decryptString: (value: Buffer) => value.toString().replace(/^encrypted:/, ''),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../chatStoreBinding.js')>()
+  return {
+    ...actual,
+    bindChatStoreForUser: vi.fn(),
+    unbindChatStore: vi.fn(),
+  }
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -39,6 +40,7 @@ vi.mock('../pluginSdkRuntime.js', () => ({
 const homeToken = 'fixture-journal-home'
 const teamToken = 'fixture-journal-team'
 const freshToken = 'fixture-journal-fresh'
+const rejectedToken = 'fixture-journal-rejected'
 const homeMe = {
   id: 'fixture-journal-home-user',
   email: 'fixture-journal@example.com',
@@ -55,6 +57,8 @@ const userFor = (token: string) =>
     : { ...homeMe, teamId: token === teamToken ? 'fixture-team' : homeMe.teamId }
 const releases = new Set<() => void>()
 const operations = new Set<Promise<unknown>>()
+let previousRestUrl: string | undefined
+let previousRpcUrl: string | undefined
 
 function gate() {
   let resolve!: () => void
@@ -102,6 +106,10 @@ beforeEach(async () => {
   vi.doMock('keytar', () => boundary)
   boundary.keychain.clear()
   boundary.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-journal-producer-'))
+  previousRestUrl = process.env.EXTERNAL_REST_API_BASE_URL
+  previousRpcUrl = process.env.RPC_PROXY_BASE_URL
+  process.env.EXTERNAL_REST_API_BASE_URL = 'http://rest-prior-authority.test'
+  process.env.RPC_PROXY_BASE_URL = 'http://rpc-prior-authority.test'
   boundary.getPassword
     .mockReset()
     .mockImplementation(
@@ -126,16 +134,19 @@ afterEach(async () => {
   vi.restoreAllMocks()
   await fs.rm(boundary.directory, { recursive: true, force: true })
   boundary.directory = ''
+  if (previousRestUrl === undefined) delete process.env.EXTERNAL_REST_API_BASE_URL
+  else process.env.EXTERNAL_REST_API_BASE_URL = previousRestUrl
+  if (previousRpcUrl === undefined) delete process.env.RPC_PROXY_BASE_URL
+  else process.env.RPC_PROXY_BASE_URL = previousRpcUrl
   boundary.keychain.clear()
   vi.resetModules()
 })
 
 async function harness() {
-  const [{ AppService }, { TokenStore }, markers, journal, config] = await Promise.all([
+  const [{ AppService }, { TokenStore }, acceptance, config] = await Promise.all([
     import('../appService.js'),
     import('../tokenStore.js'),
-    import('../pendingExternalLogout.js'),
-    import('../sessionPersistenceJournal.js'),
+    import('../sessionAuthorityAcceptance.js'),
     import('../config.js'),
   ])
   const tokenStore = new TokenStore()
@@ -148,260 +159,172 @@ async function harness() {
   const state = service as unknown as {
     sessionToken: string | null
     me: typeof homeMe | null
-    installAuthenticatedLogin: (value: { token: string; me: typeof homeMe }) => Promise<unknown>
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
       switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
     }
   }
   vi.spyOn(state.authClient, 'getMe').mockImplementation(async token => userFor(token))
   vi.spyOn(state.authClient, 'switchTeam').mockResolvedValue({ token: teamToken })
   const envKey = config.getActiveEnvKey()
-  const digest = createHash('sha256').update(envKey).digest('hex')
-  return {
-    service,
-    state,
-    tokenStore,
-    markers,
-    journal,
-    envKey,
-    reportFailure,
-    journalPath: path.join(boundary.directory, `session-persistence-journal-${digest}`),
-    markerPath: path.join(boundary.directory, `pending-external-logout-${digest}`),
-    encryptedPath: path.join(boundary.directory, `session-token-${envKey}.enc`),
-  }
+  return { service, state, tokenStore, acceptance, envKey, reportFailure }
 }
 
-describe('R21-M11 verified prior authority survives secure-source repair failure', () => {
-  it.each(['none', 'active-keytar'] as const)(
-    'recovers verified encrypted Home after partial native failure from %s authority',
-    async source => {
-      const h = await harness()
-      await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-      if (source === 'active-keytar')
-        h.markers.recordPendingKeytarCleanup(boundary.directory, h.envKey, source)
-      boundary.setPassword.mockImplementation(async (service, account, token) => {
-        if (token === teamToken) boundary.keychain.set(keyOf(service, account), token)
-        throw new Error('fixture-native replacement and Home repair rejected')
-      })
-      const rename = fs.rename.bind(fs)
-      let candidateRenameRejected = false
-      vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-        if (!candidateRenameRejected && String(to) === h.encryptedPath) {
-          candidateRenameRejected = true
-          throw new Error('fixture-encrypted candidate rename rejected')
-        }
-        return rename(from, to)
-      })
-      boundary.notifySessionChanged.mockClear()
-      const error = await h.service.switchTeam('fixture-team').then(
-        () => null,
-        error => error
-      )
-      const recoveryMarker = h.markers.readPendingExternalLogoutMarker(boundary.directory, h.envKey)
-      const restarted = await harness()
-      await expect(restarted.service.initialize()).resolves.toEqual({
-        authenticated: true,
-        me: homeMe,
-      })
-      expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
-      expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
-      expect(h.service.getCachedUserId()).toBe(homeMe.id)
-      expect(h.state.sessionToken).toBe(homeToken)
-      expect(await h.tokenStore.getSafeStorageSessionToken(h.envKey)).toBe(homeToken)
-      expect(recoveryMarker?.intent).toEqual({
-        intent: 'keytar-cleanup-pending',
-        credentialSource: 'safe-storage',
-      })
-      expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)).toBeNull()
-      expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
-      expect(candidateRenameRejected).toBe(true)
-      expect(error).toBeInstanceOf(Error)
-    }
-  )
+async function acceptPasswordLogin(
+  h: Awaited<ReturnType<typeof harness>>,
+  token: string,
+  me: typeof homeMe
+) {
+  vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({ token, me })
+  return h.service.passwordLogin(me.email, 'fixture-password')
+}
 
-  async function encryptedSource(options: { nativeValue?: string } = {}) {
+describe('R21-M11 prior accepted authority survives candidate rejection and supersession', () => {
+  it('retains the exact accepted V1 Keytar source after a partial team-candidate write', async () => {
     const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-    await h.tokenStore.setSafeStorageSessionToken(homeToken, h.envKey)
-    h.markers.recordPendingKeytarCleanup(boundary.directory, h.envKey, 'safe-storage')
-    if (options.nativeValue)
-      await h.tokenStore.setSessionToken(options.nativeValue, h.envKey, { requireKeytar: true })
-    const { safeStorage } = await import('electron')
-    const rename = fs.rename.bind(fs)
-    let candidateRenamed = false
-    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-      await rename(from, to)
-      if (!candidateRenamed && String(to) === h.encryptedPath) {
-        candidateRenamed = true
-        vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    await acceptPasswordLogin(h, homeToken, homeMe)
+    const original = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(original.status).toBe('accepted')
+    if (original.status !== 'accepted') throw new Error('Expected Home to be accepted')
+    expect(original.session.token).toBe(homeToken)
+    expect(original.session.accepted.record.frame.source).toMatchObject({
+      format: 'v1',
+      kind: 'keytar',
+      accountId: homeMe.id,
+    })
+
+    boundary.setPassword.mockImplementation(async (service, account, serialized) => {
+      boundary.keychain.set(keyOf(service, account), serialized)
+      try {
+        const envelope = JSON.parse(serialized) as { sessionToken?: string }
+        if (envelope.sessionToken === teamToken)
+          throw new Error('fixture-team candidate failed after publication')
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === 'fixture-team candidate failed after publication'
+        )
+          throw error
       }
     })
-    boundary.setPassword.mockClear()
-    return { ...h, candidateRenamed: () => candidateRenamed, safeStorage }
-  }
 
-  it('source-transfers only exact verified native Home when CP-S becomes unavailable after publication', async () => {
-    const h = await encryptedSource()
-    boundary.notifySessionChanged.mockClear()
-    const error = await h.service.switchTeam('fixture-team').then(
-      () => null,
-      error => error
+    await expect(h.service.switchTeam('fixture-team')).rejects.toThrow()
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
+
+    const selected = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Rejected candidate displaced Home')
+    expect(selected.session.token).toBe(homeToken)
+    expect(selected.session.accepted.record.frame.source?.sourceRef).toBe(
+      original.session.accepted.record.frame.source?.sourceRef
     )
-    const recoveryMarker = h.markers.readPendingExternalLogoutMarker(boundary.directory, h.envKey)
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
       me: homeMe,
     })
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
-    expect(h.service.getCachedUserId()).toBe(homeMe.id)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
-    expect(recoveryMarker?.intent).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'active-keytar',
-    })
-    expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)).toBeNull()
-    expect(boundary.setPassword).not.toHaveBeenCalled()
-    expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
-    expect(h.candidateRenamed()).toBe(true)
-    expect(error).toBeInstanceOf(Error)
   })
 
-  it('does not source-transfer another native value or overwrite that producer with Home', async () => {
-    const different = 'fixture-independent-native-value'
-    const h = await encryptedSource({ nativeValue: different })
-    const error = await h.service.switchTeam('fixture-team').then(
-      () => null,
-      error => error
+  it('does not replace the accepted team source when a later team candidate fails identity', async () => {
+    const h = await harness()
+    await acceptPasswordLogin(h, homeToken, homeMe)
+    await expect(h.service.switchTeam('fixture-team')).resolves.toMatchObject({
+      authenticated: true,
+      me: { ...homeMe, teamId: 'fixture-team' },
+    })
+    const before = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(before.status).toBe('accepted')
+    if (before.status !== 'accepted') throw new Error('Expected the Home team candidate to commit')
+    expect(before.session.token).toBe(teamToken)
+
+    vi.mocked(h.state.authClient.switchTeam).mockResolvedValueOnce({ token: rejectedToken })
+    await expect(h.service.switchTeam('fixture-rejected')).rejects.toThrow()
+    expect(h.state.sessionToken).toBe(teamToken)
+    expect(h.state.me).toEqual({ ...homeMe, teamId: 'fixture-team' })
+
+    const after = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(after.status).toBe('accepted')
+    if (after.status !== 'accepted') throw new Error('Rejected team candidate displaced prior team')
+    expect(after.session.token).toBe(teamToken)
+    expect(after.session.accepted.record.frame.source).toEqual(
+      before.session.accepted.record.frame.source
     )
-    expect(h.candidateRenamed()).toBe(true)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(different)
-    expect(boundary.setPassword).not.toHaveBeenCalled()
-    expect(h.service.getCachedUserId()).toBeNull()
-    expect(h.markers.readPendingExternalLogoutMarker(boundary.directory, h.envKey)?.intent).toEqual(
-      { intent: 'keytar-cleanup-pending', credentialSource: 'safe-storage' }
-    )
+
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: false,
-      me: null,
+      authenticated: true,
+      me: { ...homeMe, teamId: 'fixture-team' },
     })
-    expect(restarted.state.authClient.getMe).not.toHaveBeenCalled()
-    expect(error).toBeInstanceOf(Error)
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(teamToken)
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(rejectedToken)
   })
 
-  it('retains Home denial when its accepting native source frame renames but fsync fails', async () => {
-    const h = await encryptedSource()
-    const rename = fsSync.renameSync.bind(fsSync)
-    const sync = fsSync.fsyncSync.bind(fsSync)
-    let transferRenamed = false
-    let transferSyncFailed = false
-    vi.spyOn(fsSync, 'renameSync').mockImplementation((from, to) => {
-      rename(from, to)
-      if (String(to) === h.markerPath) transferRenamed = true
-    })
-    vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      if (transferRenamed && !transferSyncFailed && fsSync.fstatSync(descriptor).isDirectory()) {
-        transferSyncFailed = true
-        throw Object.assign(new Error('fixture-native source-transfer fsync failed'), {
-          code: 'EIO',
-        })
+  it('keeps a newer password owner when a paused team candidate resumes', async () => {
+    const h = await harness()
+    await acceptPasswordLogin(h, homeToken, homeMe)
+    const enteredIdentity = gate()
+    const releaseIdentity = gate()
+    vi.spyOn(h.state.authClient, 'getMe').mockImplementation(async token => {
+      if (token === teamToken) {
+        enteredIdentity.resolve()
+        await releaseIdentity.promise
       }
-      return sync(descriptor)
+      return userFor(token)
     })
-    const error = await h.service.switchTeam('fixture-team').then(
-      () => null,
-      error => error
-    )
-    expect(transferRenamed && transferSyncFailed).toBe(true)
-    expect(
-      h.journal.isSessionPersistenceCandidateDenied(
-        h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey),
-        homeToken
-      )
-    ).toBe(true)
-    expect(h.markers.readPendingExternalLogoutMarker(boundary.directory, h.envKey)?.intent).toEqual(
-      { intent: 'keytar-cleanup-pending', credentialSource: 'active-keytar' }
-    )
-    const restarted = await harness()
-    await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: false,
-      me: null,
-    })
-    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
-    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
-    expect(error).toBeInstanceOf(Error)
-  })
 
-  it('preserves an independent newer source admitted while prior native verification awaits', async () => {
-    const h = await encryptedSource()
-    const reachedNative = gate()
-    const releaseNative = gate()
-    const native = h.tokenStore.getKeytarSessionToken.bind(h.tokenStore)
-    vi.spyOn(h.tokenStore, 'getKeytarSessionToken').mockImplementationOnce(async (...args) => {
-      const result = await native(...args)
-      reachedNative.resolve()
-      await releaseNative.promise
-      return result
-    })
-    const replacement = own(h.service.switchTeam('fixture-team'))
-    const outcome = replacement.then(
+    const staleTeam = own(h.service.switchTeam('fixture-team'))
+    const staleOutcome = staleTeam.then(
       () => null,
       error => error
     )
-    await entered(reachedNative.promise, replacement)
+    await entered(enteredIdentity.promise, staleTeam)
+
+    const winner = await harness()
     try {
-      vi.mocked(h.safeStorage.isEncryptionAvailable).mockReturnValue(true)
-      const winner = await harness()
-      await expect(
-        winner.state.installAuthenticatedLogin({ token: freshToken, me: freshMe })
-      ).resolves.toEqual({ authenticated: true, me: freshMe })
+      await expect(acceptPasswordLogin(winner, freshToken, freshMe)).resolves.toMatchObject({
+        authenticated: true,
+        me: freshMe,
+      })
     } finally {
-      releaseNative.resolve()
+      releaseIdentity.resolve()
     }
-    const error = await outcome
+    expect(await staleOutcome).toBeInstanceOf(Error)
+
+    const selected = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Newer password owner was not accepted')
+    expect(selected.session.token).toBe(freshToken)
+    expect(selected.session.accepted.record.frame.source?.accountId).toBe(freshMe.id)
+
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
       me: freshMe,
     })
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(freshToken)
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(freshToken)
-    expect(h.markers.readPendingExternalLogoutMarker(boundary.directory, h.envKey)).toBeNull()
-    expect(error).toBeInstanceOf(Error)
-  })
-
-  it('repairs an available CP-S partial publication inside its named source without native fallback', async () => {
-    const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-    await h.tokenStore.setSafeStorageSessionToken(homeToken, h.envKey)
-    h.markers.recordPendingKeytarCleanup(boundary.directory, h.envKey, 'safe-storage')
-    boundary.setPassword.mockClear()
-    const rename = fs.rename.bind(fs)
-    let candidateRenamed = false
-    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-      await rename(from, to)
-      if (!candidateRenamed && String(to) === h.encryptedPath) {
-        candidateRenamed = true
-        throw new Error('fixture-encrypted candidate renamed then rejected')
-      }
-    })
-    const error = await h.service.switchTeam('fixture-team').then(
-      () => null,
-      error => error
-    )
-    expect(candidateRenamed).toBe(true)
-    expect(await h.tokenStore.getSafeStorageSessionToken(h.envKey)).toBe(homeToken)
-    expect(boundary.setPassword).not.toHaveBeenCalled()
-    const restarted = await harness()
-    await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: true,
-      me: homeMe,
-    })
-    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
-    expect(h.service.getCachedUserId()).toBe(homeMe.id)
-    expect(error).toBeInstanceOf(Error)
   })
 })

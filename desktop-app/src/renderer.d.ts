@@ -16,6 +16,7 @@ import {
   ChatMetadata,
   ContextBreakdownResult,
   DesktopAppInfo,
+  DesktopLogoutOutcome,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
@@ -112,8 +113,9 @@ declare global {
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void
+        onSessionStateChanged: (callback: () => void) => () => void
         onSessionExpired: (callback: () => void) => () => void
-        logout: () => Promise<{ ok: true; sessionGeneration: number }>
+        logout: () => Promise<DesktopLogoutOutcome>
       }
       team: {
         list: () => Promise<{ currentTeamId: string; items: TeamSummary[] }>

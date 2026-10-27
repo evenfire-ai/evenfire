@@ -24,11 +24,10 @@ vi.mock('electron', () => ({
     decryptString: (value: Buffer) => value.toString().replace(/^encrypted:/, ''),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -139,6 +138,11 @@ async function harness() {
     import('../config.js'),
   ])
   const tokenStore = new TokenStore()
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://auth.journal-fixture.test/api',
+    rpcProxyBaseUrl: 'https://rpc.journal-fixture.test',
+    appName: 'Journal Fixture',
+  })
   const reportFailure = vi.fn()
   const service = new AppService({
     tokenStore,
@@ -148,9 +152,12 @@ async function harness() {
   const state = service as unknown as {
     sessionToken: string | null
     me: typeof homeMe | null
-    installAuthenticatedLogin: (value: { token: string; me: typeof homeMe }) => Promise<unknown>
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
       switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
     }
   }
@@ -172,41 +179,35 @@ async function harness() {
   }
 }
 
+async function passwordLogin(
+  h: Awaited<ReturnType<typeof harness>>,
+  token: string,
+  me: typeof homeMe
+) {
+  vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({ token, me })
+  return h.service.passwordLogin(me.email, 'synthetic-password')
+}
+
 describe('actual AppService write-ahead acceptance and migration', () => {
-  it('accepts its own real secure legacy migration only after restart authentication', async () => {
+  it('requires fresh authentication for a historical plaintext credential', async () => {
     const h = await harness()
-    const legacyFile = path.join(boundary.directory, 'session-token.json')
-    await fs.writeFile(legacyFile, JSON.stringify({ token: homeToken }), { mode: 0o600 })
+    const { TokenStore } = await import('../tokenStore.js')
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const historicalWriter = new TokenStore({ isolatedUserDataPath: boundary.directory })
+    await historicalWriter.setSessionToken(homeToken, h.envKey)
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    const legacyFile = path.join(boundary.directory, `session-token-${h.envKey}.json`)
+    const originalBytes = await fs.readFile(legacyFile)
+    boundary.setPassword.mockClear()
 
-    const reachedAuthentication = gate()
-    const releaseAuthentication = gate()
-    vi.mocked(h.state.authClient.getMe).mockImplementationOnce(async () => {
-      reachedAuthentication.resolve()
-      await releaseAuthentication.promise
-      return homeMe
-    })
-    const restoration = own(h.service.initialize())
-    await entered(reachedAuthentication.promise, restoration)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
-    expect(
-      h.journal.isSessionPersistenceCandidateDenied(
-        h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey),
-        homeToken
-      )
-    ).toBe(true)
+    await expect(h.service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+
+    expect(h.state.authClient.getMe).not.toHaveBeenCalled()
+    expect(boundary.setPassword).not.toHaveBeenCalled()
     expect(h.service.getCachedUserId()).toBeNull()
-    releaseAuthentication.resolve()
-    await expect(restoration).resolves.toEqual({ authenticated: true, me: homeMe })
-
-    expect(h.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
-    await expect(fs.access(legacyFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.readFile(legacyFile)).resolves.toEqual(originalBytes)
     expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)).toBeNull()
-    const restarted = await harness()
-    await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: true,
-      me: homeMe,
-    })
   })
 
   it('does not launder an older denied same hash through automatic legacy migration', async () => {
@@ -234,42 +235,56 @@ describe('actual AppService write-ahead acceptance and migration', () => {
         homeToken
       )
     ).toBe(true)
-    await expect(
-      h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-    ).resolves.toEqual({ authenticated: true, me: homeMe })
+    await expect(passwordLogin(h, freshToken, freshMe)).resolves.toEqual({
+      authenticated: true,
+      me: freshMe,
+    })
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
-      me: homeMe,
+      me: freshMe,
     })
-    expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)).toBeNull()
+    expect(
+      h.journal.isSessionPersistenceCandidateDenied(
+        h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey),
+        homeToken
+      )
+    ).toBe(true)
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(freshToken)
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
   })
 
-  it('rejects journal admission before native publication without encrypted fallback or Home loss', async () => {
+  it('rejects authority admission before native publication without Home loss', async () => {
     const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    await passwordLogin(h, homeToken, homeMe)
     boundary.setPassword.mockClear()
     const rename = vi.spyOn(fs, 'rename')
+    const authorityScope = await h.tokenStore.createSessionAuthorityStorageScope()
+    const authorityDirectory = h.tokenStore.resolveSessionAuthorityStorageDirectory(authorityScope)
+    const authorityPath = path.join(
+      authorityDirectory,
+      `session-authority-${createHash('sha256').update(h.envKey).digest('hex')}`
+    )
     const open = fsSync.openSync.bind(fsSync)
     const sync = fsSync.fsyncSync.bind(fsSync)
-    const journalDescriptors = new Set<number>()
+    const authorityDescriptors = new Set<number>()
     let faultReached = false
     vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
       const descriptor = open(file, flags, mode)
-      if (String(file).startsWith(`${h.journalPath}.`)) journalDescriptors.add(descriptor)
+      if (String(file).startsWith(`${authorityPath}.`)) authorityDescriptors.add(descriptor)
       return descriptor
     })
     const fault = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      if (!faultReached && journalDescriptors.has(descriptor)) {
+      if (!faultReached && authorityDescriptors.has(descriptor)) {
         faultReached = true
-        throw Object.assign(new Error('fixture-prepare journal file sync'), { code: 'EIO' })
+        throw Object.assign(new Error('fixture authority record sync'), { code: 'EIO' })
       }
       return sync(descriptor)
     })
 
-    const error = await h.state.installAuthenticatedLogin({ token: freshToken, me: freshMe }).then(
+    const error = await passwordLogin(h, freshToken, freshMe).then(
       () => null,
-      error => error
+      caught => caught
     )
 
     fault.mockRestore()
@@ -287,7 +302,19 @@ describe('actual AppService write-ahead acceptance and migration', () => {
       ownerId: homeMe.id,
       teamId: homeMe.teamId,
     })
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const preserved = await readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(preserved.status).toBe('accepted')
+    if (preserved.status !== 'accepted') throw new Error('Expected the accepted Home source')
+    expect(preserved.session.token).toBe(homeToken)
+    expect(preserved.session.accepted.record.frame.source).toMatchObject({
+      format: 'v1',
+      kind: 'keytar',
+      accountId: homeMe.id,
+    })
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -297,141 +324,143 @@ describe('actual AppService write-ahead acceptance and migration', () => {
     expect(error).toBeInstanceOf(Error)
   })
 
-  it('denies a rejected candidate despite a visible accepting CP-S rename with failed directory sync', async () => {
+  it('keeps the exact accepted safeStorage source after a candidate directory sync failure', async () => {
     const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-    h.markers.recordPendingKeytarCleanup(boundary.directory, h.envKey, 'active-keytar')
-    let locked = false
-    boundary.setPassword.mockImplementation(async (service, account, token) => {
-      boundary.keychain.set(keyOf(service, account), token)
-      if (token === teamToken) {
-        locked = true
-        throw new Error('fixture-native candidate published then rejected')
-      }
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeMe,
     })
-    boundary.getPassword.mockImplementation(async (service, account) => {
-      if (locked) throw new Error('fixture-native source locked during rejected repair')
-      return boundary.keychain.get(keyOf(service, account)) ?? null
+    vi.spyOn(h.tokenStore, 'inspectVersionedKeytarCapability').mockResolvedValueOnce('unavailable')
+    await expect(h.service.passwordLogin(homeMe.email, 'fixture-password')).resolves.toMatchObject({
+      authenticated: true,
+      me: homeMe,
     })
-    const rename = fsSync.renameSync.bind(fsSync)
-    const sync = fsSync.fsyncSync.bind(fsSync)
-    const unlink = fsSync.unlinkSync.bind(fsSync)
-    let conversionLanded = false
-    let syncFailed = false
-    let priorEncryptedPublicationRejected = false
-    const renameEncrypted = fs.rename.bind(fs)
+
+    const prior = await readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(prior.status).toBe('accepted')
+    if (prior.status !== 'accepted') throw new Error('Expected accepted safeStorage source')
+    expect(prior.session.token).toBe(homeToken)
+    expect(prior.session.accepted.record.frame.source).toMatchObject({
+      kind: 'safe-storage',
+      format: 'v1',
+    })
+
+    const rejectedToken = 'fixture-journal-team-after-sync-failure'
+    const rejectedMe = { ...homeMe, teamId: 'fixture-team-after-sync-failure' }
+    vi.mocked(h.state.authClient.switchTeam).mockResolvedValueOnce({ token: rejectedToken })
+    vi.mocked(h.state.authClient.getMe).mockResolvedValueOnce(rejectedMe)
+
+    const sessionDirectory = path.join(await fs.realpath(boundary.directory), 'sessions')
+    const rename = fs.rename.bind(fs)
+    let candidateRenamed = false
+    let publishedCandidatePath: string | null = null
     vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-      if (
-        locked &&
-        String(to) === h.encryptedPath &&
-        (await fs.readFile(from)).equals(Buffer.from(`encrypted:${homeToken}`))
-      ) {
-        priorEncryptedPublicationRejected = true
-        throw Object.assign(new Error('fixture-prior encrypted repair publication failed'), {
-          code: 'EIO',
+      const result = await rename(from, to)
+      if (String(to).startsWith(`${sessionDirectory}${path.sep}session-v1-`)) {
+        candidateRenamed = true
+        publishedCandidatePath = String(to)
+      }
+      return result
+    })
+    const open = fs.open.bind(fs)
+    let directorySyncFailed = false
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args)
+      if (candidateRenamed && String(args[0]) === sessionDirectory) {
+        candidateRenamed = false
+        vi.spyOn(handle, 'sync').mockImplementation(async () => {
+          directorySyncFailed = true
+          throw Object.assign(new Error('fixture candidate directory sync failed'), {
+            code: 'EIO',
+          })
         })
       }
-      return renameEncrypted(from, to)
-    })
-    vi.spyOn(fsSync, 'renameSync').mockImplementation((from, to) => {
-      rename(from, to)
-      if (String(to) === h.markerPath) conversionLanded = true
-    })
-    vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      if (conversionLanded && !syncFailed && fsSync.fstatSync(descriptor).isDirectory()) {
-        syncFailed = true
-        throw Object.assign(new Error('fixture-conversion directory sync'), { code: 'EIO' })
-      }
-      return sync(descriptor)
-    })
-    vi.spyOn(fsSync, 'unlinkSync').mockImplementation(file => {
-      if (locked && String(file) === h.encryptedPath)
-        throw Object.assign(new Error('fixture-rejected encrypted cleanup'), { code: 'EIO' })
-      return unlink(file)
+      return handle
     })
 
-    const error = await h.service.switchTeam('fixture-team').then(
+    const error = await h.service.switchTeam('fixture-team-after-sync-failure').then(
       () => null,
-      error => error
+      caught => caught
     )
 
-    expect(conversionLanded && syncFailed).toBe(true)
-    expect(priorEncryptedPublicationRejected).toBe(true)
-    expect(await h.tokenStore.getSafeStorageSessionToken(h.envKey)).toBe(teamToken)
-    expect(h.markers.readPendingExternalLogoutMarker(boundary.directory, h.envKey)?.intent).toEqual(
-      { intent: 'keytar-cleanup-pending', credentialSource: 'safe-storage' }
-    )
-    expect(
-      h.journal.isSessionPersistenceCandidateDenied(
-        h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey),
-        teamToken
-      )
-    ).toBe(true)
-    expect(
-      h.journal
-        .readSessionPersistenceJournal(boundary.directory, h.envKey)
-        ?.pending.find(
-          entry => entry.candidateHash === h.journal.sessionPersistenceCandidateHash(teamToken)
-        )?.sources
-    ).toEqual(['keytar', 'safe-storage'])
-    locked = false
-    const restarted = await harness()
-    await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: false,
-      me: null,
-    })
-    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
-    expect(h.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+    expect(directorySyncFailed).toBe(true)
     expect(error).toBeInstanceOf(Error)
+    expect(h.service.getCachedUserId()).toBe(homeMe.id)
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
+    expect(h.state.authClient.getMe).not.toHaveBeenCalledWith(rejectedToken)
+    expect(publishedCandidatePath).not.toBeNull()
+    if (!publishedCandidatePath)
+      throw new Error('Expected a published candidate before sync failed')
+    await expect(fs.access(publishedCandidatePath)).rejects.toThrow()
+    const after = await readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(after.status).toBe('accepted')
+    if (after.status !== 'accepted') throw new Error('Rejected candidate displaced accepted source')
+    expect(after.session.token).toBe(homeToken)
+    expect(after.session.accepted.record.frame.source).toEqual(
+      prior.session.accepted.record.frame.source
+    )
+
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toMatchObject({
+      authenticated: true,
+      me: homeMe,
+    })
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(rejectedToken)
   })
 
-  it('keeps accepted login live after retirement failure and denies restart until fresh recovery', async () => {
+  it('retains the exact legacy denial snapshot through accepted login and restart', async () => {
     const h = await harness()
-    const unlink = fsSync.unlinkSync.bind(fsSync)
-    let faultReached = false
-    const fault = vi.spyOn(fsSync, 'unlinkSync').mockImplementation(file => {
-      if (!faultReached && String(file) === h.journalPath) {
-        faultReached = true
-        throw Object.assign(new Error('fixture-accepted journal retirement'), { code: 'EIO' })
-      }
-      return unlink(file)
-    })
+    const deniedToken = 'fixture-unresolved-legacy-denial'
+    const producer = new h.journal.SessionPersistenceProducer(
+      boundary.directory,
+      h.envKey,
+      null,
+      () => {},
+      () => {}
+    )
+    producer.prepare('keytar', deniedToken)
+    const journalBytes = await fs.readFile(h.journalPath)
 
-    await expect(
-      h.state.installAuthenticatedLogin({ token: freshToken, me: freshMe })
-    ).resolves.toEqual({ authenticated: true, me: freshMe })
-
-    fault.mockRestore()
-    expect(faultReached).toBe(true)
-    expect(h.service.getCachedUserId()).toBe(freshMe.id)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(freshToken)
-    expect(h.reportFailure).toHaveBeenCalled()
-    expect(
-      h.journal.isSessionPersistenceCandidateDenied(
-        h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey),
-        freshToken
-      )
-    ).toBe(true)
-    const restarted = await harness()
-    await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: false,
-      me: null,
-    })
-    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(freshToken)
-    await expect(
-      restarted.state.installAuthenticatedLogin({ token: freshToken, me: freshMe })
-    ).resolves.toEqual({ authenticated: true, me: freshMe })
-    const recovered = await harness()
-    await expect(recovered.service.initialize()).resolves.toEqual({
+    await expect(passwordLogin(h, freshToken, freshMe)).resolves.toEqual({
       authenticated: true,
       me: freshMe,
     })
-    expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)).toBeNull()
+
+    expect(h.service.getCachedUserId()).toBe(freshMe.id)
+    const selected = await (
+      await import('../sessionAuthorityAcceptance.js')
+    ).readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected accepted V1 source')
+    expect(selected.session.token).toBe(freshToken)
+    expect(
+      h.journal.isSessionPersistenceCandidateDenied(
+        h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey),
+        deniedToken
+      )
+    ).toBe(true)
+    await expect(fs.readFile(h.journalPath)).resolves.toEqual(journalBytes)
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: freshMe,
+    })
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(freshToken)
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(deniedToken)
   })
 
   it('does not reject accepted team persistence when the SDK notification throws', async () => {
     const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    await passwordLogin(h, homeToken, homeMe)
     boundary.notifySessionChanged.mockImplementation(authenticated => {
       if (authenticated) throw new Error('fixture-dead SDK surface')
     })
@@ -444,7 +473,18 @@ describe('actual AppService write-ahead acceptance and migration', () => {
     expect(boundary.notifySessionChanged).toHaveBeenCalledWith(true)
     expect(h.service.getCachedUserId()).toBe(homeMe.id)
     expect(h.state.sessionToken).toBe(teamToken)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(teamToken)
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected accepted candidate authority')
+    expect(selected.session.token).toBe(teamToken)
+    expect(selected.session.accepted.record.frame.source).toMatchObject({
+      kind: 'keytar',
+      format: 'v1',
+    })
     expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)).toBeNull()
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
@@ -453,9 +493,8 @@ describe('actual AppService write-ahead acceptance and migration', () => {
     })
   })
 
-  it('never evicts full-journal denials and recovers quota only after verified logout cleanup', async () => {
+  it('preserves a full legacy denial journal while public V1 login uses its authority record', async () => {
     const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
     for (let index = 0; index < 128; index += 1) {
       const pending = new h.journal.SessionPersistenceProducer(
         boundary.directory,
@@ -466,39 +505,74 @@ describe('actual AppService write-ahead acceptance and migration', () => {
       )
       pending.prepare('keytar', `fixture-unaccepted-quota-${index}`)
     }
+    await passwordLogin(h, homeToken, homeMe)
+    const firstAccepted = await (
+      await import('../sessionAuthorityAcceptance.js')
+    ).readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    expect(firstAccepted.status).toBe('accepted')
+    if (firstAccepted.status !== 'accepted') throw new Error('Expected first V1 acceptance')
+    const legacySnapshot = h.journal.observeSessionPersistenceLegacySnapshot(
+      boundary.directory,
+      h.envKey
+    )
+    expect(legacySnapshot.status).toBe('observed')
+    if (legacySnapshot.status !== 'observed') throw new Error('Expected valid legacy snapshot')
+    expect(firstAccepted.session.accepted.record.projectionReceipt?.legacyJournalReceipt).toEqual(
+      legacySnapshot.receipt
+    )
     const previousDenials = h.journal.readSessionPersistenceJournal(
       boundary.directory,
       h.envKey
     )!.pending
     boundary.setPassword.mockClear()
 
-    const error = await h.state.installAuthenticatedLogin({ token: freshToken, me: freshMe }).then(
-      () => null,
-      error => error
-    )
+    await expect(passwordLogin(h, freshToken, freshMe)).resolves.toEqual({
+      authenticated: true,
+      me: freshMe,
+    })
 
-    expect(boundary.setPassword).not.toHaveBeenCalled()
+    expect(boundary.setPassword).toHaveBeenCalledTimes(1)
+    expect(boundary.setPassword.mock.calls[0]?.[1]).toMatch(/^session-v1:/)
     expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)?.pending).toEqual(
       previousDenials
     )
-    expect(h.service.getCachedUserId()).toBe(homeMe.id)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    expect(h.service.getCachedUserId()).toBe(freshMe.id)
+    const selected = await (
+      await import('../sessionAuthorityAcceptance.js')
+    ).readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected the new V1 source to be accepted')
+    expect(selected.session.token).toBe(freshToken)
+    expect(selected.session.accepted.record.frame.source).toMatchObject({
+      format: 'v1',
+      kind: 'keytar',
+      accountId: freshMe.id,
+    })
     const beforeLogoutRestart = await harness()
     await expect(beforeLogoutRestart.service.initialize()).resolves.toEqual({
       authenticated: true,
-      me: homeMe,
+      me: freshMe,
     })
-    expect(beforeLogoutRestart.state.authClient.getMe).not.toHaveBeenCalledWith(freshToken)
-    expect(error).toBeInstanceOf(Error)
+    expect(beforeLogoutRestart.state.authClient.getMe).toHaveBeenCalledWith(freshToken)
+    expect(beforeLogoutRestart.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
 
-    await h.service.logout()
+    await expect(beforeLogoutRestart.service.logout()).resolves.toMatchObject({
+      kind: 'committed',
+    })
 
-    expect(h.service.getCachedUserId()).toBeNull()
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBeNull()
-    expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)).toBeNull()
-    await expect(
-      h.state.installAuthenticatedLogin({ token: freshToken, me: freshMe })
-    ).resolves.toEqual({ authenticated: true, me: freshMe })
+    expect(beforeLogoutRestart.service.getCachedUserId()).toBeNull()
+    expect(await beforeLogoutRestart.tokenStore.getKeytarSessionToken(h.envKey)).toBeNull()
+    expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)?.pending).toEqual(
+      previousDenials
+    )
+    await expect(passwordLogin(beforeLogoutRestart, freshToken, freshMe)).resolves.toEqual({
+      authenticated: true,
+      me: freshMe,
+    })
+    expect(h.journal.readSessionPersistenceJournal(boundary.directory, h.envKey)?.pending).toEqual(
+      previousDenials
+    )
+    expect(beforeLogoutRestart.service.getCachedUserId()).toBe(freshMe.id)
     const recovered = await harness()
     await expect(recovered.service.initialize()).resolves.toEqual({
       authenticated: true,

@@ -23,11 +23,10 @@ vi.mock('electron', () => ({
     decryptString: vi.fn((value: Buffer) => value.toString().replace(/^encrypted:/, '')),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -35,8 +34,14 @@ vi.mock('../pluginSdkRuntime.js', () => ({
   }),
 }))
 
-const homeToken = 'fixture-r21-home-session'
-const teamToken = 'fixture-r21-team-session'
+const tokenWithExpiry = (id: string) => {
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, jti: id })
+  ).toString('base64url')
+  return `header.${payload}.signature`
+}
+const homeToken = tokenWithExpiry('fixture-r21-home-session')
+const teamToken = tokenWithExpiry('fixture-r21-team-session')
 const homeMe = {
   id: 'fixture-r21-user',
   email: 'fixture-r21@example.com',
@@ -46,6 +51,7 @@ const homeMe = {
   teamName: 'Fixture home',
   role: 'member',
 }
+let previousConfigPath: string | undefined
 
 beforeEach(async () => {
   vi.resetModules()
@@ -53,6 +59,8 @@ beforeEach(async () => {
   vi.doMock('keytar', () => boundary)
   runtime.keychain.clear()
   runtime.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-r21-marker-'))
+  previousConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
+  process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(runtime.directory, 'desktop-runtime.json')
   boundary.getPassword
     .mockReset()
     .mockImplementation(
@@ -66,12 +74,20 @@ beforeEach(async () => {
     .mockImplementation(async (service, account) =>
       runtime.keychain.delete(keyOf(service, account))
     )
+  const config = await import('../config.js')
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://api.example.test',
+    rpcProxyBaseUrl: 'https://rpc.example.test',
+  })
   const { safeStorage } = await import('electron')
   vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
 })
 
 afterEach(async () => {
   vi.restoreAllMocks()
+  if (previousConfigPath === undefined) delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+  else process.env.CLERUM_DESKTOP_CONFIG_PATH = previousConfigPath
+  previousConfigPath = undefined
   await fs.rm(runtime.directory, { recursive: true, force: true })
   runtime.directory = ''
   runtime.keychain.clear()
@@ -102,6 +118,10 @@ async function harness(options: { isolated?: boolean } = {}) {
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
       switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
     }
   }
   vi.spyOn(state.authClient, 'getMe').mockImplementation(async token => ({
@@ -121,21 +141,39 @@ async function harness(options: { isolated?: boolean } = {}) {
 
 describe('R21-M6 live restore retains verified authority after transient inspection', () => {
   it('preserves live CP-S Home when the actual selected encrypted read is transient', async () => {
-    boundary.setPassword.mockImplementation(async () => {
-      throw new Error('fixture-native setter unavailable before publication')
-    })
+    // Exercise a genuine pre-dispatch Keytar absence, not an ambiguous rejected setter.
     const h = await harness()
+    vi.spyOn(h.tokenStore, 'inspectVersionedKeytarCapability').mockResolvedValue('unavailable')
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-    // Historical heads did not bind ordinary encrypted login automatically.
-    // This is the real marker producer over the already verified encrypted token.
-    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'safe-storage')
+    h.state.authClient.getMe.mockClear()
     const marker = h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
-    const encryptedPath = path.join(runtime.directory, `session-token-${h.envKey}.enc`)
+    const selection = await import('../sessionAuthorityAcceptance.js').then(module =>
+      module.readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    )
+    expect(selection.status).toBe('accepted')
+    if (selection.status !== 'accepted') throw new Error('Expected selected safeStorage source')
+    expect(selection.session.accepted.record.frame.source?.kind).toBe('safe-storage')
+    expect(selection.session.accepted.record.projectionReceipt).not.toBeNull()
+    const selectedSource = selection.session.accepted.record.frame.source
+    if (!selectedSource || selectedSource.format !== 'v1')
+      throw new Error('Expected the exact selected safeStorage candidate source')
+    expect(marker).toEqual(
+      h.markers.acceptancePendingExternalMarker(
+        selection.session.accepted.record.projectionReceipt!.marker
+      )
+    )
+    const encryptedPath = path.join(
+      runtime.directory,
+      'sessions',
+      `session-v1-${selectedSource.sourceRef}.enc`
+    )
+    const encryptedBytesBefore = await fs.readFile(encryptedPath)
+    const canonicalEncryptedPath = await fs.realpath(encryptedPath)
     const read = fs.readFile.bind(fs)
     const open = fsSync.openSync.bind(fsSync)
     let injected = false
     const failRead = (file: unknown) => {
-      if (!injected && String(file) === encryptedPath) {
+      if (!injected && String(file) === canonicalEncryptedPath) {
         injected = true
         throw Object.assign(new Error('fixture-selected encrypted read'), { code: 'EMFILE' })
       }
@@ -153,7 +191,7 @@ describe('R21-M6 live restore retains verified authority after transient inspect
     boundary.notifySessionChanged.mockClear()
     const result = await h.service.initialize()
     expect(injected).toBe(true)
-    await expect(h.tokenStore.getSafeStorageSessionToken(h.envKey)).resolves.toBe(homeToken)
+    await expect(fs.readFile(encryptedPath)).resolves.toEqual(encryptedBytesBefore)
     expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toEqual(marker)
     expect(result.authenticated).toBe(true)
     expect(h.state.sessionToken).toBe(homeToken)
@@ -168,21 +206,18 @@ describe('R21-M6 live restore retains verified authority after transient inspect
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
   })
 
-  it('preserves live native authority after a transient fallback-file snapshot read', async () => {
+  it('preserves live native authority after a transient exact Keytar source read', async () => {
     const h = await harness()
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-    const encryptedPath = path.join(runtime.directory, `session-token-${h.envKey}.enc`)
-    const open = fsSync.openSync.bind(fsSync)
     let injected = false
-    vi.spyOn(fsSync, 'openSync').mockImplementation(
-      (...args: Parameters<typeof fsSync.openSync>) => {
-        if (!injected && String(args[0]) === encryptedPath) {
-          injected = true
-          throw Object.assign(new Error('fixture-fallback-snapshot-read'), { code: 'EMFILE' })
-        }
-        return open(...args)
+    const getPassword = boundary.getPassword.getMockImplementation()
+    boundary.getPassword.mockImplementation(async (...args) => {
+      if (!injected) {
+        injected = true
+        throw Object.assign(new Error('fixture-selected Keytar source read'), { code: 'EMFILE' })
       }
-    )
+      return getPassword?.(...args) ?? null
+    })
     boundary.notifySessionChanged.mockClear()
     const result = await h.service.initialize()
     expect(injected).toBe(true)
@@ -190,7 +225,13 @@ describe('R21-M6 live restore retains verified authority after transient inspect
     expect(h.state.sessionToken).toBe(homeToken)
     expect(h.state.me).toEqual(homeMe)
     expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
-    await expect(h.tokenStore.getKeytarSessionToken(h.envKey)).resolves.toBe(homeToken)
+    const selected = await import('../sessionAuthorityAcceptance.js').then(module =>
+      module.readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    )
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected selected native source')
+    expect(selected.session.token).toBe(homeToken)
+    expect(selected.session.accepted.record.frame.source?.kind).toBe('keytar')
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -201,7 +242,6 @@ describe('R21-M6 live restore retains verified authority after transient inspect
 
   it('preserves an already authenticated session when journal descriptor close is transient', async () => {
     const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
     const { SessionPersistenceProducer } = await import('../sessionPersistenceJournal.js')
     new SessionPersistenceProducer(
       runtime.directory,
@@ -210,6 +250,9 @@ describe('R21-M6 live restore retains verified authority after transient inspect
       () => {},
       () => {}
     ).prepare('keytar', 'fixture-independent-unaccepted')
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
     const open = fsSync.openSync.bind(fsSync)
     const close = fsSync.closeSync.bind(fsSync)
     const descriptors = new Set<number>()
@@ -235,7 +278,12 @@ describe('R21-M6 live restore retains verified authority after transient inspect
     expect(h.state.sessionToken).toBe(homeToken)
     expect(h.state.me).toEqual(homeMe)
     expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
-    await expect(h.tokenStore.getKeytarSessionToken(h.envKey)).resolves.toBe(homeToken)
+    const selected = await import('../sessionAuthorityAcceptance.js').then(module =>
+      module.readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    )
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected the accepted session source')
+    expect(selected.session.token).toBe(homeToken)
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -244,23 +292,39 @@ describe('R21-M6 live restore retains verified authority after transient inspect
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
   })
 
-  it('preserves live Home after a transient second journal read without announcing logout', async () => {
+  it('preserves live Home after a transient selected journal read', async () => {
     const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.state.authClient.passwordLogin = vi.fn().mockResolvedValue({ token: homeToken, me: homeMe })
+    await h.service.passwordLogin(homeMe.email, 'synthetic-password')
+    await expect(h.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: homeMe,
+    })
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected pinned V1 source')
+    expect(selected.session.accepted.record.frame.source?.format).toBe('v1')
+    h.state.authClient.getMe.mockClear()
     boundary.notifySessionChanged.mockClear()
     const journalPath = path.join(
-      runtime.directory,
+      fsSync.realpathSync(runtime.directory),
       `session-persistence-journal-${createHash('sha256').update(h.envKey).digest('hex')}`
     )
     const open = fsSync.openSync.bind(fsSync)
     let journalReads = 0
     let faultReached = false
+    const openedPaths: string[] = []
     vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      openedPaths.push(String(file))
       if (String(file) === journalPath) {
         journalReads += 1
-        if (journalReads === 2) {
+        if (journalReads === 1) {
           faultReached = true
-          throw Object.assign(new Error('fixture-transient second journal read'), {
+          throw Object.assign(new Error('fixture-transient selected V1 journal read'), {
             code: 'EMFILE',
           })
         }
@@ -270,8 +334,14 @@ describe('R21-M6 live restore retains verified authority after transient inspect
 
     const result = await h.service.initialize()
 
-    expect(faultReached).toBe(true)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    expect(faultReached, `journal path was not opened: ${openedPaths.join(', ')}`).toBe(true)
+    const selectedAfterTransient = await import('../sessionAuthorityAcceptance.js').then(module =>
+      module.readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    )
+    expect(selectedAfterTransient.status).toBe('accepted')
+    if (selectedAfterTransient.status !== 'accepted')
+      throw new Error('Expected prior accepted source')
+    expect(selectedAfterTransient.session.token).toBe(homeToken)
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -284,48 +354,35 @@ describe('R21-M6 live restore retains verified authority after transient inspect
     expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
   })
 
-  it('denies the owned recovery runtime when its genuine Home chat rebind fails', async () => {
+  it('keeps Home bound when staged replacement chat preparation fails', async () => {
     const h = await harness()
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
     const freshToken = 'fixture-rejected-recovery-binding-session'
-    const owner = h.service as unknown as {
-      bindCurrentChatStore: (userId: string) => Promise<void>
-    }
-    const bind = owner.bindCurrentChatStore.bind(owner)
-    let freshBound = false
-    let recoveryAttempted = false
-    let readFailed = false
-    // Home and Fresh have distinct identities; only the restored Home rebind fails.
-    vi.spyOn(owner, 'bindCurrentChatStore').mockImplementation(async userId => {
-      if (freshBound && userId === homeMe.id) {
-        recoveryAttempted = true
-        throw new Error('fixture-genuine Home chat rebind failed')
-      }
-      await bind(userId)
-      if (userId === 'fixture-new-user') freshBound = true
+    const freshMe = { ...homeMe, id: 'fixture-new-user' }
+    const binding = await import('../chatStoreBinding.js')
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: freshToken,
+      me: freshMe,
     })
-    const open = fsSync.openSync.bind(fsSync)
-    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
-      if (freshBound && !readFailed && String(file) === h.markerPath) {
-        readFailed = true
-        throw Object.assign(new Error('fixture-post-bind marker EMFILE'), { code: 'EMFILE' })
-      }
-      return open(file, flags, mode)
-    })
-    const error = await h.state
-      .installAuthenticatedLogin({
-        token: freshToken,
-        me: { ...homeMe, id: 'fixture-new-user' },
-      })
+    vi.spyOn(h.state.authClient, 'getMe').mockImplementation(async token =>
+      token === freshToken ? freshMe : homeMe
+    )
+    vi.mocked(binding.prepareChatStoreBindingForUser).mockRejectedValueOnce(
+      new Error('fixture-staged replacement chat preparation failed')
+    )
+    const error = await h.service
+      .passwordLogin('fixture-new-user@example.test', 'fixture-password')
       .then(
         () => null,
         error => error
       )
-    expect(recoveryAttempted).toBe(true)
-    expect(h.service.getCachedUserId()).toBeNull()
-    expect(h.state.sessionToken).toBeNull()
-    expect(h.state.me).toBeNull()
-    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    expect(h.service.getCachedUserId()).toBe(homeMe.id)
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
+    expect(binding.requireChatStore().getAuthorityScope()).toMatchObject({
+      userId: homeMe.id,
+      teamId: homeMe.teamId,
+    })
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -335,16 +392,30 @@ describe('R21-M6 live restore retains verified authority after transient inspect
     expect(error).toBeInstanceOf(Error)
   })
 
-  it('restores the verified previous live scope after transient post-bind login inspection', async () => {
+  it('preserves prior authority after transient projection inspection following consumer staging', async () => {
     const h = await harness()
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
     const fresh = 'fixture-rejected-post-bind-user'
     const freshMe = { ...homeMe, id: 'fixture-post-bind-user' }
     const binding = await import('../chatStoreBinding.js')
     let armed = false
-    vi.mocked(binding.bindChatStoreForUser).mockImplementationOnce(async () => {
+    const prepareNormally = vi
+      .mocked(binding.prepareChatStoreBindingForUser)
+      .getMockImplementation()
+    if (!prepareNormally) throw new Error('Chat preparation fixture is not installed')
+    vi.mocked(binding.prepareChatStoreBindingForUser).mockImplementationOnce(async (...args) => {
+      const prepared = await prepareNormally(...args)
       armed = true
+      return prepared
     })
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: fresh,
+      me: freshMe,
+    })
+    vi.spyOn(h.state.authClient, 'getMe').mockImplementation(async token =>
+      token === fresh ? freshMe : homeMe
+    )
+    const beforeMarker = h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
     const open = fsSync.openSync.bind(fsSync)
     const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
       if (String(file) === h.markerPath && armed) {
@@ -354,10 +425,12 @@ describe('R21-M6 live restore retains verified authority after transient inspect
       return open(file, flags, mode)
     })
     boundary.notifySessionChanged.mockClear()
-    const error = await h.state.installAuthenticatedLogin({ token: fresh, me: freshMe }).then(
-      () => null,
-      error => error
-    )
+    const error = await h.service
+      .passwordLogin('fixture-post-bind-user@example.test', 'fixture-password')
+      .then(
+        () => null,
+        error => error
+      )
     spy.mockRestore()
     expect(h.state.sessionToken).toBe(homeToken)
     expect(h.state.me).toEqual(homeMe)
@@ -375,8 +448,16 @@ describe('R21-M6 live restore retains verified authority after transient inspect
       teamId: homeMe.teamId,
     })
     expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
-    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    const selected = await import('../sessionAuthorityAcceptance.js').then(module =>
+      module.readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    )
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted')
+      throw new Error('Expected prior authority to remain accepted')
+    expect(selected.session.token).toBe(homeToken)
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toEqual(
+      beforeMarker
+    )
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -389,7 +470,6 @@ describe('R21-M6 live restore retains verified authority after transient inspect
   it('preserves already valid authentication when post-getMe marker inspection is transient', async () => {
     const h = await harness()
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
     const getMe = h.state.authClient.getMe.bind(h.state.authClient)
     const open = fsSync.openSync.bind(fsSync)
     let armed = false
@@ -412,7 +492,12 @@ describe('R21-M6 live restore retains verified authority after transient inspect
     expect(result.authenticated).toBe(true)
     expect(h.state.sessionToken).toBe(homeToken)
     expect(h.state.me?.id).toBe(homeMe.id)
-    await expect(h.tokenStore.getKeytarSessionToken(h.envKey)).resolves.toBe(homeToken)
+    const selected = await import('../sessionAuthorityAcceptance.js').then(module =>
+      module.readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey: h.envKey })
+    )
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected live accepted source')
+    expect(selected.session.token).toBe(homeToken)
     expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({

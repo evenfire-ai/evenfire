@@ -1,3 +1,5 @@
+import type { DesktopLogoutOutcome } from './types.js'
+
 type RendererTarget = {
   isDestroyed: () => boolean
   webContents: {
@@ -12,7 +14,7 @@ type EvenfireDeepLinkRouterOptions<TWindow extends RendererTarget> = {
   getSessionState: () => Promise<{ authenticated: boolean }>
   handleSandboxUiDeepLink: (rawUrl: string) => boolean
   isRendererReady: () => boolean
-  logout: () => Promise<unknown>
+  logout: () => Promise<DesktopLogoutOutcome>
   reportLogoutFailure: (error: unknown) => void
   deferLogout?: (error: unknown) => boolean | void
   maxPendingUrls?: number
@@ -95,23 +97,7 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
       // rejection or prevent the renderer from reflecting the auth state.
     }
 
-    let authenticated: boolean
-    try {
-      authenticated = (await options.getSessionState()).authenticated
-    } catch (stateError) {
-      try {
-        options.reportLogoutFailure(stateError)
-      } catch {
-        // The protocol has no failure response channel.
-      }
-      return
-    }
-    if (authenticated) return
-
-    const window = options.getWindow()
-    if (!window || window.isDestroyed()) return
-    options.focusMainWindow()
-    window.webContents.send('auth:externalLogout')
+    // An exceptional or unverified result never authorizes a logout-success notification.
   }
 
   const handle = (rawUrl: string): void => {
@@ -132,16 +118,29 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
 
     if (hostname === 'logout') {
       void options.logout().then(
-        () => {
+        async outcome => {
+          if (outcome.kind === 'not-committed') {
+            if (outcome.reason !== 'deferred')
+              void reportLogoutFailure(new Error(`logout_${outcome.reason}`))
+
+            try {
+              const session = await options.getSessionState()
+              const window = getReadyWindow()
+              if (!session.authenticated && window) {
+                window.webContents.send('auth:sessionStateChanged')
+              }
+            } catch {
+              // State reconciliation is best effort; it never changes the logout outcome.
+            }
+            return
+          }
           const window = options.getWindow()
           if (!window || window.isDestroyed()) return
           options.focusMainWindow()
           window.webContents.send('auth:externalLogout')
         },
         error => {
-          // The in-memory session can already be cleared when persisted-token
-          // deletion fails. Report that state change to the renderer, but never
-          // emit success while the service still considers the user signed in.
+          // A thrown but unverified operation cannot authorize the success event.
           try {
             if (options.deferLogout?.(error) === true) return
           } catch (deferError) {

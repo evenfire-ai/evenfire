@@ -143,7 +143,11 @@ describe('observed fallback file retirement', () => {
         legacyEnvKeys: [LEGACY_ENV],
         preserveActiveEnvKey: true,
       })
-    ).resolves.toEqual({ keytarAvailable: true, keytarDisabled: false })
+    ).resolves.toEqual({
+      keytarAvailable: true,
+      keytarDisabled: false,
+      keytarDisposition: 'available',
+    })
     const keytar = await import('keytar')
     expect(
       await Promise.all(vi.mocked(keytar.deletePassword).mock.results.map(row => row.value))

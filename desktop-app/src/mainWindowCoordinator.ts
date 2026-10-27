@@ -9,14 +9,72 @@ export function retryPendingExternalLogoutAfterQuitCancellation(
   cancelQuitPreparation: () => void,
   applyPendingLogout: () => Promise<boolean>,
   onApplied: () => void,
-  onFailure: (error: unknown) => void
+  onFailure: (error: unknown) => void,
+  onNotApplied: () => void = () => {},
+  onNotificationFailure: (error: unknown) => void = () => {}
 ): void {
   cancelQuitPreparation()
-  void applyPendingLogout()
-    .then(applied => {
-      if (applied) onApplied()
-    })
-    .catch(onFailure)
+  void applyPendingLogout().then(
+    applied => {
+      try {
+        if (applied) onApplied()
+        else onNotApplied()
+      } catch (error) {
+        try {
+          onNotificationFailure(error)
+        } catch {
+          // A renderer notification is best-effort and cannot change the logout result.
+        }
+      }
+    },
+    error => {
+      try {
+        onFailure(error)
+      } catch {
+        // The retry is detached from quit cancellation; a reporter must not reject it again.
+      }
+    }
+  )
+}
+
+type SessionStateWindow = {
+  isDestroyed: () => boolean
+  webContents: {
+    send: (channel: 'auth:sessionStateChanged') => void
+  }
+}
+
+export function createDeferredExternalLogoutStateRefreshHandler(options: {
+  getCachedUserId: () => string | null
+  getWindow: () => SessionStateWindow | null
+}): () => void {
+  return () => {
+    try {
+      const window = options.getWindow()
+      if (!options.getCachedUserId() && window && !window.isDestroyed()) {
+        window.webContents.send('auth:sessionStateChanged')
+      }
+    } catch {
+      // State refresh is best-effort; it never declares logout success.
+    }
+  }
+}
+
+export function createDeferredExternalLogoutFailureHandler(options: {
+  getCachedUserId: () => string | null
+  getWindow: () => SessionStateWindow | null
+  reportFailure: (error: unknown) => void
+}): (error: unknown) => void {
+  return error => {
+    try {
+      options.reportFailure(error)
+    } catch {
+      // This callback runs from a detached retry promise; reporting must not create
+      // a second unhandled rejection.
+    }
+
+    createDeferredExternalLogoutStateRefreshHandler(options)()
+  }
 }
 
 type MainWindowHandle = {

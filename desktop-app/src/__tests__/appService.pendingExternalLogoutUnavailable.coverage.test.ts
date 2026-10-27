@@ -16,11 +16,10 @@ vi.mock('electron', () => ({
     decryptString: vi.fn((value: Buffer) => value.toString()),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({ notifySessionChanged, unpinAllSandboxUiSurfaces: vi.fn() }),
 }))
@@ -51,90 +50,69 @@ async function createService() {
   return { service, tokenStore, envKey: config.getActiveEnvKey(), markers }
 }
 
-function validSessionToken(): string {
-  const payload = Buffer.from(
-    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })
-  ).toString('base64url')
-  return `header.${payload}.signature`
-}
-
-// October 14 owner clarification extends the logout fence to an absent production module.
 describe('pending logout without a Keytar module', () => {
-  it('retains logout intent after canceled-quit file cleanup when Keytar cleanup cannot be verified', async () => {
+  it('does not restore historical safeStorage credentials under a legacy LP marker', async () => {
     const { service, tokenStore, envKey, markers } = await createService()
     await tokenStore.setSafeStorageSessionToken('fixture-stale-file-session', envKey)
     markers.recordPendingExternalLogout(runtime.directory, envKey)
-    await service.prepareForQuit()
-    service.cancelQuitPreparation()
+    const authClient = (
+      service as unknown as { authClient: { getMe: (token: string) => Promise<unknown> } }
+    ).authClient
+    const initialGetMe = vi.spyOn(authClient, 'getMe')
 
-    await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(true)
-    await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBeNull()
+    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+
+    expect(initialGetMe).not.toHaveBeenCalled()
+    await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBe(
+      'fixture-stale-file-session'
+    )
     expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toEqual({
       intent: 'logout-pending',
     })
-    expect(notifySessionChanged).toHaveBeenCalledWith(false)
     const restarted = await createService()
+    const restartedAuth = (
+      restarted.service as unknown as { authClient: { getMe: ReturnType<typeof vi.fn> } }
+    ).authClient
+    const restartedGetMe = vi.spyOn(restartedAuth, 'getMe')
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: false,
       me: null,
     })
+    expect(restartedGetMe).not.toHaveBeenCalled()
     expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toEqual({
       intent: 'logout-pending',
     })
   })
 
-  it('admits a temporary login after logout when no secure provider is available', async () => {
+  it('preserves historical safeStorage bytes when a fresh password login is rejected', async () => {
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://auth.example.test/api',
+      rpcProxyBaseUrl: '',
+    })
     const { service, tokenStore, envKey, markers } = await createService()
     await tokenStore.setSafeStorageSessionToken('fixture-file-session', envKey)
+    const safeStorageSourcePath = path.join(runtime.directory, `session-token-${envKey}.enc`)
+    const originalSafeStorageBytes = await fs.readFile(safeStorageSourcePath)
+    const authClient = (
+      service as unknown as {
+        authClient: { passwordLogin: (email: string, password: string) => Promise<unknown> }
+      }
+    ).authClient
+    vi.spyOn(authClient, 'passwordLogin').mockRejectedValue(new Error('synthetic login rejection'))
 
-    await expect(service.logout()).resolves.toBeTypeOf('number')
-    await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBeNull()
-    expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toEqual({
-      intent: 'logout-pending',
-    })
-    expect(notifySessionChanged).toHaveBeenCalledWith(false)
-    const { safeStorage } = await import('electron')
-    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
-    const state = service as unknown as {
-      installAuthenticatedLogin: (result: {
-        token: string
-        me: {
-          id: string
-          email: string
-          name: null
-          picture: null
-          teamId: string
-          teamName: string
-          role: string
-        }
-      }) => Promise<unknown>
-    }
     await expect(
-      state.installAuthenticatedLogin({
-        token: validSessionToken(),
-        me: {
-          id: 'fixture-user',
-          email: 'fixture@example.com',
-          name: null,
-          picture: null,
-          teamId: 'fixture-team',
-          teamName: 'Fixture team',
-          role: 'member',
-        },
-      })
-    ).resolves.toMatchObject({ authenticated: true, sessionMode: 'temporary' })
-    expect(await fs.readdir(runtime.directory)).not.toContain(`session-token-${envKey}.json`)
-    const restarted = await createService()
-    await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: false,
-      me: null,
-    })
-    expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toMatchObject({
-      intent: 'memory-only-session',
-    })
+      service.passwordLogin('fixture@example.com', 'synthetic-password')
+    ).rejects.toThrow('synthetic login rejection')
+
+    await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBe(
+      'fixture-file-session'
+    )
+    expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toBeNull()
+    await expect(fs.readFile(safeStorageSourcePath)).resolves.toEqual(originalSafeStorageBytes)
   })
 
-  it('retains the memory-only restart fence when external logout cannot verify absent Keytar cleanup', async () => {
+  it('retains memory-only denial without deleting saved sources absent durable logout debt', async () => {
     const { service, tokenStore, envKey, markers } = await createService()
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
@@ -147,10 +125,10 @@ describe('pending logout without a Keytar module', () => {
     )
     expect(marker).not.toBeNull()
 
-    await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(true)
+    await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(false)
 
     expect(markers.readPendingExternalLogoutMarker(runtime.directory, envKey)).toEqual(marker)
-    await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBeNull()
+    await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBe('stale-saved-session')
     const restarted = await createService()
     const authClient = (
       restarted.service as unknown as {

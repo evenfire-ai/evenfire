@@ -122,6 +122,7 @@ describe('source-owned rejected-value cleanup modes', () => {
     ).resolves.toEqual({
       keytarAvailable: true,
       keytarDisabled: false,
+      keytarDisposition: 'available',
       sourceAuthorityVerified: true,
     })
     await expect(store.getKeytarSessionToken(ENV)).resolves.toBeNull()
@@ -331,7 +332,12 @@ describe('source-owned rejected-value cleanup modes', () => {
       expect(completed).toBe(true)
       await expect(cleanup).resolves.toEqual(
         mode === 'native'
-          ? { keytarAvailable: true, keytarDisabled: false, sourceAuthorityVerified: true }
+          ? {
+              keytarAvailable: true,
+              keytarDisabled: false,
+              keytarDisposition: 'available',
+              sourceAuthorityVerified: true,
+            }
           : true
       )
     }

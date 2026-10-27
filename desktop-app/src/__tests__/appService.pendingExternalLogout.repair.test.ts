@@ -7,6 +7,7 @@ import path from 'node:path'
 
 const runtime = vi.hoisted(() => ({ directory: '' }))
 const { notifySessionChanged } = vi.hoisted(() => ({ notifySessionChanged: vi.fn() }))
+let priorRuntimeEnv: { externalRest?: string; rpcProxy?: string } | undefined
 const keychain = new Map<string, string>()
 const keyOf = (service: string, account: string) => `${service}::${account}`
 const keytarMock = {
@@ -30,11 +31,10 @@ vi.mock('electron', () => ({
     decryptString: vi.fn((value: Buffer) => value.toString().replace(/^encrypted:/, '')),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({ notifySessionChanged, unpinAllSandboxUiSurfaces: vi.fn() }),
 }))
@@ -59,6 +59,12 @@ function sessionToken(label: string): string {
 }
 
 beforeEach(async () => {
+  priorRuntimeEnv = {
+    externalRest: process.env.EXTERNAL_REST_API_BASE_URL,
+    rpcProxy: process.env.RPC_PROXY_BASE_URL,
+  }
+  process.env.EXTERNAL_REST_API_BASE_URL = 'https://auth.pending-logout.test'
+  process.env.RPC_PROXY_BASE_URL = 'https://rpc.pending-logout.test'
   vi.clearAllMocks()
   vi.resetModules()
   keychain.clear()
@@ -82,6 +88,11 @@ afterEach(async () => {
   if (runtime.directory) await fs.rm(runtime.directory, { recursive: true, force: true })
   runtime.directory = ''
   keychain.clear()
+  if (priorRuntimeEnv?.externalRest === undefined) delete process.env.EXTERNAL_REST_API_BASE_URL
+  else process.env.EXTERNAL_REST_API_BASE_URL = priorRuntimeEnv.externalRest
+  if (priorRuntimeEnv?.rpcProxy === undefined) delete process.env.RPC_PROXY_BASE_URL
+  else process.env.RPC_PROXY_BASE_URL = priorRuntimeEnv.rpcProxy
+  priorRuntimeEnv = undefined
   vi.resetModules()
 })
 
@@ -112,16 +123,19 @@ async function createService(options: { isolated?: boolean } = {}) {
       authClient: {
         getMe: (token: string) => Promise<typeof me>
         switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+        passwordLogin: (
+          email: string,
+          password: string
+        ) => Promise<{ token: string; me: typeof me }>
       }
     }
   ).authClient
   vi.spyOn(authClient, 'getMe').mockResolvedValue(me)
-  const login = (token = expectedFreshToken) =>
-    (
-      service as unknown as {
-        installAuthenticatedLogin: (result: { token: string; me: typeof me }) => Promise<unknown>
-      }
-    ).installAuthenticatedLogin({ token, me })
+  const passwordLogin = vi.spyOn(authClient, 'passwordLogin')
+  const login = (token = expectedFreshToken) => {
+    passwordLogin.mockResolvedValueOnce({ token, me })
+    return service.passwordLogin(me.email, 'fixture-password')
+  }
   return { service, tokenStore, reportFailure, markers, envKey, markerPath, authClient, login }
 }
 
@@ -134,56 +148,114 @@ function deferred() {
 }
 
 describe('explicit login repair uses the pending-logout storage plan', () => {
-  it('recovers malformed regular bytes with failing Keytar and verified safeStorage', async () => {
+  it('keeps logout denial after malformed-marker recovery and uncertain Keytar publication', async () => {
     const harness = await createService()
     await fs.writeFile(harness.markerPath, '{malformed')
-    keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-
-    await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
-
-    expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
-      expectedFreshToken
+    keytarMock.setPassword.mockImplementationOnce(async (service, account, token) => {
+      keychain.set(keyOf(service, account), token)
+      throw new Error('fixture-Keytar publication outcome uncertain')
+    })
+    keytarMock.deletePassword.mockRejectedValue(
+      new Error('fixture-Keytar candidate cleanup unavailable')
     )
+
+    await expect(harness.login()).rejects.toThrow('fixture-Keytar publication outcome uncertain')
+
+    expect(harness.service.getCachedUserId()).toBeNull()
+    await expect(harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).resolves.toBeNull()
     expect(
       harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-    ).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'safe-storage',
-    })
-    expect(harness.service.getCachedUserId()).toBe(me.id)
+    ).toEqual({ intent: 'logout-pending' })
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    await expect(
+      readSessionAuthoritySourceSelection({
+        tokenStore: harness.tokenStore,
+        envKey: harness.envKey,
+      })
+    ).resolves.toMatchObject({ status: 'denied', frameMode: 'logged-out' })
     expect(harness.reportFailure).toHaveBeenCalled()
-    expect(await fs.readdir(runtime.directory)).not.toContain(
-      `session-token-${harness.envKey}.json`
-    )
     const restarted = await createService()
-    await expect(restarted.service.initialize()).resolves.toEqual({ authenticated: true, me })
-    expect(restarted.authClient.getMe).toHaveBeenCalledWith(expectedFreshToken)
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith(expectedFreshToken)
   })
 
-  it('recovers malformed regular bytes when the Keytar module is absent', async () => {
-    vi.doMock('keytar', () => ({}))
+  it('accepts fresh V1 authority when legacy Keytar inventory is unavailable', async () => {
+    keytarMock.getPassword.mockRejectedValue(
+      Object.assign(new Error('fixture-Keytar access denied'), { code: 'EACCES' })
+    )
     const harness = await createService()
     await fs.writeFile(harness.markerPath, '{malformed')
 
-    await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
+    await expect(harness.login()).resolves.toMatchObject({ authenticated: true, me })
 
-    expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
-      expectedFreshToken
-    )
-    expect(
-      harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-    ).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'safe-storage',
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: harness.tokenStore,
+      envKey: harness.envKey,
     })
-    expect(await fs.readdir(runtime.directory)).not.toContain(
-      `session-token-${harness.envKey}.json`
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected a fresh V1 session')
+    expect(selected.session.accepted.record.frame.source).toMatchObject({
+      format: 'v1',
+      kind: 'safe-storage',
+    })
+    expect(selected.session.token).toBe(expectedFreshToken)
+    expect(harness.service.getCachedUserId()).toBe(me.id)
+    expect(await fs.readFile(harness.markerPath, 'utf8')).not.toBe('{malformed')
+    expect(keytarMock.getPassword).not.toHaveBeenCalledWith(
+      expect.any(String),
+      `session-token::${harness.envKey}`
     )
   })
 
-  it('converts normalized logout intent after an active-Keytar replacement write fails', async () => {
+  it('does not require legacy namespace enumeration for fresh V1 authority', async () => {
+    const config = await import('../config.js')
+    vi.spyOn(config, 'getActiveLegacyEnvKeyInventory').mockReturnValue({
+      keys: [],
+      complete: false,
+    })
+    const harness = await createService()
+    await fs.writeFile(harness.markerPath, '{malformed')
+
+    await expect(harness.login()).resolves.toMatchObject({ authenticated: true, me })
+
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: harness.tokenStore,
+      envKey: harness.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected a fresh V1 session')
+    expect(selected.session.token).toBe(expectedFreshToken)
+    expect(harness.service.getCachedUserId()).toBe(me.id)
+    expect(await fs.readFile(harness.markerPath, 'utf8')).not.toBe('{malformed')
+  })
+
+  it('accepts fresh persistent V1 authority without legacy environment enumeration', async () => {
+    const config = await import('../config.js')
+    vi.spyOn(config, 'getActiveLegacyEnvKeyInventory').mockReturnValue({
+      keys: [],
+      complete: false,
+    })
+    const harness = await createService()
+
+    await expect(harness.login()).resolves.toMatchObject({ authenticated: true, me })
+
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: harness.tokenStore,
+      envKey: harness.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected a fresh persistent session')
+    expect(selected.session.token).toBe(expectedFreshToken)
+    expect(selected.session.accepted.record.frame.source?.format).toBe('v1')
+  })
+
+  it('does not use memory-only fallback after an active-Keytar candidate write fails', async () => {
     const harness = await createService()
     await fs.writeFile(harness.markerPath, '{malformed')
     keytarMock.deletePassword.mockImplementation(async (service, account) => {
@@ -193,17 +265,19 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     })
     keytarMock.setPassword.mockRejectedValue(new Error('fixture-active write failed'))
 
-    await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
+    await expect(harness.login()).rejects.toThrow('fixture-active write failed')
 
-    expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
-      expectedFreshToken
-    )
+    expect(harness.service.getCachedUserId()).toBeNull()
+    await expect(harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).resolves.toBeNull()
     expect(
       harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-    ).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'safe-storage',
+    ).toEqual({ intent: 'logout-pending' })
+    const restarted = await createService()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
     })
+    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith(expectedFreshToken)
   })
 
   it('allows a first isolated-development login without secure storage after malformed repair', async () => {
@@ -212,50 +286,58 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     const harness = await createService({ isolated: true })
     await fs.writeFile(harness.markerPath, '{malformed')
 
-    await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
+    await expect(harness.login()).resolves.toMatchObject({
+      authenticated: true,
+      me,
+      sessionMode: 'temporary',
+    })
 
-    expect(await harness.tokenStore.getSessionToken(harness.envKey)).toBe(expectedFreshToken)
-    expect(
-      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
-    ).toBeNull()
+    expect(await harness.tokenStore.getSessionToken(harness.envKey)).toBeNull()
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: harness.tokenStore,
+      envKey: harness.envKey,
+    })
+    expect(selected).toEqual({ status: 'denied', frameMode: 'memory-only' })
+    const marker = harness.markers.readPendingExternalLogoutMarker(
+      runtime.directory,
+      harness.envKey
+    )
+    expect(marker?.intent.intent).toBe('acceptance-pending')
+    expect(marker?.intent).toMatchObject({
+      expectedAuthorityRevision: expect.any(String),
+      expectedAuthorityDigest: expect.any(String),
+    })
     expect(keytarMock.setPassword).not.toHaveBeenCalled()
-    expect(await fs.readdir(runtime.directory)).toContain(`session-token-${harness.envKey}.json`)
+    expect(await fs.readdir(runtime.directory)).not.toContain(
+      `session-token-${harness.envKey}.json`
+    )
+    expect(await fs.readdir(runtime.directory)).not.toContain(`session-token-${harness.envKey}.enc`)
   })
 
-  it('normalizes the content hash before asynchronous cleanup begins', async () => {
+  it('repairs a malformed marker before publishing a fresh credential candidate', async () => {
     const harness = await createService()
     await fs.writeFile(harness.markerPath, '{malformed')
-    const entered = deferred()
-    const release = deferred()
-    const snapshot = harness.tokenStore.snapshotSessionTokenFallbackFiles.bind(harness.tokenStore)
-    vi.spyOn(harness.tokenStore, 'snapshotSessionTokenFallbackFiles').mockImplementationOnce(
-      async (...args) => {
-        entered.resolve()
-        await release.promise
-        return snapshot(...args)
-      }
-    )
-    const result = harness.login()
-    await entered.promise
-    let marker: ReturnType<typeof harness.markers.readPendingExternalLogoutMarker> | undefined
-    let inspectionError: unknown
-    try {
-      marker = harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
-    } catch (error) {
-      inspectionError = error
-    } finally {
-      release.resolve()
-      await result
-    }
+    let markerAtCandidateWrite: ReturnType<
+      typeof harness.markers.readPendingExternalLogoutMarker
+    > | null = null
+    keytarMock.setPassword.mockImplementationOnce(async (service, account, token) => {
+      markerAtCandidateWrite = harness.markers.readPendingExternalLogoutMarker(
+        runtime.directory,
+        harness.envKey
+      )
+      keychain.set(keyOf(service, account), token)
+    })
 
-    expect(inspectionError).toBeUndefined()
-    expect(marker?.intent).toEqual({ intent: 'logout-pending' })
-    expect(marker?.revision).toEqual(expect.any(String))
+    await expect(harness.login()).resolves.toMatchObject({ authenticated: true, me })
+
+    expect(markerAtCandidateWrite?.intent).toEqual({ intent: 'logout-pending' })
+    expect(markerAtCandidateWrite?.revision).toEqual(expect.any(String))
   })
 
   it('preserves the exact newer logout revision during a secure login write', async () => {
     const harness = await createService()
-    await fs.writeFile(harness.markerPath, '{malformed')
+    harness.markers.recordPendingExternalLogout(runtime.directory, harness.envKey)
     let newerMarker: ReturnType<typeof harness.markers.readPendingExternalLogoutMarker> | undefined
     keytarMock.setPassword.mockImplementation(async (service, account, token) => {
       keychain.set(keyOf(service, account), token)
@@ -276,7 +358,6 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     ).toEqual(newerMarker)
     expect(harness.service.getCachedUserId()).toBeNull()
     expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBeNull()
-    expect(notifySessionChanged).toHaveBeenCalledWith(false)
     const restarted = await createService()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: false,
@@ -292,8 +373,6 @@ describe('team persistence respects pending-marker authority', () => {
   it.each([
     { keytarState: 'failed', safeStorageAvailable: true },
     { keytarState: 'failed', safeStorageAvailable: false },
-    { keytarState: 'absent', safeStorageAvailable: true },
-    { keytarState: 'absent', safeStorageAvailable: false },
   ])(
     'keeps source-bound team persistence with $keytarState Keytar and safeStorage=$safeStorageAvailable',
     async ({ keytarState, safeStorageAvailable }) => {
@@ -301,60 +380,59 @@ describe('team persistence respects pending-marker authority', () => {
       await harness.login()
       const { safeStorage } = await import('electron')
       vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(safeStorageAvailable)
-      harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
-      if (keytarState === 'absent') {
-        vi.doMock('keytar', () => ({}))
-      } else {
-        keytarMock.setPassword.mockRejectedValue(new Error('fixture-team Keytar write failed'))
-      }
+      const markerBefore = harness.markers.readPendingExternalLogoutMarker(
+        runtime.directory,
+        harness.envKey
+      )
+      const { readSessionAuthoritySourceSelection } =
+        await import('../sessionAuthorityAcceptance.js')
+      const priorSelection = await readSessionAuthoritySourceSelection({
+        tokenStore: harness.tokenStore,
+        envKey: harness.envKey,
+      })
+      expect(priorSelection.status).toBe('accepted')
+      if (priorSelection.status !== 'accepted') throw new Error('Expected prior accepted source')
+      const priorSource = priorSelection.session.accepted.record.frame.source
+      keytarMock.setPassword.mockRejectedValue(new Error('fixture-team Keytar write failed'))
       vi.spyOn(harness.authClient, 'switchTeam').mockResolvedValue({
         token: 'fixture-other-team-session',
       })
       const switchedMe = { ...me, teamId: 'fixture-other-team', teamName: 'Fixture other team' }
       vi.mocked(harness.authClient.getMe).mockResolvedValue(switchedMe)
-      if (safeStorageAvailable) {
-        await expect(harness.service.switchTeam('fixture-other-team')).resolves.toEqual({
-          authenticated: true,
-          me: switchedMe,
-        })
-        expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
-          'fixture-other-team-session'
-        )
-      } else {
-        await expect(harness.service.switchTeam('fixture-other-team')).rejects.toThrow(
-          /Keytar|safeStorage/
-        )
-        // Missing Keytar cannot mutate its slot; an ordinary failed setter's
-        // working reader verifies the old slot. Neither case destroys the old session.
-        if (keytarState === 'failed')
-          expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
-            expectedFreshToken
-          )
-      }
+      await expect(harness.service.switchTeam('fixture-other-team')).rejects.toThrow()
+      // Team persistence is source-bound. A recovered or available S provider does not silently
+      // replace the selected K source after an uncertain native write.
+      await expect(
+        harness.tokenStore.getSafeStorageSessionToken(harness.envKey)
+      ).resolves.toBeNull()
       expect(harness.service.getCachedUserId()).toBe(me.id)
-      expect(harness.reportFailure).toHaveBeenCalled()
-      expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
+      // Team operations remain source-bound and preserve the exact V2 projection receipt.
+      expect(harness.reportFailure).not.toHaveBeenCalled()
       expect(
-        harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-      ).toEqual({
-        intent: 'keytar-cleanup-pending',
-        credentialSource: safeStorageAvailable ? 'safe-storage' : 'active-keytar',
-      })
-      if (!safeStorageAvailable)
-        expect(await fs.readdir(runtime.directory)).not.toContain(
-          `session-token-${harness.envKey}.enc`
-        )
+        harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
+      ).toEqual(markerBefore)
+      expect(await fs.readdir(runtime.directory)).not.toContain(
+        `session-token-${harness.envKey}.enc`
+      )
       expect(await fs.readdir(runtime.directory)).not.toContain(
         `session-token-${harness.envKey}.json`
       )
+      const selected = await readSessionAuthoritySourceSelection({
+        tokenStore: harness.tokenStore,
+        envKey: harness.envKey,
+      })
+      expect(selected.status).toBe('accepted')
+      if (selected.status !== 'accepted')
+        throw new Error('Failed team transition displaced authority')
+      expect(selected.session.token).toBe(expectedFreshToken)
+      expect(selected.session.accepted.record.frame.source).toEqual(priorSource)
     }
   )
 
-  // Characterization: successful source-bound team writes retain the established restore path.
-  it('restores a successful active-Keytar team switch and retires unrelated safeStorage bytes', async () => {
+  // Characterization: only the exact accepted Keytar source is selected or retired.
+  it('keeps V0 safeStorage residue outside accepted V1 team ownership', async () => {
     const harness = await createService()
     await harness.login()
-    harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
     await harness.tokenStore.setSafeStorageSessionToken(
       'fixture-unrelated-file-token',
       harness.envKey
@@ -365,29 +443,49 @@ describe('team persistence respects pending-marker authority', () => {
       token: 'fixture-other-team-session',
     })
 
-    await expect(harness.service.switchTeam('fixture-other-team')).resolves.toEqual({
+    await expect(harness.service.switchTeam('fixture-other-team')).resolves.toMatchObject({
       authenticated: true,
       me: switchedMe,
     })
 
-    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
-      'fixture-other-team-session'
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: harness.tokenStore,
+      envKey: harness.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected accepted team source')
+    expect(selected.session.token).toBe('fixture-other-team-session')
+    expect(selected.session.accepted.record.frame.source).toMatchObject({
+      kind: 'keytar',
+      format: 'v1',
+    })
+    expect(
+      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)?.intent
+        .intent
+    ).toBe('acceptance-pending')
+    await expect(harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).resolves.toBe(
+      'fixture-unrelated-file-token'
     )
-    expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBeNull()
     const restarted = await createService()
     vi.mocked(restarted.authClient.getMe).mockResolvedValue(switchedMe)
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
       me: switchedMe,
     })
-    expect(restarted.authClient.getMe).toHaveBeenCalledWith('fixture-other-team-session')
     expect(restarted.authClient.getMe).not.toHaveBeenCalledWith('fixture-unrelated-file-token')
-    vi.doMock('keytar', () => ({}))
+    await expect(restarted.tokenStore.getSafeStorageSessionToken(restarted.envKey)).resolves.toBe(
+      'fixture-unrelated-file-token'
+    )
+    keytarMock.getPassword.mockRejectedValue(
+      Object.assign(new Error('fixture-Keytar access denied'), { code: 'EACCES' })
+    )
     const unavailable = await createService()
     await expect(unavailable.service.initialize()).resolves.toEqual({
       authenticated: false,
       me: null,
     })
+    expect(unavailable.service.getCachedUserId()).toBeNull()
     expect(unavailable.authClient.getMe).not.toHaveBeenCalledWith('fixture-unrelated-file-token')
   })
 
@@ -400,12 +498,17 @@ describe('team persistence respects pending-marker authority', () => {
       token: 'fixture-other-team-session',
     })
 
-    await expect(harness.service.switchTeam('fixture-other-team')).rejects.toThrow('invalid format')
+    await expect(harness.service.switchTeam('fixture-other-team')).rejects.toThrow()
 
     expect(harness.service.getCachedUserId()).toBeNull()
+    expect(harness.authClient.switchTeam).not.toHaveBeenCalled()
     expect(writeToken).not.toHaveBeenCalled()
     expect(harness.reportFailure).toHaveBeenCalledWith(
-      expect.objectContaining({ message: 'Pending logout marker has an invalid format' })
+      expect.objectContaining({
+        name: 'SessionAuthorityProjectionIntegrityError',
+        source: 'marker',
+        cause: expect.objectContaining({ message: 'Pending logout marker has an invalid format' }),
+      })
     )
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
     expect(await fs.readFile(harness.markerPath, 'utf8')).toBe('{malformed')
@@ -413,380 +516,215 @@ describe('team persistence respects pending-marker authority', () => {
 })
 
 describe('durable logout failure policy', () => {
-  it.each(['read-back', 'conversion-rename'] as const)(
-    'blocks rejected login restore when its original cleanup marker survives a %s failure',
-    async failureStage => {
-      const harness = await createService()
-      await harness.tokenStore.setSafeStorageSessionToken(
-        'fixture-previous-session',
-        harness.envKey
-      )
-      harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'safe-storage')
-      keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-      keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-      keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-      let failureInjected = false
-      if (failureStage === 'read-back') {
-        const { safeStorage } = await import('electron')
-        vi.mocked(safeStorage.decryptString).mockImplementationOnce(() => {
-          failureInjected = true
-          throw new Error('fixture-owned cleanup read-back failed')
-        })
-      } else {
-        const rename = fsSync.renameSync.bind(fsSync)
-        vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
-          if (!failureInjected && String(destination) === harness.markerPath) {
-            failureInjected = true
-            throw new Error('fixture-owned cleanup conversion rename failed')
-          }
-          rename(source, destination)
-        })
-      }
-      const unlink = fs.unlink.bind(fs)
-      vi.spyOn(fs, 'unlink').mockImplementation(async file => {
-        if (failureInjected && String(file).endsWith(`session-token-${harness.envKey}.enc`)) {
-          throw Object.assign(new Error('fixture-fresh credential rollback failed'), {
-            code: 'EACCES',
-          })
-        }
-        return unlink(file)
-      })
-
-      if (failureStage === 'read-back') {
-        await expect(harness.login()).resolves.toMatchObject({
-          authenticated: true,
-          me,
-          sessionMode: 'temporary',
-        })
-        expect(
-          harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-        ).toMatchObject({ intent: 'memory-only-session' })
-        expect(harness.service.getCachedUserId()).toBe(me.id)
-      } else {
-        await expect(harness.login()).rejects.toThrow('fixture-owned cleanup')
-        expect(harness.service.getCachedUserId()).toBeNull()
-      }
-      expect(failureInjected).toBe(true)
-      const restarted = await createService()
-      await expect(restarted.service.initialize()).resolves.toEqual({
-        authenticated: false,
-        me: null,
-      })
-    }
-  )
-
-  // Ownership guard: a different producer's successful conversion must survive rollback.
-  it('preserves a newer cleanup revision when its own conversion durability fails', async () => {
+  it('fails closed when logout cannot inspect a malformed marker and keeps restart denied', async () => {
     const harness = await createService()
-    harness.markers.recordPendingExternalLogout(runtime.directory, harness.envKey)
-    keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    let conversionFailed = false
-    let newerMarker: ReturnType<typeof harness.markers.readPendingExternalLogoutMarker> | undefined
-    const sync = fsSync.fsyncSync.bind(fsSync)
-    vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      const current = harness.markers.readPendingExternalLogoutMarker(
-        runtime.directory,
-        harness.envKey
-      )
-      if (
-        !conversionFailed &&
-        fsSync.fstatSync(descriptor).isDirectory() &&
-        current?.intent.intent === 'keytar-cleanup-pending'
-      ) {
-        conversionFailed = true
-        harness.markers.recordPendingKeytarCleanupIfUnchanged(
-          runtime.directory,
-          harness.envKey,
-          current,
-          'safe-storage'
-        )
-        newerMarker = harness.markers.readPendingExternalLogoutMarker(
-          runtime.directory,
-          harness.envKey
-        )
-        throw new Error('fixture-cleanup conversion fsync failed')
-      }
-      return sync(descriptor)
-    })
+    await expect(harness.login()).resolves.toMatchObject({ authenticated: true, me })
+    expect(harness.service.getCachedUserId()).toBe(me.id)
+    await fs.writeFile(harness.markerPath, '{malformed')
+    vi.mocked(harness.authClient.getMe).mockClear()
 
-    await expect(harness.login()).rejects.toThrow('fixture-cleanup conversion fsync failed')
-
-    expect(conversionFailed).toBe(true)
-    expect(newerMarker?.intent).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'safe-storage',
-    })
-    expect(
-      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
-    ).toEqual(newerMarker)
-    expect(harness.service.getCachedUserId()).toBeNull()
-  })
-
-  it('preserves logout intent when cleanup conversion and rollback durability fail', async () => {
-    const harness = await createService()
-    harness.markers.recordPendingExternalLogout(runtime.directory, harness.envKey)
-    keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    let conversionFailed = false
-    const sync = fsSync.fsyncSync.bind(fsSync)
-    vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      if (
-        !conversionFailed &&
-        fsSync.fstatSync(descriptor).isDirectory() &&
-        harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-          ?.intent === 'keytar-cleanup-pending'
-      ) {
-        conversionFailed = true
-        throw new Error('fixture-cleanup conversion fsync failed')
-      }
-      return sync(descriptor)
-    })
-    const unlink = fs.unlink.bind(fs)
-    vi.spyOn(fs, 'unlink').mockImplementation(async file => {
-      if (conversionFailed && String(file).endsWith(`session-token-${harness.envKey}.enc`)) {
-        throw Object.assign(new Error('fixture-fresh credential rollback failed'), {
-          code: 'EACCES',
-        })
-      }
-      return unlink(file)
-    })
-
-    await expect(harness.login()).rejects.toThrow('fixture-cleanup conversion fsync failed')
+    await expect(harness.service.logout()).resolves.toMatchObject({ kind: 'not-committed' })
 
     expect(harness.service.getCachedUserId()).toBeNull()
-    expect(conversionFailed).toBe(true)
+    expect((harness.service as unknown as { sessionToken: string | null }).sessionToken).toBeNull()
+    const { requireChatStore } = await import('../chatStoreBinding.js')
+    expect(() => requireChatStore()).toThrow('Not authenticated')
+    expect(await fs.readFile(harness.markerPath, 'utf8')).toBe('{malformed')
+
     const restarted = await createService()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: false,
       me: null,
     })
+    expect(restarted.authClient.getMe).not.toHaveBeenCalled()
+    expect(() => requireChatStore()).toThrow('Not authenticated')
   })
 
-  it('orders a queued fresh login after durable logout cleanup without clearing its session', async () => {
+  it.each(['active-keytar', 'safe-storage'] as const)(
+    'uses only the approved %s source while resolving a legacy cleanup marker',
+    async source => {
+      const harness = await createService()
+      harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, source)
+      const marker = harness.markers.readPendingExternalLogoutMarker(
+        runtime.directory,
+        harness.envKey
+      )
+      expect(marker).not.toBeNull()
+      const denied = Object.assign(new Error('fixture-Keytar access denied'), { code: 'EACCES' })
+      keytarMock.getPassword.mockRejectedValue(denied)
+      keytarMock.setPassword.mockRejectedValue(denied)
+      keytarMock.deletePassword.mockRejectedValue(denied)
+      const candidateWrite = vi.spyOn(harness.tokenStore, 'writeSessionTokenCandidate')
+
+      const { readSessionAuthoritySourceSelection } =
+        await import('../sessionAuthorityAcceptance.js')
+      await expect(harness.login()).resolves.toMatchObject({ authenticated: true, me })
+      expect(harness.service.getCachedUserId()).toBe(me.id)
+      expect(candidateWrite).toHaveBeenCalledOnce()
+      expect(harness.authClient.getMe).toHaveBeenCalledWith(expectedFreshToken)
+      expect(harness.authClient.getMe).not.toHaveBeenCalledWith('fixture-v0-legacy-keytar-session')
+      expect(
+        harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
+      ).toMatchObject({ intent: 'acceptance-pending' })
+      const selected = await readSessionAuthoritySourceSelection({
+        tokenStore: harness.tokenStore,
+        envKey: harness.envKey,
+      })
+      expect(selected.status).toBe('accepted')
+      if (selected.status !== 'accepted') throw new Error('Expected a fresh V1 session')
+      expect(selected.session.token).toBe(expectedFreshToken)
+      expect(selected.session.accepted.record.frame.source).toMatchObject({
+        format: 'v1',
+        kind: 'safe-storage',
+      })
+
+      const restarted = await createService()
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: true,
+        me,
+      })
+      expect(restarted.authClient.getMe).toHaveBeenCalledWith(expectedFreshToken)
+      expect(restarted.authClient.getMe).not.toHaveBeenCalledWith(
+        'fixture-v0-legacy-keytar-session'
+      )
+    }
+  )
+
+  it('signs out at durable LP plus exact debt while cleanup retries', async () => {
     const harness = await createService()
     await harness.login()
-    harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const before = await readSessionAuthoritySourceSelection({
+      tokenStore: harness.tokenStore,
+      envKey: harness.envKey,
+    })
+    expect(before.status).toBe('accepted')
+    if (before.status !== 'accepted') throw new Error('Expected an accepted source before logout')
+    const priorSource = before.session.accepted.record.frame.source
     const entered = deferred()
     const release = deferred()
-    keytarMock.deletePassword.mockRejectedValueOnce(
-      new Error('fixture-logout active delete failed')
+    const cleanupSettled = deferred<void>()
+    const deleteSource = harness.tokenStore.deleteSessionCredentialSourceIfUnselectedWithProof.bind(
+      harness.tokenStore
     )
-    const clear = harness.tokenStore.clearSessionTokenStrictly.bind(harness.tokenStore)
-    let cleanupSettled = false
-    vi.spyOn(harness.tokenStore, 'clearSessionTokenStrictly').mockImplementationOnce(
-      async (...args) => {
-        const outcome = await clear(...args).then(
-          value => ({ value }),
-          error => ({ error })
-        )
-        cleanupSettled = true
-        entered.resolve()
-        await release.promise
-        if ('error' in outcome) throw outcome.error
-        return outcome.value
+    let cleanupSource: unknown
+    vi.spyOn(
+      harness.tokenStore,
+      'deleteSessionCredentialSourceIfUnselectedWithProof'
+    ).mockImplementationOnce(async (...args) => {
+      cleanupSource = args[0]
+      entered.resolve()
+      await release.promise
+      try {
+        return await deleteSource(...args)
+      } finally {
+        cleanupSettled.resolve()
       }
-    )
-    const originalRead = fsSync.readFileSync.bind(fsSync)
-    const originalOpen = fsSync.openSync.bind(fsSync)
-    const markerDescriptors = new Set<number>()
-    let rereadFailed = false
-    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
-      const descriptor = originalOpen(file, flags, mode)
-      if (String(file) === harness.markerPath) markerDescriptors.add(descriptor)
-      else markerDescriptors.delete(descriptor)
-      return descriptor
     })
-    vi.spyOn(fsSync, 'readFileSync').mockImplementation(((
-      file: Parameters<typeof originalRead>[0],
-      options: Parameters<typeof originalRead>[1]
-    ) => {
-      if (
-        cleanupSettled &&
-        !rereadFailed &&
-        typeof file === 'number' &&
-        markerDescriptors.has(file)
-      ) {
-        rereadFailed = true
-        throw Object.assign(new Error('fixture-marker reread failed'), { code: 'EIO' })
-      }
-      return originalRead(file, options)
-    }) as typeof fsSync.readFileSync)
-    const logout = harness.service.logout()
-    const logoutOutcome = logout.then(
-      () => null,
-      error => error
-    )
-    let loginOutcome: Promise<unknown> | undefined
-    let phaseTimer: ReturnType<typeof setTimeout> | undefined
+
     try {
-      const phase = await Promise.race([
-        entered.promise.then(() => 'entered'),
-        logout.then(
-          () => 'settled',
-          () => 'settled'
-        ),
-        new Promise<string>(resolve => {
-          phaseTimer = setTimeout(() => resolve('deadline'), 5_000)
-        }),
-      ])
-      expect(phase, 'Native cleanup must settle before its response is held').toBe('entered')
-      const state = harness.service as unknown as {
-        runSessionPersistence: <T>(operation: () => Promise<T>) => Promise<T>
-      }
-      const queued = deferred()
-      const persist = state.runSessionPersistence.bind(state)
-      vi.spyOn(state, 'runSessionPersistence').mockImplementationOnce(operation => {
-        queued.resolve()
-        return persist(operation)
+      await expect(harness.service.logout()).resolves.toMatchObject({
+        kind: 'committed',
+        cleanup: 'pending',
       })
-      keytarMock.setPassword.mockClear()
-      const login = harness.login('fixture-concurrent-session')
-      loginOutcome = login.then(
-        value => value,
-        error => error
-      )
-      if (phaseTimer) clearTimeout(phaseTimer)
-      const queuedPhase = await Promise.race([
-        queued.promise.then(() => 'entered'),
-        loginOutcome.then(() => 'settled'),
-        new Promise<string>(resolve => {
-          phaseTimer = setTimeout(() => resolve('deadline'), 5_000)
-        }),
-      ])
-      expect(queuedPhase, 'Fresh login must queue behind the held logout transaction').toBe(
-        'entered'
-      )
-      expect(keytarMock.setPassword).not.toHaveBeenCalled()
+      await entered.promise
+      expect(harness.service.getCachedUserId()).toBeNull()
+      expect(
+        harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
+      ).toEqual({ intent: 'logout-pending' })
+      await expect(
+        readSessionAuthoritySourceSelection({
+          tokenStore: harness.tokenStore,
+          envKey: harness.envKey,
+        })
+      ).resolves.toMatchObject({ status: 'denied', frameMode: 'logged-out' })
+      expect(cleanupSource).toEqual(priorSource)
     } finally {
-      if (phaseTimer) clearTimeout(phaseTimer)
       release.resolve()
-      await logoutOutcome
-      if (loginOutcome) await loginOutcome
+      await cleanupSettled.promise
     }
 
-    const logoutError = await logoutOutcome
-    const loginResult = await loginOutcome
+    const nextToken = sessionToken('fixture-session-after-logout')
+    await expect(harness.login(nextToken)).resolves.toEqual({ authenticated: true, me })
     const restarted = await createService()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
       me,
     })
-    expect(restarted.authClient.getMe).toHaveBeenCalledWith('fixture-concurrent-session')
+    expect(restarted.authClient.getMe).toHaveBeenCalledWith(nextToken)
     expect(harness.service.getCachedUserId()).toBe(me.id)
-    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
-      'fixture-concurrent-session'
-    )
-    expect(
-      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
-    ).toBeNull()
-    expect(loginResult).toEqual({ authenticated: true, me })
-    expect(rereadFailed).toBe(true)
-    expect(logoutError).toMatchObject({ code: 'EIO', message: 'fixture-marker reread failed' })
+    const after = await readSessionAuthoritySourceSelection({
+      tokenStore: harness.tokenStore,
+      envKey: harness.envKey,
+    })
+    expect(after.status).toBe('accepted')
+    if (after.status !== 'accepted') throw new Error('Fresh login did not replace logout denial')
+    expect(after.session.token).toBe(nextToken)
+    expect(after.session.accepted.record.frame.source?.sourceRef).not.toBe(priorSource?.sourceRef)
   })
 
-  it('admits a temporary login after ordinary logout while secure storage is unavailable', async () => {
+  it('allows temporary login without reading unavailable legacy source inventory', async () => {
     const harness = await createService()
     await harness.login()
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
-    keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
-    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    const denied = Object.assign(new Error('fixture-Keytar access denied'), { code: 'EACCES' })
+    keytarMock.getPassword.mockRejectedValue(denied)
+    keytarMock.setPassword.mockRejectedValue(denied)
+    keytarMock.deletePassword.mockRejectedValue(denied)
 
-    await expect(harness.service.logout()).resolves.toBeTypeOf('number')
+    await expect(harness.service.logout()).resolves.toMatchObject({ kind: 'committed' })
     const temporaryToken = sessionToken('temporary-after-logout')
     await expect(harness.login(temporaryToken)).resolves.toMatchObject({
       authenticated: true,
       me,
       sessionMode: 'temporary',
     })
-
     expect(harness.service.getCachedUserId()).toBe(me.id)
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
     expect(
-      harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-    ).toMatchObject({ intent: 'memory-only-session' })
-    expect(await fs.readdir(runtime.directory)).not.toContain(
-      `session-token-${harness.envKey}.json`
+      await readSessionAuthoritySourceSelection({
+        tokenStore: harness.tokenStore,
+        envKey: harness.envKey,
+      })
+    ).toMatchObject({ status: 'denied', frameMode: 'memory-only' })
+    expect(keytarMock.setPassword).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('session-v1-'),
+      expect.anything()
     )
-    keytarMock.getPassword.mockImplementation(
-      async (service, account) => keychain.get(keyOf(service, account)) ?? null
-    )
-    keytarMock.setPassword.mockImplementation(async (service, account, token) => {
-      keychain.set(keyOf(service, account), token)
-    })
-    keytarMock.deletePassword.mockImplementation(async (service, account) =>
-      keychain.delete(keyOf(service, account))
-    )
-
-    await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
-    expect(
-      harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-    ).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'active-keytar',
-    })
-    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(expectedFreshToken)
-    const recovered = await createService()
-    await expect(recovered.service.initialize()).resolves.toEqual({ authenticated: true, me })
   })
 
-  it('rejects logout when durable intent cannot be reverified after cleanup fails', async () => {
+  it('keeps durable LP and exact source debt when cleanup fails after local sign-out', async () => {
     const harness = await createService()
     await harness.login()
-    harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
-    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar cleanup failed'))
-    const clear = harness.tokenStore.clearSessionTokenStrictly.bind(harness.tokenStore)
-    let cleanupSettled = false
-    vi.spyOn(harness.tokenStore, 'clearSessionTokenStrictly').mockImplementationOnce(
-      async (...args) => {
-        try {
-          return await clear(...args)
-        } finally {
-          cleanupSettled = true
-        }
-      }
-    )
-    const originalRead = fsSync.readFileSync.bind(fsSync)
-    const originalOpen = fsSync.openSync.bind(fsSync)
-    const markerDescriptors = new Set<number>()
-    let rereadFailed = false
-    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
-      const descriptor = originalOpen(file, flags, mode)
-      if (String(file) === harness.markerPath) markerDescriptors.add(descriptor)
-      else markerDescriptors.delete(descriptor)
-      return descriptor
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const prior = await readSessionAuthoritySourceSelection({
+      tokenStore: harness.tokenStore,
+      envKey: harness.envKey,
     })
-    vi.spyOn(fsSync, 'readFileSync').mockImplementation(((
-      file: Parameters<typeof originalRead>[0],
-      options: Parameters<typeof originalRead>[1]
-    ) => {
-      if (
-        cleanupSettled &&
-        !rereadFailed &&
-        typeof file === 'number' &&
-        markerDescriptors.has(file)
-      ) {
-        rereadFailed = true
-        throw Object.assign(new Error('fixture-marker reread failed'), { code: 'EIO' })
-      }
-      return originalRead(file, options)
-    }) as typeof fsSync.readFileSync)
-    const originalRename = fsSync.renameSync.bind(fsSync)
-    let markerWrites = 0
-    vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
-      if (String(destination) === harness.markerPath && ++markerWrites > 1) {
-        throw Object.assign(new Error('fixture-redundant marker write failed'), { code: 'EIO' })
-      }
-      originalRename(source, destination)
+    expect(prior.status).toBe('accepted')
+    if (prior.status !== 'accepted') throw new Error('Expected a selected credential source')
+    const priorSource = prior.session.accepted.record.frame.source
+    const cleanupSettled = deferred<void>()
+    vi.spyOn(
+      harness.tokenStore,
+      'deleteSessionCredentialSourceIfUnselectedWithProof'
+    ).mockImplementationOnce(async () => {
+      cleanupSettled.resolve()
+      throw Object.assign(new Error('fixture-Keytar cleanup failed'), { code: 'EIO' })
     })
 
-    const error = await harness.service.logout().then(
-      () => null,
-      error => error
-    )
+    await expect(harness.service.logout()).resolves.toMatchObject({
+      kind: 'committed',
+      cleanup: 'pending',
+    })
+    await cleanupSettled.promise
+    await vi.waitFor(() => {
+      expect(harness.reportFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'fixture-Keytar cleanup failed', code: 'EIO' })
+      )
+    })
 
     expect(harness.service.getCachedUserId()).toBeNull()
     expect(
@@ -794,21 +732,37 @@ describe('durable logout failure policy', () => {
     ).toEqual({
       intent: 'logout-pending',
     })
-    expect(harness.reportFailure).toHaveBeenCalledWith(
-      expect.objectContaining({ message: 'fixture-marker reread failed' })
-    )
-    expect(harness.reportFailure).toHaveBeenCalledWith(
-      expect.objectContaining({ message: 'Failed to clear session token storage' })
-    )
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
-    expect(markerWrites).toBe(1)
-    expect(rereadFailed).toBe(true)
+    const lease = harness.tokenStore.beginSessionAuthorityTransaction()
+    try {
+      const observed = await harness.tokenStore.runWithSessionAuthorityTransaction(
+        lease,
+        async () => {
+          const scope = await harness.tokenStore.createSessionAuthorityStorageScope()
+          const { SessionAuthorityRecordRepository } = await import('../sessionAuthorityRecord.js')
+          const repository = new SessionAuthorityRecordRepository(
+            scope,
+            harness.envKey,
+            harness.tokenStore,
+            lease
+          )
+          return repository.observe()
+        }
+      )
+      expect(observed.status).toBe('observed')
+      if (observed.status !== 'observed') throw new Error('Expected durable logout authority')
+      expect(observed.record.frame.mode).toBe('logged-out')
+      expect(observed.record.cleanupDebts).toEqual(
+        expect.arrayContaining([expect.objectContaining({ source: priorSource })])
+      )
+    } finally {
+      harness.tokenStore.finishSessionAuthorityTransaction(lease)
+    }
     const restarted = await createService()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: false,
       me: null,
     })
     expect(restarted.authClient.getMe).not.toHaveBeenCalledWith(expectedFreshToken)
-    expect(error).toMatchObject({ code: 'EIO', message: 'fixture-marker reread failed' })
   })
 })

@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -23,11 +22,14 @@ vi.mock('electron', () => ({
     decryptString: (value: Buffer) => value.toString().replace(/^encrypted:/, ''),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../chatStoreBinding.js')>()
+  return {
+    ...actual,
+    bindChatStoreForUser: vi.fn(),
+    unbindChatStore: vi.fn(),
+  }
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -52,12 +54,18 @@ const userFor = (token: string) =>
   token === freshToken
     ? freshMe
     : { ...homeMe, teamId: token === teamToken ? 'fixture-team' : homeMe.teamId }
+let previousRestUrl: string | undefined
+let previousRpcUrl: string | undefined
 beforeEach(async () => {
   vi.resetModules()
   vi.clearAllMocks()
   vi.doMock('keytar', () => boundary)
   boundary.keychain.clear()
   boundary.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-journal-producer-'))
+  previousRestUrl = process.env.EXTERNAL_REST_API_BASE_URL
+  previousRpcUrl = process.env.RPC_PROXY_BASE_URL
+  process.env.EXTERNAL_REST_API_BASE_URL = 'http://rest.accepted-prior.test'
+  process.env.RPC_PROXY_BASE_URL = 'http://rpc.accepted-prior.test'
   boundary.getPassword
     .mockReset()
     .mockImplementation(
@@ -79,16 +87,19 @@ afterEach(async () => {
   vi.restoreAllMocks()
   await fs.rm(boundary.directory, { recursive: true, force: true })
   boundary.directory = ''
+  if (previousRestUrl === undefined) delete process.env.EXTERNAL_REST_API_BASE_URL
+  else process.env.EXTERNAL_REST_API_BASE_URL = previousRestUrl
+  if (previousRpcUrl === undefined) delete process.env.RPC_PROXY_BASE_URL
+  else process.env.RPC_PROXY_BASE_URL = previousRpcUrl
   boundary.keychain.clear()
   vi.resetModules()
 })
 
 async function harness() {
-  const [{ AppService }, { TokenStore }, markers, journal, config] = await Promise.all([
+  const [{ AppService }, { TokenStore }, acceptance, config] = await Promise.all([
     import('../appService.js'),
     import('../tokenStore.js'),
-    import('../pendingExternalLogout.js'),
-    import('../sessionPersistenceJournal.js'),
+    import('../sessionAuthorityAcceptance.js'),
     import('../config.js'),
   ])
   const tokenStore = new TokenStore()
@@ -101,76 +112,76 @@ async function harness() {
   const state = service as unknown as {
     sessionToken: string | null
     me: typeof homeMe | null
-    installAuthenticatedLogin: (value: { token: string; me: typeof homeMe }) => Promise<unknown>
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
       switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
     }
   }
   vi.spyOn(state.authClient, 'getMe').mockImplementation(async token => userFor(token))
   vi.spyOn(state.authClient, 'switchTeam').mockResolvedValue({ token: teamToken })
   const envKey = config.getActiveEnvKey()
-  const digest = createHash('sha256').update(envKey).digest('hex')
-  return {
-    service,
-    state,
-    tokenStore,
-    markers,
-    journal,
-    envKey,
-    reportFailure,
-    journalPath: path.join(boundary.directory, `session-persistence-journal-${digest}`),
-    markerPath: path.join(boundary.directory, `pending-external-logout-${digest}`),
-    encryptedPath: path.join(boundary.directory, `session-token-${envKey}.enc`),
-  }
+  return { service, state, tokenStore, acceptance, envKey, reportFailure }
 }
 
 describe('R21-M15 verified live prior recovery retains its original accepted authority', () => {
-  it('recovers actual Native Home after a later partial encrypted write rejects', async () => {
+  it('preserves the exact accepted source after a rejected public password replacement', async () => {
     const h = await harness()
-    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-    const { safeStorage } = await import('electron')
-    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeMe,
+    })
+    await h.service.passwordLogin(homeMe.email, 'fixture-password')
+
+    const acceptedBefore = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(acceptedBefore.status).toBe('accepted')
+    if (acceptedBefore.status !== 'accepted')
+      throw new Error('The public password producer did not select Home')
+    expect(acceptedBefore.session.token).toBe(homeToken)
+    expect(acceptedBefore.session.accepted.record.frame.source).toMatchObject({
+      kind: 'keytar',
+      format: 'v1',
+      accountId: homeMe.id,
+    })
+
     boundary.setPassword.mockImplementationOnce(async (service, account, token) => {
       boundary.keychain.set(keyOf(service, account), token)
-      throw new Error('fixture-Fresh setter rejected after publication')
+      throw new Error('fixture-candidate setter rejected after publication')
     })
-    const loginError = await h.state
-      .installAuthenticatedLogin({
-        token: freshToken,
-        me: freshMe,
-      })
-      .then(
-        () => null,
-        error => error
-      )
-    expect(loginError).toBeInstanceOf(Error)
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: freshToken,
+      me: freshMe,
+    })
+    await expect(h.service.passwordLogin(freshMe.email, 'fixture-password')).rejects.toThrow()
     expect(h.state.sessionToken).toBe(homeToken)
     expect(h.state.me).toEqual(homeMe)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
-    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
-    await h.tokenStore.setSafeStorageSessionToken(homeToken, h.envKey)
-    h.markers.recordPendingKeytarCleanup(boundary.directory, h.envKey, 'safe-storage')
-    const setEncrypted = h.tokenStore.setSafeStorageSessionToken.bind(h.tokenStore)
-    const published = vi
-      .spyOn(h.tokenStore, 'setSafeStorageSessionToken')
-      .mockImplementationOnce(async (token, envKey, options) => {
-        await setEncrypted(token, envKey, options)
-        vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
-      })
-    const switchError = await h.service.switchTeam('fixture-team').then(
-      () => null,
-      error => error
+
+    const acceptedAfter = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(acceptedAfter.status).toBe('accepted')
+    if (acceptedAfter.status !== 'accepted')
+      throw new Error('Rejected replacement removed the prior accepted source')
+    expect(acceptedAfter.session.token).toBe(homeToken)
+    expect(acceptedAfter.session.accepted.record.frame.source?.sourceRef).toBe(
+      acceptedBefore.session.accepted.record.frame.source?.sourceRef
     )
-    expect(published).toHaveBeenCalledWith(teamToken, h.envKey, expect.any(Object))
-    expect(switchError).toBeInstanceOf(Error)
-    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
       me: homeMe,
     })
-    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledTimes(1)
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(freshToken)
     expect(h.state.sessionToken).toBe(homeToken)
     expect(h.state.me).toEqual(homeMe)
   })

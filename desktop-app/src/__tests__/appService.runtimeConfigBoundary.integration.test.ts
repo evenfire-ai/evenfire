@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { testSessionMe } from '../../testSupport/authTestFixtures.js'
+import { testSessionMe, testSessionTokenWithExpiry } from '../../testSupport/authTestFixtures.js'
 
 const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
 const originalAppData = process.env.APPDATA
+const originalRestBase = process.env.EXTERNAL_REST_API_BASE_URL
+const originalRpcBase = process.env.RPC_PROXY_BASE_URL
 let tempDir: string | null = null
 let cleanupModules: (() => Promise<void>) | null = null
 
@@ -13,17 +15,204 @@ afterEach(async () => {
   await cleanupModules?.()
   cleanupModules = null
   vi.doUnmock('electron')
+  vi.doUnmock('keytar')
   vi.resetModules()
   if (originalConfigPath === undefined) delete process.env.CLERUM_DESKTOP_CONFIG_PATH
   else process.env.CLERUM_DESKTOP_CONFIG_PATH = originalConfigPath
   if (originalAppData === undefined) delete process.env.APPDATA
   else process.env.APPDATA = originalAppData
+  if (originalRestBase === undefined) delete process.env.EXTERNAL_REST_API_BASE_URL
+  else process.env.EXTERNAL_REST_API_BASE_URL = originalRestBase
+  if (originalRpcBase === undefined) delete process.env.RPC_PROXY_BASE_URL
+  else process.env.RPC_PROXY_BASE_URL = originalRpcBase
   if (tempDir) await fs.rm(tempDir, { recursive: true, force: true })
   tempDir = null
 })
 
 describe('AppService RPC discovery restore boundary', () => {
-  it('migrates real token, chat, and GFS state at the next restore boundary', async () => {
+  it('uses the versioned credential namespace when profiles collide in the legacy namespace', async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-runtime-legacy-collision-'))
+    const userDataDir = path.join(tempDir, 'user-data')
+    const runtimeConfigDir = path.join(userDataDir, 'runtime-configs')
+    await fs.mkdir(runtimeConfigDir, { recursive: true })
+    delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+    delete process.env.EXTERNAL_REST_API_BASE_URL
+    delete process.env.RPC_PROXY_BASE_URL
+    delete process.env.APPDATA
+
+    const activeRest = 'https://api.shared-legacy.example.test'
+    const activeRpc = 'https://rpc.active.example.test'
+    const siblingRpc = 'https://rpc.sibling.example.test'
+    const timestamp = '2026-01-01T00:00:00.000Z'
+    await fs.writeFile(
+      path.join(runtimeConfigDir, 'index.json'),
+      JSON.stringify({
+        version: 1,
+        activeProfileId: 'active-profile',
+        profiles: [
+          {
+            id: 'active-profile',
+            appName: 'Active',
+            fileName: 'runtime-config-active.json',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+          {
+            id: 'sibling-profile',
+            appName: 'Sibling',
+            fileName: 'runtime-config-sibling.json',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+        ],
+      })
+    )
+    await fs.writeFile(
+      path.join(runtimeConfigDir, 'runtime-config-active.json'),
+      JSON.stringify({
+        externalRestApiBaseUrl: activeRest,
+        rpcProxyBaseUrl: activeRpc,
+        appName: 'Active',
+      })
+    )
+    await fs.writeFile(
+      path.join(runtimeConfigDir, 'runtime-config-sibling.json'),
+      JSON.stringify({
+        externalRestApiBaseUrl: activeRest,
+        rpcProxyBaseUrl: siblingRpc,
+        appName: 'Sibling',
+      })
+    )
+
+    vi.resetModules()
+    const keychain = new Map<string, string>()
+    const keytar = {
+      getPassword: vi.fn(
+        async (service: string, account: string) => keychain.get(`${service}::${account}`) ?? null
+      ),
+      setPassword: vi.fn(async (service: string, account: string, value: string) => {
+        keychain.set(`${service}::${account}`, value)
+      }),
+      deletePassword: vi.fn(async (service: string, account: string) =>
+        keychain.delete(`${service}::${account}`)
+      ),
+    }
+    vi.doMock('keytar', () => keytar)
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'appData' ? path.dirname(userDataDir) : userDataDir
+        ),
+        isPackaged: false,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+      safeStorage: {
+        isEncryptionAvailable: vi.fn(() => true),
+        getSelectedStorageBackend: vi.fn(() => 'gnome_libsecret'),
+        encryptString: vi.fn((value: string) => Buffer.from(`encrypted:${value}`)),
+        decryptString: vi.fn((value: Buffer) => value.toString().replace(/^encrypted:/, '')),
+      },
+    }))
+
+    const [{ AppService }, runtimeConfig, { TokenStore }, chatStoreBinding] = await Promise.all([
+      import('../appService.js'),
+      import('../config.js'),
+      import('../tokenStore.js'),
+      import('../chatStoreBinding.js'),
+    ])
+    const chatBaseDir = path.join(tempDir, 'chats')
+    chatStoreBinding.__setChatStoreBaseDirForTests(chatBaseDir)
+    cleanupModules = async () => {
+      chatStoreBinding.unbindChatStore()
+      chatStoreBinding.__setChatStoreBaseDirForTests(null)
+    }
+
+    expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(activeRest)
+    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe(activeRpc)
+    expect(runtimeConfig.getActiveLegacyEnvKeyInventory()).toEqual({ keys: [], complete: false })
+    const tokenStore = new TokenStore()
+    const legacyToken = testSessionTokenWithExpiry()
+    const candidateToken = testSessionTokenWithExpiry(Date.now() + 2 * 60 * 60 * 1000)
+    const legacyEnvKey = runtimeConfig.getActiveLegacyRestOnlyEnvKey()
+    await tokenStore.setSessionToken(legacyToken, legacyEnvKey)
+    const writeCandidate = vi.spyOn(tokenStore, 'writeSessionTokenCandidate')
+    keytar.setPassword.mockClear()
+    keytar.getPassword.mockClear()
+
+    const me = testSessionMe()
+    const service = new AppService({
+      tokenStore,
+      getUserDataDirectory: () => userDataDir,
+      reportDeferredLogoutFailure: vi.fn(),
+    }) as unknown as {
+      authClient: {
+        passwordLogin: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
+        getDesktopEnvironment: ReturnType<typeof vi.fn>
+      }
+      initialize: () => Promise<unknown>
+      passwordLogin: (email: string, password: string) => Promise<unknown>
+    }
+    const passwordLogin = vi.spyOn(service.authClient, 'passwordLogin').mockResolvedValue({
+      token: candidateToken,
+      me,
+    })
+    const getMe = vi.spyOn(service.authClient, 'getMe').mockResolvedValue(me)
+    vi.spyOn(service.authClient, 'getDesktopEnvironment').mockRejectedValue(
+      new Error('runtime discovery unavailable')
+    )
+
+    await expect(service.passwordLogin('user@example.test', 'test-password')).resolves.toEqual({
+      authenticated: true,
+      me,
+    })
+    expect(passwordLogin).toHaveBeenCalledOnce()
+    expect(writeCandidate).toHaveBeenCalledOnce()
+    expect(keytar.setPassword).toHaveBeenCalled()
+    expect(keychain.values()).toContain(legacyToken)
+    expect(keychain.values()).not.toContain(candidateToken)
+    expect(getMe).not.toHaveBeenCalledWith(legacyToken)
+    expect(chatStoreBinding.requireChatStore()).toBeDefined()
+    const activeEnvKey = runtimeConfig.getActiveEnvKey()
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const accepted = await readSessionAuthoritySourceSelection({ tokenStore, envKey: activeEnvKey })
+    expect(accepted.status).toBe('accepted')
+    if (accepted.status !== 'accepted') throw new Error('Expected fresh V1 authority')
+    expect(accepted.session.token).toBe(candidateToken)
+    expect(accepted.session.accepted.record.frame.source).toMatchObject({
+      format: 'v1',
+      kind: 'keytar',
+    })
+
+    const restartedTokenStore = new TokenStore()
+    const restarted = new AppService({
+      tokenStore: restartedTokenStore,
+      getUserDataDirectory: () => userDataDir,
+      reportDeferredLogoutFailure: vi.fn(),
+    }) as unknown as {
+      authClient: {
+        getMe: ReturnType<typeof vi.fn>
+        getDesktopEnvironment: ReturnType<typeof vi.fn>
+      }
+      initialize: () => Promise<unknown>
+    }
+    const restartedGetMe = vi.spyOn(restarted.authClient, 'getMe').mockResolvedValue(me)
+    vi.spyOn(restarted.authClient, 'getDesktopEnvironment').mockRejectedValue(
+      new Error('runtime discovery unavailable')
+    )
+    await expect(restarted.initialize()).resolves.toEqual({ authenticated: true, me })
+    expect(restartedGetMe).toHaveBeenCalledWith(candidateToken)
+    expect(restartedGetMe).not.toHaveBeenCalledWith(legacyToken)
+    expect(keytar.getPassword).not.toHaveBeenCalledWith(
+      'Evenfire',
+      `session-token::${legacyEnvKey}`
+    )
+    expect(keychain.values()).toContain(legacyToken)
+  })
+
+  it('does not restore a temporary session after RPC discovery changes the environment key', async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-runtime-boundary-'))
     const userDataDir = path.join(tempDir, 'user-data')
     const chatBaseDir = path.join(tempDir, 'chats')
@@ -70,10 +259,11 @@ describe('AppService RPC discovery restore boundary', () => {
     const seedService = new AppService() as unknown as {
       authClient: {
         getDesktopEnvironment: ReturnType<typeof vi.fn>
-        googleLogin: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
       }
       tokenStore: TokenStore
-      googleLogin: (idToken: string) => Promise<unknown>
+      passwordLogin: (email: string, password: string) => Promise<unknown>
       gfsScopeIdentity: {
         ownerId: string
         teamId: string | null
@@ -84,11 +274,13 @@ describe('AppService RPC discovery restore boundary', () => {
       persistDesktopGfsUpload: (record: unknown) => Promise<void>
     }
     seedService.tokenStore = tokenStore
+    const savedToken = testSessionTokenWithExpiry()
     seedService.authClient = {
       getDesktopEnvironment: vi.fn().mockRejectedValue(new Error('seed discovery unavailable')),
-      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-saved-session-a', me }),
+      getMe: vi.fn().mockResolvedValue(me),
+      passwordLogin: vi.fn().mockResolvedValue({ token: savedToken, me }),
     }
-    await seedService.googleLogin('synthetic-seed-google-token')
+    await seedService.passwordLogin('user@example.test', 'test-password')
     await chatStoreBinding.requireChatStore().createChat('agent-a', 'chat-a')
     if (!seedService.gfsScopeIdentity)
       throw new Error('The seed login did not activate a GFS scope')
@@ -145,25 +337,24 @@ describe('AppService RPC discovery restore boundary', () => {
       getMe: vi.fn().mockResolvedValue(me),
     }
 
-    await expect(service.initialize()).resolves.toMatchObject({ authenticated: true, me })
+    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
 
     const rpcEnvKey = runtimeConfig.getActiveEnvKey()
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe(rpcBaseUrl)
     expect(rpcEnvKey).not.toBe(restOnlyEnvKey)
-    expect(await tokenStore.getSessionToken(rpcEnvKey)).toBe('synthetic-saved-session-a')
+    expect(service.authClient.getMe).not.toHaveBeenCalled()
+    expect(await tokenStore.getSessionToken(rpcEnvKey)).toBeNull()
     expect(await tokenStore.getSessionToken(restOnlyEnvKey)).toBeNull()
-    expect(
-      (await chatStoreBinding.requireChatStore().listChats('agent-a')).map(chat => chat.id)
-    ).toEqual(['chat-a'])
-    await expect(fs.access(path.join(chatBaseDir, restOnlyEnvKey, me.id))).rejects.toMatchObject({
+    expect(await tokenStore.getSessionToken(rpcEnvKey)).toBeNull()
+    expect(service.authClient.getMe).not.toHaveBeenCalledWith(savedToken)
+    expect(() => chatStoreBinding.requireChatStore()).toThrow('Not authenticated')
+    await expect(fs.access(path.join(chatBaseDir, rpcEnvKey, me.id))).rejects.toMatchObject({
       code: 'ENOENT',
     })
-    await expect(
-      fs.access(path.join(chatBaseDir, rpcEnvKey, me.id, 'agent-a', 'index.json'))
-    ).resolves.toBeUndefined()
-    await expect(service.listGfsUploadSessions('main')).resolves.toEqual([
-      expect.objectContaining({ uploadId: 'upload-a', status: 'suspended_auth' }),
-    ])
+    await expect(fs.access(path.join(chatBaseDir, restOnlyEnvKey, me.id))).resolves.toBeUndefined()
+    await expect(service.listGfsUploadSessions('main')).rejects.toThrow(
+      'GFS upload dispatch is unavailable without an active authenticated scope'
+    )
   })
 
   it('migrates only matching producer-written GFS records during login', async () => {
@@ -206,10 +397,11 @@ describe('AppService RPC discovery restore boundary', () => {
     const seedService = new AppService() as unknown as {
       authClient: {
         getDesktopEnvironment: ReturnType<typeof vi.fn>
-        googleLogin: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
       }
       tokenStore: TokenStore
-      googleLogin: (idToken: string) => Promise<unknown>
+      passwordLogin: (email: string, password: string) => Promise<unknown>
       logout: () => Promise<number>
       gfsScopeIdentity: {
         ownerId: string
@@ -221,11 +413,13 @@ describe('AppService RPC discovery restore boundary', () => {
       persistDesktopGfsUpload: (record: unknown) => Promise<void>
     }
     seedService.tokenStore = tokenStore
+    const seedToken = testSessionTokenWithExpiry()
     seedService.authClient = {
       getDesktopEnvironment: vi.fn().mockRejectedValue(new Error('seed discovery unavailable')),
-      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-seed-session', me }),
+      getMe: vi.fn().mockResolvedValue(me),
+      passwordLogin: vi.fn().mockResolvedValue({ token: seedToken, me }),
     }
-    await seedService.googleLogin('synthetic-seed-google-token')
+    await seedService.passwordLogin('user@example.test', 'test-password')
     if (!seedService.gfsScopeIdentity)
       throw new Error('The seed login did not activate a GFS scope')
     const seedScope = seedService.gfsScopeIdentity
@@ -289,18 +483,24 @@ describe('AppService RPC discovery restore boundary', () => {
     })
     const rpcEnvKey = runtimeConfig.getActiveEnvKey()
     const loginService = new AppService() as unknown as {
-      authClient: { googleLogin: ReturnType<typeof vi.fn> }
+      authClient: {
+        getMe: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
+      }
       tokenStore: TokenStore
-      googleLogin: (idToken: string) => Promise<unknown>
+      passwordLogin: (email: string, password: string) => Promise<unknown>
     }
     loginService.tokenStore = tokenStore
+    const loginToken = testSessionTokenWithExpiry()
     loginService.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-login-session', me }),
+      getMe: vi.fn().mockResolvedValue(me),
+      passwordLogin: vi.fn().mockResolvedValue({ token: loginToken, me }),
     }
 
-    await loginService.googleLogin('synthetic-login-google-token')
+    const loginState = await loginService.passwordLogin('user@example.test', 'test-password')
 
-    expect(await tokenStore.getSessionToken(rpcEnvKey)).toBe('synthetic-login-session')
+    expect(loginState).toEqual(expect.objectContaining({ authenticated: true }))
+    expect(await tokenStore.getSessionToken(rpcEnvKey)).toBeNull()
     expect(await tokenStore.getSessionToken(restOnlyEnvKey)).toBeNull()
     const state = JSON.parse(
       await fs.readFile(path.join(userDataDir, 'gfs-upload-sessions.json'), 'utf8')

@@ -5,7 +5,9 @@ import path from 'node:path'
 // ── import after mocks are set up ─────────────────────────────────────────────
 
 import { AppService } from '../appService.js'
+import { getActiveEnvKey } from '../config.js'
 import { ApiError } from '../httpClient.js'
+import { readPendingExternalLogoutIntent } from '../pendingExternalLogout.js'
 import { TokenStore } from '../tokenStore.js'
 
 let userDataDirectory = ''
@@ -24,9 +26,14 @@ beforeEach(async () => {
 afterEach(async () => {
   try {
     expect(reportLogoutFailure).not.toHaveBeenCalled()
-    expect(
-      (await readdir(userDataDirectory)).filter(name => name.startsWith('pending-external-logout-'))
-    ).toEqual([])
+    const markers = (await readdir(userDataDirectory)).filter(name =>
+      name.startsWith('pending-external-logout-')
+    )
+    expect(markers.length).toBeLessThanOrEqual(1)
+    if (markers.length > 0)
+      expect(readPendingExternalLogoutIntent(userDataDirectory, getActiveEnvKey())).toEqual({
+        intent: 'logout-pending',
+      })
   } finally {
     await rm(userDataDirectory, { recursive: true, force: true })
   }
@@ -38,6 +45,7 @@ vi.mock('../config.js', () => ({
   getActiveRuntimeConfigOptionId: () => 'test-profile',
   getActiveEnvKey: () => 'test_env-000000000000',
   getActiveLegacyEnvKeys: () => [],
+  getActiveLegacyEnvKeyInventory: () => ({ keys: [], complete: true }),
   getDesktopRuntimeConfigState: () => ({ activeOptionId: 'test-profile' }),
   config: {
     rpcProxyBaseUrl: 'http://proxy',
@@ -98,7 +106,7 @@ function makeService(): AppService {
 describe('AppService.prewarmHost', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],
@@ -220,7 +228,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.useFakeTimers()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],
@@ -305,6 +313,9 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     expect(vi.getTimerCount()).toBe(1)
 
     await svc.logout()
+    expect(readPendingExternalLogoutIntent(userDataDirectory, getActiveEnvKey())).toEqual({
+      intent: 'logout-pending',
+    })
 
     expect(vi.getTimerCount()).toBe(0)
     await vi.advanceTimersByTimeAsync(30_000)
@@ -338,6 +349,9 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     for (let i = 0; i < 10 && mockGetOrIssue.mock.calls.length === 0; i++) await Promise.resolve()
     expect(mockGetOrIssue).toHaveBeenCalledTimes(1)
     await svc.logout()
+    expect(readPendingExternalLogoutIntent(userDataDirectory, getActiveEnvKey())).toEqual({
+      intent: 'logout-pending',
+    })
     ;(svc as unknown as { sessionToken: string }).sessionToken = 'next-session'
     ;(svc as unknown as { me: unknown }).me = { id: 2, teamId: 'team-2' }
 
@@ -447,6 +461,9 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
     await svc.logout()
+    expect(readPendingExternalLogoutIntent(userDataDirectory, getActiveEnvKey())).toEqual({
+      intent: 'logout-pending',
+    })
     ;(svc as unknown as { sessionToken: string }).sessionToken = 'next-session'
     ;(svc as unknown as { me: unknown }).me = { id: 2, teamId: 'team-2' }
     await svc.prewarmHost('chatllm')
@@ -599,7 +616,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
 describe('AppService host status stream — ANTI-FLAP invariant', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],

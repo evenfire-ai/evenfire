@@ -357,13 +357,13 @@ export class AuthClient {
   }
 
   async googleLogin(idToken: string): Promise<LoginResult> {
-    return requestJson<LoginResult>('POST', url('/api/v1/auth/google'), {
+    return requestJson<LoginResult>('POST', url('/api/v1/auth/v2/google'), {
       body: { idToken },
     })
   }
 
   async passwordLogin(email: string, password: string): Promise<LoginResult> {
-    return requestJson<LoginResult>('POST', url('/api/v1/auth/password-login'), {
+    return requestJson<LoginResult>('POST', url('/api/v1/auth/v2/password-login'), {
       body: { email, password },
     })
   }

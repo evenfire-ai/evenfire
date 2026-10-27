@@ -2,12 +2,12 @@ import { vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { DesktopLogoutOutcome } from '../src/types.js'
 
-vi.mock('../src/chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../src/chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('./chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 
 export type Deferred<T> = {
   promise: Promise<T>
@@ -23,7 +23,11 @@ export function deferred<T>(): Deferred<T> {
 }
 
 export type NativeCommitTestService = {
-  authClient: { googleLogin: ReturnType<typeof vi.fn> }
+  authClient: {
+    googleLogin: ReturnType<typeof vi.fn>
+    passwordLogin: ReturnType<typeof vi.fn>
+    getMe: ReturnType<typeof vi.fn>
+  }
   tokenStore: {
     clearSessionToken: ReturnType<typeof vi.fn>
     clearSessionTokenStrictly: ReturnType<typeof vi.fn>
@@ -34,7 +38,8 @@ export type NativeCommitTestService = {
   me: { id: string } | null
   gfsScopeIdentity: { ownerId: string; environmentKey: string; baseUrl: string } | null
   googleLogin: (token: string) => Promise<unknown>
-  logout: () => Promise<number>
+  passwordLogin: (email: string, password: string) => Promise<unknown>
+  logout: () => Promise<DesktopLogoutOutcome>
   selectRuntimeConfig: (optionId: string) => Promise<unknown>
   getSessionState: () => Promise<unknown>
   getSessionGeneration: () => number
@@ -51,7 +56,7 @@ const originalEnvironment = {
 }
 const tempDirs = new Set<string>()
 
-export async function createNativeCommitTestHarness() {
+export async function createNativeCommitTestHarness(options: { keytarAvailable?: boolean } = {}) {
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-native-commit-'))
   tempDirs.add(userDataDir)
   delete process.env.CLERUM_DESKTOP_CONFIG_PATH
@@ -76,6 +81,21 @@ export async function createNativeCommitTestHarness() {
       decryptString: vi.fn((value: Uint8Array) => Buffer.from(value).toString()),
     },
   }))
+  if (options.keytarAvailable) {
+    const keychain = new Map<string, string>()
+    const keyOf = (service: string, account: string) => `${service}::${account}`
+    vi.doMock('keytar', () => ({
+      getPassword: vi.fn(
+        async (service: string, account: string) => keychain.get(keyOf(service, account)) ?? null
+      ),
+      setPassword: vi.fn(async (service: string, account: string, token: string) => {
+        keychain.set(keyOf(service, account), token)
+      }),
+      deletePassword: vi.fn(async (service: string, account: string) =>
+        keychain.delete(keyOf(service, account))
+      ),
+    }))
+  }
 
   const [{ AppService }, { TokenStore }, runtimeConfig] = await Promise.all([
     import('../src/appService.js'),
@@ -103,8 +123,13 @@ export async function createNativeCommitTestHarness() {
   if (!optionA || !optionB) throw new Error('test runtime profiles were not created')
   await runtimeConfig.selectDesktopRuntimeConfigOption(optionA.id)
 
-  const service = new AppService() as unknown as NativeCommitTestService
-  const tokenStore = new TokenStore({ isolatedUserDataPath: userDataDir })
+  const tokenStore = options.keytarAvailable
+    ? new TokenStore()
+    : new TokenStore({ isolatedUserDataPath: userDataDir })
+  const service = new AppService({
+    tokenStore,
+    getUserDataDirectory: () => userDataDir,
+  }) as unknown as NativeCommitTestService
   const clearSessionToken = tokenStore.clearSessionToken.bind(tokenStore)
   const clearSessionTokenStrictly = tokenStore.clearSessionTokenStrictly.bind(tokenStore)
   const getSessionToken = tokenStore.getSessionToken.bind(tokenStore)
@@ -113,7 +138,6 @@ export async function createNativeCommitTestHarness() {
   vi.spyOn(tokenStore, 'clearSessionTokenStrictly').mockImplementation(clearSessionTokenStrictly)
   vi.spyOn(tokenStore, 'getSessionToken').mockImplementation(getSessionToken)
   vi.spyOn(tokenStore, 'setSessionToken').mockImplementation(setSessionToken)
-  service.tokenStore = tokenStore as never
   return { service, runtimeConfig, restA, restB, optionA, optionB, userDataDir }
 }
 

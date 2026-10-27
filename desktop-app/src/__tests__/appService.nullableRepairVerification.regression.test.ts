@@ -97,6 +97,10 @@ async function harness() {
     installAuthenticatedLogin: (value: { token: string; me: typeof homeMe }) => Promise<unknown>
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
     }
   }
   vi.spyOn(state.authClient, 'getMe').mockResolvedValue(homeMe)
@@ -120,6 +124,12 @@ describe('R21-M14 nullable native rollback requires verified absence', () => {
   it.each([false, true])(
     'denies a rejected login when deletion returns %s but retains its native token',
     async acknowledgement => {
+      const config = await import('../config.js')
+      await config.saveDesktopRuntimeConfig({
+        externalRestApiBaseUrl: 'https://auth.nullable-repair.test/api',
+        rpcProxyBaseUrl: 'https://rpc.nullable-repair.test',
+        appName: 'Evenfire Test',
+      })
       const h = await harness()
       const { safeStorage } = await import('electron')
       vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
@@ -127,38 +137,53 @@ describe('R21-M14 nullable native rollback requires verified absence', () => {
       let readbackRejected = false
       let deletionAcknowledged = false
       let locked = false
+      let candidateAccount: string | null = null
       boundary.setPassword.mockImplementation(async (service, account, token) => {
         boundary.keychain.set(keyOf(service, account), token)
-        written = true
+        const normalizedAccount = String(account)
+        if (normalizedAccount.startsWith('session-v1:')) {
+          candidateAccount = normalizedAccount
+          written = true
+        }
       })
       boundary.getPassword.mockImplementation(async (service, account) => {
         const token = boundary.keychain.get(keyOf(service, account)) ?? null
         if (locked) throw new Error('fixture-keyring locked after false deletion')
-        if (written && token === homeToken && !readbackRejected) {
+        if (written && String(account) === candidateAccount && !readbackRejected) {
           readbackRejected = true
-          return 'fixture-rejected read-back'
+          return `${token ?? ''}-fixture-rejected-read-back`
         }
         return token
       })
       boundary.deletePassword.mockImplementation(async (service, account) => {
-        if (boundary.keychain.get(keyOf(service, account)) === homeToken) {
+        if (
+          String(account) === candidateAccount &&
+          boundary.keychain.has(keyOf(service, account))
+        ) {
           deletionAcknowledged = true
           locked = true
           return acknowledgement
         }
         return boundary.keychain.delete(keyOf(service, account))
       })
-      const rejected = await h.state
-        .installAuthenticatedLogin({ token: homeToken, me: homeMe })
-        .then(
-          () => null,
-          error => error
-        )
+      const passwordLogin = vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+        token: homeToken,
+        me: homeMe,
+      })
+      const rejected = await h.service.passwordLogin(homeMe.email, 'fixture-password').then(
+        () => null,
+        error => error
+      )
       expect(rejected).toBeInstanceOf(Error)
+      expect(passwordLogin).toHaveBeenCalledOnce()
       expect(readbackRejected).toBe(true)
       expect(deletionAcknowledged).toBe(true)
       expect(locked).toBe(true)
-      expect([...boundary.keychain.values()]).toContain(homeToken)
+      const rejectedCandidateEntry = [...boundary.keychain.entries()].find(([account]) =>
+        account.includes('session-v1:')
+      )
+      expect(rejectedCandidateEntry?.[0]).toContain('session-v1:')
+      expect(rejectedCandidateEntry?.[1]).toContain(homeToken)
       locked = false
       const restart = await harness()
       await expect(restart.service.initialize()).resolves.toEqual({

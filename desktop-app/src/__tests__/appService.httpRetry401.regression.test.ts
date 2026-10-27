@@ -4,22 +4,15 @@ import os from 'node:os'
 import path from 'node:path'
 
 const fixture = vi.hoisted(() => ({ directory: '' }))
-const keytar = vi.hoisted(() => ({
-  getPassword: vi.fn(),
-  setPassword: vi.fn(),
-  deletePassword: vi.fn(),
-}))
-
 vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => fixture.directory), isReady: vi.fn(() => true) },
   safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
   shell: { openExternal: vi.fn() },
 }))
-vi.mock('keytar', () => keytar)
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({ notifySessionChanged: vi.fn() }),
 }))
@@ -56,9 +49,6 @@ describe('AppService HTTP retry authorization lifecycle', () => {
     process.env.RPC_PROXY_BASE_URL = 'http://proxy.retry-401.test'
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-retry-401-'))
     fixture.directory = directory
-    keytar.getPassword.mockRejectedValue(new Error('OS credential store unavailable'))
-    keytar.setPassword.mockRejectedValue(new Error('OS credential store unavailable'))
-    keytar.deletePassword.mockRejectedValue(new Error('OS credential store unavailable'))
     const [appServiceModule, tokenStoreModule, httpModule] = await Promise.all([
       import('../appService.js'),
       import('../tokenStore.js'),
@@ -90,9 +80,16 @@ describe('AppService HTTP retry authorization lifecycle', () => {
     let workflowRequestCount = 0
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.endsWith('/api/v1/auth/password-login'))
+      if (url.endsWith('/api/v1/auth/v2/password-login'))
         return Promise.resolve(
           new Response(JSON.stringify({ token: accessToken, me }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        )
+      if (url.endsWith('/api/v1/me'))
+        return Promise.resolve(
+          new Response(JSON.stringify(me), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           })
@@ -108,7 +105,7 @@ describe('AppService HTTP retry authorization lifecycle', () => {
 
     const notifySessionExpired = vi.fn()
     const service = new AppService({
-      tokenStore: new TokenStore(),
+      tokenStore: new TokenStore({ isolatedUserDataPath: directory }),
       getUserDataDirectory: () => directory,
       notifySessionExpired,
     })
@@ -122,7 +119,7 @@ describe('AppService HTTP retry authorization lifecycle', () => {
     await expect(service.listWorkflowRuns('ns', 'name')).rejects.toMatchObject({ status: 401 })
 
     expect(workflowRequestCount).toBe(2)
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
     expect(service.getCachedUserId()).toBeNull()
     expect(notifySessionExpired).toHaveBeenCalledOnce()
     await (service as any).memoryOnlySessionTermination

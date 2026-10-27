@@ -2750,67 +2750,6 @@ export function App() {
         }
       })()
     : ''
-  const pendingSwitchTargetHost = vm.pendingDesktopEnvironmentSwitchConfirmation
-    ? (() => {
-        try {
-          return new URL(
-            vm.pendingDesktopEnvironmentSwitchConfirmation.targetExternalRestApiBaseUrl
-          ).host
-        } catch {
-          return vm.pendingDesktopEnvironmentSwitchConfirmation.targetExternalRestApiBaseUrl
-        }
-      })()
-    : ''
-  const pendingSwitchCurrentHost = vm.pendingDesktopEnvironmentSwitchConfirmation
-    ? (() => {
-        try {
-          return new URL(
-            vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl
-          ).host
-        } catch {
-          return vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl
-        }
-      })()
-    : ''
-  const environmentSwitchConfirmationDialog = vm.pendingDesktopEnvironmentSwitchConfirmation ? (
-    <ConfirmDialog
-      title="Switch desktop environment?"
-      body={
-        <>
-          <p>
-            You are signed in to the REST API host{' '}
-            <strong>{pendingSwitchCurrentHost || 'unknown'}</strong>. The Profile UI link requests{' '}
-            the REST API host <strong>{pendingSwitchTargetHost || 'unknown'}</strong>. Switching
-            will sign you out and interrupt activity in the current environment.
-          </p>
-          <p className="muted">
-            Profile link label (unverified):{' '}
-            {formatLinkProvidedEnvironmentName(
-              vm.pendingDesktopEnvironmentSwitchConfirmation.targetEnvironmentName
-            )}
-          </p>
-          {vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl ? (
-            <p className="auth-environment-confirm-url">
-              Current REST API:{' '}
-              {vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl}
-            </p>
-          ) : null}
-          <p>Continue only if you trust this External REST API host:</p>
-          <p className="auth-environment-confirm-url">
-            {vm.pendingDesktopEnvironmentSwitchConfirmation.targetExternalRestApiBaseUrl}
-          </p>
-          {pendingSwitchTargetHost ? (
-            <p className="muted">Host: {pendingSwitchTargetHost}</p>
-          ) : null}
-        </>
-      }
-      cancelLabel="Stay signed in"
-      confirmLabel="Sign out and switch"
-      onCancel={vm.handleCancelDesktopEnvironmentSwitchConfirmation}
-      onConfirm={vm.handleConfirmDesktopEnvironmentSwitchConfirmation}
-      tone="danger"
-    />
-  ) : null
   const environmentSetupConfirmationDialog = vm.pendingDesktopEnvironmentSetup ? (
     <ConfirmDialog
       title="Add desktop environment?"
@@ -3134,7 +3073,6 @@ export function App() {
                           ) : null}
                           {desktopUpdateRequiredDialog}
                           {environmentSetupConfirmationDialog}
-                          {environmentSwitchConfirmationDialog}
                           {environmentSetupSuccessDialog}
                           {sandboxUiDeepLinkDialog}
                           {pluginConsentPrompt ? (
@@ -3171,7 +3109,6 @@ export function App() {
                 <AuthPage />
               )}
               {environmentSetupConfirmationDialog}
-              {environmentSwitchConfirmationDialog}
               {environmentSetupSuccessDialog}
               <ToastStack items={vm.toasts} />
             </>

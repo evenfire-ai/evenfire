@@ -2,6 +2,47 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import {
+  testLoginResult,
+  testSessionMe,
+  testSessionTokenWithExpiry,
+} from '../../testSupport/authTestFixtures.js'
+
+const electronFixture = vi.hoisted(() => ({ userDataDirectory: '' }))
+const keytarFixture = vi.hoisted(() => {
+  const values = new Map<string, string>()
+  const keyOf = (service: string, account: string) => `${service}::${account}`
+  return {
+    values,
+    getPassword: vi.fn(
+      async (service: string, account: string) => values.get(keyOf(service, account)) ?? null
+    ),
+    setPassword: vi.fn(async (service: string, account: string, token: string) => {
+      values.set(keyOf(service, account), token)
+    }),
+    deletePassword: vi.fn(async (service: string, account: string) =>
+      values.delete(keyOf(service, account))
+    ),
+  }
+})
+
+vi.mock('electron', () => ({
+  app: {
+    getPath: vi.fn(() => electronFixture.userDataDirectory),
+    isReady: vi.fn(() => true),
+    setName: vi.fn(),
+    setPath: vi.fn(),
+  },
+  safeStorage: {
+    isEncryptionAvailable: vi.fn(() => true),
+    getSelectedStorageBackend: vi.fn(() =>
+      process.platform === 'linux' ? 'gnome_libsecret' : 'test-secure-storage'
+    ),
+    encryptString: vi.fn((value: string) => Buffer.from(value, 'utf8')),
+    decryptString: vi.fn((value: Buffer) => value.toString('utf8')),
+  },
+}))
+vi.mock('keytar', () => keytarFixture)
 
 const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
 let isolatedConfigPath = ''
@@ -41,7 +82,9 @@ afterAll(async () => {
 })
 
 beforeEach(async () => {
+  keytarFixture.values.clear()
   userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-quit-preparation-data-'))
+  electronFixture.userDataDirectory = userDataDirectory
 })
 
 afterEach(async () => {
@@ -85,6 +128,45 @@ function createService(tokenStore = new TokenStoreClass()) {
   })
 }
 
+async function acceptPersistentSession(
+  service: InstanceType<typeof AppServiceClass>,
+  tokenStore: InstanceType<typeof TokenStoreClass>
+): Promise<void> {
+  const me = testSessionMe()
+  const result = testLoginResult(testSessionTokenWithExpiry(), me)
+  const authClient = (
+    service as unknown as {
+      authClient: {
+        passwordLogin: (email: string, password: string) => Promise<typeof result>
+        getMe: (token: string) => Promise<typeof me>
+      }
+    }
+  ).authClient
+  vi.spyOn(authClient, 'passwordLogin').mockResolvedValue(result)
+  vi.spyOn(authClient, 'getMe').mockResolvedValue(me)
+  const { saveDesktopRuntimeConfig, getActiveEnvKey } = await import('../config.js')
+  await saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://quit-preparation.example.test',
+    rpcProxyBaseUrl: 'https://rpc.quit-preparation.example.test',
+    appName: 'Quit Preparation Test',
+  })
+
+  await expect(
+    service.passwordLogin(me.email, 'synthetic-quit-preparation-password')
+  ).resolves.toMatchObject({ authenticated: true, me })
+
+  const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+  const selection = await readSessionAuthoritySourceSelection({
+    tokenStore,
+    envKey: getActiveEnvKey(),
+  })
+  expect(selection.status).toBe('accepted')
+  if (selection.status !== 'accepted')
+    throw new Error('the public password-login fixture did not accept a persistent source')
+  expect(selection.session.token).toBe(result.token)
+  expect(selection.session.accepted.record.frame.source.format).toBe('v1')
+}
+
 describe('AppService quit preparation', () => {
   it('loads runtime config from this suite’s isolated path', () => {
     expect(getDesktopRuntimeConfigState().storagePath).toBe(isolatedConfigPath)
@@ -95,42 +177,50 @@ describe('AppService quit preparation', () => {
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
     const reopenAdmission = vi.spyOn(tokenStore, 'reopenAdmission')
     const clearSessionToken = vi.spyOn(tokenStore, 'clearSessionToken').mockResolvedValue()
-    const clearSessionTokenStrictly = vi
-      .spyOn(tokenStore, 'clearSessionTokenStrictly')
-      .mockResolvedValue({ keytarAvailable: true, keytarDisabled: false })
+    const deleteSelectedSource = vi.spyOn(
+      tokenStore,
+      'deleteSessionCredentialSourceIfUnselectedWithProof'
+    )
     const service = createService(tokenStore)
+    await acceptPersistentSession(service, tokenStore)
 
     await service.prepareForQuit()
-    await expect(service.logout()).rejects.toThrow('Application is shutting down')
+    await expect(service.logout()).resolves.toMatchObject({
+      kind: 'not-committed',
+      reason: 'failed',
+    })
 
     service.cancelQuitPreparation()
-    await expect(service.logout()).resolves.toBeTypeOf('number')
+    await expect(service.logout()).resolves.toMatchObject({ kind: 'committed' })
     expect(clearSessionToken).not.toHaveBeenCalled()
-    expect(clearSessionTokenStrictly).toHaveBeenCalledOnce()
+    expect(deleteSelectedSource).toHaveBeenCalledOnce()
     expect(reopenAdmission).toHaveBeenCalledOnce()
     expect(prepareForQuit).toHaveBeenCalledOnce()
   })
 
-  it('keeps an admitted logout pending beyond a two-minute producer bound', async () => {
+  it('keeps quit waiting for accepted logout cleanup beyond a two-minute bound', async () => {
     const [{ readPendingExternalLogoutMarker }, { getActiveEnvKey }] = await Promise.all([
       import('../pendingExternalLogout.js'),
       import('../config.js'),
     ])
-    vi.useFakeTimers()
     const pendingTokenClear = deferred<void>()
     const tokenClearStarted = deferred<void>()
     const tokenStore = new TokenStoreClass()
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
-    const clearSessionTokenStrictly = vi
-      .spyOn(tokenStore, 'clearSessionTokenStrictly')
-      .mockImplementation(async () => {
+    const deleteExactSource =
+      tokenStore.deleteSessionCredentialSourceIfUnselectedWithProof.bind(tokenStore)
+    const deleteSelectedSource = vi
+      .spyOn(tokenStore, 'deleteSessionCredentialSourceIfUnselectedWithProof')
+      .mockImplementation(async (...args) => {
         tokenClearStarted.resolve()
         await pendingTokenClear.promise
-        return { keytarAvailable: true, keytarDisabled: false }
+        return deleteExactSource(...args)
       })
     const service = createService(tokenStore)
+    await acceptPersistentSession(service, tokenStore)
+    vi.useFakeTimers()
 
-    const logout = service.logout().catch(error => error)
+    const logout = service.logout()
     await tokenClearStarted.promise
     let preparationSettled = false
     const preparation = service.prepareForQuit().then(() => {
@@ -139,26 +229,29 @@ describe('AppService quit preparation', () => {
 
     try {
       expect(vi.getTimerCount()).toBe(0)
-      await expect(service.logout()).rejects.toThrow('Application is shutting down')
-      const newerLogoutIntent = readPendingExternalLogoutMarker(
+      await expect(service.logout()).resolves.toMatchObject({
+        kind: 'not-committed',
+        reason: 'deferred',
+      })
+      const committedLogoutIntent = readPendingExternalLogoutMarker(
         userDataDirectory,
         getActiveEnvKey()
       )
-      expect(newerLogoutIntent?.intent).toEqual({ intent: 'logout-pending' })
-      expect(newerLogoutIntent?.revision).not.toBeNull()
+      expect(committedLogoutIntent?.intent).toEqual({ intent: 'logout-pending' })
+      expect(committedLogoutIntent?.revision).not.toBeNull()
       await vi.advanceTimersByTimeAsync(120_001)
       expect(preparationSettled).toBe(false)
-      expect(prepareForQuit).not.toHaveBeenCalled()
-      expect(clearSessionTokenStrictly).toHaveBeenCalledOnce()
+      expect(prepareForQuit).toHaveBeenCalledOnce()
+      expect(deleteSelectedSource).toHaveBeenCalledOnce()
 
       pendingTokenClear.resolve()
       const [logoutResult] = await Promise.all([logout, preparation])
-      expect(logoutResult).toBeInstanceOf(SupersededBeforeWrite)
+      expect(logoutResult).toMatchObject({ kind: 'committed' })
       expect(readPendingExternalLogoutMarker(userDataDirectory, getActiveEnvKey())).toEqual(
-        newerLogoutIntent
+        committedLogoutIntent
       )
       expect(preparationSettled).toBe(true)
-      expect(clearSessionTokenStrictly.mock.invocationCallOrder[0]).toBeLessThan(
+      expect(deleteSelectedSource.mock.invocationCallOrder[0]).toBeLessThan(
         prepareForQuit.mock.invocationCallOrder[0]
       )
     } finally {
@@ -173,12 +266,17 @@ describe('AppService quit preparation', () => {
     const producerStarted = deferred<void>()
     const tokenStore = new TokenStoreClass()
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
-    vi.spyOn(tokenStore, 'clearSessionTokenStrictly').mockImplementation(async () => {
-      producerStarted.resolve()
-      await producer.promise
-      return { keytarAvailable: true, keytarDisabled: false }
-    })
+    const deleteExactSource =
+      tokenStore.deleteSessionCredentialSourceIfUnselectedWithProof.bind(tokenStore)
+    vi.spyOn(tokenStore, 'deleteSessionCredentialSourceIfUnselectedWithProof').mockImplementation(
+      async (...args) => {
+        producerStarted.resolve()
+        await producer.promise
+        return deleteExactSource(...args)
+      }
+    )
     const service = createService(tokenStore)
+    await acceptPersistentSession(service, tokenStore)
     const logout = service.logout()
     await producerStarted.promise
     const preparation = service.prepareForQuit()
@@ -201,25 +299,23 @@ describe('AppService quit preparation', () => {
     const secondStarted = deferred<void>()
     const tokenStore = new TokenStoreClass()
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
-    vi.spyOn(tokenStore, 'clearSessionTokenStrictly')
-      .mockImplementationOnce(async () => {
-        firstStarted.resolve()
-        await rejectedProducer.promise
-        return { keytarAvailable: true, keytarDisabled: false }
-      })
-      .mockImplementationOnce(async () => {
-        secondStarted.resolve()
-        await pendingProducer.promise
-        return { keytarAvailable: true, keytarDisabled: false }
-      })
     const service = createService(tokenStore)
-
-    const first = service.logout().catch(error => error)
-    let second: Promise<void> | undefined
+    const producerService = service as unknown as {
+      runCredentialProducer<T>(operation: () => Promise<T>): Promise<T>
+    }
+    const first = producerService.runCredentialProducer(async () => {
+      firstStarted.resolve()
+      await rejectedProducer.promise
+      throw new SupersededBeforeWrite()
+    })
+    const second = producerService.runCredentialProducer(async () => {
+      secondStarted.resolve()
+      await pendingProducer.promise
+    })
     let preparation: Promise<void> | undefined
     try {
       await requireProducerEntry(firstStarted.promise)
-      second = service.logout()
+      await requireProducerEntry(secondStarted.promise)
       expect(
         (service as unknown as { pendingCredentialProducers: Set<unknown> })
           .pendingCredentialProducers.size
@@ -230,8 +326,7 @@ describe('AppService quit preparation', () => {
       // A real superseded producer rejects; an ordinary clear failure could
       // instead succeed through a durable LP, which would not prove this case.
       rejectedProducer.reject(new SupersededBeforeWrite())
-      expect(await first).toBeInstanceOf(SupersededBeforeWrite)
-      await requireProducerEntry(secondStarted.promise)
+      await expect(first).rejects.toBeInstanceOf(SupersededBeforeWrite)
       expect(prepareForQuit).not.toHaveBeenCalled()
 
       pendingProducer.resolve()
@@ -240,11 +335,7 @@ describe('AppService quit preparation', () => {
     } finally {
       rejectedProducer.resolve()
       pendingProducer.resolve()
-      await Promise.allSettled([
-        first,
-        ...(second ? [second] : []),
-        ...(preparation ? [preparation] : []),
-      ])
+      await Promise.allSettled([first, second, ...(preparation ? [preparation] : [])])
     }
   })
 

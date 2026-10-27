@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { persistAcceptedPasswordSession } from '../../testSupport/acceptedPasswordSession.js'
 import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
-import { testLoginResult, testSessionMe } from '../../testSupport/authTestFixtures.js'
+import {
+  testLoginResult,
+  testSessionMe,
+  testSessionTokenWithExpiry,
+} from '../../testSupport/authTestFixtures.js'
 
 afterEach(cleanupNativeCommitTestHarness)
 
@@ -27,7 +32,8 @@ describe('AppService runtime config discovery ownership', () => {
     const app = service as unknown as {
       authClient: {
         getDesktopEnvironment: ReturnType<typeof vi.fn>
-        googleLogin: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
       }
     }
     app.authClient = {
@@ -36,28 +42,23 @@ describe('AppService runtime config discovery ownership', () => {
         rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
         appName: 'Environment A',
       }),
-      googleLogin: vi.fn().mockResolvedValue(testLoginResult('session-token-a', me)),
+      passwordLogin: vi.fn().mockResolvedValue(testLoginResult(testSessionTokenWithExpiry(), me)),
+      getMe: vi.fn().mockResolvedValue(me),
     }
 
-    await service.googleLogin('google-token-a')
+    const candidateWrite = vi.spyOn(service.tokenStore, 'writeSessionTokenCandidate')
+    await service.passwordLogin('user-a@example.test', 'fixture-password')
 
     const rpcEnvKey = runtimeConfig.getDesktopRuntimeConfigState().envKey
-    const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
     expect(rpcEnvKey).not.toBe(restOnlyEnvKey)
-    expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
-      'session-token-a',
-      rpcEnvKey,
-      expect.objectContaining({
-        mayWrite: expect.any(Function),
-        onMutationDispatched: expect.any(Function),
-        onMutationSettled: expect.any(Function),
-      })
-    )
-    expect(bindChatStoreForUser).toHaveBeenLastCalledWith(
-      me.id,
-      rpcEnvKey,
-      expect.objectContaining({ legacyEnvKeys: [restOnlyEnvKey] })
-    )
+    expect(candidateWrite).not.toHaveBeenCalled()
+    expect(service.sessionToken).not.toBeNull()
+    const { getChatStore } = await import('../chatStoreBinding.js')
+    expect(getChatStore().getAuthorityScope()).toEqual({
+      environmentKey: rpcEnvKey,
+      userId: me.id,
+      teamId: me.teamId,
+    })
   })
 
   it('uses late RPC discovery for the active session without rebinding its durable identity', async () => {
@@ -80,7 +81,8 @@ describe('AppService runtime config discovery ownership', () => {
     const app = service as unknown as {
       authClient: {
         getDesktopEnvironment: typeof getDesktopEnvironment
-        googleLogin: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
         health: ReturnType<typeof vi.fn>
       }
       rpcClient: { health: ReturnType<typeof vi.fn> }
@@ -95,10 +97,13 @@ describe('AppService runtime config discovery ownership', () => {
     }
     app.authClient = {
       getDesktopEnvironment,
-      googleLogin: vi
+      passwordLogin: vi
         .fn()
-        .mockResolvedValueOnce(testLoginResult('session-token-a', me))
-        .mockResolvedValueOnce(testLoginResult('session-token-b', me)),
+        .mockResolvedValueOnce(testLoginResult(testSessionTokenWithExpiry(), me))
+        .mockResolvedValueOnce(
+          testLoginResult(testSessionTokenWithExpiry(Date.now() + 2 * 60 * 60 * 1000), me)
+        ),
+      getMe: vi.fn().mockResolvedValue(me),
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
     const { AuthClient } = await import('../authClient.js')
@@ -112,19 +117,14 @@ describe('AppService runtime config discovery ownership', () => {
     })
     app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
 
-    await service.googleLogin('google-token-a')
+    const candidateWrite = vi.spyOn(service.tokenStore, 'writeSessionTokenCandidate')
+    await service.passwordLogin('user-a@example.test', 'fixture-password')
     const generation = service.getSessionGeneration()
     const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
     const activeBindingCount = vi.mocked(bindChatStoreForUser).mock.calls.length
-    expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
-      'session-token-a',
-      restOnlyEnvKey,
-      expect.objectContaining({
-        mayWrite: expect.any(Function),
-        onMutationDispatched: expect.any(Function),
-        onMutationSettled: expect.any(Function),
-      })
-    )
+    expect(candidateWrite).not.toHaveBeenCalled()
+    const firstToken = service.sessionToken
+    expect(firstToken).not.toBeNull()
 
     await app.getDependenciesHealth()
     await app.getDependenciesHealth()
@@ -134,7 +134,7 @@ describe('AppService runtime config discovery ownership', () => {
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('')
     expect(app.getEffectiveRpcProxyBaseUrl()).toBe('https://rpc-discovered.example.test')
     expect(getDesktopEnvironment).toHaveBeenCalledTimes(2)
-    expect(service.tokenStore.setSessionToken).toHaveBeenCalledTimes(1)
+    expect(candidateWrite).not.toHaveBeenCalled()
     expect(vi.mocked(bindChatStoreForUser)).toHaveBeenCalledTimes(activeBindingCount)
     expect(app.getChatDeletionFenceAuthority().authorityScope.environmentKey).toBe(restOnlyEnvKey)
     expect(service.getSessionGeneration()).toBe(generation)
@@ -142,7 +142,10 @@ describe('AppService runtime config discovery ownership', () => {
     expect(app.gfsScopeIdentity?.environmentKey).toBe(restOnlyEnvKey)
 
     const openDesktopWindow = vi.fn().mockResolvedValue(undefined)
-    vi.doMock('../desktopWindow.js', () => ({ openDesktopWindow }))
+    vi.doMock('../desktopWindow.js', () => ({
+      openDesktopWindow,
+      closeAllDesktopWindows: vi.fn().mockResolvedValue(undefined),
+    }))
     await app.openDesktop('chatllm')
     expect(openDesktopWindow).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -154,33 +157,37 @@ describe('AppService runtime config discovery ownership', () => {
     await service.logout()
 
     const rpcConfiguredEnvKey = runtimeConfig.getDesktopRuntimeConfigState().envKey
-    expect(rpcConfiguredEnvKey).not.toBe(restOnlyEnvKey)
-    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')
-    expect(service.tokenStore.clearSessionTokenStrictly).toHaveBeenCalledWith(
-      restOnlyEnvKey,
-      expect.objectContaining({ legacyEnvKeys: expect.any(Array) })
-    )
+    // M logout keeps the configured durable identity unchanged. Discovery made while the
+    // previous session was active is applied only when a new auth boundary starts.
+    expect(rpcConfiguredEnvKey).toBe(restOnlyEnvKey)
+    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('')
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    expect(
+      await readSessionAuthoritySourceSelection({
+        tokenStore: service.tokenStore,
+        envKey: restOnlyEnvKey,
+      })
+    ).toMatchObject({ status: 'denied', frameMode: 'logged-out' })
     expect(app.gfsScopeIdentity).toBeNull()
 
-    await service.googleLogin('google-token-b')
-    expect(service.tokenStore.setSessionToken).toHaveBeenLastCalledWith(
-      'session-token-b',
-      rpcConfiguredEnvKey,
-      expect.objectContaining({
-        mayWrite: expect.any(Function),
-        onMutationDispatched: expect.any(Function),
-        onMutationSettled: expect.any(Function),
-      })
-    )
-    expect(bindChatStoreForUser).toHaveBeenLastCalledWith(
-      'user-a',
-      rpcConfiguredEnvKey,
-      expect.objectContaining({ legacyEnvKeys: [restOnlyEnvKey] })
-    )
+    await service.passwordLogin('user-a@example.test', 'fixture-password')
+    const nextConfiguredEnvKey = runtimeConfig.getDesktopRuntimeConfigState().envKey
+    expect(nextConfiguredEnvKey).not.toBe(restOnlyEnvKey)
+    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')
+    expect(candidateWrite).not.toHaveBeenCalled()
+    expect(service.sessionToken).not.toBe(firstToken)
+    const { getChatStore } = await import('../chatStoreBinding.js')
+    expect(getChatStore().getAuthorityScope()).toEqual({
+      environmentKey: nextConfiguredEnvKey,
+      userId: 'user-a',
+      teamId: 'team-a',
+    })
   })
 
   it('uses discovery completed during saved-session restore without changing durable identity', async () => {
-    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    const { service, runtimeConfig, restA, userDataDir } = await createNativeCommitTestHarness({
+      keytarAvailable: true,
+    })
     await runtimeConfig.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: restA,
       rpcProxyBaseUrl: '',
@@ -222,12 +229,13 @@ describe('AppService runtime config discovery ownership', () => {
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
     app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
-    await service.tokenStore.setSessionToken(
-      'synthetic-saved-session-a',
-      runtimeConfig.getActiveEnvKey()
-    )
+    await persistAcceptedPasswordSession({
+      tokenStore: service.tokenStore,
+      userDataDirectory: userDataDir,
+      token: 'synthetic-saved-session-a',
+    })
     service.tokenStore.setSessionToken.mockClear()
-    const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
+    const { getChatStore } = await import('../chatStoreBinding.js')
 
     const restore = service.getSessionState()
     await getMeStarted.promise
@@ -245,16 +253,12 @@ describe('AppService runtime config discovery ownership', () => {
 
     restoredMe.resolve(me)
     await expect(restore).resolves.toMatchObject({ authenticated: true, me })
-    expect(service.tokenStore.getSessionToken).toHaveBeenCalledWith(
-      restOnlyEnvKey,
-      expect.objectContaining({ legacyEnvKeys: [] })
-    )
     expect(service.tokenStore.setSessionToken).not.toHaveBeenCalled()
-    expect(bindChatStoreForUser).toHaveBeenLastCalledWith(
-      'user-a',
-      restOnlyEnvKey,
-      expect.objectContaining({ legacyEnvKeys: [] })
-    )
+    expect(getChatStore().getAuthorityScope()).toEqual({
+      environmentKey: restOnlyEnvKey,
+      userId: 'user-a',
+      teamId: 'team-a',
+    })
     expect(app.gfsScopeIdentity?.environmentKey).toBe(restOnlyEnvKey)
     expect(service.getCachedUserId()).toBe('user-a')
     expect(app.getEffectiveRpcProxyBaseUrl()).toBe('https://rpc-discovered.example.test')
@@ -271,8 +275,10 @@ describe('AppService runtime config discovery ownership', () => {
     expect(app.gfsScopeIdentity).toBeNull()
   })
 
-  it('commits a restore-pending discovery before an interactive login captures its binding', async () => {
-    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+  it('keeps the durable selector when restore-pending discovery would replace its identity', async () => {
+    const { service, runtimeConfig, restA, userDataDir } = await createNativeCommitTestHarness({
+      keytarAvailable: true,
+    })
     await runtimeConfig.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: restA,
       rpcProxyBaseUrl: '',
@@ -282,7 +288,7 @@ describe('AppService runtime config discovery ownership', () => {
     const app = service as unknown as {
       authClient: {
         getDesktopEnvironment: ReturnType<typeof vi.fn>
-        googleLogin: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
         getMe: ReturnType<typeof vi.fn>
         health: ReturnType<typeof vi.fn>
       }
@@ -292,10 +298,11 @@ describe('AppService runtime config discovery ownership', () => {
     const restoreStarted = deferred<void>()
     const { RpcProxyClient } = await import('../rpcProxyClient.js')
     vi.spyOn(RpcProxyClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
-    await service.tokenStore.setSessionToken(
-      'synthetic-saved-session',
-      runtimeConfig.getActiveEnvKey()
-    )
+    await persistAcceptedPasswordSession({
+      tokenStore: service.tokenStore,
+      userDataDirectory: userDataDir,
+      token: 'synthetic-saved-session',
+    })
     service.tokenStore.setSessionToken.mockClear()
     app.authClient = {
       getDesktopEnvironment: vi
@@ -306,10 +313,15 @@ describe('AppService runtime config discovery ownership', () => {
           rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
           appName: 'Environment A',
         }),
-      googleLogin: vi.fn().mockResolvedValue(testLoginResult('session-token-a', testSessionMe())),
-      getMe: vi.fn(() => {
-        restoreStarted.resolve()
-        return restoredMe.promise
+      passwordLogin: vi
+        .fn()
+        .mockResolvedValue(testLoginResult(testSessionTokenWithExpiry(), testSessionMe())),
+      getMe: vi.fn((token: string) => {
+        if (token === 'synthetic-saved-session') {
+          restoreStarted.resolve()
+          return restoredMe.promise
+        }
+        return Promise.resolve(testSessionMe())
       }),
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
@@ -317,22 +329,27 @@ describe('AppService runtime config discovery ownership', () => {
     const restore = service.getSessionState()
     await restoreStarted.promise
     await app.getDependenciesHealth()
-    await service.googleLogin('google-token-a')
+    await service.passwordLogin('user-a@example.test', 'fixture-password')
     restoredMe.resolve(testSessionMe())
     await restore
 
     const rpcAwareEnvKey = runtimeConfig.getDesktopRuntimeConfigState().envKey
-    expect(rpcAwareEnvKey).not.toBe(restOnlyEnvKey)
-    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')
-    expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
-      'session-token-a',
-      rpcAwareEnvKey,
-      expect.objectContaining({
-        mayWrite: expect.any(Function),
-        onMutationDispatched: expect.any(Function),
-        onMutationSettled: expect.any(Function),
+    expect(rpcAwareEnvKey).toBe(restOnlyEnvKey)
+    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('')
+    await expect(service.getSessionState()).resolves.toMatchObject({
+      authenticated: true,
+      me: { id: 'user-a' },
+    })
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    await expect(
+      readSessionAuthoritySourceSelection({
+        tokenStore: service.tokenStore,
+        envKey: rpcAwareEnvKey,
       })
-    )
+    ).resolves.toMatchObject({
+      status: 'accepted',
+      session: { token: expect.any(String) },
+    })
   })
 
   it('discards a stale effective endpoint when a different REST-only profile is selected', async () => {
@@ -372,14 +389,16 @@ describe('AppService runtime config discovery ownership', () => {
         rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
         appName: 'A',
       })
-    vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(testLoginResult())
+    vi.spyOn(AuthClient.prototype, 'passwordLogin').mockResolvedValue(testLoginResult())
+    vi.spyOn(AuthClient.prototype, 'getMe').mockResolvedValue(testSessionMe())
     vi.spyOn(AuthClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
     const { RpcProxyClient } = await import('../rpcProxyClient.js')
     vi.spyOn(RpcProxyClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
-    await service.googleLogin('synthetic-google')
+    await service.passwordLogin('user-a@example.test', 'fixture-password')
     const { AppService } = await import('../appService.js')
     await (service as unknown as InstanceType<typeof AppService>).getDependenciesHealth()
 
+    await service.logout()
     await service.selectRuntimeConfig(optionB.id)
 
     expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restB)
@@ -390,11 +409,6 @@ describe('AppService runtime config discovery ownership', () => {
   })
 
   it.each([
-    [
-      'Google',
-      (service: { googleLogin: (idToken: string) => Promise<unknown> }) =>
-        service.googleLogin('token'),
-    ],
     [
       'password',
       (service: { passwordLogin: (email: string, password: string) => Promise<unknown> }) =>
@@ -410,7 +424,6 @@ describe('AppService runtime config discovery ownership', () => {
     const app = service as unknown as {
       authClient: {
         getDesktopEnvironment: ReturnType<typeof vi.fn>
-        googleLogin: ReturnType<typeof vi.fn>
         passwordLogin: ReturnType<typeof vi.fn>
       }
       passwordLogin: (email: string, password: string) => Promise<unknown>
@@ -421,7 +434,6 @@ describe('AppService runtime config discovery ownership', () => {
         rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
         appName: 'Environment A',
       }),
-      googleLogin: vi.fn().mockRejectedValue(new Error('Google login rejected')),
       passwordLogin: vi.fn().mockRejectedValue(new Error('password login rejected')),
     }
 

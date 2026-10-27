@@ -65,26 +65,14 @@ describe('TokenStore isolated plaintext and historical migration compatibility',
     ).toBe(true)
   })
 
-  it('preserves the legacy token when scoped persistence fails during migration', async () => {
+  it('requires fresh authentication instead of importing production historical plaintext', async () => {
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
     const legacyFile = path.join(userDataDir, 'session-token.json')
     const scopedFile = path.join(userDataDir, `session-token-${ENV_A}.enc`)
     await fs.writeFile(legacyFile, JSON.stringify({ token: 'legacy-token' }))
-    const originalRename = fs.rename.bind(fs)
-    let renameAttempted = false
-    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-      if (String(to) === scopedFile) {
-        renameAttempted = true
-        const error = new Error('disk full') as NodeJS.ErrnoException
-        error.code = 'ENOSPC'
-        throw error
-      }
-      return originalRename(from, to)
-    })
 
     await expect(new TokenStore().getSessionToken(ENV_A)).resolves.toBeNull()
-    expect(renameAttempted).toBe(true)
 
     expect(JSON.parse(await fs.readFile(legacyFile, 'utf8'))).toEqual({
       token: 'legacy-token',

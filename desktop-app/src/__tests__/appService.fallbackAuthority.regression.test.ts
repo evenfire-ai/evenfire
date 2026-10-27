@@ -22,11 +22,10 @@ vi.mock('electron', () => ({
     decryptString: vi.fn((value: Buffer) => value.toString().replace(/^encrypted:/, '')),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -84,6 +83,10 @@ async function harness(options: { isolated?: boolean } = {}) {
     import('../pendingExternalLogout.js'),
     import('../config.js'),
   ])
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://auth.r21-l1.example.test',
+    rpcProxyBaseUrl: 'https://rpc.r21-l1.example.test',
+  })
   const tokenStore = new TokenStore(
     options.isolated ? { isolatedUserDataPath: runtime.directory } : {}
   )
@@ -101,6 +104,10 @@ async function harness(options: { isolated?: boolean } = {}) {
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
       switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
     }
   }
   vi.spyOn(state.authClient, 'getMe').mockImplementation(async token => ({
@@ -110,48 +117,62 @@ async function harness(options: { isolated?: boolean } = {}) {
   vi.spyOn(state.authClient, 'switchTeam').mockImplementation(async (_token, team) => ({
     token: team === homeMe.teamId ? homeToken : teamToken,
   }))
+  vi.spyOn(state.authClient, 'passwordLogin').mockResolvedValue({ token: homeToken, me: homeMe })
   const envKey = config.getActiveEnvKey()
   const markerPath = path.join(
     runtime.directory,
     `pending-external-logout-${createHash('sha256').update(envKey).digest('hex')}`
   )
-  return { service, tokenStore, markers, envKey, markerPath, state, reportFailure }
+  return { service, tokenStore, markers, config, envKey, markerPath, state, reportFailure }
 }
 
 describe('R21-L1 complete stale fallback authority', () => {
-  it('retires CP-S extras without exposing historical plaintext during a later encryption outage', async () => {
+  it('ignores V0 residue and accepts a new V1 safeStorage session when Keytar is unavailable', async () => {
     const h = await harness()
+    const envKey = h.config.getActiveEnvKey()
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
     const isolated = await harness({ isolated: true })
-    await isolated.tokenStore.setSessionToken(homeToken, h.envKey)
+    await isolated.tokenStore.setSessionToken(homeToken, envKey)
+    const plaintextPath = path.join(runtime.directory, `session-token-${envKey}.json`)
+    const plaintextBefore = await fs.readFile(plaintextPath)
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
     vi.doMock('keytar', () => ({}))
     const freshToken = 'fixture-r21-fresh-encrypted-user'
     const freshMe = { ...homeMe, id: 'fixture-r21-fresh-user' }
-    await h.state.installAuthenticatedLogin({ token: freshToken, me: freshMe })
-    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)?.intent).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'safe-storage',
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValue({
+      token: freshToken,
+      me: freshMe,
+    })
+    const getMe = vi.spyOn(h.state.authClient, 'getMe').mockResolvedValue(freshMe)
+    await expect(h.service.passwordLogin(freshMe.email, 'fixture-password')).resolves.toEqual({
+      authenticated: true,
+      me: freshMe,
+    })
+    expect(getMe).toHaveBeenCalledWith(freshToken)
+    expect(h.state.sessionToken).toBe(freshToken)
+    expect(h.state.me).toEqual(freshMe)
+    expect(await fs.readFile(plaintextPath)).toEqual(plaintextBefore)
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const accepted = await readSessionAuthoritySourceSelection({ tokenStore: h.tokenStore, envKey })
+    expect(accepted.status).toBe('accepted')
+    if (accepted.status !== 'accepted') throw new Error('Expected accepted V1 source')
+    expect(accepted.session.token).toBe(freshToken)
+    expect(accepted.session.accepted.record.frame.source).toMatchObject({
+      format: 'v1',
+      kind: 'safe-storage',
     })
     vi.doMock('keytar', () => boundary)
     const healthy = await harness()
-    vi.mocked(healthy.state.authClient.getMe).mockImplementation(async token =>
-      token === freshToken ? freshMe : homeMe
-    )
+    const restartGetMe = vi.spyOn(healthy.state.authClient, 'getMe').mockResolvedValue(freshMe)
     await expect(healthy.service.initialize()).resolves.toEqual({
       authenticated: true,
       me: freshMe,
     })
-    expect(healthy.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
-    expect(await healthy.tokenStore.getSafeStorageSessionToken(h.envKey)).toBe(freshToken)
-    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
-    const outage = await harness()
-    vi.mocked(outage.state.authClient.getMe).mockImplementation(async token =>
-      token === freshToken ? freshMe : homeMe
-    )
-    await expect(outage.service.initialize()).resolves.toEqual({ authenticated: false, me: null })
-    expect(outage.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+    expect(restartGetMe).toHaveBeenCalledWith(freshToken)
+    expect(healthy.state.sessionToken).toBe(freshToken)
+    expect(healthy.state.me).toEqual(freshMe)
+    expect(await fs.readFile(plaintextPath)).toEqual(plaintextBefore)
   })
   it.each([
     { source: 'encrypted', scope: 'active' },
@@ -166,12 +187,11 @@ describe('R21-L1 complete stale fallback authority', () => {
       const h = await harness()
       const previousToken = 'fixture-previous-user-session'
       const previousMe = { ...homeMe, id: 'fixture-previous-user' }
-      const legacyEnvKey = 'fixturelegacy-333333333333'
+      const legacyNamespace = h.config.getActiveLegacyEnvKeyInventory()
+      expect(legacyNamespace.complete).toBe(true)
+      const legacyEnvKey = legacyNamespace.keys[0]
+      if (!legacyEnvKey) throw new Error('Expected a verified pre-RPC environment key')
       const sourceEnvKey = scope === 'legacy-env' ? legacyEnvKey : h.envKey
-      if (scope === 'legacy-env') {
-        const config = await import('../config.js')
-        vi.spyOn(config, 'getActiveLegacyEnvKeys').mockReturnValue([legacyEnvKey])
-      }
       if (source === 'encrypted') {
         await h.tokenStore.setSafeStorageSessionToken(previousToken, sourceEnvKey)
       } else {
@@ -189,10 +209,31 @@ describe('R21-L1 complete stale fallback authority', () => {
         )
       }
       expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
-      await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+      await h.service.passwordLogin(homeMe.email, 'fixture-password')
       expect(h.state.sessionToken).toBe(homeToken)
-      expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
-      vi.doMock('keytar', () => ({}))
+      const { readSessionAuthoritySourceSelection } =
+        await import('../sessionAuthorityAcceptance.js')
+      const selected = await readSessionAuthoritySourceSelection({
+        tokenStore: h.tokenStore,
+        envKey: h.envKey,
+      })
+      expect(selected.status).toBe('accepted')
+      if (selected.status !== 'accepted') throw new Error('Expected the fresh V1 authority')
+      expect(selected.session.token).toBe(homeToken)
+      const selectedSource = selected.session.accepted.record.frame.source
+      expect(selectedSource).toMatchObject({ format: 'v1', kind: 'keytar', accountId: homeMe.id })
+      if (!selectedSource || selectedSource.format !== 'v1' || selectedSource.kind !== 'keytar')
+        throw new Error('Expected the selected V1 Keytar source')
+      const selectedAccount = `session-v1:${selectedSource.sourceRef}`
+      boundary.getPassword.mockImplementation(async (service, account) => {
+        if (account === selectedAccount)
+          throw Object.assign(new Error('fixture selected source is unavailable'), {
+            code: 'EACCES',
+          })
+        return boundary.keychain.get(keyOf(service, account)) ?? null
+      })
+      vi.resetModules()
+      vi.doMock('keytar', () => boundary)
       const restarted = await harness()
       vi.mocked(restarted.state.authClient.getMe).mockImplementation(async token =>
         token === previousToken ? previousMe : homeMe

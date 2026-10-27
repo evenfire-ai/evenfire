@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rename, rm, symlink, truncate, writeFile } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
-import { config, getActiveEnvKey } from '../config.js'
+import { config, getActiveEnvKey, saveDesktopRuntimeConfig } from '../config.js'
 import { DesktopUploadCapabilityError, normalizeUploadProductMaxBytes } from '../gfs/upload.js'
 import { readPendingExternalLogoutMarker } from '../pendingExternalLogout.js'
 import { TokenStore } from '../tokenStore.js'
@@ -28,11 +28,10 @@ afterEach(() => {
   tokenStorageRuntime.directory = ''
 })
 
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  getChatStore: vi.fn(),
-  unbindChatStore: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 
 const RESOURCE_ID = '11111111-1111-1111-1111-111111111111'
 
@@ -317,11 +316,12 @@ type UploadScopeTestService = {
   desktopGfsUploadStatePath: () => Promise<string>
   startDesktopGfsUpload: ReturnType<typeof vi.fn>
   authClient: {
+    getMe: ReturnType<typeof vi.fn>
     passwordLogin: ReturnType<typeof vi.fn>
     googleLogin: ReturnType<typeof vi.fn>
   }
   tokenStore: TokenStore
-  completePasswordLogin: (email: string, password: string) => ReturnType<AppService['googleLogin']>
+  passwordLogin: AppService['passwordLogin']
   googleLogin: AppService['googleLogin']
   listGfsUploadSessions: AppService['listGfsUploadSessions']
   getGfsUploadSnapshot: AppService['getGfsUploadSnapshot']
@@ -339,15 +339,17 @@ type UploadScopeTestService = {
 
 async function authenticatedUploadService(statePath: string): Promise<UploadScopeTestService> {
   tokenStorageRuntime.directory = dirname(statePath)
+  await saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://auth.gfs-acceptance.test',
+    rpcProxyBaseUrl: 'https://rpc.gfs-acceptance.test',
+  })
   const tokenStore = new TokenStore({ isolatedUserDataPath: tokenStorageRuntime.directory })
-  await tokenStore.setSessionToken('token-a', getActiveEnvKey())
   vi.spyOn(tokenStore, 'setSessionToken')
   const service = new AppService({
     tokenStore,
     getUserDataDirectory: () => dirname(statePath),
   }) as unknown as UploadScopeTestService
-  setGfsFixtureSession(service, 'token-a')
-  service.me = {
+  const homeUser = {
     id: 'user-a',
     email: 'a@example.test',
     name: null,
@@ -356,20 +358,14 @@ async function authenticatedUploadService(statePath: string): Promise<UploadScop
     teamName: 'Team A',
     role: null,
   }
-  service.gfsAuthEpoch = 7
-  service.gfsDispatchBlocked = false
-  ;(service as any).gfsScopeIdentity = {
-    ownerId: service.me.id,
-    teamId: service.me.teamId,
-    environmentKey: getActiveEnvKey(),
-    baseUrl: canonicalExternalBaseUrl(),
-  }
   service.desktopGfsUploadStatePath = async () => statePath
   service.authClient = {
-    passwordLogin: vi.fn(),
+    getMe: vi.fn(async () => homeUser),
+    passwordLogin: vi.fn().mockResolvedValue({ token: 'token-a', me: homeUser }),
     googleLogin: vi.fn(),
   }
   service.startDesktopGfsUpload = vi.fn()
+  await service.passwordLogin(homeUser.email, 'fixture-password')
   return service
 }
 
@@ -535,11 +531,13 @@ describe('AppService GFS upload security scope', () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-transient-controls-'))
     try {
       const statePath = join(root, 'gfs-upload-sessions.json')
-      const record = scopedUploadRecord('92929292-9292-4292-8292-929292929292')
-      await writeFile(statePath, JSON.stringify({ version: 2, records: [record], quarantined: [] }))
       const service = (await authenticatedUploadService(statePath)) as UploadScopeTestService & {
         gfsTransientTeamHopDepth: number
       }
+      const record = scopedUploadRecord('92929292-9292-4292-8292-929292929292', {
+        authEpoch: service.gfsAuthEpoch,
+      })
+      await writeFile(statePath, JSON.stringify({ version: 2, records: [record], quarantined: [] }))
       const job = {
         snapshot: vi.fn(() => ({
           state: 'uploading',
@@ -746,9 +744,22 @@ describe('AppService GFS upload security scope', () => {
         throw new Error('unreachable pending capabilities request')
       }) as typeof fetch
 
-      const service = new AppService() as unknown as {
+      tokenStorageRuntime.directory = root
+      await saveDesktopRuntimeConfig({
+        externalRestApiBaseUrl: 'https://auth.gfs-acceptance.test',
+        rpcProxyBaseUrl: 'https://rpc.gfs-acceptance.test',
+      })
+      const service = new AppService({
+        tokenStore: new TokenStore({ isolatedUserDataPath: root }),
+        getUserDataDirectory: () => root,
+      }) as unknown as {
         sessionToken: string | null
         me: UploadScopeTestService['me']
+        passwordLogin: AppService['passwordLogin']
+        authClient: {
+          passwordLogin: ReturnType<typeof vi.fn>
+          getMe: ReturnType<typeof vi.fn>
+        }
         gfsAuthEpoch: number
         gfsDispatchBlocked: boolean
         gfsScopeIdentity: Omit<
@@ -760,8 +771,7 @@ describe('AppService GFS upload security scope', () => {
         startDesktopGfsUpload: (input: Record<string, unknown>) => Promise<unknown>
         suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
       }
-      setGfsFixtureSession(service, 'token-a')
-      service.me = {
+      const userA = {
         id: 'user-a',
         email: 'a@example.test',
         name: null,
@@ -770,14 +780,15 @@ describe('AppService GFS upload security scope', () => {
         teamName: 'Team A',
         role: null,
       }
-      service.gfsAuthEpoch = 7
-      service.gfsDispatchBlocked = false
-      service.gfsScopeIdentity = {
-        ownerId: 'user-a',
-        teamId: 'team-a',
-        environmentKey: getActiveEnvKey(),
-        baseUrl: canonicalExternalBaseUrl(),
-      }
+      vi.spyOn(service.authClient, 'passwordLogin').mockResolvedValue({
+        token: 'token-a',
+        me: userA,
+      })
+      vi.spyOn(service.authClient, 'getMe').mockResolvedValue(userA)
+      await expect(service.passwordLogin(userA.email, 'fixture-password')).resolves.toMatchObject({
+        authenticated: true,
+        me: userA,
+      })
       service.desktopGfsUploadStatePath = async () => join(root, 'gfs-upload-sessions.json')
 
       const start = service.startDesktopGfsUpload({
@@ -844,10 +855,23 @@ describe('AppService GFS upload security scope', () => {
       expect(service.sessionToken).toBeNull()
       expect(service.gfsDispatchBlocked).toBe(true)
       await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBeNull()
-      expect(readPendingExternalLogoutMarker(root, getActiveEnvKey())).toBeNull()
+      expect(readPendingExternalLogoutMarker(root, getActiveEnvKey())).toMatchObject({
+        intent: { intent: 'logout-pending' },
+        revision: expect.any(String),
+      })
+      const { SessionAuthorityRecordRepository } = await import('../sessionAuthorityRecord.js')
+      const authorityScope = await service.tokenStore.createSessionAuthorityStorageScope()
+      const authority = new SessionAuthorityRecordRepository(
+        authorityScope,
+        getActiveEnvKey(),
+        service.tokenStore
+      ).observe()
+      expect(authority.status).toBe('observed')
+      if (authority.status !== 'observed') throw new Error('Expected durable logout authority')
+      expect(authority.record.frame.mode).toBe('logged-out')
+      expect(authority.record.logoutReceipt).not.toBeNull()
 
-      setGfsFixtureSession(service, 'token-b')
-      service.me = {
+      const nextOwner = {
         id: 'user-b',
         email: 'b@example.test',
         name: null,
@@ -856,21 +880,19 @@ describe('AppService GFS upload security scope', () => {
         teamName: 'Team B',
         role: null,
       }
-      service.gfsDispatchBlocked = false
-      ;(service as any).gfsScopeIdentity = {
-        ownerId: service.me.id,
-        teamId: service.me.teamId,
-        environmentKey: getActiveEnvKey(),
-        baseUrl: canonicalExternalBaseUrl(),
-      }
+      service.authClient.passwordLogin.mockResolvedValueOnce({ token: 'token-b', me: nextOwner })
+      service.authClient.getMe.mockResolvedValue(nextOwner)
+      await expect(service.passwordLogin(nextOwner.email, 'fixture-password')).resolves.toEqual({
+        authenticated: true,
+        me: nextOwner,
+      })
       await expect(service.listGfsUploadSessions('main')).resolves.toEqual([])
       await expect(service.resumeGfsUpload(exact.uploadId, 'main')).rejects.toThrow(
         'not available in the active security scope'
       )
       expect(service.startDesktopGfsUpload).not.toHaveBeenCalled()
 
-      setGfsFixtureSession(service, 'token-a-new')
-      service.me = {
+      const originalOwner = {
         id: 'user-a',
         email: 'a@example.test',
         name: null,
@@ -879,13 +901,17 @@ describe('AppService GFS upload security scope', () => {
         teamName: 'Team A',
         role: null,
       }
-      service.gfsAuthEpoch += 1
-      ;(service as any).gfsScopeIdentity = {
-        ownerId: service.me.id,
-        teamId: service.me.teamId,
-        environmentKey: getActiveEnvKey(),
-        baseUrl: canonicalExternalBaseUrl(),
-      }
+      service.authClient.passwordLogin.mockResolvedValueOnce({
+        token: 'token-a-new',
+        me: originalOwner,
+      })
+      service.authClient.getMe.mockResolvedValue(originalOwner)
+      await expect(service.passwordLogin(originalOwner.email, 'fixture-password')).resolves.toEqual(
+        {
+          authenticated: true,
+          me: originalOwner,
+        }
+      )
       service.startDesktopGfsUpload.mockResolvedValue({ ...exact.session, state: 'uploading' })
       await service.resumeGfsUpload(exact.uploadId, 'main')
       expect(service.startDesktopGfsUpload).toHaveBeenCalledWith(
@@ -896,11 +922,13 @@ describe('AppService GFS upload security scope', () => {
     }
   })
 
-  it('aborts and awaits an in-flight legacy fallback before logout clears A credentials', async () => {
+  it('fences A before draining an in-flight legacy fallback during logout', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-auth-fence-'))
     try {
       const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
-      const scope = scopedUploadRecord('91919191-9191-4191-8191-919191919191').scope
+      const scope = scopedUploadRecord('91919191-9191-4191-8191-919191919191', {
+        authEpoch: service.gfsAuthEpoch,
+      }).scope
       let releaseAbort!: () => void
       const abortReleased = new Promise<void>(resolve => {
         releaseAbort = resolve
@@ -925,14 +953,40 @@ describe('AppService GFS upload security scope', () => {
       })
       await vi.waitFor(() => expect(sawAbort).toBe(true))
       expect(logoutSettled).toBe(false)
-      await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBe('token-a')
+      const { SessionAuthorityRecordRepository: SessionAuthorityRecordRepositoryBeforeLogout } =
+        await import('../sessionAuthorityRecord.js')
+      const beforeLogoutScope = await service.tokenStore.createSessionAuthorityStorageScope()
+      const beforeLogoutCommit = new SessionAuthorityRecordRepositoryBeforeLogout(
+        beforeLogoutScope,
+        getActiveEnvKey(),
+        service.tokenStore
+      ).observe()
+      expect(beforeLogoutCommit.status).toBe('observed')
+      if (beforeLogoutCommit.status !== 'observed')
+        throw new Error('Expected logout authority to remain observable while GFS drains')
+      expect(beforeLogoutCommit.record.frame.mode).toBe('logged-out')
+      expect(service.sessionToken).toBeNull()
+      expect(service.me).toBeNull()
       releaseAbort()
       await logout
 
       await expect(settled).resolves.toContain('authentication fence')
       expect(service.sessionToken).toBeNull()
-      await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBeNull()
-      expect(readPendingExternalLogoutMarker(root, getActiveEnvKey())).toBeNull()
+      expect(readPendingExternalLogoutMarker(root, getActiveEnvKey())).toMatchObject({
+        intent: { intent: 'logout-pending' },
+        revision: expect.any(String),
+      })
+      const { SessionAuthorityRecordRepository } = await import('../sessionAuthorityRecord.js')
+      const authorityScope = await service.tokenStore.createSessionAuthorityStorageScope()
+      const authority = new SessionAuthorityRecordRepository(
+        authorityScope,
+        getActiveEnvKey(),
+        service.tokenStore
+      ).observe()
+      expect(authority.status).toBe('observed')
+      if (authority.status !== 'observed') throw new Error('Expected durable logout authority')
+      expect(authority.record.frame.mode).toBe('logged-out')
+      expect(authority.record.logoutReceipt).not.toBeNull()
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -944,7 +998,10 @@ describe('AppService GFS upload security scope', () => {
       const root = await mkdtemp(join(tmpdir(), `evenfire-gfs-${loginKind}-login-fence-`))
       try {
         const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
-        const scope = scopedUploadRecord('92929292-9292-4292-8292-929292929292').scope
+        const writeCandidate = vi.spyOn(service.tokenStore, 'writeSessionTokenCandidate')
+        const scope = scopedUploadRecord('92929292-9292-4292-8292-929292929292', {
+          authEpoch: service.gfsAuthEpoch,
+        }).scope
         const nextMe = {
           id: 'user-b',
           email: 'b@example.test',
@@ -956,6 +1013,7 @@ describe('AppService GFS upload security scope', () => {
         }
         service.authClient.passwordLogin.mockResolvedValue({ token: 'token-b', me: nextMe })
         service.authClient.googleLogin.mockResolvedValue({ token: 'token-b', me: nextMe })
+        service.authClient.getMe.mockResolvedValue(nextMe)
 
         let releaseAbort!: () => void
         const abortReleased = new Promise<void>(resolve => {
@@ -979,11 +1037,7 @@ describe('AppService GFS upload security scope', () => {
         let loginSettled = false
         const login = (
           loginKind === 'password'
-            ? service.completePasswordLogin(
-                'b@example.test',
-                'password',
-                service.getSessionGeneration()
-              )
+            ? service.passwordLogin('b@example.test', 'password')
             : service.googleLogin('google-id-token')
         ).then(result => {
           loginSettled = true
@@ -993,7 +1047,34 @@ describe('AppService GFS upload security scope', () => {
         await vi.waitFor(() => expect(sawAbort).toBe(true))
         expect(loginSettled).toBe(false)
         expect(service.sessionToken).toBe('token-a')
-        await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBe('token-a')
+        expect(writeCandidate).toHaveBeenCalledWith(
+          expect.objectContaining({ token: 'token-b', accountId: 'user-b' })
+        )
+        const { SessionAuthorityRecordRepository } = await import('../sessionAuthorityRecord.js')
+        const authorityScope = await service.tokenStore.createSessionAuthorityStorageScope()
+        const pendingAuthority = new SessionAuthorityRecordRepository(
+          authorityScope,
+          getActiveEnvKey(),
+          service.tokenStore
+        ).observe()
+        expect(pendingAuthority.status).toBe('observed')
+        if (pendingAuthority.status !== 'observed')
+          throw new Error('Expected A authority while B is still awaiting consumer drain')
+        expect(pendingAuthority.record.frame.mode).toBe('persistent')
+        expect(pendingAuthority.record.frame.source).toMatchObject({
+          accountId: 'user-a',
+          format: 'v1',
+        })
+        const pendingSelection = await import('../sessionAuthorityAcceptance.js').then(
+          ({ readSessionAuthoritySourceSelection }) =>
+            readSessionAuthoritySourceSelection({
+              tokenStore: service.tokenStore,
+              envKey: getActiveEnvKey(),
+            })
+        )
+        expect(
+          pendingSelection.status === 'accepted' && pendingSelection.session.token === 'token-b'
+        ).toBe(false)
         expect(service.tokenStore.setSessionToken).not.toHaveBeenCalled()
         releaseAbort()
 
@@ -1002,16 +1083,21 @@ describe('AppService GFS upload security scope', () => {
         expect(service.sessionToken).toBe('token-b')
         expect(service.me).toEqual(nextMe)
         expect(service.gfsDispatchBlocked).toBe(false)
-        await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBe('token-b')
-        expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
-          'token-b',
-          getActiveEnvKey(),
-          {
-            mayWrite: expect.any(Function),
-            onMutationDispatched: expect.any(Function),
-            onMutationSettled: expect.any(Function),
-          }
+        const acceptedSelection = await import('../sessionAuthorityAcceptance.js').then(
+          ({ readSessionAuthoritySourceSelection }) =>
+            readSessionAuthoritySourceSelection({
+              tokenStore: service.tokenStore,
+              envKey: getActiveEnvKey(),
+            })
         )
+        expect(acceptedSelection.status).toBe('accepted')
+        if (acceptedSelection.status !== 'accepted')
+          throw new Error('Expected the accepted candidate source after login')
+        expect(acceptedSelection.session.token).toBe('token-b')
+        expect(acceptedSelection.session.accepted.record.frame.source).toMatchObject({
+          accountId: 'user-b',
+          format: 'v1',
+        })
       } finally {
         await rm(root, { recursive: true, force: true })
       }

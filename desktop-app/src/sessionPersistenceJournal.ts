@@ -2,6 +2,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { PendingExternalLogoutMarker } from './pendingExternalLogout.js'
+import {
+  renameSessionAuthorityFileDurablySync,
+  retireSessionCredentialFileDurablySync,
+} from './sessionAuthorityDurableFileOps.js'
 import type { SessionTokenMutationSource } from './tokenStore.js'
 
 const MAX_ENTRIES = 128
@@ -34,6 +38,22 @@ export type SessionPersistenceJournal = {
   revision: string
   pending: SessionPersistenceDenial[]
 }
+
+/**
+ * Content-addressed compatibility receipt for the immutable pre-V2 denial journal.
+ * The journal's random `revision` is not an ownership proof; exact raw bytes are.
+ */
+export type SessionPersistenceLegacySnapshotReceipt = {
+  schemaVersion: 0 | 1
+  revision: string
+  byteLength: number
+  digest: string
+  denials: Array<{ producer: string; candidateHash: string }>
+}
+
+export type SessionPersistenceLegacySnapshotObservation =
+  | { status: 'observed'; receipt: SessionPersistenceLegacySnapshotReceipt }
+  | { status: 'transient' | 'invalid'; error: unknown }
 
 export class SessionPersistenceJournalAdmissionError extends Error {
   constructor(cause: unknown) {
@@ -198,6 +218,58 @@ export function readSessionPersistenceJournal(directory: string, envKey: string)
   return parse(readContents(journalPath(directory, envKey)))
 }
 
+/** Observe the legacy journal as an immutable, bounded V0 denial snapshot. */
+export function observeSessionPersistenceLegacySnapshot(
+  directory: string,
+  envKey: string
+): SessionPersistenceLegacySnapshotObservation {
+  try {
+    const contents = readContents(journalPath(directory, envKey))
+    const journal = parse(contents)
+    const raw =
+      contents === null
+        ? Buffer.from('session-persistence-journal:absent:v0')
+        : Buffer.from(contents)
+    const digest = createHash('sha256').update(raw).digest('hex')
+    return {
+      status: 'observed',
+      receipt: {
+        schemaVersion: contents === null ? 0 : 1,
+        revision: `v0-sha256:${digest}`,
+        byteLength: contents === null ? 0 : Buffer.byteLength(contents),
+        digest,
+        denials: (journal?.pending ?? []).map(({ producer, candidateHash }) => ({
+          producer,
+          candidateHash,
+        })),
+      },
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    return {
+      status:
+        typeof code === 'string' &&
+        ['EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EINTR', 'EIO'].includes(code)
+          ? 'transient'
+          : 'invalid',
+      error,
+    }
+  }
+}
+
+export function sessionPersistenceLegacySnapshotMatches(
+  expected: SessionPersistenceLegacySnapshotReceipt,
+  current: SessionPersistenceLegacySnapshotReceipt
+): boolean {
+  return (
+    expected.schemaVersion === current.schemaVersion &&
+    expected.revision === current.revision &&
+    expected.byteLength === current.byteLength &&
+    expected.digest === current.digest &&
+    JSON.stringify(expected.denials) === JSON.stringify(current.denials)
+  )
+}
+
 /** Capture before cleanup starts; a later producer's journal must never be erased. */
 export function snapshotSessionPersistenceJournal(directory: string, envKey: string) {
   const snapshot = {} as SessionPersistenceJournalSnapshot
@@ -221,18 +293,15 @@ export function retireSessionPersistenceJournalAfterVerifiedLogout(
 }
 
 function syncDirectory(directory: string): void {
+  if (process.platform === 'win32')
+    throw Object.assign(
+      new Error('Windows session journal requires a native write-through namespace operation'),
+      { code: 'ENOTSUP' }
+    )
   let descriptor: number | undefined
   try {
     descriptor = fs.openSync(directory, 'r')
     fs.fsyncSync(descriptor)
-  } catch (error) {
-    if (
-      process.platform !== 'win32' ||
-      !['EISDIR', 'EPERM', 'EINVAL', 'ENOTSUP'].includes(
-        String((error as NodeJS.ErrnoException)?.code)
-      )
-    )
-      throw error
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor)
   }
@@ -252,11 +321,10 @@ function writeIfUnchanged(
   if (readContents(file) !== expected) return false
   if (pending.length === 0) {
     try {
-      fs.unlinkSync(file)
+      retireSessionCredentialFileDurablySync(file)
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error
     }
-    syncDirectory(directory)
     return true
   }
   const journal: SessionPersistenceJournal = { version: 1, revision: randomUUID(), pending }
@@ -272,8 +340,12 @@ function writeIfUnchanged(
     fs.closeSync(descriptor)
     descriptor = undefined
     if (readContents(file) !== expected) return false
-    fs.renameSync(temporary, file)
-    syncDirectory(directory)
+    if (process.platform === 'win32') {
+      renameSessionAuthorityFileDurablySync(temporary, file, expected !== null)
+    } else {
+      fs.renameSync(temporary, file)
+      syncDirectory(directory)
+    }
     return true
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor)
@@ -291,6 +363,7 @@ function writeIfUnchanged(
 export class SessionPersistenceProducer {
   readonly producer = randomUUID()
   private accepted = false
+  private repairedRetirementVerified = false
   private planned = new Set<string>()
   private candidates = new Set<string>()
   private priorHash: string | undefined
@@ -461,7 +534,34 @@ export class SessionPersistenceProducer {
     if (this.accepted)
       throw new Error('Accepted persistence producer cannot roll back another candidate')
     this.requireOwnership()
-    return this.retire()
+    const retired = this.retire()
+    if (retired) this.repairedRetirementVerified = true
+    return retired
+  }
+
+  get hasVerifiedRepairedRetirement(): boolean {
+    return this.repairedRetirementVerified
+  }
+
+  /**
+   * Once exact prior-source repair is verified, remove only its rollback-denial
+   * entry. The rejected candidate denial and every other producer remain intact.
+   */
+  resolveVerifiedPriorRepair(priorToken: string): boolean {
+    const priorHash = sessionPersistenceCandidateHash(priorToken)
+    if (!this.priorHash || priorHash !== this.priorHash)
+      throw new Error('Prior repair does not match the captured session owner')
+    this.requireRuntimeOwnership()
+    const file = journalPath(this.directory, this.envKey)
+    const contents = readContents(file)
+    const current = parse(contents)
+    if (!current) return true
+    const pending = current.pending.filter(
+      entry => entry.producer !== this.producer || entry.candidateHash !== priorHash
+    )
+    if (pending.length === current.pending.length) return true
+    this.requireRuntimeOwnership()
+    return writeIfUnchanged(this.directory, this.envKey, contents, pending)
   }
 
   private retire(acceptedHash?: string, acceptedRetry = false): boolean {
@@ -470,7 +570,11 @@ export class SessionPersistenceProducer {
       const contents = readContents(file)
       const current = parse(contents)
       if (!current) {
-        syncDirectory(this.directory)
+        // A confirmed ENOENT is a read-only observation, not a namespace mutation. On Windows
+        // all journal namespace mutations already use MoveFileExW(MOVEFILE_WRITE_THROUGH), while
+        // opening a directory for fsync is unsupported. Do not turn an absent journal into a
+        // false acceptance failure by asking the platform to flush an unchanged directory.
+        if (process.platform !== 'win32') syncDirectory(this.directory)
         return true
       }
       const pending = current.pending.filter(entry =>

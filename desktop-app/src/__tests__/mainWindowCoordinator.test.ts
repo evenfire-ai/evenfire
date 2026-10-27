@@ -114,21 +114,27 @@ describe('retryable initializer', () => {
 describe('quit drain registration', () => {
   const nextImmediate = () => new Promise<void>(resolve => setImmediate(resolve))
 
-  it('reports retry callback errors and does not notify when no logout was applied', async () => {
+  it('keeps retry outcomes and renderer notification failures distinct', async () => {
     const cancelQuitPreparation = vi.fn()
     const onApplied = vi.fn()
     const onFailure = vi.fn()
+    const onNotApplied = vi.fn()
+    const onNotificationFailure = vi.fn()
     retryPendingExternalLogoutAfterQuitCancellation(
       cancelQuitPreparation,
       async () => false,
       onApplied,
-      onFailure
+      onFailure,
+      onNotApplied,
+      onNotificationFailure
     )
     await nextImmediate()
 
     expect(cancelQuitPreparation).toHaveBeenCalledOnce()
     expect(onApplied).not.toHaveBeenCalled()
+    expect(onNotApplied).toHaveBeenCalledOnce()
     expect(onFailure).not.toHaveBeenCalled()
+    expect(onNotificationFailure).not.toHaveBeenCalled()
 
     const callbackError = new Error('renderer notification failed')
     retryPendingExternalLogoutAfterQuitCancellation(
@@ -137,11 +143,27 @@ describe('quit drain registration', () => {
       () => {
         throw callbackError
       },
-      onFailure
+      onFailure,
+      onNotApplied,
+      onNotificationFailure
     )
     await nextImmediate()
 
-    expect(onFailure).toHaveBeenCalledWith(callbackError)
+    expect(onFailure).not.toHaveBeenCalled()
+    expect(onNotificationFailure).toHaveBeenCalledWith(callbackError)
+
+    const operationError = new Error('logout operation failed')
+    retryPendingExternalLogoutAfterQuitCancellation(
+      cancelQuitPreparation,
+      async () => Promise.reject(operationError),
+      onApplied,
+      onFailure,
+      onNotApplied,
+      onNotificationFailure
+    )
+    await nextImmediate()
+
+    expect(onFailure).toHaveBeenCalledWith(operationError)
   })
 
   function createAppHarness() {

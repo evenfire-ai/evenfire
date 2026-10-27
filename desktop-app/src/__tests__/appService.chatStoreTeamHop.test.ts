@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { testSessionTokenWithExpiry } from '../../testSupport/authTestFixtures.js'
 import { AppService } from '../appService.js'
 import {
   __setChatStoreBaseDirForTests,
@@ -50,25 +51,45 @@ const member = (teamId: string) => ({
   role: 'member',
 })
 
-/** An AppService signed in on team-a whose auth client answers team switches. */
-function signedInService(getMeAnswers: string[]): AppService {
+/** A publicly authenticated AppService on team-a whose client answers team switches. */
+async function signedInService(getMeAnswers: string[]): Promise<AppService> {
+  const runtimeConfig = await import('../config.js')
+  await runtimeConfig.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://api.chat-store-team-hop.example.test',
+    rpcProxyBaseUrl: 'https://rpc.chat-store-team-hop.example.test',
+    appName: 'Chat store team-hop test',
+  })
   const service = new AppService({ getUserDataDirectory: () => base }) as unknown as Record<
     string,
     unknown
   >
-  service.sessionToken = 'team-a-token'
-  service.me = member('team-a')
-  const getMe = vi.fn()
-  for (const teamId of getMeAnswers) getMe.mockResolvedValueOnce(member(teamId))
+  let tokenSequence = 0
+  const teamByToken = new Map<string, string>()
+  const issueToken = (teamId: string) => {
+    const token = testSessionTokenWithExpiry(Date.now() + (60 + ++tokenSequence) * 1000)
+    teamByToken.set(token, teamId)
+    return token
+  }
+  const homeToken = issueToken('team-a')
+  const getMe = vi.fn(async (token: string) => {
+    const teamId = teamByToken.get(token)
+    if (!teamId) throw new Error('unexpected identity validation token')
+    if (token !== homeToken && getMeAnswers.shift() !== teamId)
+      throw new Error('identity validation did not match the issued team token')
+    return member(teamId)
+  })
   service.authClient = {
+    passwordLogin: vi.fn().mockResolvedValue({ token: homeToken, me: member('team-a') }),
     getMe,
     switchTeam: vi.fn(async (_token: string, teamId: string) => ({
-      token: `${teamId}-token`,
+      token: issueToken(teamId),
       team: { id: teamId, name: teamId, role: 'member' },
     })),
   }
-  service.tokenStore = new TokenStore({ isolatedUserDataPath: base })
-  return service as unknown as AppService
+  const appService = service as unknown as AppService
+  appService.tokenStore = new TokenStore({ isolatedUserDataPath: base })
+  await appService.passwordLogin(member('team-a').email, 'synthetic-password')
+  return appService
 }
 
 const lateMessage = (): ChatMessage => ({
@@ -80,7 +101,7 @@ const lateMessage = (): ChatMessage => ({
 
 describe('chat store scope across a transient team hop', () => {
   it('keeps the store scope and the delete authority on the home team for the whole hop', async () => {
-    const service = signedInService(['team-b', 'team-a'])
+    const service = await signedInService(['team-b', 'team-a'])
     const internals = service as unknown as {
       bindCurrentChatStore(userId: string): Promise<void>
       runWithTeamContext<T>(teamId: string, op: (token: string) => Promise<T>): Promise<T>
@@ -117,7 +138,7 @@ describe('chat store scope across a transient team hop', () => {
   })
 
   it('releases the home-team pin once the hop completes so the store follows the session again', async () => {
-    const service = signedInService(['team-b', 'team-a', 'team-c'])
+    const service = await signedInService(['team-b', 'team-a', 'team-c'])
     const internals = service as unknown as {
       bindCurrentChatStore(userId: string): Promise<void>
       runWithTeamContext<T>(teamId: string, op: (token: string) => Promise<T>): Promise<T>
@@ -158,18 +179,26 @@ describe('chat store scope across a transient team hop', () => {
     }
 
     /** team-a service whose auth client accepts the hop to team-b and refuses the way back. */
-    function serviceFailingToRestore(): { service: AppService; internals: HopInternals } {
-      const service = signedInService(['team-b'])
-      const authClient = (service as unknown as { authClient: { switchTeam: unknown } }).authClient
+    async function serviceFailingToRestore(): Promise<{
+      service: AppService
+      internals: HopInternals
+    }> {
+      const service = await signedInService(['team-b'])
+      const authClient = (
+        service as unknown as {
+          authClient: { switchTeam: (token: string, teamId: string) => Promise<unknown> }
+        }
+      ).authClient
+      const switchTeam = authClient.switchTeam.bind(authClient)
       authClient.switchTeam = vi.fn(async (_token: string, teamId: string) => {
         if (teamId === 'team-a') throw new Error('network down')
-        return { token: `${teamId}-token`, team: { id: teamId, name: teamId, role: 'member' } }
+        return switchTeam(_token, teamId)
       })
       return { service, internals: service as unknown as HopInternals }
     }
 
     it('rebinds the store to the team the session is really on so the delete fence still matches', async () => {
-      const { service, internals } = serviceFailingToRestore()
+      const { service, internals } = await serviceFailingToRestore()
       await internals.bindCurrentChatStore('user-1')
       const store = requireChatStore()
       await store.createChat('agent-1', 'c1')
@@ -199,47 +228,27 @@ describe('chat store scope across a transient team hop', () => {
       expect(await requireChatStore().loadMessages('agent-1', 'c2')).toEqual([])
     })
 
-    it('logs a failed rebind and keeps the error of the failed operation', async () => {
-      const { internals } = serviceFailingToRestore()
+    it('preserves the failed operation when restoring Home also fails', async () => {
+      const { service, internals } = await serviceFailingToRestore()
       await internals.bindCurrentChatStore('user-1')
-      const realBind = internals.bindCurrentChatStore.bind(internals)
-      let hopFinished = false
-      const rebindAttempts: string[] = []
-      internals.bindCurrentChatStore = vi.fn(async (userId: string) => {
-        if (!hopFinished) return realBind(userId)
-        rebindAttempts.push(userId)
-        throw new Error('rebind exploded')
-      })
-      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const operationFailure = new Error('operation failed')
 
-      try {
-        await expect(
-          internals.runWithTeamContext('team-b', async () => {
-            hopFinished = true
-            throw new Error('operation failed')
-          })
-        ).rejects.toThrow('operation failed')
+      await expect(
+        internals.runWithTeamContext('team-b', async () => {
+          throw operationFailure
+        })
+      ).rejects.toBe(operationFailure)
 
-        // Liveness witness: the rebind ran and failed, and it was reported.
-        expect(rebindAttempts).toEqual(['user-1'])
-        const logged = errorLog.mock.calls.map(([record]) => JSON.parse(String(record)))
-        expect(logged).toContainEqual(
-          expect.objectContaining({
-            level: 'error',
-            service: 'desktop-app',
-            message: expect.stringContaining('Failed to rebind the chat store'),
-            err: { name: 'Error' },
-          })
-        )
-        expect(JSON.stringify(logged)).not.toContain('rebind exploded')
-      } finally {
-        errorLog.mockRestore()
-      }
+      // The producer failure remains observable while the actual accepted hop owner and chat
+      // deletion scope are restored coherently after the failed Home transition.
+      expect(internals.me.teamId).toBe('team-b')
+      expect(service.getChatDeletionFenceAuthority().authorityScope.teamId).toBe('team-b')
+      expect(requireChatStore().getAuthorityScope()?.teamId).toBe('team-b')
     })
   })
 
   it('still rebinds the store when the team changes without a restoring hop', async () => {
-    const service = signedInService(['team-b'])
+    const service = await signedInService(['team-b'])
     const internals = service as unknown as {
       bindCurrentChatStore(userId: string): Promise<void>
       suspendDesktopGfsUploadsForAuthBoundary(): Promise<void>

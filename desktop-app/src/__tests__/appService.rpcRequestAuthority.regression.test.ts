@@ -16,10 +16,10 @@ vi.mock('electron', () => ({
   shell: { openExternal: vi.fn() },
 }))
 vi.mock('keytar', () => keytar)
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({ notifySessionChanged: vi.fn() }),
 }))
@@ -59,9 +59,12 @@ describe('AppService RPC request authority', () => {
     process.env.RPC_PROXY_BASE_URL = 'http://proxy.rpc-lease.test'
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-rpc-authority-'))
     fixture.directory = directory
-    keytar.getPassword.mockRejectedValue(new Error('OS credential store unavailable'))
-    keytar.setPassword.mockRejectedValue(new Error('OS credential store unavailable'))
-    keytar.deletePassword.mockRejectedValue(new Error('OS credential store unavailable'))
+    const credentialStoreDenied = Object.assign(new Error('OS credential store denied access'), {
+      code: 'EACCES',
+    })
+    keytar.getPassword.mockRejectedValue(credentialStoreDenied)
+    keytar.setPassword.mockRejectedValue(credentialStoreDenied)
+    keytar.deletePassword.mockRejectedValue(credentialStoreDenied)
     const [appServiceModule, tokenStoreModule, httpModule] = await Promise.all([
       import('../appService.js'),
       import('../tokenStore.js'),
@@ -94,6 +97,13 @@ describe('AppService RPC request authority', () => {
     })
   }
 
+  function meResponse(me: typeof firstMe | typeof secondMe) {
+    return new Response(JSON.stringify(me), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
   function rpcTokenResponse(token: string) {
     return new Response(
       JSON.stringify({
@@ -114,10 +124,11 @@ describe('AppService RPC request authority', () => {
 
   it('allows temporary authentication to use its derived RPC credential over HTTP', async () => {
     const accessToken = sessionToken(firstMe.id)
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.endsWith('/api/v1/auth/password-login'))
+      if (url.endsWith('/api/v1/auth/v2/password-login'))
         return credentialResponse(accessToken, firstMe)
+      if (url.endsWith('/api/v1/me')) return meResponse(firstMe)
       if (url.endsWith('/api/v1/rpc/token')) return rpcTokenResponse('derived-rpc-credential')
       if (url.endsWith('/api/v1/sandbox-ui/apps'))
         return new Response(JSON.stringify({ apps: [] }), {
@@ -145,12 +156,12 @@ describe('AppService RPC request authority', () => {
       setCookie: 'sandbox_session=opaque; Path=/; HttpOnly',
     })
 
-    expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    expect(fetchMock.mock.calls[2][1]).toMatchObject({
       method: 'POST',
       headers: expect.objectContaining({ authorization: `Bearer ${accessToken}` }),
     })
-    expect(fetchMock.mock.calls[2][1]).toMatchObject({
+    expect(fetchMock.mock.calls[3][1]).toMatchObject({
       headers: expect.objectContaining({ authorization: 'Bearer derived-rpc-credential' }),
     })
   })
@@ -160,13 +171,17 @@ describe('AppService RPC request authority', () => {
     const secondToken = sessionToken(secondMe.id)
     let loginNumber = 0
     let rpcTokenNumber = 0
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.endsWith('/api/v1/auth/password-login')) {
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
         loginNumber += 1
         return loginNumber === 1
           ? credentialResponse(firstToken, firstMe)
           : credentialResponse(secondToken, secondMe)
+      }
+      if (url.endsWith('/api/v1/me')) {
+        const authorization = new Headers(init?.headers).get('authorization')
+        return meResponse(authorization === `Bearer ${secondToken}` ? secondMe : firstMe)
       }
       if (url.endsWith('/api/v1/rpc/token'))
         return rpcTokenResponse(`derived-rpc-credential-${++rpcTokenNumber}`)

@@ -75,10 +75,8 @@ type Migration = {
 const migrations: Migration[] = [
   { name: 'environment Keytar', scope: 'environment', source: 'keytar' },
   { name: 'environment encrypted file', scope: 'environment', source: 'encrypted' },
-  { name: 'environment plaintext file', scope: 'environment', source: 'plaintext' },
   { name: 'global Keytar', scope: 'global', source: 'keytar' },
   { name: 'global encrypted file', scope: 'global', source: 'encrypted' },
-  { name: 'global plaintext file', scope: 'global', source: 'plaintext' },
 ]
 
 beforeEach(async () => {
@@ -235,5 +233,32 @@ describe('TokenStore migrations stay inside an already accepted read', () => {
         fixture.keychain.set(account, token)
       })
     }
+  })
+
+  it.each([
+    { name: 'environment', scope: 'environment' as const },
+    { name: 'global', scope: 'global' as const },
+  ])('does not automatically import a historical $name plaintext credential', async migration => {
+    const { sourceFile } = await seedMigration({ ...migration, source: 'plaintext' })
+    fixture.encryptionAvailable = true
+    const originalBytes = await fs.readFile(sourceFile)
+    const keytar = await import('keytar')
+    vi.mocked(keytar.setPassword).mockClear()
+    const store = new TokenStore()
+    const onTokenRead = vi.fn()
+    const onMutationDispatched = vi.fn()
+
+    await expect(
+      store.getSessionToken(ENV, {
+        legacyEnvKeys: migration.scope === 'environment' ? [LEGACY_ENV] : [],
+        onTokenRead,
+        onMutationDispatched,
+      })
+    ).resolves.toBeNull()
+
+    expect(onTokenRead).not.toHaveBeenCalled()
+    expect(onMutationDispatched).not.toHaveBeenCalled()
+    expect(keytar.setPassword).not.toHaveBeenCalled()
+    await expect(fs.readFile(sourceFile)).resolves.toEqual(originalBytes)
   })
 })

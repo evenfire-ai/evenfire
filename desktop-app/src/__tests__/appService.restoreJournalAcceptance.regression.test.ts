@@ -23,11 +23,10 @@ vi.mock('electron', () => ({
     decryptString: (value: Buffer) => value.toString().replace(/^encrypted:/, ''),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -54,6 +53,7 @@ const userFor = (token: string) =>
     : { ...homeMe, teamId: token === teamToken ? 'fixture-team' : homeMe.teamId }
 const releases = new Set<() => void>()
 const operations = new Set<Promise<unknown>>()
+let previousConfigPath: string | undefined
 
 function gate() {
   let resolve!: () => void
@@ -101,6 +101,8 @@ beforeEach(async () => {
   vi.doMock('keytar', () => boundary)
   boundary.keychain.clear()
   boundary.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-journal-producer-'))
+  previousConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
+  process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(boundary.directory, 'desktop-runtime.json')
   boundary.getPassword
     .mockReset()
     .mockImplementation(
@@ -115,6 +117,11 @@ beforeEach(async () => {
       boundary.keychain.delete(keyOf(service, account))
     )
   boundary.notifySessionChanged.mockReset()
+  const config = await import('../config.js')
+  await config.saveDesktopRuntimeConfig({
+    externalRestApiBaseUrl: 'https://api.example.test',
+    rpcProxyBaseUrl: 'https://rpc.example.test',
+  })
   const { safeStorage } = await import('electron')
   vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
 })
@@ -123,6 +130,9 @@ afterEach(async () => {
   await Promise.allSettled([...operations])
   releases.clear()
   vi.restoreAllMocks()
+  if (previousConfigPath === undefined) delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+  else process.env.CLERUM_DESKTOP_CONFIG_PATH = previousConfigPath
+  previousConfigPath = undefined
   await fs.rm(boundary.directory, { recursive: true, force: true })
   boundary.directory = ''
   boundary.keychain.clear()
@@ -151,6 +161,10 @@ async function harness() {
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
       switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+      passwordLogin: (
+        email: string,
+        password: string
+      ) => Promise<{ token: string; me: typeof homeMe }>
     }
   }
   vi.spyOn(state.authClient, 'getMe').mockImplementation(async token => userFor(token))
@@ -175,11 +189,22 @@ describe('R21-M10 automatic acceptance rechecks unresolved same-hash authority',
   it.each(['getMe', 'chat-bind'] as const)(
     'preserves a later rejected same-hash login while automatic restore awaits %s',
     async boundaryPhase => {
+      const seed = await harness()
+      seed.state.authClient.passwordLogin = vi.fn().mockResolvedValue({
+        token: homeToken,
+        me: homeMe,
+      })
+      await seed.service.passwordLogin(homeMe.email, 'synthetic-password')
+      await expect(seed.service.initialize()).resolves.toEqual({
+        authenticated: true,
+        me: homeMe,
+      })
+      const chatBinding = await import('../chatStoreBinding.js')
+      chatBinding.unbindChatStore()
       const original = await harness()
-      await original.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
       const validationEntered = gate()
       const validationRelease = gate()
-      const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
+      const { prepareChatStoreBindingForUser } = await import('../chatStoreBinding.js')
       if (boundaryPhase === 'getMe') {
         vi.mocked(original.state.authClient.getMe).mockImplementationOnce(async () => {
           validationEntered.resolve()
@@ -187,9 +212,13 @@ describe('R21-M10 automatic acceptance rechecks unresolved same-hash authority',
           return homeMe
         })
       } else {
-        vi.mocked(bindChatStoreForUser).mockImplementationOnce(async () => {
+        const prepare = vi.mocked(prepareChatStoreBindingForUser)
+        const prepareNormally = prepare.getMockImplementation()
+        if (!prepareNormally) throw new Error('Chat preparation fixture is not installed')
+        prepare.mockImplementationOnce(async (...args) => {
           validationEntered.resolve()
           await validationRelease.promise
+          return prepareNormally(...args)
         })
       }
       const restore = own(original.service.initialize())
@@ -199,69 +228,59 @@ describe('R21-M10 automatic acceptance rechecks unresolved same-hash authority',
       )
       await entered(validationEntered.promise, restore)
       const rejected = await harness()
-      vi.mocked(bindChatStoreForUser).mockRejectedValueOnce(
-        new Error('fixture-independent chat bind failed')
+      vi.spyOn(rejected.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+        token: homeToken,
+        me: homeMe,
+      })
+      vi.mocked(prepareChatStoreBindingForUser).mockRejectedValueOnce(
+        new Error('fixture-independent staged chat preparation failed')
       )
+      let failCandidateCleanupOnce = true
       boundary.deletePassword.mockImplementation(async (service, account) => {
-        if (account === 'session-token::' + rejected.envKey)
+        if (account.startsWith('session-v1:') && failCandidateCleanupOnce) {
+          failCandidateCleanupOnce = false
           throw new Error('fixture-independent native rollback failed')
+        }
         return boundary.keychain.delete(keyOf(service, account))
       })
-      const rejection = await rejected.state
-        .installAuthenticatedLogin({ token: homeToken, me: homeMe })
+      const rejection = await rejected.service
+        .passwordLogin('fixture@example.test', 'fixture-password')
         .then(
           () => null,
           error => error
         )
       expect(rejection).toBeInstanceOf(Error)
-      expect(await rejected.tokenStore.getKeytarSessionToken(rejected.envKey)).toBe(homeToken)
-      expect(
-        rejected.markers.readPendingExternalLogoutMarker(boundary.directory, rejected.envKey)
-      ).toBeNull()
-      expect(
-        rejected.journal.isSessionPersistenceCandidateDenied(
-          rejected.journal.readSessionPersistenceJournal(boundary.directory, rejected.envKey),
-          homeToken
-        )
-      ).toBe(true)
+      expect((rejection as Error).message).toBe(
+        'fixture-independent staged chat preparation failed'
+      )
+      expect(await rejected.tokenStore.getKeytarSessionToken(rejected.envKey)).toBeNull()
+      const authorityAfterRejection = await import('../sessionAuthorityAcceptance.js').then(
+        module =>
+          module.readSessionAuthoritySourceSelection({
+            tokenStore: rejected.tokenStore,
+            envKey: rejected.envKey,
+          })
+      )
+      expect(authorityAfterRejection.status).toBe('accepted')
+      if (authorityAfterRejection.status !== 'accepted')
+        throw new Error('Rejected candidate displaced the prior accepted source')
+      expect(authorityAfterRejection.session.token).toBe(homeToken)
+      expect(authorityAfterRejection.session.accepted.record.frame.source).toMatchObject({
+        format: 'v1',
+        kind: 'keytar',
+      })
       validationRelease.resolve()
       const outcome = await restoreOutcome
       const restarted = await harness()
       await expect(restarted.service.initialize()).resolves.toEqual({
-        authenticated: false,
-        me: null,
-      })
-      expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
-      expect(
-        rejected.journal.isSessionPersistenceCandidateDenied(
-          rejected.journal.readSessionPersistenceJournal(boundary.directory, rejected.envKey),
-          homeToken
-        )
-      ).toBe(true)
-      expect(outcome).toEqual({ authenticated: false, me: null })
-      expect(original.state.sessionToken).toBeNull()
-      expect(original.state.me).toBeNull()
-      expect(await rejected.tokenStore.getKeytarSessionToken(rejected.envKey)).toBe(homeToken)
-
-      // A new explicitly authenticated secure producer may accept this same hash.
-      // That is distinct from laundering it through an already-started restore.
-      const fresh = await harness()
-      await expect(
-        fresh.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
-      ).resolves.toEqual({ authenticated: true, me: homeMe })
-      expect(
-        fresh.journal.isSessionPersistenceCandidateDenied(
-          fresh.journal.readSessionPersistenceJournal(boundary.directory, fresh.envKey),
-          homeToken
-        )
-      ).toBe(false)
-      expect(await fresh.tokenStore.getKeytarSessionToken(fresh.envKey)).toBe(homeToken)
-      const recoveredRestart = await harness()
-      await expect(recoveredRestart.service.initialize()).resolves.toEqual({
         authenticated: true,
         me: homeMe,
       })
-      expect(recoveredRestart.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
+      expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
+      expect(outcome).toEqual({ authenticated: false, me: null })
+      expect(original.state.sessionToken).toBeNull()
+      expect(original.state.me).toBeNull()
+      expect(await rejected.tokenStore.getKeytarSessionToken(rejected.envKey)).toBeNull()
     }
   )
 })

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { QuitAdmissionClosedError } from '../appService.js'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
 import { isQuitAdmissionClosedError } from '../mainWindowCoordinator.js'
+import type { DesktopLogoutOutcome } from '../types.js'
 
 type SentMessage = {
   channel: string
@@ -39,7 +40,9 @@ function createHarness() {
   let authenticated = true
   const focusWindow = vi.fn()
   const requestMainWindow = vi.fn()
-  const logout = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+  const logout = vi
+    .fn<() => Promise<DesktopLogoutOutcome>>()
+    .mockResolvedValue({ kind: 'committed', sessionGeneration: 1, cleanup: 'not-required' })
   const deferLogout = vi.fn<(error: unknown) => boolean | void>()
   const getSessionState = vi.fn(async () => ({ authenticated }))
   const reportLogoutFailure = vi.fn()
@@ -263,6 +266,45 @@ describe('evenfire deep-link router', () => {
     }
   })
 
+  it('resynchronizes renderer state without treating a rejected LP CAS as success', async () => {
+    const harness = createHarness()
+    harness.setRendererReady(true)
+    harness.setAuthenticated(false)
+    harness.logout.mockResolvedValue({
+      kind: 'not-committed',
+      reason: 'failed',
+      sessionGeneration: 1,
+    })
+
+    harness.router.handle('evenfire://logout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(harness.getSessionState).toHaveBeenCalledOnce()
+    expect(harness.sent).toEqual([
+      { channel: 'auth:sessionStateChanged', payload: undefined, window: 'initial' },
+    ])
+    expect(harness.reportLogoutFailure).toHaveBeenCalledOnce()
+    expect(harness.focusWindow).not.toHaveBeenCalled()
+  })
+
+  it('does not notify renderer signed-out state when rejected logout leaves auth active', async () => {
+    const harness = createHarness()
+    harness.setRendererReady(true)
+    harness.setAuthenticated(true)
+    harness.logout.mockResolvedValue({
+      kind: 'not-committed',
+      reason: 'superseded',
+      sessionGeneration: 1,
+    })
+
+    harness.router.handle('evenfire://logout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(harness.getSessionState).toHaveBeenCalledOnce()
+    expect(harness.sent).toEqual([])
+    expect(harness.focusWindow).not.toHaveBeenCalled()
+  })
+
   it('reports a generic shutdown-shaped error unless the caller confirms durable deferral', async () => {
     const harness = createHarness()
     const failure = new Error('Application is shutting down')
@@ -313,7 +355,7 @@ describe('evenfire deep-link router', () => {
     }
   })
 
-  it('reports external logout after a failure that already cleared authentication', async () => {
+  it('does not signal logout success after an exceptional unverified outcome', async () => {
     const harness = createHarness()
     const error = new Error('credential deletion failed')
     harness.setAuthenticated(false)
@@ -323,10 +365,8 @@ describe('evenfire deep-link router', () => {
     await new Promise<void>(resolve => setImmediate(resolve))
 
     expect(harness.reportLogoutFailure).toHaveBeenCalledWith(error)
-    expect(harness.getSessionState).toHaveBeenCalledOnce()
-    expect(harness.sent).toEqual([
-      { channel: 'auth:externalLogout', payload: undefined, window: 'initial' },
-    ])
-    expect(harness.focusWindow).toHaveBeenCalledOnce()
+    expect(harness.getSessionState).not.toHaveBeenCalled()
+    expect(harness.sent).toEqual([])
+    expect(harness.focusWindow).not.toHaveBeenCalled()
   })
 })

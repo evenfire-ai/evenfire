@@ -4,22 +4,15 @@ import os from 'node:os'
 import path from 'node:path'
 
 const fixture = vi.hoisted(() => ({ directory: '' }))
-const keytar = vi.hoisted(() => ({
-  getPassword: vi.fn(),
-  setPassword: vi.fn(),
-  deletePassword: vi.fn(),
-}))
-
 vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => fixture.directory), isReady: vi.fn(() => true) },
   safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
   shell: { openExternal: vi.fn() },
 }))
-vi.mock('keytar', () => keytar)
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({ notifySessionChanged: vi.fn() }),
 }))
@@ -59,9 +52,6 @@ describe('AppService stale session invalidation', () => {
     process.env.RPC_PROXY_BASE_URL = 'http://proxy.rpc-lease.test'
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-rpc-invalidation-'))
     fixture.directory = directory
-    keytar.getPassword.mockRejectedValue(new Error('OS credential store unavailable'))
-    keytar.setPassword.mockRejectedValue(new Error('OS credential store unavailable'))
-    keytar.deletePassword.mockRejectedValue(new Error('OS credential store unavailable'))
     const [appServiceModule, tokenStoreModule, httpModule] = await Promise.all([
       import('../appService.js'),
       import('../tokenStore.js'),
@@ -95,7 +85,10 @@ describe('AppService stale session invalidation', () => {
   }
 
   function createService() {
-    return new AppService({ tokenStore: new TokenStore(), getUserDataDirectory: () => directory })
+    return new AppService({
+      tokenStore: new TokenStore({ isolatedUserDataPath: directory }),
+      getUserDataDirectory: () => directory,
+    })
   }
 
   it('does not let an old session 401 invalidate its replacement', async () => {
@@ -108,7 +101,7 @@ describe('AppService stale session invalidation', () => {
     let loginNumber = 0
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.endsWith('/api/v1/auth/password-login')) {
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
         loginNumber += 1
         return Promise.resolve(
           loginNumber === 1
@@ -116,6 +109,13 @@ describe('AppService stale session invalidation', () => {
             : credentialResponse(secondToken, secondMe)
         )
       }
+      if (url.endsWith('/api/v1/me'))
+        return Promise.resolve(
+          new Response(JSON.stringify(loginNumber === 1 ? firstMe : secondMe), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        )
       if (url.endsWith('/api/v1/probe')) return probePending
       if (url.endsWith('/api/v1/rpc/token')) {
         return Promise.resolve(
@@ -144,7 +144,7 @@ describe('AppService stale session invalidation', () => {
       value => ({ value }),
       error => ({ error })
     )
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
 
     await service.passwordLogin(secondMe.email, 'second-password')
     resolveProbe(new Response('unauthorized', { status: 401 }))
@@ -162,10 +162,17 @@ describe('AppService stale session invalidation', () => {
     let loginNumber = 0
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.endsWith('/api/v1/auth/password-login')) {
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
         loginNumber += 1
         return Promise.resolve(credentialResponse(accessToken, firstMe))
       }
+      if (url.endsWith('/api/v1/me'))
+        return Promise.resolve(
+          new Response(JSON.stringify(firstMe), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        )
       if (url.endsWith('/api/v1/probe')) return probePending
       return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
     })
@@ -181,7 +188,7 @@ describe('AppService stale session invalidation', () => {
       value => ({ value }),
       error => ({ error })
     )
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
 
     await service.passwordLogin(firstMe.email, 'reauthenticated-password')
     resolveProbe(new Response('unauthorized', { status: 401 }))

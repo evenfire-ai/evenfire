@@ -1,6 +1,46 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { establishAcceptedPasswordSession } from '../../testSupport/acceptedPasswordSession.js'
+import { testSessionMe } from '../../testSupport/authTestFixtures.js'
 import { AppService } from '../appService.js'
 import { ApiError } from '../httpClient.js'
+import { TokenStore } from '../tokenStore.js'
+
+const fixture = vi.hoisted(() => ({ directory: '' }))
+const sessionMe = testSessionMe({ id: '7', teamId: 'team-1' })
+
+vi.mock('../config.js', () => ({
+  getActiveEnvKey: () => 'test_env-000000000000',
+  getActiveRuntimeConfigOptionId: () => null,
+  getActiveLegacyEnvKeys: () => [],
+  getActiveLegacyEnvKeyInventory: () => ({ keys: [], complete: true }),
+  hydrateDesktopRuntimeConfig: vi.fn(),
+  isDesktopRuntimeConfigured: () => true,
+  resolveEnvKey: () => 'test_env-000000000000',
+  config: {
+    rpcProxyBaseUrl: 'http://proxy',
+    externalRestApiBaseUrl: 'http://rest',
+    enableDevLoginUi: false,
+    requestTimeoutMs: 60_000,
+    appName: 'test',
+  },
+}))
+
+vi.mock('electron', () => ({
+  app: {
+    getPath: () => fixture.directory,
+    isPackaged: false,
+    isReady: () => true,
+  },
+  safeStorage: { isEncryptionAvailable: () => false },
+}))
+
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 
 // Drain team-context resolution plus the serialized auth/environment commit
 // queue introduced by runtime-profile handoff. This does not advance timers.
@@ -10,18 +50,49 @@ async function flushAsyncWork(iterations = 64): Promise<void> {
   }
 }
 
+const tempDirectories: string[] = []
+
+async function makeService(): Promise<any> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-task-progress-'))
+  tempDirectories.push(directory)
+  fixture.directory = directory
+  const service = new AppService({
+    tokenStore: new TokenStore({ isolatedUserDataPath: directory }),
+    getUserDataDirectory: () => directory,
+  }) as any
+  await establishAcceptedPasswordSession(service, { me: sessionMe })
+  service.rpcTokenManager = {
+    getOrIssue: vi.fn().mockResolvedValue({
+      token: 'rpc-token',
+      expiresInSeconds: 300,
+      scopes: ['host:activity:read'],
+    }),
+    clear: vi.fn(),
+  }
+  return service
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+})
+
+afterEach(async () => {
+  vi.useRealTimers()
+  await Promise.all(
+    tempDirectories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true }))
+  )
+})
+
 describe('AppService.startTaskProgressStream', () => {
   it('forwards waiting and open as DISTINCT renderer events (de-collapsed, §4.5-1)', async () => {
-    const service = new AppService() as any
-
-    service.sessionToken = 'session-token'
+    const service = await makeService()
     // issueRpcTokenForHostRefs requires a resolvable current team (team-bounded
 
     // RPC tokens); me.teamId short-circuits resolution without network calls.
-    service.me = { id: 7, teamId: 'team-1' }
     service.rpcTokenManager = {
       getOrIssue: vi.fn().mockResolvedValue({
         token: 'rpc-token',
+        expiresInSeconds: 300,
         scopes: ['host:activity:read'],
       }),
       clear: vi.fn(),
@@ -73,16 +144,14 @@ describe('AppService.startTaskProgressStream', () => {
   })
 
   it('forwards heartbeat events to the renderer (watchdog keepalive)', async () => {
-    const service = new AppService() as any
-
-    service.sessionToken = 'session-token'
+    const service = await makeService()
     // issueRpcTokenForHostRefs requires a resolvable current team (team-bounded
 
     // RPC tokens); me.teamId short-circuits resolution without network calls.
-    service.me = { id: 7, teamId: 'team-1' }
     service.rpcTokenManager = {
       getOrIssue: vi.fn().mockResolvedValue({
         token: 'rpc-token',
+        expiresInSeconds: 300,
         scopes: ['host:activity:read'],
       }),
       clear: vi.fn(),
@@ -125,11 +194,13 @@ describe('AppService.startTaskProgressStream', () => {
   })
 
   it('stopAllStreams() tears down silently — no `closed`/terminal to a live tracker (R-F13)', async () => {
-    const service = new AppService() as any
-    service.sessionToken = 'session-token'
-    service.me = { id: 7, teamId: 'team-1' }
+    const service = await makeService()
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token', scopes: ['host:activity:read'] }),
+      getOrIssue: vi.fn().mockResolvedValue({
+        token: 'rpc-token',
+        expiresInSeconds: 300,
+        scopes: ['host:activity:read'],
+      }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -190,15 +261,15 @@ describe('AppService.startTaskProgressStream', () => {
   it('reconnects after a transport drop and replays the terminal (no error)', async () => {
     vi.useFakeTimers()
     try {
-      const service = new AppService() as any
-      service.sessionToken = 'session-token'
+      const service = await makeService()
       // issueRpcTokenForHostRefs requires a resolvable current team (team-bounded
       // RPC tokens); me.teamId short-circuits resolution without network calls.
-      service.me = { id: 7, teamId: 'team-1' }
       service.rpcTokenManager = {
-        getOrIssue: vi
-          .fn()
-          .mockResolvedValue({ token: 'rpc-token', scopes: ['host:activity:read'] }),
+        getOrIssue: vi.fn().mockResolvedValue({
+          token: 'rpc-token',
+          expiresInSeconds: 300,
+          scopes: ['host:activity:read'],
+        }),
         clear: vi.fn(),
       }
       let calls = 0
@@ -247,15 +318,15 @@ describe('AppService.startTaskProgressStream', () => {
   it('does not retry on task_not_found_or_expired; surfaces the loss for reconcile', async () => {
     vi.useFakeTimers()
     try {
-      const service = new AppService() as any
-      service.sessionToken = 'session-token'
+      const service = await makeService()
       // issueRpcTokenForHostRefs requires a resolvable current team (team-bounded
       // RPC tokens); me.teamId short-circuits resolution without network calls.
-      service.me = { id: 7, teamId: 'team-1' }
       service.rpcTokenManager = {
-        getOrIssue: vi
-          .fn()
-          .mockResolvedValue({ token: 'rpc-token', scopes: ['host:activity:read'] }),
+        getOrIssue: vi.fn().mockResolvedValue({
+          token: 'rpc-token',
+          expiresInSeconds: 300,
+          scopes: ['host:activity:read'],
+        }),
         clear: vi.fn(),
       }
       service.rpcClient = {
@@ -297,15 +368,15 @@ describe('AppService.startTaskProgressStream', () => {
   it('emits a single gone after exhausting all reconnect attempts (§4.5-2)', async () => {
     vi.useFakeTimers()
     try {
-      const service = new AppService() as any
-      service.sessionToken = 'session-token'
+      const service = await makeService()
       // issueRpcTokenForHostRefs requires a resolvable current team (team-bounded
       // RPC tokens); me.teamId short-circuits resolution without network calls.
-      service.me = { id: 7, teamId: 'team-1' }
       service.rpcTokenManager = {
-        getOrIssue: vi
-          .fn()
-          .mockResolvedValue({ token: 'rpc-token', scopes: ['host:activity:read'] }),
+        getOrIssue: vi.fn().mockResolvedValue({
+          token: 'rpc-token',
+          expiresInSeconds: 300,
+          scopes: ['host:activity:read'],
+        }),
         clear: vi.fn(),
       }
       service.rpcClient = {
@@ -348,21 +419,10 @@ describe('AppService.startTaskProgressStream', () => {
 
   // ── F3: the 8s bound guards CONNECTION ESTABLISHMENT, not the reporter wait ──
 
-  function makeService(): any {
-    const service = new AppService() as any
-    service.sessionToken = 'session-token'
-    service.me = { id: 7, teamId: 'team-1' }
-    service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token', scopes: ['host:activity:read'] }),
-      clear: vi.fn(),
-    }
-    return service
-  }
-
   it('F3: a >8s gap between waiting and open does NOT abort or emit a false error', async () => {
     vi.useFakeTimers()
     try {
-      const service = makeService()
+      const service = await makeService()
       let calls = 0
       service.rpcClient = {
         openTaskProgressStream: vi
@@ -415,7 +475,7 @@ describe('AppService.startTaskProgressStream', () => {
   it('F3: no waiting within 8s still aborts the attempt and retries', async () => {
     vi.useFakeTimers()
     try {
-      const service = makeService()
+      const service = await makeService()
       let calls = 0
       service.rpcClient = {
         openTaskProgressStream: vi
@@ -469,7 +529,7 @@ describe('AppService.startTaskProgressStream', () => {
   it('F3: a connection that goes silent AFTER waiting is still eventually caught', async () => {
     vi.useFakeTimers()
     try {
-      const service = makeService()
+      const service = await makeService()
       let calls = 0
       service.rpcClient = {
         openTaskProgressStream: vi
@@ -522,7 +582,7 @@ describe('AppService.startTaskProgressStream', () => {
   it('F4: a single transient 401 on token re-issue retries and recovers', async () => {
     vi.useFakeTimers()
     try {
-      const service = makeService()
+      const service = await makeService()
       let issueCalls = 0
       service.rpcTokenManager = {
         getOrIssue: vi.fn().mockImplementation(async () => {
@@ -530,7 +590,7 @@ describe('AppService.startTaskProgressStream', () => {
           if (issueCalls === 1) {
             throw new ApiError('Unauthorized', 401, '')
           }
-          return { token: 'rpc-token-fresh', scopes: ['host:activity:read'] }
+          return { token: 'rpc-token-fresh', expiresInSeconds: 300, scopes: ['host:activity:read'] }
         }),
         clear: vi.fn(),
       }
@@ -576,7 +636,7 @@ describe('AppService.startTaskProgressStream', () => {
   it('F4: a persistent 401 on token re-issue gives up after the reconnect budget', async () => {
     vi.useFakeTimers()
     try {
-      const service = makeService()
+      const service = await makeService()
       service.rpcTokenManager = {
         getOrIssue: vi.fn().mockRejectedValue(new ApiError('Unauthorized', 401, '')),
         clear: vi.fn(),
@@ -610,14 +670,18 @@ describe('AppService.startTaskProgressStream', () => {
   it('F4: a healthy stream that absorbed prior drops still survives a later 401 (attempt budget reset on heartbeat)', async () => {
     vi.useFakeTimers()
     try {
-      const service = makeService()
+      const service = await makeService()
       let issueCalls = 0
       service.rpcTokenManager = {
         getOrIssue: vi.fn().mockImplementation(async () => {
           issueCalls += 1
           // The 3rd re-issue 401s once (token expiry blip); all others succeed.
           if (issueCalls === 3) throw new ApiError('Unauthorized', 401, '')
-          return { token: `rpc-token-${issueCalls}`, scopes: ['host:activity:read'] }
+          return {
+            token: `rpc-token-${issueCalls}`,
+            expiresInSeconds: 300,
+            scopes: ['host:activity:read'],
+          }
         }),
         clear: vi.fn(),
       }

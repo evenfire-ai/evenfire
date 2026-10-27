@@ -106,7 +106,7 @@ function makeService(): AppService {
 describe('AppService.listSandboxUiApps', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
     mockListSandboxUiApps.mockResolvedValue({ apps: [] })
   })
 
@@ -146,8 +146,8 @@ describe('AppService.listSandboxUiApps', () => {
 
   it('clears and reissues the RPC token when rpc-proxy reports a missing sandbox UI scope', async () => {
     mockGetOrIssue
-      .mockResolvedValueOnce({ token: 'stale-rpc-token' })
-      .mockResolvedValueOnce({ token: 'fresh-rpc-token' })
+      .mockResolvedValueOnce({ token: 'stale-rpc-token', expiresInSeconds: 300 })
+      .mockResolvedValueOnce({ token: 'fresh-rpc-token', expiresInSeconds: 300 })
     mockListSandboxUiApps
       .mockRejectedValueOnce(new ApiError('403 Forbidden: missing scope', 403, 'missing scope'))
       .mockResolvedValueOnce({ apps: [] })

@@ -4,6 +4,7 @@ import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook } from '@testing-library/react'
 import type {
+  DesktopLogoutOutcome,
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
 } from '../../../../../../src/types'
@@ -128,7 +129,7 @@ export interface AppControllerClerumOptions {
       optionId: string,
       expectedGeneration: number
     ) => Promise<DesktopRuntimeConfigHandoffSelection>
-    logout: () => Promise<number>
+    logout: () => Promise<DesktopLogoutOutcome>
   }
 }
 
@@ -149,6 +150,7 @@ export interface AppControllerClerumHandle {
     externalRestApiBaseUrl: string
     appName?: string
   }) => Promise<void>
+  emitSessionStateChanged: () => void
   getDesktopReleaseStatus: Fn
   teamDirectory: Fn
   switchTeam: Fn
@@ -248,9 +250,9 @@ export function extendMockClerumForAppController(
       throw new Error('Desktop environment handoff tests require the native auth producer')
     }
     try {
-      const generation = await handoffProducer.logout()
-      authenticated = false
-      return { ok: true as const, sessionGeneration: generation }
+      const outcome = await handoffProducer.logout()
+      if (outcome.kind === 'committed') authenticated = false
+      return outcome
     } catch (error) {
       throw wrapLikeElectronIpc(
         'auth:logout',
@@ -304,6 +306,13 @@ export function extendMockClerumForAppController(
       }
     }
   )
+  let sessionStateChangedListener: (() => void) | null = null
+  const onSessionStateChanged = vi.fn((callback: () => void) => {
+    sessionStateChangedListener = callback
+    return () => {
+      if (sessionStateChangedListener === callback) sessionStateChangedListener = null
+    }
+  })
 
   Object.assign(bridge.rpc as object, {
     listServers: vi.fn(async () => ({ servers: [] })),
@@ -332,6 +341,7 @@ export function extendMockClerumForAppController(
       onDesktopSetupToken: vi.fn(() => () => undefined),
       onDesktopEnvironmentSetup,
       onExternalLogout: vi.fn(() => () => undefined),
+      onSessionStateChanged,
       onSessionExpired: vi.fn(() => () => undefined),
     },
     team: {
@@ -408,6 +418,9 @@ export function extendMockClerumForAppController(
     getRuntimeConfigState,
     selectRuntimeConfigForHandoff,
     onDesktopEnvironmentSetup,
+    emitSessionStateChanged() {
+      sessionStateChangedListener?.()
+    },
     async emitDesktopEnvironmentSetup(payload) {
       await desktopEnvironmentSetupListener?.(payload)
     },

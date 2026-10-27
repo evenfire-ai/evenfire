@@ -73,7 +73,8 @@ describe('chat IPC pagination validation', () => {
 
 describe('ipc host status stream handlers', () => {
   const service = {
-    getSessionState: vi.fn(),
+    getSessionState: vi.fn().mockResolvedValue({ authenticated: false, me: null }),
+    getSessionGeneration: vi.fn().mockReturnValue(7),
     getDependenciesHealth: vi.fn(),
     saveRuntimeConfig: vi.fn(),
     deleteRuntimeConfig: vi.fn(),
@@ -522,11 +523,14 @@ describe('ipc host status stream handlers', () => {
       })
     )
 
-    expect(service.saveRuntimeConfig).toHaveBeenCalledWith({
-      externalRestApiBaseUrl: 'https://example.com',
-      rpcProxyBaseUrl: 'https://example.com',
-      appName: 'Production',
-    })
+    expect(service.saveRuntimeConfig).toHaveBeenCalledWith(
+      {
+        externalRestApiBaseUrl: 'https://example.com',
+        rpcProxyBaseUrl: 'https://example.com',
+        appName: 'Production',
+      },
+      7
+    )
     expect(result).toMatchObject({ configured: true, activeOptionId: 'prod-1' })
   })
 

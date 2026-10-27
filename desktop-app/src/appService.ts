@@ -3,13 +3,23 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
-import { bindChatStoreForUser, unbindChatStore } from './chatStoreBinding.js'
+import {
+  bindChatStoreForUser,
+  getChatStoreBindingGeneration,
+  prepareChatStoreBindingForUser,
+  requireChatStore,
+  reserveBoundChatStoreTeamScope,
+  unbindChatStore,
+  updateBoundChatStoreTeamScope,
+} from './chatStoreBinding.js'
 import {
   clearDesktopRuntimeConfigSelection,
   config,
   deleteDesktopRuntimeConfigOption,
   getActiveEnvKey,
+  getActiveLegacyEnvKeyInventory,
   getActiveLegacyEnvKeys,
+  getActiveLegacyRestOnlyEnvKey,
   getActiveRuntimeConfigOptionId,
   getDesktopRuntimeConfigState,
   hydrateDesktopRuntimeConfig,
@@ -38,8 +48,11 @@ import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandl
 import {
   ApiError,
   assertSessionRequestAllowed,
+  enterSessionRequestContext,
+  getSessionRequestContext,
   reportSessionUnauthorized,
   requestJson,
+  runWithSessionRequestContext,
   setSessionInvalidationHandler,
   withTimeout,
 } from './httpClient.js'
@@ -47,13 +60,12 @@ import { MemberRegistrationServiceClient } from './memberRegistrationServiceClie
 import {
   type PendingExternalLogoutIntent,
   type PendingExternalLogoutMarker,
+  acceptancePendingExternalMarker,
+  applyPendingExternalLogoutCas,
   clearPendingExternalLogoutIfUnchanged,
-  isPendingExternalLogoutReadFailure,
-  isTransientPendingLogoutReadError,
   pendingExternalLogoutMarkersMatch,
   readPendingExternalLogoutContentsRevision,
   recordMemoryOnlySessionIfMissing,
-  recordMemoryOnlySessionIfUnchanged,
   recordPendingExternalLogout,
   recordPendingExternalLogoutIfContentsUnchanged,
   recordPendingExternalLogoutIfUnchanged,
@@ -64,28 +76,36 @@ import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
 import { RpcTokenManager } from './rpcTokenManager.js'
 import {
+  SessionAuthorityAcceptanceTransaction,
+  type SessionAuthorityAcceptedRecord,
+  SessionAuthorityLogoutPreflightError,
+  SessionAuthorityLogoutTransaction,
+  readSessionAuthoritySourceSelection,
+} from './sessionAuthorityAcceptance.js'
+import {
   type AcceptedSessionTokenSource,
   type MemoryOnlySessionLease,
+  type PendingLogoutFailureDisposition,
   type PendingLogoutLoginPlan,
+  type PersistenceFailureContext,
   type SavedSessionRestorePlan,
-  SelectedSessionSourceSupersededError,
   SessionAuthorityCoordinator,
-  type SessionPersistenceReceipt,
-  type SessionPersistenceSourceReceipt,
+  SessionRequestOwnershipError,
+  type SessionSourceCleanupOutcome,
   TemporarySessionAuthorityUnavailableError,
   TemporarySessionEnvironmentChangedError,
   TemporarySessionExpiredError,
-  type TemporarySessionReceipt,
   type VerifiedSessionTokenSource,
-  canAdmitMemoryOnlyAfterStorageFailure,
   isMemoryOnlySessionMarker,
   sessionTokenPublicationSource,
 } from './sessionAuthorityCoordinator.js'
 import {
-  SessionPersistenceCandidateDeniedError,
-  SessionPersistenceJournalAdmissionError,
-  SessionPersistenceProducer,
-  isSessionPersistenceJournalReadFailure,
+  type SessionAuthorityCredentialSource,
+  SessionAuthorityProjectionIntegrityError,
+  SessionAuthorityRecordConflictError,
+  SessionAuthorityRecordRepository,
+} from './sessionAuthorityRecord.js'
+import {
   retireSessionPersistenceJournalAfterVerifiedLogout,
   snapshotSessionPersistenceJournal,
 } from './sessionPersistenceJournal.js'
@@ -96,15 +116,13 @@ import {
 } from './sharedFilesClient.js'
 import {
   type SessionTokenFallbackSnapshot,
-  type SessionTokenMutationSource,
-  type SessionTokenReadAuthority,
   type SessionTokenReadSource,
   SessionTokenStorageClearError,
   SessionTokenStorageSupersededBeforeWriteError,
   SessionTokenStorageUnavailableBeforeWriteError,
   TokenStore,
+  isKeytarCleanupEstablished,
   isSessionTokenMutationCallbackFailure,
-  isSessionTokenReadAuthorityCurrent,
 } from './tokenStore.js'
 import {
   AccessCatalog,
@@ -114,6 +132,7 @@ import {
   ContextBreakdownResult,
   DependencyHealth,
   DesktopAppInfo,
+  DesktopLogoutOutcome,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
@@ -636,7 +655,7 @@ function normalizeDesktopUploadBaseUrl(value: string): string {
 function desktopGfsUploadIdentity(me: SessionMe): DesktopGfsUploadIdentity {
   return {
     ownerId: me.id,
-    teamId: me.teamId ? String(me.teamId).trim() : null,
+    teamId: String(me.teamId ?? '').trim() || null,
     environmentKey: getActiveEnvKey(),
     baseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
   }
@@ -854,6 +873,28 @@ function sameDesktopGfsUploadScope(
   )
 }
 
+function currentChatAuthorityScopeOrNull(): ChatAuthorityScope | null {
+  try {
+    return requireChatStore().getAuthorityScope()
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Not authenticated') return null
+    throw error
+  }
+}
+
+function sameChatAuthorityScope(
+  left: ChatAuthorityScope | null,
+  right: ChatAuthorityScope | null
+): boolean {
+  return Boolean(
+    left &&
+    right &&
+    left.environmentKey === right.environmentKey &&
+    left.userId === right.userId &&
+    left.teamId === right.teamId
+  )
+}
+
 export function migrateDesktopGfsUploadState(value: unknown): {
   state: DesktopGfsUploadStateFile
   migrated: boolean
@@ -949,9 +990,19 @@ export interface AppServiceOptions {
 
 type ActiveTeamContextHop = {
   homeTeamId: string
+  homeRequestContext: unknown
   restoredToken: string | null
   restorationError: unknown
   homeTeamOperations: Array<() => Promise<void>>
+}
+
+type AcceptedTeamSwitchRequestTransition = {
+  previousRequestContext: unknown
+  nextRequestContext: unknown
+  nextToken: string
+  nextGeneration: number
+  envKey: string
+  userId: string
 }
 
 export class QuitAdmissionClosedError extends Error {
@@ -990,6 +1041,7 @@ export class AppService {
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private activeTeamContextHop: ActiveTeamContextHop | null = null
+  private acceptedTeamSwitchRequestTransition: AcceptedTeamSwitchRequestTransition | null = null
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private restoreSavedSessionReservationStarted = false
   private runtimeConfigResolutionInFlight = new Map<string, { promise: Promise<void> }>()
@@ -997,7 +1049,17 @@ export class AppService {
   private pendingRuntimeConfigDiscovery: RuntimeConfigDiscovery | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
-  private logoutInProgress = false
+  private logoutFenceCount = 0
+  private pendingLogoutAuthoritySource: {
+    envKey: string
+    source: SessionAuthorityCredentialSource
+  } | null = null
+  private volatileLogoutInFlight: {
+    sessionId: string
+    promise: Promise<DesktopLogoutOutcome>
+  } | null = null
+  private memoryOnlyExpiryDeferredDuringLogout = false
+  private sessionAuthorityCleanupInFlight: Promise<void> | null = null
   private interactiveLoginAttempts = 0
   private nativeAuthEnvironmentCommitQueue: Promise<void> = Promise.resolve()
   private gfsAuthEpoch = 0
@@ -1033,6 +1095,7 @@ export class AppService {
   private readonly gfsPendingLegacyUploads = new Set<{
     controller: AbortController
     promise: Promise<unknown>
+    scope: DesktopGfsUploadScope
   }>()
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
@@ -1074,6 +1137,7 @@ export class AppService {
   >()
   private entityChangeConnectionStop: ((opts?: { silent?: boolean }) => void) | null = null
   private entityChangeSessionToken: string | null = null
+  private entityChangeSessionRequestContext: unknown = null
   private entityChangeSessionGeneration = 0
   private entityChangeEnvironmentSwitching = false
   private entityChangeSessionExpiryDeferred = false
@@ -1082,6 +1146,16 @@ export class AppService {
     string,
     { ownerId: number; stop: (opts?: { silent?: boolean }) => void }
   >()
+
+  private get logoutInProgress(): boolean {
+    return this.logoutFenceCount > 0
+  }
+
+  private set logoutInProgress(active: boolean) {
+    this.logoutFenceCount = active
+      ? this.logoutFenceCount + 1
+      : Math.max(0, this.logoutFenceCount - 1)
+  }
 
   constructor(options: AppServiceOptions = {}) {
     this.tokenStore = options.tokenStore ?? new TokenStore()
@@ -1095,8 +1169,14 @@ export class AppService {
       failClosedForPendingLogout: error => this.failClosedForPendingLogout(error),
     })
     setSessionInvalidationHandler(
-      (token, requestOwner) => this.endInvalidatedMemoryOnlySession(token, requestOwner),
-      token => this.assertTemporarySessionRequestAllowed(token)
+      (token, requestOwner) => {
+        // A derived RPC token can expire independently while its owning session
+        // lease remains valid. RPC callers own their one-refresh retry; only a
+        // 401 from the primary session credential invalidates the lease here.
+        if (this.sessionAuthority.isPrimarySessionRequestOwner(requestOwner))
+          this.endInvalidatedMemoryOnlySession(token, requestOwner)
+      },
+      (token, requestContext) => this.assertTemporarySessionRequestAllowed(token, requestContext)
     )
   }
 
@@ -1118,10 +1198,6 @@ export class AppService {
 
   private get sessionGeneration(): number {
     return this.sessionAuthority.sessionGeneration
-  }
-
-  private set sessionGeneration(value: number) {
-    this.sessionAuthority.sessionGeneration = value
   }
 
   private get acceptedSessionSource(): AcceptedSessionTokenSource | undefined {
@@ -1165,13 +1241,6 @@ export class AppService {
     )
   }
 
-  private static isRejectedStoredSessionError(error: unknown): boolean {
-    return (
-      error instanceof ApiError &&
-      (error.status === 401 || error.status === 403 || error.status === 410)
-    )
-  }
-
   private admitCredentialProducer(): (() => void) | null {
     if (this.quitPreparationStarted) {
       return null
@@ -1193,12 +1262,19 @@ export class AppService {
 
   private runCredentialProducer<T>(
     operation: () => Promise<T>,
-    onAdmissionRejected?: (error: QuitAdmissionClosedError) => void
+    onAdmissionRejected?: (error: QuitAdmissionClosedError) => T | void | Promise<T | void>
   ): Promise<T> {
     if (this.quitPreparationStarted) {
       const error = new QuitAdmissionClosedError()
       try {
-        onAdmissionRejected?.(error)
+        const fallback = onAdmissionRejected?.(error)
+        if (fallback instanceof Promise) {
+          return fallback.then(value => {
+            if (value !== undefined) return value
+            throw error
+          })
+        }
+        if (fallback !== undefined) return Promise.resolve(fallback)
       } catch (recordError) {
         return Promise.reject(recordError)
       }
@@ -1398,16 +1474,56 @@ export class AppService {
     }
   }
 
+  private async inspectTeamTransitionMarker(
+    envKey: string
+  ): Promise<PendingExternalLogoutMarker | null> {
+    const legacyNamespace = getActiveLegacyEnvKeyInventory()
+    try {
+      await SessionAuthorityAcceptanceTransaction.reconcilePendingAcceptanceProjection(
+        this.tokenStore,
+        this.getUserDataDirectory(),
+        envKey,
+        legacyNamespace.keys,
+        legacyNamespace.complete
+      )
+    } catch (error) {
+      // A confirmed projection mismatch is an authoritative denial, not a benign team-hop
+      // conflict. Route it through the same fail-closed runtime transition used by restore/login.
+      await this.handlePendingLogoutInspectionFailure(error, 'marker-inspection')
+      throw error
+    }
+    const marker = await this.inspectPendingLogoutBeforeTeamPersistence(envKey)
+    if (
+      this.sessionAuthority.planTeamTransitionMarkerAdmission(marker, envKey).kind === 'fail-closed'
+    ) {
+      await this.failClosedForPendingLogout(
+        new Error('Durable session authority does not admit a team transition')
+      )
+      throw new SessionTokenStorageSupersededBeforeWriteError()
+    }
+    return marker
+  }
+
+  private async assertTeamTransitionMarkerCurrent(
+    envKey: string,
+    expected: PendingExternalLogoutMarker | null
+  ): Promise<void> {
+    const current = await this.inspectTeamTransitionMarker(envKey)
+    if (
+      expected === null ? current !== null : !pendingExternalLogoutMarkersMatch(current, expected)
+    )
+      throw new SessionTokenStorageSupersededBeforeWriteError()
+  }
+
   private inspectPendingLogoutMarker(envKey: string): PendingExternalLogoutMarker | null {
     return this.sessionAuthority.inspectPendingLogoutMarker(envKey)
   }
 
-  private async handlePendingLogoutInspectionFailure(error: unknown): Promise<void> {
-    await this.sessionAuthority.handlePendingLogoutInspectionFailure(error)
-  }
-
-  private isTransientPersistenceAuthorityRead(error: unknown): boolean {
-    return this.sessionAuthority.isTransientPersistenceAuthorityRead(error)
+  private async handlePendingLogoutInspectionFailure(
+    error: unknown,
+    context: PersistenceFailureContext = 'marker-inspection'
+  ): Promise<PendingLogoutFailureDisposition> {
+    return this.sessionAuthority.handlePendingLogoutInspectionFailure(error, context)
   }
 
   private unwrapPersistenceAuthorityError(error: unknown): unknown {
@@ -1432,22 +1548,12 @@ export class AppService {
     return this.sessionAuthority.runSessionPersistence(operation)
   }
 
-  private async retireRepairedPersistenceProducer(
-    producer: SessionPersistenceProducer
-  ): Promise<void> {
-    return this.sessionAuthority.retireRepairedPersistenceProducer(producer)
-  }
-
   private requireSessionTokenSourceCurrent(
     selected: VerifiedSessionTokenSource | undefined,
     envKey: string,
     mayContinue: () => boolean
   ): asserts selected is VerifiedSessionTokenSource {
     this.sessionAuthority.requireSessionTokenSourceCurrent(selected, envKey, mayContinue)
-  }
-
-  private recordAcceptedSessionSource(selected: VerifiedSessionTokenSource, envKey: string): void {
-    this.sessionAuthority.recordAcceptedSessionSource(selected, envKey)
   }
 
   private captureAcceptedSessionSource(envKey: string): VerifiedSessionTokenSource | undefined {
@@ -1498,1156 +1604,13 @@ export class AppService {
     )
   }
 
-  private requireSessionPersistenceReceipt(
-    receipt: SessionPersistenceReceipt | SessionPersistenceSourceReceipt
-  ): void {
-    this.sessionAuthority.requireSessionPersistenceReceipt(receipt)
-  }
-
-  private async verifySessionPersistenceReceipt(
-    receipt: SessionPersistenceReceipt | SessionPersistenceSourceReceipt
-  ) {
-    return this.sessionAuthority.verifySessionPersistenceReceipt(receipt)
-  }
-
-  private async commitSessionToken(
-    token: string,
-    options: {
-      advanceSessionGeneration?: boolean
-      refreshMe?: boolean
-      onInstalled?: (receipt: SessionPersistenceReceipt) => void
-    } = {}
-  ): Promise<void> {
-    const tokenChanged = token !== this.sessionToken
-    if (tokenChanged && this.memoryOnlySession) {
-      await this.commitTemporarySessionToken(token, options)
-      return
-    }
-    const previousToken = this.sessionToken
-    const previousGeneration = this.sessionGeneration
-    let installedGeneration = previousGeneration
-    let installedProducer: SessionPersistenceProducer | undefined
-    let installedSourceReceipt: SessionPersistenceSourceReceipt | undefined
-    const envKey = getActiveEnvKey()
-    let pendingMarker: PendingExternalLogoutMarker | null = null
-    if (tokenChanged) {
-      pendingMarker = await this.inspectPendingLogoutBeforeTeamPersistence(envKey)
-    }
-    if (tokenChanged) {
-      // No runtime identity changes until the source-bound credential is durable.
-      await this.runSessionPersistence(async () => {
-        if (this.sessionGeneration !== previousGeneration || this.sessionToken !== previousToken) {
-          throw new Error('stale_auth_epoch: authenticated team scope changed before persistence')
-        }
-        const currentMarker = await this.inspectPendingLogoutBeforeTeamPersistence(envKey)
-        if (this.sessionGeneration !== previousGeneration || this.sessionToken !== previousToken) {
-          throw new Error('stale_auth_epoch: authenticated team scope changed before persistence')
-        }
-        if (
-          pendingMarker === null
-            ? currentMarker !== null
-            : !pendingExternalLogoutMarkersMatch(currentMarker, pendingMarker)
-        ) {
-          throw new Error('Pending logout intent changed before team persistence was dispatched')
-        }
-        const sourceReceipt = await this.persistTeamSessionToken(token, envKey, pendingMarker)
-        await this.verifySessionPersistenceReceipt(sourceReceipt)
-        this.requireSessionPersistenceReceipt(sourceReceipt)
-        if (this.sessionGeneration !== previousGeneration || this.sessionToken !== previousToken)
-          throw new SessionTokenStorageSupersededBeforeWriteError()
-        if (options.advanceSessionGeneration !== false) this.sessionGeneration += 1
-        installedGeneration = this.sessionGeneration
-        this.sessionToken = token
-        sourceReceipt.owner.generation = installedGeneration
-        sourceReceipt.owner.token = token
-        installedProducer = sourceReceipt.producer
-        installedSourceReceipt = sourceReceipt
-        options.onInstalled?.({
-          ...sourceReceipt,
-          mode: 'persistent',
-          token,
-          generation: installedGeneration,
-        })
-        this.rpcTokenManager.clear()
-        this.profileUiBaseUrlCache = null
-        this.accessCatalog = null
-        if (this.gfsTransientTeamHopDepth === 0) {
-          this.updateEntityChangeSessionToken(token)
-          this.restartEntityChangeStreamForSessionReplacement()
-        }
-      })
-      if (this.sessionGeneration !== installedGeneration || this.sessionToken !== token) {
-        throw new Error('stale_auth_epoch: authenticated team scope changed during persistence')
-      }
-    }
-    if (options.refreshMe) {
-      const installedGeneration = this.sessionGeneration
-      try {
-        if (installedProducer)
-          this.sessionAuthority.assertCandidateMayAuthenticate(installedProducer, token)
-        const switchedMe = await this.authClient.getMe(token)
-        if (installedSourceReceipt)
-          await this.verifySessionPersistenceReceipt(installedSourceReceipt)
-        if (installedSourceReceipt) this.requireSessionPersistenceReceipt(installedSourceReceipt)
-        if (this.sessionGeneration !== installedGeneration || this.sessionToken !== token) {
-          throw new Error('stale_auth_epoch: authenticated team scope changed during refresh')
-        }
-        this.me = switchedMe
-      } catch (error) {
-        if (this.sessionGeneration === installedGeneration && this.sessionToken === token) {
-          unbindChatStore()
-        }
-        throw error
-      }
-      await this.bindCurrentChatStore(this.me.id)
-      if (installedSourceReceipt) await this.verifySessionPersistenceReceipt(installedSourceReceipt)
-      if (installedSourceReceipt) this.requireSessionPersistenceReceipt(installedSourceReceipt)
-      if (this.sessionGeneration !== installedGeneration || this.sessionToken !== token) {
-        if (this.me) await this.bindCurrentChatStore(this.me.id)
-        else unbindChatStore()
-        throw new Error('stale_auth_epoch: authenticated team scope changed during binding')
-      }
-      this.updateCachedCurrentTeam(this.me.teamId)
-    }
-  }
-
-  private async commitTemporarySessionToken(
-    token: string,
-    options: {
-      advanceSessionGeneration?: boolean
-      refreshMe?: boolean
-      onInstalled?: (receipt: SessionPersistenceReceipt) => void
-    }
-  ): Promise<void> {
-    const previousLease = this.memoryOnlySession
-    const previousToken = this.sessionToken
-    const previousMe = this.me
-    const previousGeneration = this.sessionGeneration
-    const envKey = getActiveEnvKey()
-    if (!previousLease || !previousToken || !previousMe || previousLease.envKey !== envKey) {
-      throw new SessionTokenStorageSupersededBeforeWriteError()
-    }
-    const expiresAt = this.sessionAuthority.memoryOnlySessionReplacementDeadline(
-      previousLease.expiresAt,
-      token
-    )
-    let receipt: TemporarySessionReceipt | undefined
-    await this.runSessionPersistence(async () => {
-      if (
-        this.sessionGeneration !== previousGeneration ||
-        this.sessionToken !== previousToken ||
-        this.memoryOnlySession !== previousLease
-      )
-        throw new SessionTokenStorageSupersededBeforeWriteError()
-      this.assertMemoryOnlySessionCurrent(previousLease)
-      if (options.advanceSessionGeneration !== false) this.sessionGeneration += 1
-      const generation = this.sessionGeneration
-      this.sessionToken = token
-      this.memoryOnlySession = { ...previousLease, expiresAt }
-      this.scheduleMemoryOnlySessionExpiry(this.memoryOnlySession)
-      receipt = {
-        mode: 'temporary',
-        envKey,
-        volatileSessionId: previousLease.volatileSessionId,
-        marker: previousLease.marker,
-        token,
-        generation,
-        expiresAt,
-        previousToken,
-        previousMe,
-        previousLease,
-      }
-      options.onInstalled?.(receipt)
-      this.rpcTokenManager.clear()
-      this.profileUiBaseUrlCache = null
-      this.accessCatalog = null
-      if (this.gfsTransientTeamHopDepth === 0) {
-        this.updateEntityChangeSessionToken(token)
-        this.restartEntityChangeStreamForSessionReplacement()
-      }
-    })
-
-    if (!options.refreshMe) return
-    const installedGeneration = this.sessionGeneration
-    try {
-      const switchedMe = await this.authClient.getMe(token)
-      if (receipt) this.requireSessionPersistenceReceipt(receipt)
-      if (this.sessionGeneration !== installedGeneration || this.sessionToken !== token) {
-        throw new SessionTokenStorageSupersededBeforeWriteError()
-      }
-      this.me = switchedMe
-      await this.bindCurrentChatStore(switchedMe.id)
-      if (receipt) this.requireSessionPersistenceReceipt(receipt)
-      if (this.sessionGeneration !== installedGeneration || this.sessionToken !== token) {
-        throw new SessionTokenStorageSupersededBeforeWriteError()
-      }
-      this.updateCachedCurrentTeam(switchedMe.teamId)
-    } catch (error) {
-      if (this.sessionGeneration === installedGeneration && this.sessionToken === token) {
-        unbindChatStore()
-      }
-      throw error
-    }
-  }
-
-  /** The same verified secure replacement policy serves login and team producers. */
-  private async bindVerifiedEncryptedCredentialIfMarkerMissing(
-    token: string,
-    envKey: string,
-    mayContinue: () => boolean,
-    markerAttempted: (marker: PendingExternalLogoutMarker) => void,
-    selected?: VerifiedSessionTokenSource
-  ): Promise<PendingExternalLogoutMarker> {
-    if (!mayContinue()) throw new SessionTokenStorageSupersededBeforeWriteError()
-    selected ??= await this.readVerifiedSessionTokenSource(
-      token,
-      envKey,
-      'safe-storage',
-      mayContinue
-    )
-    await this.verifySessionTokenSource(selected, envKey, mayContinue)
-    if (!mayContinue()) throw new SessionTokenStorageSupersededBeforeWriteError()
-    const marker: PendingExternalLogoutMarker = {
-      intent: { intent: 'keytar-cleanup-pending', credentialSource: 'safe-storage' },
-      revision: randomUUID(),
-    }
-    markerAttempted(marker)
-    if (
-      !recordPendingKeytarCleanupIfMissing(
-        this.getUserDataDirectory(),
-        envKey,
-        'safe-storage',
-        marker.revision ?? undefined
-      )
-    )
-      throw new SessionTokenStorageSupersededBeforeWriteError()
-    return marker
-  }
-
-  private async persistRequiredKeytarOrSafeStorage(
-    token: string,
-    envKey: string,
-    mayContinue: () => boolean = () => true,
-    credentialPersisted: () => void = () => {},
-    encryptedWriteAttempted: () => void = () => {},
-    receipt?: {
-      keytarUnavailableBeforeWrite: boolean
-      onMutationDispatched?: (source: SessionTokenMutationSource, candidateToken: string) => void
-      onSourceVerified?: (selected: VerifiedSessionTokenSource) => void
-      onMutationSettled?: (
-        source: SessionTokenMutationSource,
-        authority: SessionTokenReadAuthority
-      ) => void
-      publications: Map<SessionTokenReadSource, VerifiedSessionTokenSource>
-    }
-  ): Promise<'active-keytar' | 'safe-storage'> {
-    return this.sessionAuthority.persistRequiredKeytarOrSafeStorage(
-      token,
-      envKey,
-      mayContinue,
-      credentialPersisted,
-      encryptedWriteAttempted,
-      receipt
-    )
-  }
-
-  private async persistTeamSessionToken(
-    token: string,
-    envKey: string,
-    marker: PendingExternalLogoutMarker | null
-  ): Promise<SessionPersistenceSourceReceipt> {
-    const userDataDirectory = this.getUserDataDirectory()
-    const previousToken = this.sessionToken
-    const previousGeneration = this.sessionGeneration
-    const previouslyAcceptedSource = this.captureAcceptedSessionSource(envKey)
-    const persistencePlan = this.sessionAuthority.planTeamSessionPersistence(
-      marker,
-      this.sessionAuthority.isIsolatedDevelopmentStorage()
-    )
-    const source = persistencePlan.cleanupSource
-    let rollbackSource = persistencePlan.initialRollbackSource
-    let persistedSource: SessionPersistenceSourceReceipt['credentialSource'] =
-      persistencePlan.persistedSource
-    let installedFallbackSnapshot: SessionTokenFallbackSnapshot | undefined
-    let selectedSource: VerifiedSessionTokenSource | undefined
-    const publications = new Map<SessionTokenReadSource, VerifiedSessionTokenSource>()
-    const priorPublications = new Map<SessionTokenReadSource, VerifiedSessionTokenSource>()
-    const owner = { generation: previousGeneration, token: previousToken }
-    let candidateMutationDispatched = false
-    const receipt = {
-      keytarUnavailableBeforeWrite: false,
-      publications,
-      onMutationSettled: (
-        source: SessionTokenMutationSource,
-        authority: SessionTokenReadAuthority
-      ) => {
-        const selected = sessionTokenPublicationSource(source, token, authority)
-        publications.set(selected.source, selected)
-      },
-      onSourceVerified: (selected: VerifiedSessionTokenSource) => {
-        selectedSource = selected
-      },
-      onMutationDispatched: (source: SessionTokenMutationSource, candidate: string) => {
-        this.sessionAuthority.prepareCandidate(producer, source, candidate)
-        candidateMutationDispatched = true
-      },
-    }
-    let encryptedWriteAttempted = false
-    let encryptedCleanupUncertain = false
-    let repairedConvertedEncryptedSource = false
-    let repairedPriorSource: VerifiedSessionTokenSource | undefined
-    let dispatchInspectionError: unknown
-    let attemptedMarker: PendingExternalLogoutMarker | null = null
-    const runtimeOwned = () =>
-      getActiveEnvKey() === envKey &&
-      this.sessionToken === owner.token &&
-      this.sessionGeneration === owner.generation
-    const ownership = () =>
-      this.sessionAuthority.inspectOwnership(
-        envKey,
-        attemptedMarker ? [marker, attemptedMarker] : [marker],
-        runtimeOwned()
-      )
-    const assertInspectedOwnership = () => {
-      const observation = ownership()
-      if (observation.status === 'transient' || observation.status === 'invalid')
-        throw observation.error
-      return observation.status === 'owned'
-    }
-    const mayDispatch = () => {
-      const observation = ownership()
-      if (observation.status === 'transient' || observation.status === 'invalid') {
-        dispatchInspectionError = observation.error
-        return false
-      }
-      return observation.status === 'owned'
-    }
-    const producer = this.sessionAuthority.createPersistenceProducer(
-      userDataDirectory,
-      envKey,
-      marker,
-      () => {
-        if (!assertInspectedOwnership()) throw new SessionTokenStorageSupersededBeforeWriteError()
-      },
-      true,
-      previousToken,
-      () => {
-        if (!runtimeOwned()) throw new SessionTokenStorageSupersededBeforeWriteError()
-      }
-    )
-    const onPriorMutation = (source: SessionTokenMutationSource, prior: string) =>
-      this.sessionAuthority.preparePriorRepair(producer, source, token, prior)
-    const onPriorMutationSettled = (
-      source: SessionTokenMutationSource,
-      authority: SessionTokenReadAuthority
-    ) => {
-      if (!previousToken) return
-      const selected = sessionTokenPublicationSource(source, previousToken, authority)
-      priorPublications.set(selected.source, selected)
-    }
-    const rejectUnverifiedRepair = async (repairError: unknown) => {
-      this.reportDeferredLogoutFailureSafely(repairError)
-      if (!runtimeOwned()) return
-      // Durable candidate denial already precedes publication. Unverified repair
-      // cannot manufacture logout intent or overwrite an independent revision.
-      if (runtimeOwned()) await this.failClosedForPendingLogout(repairError)
-    }
-    const discardRejectedEncryptedCandidate = async () => {
-      if (!encryptedWriteAttempted) return
-      try {
-        const observation = ownership()
-        if (observation.status === 'transient' || observation.status === 'invalid')
-          throw observation.error
-        const winning = this.inspectPendingLogoutMarker(envKey)
-        if (
-          winning?.intent.intent === 'keytar-cleanup-pending' &&
-          winning.intent.credentialSource === 'safe-storage' &&
-          observation.status !== 'owned'
-        )
-          return
-        const discarded = await this.tokenStore.discardSafeStorageSessionTokenIfMatches(
-          token,
-          envKey,
-          {
-            mayWrite: () => {
-              if (!runtimeOwned()) return false
-              const current = ownership()
-              if (current.status === 'transient' || current.status === 'invalid')
-                throw current.error
-              const latest = this.inspectPendingLogoutMarker(envKey)
-              return !(
-                latest?.intent.intent === 'keytar-cleanup-pending' &&
-                latest.intent.credentialSource === 'safe-storage' &&
-                current.status !== 'owned'
-              )
-            },
-          }
-        )
-        const remaining = await this.sessionAuthority.readSessionTokenFromSource(
-          'safe-storage',
-          envKey
-        )
-        if (!discarded && remaining === token)
-          throw new Error('Rejected encrypted credential cleanup could not be verified')
-        encryptedCleanupUncertain = remaining !== null && remaining !== previousToken
-      } catch (cleanupError) {
-        this.reportDeferredLogoutFailureSafely(cleanupError)
-        encryptedCleanupUncertain = true
-      }
-    }
-    const repairAfterTransientObservation = async () => {
-      if (!previousToken || !runtimeOwned()) return
-      // The marker cannot grant or revoke authority while it is unreadable.
-      // Compare only this transaction's exact candidate inside each source lane.
-      // Both sources are repaired if a conversion may already have renamed CP-S.
-      if (source !== 'safe-storage') {
-        await this.tokenStore.repairKeytarSessionTokenIfMatches(token, previousToken, envKey, {
-          mayWrite: runtimeOwned,
-          onMutationDispatched: onPriorMutation,
-          onMutationSettled: onPriorMutationSettled,
-          candidateAuthority: publications.get('keytar')?.authority,
-        })
-      }
-      if (source === 'safe-storage' || encryptedWriteAttempted) {
-        await this.tokenStore.repairSafeStorageSessionTokenIfMatches(token, previousToken, envKey, {
-          mayWrite: runtimeOwned,
-          onMutationDispatched: onPriorMutation,
-          onMutationSettled: onPriorMutationSettled,
-          candidateAuthority:
-            publications.get('safe-storage')?.authority ?? publications.get('keytar')?.authority,
-        })
-      }
-      repairedPriorSource = await this.readVerifiedSessionTokenSource(
-        previousToken,
-        envKey,
-        source === 'safe-storage'
-          ? 'safe-storage'
-          : source === 'active-keytar'
-            ? 'keytar'
-            : 'default',
-        runtimeOwned,
-        this.priorSessionSource(
-          previousToken,
-          envKey,
-          source === 'safe-storage'
-            ? 'safe-storage'
-            : source === 'active-keytar'
-              ? 'keytar'
-              : 'default',
-          priorPublications,
-          publications,
-          previouslyAcceptedSource
-        )
-      )
-      await this.verifySessionTokenSource(repairedPriorSource, envKey, runtimeOwned)
-      this.requireSessionTokenSourceCurrent(repairedPriorSource, envKey, runtimeOwned)
-      if (this.me) this.recordAcceptedSessionSource(repairedPriorSource, envKey)
-      if (runtimeOwned()) await this.retireRepairedPersistenceProducer(producer)
-    }
-    const repairPreviouslyAcceptedTeamAuthority = async (): Promise<
-      'active-keytar' | 'safe-storage'
-    > => {
-      if (!previousToken || !assertInspectedOwnership())
-        throw new SessionTokenStorageSupersededBeforeWriteError()
-      if (persistedSource === 'safe-storage') {
-        try {
-          await this.tokenStore.repairSafeStorageSessionTokenIfMatches(
-            token,
-            previousToken,
-            envKey,
-            {
-              mayWrite: mayDispatch,
-              onMutationDispatched: onPriorMutation,
-              onMutationSettled: onPriorMutationSettled,
-              candidateAuthority: publications.get('safe-storage')?.authority,
-            }
-          )
-        } catch (encryptedRepairError) {
-          if (
-            isSessionTokenMutationCallbackFailure(encryptedRepairError) ||
-            encryptedRepairError instanceof SessionTokenStorageSupersededBeforeWriteError
-          )
-            throw encryptedRepairError
-          if (source !== 'safe-storage' || !assertInspectedOwnership()) throw encryptedRepairError
-          repairedPriorSource = await this.readVerifiedSessionTokenSource(
-            previousToken,
-            envKey,
-            'keytar',
-            mayDispatch,
-            this.priorSessionSource(
-              previousToken,
-              envKey,
-              'keytar',
-              priorPublications,
-              publications,
-              previouslyAcceptedSource
-            )
-          )
-          if (!assertInspectedOwnership()) throw new SessionTokenStorageSupersededBeforeWriteError()
-          // The exact captured accepted Home already exists securely in Keytar.
-          // Prepare its source-transfer boundary; no native write is fabricated.
-          this.sessionAuthority.preparePriorRepair(producer, 'keytar', token, previousToken)
-          await this.verifySessionTokenSource(repairedPriorSource, envKey, mayDispatch)
-          this.reportDeferredLogoutFailureSafely(encryptedRepairError)
-          return 'active-keytar'
-        }
-        repairedPriorSource = await this.readVerifiedSessionTokenSource(
-          previousToken,
-          envKey,
-          'safe-storage',
-          mayDispatch,
-          this.priorSessionSource(
-            previousToken,
-            envKey,
-            'safe-storage',
-            priorPublications,
-            publications,
-            previouslyAcceptedSource
-          )
-        )
-        return 'safe-storage'
-      }
-      try {
-        await this.tokenStore.repairKeytarSessionTokenIfMatches(token, previousToken, envKey, {
-          mayWrite: mayDispatch,
-          onMutationDispatched: onPriorMutation,
-          onMutationSettled: onPriorMutationSettled,
-          candidateAuthority: publications.get('keytar')?.authority,
-        })
-        repairedPriorSource = await this.readVerifiedSessionTokenSource(
-          previousToken,
-          envKey,
-          'keytar',
-          mayDispatch,
-          this.priorSessionSource(
-            previousToken,
-            envKey,
-            'keytar',
-            priorPublications,
-            publications,
-            previouslyAcceptedSource
-          )
-        )
-      } catch (nativeRepairError) {
-        if (
-          isSessionTokenMutationCallbackFailure(nativeRepairError) ||
-          nativeRepairError instanceof SessionTokenStorageSupersededBeforeWriteError
-        )
-          throw nativeRepairError
-        if (!assertInspectedOwnership()) throw new SessionTokenStorageSupersededBeforeWriteError()
-        const repaired = await this.tokenStore.repairSafeStorageSessionTokenIfMatches(
-          token,
-          previousToken,
-          envKey,
-          {
-            createIfAbsent: true,
-            mayWrite: mayDispatch,
-            onMutationDispatched: onPriorMutation,
-            onMutationSettled: onPriorMutationSettled,
-            candidateAuthority:
-              priorPublications.get('keytar')?.authority ??
-              publications.get('safe-storage')?.authority ??
-              publications.get('keytar')?.authority ??
-              publications.get('historical-plaintext')?.authority,
-          }
-        )
-        if (!repaired) throw nativeRepairError
-        repairedPriorSource = await this.readVerifiedSessionTokenSource(
-          previousToken,
-          envKey,
-          'safe-storage',
-          mayDispatch,
-          this.priorSessionSource(
-            previousToken,
-            envKey,
-            'safe-storage',
-            priorPublications,
-            publications,
-            previouslyAcceptedSource
-          )
-        )
-        if (!assertInspectedOwnership()) throw new SessionTokenStorageSupersededBeforeWriteError()
-        this.reportDeferredLogoutFailureSafely(nativeRepairError)
-        return 'safe-storage'
-      }
-      return 'active-keytar'
-    }
-    try {
-      if (!this.sessionAuthority.isIsolatedDevelopmentStorage())
-        installedFallbackSnapshot = await this.tokenStore.snapshotSessionTokenFallbackFiles(
-          envKey,
-          {
-            legacyEnvKeys: getActiveLegacyEnvKeys(),
-            mayWrite: mayDispatch,
-          }
-        )
-      if (source === null) {
-        encryptedWriteAttempted = true
-        if (this.sessionAuthority.isIsolatedDevelopmentStorage()) {
-          await this.sessionAuthority.writeSessionTokenToSource(
-            'isolated-development',
-            token,
-            envKey,
-            {
-              mayWrite: mayDispatch,
-              onMutationDispatched: receipt.onMutationDispatched,
-              onMutationSettled: receipt.onMutationSettled,
-            }
-          )
-          selectedSource = await this.readVerifiedSessionTokenSource(
-            token,
-            envKey,
-            'default',
-            mayDispatch,
-            publications.get('safe-storage') ?? publications.get('historical-plaintext')
-          )
-          installedFallbackSnapshot = await this.tokenStore.snapshotSessionTokenFallbackFiles(
-            envKey,
-            {
-              mayWrite: mayDispatch,
-            }
-          )
-        } else {
-          const writtenSource = await this.persistRequiredKeytarOrSafeStorage(
-            token,
-            envKey,
-            mayDispatch,
-            () => {},
-            () => {},
-            receipt
-          )
-          persistedSource = writtenSource
-          if (writtenSource === 'safe-storage')
-            attemptedMarker = await this.bindVerifiedEncryptedCredentialIfMarkerMissing(
-              token,
-              envKey,
-              mayDispatch,
-              attempted => {
-                this.sessionAuthority.declarePlannedMarker(producer, attempted)
-                attemptedMarker = attempted
-              },
-              selectedSource
-            )
-          else if (installedFallbackSnapshot)
-            attemptedMarker = await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
-              token,
-              envKey,
-              marker,
-              installedFallbackSnapshot,
-              mayDispatch,
-              attempted => {
-                this.sessionAuthority.declarePlannedMarker(producer, attempted)
-                attemptedMarker = attempted
-              },
-              selectedSource
-            )
-        }
-        if (this.sessionGeneration !== previousGeneration || this.sessionToken !== previousToken) {
-          throw new Error('stale_auth_epoch: authenticated team scope changed during persistence')
-        }
-        if (!assertInspectedOwnership())
-          throw new Error('Pending logout intent changed while team persistence was completing')
-        await this.verifySessionTokenSource(selectedSource, envKey, mayDispatch)
-        return {
-          envKey,
-          marker: attemptedMarker ?? marker,
-          credentialSource: persistedSource,
-          fallbackSnapshot: installedFallbackSnapshot,
-          producer,
-          owner,
-          selectedSource: selectedSource!,
-          publications,
-        }
-      }
-      const writtenSource =
-        source === 'safe-storage'
-          ? ((encryptedWriteAttempted = true),
-            await this.sessionAuthority.writeSessionTokenToSource('safe-storage', token, envKey, {
-              mayWrite: mayDispatch,
-              onMutationDispatched: receipt.onMutationDispatched,
-              onMutationSettled: receipt.onMutationSettled,
-            }),
-            'safe-storage' as const)
-          : await this.persistRequiredKeytarOrSafeStorage(
-              token,
-              envKey,
-              mayDispatch,
-              () => {},
-              () => {
-                encryptedWriteAttempted = true
-              },
-              receipt
-            )
-      persistedSource = writtenSource
-      if (source === 'safe-storage')
-        selectedSource = await this.readVerifiedSessionTokenSource(
-          token,
-          envKey,
-          'safe-storage',
-          mayDispatch,
-          publications.get('safe-storage')
-        )
-      await this.verifySessionTokenSource(selectedSource, envKey, mayDispatch)
-      if (!runtimeOwned()) throw new SessionTokenStorageSupersededBeforeWriteError()
-      if (writtenSource !== source) {
-        const revision = randomUUID()
-        attemptedMarker = {
-          intent: { intent: 'keytar-cleanup-pending', credentialSource: writtenSource },
-          revision,
-        }
-        this.sessionAuthority.declarePlannedMarker(producer, attemptedMarker)
-        if (
-          !marker ||
-          !recordPendingKeytarCleanupIfUnchanged(
-            userDataDirectory,
-            envKey,
-            marker,
-            writtenSource,
-            revision
-          )
-        )
-          throw new Error('Pending logout intent changed while team persistence was completing')
-      } else if (!assertInspectedOwnership()) {
-        throw new Error('Pending logout intent changed while team persistence was completing')
-      }
-      if (writtenSource === 'active-keytar' && installedFallbackSnapshot)
-        attemptedMarker = await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
-          token,
-          envKey,
-          attemptedMarker ?? marker,
-          installedFallbackSnapshot,
-          mayDispatch,
-          attempted => {
-            this.sessionAuthority.declarePlannedMarker(producer, attempted)
-            attemptedMarker = attempted
-          },
-          selectedSource
-        )
-      await this.verifySessionTokenSource(selectedSource, envKey, mayDispatch)
-      return {
-        envKey,
-        marker: attemptedMarker ?? marker,
-        credentialSource: persistedSource,
-        fallbackSnapshot: installedFallbackSnapshot,
-        producer,
-        owner,
-        selectedSource: selectedSource!,
-        publications,
-      }
-    } catch (error) {
-      if (dispatchInspectionError !== undefined) error = dispatchInspectionError
-      error = this.unwrapPersistenceAuthorityError(error)
-      this.reportDeferredLogoutFailureSafely(error)
-      if (
-        error instanceof SelectedSessionSourceSupersededError ||
-        (selectedSource &&
-          !isSessionTokenReadAuthorityCurrent(
-            selectedSource.authority,
-            selectedSource.source,
-            envKey
-          ))
-      ) {
-        if (runtimeOwned()) this.clearAuthenticatedSessionState()
-        throw error
-      }
-      if (
-        isSessionPersistenceJournalReadFailure(error) &&
-        !isTransientPendingLogoutReadError(error)
-      ) {
-        if (runtimeOwned()) await this.failClosedForPendingLogout(error)
-        throw error
-      }
-      if (this.isTransientPersistenceAuthorityRead(error)) {
-        if (!candidateMutationDispatched) throw error
-        try {
-          await repairAfterTransientObservation()
-        } catch (repairError) {
-          // This is a real credential repair failure, not inferred corruption
-          // from the transient marker read. Keep every uninspected marker byte.
-          await rejectUnverifiedRepair(repairError)
-        }
-        throw error
-      }
-      if (isPendingExternalLogoutReadFailure(error) && !isTransientPendingLogoutReadError(error)) {
-        if (runtimeOwned()) await this.failClosedForPendingLogout(error)
-        throw error
-      }
-      if (
-        !candidateMutationDispatched &&
-        runtimeOwned() &&
-        !(error instanceof SessionTokenStorageSupersededBeforeWriteError)
-      ) {
-        await this.retireRepairedPersistenceProducer(producer)
-        throw error
-      }
-      if (
-        previousToken &&
-        this.sessionToken === previousToken &&
-        this.sessionGeneration === previousGeneration
-      ) {
-        try {
-          // A setter can reject after writing. Preserve the old session only
-          // after verifying its source, repairing it when the owned write changed it.
-          // Never overwrite the source belonging to an independent newer producer.
-          if (assertInspectedOwnership()) {
-            const readPrevious = () =>
-              rollbackSource === 'active-keytar'
-                ? this.sessionAuthority.readSessionTokenFromSource('active-keytar', envKey)
-                : rollbackSource === 'safe-storage'
-                  ? this.sessionAuthority.readSessionTokenFromSource('safe-storage', envKey)
-                  : this.sessionAuthority.readPreferredSessionToken(envKey, {
-                      allowLegacyMigration: false,
-                    })
-            let previousAuthorityNeedsRepair: boolean
-            try {
-              previousAuthorityNeedsRepair = (await readPrevious()) !== previousToken
-            } catch (sourceReadError) {
-              // An unavailable encrypted source must reach the shared recovery
-              // helper, which still requires exact secure Native Home and full
-              // ownership. It cannot grant authority to this unverified file.
-              if (source !== 'safe-storage' || !assertInspectedOwnership()) throw sourceReadError
-              previousAuthorityNeedsRepair = true
-            }
-            if (previousAuthorityNeedsRepair && assertInspectedOwnership()) {
-              rollbackSource = await repairPreviouslyAcceptedTeamAuthority()
-              if (rollbackSource !== source || source === null) {
-                const current = ownership()
-                if (current.status === 'transient' || current.status === 'invalid')
-                  throw current.error
-                if (current.status !== 'owned')
-                  throw new SessionTokenStorageSupersededBeforeWriteError()
-                if (current.marker) {
-                  const revision = randomUUID()
-                  const restored: PendingExternalLogoutMarker = {
-                    intent: { intent: 'keytar-cleanup-pending', credentialSource: rollbackSource },
-                    revision,
-                  }
-                  this.sessionAuthority.declarePlannedMarker(producer, restored)
-                  const observed = current.marker
-                  attemptedMarker = restored
-                  if (
-                    !recordPendingKeytarCleanupIfUnchanged(
-                      userDataDirectory,
-                      envKey,
-                      observed,
-                      rollbackSource,
-                      revision
-                    )
-                  )
-                    throw new SessionTokenStorageSupersededBeforeWriteError()
-                } else if (rollbackSource === 'safe-storage') {
-                  attemptedMarker = await this.bindVerifiedEncryptedCredentialIfMarkerMissing(
-                    previousToken,
-                    envKey,
-                    mayDispatch,
-                    attempted => {
-                      this.sessionAuthority.declarePlannedMarker(producer, attempted)
-                      attemptedMarker = attempted
-                    }
-                  )
-                }
-                if (!assertInspectedOwnership())
-                  throw new SessionTokenStorageSupersededBeforeWriteError()
-              }
-              if ((await readPrevious()) !== previousToken) {
-                throw new Error('Previous team session could not be verified in its secure store')
-              }
-              await this.verifySessionTokenSource(repairedPriorSource, envKey, mayDispatch)
-              if (!runtimeOwned()) throw new SessionTokenStorageSupersededBeforeWriteError()
-            }
-            if (
-              (source === 'active-keytar' || source === null) &&
-              attemptedMarker?.intent.intent === 'keytar-cleanup-pending' &&
-              attemptedMarker.intent.credentialSource === 'safe-storage' &&
-              runtimeOwned()
-            ) {
-              await this.tokenStore.repairSafeStorageSessionTokenIfMatches(
-                token,
-                previousToken,
-                envKey,
-                {
-                  mayWrite: runtimeOwned,
-                  onMutationDispatched: onPriorMutation,
-                  onMutationSettled: onPriorMutationSettled,
-                  candidateAuthority:
-                    publications.get('safe-storage')?.authority ??
-                    publications.get('keytar')?.authority,
-                }
-              )
-              if (
-                runtimeOwned() &&
-                (await this.sessionAuthority.readSessionTokenFromSource('safe-storage', envKey)) !==
-                  previousToken
-              )
-                throw new Error('Converted encrypted rollback source could not be verified')
-              repairedConvertedEncryptedSource = true
-              if (source === null) rollbackSource = 'safe-storage'
-            }
-            // Restore the authoritative source before discarding its candidate.
-            // Otherwise a later temporary read failure would find an empty CP-S
-            // file and could incorrectly destroy the previously valid session.
-            await discardRejectedEncryptedCandidate()
-            if (encryptedCleanupUncertain && marker === null && assertInspectedOwnership()) {
-              if (
-                (await this.sessionAuthority.readSessionTokenFromSource(
-                  'active-keytar',
-                  envKey
-                )) !== previousToken
-              ) {
-                throw new Error('Previous session has no verified source for encrypted quarantine')
-              }
-              const revision = randomUUID()
-              this.sessionAuthority.declarePlannedMarker(producer, {
-                intent: { intent: 'keytar-cleanup-pending', credentialSource: 'active-keytar' },
-                revision,
-              })
-              if (
-                assertInspectedOwnership() &&
-                recordPendingKeytarCleanupIfMissing(
-                  userDataDirectory,
-                  envKey,
-                  'active-keytar',
-                  revision
-                )
-              ) {
-                attemptedMarker = this.inspectPendingLogoutMarker(envKey)
-              }
-            }
-            if (source && attemptedMarker && assertInspectedOwnership()) {
-              const current = this.inspectPendingLogoutMarker(envKey)
-              const restoredSource = rollbackSource ?? source
-              if (
-                pendingExternalLogoutMarkersMatch(current, attemptedMarker) &&
-                attemptedMarker.intent.intent === 'keytar-cleanup-pending' &&
-                attemptedMarker.intent.credentialSource !== restoredSource
-              ) {
-                const revision = randomUUID()
-                this.sessionAuthority.declarePlannedMarker(producer, {
-                  intent: { intent: 'keytar-cleanup-pending', credentialSource: restoredSource },
-                  revision,
-                })
-                const restoredMarker = recordPendingKeytarCleanupIfUnchanged(
-                  userDataDirectory,
-                  envKey,
-                  attemptedMarker,
-                  restoredSource,
-                  revision
-                )
-                if (!restoredMarker) throw new SessionTokenStorageSupersededBeforeWriteError()
-                attemptedMarker = this.inspectPendingLogoutMarker(envKey)
-                if (repairedConvertedEncryptedSource && restoredSource === 'active-keytar') {
-                  await this.tokenStore.discardSafeStorageSessionTokenIfMatches(
-                    previousToken,
-                    envKey,
-                    {
-                      mayWrite: () => runtimeOwned() && assertInspectedOwnership(),
-                    }
-                  )
-                }
-              }
-            }
-            repairedPriorSource ??= await this.readVerifiedSessionTokenSource(
-              previousToken,
-              envKey,
-              rollbackSource === 'safe-storage'
-                ? 'safe-storage'
-                : rollbackSource === 'active-keytar'
-                  ? 'keytar'
-                  : 'default',
-              mayDispatch,
-              this.priorSessionSource(
-                previousToken,
-                envKey,
-                rollbackSource === 'safe-storage'
-                  ? 'safe-storage'
-                  : rollbackSource === 'active-keytar'
-                    ? 'keytar'
-                    : 'default',
-                priorPublications,
-                publications,
-                previouslyAcceptedSource
-              )
-            )
-            await this.verifySessionTokenSource(repairedPriorSource, envKey, mayDispatch)
-            this.requireSessionTokenSourceCurrent(repairedPriorSource, envKey, mayDispatch)
-            if (this.me) this.recordAcceptedSessionSource(repairedPriorSource, envKey)
-          }
-          if (source === 'active-keytar' && receipt.keytarUnavailableBeforeWrite)
-            await discardRejectedEncryptedCandidate()
-          if (runtimeOwned()) await this.retireRepairedPersistenceProducer(producer)
-        } catch (rollbackError) {
-          this.reportDeferredLogoutFailureSafely(rollbackError)
-          if (dispatchInspectionError !== undefined) rollbackError = dispatchInspectionError
-          if (this.isTransientPersistenceAuthorityRead(rollbackError)) {
-            try {
-              await repairAfterTransientObservation()
-            } catch (repairError) {
-              await rejectUnverifiedRepair(repairError)
-            }
-            throw error
-          }
-          await rejectUnverifiedRepair(rollbackError)
-        }
-      }
-      throw error
-    }
-  }
-
-  private async clearOwnedPartialTeamSession(
-    receipt: SessionPersistenceReceipt,
-    previousToken: string
-  ): Promise<void> {
-    if (receipt.mode === 'temporary') {
-      await this.runSessionPersistence(async () => {
-        const runtimeOwned = () =>
-          getActiveEnvKey() === receipt.envKey &&
-          this.sessionGeneration === receipt.generation &&
-          this.sessionToken === receipt.token &&
-          this.memoryOnlySession?.volatileSessionId === receipt.volatileSessionId
-        if (!runtimeOwned()) return
-        const observation = this.sessionAuthority.observeMarker(receipt.envKey)
-        // An unreadable marker cannot prove that this rollback still owns the
-        // session. A concurrent logout or newer producer may have replaced it;
-        // in that case discard the volatile runtime instead of restoring an
-        // older credential under uncertain authority.
-        const mayRestore =
-          observation.status === 'observed' &&
-          pendingExternalLogoutMarkersMatch(observation.marker, receipt.marker)
-        if (observation.status === 'invalid' || observation.status === 'transient') {
-          this.reportDeferredLogoutFailureSafely(observation.error)
-        }
-        if (
-          mayRestore &&
-          receipt.previousToken === previousToken &&
-          !this.sessionAuthority.isMemoryOnlySessionExpired(receipt.previousLease.expiresAt)
-        ) {
-          this.clearAuthenticatedSessionState({ notifySessionChanged: false })
-          this.sessionToken = receipt.previousToken
-          this.me = receipt.previousMe
-          this.memoryOnlySession = receipt.previousLease
-          this.scheduleMemoryOnlySessionExpiry(receipt.previousLease)
-          this.updateEntityChangeSessionToken(receipt.previousToken)
-          this.restartEntityChangeStreamForSessionReplacement()
-          try {
-            await this.bindCurrentChatStore(receipt.previousMe.id)
-            this.activateGfsAuthScope()
-          } catch (error) {
-            if (this.sessionToken === receipt.previousToken) this.clearAuthenticatedSessionState()
-            this.reportDeferredLogoutFailureSafely(error)
-          }
-        } else {
-          this.clearAuthenticatedSessionState()
-        }
-      })
-      return
-    }
-    const envKey = receipt.envKey
-    const userDataDirectory = this.getUserDataDirectory()
-    const runtimeOwned = () =>
-      getActiveEnvKey() === envKey &&
-      this.sessionGeneration === receipt.generation &&
-      this.sessionToken === receipt.token
-    const ownership = () =>
-      this.sessionAuthority.inspectOwnership(envKey, [receipt.marker], runtimeOwned())
-    await this.runSessionPersistence(async () => {
-      if (!runtimeOwned()) return
-      const observation = ownership()
-      if (observation.status === 'superseded') {
-        if (runtimeOwned()) this.clearAuthenticatedSessionState()
-        return
-      }
-      if (observation.status === 'invalid') {
-        this.reportDeferredLogoutFailureSafely(observation.error)
-        if (runtimeOwned()) this.clearAuthenticatedSessionState()
-        return
-      }
-      if (observation.status === 'transient')
-        this.reportDeferredLogoutFailureSafely(observation.error)
-      const mayRepair = () => {
-        if (!runtimeOwned()) return false
-        if (
-          !isSessionTokenReadAuthorityCurrent(
-            receipt.selectedSource.authority,
-            receipt.selectedSource.source,
-            envKey
-          )
-        )
-          return false
-        const current = ownership()
-        if (current.status === 'invalid') throw current.error
-        // Exact candidate repair uses the installation receipt when marker I/O
-        // is uncertain. It cannot rewrite unknown marker bytes or another value.
-        return current.status === 'owned' || current.status === 'transient'
-      }
-      try {
-        let priorSource: VerifiedSessionTokenSource | undefined
-        const onPriorMutation = (source: SessionTokenMutationSource, prior: string) =>
-          this.sessionAuthority.preparePriorRepair(receipt.producer, source, receipt.token, prior)
-        const onPriorMutationSettled = (
-          source: SessionTokenMutationSource,
-          authority: SessionTokenReadAuthority
-        ) => {
-          priorSource = sessionTokenPublicationSource(source, previousToken, authority)
-        }
-        if (receipt.credentialSource === 'active-keytar') {
-          await this.tokenStore.repairKeytarSessionTokenIfMatches(
-            receipt.token,
-            previousToken,
-            envKey,
-            {
-              mayWrite: mayRepair,
-              onMutationDispatched: onPriorMutation,
-              onMutationSettled: onPriorMutationSettled,
-              candidateAuthority: receipt.publications.get('keytar')?.authority,
-            }
-          )
-          if (
-            runtimeOwned() &&
-            (await this.sessionAuthority.readSessionTokenFromSource('active-keytar', envKey)) !==
-              previousToken
-          )
-            throw new Error('Rejected team credential repair could not be verified in Keytar')
-        } else if (receipt.credentialSource === 'safe-storage') {
-          await this.tokenStore.repairSafeStorageSessionTokenIfMatches(
-            receipt.token,
-            previousToken,
-            envKey,
-            {
-              mayWrite: mayRepair,
-              onMutationDispatched: onPriorMutation,
-              onMutationSettled: onPriorMutationSettled,
-              candidateAuthority: receipt.publications.get('safe-storage')?.authority,
-            }
-          )
-          if (
-            runtimeOwned() &&
-            (await this.sessionAuthority.readSessionTokenFromSource('safe-storage', envKey)) !==
-              previousToken
-          )
-            throw new Error('Rejected team credential repair could not be verified in safeStorage')
-        } else if (receipt.fallbackSnapshot) {
-          const retired = await this.tokenStore.retireSessionTokenFallbackFilesIfUnchanged(
-            receipt.fallbackSnapshot,
-            { mayWrite: mayRepair }
-          )
-          if (!retired && runtimeOwned()) throw new SessionTokenStorageSupersededBeforeWriteError()
-        }
-        if (priorSource) await this.verifySessionTokenSource(priorSource, envKey, runtimeOwned)
-        if (runtimeOwned()) await this.retireRepairedPersistenceProducer(receipt.producer)
-      } catch (cleanupError) {
-        this.reportDeferredLogoutFailureSafely(cleanupError)
-      }
-      if (runtimeOwned()) this.clearAuthenticatedSessionState()
-    })
-  }
-
   private async switchSessionToTeam(
     teamId: string,
     token = this.requireSessionToken(),
     options: {
       advanceSessionGeneration?: boolean
-      onInstalled?: (receipt: SessionPersistenceReceipt) => void
-      deferAcceptance?: boolean
+      activateGfsScope?: boolean
+      beforeAcceptance?: () => Promise<void>
     } = {}
   ) {
     const releaseTransientHop = this.enterGfsTransientTeamHop()
@@ -2658,65 +1621,510 @@ export class AppService {
       if (this.sessionToken !== token || !this.me) {
         throw new Error('stale_auth_epoch: authenticated team scope changed before switch dispatch')
       }
+      const expectedMarker = await this.inspectTeamTransitionMarker(getActiveEnvKey())
       const previousIdentity =
         this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
-      let switchedToken: string | null = null
-      let installedReceipt: SessionPersistenceReceipt | null = null
-      try {
+      if (this.memoryOnlySession) {
         const switched = await this.authClient.switchTeam(token, targetTeamId)
-        switchedToken = switched.token
+        await this.assertTeamTransitionMarkerCurrent(getActiveEnvKey(), expectedMarker)
         if (this.sessionGeneration !== switchGeneration || this.sessionToken !== token) {
-          throw new Error('stale_auth_epoch: authenticated team scope changed during switch')
+          throw new SessionTokenStorageSupersededBeforeWriteError()
         }
-        await this.commitSessionToken(switched.token, {
-          advanceSessionGeneration: options.advanceSessionGeneration,
-          refreshMe: true,
-          onInstalled: receipt => {
-            installedReceipt = receipt
-            options.onInstalled?.(receipt)
-          },
-        })
-        if (!this.me) throw new Error('Team switch ended without an authenticated session')
-        const completedReceipt = installedReceipt as SessionPersistenceReceipt | null
-        if (completedReceipt) await this.verifySessionPersistenceReceipt(completedReceipt)
-        if (!options.deferAcceptance && completedReceipt) {
-          this.requireSessionPersistenceReceipt(completedReceipt)
-          if (completedReceipt.mode === 'persistent') {
-            this.sessionAuthority.acceptCandidate(completedReceipt.producer, switched.token)
-            this.recordAcceptedSessionSource(
-              completedReceipt.selectedSource,
-              completedReceipt.envKey
-            )
-          }
-        }
+        await this.switchMemoryOnlySessionToTeamCandidate(
+          targetTeamId,
+          token,
+          switched.token,
+          switchGeneration,
+          expectedMarker,
+          previousIdentity,
+          options
+        )
         return switched.token
-      } catch (error) {
-        if (this.sessionGeneration === switchGeneration && this.sessionToken === token && this.me) {
-          // A rejected pre-install write or inspection leaves the valid old
-          // authorization scope intact. Issuing a team token does not revoke it.
-        } else if (this.sessionToken === switchedToken && installedReceipt) {
-          // This attempt installed a replacement token, so its partially
-          // authenticated scope is no longer safe to continue. Fence and
-          // persist its uploads before clearing the partially switched session;
-          // otherwise a failed refresh/restore could leave a job running with a
-          // token whose team ownership is unknown. The fence is best effort:
-          // clearing the in-memory scope and revoking the persisted token must
-          // still happen when its state write is unavailable.
-          try {
-            await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
-          } catch (fenceError) {
-            desktopRuntimeLog.warn(
-              '[AppService] Failed to persist the GFS authentication fence during team switch:',
-              fenceError
-            )
-          }
-          await this.clearOwnedPartialTeamSession(installedReceipt, token)
-        }
-        throw error
       }
+
+      const switched = await this.authClient.switchTeam(token, targetTeamId)
+      await this.assertTeamTransitionMarkerCurrent(getActiveEnvKey(), expectedMarker)
+      if (this.sessionGeneration !== switchGeneration || this.sessionToken !== token) {
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      }
+      await this.switchPersistentSessionToTeamCandidate(
+        targetTeamId,
+        token,
+        switched.token,
+        switchGeneration,
+        previousIdentity,
+        expectedMarker,
+        options
+      )
+      return switched.token
     } finally {
       releaseTransientHop()
     }
+  }
+
+  private async switchMemoryOnlySessionToTeamCandidate(
+    targetTeamId: string,
+    priorToken: string,
+    candidateToken: string,
+    generation: number,
+    expectedMarker: PendingExternalLogoutMarker | null,
+    priorGfsIdentity: DesktopGfsUploadIdentity | undefined,
+    options: {
+      advanceSessionGeneration?: boolean
+      activateGfsScope?: boolean
+      beforeAcceptance?: () => Promise<void>
+    }
+  ): Promise<void> {
+    const priorUser = this.me
+    const priorLease = this.memoryOnlySession
+    const envKey = getActiveEnvKey()
+    if (
+      !priorUser ||
+      !priorLease ||
+      priorLease.envKey !== envKey ||
+      !expectedMarker ||
+      !pendingExternalLogoutMarkersMatch(priorLease.marker, expectedMarker)
+    )
+      throw new SessionTokenStorageSupersededBeforeWriteError()
+
+    const ownerIsCurrent = () =>
+      this.sessionGeneration === generation &&
+      this.sessionToken === priorToken &&
+      this.me === priorUser &&
+      this.memoryOnlySession === priorLease &&
+      !this.logoutInProgress &&
+      getActiveEnvKey() === envKey
+    const producerIsCurrent = () =>
+      ownerIsCurrent() && !this.sessionAuthority.isMemoryOnlySessionExpired(priorLease.expiresAt)
+    const assertOwnerCurrent = async () => {
+      if (!ownerIsCurrent()) throw new SessionTokenStorageSupersededBeforeWriteError()
+      this.assertMemoryOnlySessionCurrent(priorLease)
+      await this.assertTeamTransitionMarkerCurrent(envKey, expectedMarker)
+      if (!ownerIsCurrent()) throw new SessionTokenStorageSupersededBeforeWriteError()
+      this.assertMemoryOnlySessionCurrent(priorLease)
+    }
+
+    const initialChatBindingGeneration = getChatStoreBindingGeneration()
+    const initialChatScope = requireChatStore().getAuthorityScope()
+    if (
+      !initialChatScope ||
+      initialChatScope.environmentKey !== envKey ||
+      initialChatScope.userId !== priorUser.id
+    )
+      throw new Error('Temporary team candidate cannot prepare the current chat-store owner')
+
+    const candidate = await SessionAuthorityAcceptanceTransaction.begin({
+      tokenStore: this.tokenStore,
+      userDataDirectory: this.getUserDataDirectory(),
+      envKey,
+      legacyEnvKeys: getActiveLegacyEnvKeys(),
+      legacyNamespaceComplete: getActiveLegacyEnvKeyInventory().complete,
+      token: candidateToken,
+      accountId: priorUser.id,
+      source: 'memory-only',
+      priorToken,
+      priorVolatileSessionId: priorLease.volatileSessionId,
+      volatileSessionId: priorLease.volatileSessionId,
+      ownerEpoch: generation,
+    })
+    let gfsPrepared = false
+    let acceptedMemoryLease: MemoryOnlySessionLease | undefined
+    try {
+      const expiresAt = this.sessionAuthority.memoryOnlySessionReplacementDeadline(
+        priorLease.expiresAt,
+        candidateToken
+      )
+      await this.runSessionPersistence(async () => {
+        await candidate.execute({
+          assertOwned: assertOwnerCurrent,
+          isProducerStillCurrent: producerIsCurrent,
+          isPriorConsumerOwnerCurrent: () =>
+            sameChatAuthorityScope(requireChatStore().getAuthorityScope(), initialChatScope),
+          onAcceptanceIndeterminate: () => {
+            if (ownerIsCurrent()) this.clearAuthenticatedSessionState()
+          },
+          onAcceptancePublicationFailure: () => {
+            // The durable frame may already select this candidate. Do not restore the old
+            // in-process owner after a partial synchronous publication; deny runtime access
+            // and let startup reconcile the accepted receipt.
+            this.clearAuthenticatedSessionState()
+          },
+          verifyIdentity: async () => {
+            const user = await this.sessionAuthority.withTemporarySessionCandidateValidation(
+              priorToken,
+              candidateToken,
+              () =>
+                runWithSessionRequestContext(
+                  this.sessionAuthority.captureSessionRequestContext(priorToken),
+                  () => this.authClient.getMe(candidateToken)
+                )
+            )
+            await assertOwnerCurrent()
+            if (user.id !== priorUser.id || String(user.teamId || '').trim() !== targetTeamId)
+              throw new SessionTokenStorageSupersededBeforeWriteError()
+            return user
+          },
+          prepareConsumers: async user => {
+            if (options.beforeAcceptance) {
+              // The GFS fence may partly apply before failing. Preserve and restore its owner.
+              gfsPrepared = true
+              await options.beforeAcceptance()
+            }
+            await assertOwnerCurrent()
+            if (this.sessionAuthority.isMemoryOnlySessionExpired(expiresAt))
+              throw new TemporarySessionExpiredError()
+            return {
+              chatBindingGeneration: initialChatBindingGeneration,
+              chatScope: initialChatScope,
+              acceptedChatTeamId:
+                this.chatStoreHomeTeamId ?? (String(user.teamId || '').trim() || null),
+            }
+          },
+          consumersReady: consumers => {
+            const currentScope = requireChatStore().getAuthorityScope()
+            return Boolean(
+              getChatStoreBindingGeneration() === consumers.chatBindingGeneration &&
+              currentScope &&
+              currentScope.environmentKey === consumers.chatScope.environmentKey &&
+              currentScope.userId === consumers.chatScope.userId &&
+              currentScope.teamId === consumers.chatScope.teamId &&
+              !this.sessionAuthority.isMemoryOnlySessionExpired(expiresAt)
+            )
+          },
+          isStillOwned: (_user, consumers) => {
+            if (
+              !ownerIsCurrent() ||
+              getChatStoreBindingGeneration() !== consumers.chatBindingGeneration
+            )
+              return false
+            // The acceptance transaction has replaced the observed before-image with its own
+            // deny-only projection marker. It validates that exact marker under the serialized
+            // authority lane immediately before CAS; comparing with the pre-transaction marker
+            // here would falsely reject every valid staged acceptance.
+            return (
+              getActiveEnvKey() === envKey &&
+              !this.sessionAuthority.isMemoryOnlySessionExpired(priorLease.expiresAt)
+            )
+          },
+          preparePublication: (user, consumers) => {
+            const publishChatScope = reserveBoundChatStoreTeamScope(
+              consumers.chatBindingGeneration,
+              user.id,
+              envKey,
+              consumers.acceptedChatTeamId
+            )
+            const acceptedMarker = candidate.stagedAcceptanceMarker
+            if (!publishChatScope || !acceptedMarker)
+              throw new SessionTokenStorageSupersededBeforeWriteError()
+            const nextLease: MemoryOnlySessionLease = {
+              ...priorLease,
+              marker: acceptedMarker,
+              expiresAt,
+            }
+            const nextGeneration =
+              options.advanceSessionGeneration === false ? generation : generation + 1
+            const activateGfs = options.activateGfsScope || this.chatStoreHomeTeamId === null
+            const nextGfsIdentity = activateGfs ? desktopGfsUploadIdentity(user) : undefined
+            const runtimeOwnerPublication = this.sessionAuthority.prepareRuntimeOwnerPublication({
+              expectedGeneration: generation,
+              generation: nextGeneration,
+              token: candidateToken,
+              user,
+              acceptedSource: undefined,
+              acceptedAuthoritySource: undefined,
+              acceptedProjectionMarker: nextLease.marker,
+              memoryLease: nextLease,
+            })
+            if (!runtimeOwnerPublication) throw new SessionTokenStorageSupersededBeforeWriteError()
+            const nextTeamDirectoryCache = this.teamDirectoryCache
+              ? { ...this.teamDirectoryCache, currentTeamId: String(user.teamId || '') }
+              : this.teamDirectoryCache
+            return {
+              isCurrent: () => runtimeOwnerPublication.isCurrent(),
+              publish: () => {
+                publishChatScope()
+                runtimeOwnerPublication.publish()
+                acceptedMemoryLease = nextLease
+                this.rpcTokenManager.clear()
+                this.profileUiBaseUrlCache = null
+                this.accessCatalog = null
+                this.teamDirectoryCache = nextTeamDirectoryCache
+                this.workflowApprovalTeamById.clear()
+                this.workflowTeamByKey.clear()
+                if (activateGfs) {
+                  this.gfsAuthEpoch += 1
+                  this.gfsDispatchBlocked = false
+                  this.gfsScopeIdentity = nextGfsIdentity ?? null
+                }
+                if (this.gfsTransientTeamHopDepth === 0)
+                  this.updateEntityChangeSessionToken(candidateToken)
+                return undefined
+              },
+            }
+          },
+          afterAcceptance: async () => {
+            if (acceptedMemoryLease) this.scheduleMemoryOnlySessionExpiry(acceptedMemoryLease)
+            if (this.gfsTransientTeamHopDepth === 0) {
+              try {
+                this.restartEntityChangeStreamForSessionReplacement()
+              } catch (error) {
+                this.reportDeferredLogoutFailureSafely(error)
+              }
+            }
+          },
+          discardConsumers: () => {},
+          rollbackBeforeAcceptance: authorization => {
+            if (!authorization.canRestorePriorConsumers) {
+              if (ownerIsCurrent()) this.clearAuthenticatedSessionState()
+              return
+            }
+            if (gfsPrepared && ownerIsCurrent()) this.activateGfsAuthScope(priorGfsIdentity)
+          },
+        })
+      })
+
+      const expectedGeneration =
+        options.advanceSessionGeneration === false ? generation : generation + 1
+      if (
+        !acceptedMemoryLease ||
+        this.sessionGeneration !== expectedGeneration ||
+        this.sessionToken !== candidateToken ||
+        this.memoryOnlySession !== acceptedMemoryLease ||
+        this.me?.teamId !== targetTeamId
+      )
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+    } catch (error) {
+      if (
+        !acceptedMemoryLease &&
+        ownerIsCurrent() &&
+        !(error instanceof SessionTokenStorageSupersededBeforeWriteError)
+      ) {
+        // A candidate failure may race a newer logout or marker revision. Re-observe the
+        // volatile lease before retaining Home; a transient read is retried, never interpreted
+        // as absence, while a confirmed newer denial ends the old lease.
+        for (let attempt = 0; attempt < 3 && ownerIsCurrent(); attempt += 1) {
+          try {
+            this.assertMemoryOnlySessionCurrent(priorLease)
+            break
+          } catch (ownershipError) {
+            const failure = this.sessionAuthority.planPersistenceAuthorityFailure(
+              ownershipError,
+              'producer-rollback'
+            )
+            if (failure.kind !== 'transient-read') break
+            this.reportDeferredLogoutFailureSafely(ownershipError)
+          }
+        }
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Stage a persistent team replacement in an immutable source slot. The prior source remains
+   * selected until server identity and the producer owner are verified and the authority CAS wins.
+   */
+  private async switchPersistentSessionToTeamCandidate(
+    targetTeamId: string,
+    priorToken: string,
+    candidateToken: string,
+    generation: number,
+    priorGfsIdentity: DesktopGfsUploadIdentity | undefined,
+    expectedMarker: PendingExternalLogoutMarker | null,
+    options: {
+      advanceSessionGeneration?: boolean
+      activateGfsScope?: boolean
+      beforeAcceptance?: () => Promise<void>
+    }
+  ): Promise<void> {
+    const priorUser = this.me
+    const envKey = getActiveEnvKey()
+    if (!priorUser || !candidateToken || !this.tokenStore)
+      throw new SessionTokenStorageSupersededBeforeWriteError()
+
+    await this.runSessionPersistence(async () => {
+      const ownerIsCurrent = () =>
+        this.sessionGeneration === generation &&
+        this.sessionToken === priorToken &&
+        this.me === priorUser &&
+        !this.logoutInProgress &&
+        getActiveEnvKey() === envKey
+      const producerIsCurrent = () => ownerIsCurrent()
+      const assertOwnerCurrent = async () => {
+        if (!ownerIsCurrent()) throw new SessionTokenStorageSupersededBeforeWriteError()
+        await this.assertTeamTransitionMarkerCurrent(envKey, expectedMarker)
+        if (!ownerIsCurrent()) throw new SessionTokenStorageSupersededBeforeWriteError()
+      }
+
+      let source: 'keytar' | 'safe-storage'
+      const selected = await readSessionAuthoritySourceSelection({
+        tokenStore: this.tokenStore,
+        envKey,
+        coordinator: this.sessionAuthority,
+      })
+      if (selected.status === 'accepted') {
+        if (selected.session.token !== priorToken)
+          throw new SessionTokenStorageSupersededBeforeWriteError()
+        const selectedSource = selected.session.accepted.record.frame.source
+        if (
+          !selectedSource ||
+          (selectedSource.kind !== 'keytar' && selectedSource.kind !== 'safe-storage')
+        )
+          throw new SessionTokenStorageSupersededBeforeWriteError()
+        source = selectedSource.kind
+      } else if (selected.status === 'absent') {
+        const legacyAccepted = this.sessionAuthority.captureAcceptedSessionSource(envKey)
+        if (!legacyAccepted || legacyAccepted.token !== priorToken)
+          throw new SessionTokenStorageSupersededBeforeWriteError()
+        if (legacyAccepted.source === 'keytar') source = 'keytar'
+        else if (legacyAccepted.source === 'safe-storage') source = 'safe-storage'
+        else throw new SessionTokenStorageSupersededBeforeWriteError()
+      } else {
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      }
+      await assertOwnerCurrent()
+
+      const candidate = await SessionAuthorityAcceptanceTransaction.begin({
+        tokenStore: this.tokenStore,
+        userDataDirectory: this.getUserDataDirectory(),
+        envKey,
+        legacyEnvKeys: getActiveLegacyEnvKeys(),
+        legacyNamespaceComplete: getActiveLegacyEnvKeyInventory().complete,
+        token: candidateToken,
+        accountId: priorUser.id,
+        source,
+        priorToken,
+        priorSourceKind: source,
+        ownerEpoch: generation,
+      })
+      let gfsPrepared = false
+      const chatBindingGeneration = getChatStoreBindingGeneration()
+      const chatScope = requireChatStore().getAuthorityScope()
+      if (!chatScope || chatScope.environmentKey !== envKey || chatScope.userId !== priorUser.id)
+        throw new Error('Team candidate cannot prepare the current chat-store owner')
+
+      await candidate.execute({
+        assertOwned: assertOwnerCurrent,
+        isProducerStillCurrent: producerIsCurrent,
+        isPriorConsumerOwnerCurrent: () =>
+          sameChatAuthorityScope(requireChatStore().getAuthorityScope(), chatScope),
+        onAcceptanceIndeterminate: () => {
+          if (ownerIsCurrent()) this.clearAuthenticatedSessionState()
+        },
+        onAcceptancePublicationFailure: () => {
+          this.clearAuthenticatedSessionState()
+        },
+        verifyIdentity: async () => {
+          const user = await this.withCandidateSessionRequest(
+            candidateToken,
+            envKey,
+            generation,
+            ownerIsCurrent,
+            () => this.authClient.getMe(candidateToken)
+          )
+          await assertOwnerCurrent()
+          if (user.id !== priorUser.id || String(user.teamId || '').trim() !== targetTeamId)
+            throw new SessionTokenStorageSupersededBeforeWriteError()
+          return user
+        },
+        prepareConsumers: async user => {
+          if (options.beforeAcceptance) {
+            // Preparation may partially fence a fallible consumer; rollback restores its scope.
+            gfsPrepared = true
+            await options.beforeAcceptance()
+          }
+          await assertOwnerCurrent()
+          return {
+            chatBindingGeneration,
+            chatScope,
+            acceptedChatTeamId:
+              this.chatStoreHomeTeamId ?? (String(user.teamId || '').trim() || null),
+          }
+        },
+        consumersReady: consumers => {
+          const currentScope = requireChatStore().getAuthorityScope()
+          return Boolean(
+            getChatStoreBindingGeneration() === consumers.chatBindingGeneration &&
+            currentScope &&
+            currentScope.environmentKey === consumers.chatScope.environmentKey &&
+            currentScope.userId === consumers.chatScope.userId &&
+            currentScope.teamId === consumers.chatScope.teamId
+          )
+        },
+        isStillOwned: (_user, consumers) => {
+          // The transaction verifies the staged acceptance marker against its durable projection
+          // intent inside the final authority lane. This callback only verifies runtime and
+          // consumer ownership; the original marker is an obsolete before-image by this point.
+          return (
+            ownerIsCurrent() && getChatStoreBindingGeneration() === consumers.chatBindingGeneration
+          )
+        },
+        preparePublication: (user, consumers) => {
+          const publishChatScope = reserveBoundChatStoreTeamScope(
+            consumers.chatBindingGeneration,
+            user.id,
+            envKey,
+            consumers.acceptedChatTeamId
+          )
+          const acceptedMarker = candidate.stagedAcceptanceMarker
+          const nextGeneration =
+            options.advanceSessionGeneration === false ? generation : generation + 1
+          const runtimeOwnerPublication = this.sessionAuthority.prepareRuntimeOwnerPublication({
+            expectedGeneration: generation,
+            generation: nextGeneration,
+            token: candidateToken,
+            user,
+            acceptedSource: undefined,
+            acceptedAuthoritySource: candidate.candidateAuthoritySource ?? undefined,
+            acceptedProjectionMarker: acceptedMarker ?? undefined,
+            memoryLease: undefined,
+          })
+          if (!publishChatScope || !acceptedMarker || !runtimeOwnerPublication)
+            throw new SessionTokenStorageSupersededBeforeWriteError()
+          const activateGfs = options.activateGfsScope || this.chatStoreHomeTeamId === null
+          const nextGfsIdentity = activateGfs ? desktopGfsUploadIdentity(user) : undefined
+          return {
+            isCurrent: () => runtimeOwnerPublication.isCurrent(),
+            publish: () => {
+              publishChatScope()
+              runtimeOwnerPublication.publish()
+              this.rpcTokenManager.clear()
+              this.profileUiBaseUrlCache = null
+              this.accessCatalog = null
+              this.teamDirectoryCache = null
+              this.workflowApprovalTeamById.clear()
+              this.workflowTeamByKey.clear()
+              if (activateGfs) {
+                this.gfsAuthEpoch += 1
+                this.gfsDispatchBlocked = false
+                this.gfsScopeIdentity = nextGfsIdentity ?? null
+              }
+              if (this.gfsTransientTeamHopDepth === 0)
+                this.updateEntityChangeSessionToken(candidateToken)
+              return undefined
+            },
+          }
+        },
+        afterAcceptance: async () => {
+          if (this.gfsTransientTeamHopDepth === 0) {
+            this.restartEntityChangeStreamForSessionReplacement()
+          }
+          try {
+            await candidate.cleanSupersededSources()
+          } catch (error) {
+            this.reportDeferredLogoutFailureSafely(error)
+          }
+        },
+        discardConsumers: () => {},
+        rollbackBeforeAcceptance: authorization => {
+          if (!authorization.canRestorePriorConsumers) {
+            if (ownerIsCurrent()) this.clearAuthenticatedSessionState()
+            return
+          }
+          if (gfsPrepared && ownerIsCurrent()) this.activateGfsAuthScope(priorGfsIdentity)
+        },
+      })
+    })
   }
 
   private enterGfsTransientTeamHop(): () => void {
@@ -2739,28 +2147,248 @@ export class AppService {
     }
   }
 
+  /**
+   * A failed return hop can leave the already-accepted borrowed team as the runtime owner.
+   * Re-enable its GFS scope only after the exact source/lease and projection marker still
+   * authorize that runtime owner. If any observation is transient or divergent, revoke this
+   * owner's consumers rather than reviving a pre-hop scope.
+   */
+  private async settleFailedTeamRestoreGfsOwner(expected: {
+    envKey: string
+    generation: number
+    token: string
+    user: SessionMe
+    authoritySource: SessionAuthorityCoordinator['acceptedSessionAuthoritySource']
+    projectionMarker: PendingExternalLogoutMarker | undefined
+    memoryLease: MemoryOnlySessionLease | undefined
+  }): Promise<boolean> {
+    const stillOwnsRuntime = () =>
+      !this.logoutInProgress &&
+      !this.quitPreparationStarted &&
+      getActiveEnvKey() === expected.envKey &&
+      this.sessionGeneration === expected.generation &&
+      this.sessionToken === expected.token &&
+      this.me === expected.user &&
+      this.sessionAuthority.acceptedSessionAuthoritySource === expected.authoritySource &&
+      this.sessionAuthority.memoryOnlySession === expected.memoryLease
+
+    if (!stillOwnsRuntime()) return false
+    try {
+      if (expected.memoryLease) {
+        this.sessionAuthority.assertMemoryOnlySessionCurrent(expected.memoryLease)
+      } else {
+        const selection = await readSessionAuthoritySourceSelection({
+          tokenStore: this.tokenStore,
+          envKey: expected.envKey,
+          coordinator: this.sessionAuthority,
+        })
+        const selectedSource =
+          selection.status === 'accepted' ? selection.session.accepted.record.frame.source : null
+        if (
+          selection.status !== 'accepted' ||
+          selection.session.token !== expected.token ||
+          !selectedSource ||
+          !expected.authoritySource ||
+          JSON.stringify(selectedSource) !== JSON.stringify(expected.authoritySource) ||
+          selectedSource.accountId !== expected.user.id
+        )
+          throw new SessionTokenStorageSupersededBeforeWriteError()
+      }
+
+      // The source read above awaits. Recheck the runtime owner and exact sidecar synchronously
+      // after it; there is no yield between this final check and the consumer publication.
+      if (!stillOwnsRuntime()) return false
+      if (
+        !pendingExternalLogoutMarkersMatch(
+          this.inspectPendingLogoutMarker(expected.envKey),
+          expected.projectionMarker ?? null
+        )
+      )
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      if (!stillOwnsRuntime()) return false
+
+      this.sessionAuthority.advanceSessionGeneration(expected.generation)
+      this.updateEntityChangeSessionToken(expected.token)
+      this.restartEntityChangeStreamForSessionReplacement()
+      this.activateGfsAuthScope(desktopGfsUploadIdentity(expected.user))
+      return true
+    } catch (error) {
+      // An independent newer owner is never cleared. If this operation still owns runtime but
+      // its durable receipt cannot be verified, fail closed across every authenticated consumer.
+      if (stillOwnsRuntime()) this.clearAuthenticatedSessionState()
+      this.reportDeferredLogoutFailureSafely(error)
+      return false
+    }
+  }
+
+  /**
+   * After a failed Home restore, the accepted hop owner may need its chat team scope rebound.
+   * The operation queue can yield while draining Home work, so publish this same-user scope
+   * synchronously only when the exact runtime owner and deny-only marker still match.
+   */
+  private rebindFailedTeamRestoreChatOwner(expected: {
+    envKey: string
+    generation: number
+    token: string
+    user: SessionMe
+    authoritySource: SessionAuthorityCoordinator['acceptedSessionAuthoritySource']
+    projectionMarker: PendingExternalLogoutMarker | undefined
+    memoryLease: MemoryOnlySessionLease | undefined
+  }): void {
+    const ownerIsCurrent = () =>
+      !this.logoutInProgress &&
+      !this.quitPreparationStarted &&
+      getActiveEnvKey() === expected.envKey &&
+      this.sessionGeneration === expected.generation &&
+      this.sessionToken === expected.token &&
+      this.me === expected.user &&
+      this.sessionAuthority.acceptedSessionAuthoritySource === expected.authoritySource &&
+      this.memoryOnlySession === expected.memoryLease
+    if (!ownerIsCurrent()) return
+
+    let marker: PendingExternalLogoutMarker | null
+    try {
+      marker = this.inspectPendingLogoutMarker(expected.envKey)
+    } catch (error) {
+      if (ownerIsCurrent()) this.clearAuthenticatedSessionState()
+      this.reportDeferredLogoutFailureSafely(error)
+      return
+    }
+    if (
+      !ownerIsCurrent() ||
+      !pendingExternalLogoutMarkersMatch(marker, expected.projectionMarker ?? null)
+    ) {
+      if (ownerIsCurrent()) this.clearAuthenticatedSessionState()
+      return
+    }
+
+    try {
+      if (expected.memoryLease)
+        this.sessionAuthority.assertMemoryOnlySessionCurrent(expected.memoryLease)
+      const chatStore = requireChatStore()
+      const bindingGeneration = getChatStoreBindingGeneration()
+      const scope = chatStore.getAuthorityScope()
+      if (!scope || scope.environmentKey !== expected.envKey || scope.userId !== expected.user.id)
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      const publish = reserveBoundChatStoreTeamScope(
+        bindingGeneration,
+        expected.user.id,
+        expected.envKey,
+        String(expected.user.teamId || '').trim() || null
+      )
+      if (
+        !publish ||
+        !ownerIsCurrent() ||
+        !pendingExternalLogoutMarkersMatch(
+          this.inspectPendingLogoutMarker(expected.envKey),
+          expected.projectionMarker ?? null
+        )
+      ) {
+        if (ownerIsCurrent()) this.clearAuthenticatedSessionState()
+        return
+      }
+      publish()
+    } catch (error) {
+      if (ownerIsCurrent()) this.clearAuthenticatedSessionState()
+      this.reportDeferredLogoutFailureSafely(error)
+    }
+  }
+
   private runWithTeamContext<T>(
     teamId: string | null | undefined,
     operation: (sessionToken: string) => Promise<T>,
-    options: { mutation?: boolean } = {}
+    options: {
+      mutation?: boolean
+      preserveRequestContext?: boolean
+      onRequestContextTransition?: (context: unknown) => void
+    } = {}
   ): Promise<T> {
     const targetTeamId = String(teamId || '').trim()
-    const run = () => this.runWithTeamContextInTeamQueue(targetTeamId, operation, options)
-    return run()
+    if (options.preserveRequestContext) {
+      this.preserveSessionRequestContextForOperation()
+    } else {
+      this.captureSessionRequestContextForOperation()
+    }
+    const requestContext = getSessionRequestContext()
+    if (requestContext === undefined) throw new SessionRequestOwnershipError()
+    const queueOptions = {
+      mutation: options.mutation,
+      onRequestContextTransition: options.onRequestContextTransition,
+      allowApprovedTeamSwitchRebind: !options.preserveRequestContext && options.mutation !== true,
+    }
+    return runWithSessionRequestContext(requestContext, () =>
+      this.runWithTeamContextInTeamQueue(targetTeamId, operation, queueOptions)
+    )
   }
 
   private async runWithTeamContextInTeamQueue<T>(
     targetTeamId: string,
     operation: (sessionToken: string) => Promise<T>,
-    options: { mutation?: boolean } = {}
+    options: {
+      mutation?: boolean
+      onRequestContextTransition?: (context: unknown) => void
+      allowApprovedTeamSwitchRebind?: boolean
+    } = {}
   ): Promise<T> {
+    let requestContext = getSessionRequestContext()
+    const activeHop = this.activeTeamContextHop
+    const currentToken = this.sessionToken
+    const activeHopOwnsRequest = Boolean(
+      activeHop &&
+      currentToken &&
+      this.sessionAuthority.isSessionRequestContextInCurrentLineage(
+        activeHop.homeRequestContext,
+        currentToken
+      )
+    )
+    if (activeHop && targetTeamId === activeHop.homeTeamId && activeHopOwnsRequest) {
+      if (!this.quitPreparationStarted)
+        return this.enqueueHomeTeamOperation(
+          activeHop,
+          operation,
+          requestContext,
+          options.onRequestContextTransition
+        )
+    }
+    if (requestContext === undefined) {
+      throw new SessionRequestOwnershipError()
+    }
+    if (!activeHopOwnsRequest) {
+      const contextIsInCurrentLineage = Boolean(
+        currentToken &&
+        this.sessionAuthority.isSessionRequestContextInCurrentLineage(requestContext, currentToken)
+      )
+      if (!contextIsInCurrentLineage) this.assertCurrentSessionRequestContext()
+    }
+    const rebindRequestContextWithinCurrentLineage = () => {
+      if (requestContext === undefined) return
+      const token = this.sessionToken
+      if (
+        !token ||
+        !this.sessionAuthority.isSessionRequestContextInCurrentLineage(requestContext, token)
+      ) {
+        return
+      }
+      const nextContext = this.sessionAuthority.captureSessionRequestContext(token)
+      if (this.sessionAuthority.sessionRequestContextsMatchOwner(requestContext, nextContext))
+        return
+      requestContext = nextContext
+      enterSessionRequestContext(nextContext)
+      options.onRequestContextTransition?.(nextContext)
+    }
     if (!targetTeamId) {
       await this.teamContextQueue.catch(() => undefined)
-      const context = await this.withNativeAuthEnvironmentCommit(async () => ({
-        sessionToken: this.requireSessionToken(),
-        sessionGeneration: this.sessionGeneration,
-        environmentBinding: this.captureAuthEnvironmentBinding(),
-      }))
+      rebindRequestContextWithinCurrentLineage()
+      this.assertCurrentSessionRequestContext()
+      const context = await this.withNativeAuthEnvironmentCommit(async () => {
+        rebindRequestContextWithinCurrentLineage()
+        this.assertCurrentSessionRequestContext()
+        return {
+          sessionToken: this.requireSessionToken(),
+          sessionGeneration: this.sessionGeneration,
+          environmentBinding: this.captureAuthEnvironmentBinding(),
+        }
+      })
       const assertContextIsCurrent = () => {
         this.assertSessionGeneration(context.sessionGeneration)
         if (this.sessionToken !== context.sessionToken) {
@@ -2771,21 +2399,24 @@ export class AppService {
       if (options.mutation) {
         return this.withNativeAuthEnvironmentCommit(async () => {
           assertContextIsCurrent()
-          return operation(context.sessionToken)
+          return runWithSessionRequestContext(
+            this.sessionAuthority.captureSessionRequestContext(context.sessionToken),
+            () => operation(context.sessionToken)
+          )
         })
       }
       const { request } = await this.withNativeAuthEnvironmentCommit(async () => {
         assertContextIsCurrent()
-        return { request: operation(context.sessionToken) }
+        return {
+          request: runWithSessionRequestContext(
+            this.sessionAuthority.captureSessionRequestContext(context.sessionToken),
+            () => operation(context.sessionToken)
+          ),
+        }
       })
       const result = await request
       await this.withNativeAuthEnvironmentCommit(async () => assertContextIsCurrent())
       return result
-    }
-
-    const activeHop = this.activeTeamContextHop
-    if (activeHop && targetTeamId === activeHop.homeTeamId && !this.quitPreparationStarted) {
-      return this.enqueueHomeTeamOperation(activeHop, operation)
     }
 
     // A request that already targets another team reserves admission at call
@@ -2814,7 +2445,32 @@ export class AppService {
     await previousQueue.catch(() => undefined)
 
     try {
+      const applyApprovedTeamSwitchRebind = () => {
+        if (!options.allowApprovedTeamSwitchRebind) return
+        const nextContext = this.applyApprovedTeamSwitchRequestTransition(
+          requestContext,
+          earlyProducer !== null
+        )
+        if (nextContext !== requestContext) {
+          requestContext = nextContext
+          options.onRequestContextTransition?.(nextContext)
+        }
+      }
+      rebindRequestContextWithinCurrentLineage()
+      applyApprovedTeamSwitchRebind()
       const session = await this.withNativeAuthEnvironmentCommit(async () => {
+        // Explicit switchTeam owns this lock through GFS activation and publication. Rebind a
+        // request admitted under its exact previous owner only after that accepted transition
+        // has settled, then check the current owner at the dispatch boundary. A quit that began
+        // while a nonproducer waited still closes admission here.
+        rebindRequestContextWithinCurrentLineage()
+        applyApprovedTeamSwitchRebind()
+        try {
+          this.assertCurrentSessionRequestContext()
+        } catch (error) {
+          if (this.quitPreparationStarted && !earlyProducer) throw new QuitAdmissionClosedError()
+          throw error
+        }
         const sessionToken = this.requireSessionToken()
         return {
           sessionToken,
@@ -2826,7 +2482,10 @@ export class AppService {
 
       let context = session
       if (!context.teamId) {
-        const me = await this.authClient.getMe(session.sessionToken)
+        const me = await runWithSessionRequestContext(
+          this.sessionAuthority.captureSessionRequestContext(session.sessionToken),
+          () => this.authClient.getMe(session.sessionToken)
+        )
         context = await this.withNativeAuthEnvironmentCommit(async () => {
           this.assertSessionGeneration(session.sessionGeneration)
           if (this.sessionToken !== session.sessionToken) {
@@ -2856,6 +2515,7 @@ export class AppService {
       const activeHop: ActiveTeamContextHop | null = shouldRestore
         ? {
             homeTeamId: originalTeamId,
+            homeRequestContext: this.sessionAuthority.captureSessionRequestContext(originalToken),
             restoredToken: null,
             restorationError: null,
             homeTeamOperations: [],
@@ -2870,13 +2530,21 @@ export class AppService {
         if (options.mutation) {
           return this.withNativeAuthEnvironmentCommit(async () => {
             assertContextIsCurrent()
-            const result = await operation(context.sessionToken)
+            const result = await runWithSessionRequestContext(
+              this.sessionAuthority.captureSessionRequestContext(context.sessionToken),
+              () => operation(context.sessionToken)
+            )
             return result
           })
         }
         const { request } = await this.withNativeAuthEnvironmentCommit(async () => {
           assertContextIsCurrent()
-          return { request: operation(context.sessionToken) }
+          return {
+            request: runWithSessionRequestContext(
+              this.sessionAuthority.captureSessionRequestContext(context.sessionToken),
+              () => operation(context.sessionToken)
+            ),
+          }
         })
         const result = await request
         return this.withNativeAuthEnvironmentCommit(async () => {
@@ -2894,6 +2562,24 @@ export class AppService {
           let restoreFailed = false
           let restoreFailure: unknown
           let hopSessionToken: string | null = null
+          let chatRebindOwner: {
+            envKey: string
+            generation: number
+            token: string
+            user: SessionMe
+            authoritySource: SessionAuthorityCoordinator['acceptedSessionAuthoritySource']
+            projectionMarker: PendingExternalLogoutMarker | undefined
+            memoryLease: MemoryOnlySessionLease | undefined
+          } | null = null
+          let hopOwner: {
+            envKey: string
+            generation: number
+            token: string
+            user: SessionMe
+            authoritySource: SessionAuthorityCoordinator['acceptedSessionAuthoritySource']
+            projectionMarker: PendingExternalLogoutMarker | undefined
+            memoryLease: MemoryOnlySessionLease | undefined
+          } | null = null
           const releaseTransientHop = this.enterGfsTransientTeamHop()
           if (activeHop) this.activeTeamContextHop = activeHop
           if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
@@ -2903,8 +2589,27 @@ export class AppService {
               advanceSessionGeneration: !shouldRestore,
             })
             hopSessionToken = activeToken
+            if (!originalTeamId) {
+              options.onRequestContextTransition?.(
+                this.sessionAuthority.captureSessionRequestContext(activeToken)
+              )
+            }
+            if (shouldRestore && this.me && this.sessionToken === activeToken) {
+              hopOwner = {
+                envKey: getActiveEnvKey(),
+                generation: this.sessionGeneration,
+                token: activeToken,
+                user: this.me,
+                authoritySource: this.sessionAuthority.acceptedSessionAuthoritySource,
+                projectionMarker: this.sessionAuthority.acceptedSessionProjectionMarker,
+                memoryLease: this.memoryOnlySession,
+              }
+            }
             try {
-              return await operation(activeToken)
+              return await runWithSessionRequestContext(
+                this.sessionAuthority.captureSessionRequestContext(activeToken),
+                () => operation(activeToken)
+              )
             } catch (error) {
               operationFailed = true
               throw error
@@ -2933,36 +2638,83 @@ export class AppService {
               } else if (
                 shouldRestore &&
                 hopSessionToken &&
-                this.sessionToken === hopSessionToken &&
+                hopOwner &&
+                this.sessionToken === hopOwner.token &&
+                this.sessionGeneration === hopOwner.generation &&
+                this.me === hopOwner.user &&
                 this.me &&
                 String(this.me.teamId || '').trim() !== originalTeamId
               ) {
                 // A failed restore leaves the hop team as the actual committed
-                // session. Publish it as a new session before releasing the owner,
-                // then rebind session-scoped consumers to the token that remains.
-                this.sessionGeneration += 1
-                this.updateEntityChangeSessionToken(this.sessionToken)
-                this.restartEntityChangeStreamForSessionReplacement()
+                // session. Re-observe its exact accepted source/lease and projection marker
+                // before publishing any session-scoped consumer after the awaited restore.
+                const settled = await this.settleFailedTeamRestoreGfsOwner(hopOwner)
+                const user = this.me
+                const token = this.sessionToken
+                if (settled && user && token) {
+                  if (
+                    activeHop &&
+                    this.sessionGeneration === hopOwner.generation + 1 &&
+                    getActiveEnvKey() === hopOwner.envKey &&
+                    this.me === hopOwner.user &&
+                    token === hopOwner.token
+                  ) {
+                    // Durable recovery advances the accepted generation after proving that the
+                    // same session still owns the hop. Carry that verified owner into queued
+                    // Home restoration; the pre-hop request context is intentionally stale now.
+                    activeHop.homeRequestContext =
+                      this.sessionAuthority.captureSessionRequestContext(token)
+                  }
+                  chatRebindOwner = {
+                    envKey: getActiveEnvKey(),
+                    generation: this.sessionGeneration,
+                    token,
+                    user,
+                    authoritySource: this.sessionAuthority.acceptedSessionAuthoritySource,
+                    projectionMarker: this.sessionAuthority.acceptedSessionProjectionMarker,
+                    memoryLease: this.memoryOnlySession,
+                  }
+                }
               }
               if (restoreFailed && !operationFailed) throw restoreFailure
             }
           } finally {
             if (activeHop) {
-              activeHop.restoredToken =
+              const restoredToken =
                 this.me?.teamId === activeHop.homeTeamId ? this.sessionToken : null
+              if (
+                restoredToken &&
+                this.sessionAuthority.isSessionRequestContextInCurrentLineage(
+                  activeHop.homeRequestContext,
+                  restoredToken
+                )
+              ) {
+                const previousHomeRequestContext = activeHop.homeRequestContext
+                const restoredHomeRequestContext =
+                  this.sessionAuthority.captureSessionRequestContext(restoredToken)
+                activeHop.homeRequestContext = restoredHomeRequestContext
+                if (
+                  !this.sessionAuthority.sessionRequestContextsMatchOwner(
+                    previousHomeRequestContext,
+                    restoredHomeRequestContext
+                  )
+                ) {
+                  options.onRequestContextTransition?.(restoredHomeRequestContext)
+                }
+              }
+              activeHop.restoredToken = restoredToken
               await this.drainHomeTeamOperations(activeHop)
             }
             if (shouldRestore) {
               this.chatStoreHomeTeamId = null
               // A failed switch back leaves the session on the hop team while the
               // store is still bound to the pinned home team. Rebind so the store
-              // scope and the delete-fence authority (both derived from
-              // chatStoreTeamId) agree again. A rebind failure is logged and never
-              // replaces the error of the operation or of the failed restore.
-              const sessionUserId = this.me?.id
-              if (sessionUserId && this.me?.teamId !== originalTeamId) {
+              // scope and the delete-fence authority agree again. The queue drain above may
+              // have yielded to logout or another owner, so publish only through the exact
+              // synchronous owner/marker fence captured after source verification.
+              if (chatRebindOwner && chatRebindOwner.user.teamId !== originalTeamId) {
                 try {
-                  await this.bindCurrentChatStore(sessionUserId)
+                  this.rebindFailedTeamRestoreChatOwner(chatRebindOwner)
                 } catch (rebindError) {
                   desktopRuntimeLog.error(
                     '[AppService] Failed to rebind the chat store after a failed team restore:',
@@ -2985,8 +2737,11 @@ export class AppService {
 
   private enqueueHomeTeamOperation<T>(
     activeHop: ActiveTeamContextHop,
-    operation: (sessionToken: string) => Promise<T>
+    operation: (sessionToken: string) => Promise<T>,
+    requestContext: unknown,
+    onRequestContextTransition?: (context: unknown) => void
   ): Promise<T> {
+    const admittedHomeContext = activeHop.homeRequestContext
     return new Promise<T>((resolve, reject) => {
       activeHop.homeTeamOperations.push(async () => {
         if (!activeHop.restoredToken) {
@@ -2998,7 +2753,22 @@ export class AppService {
           return
         }
         try {
-          resolve(await operation(activeHop.restoredToken))
+          if (requestContext === undefined || requestContext !== admittedHomeContext)
+            throw new SessionRequestOwnershipError()
+          const dispatchContext = activeHop.homeRequestContext
+          // The admitted context is the hop's original Home owner. A failed restore may
+          // advance the generation only after durable recovery proves that same owner; the
+          // hop replaces homeRequestContext with that verified receipt before draining.
+          this.sessionAuthority.assertTemporaryRequestAllowed(
+            activeHop.restoredToken,
+            dispatchContext
+          )
+          if (requestContext !== dispatchContext) onRequestContextTransition?.(dispatchContext)
+          resolve(
+            await runWithSessionRequestContext(dispatchContext, () =>
+              operation(activeHop.restoredToken!)
+            )
+          )
         } catch (error) {
           reject(error)
         }
@@ -3008,22 +2778,63 @@ export class AppService {
 
   private async drainHomeTeamOperations(activeHop: ActiveTeamContextHop): Promise<void> {
     while (activeHop.homeTeamOperations.length > 0) {
+      const currentToken = this.sessionToken
+      if (
+        !activeHop.restoredToken &&
+        this.me &&
+        this.me.teamId === activeHop.homeTeamId &&
+        currentToken &&
+        this.sessionAuthority.isSessionRequestContextInCurrentLineage(
+          activeHop.homeRequestContext,
+          currentToken
+        )
+      ) {
+        activeHop.restoredToken = currentToken
+        activeHop.restorationError = null
+      }
       if (
         !activeHop.restoredToken &&
         this.me &&
         this.me.teamId !== activeHop.homeTeamId &&
-        this.sessionToken
+        currentToken
       ) {
-        try {
-          await this.switchSessionToTeam(activeHop.homeTeamId, this.requireSessionToken())
-          if (this.me?.teamId === activeHop.homeTeamId && this.sessionToken) {
-            activeHop.restoredToken = this.sessionToken
+        if (
+          !this.sessionAuthority.isSessionRequestContextInCurrentLineage(
+            activeHop.homeRequestContext,
+            currentToken
+          )
+        ) {
+          activeHop.restorationError = new SessionRequestOwnershipError()
+        } else {
+          const priorGeneration = this.sessionGeneration
+          const priorUserId = this.me.id
+          const priorEnvKey = getActiveEnvKey()
+          const priorMemoryLeaseId = this.memoryOnlySession?.volatileSessionId ?? null
+          try {
+            const restoredToken = await this.switchSessionToTeam(
+              activeHop.homeTeamId,
+              currentToken,
+              { activateGfsScope: true }
+            )
+            if (
+              this.sessionToken !== restoredToken ||
+              this.sessionGeneration !== priorGeneration + 1 ||
+              this.me?.id !== priorUserId ||
+              this.me?.teamId !== activeHop.homeTeamId ||
+              getActiveEnvKey() !== priorEnvKey ||
+              (this.memoryOnlySession?.volatileSessionId ?? null) !== priorMemoryLeaseId
+            ) {
+              throw new SessionRequestOwnershipError()
+            }
+            activeHop.restoredToken = restoredToken
+            activeHop.homeRequestContext =
+              this.sessionAuthority.captureSessionRequestContext(restoredToken)
             activeHop.restorationError = null
-            this.updateEntityChangeSessionToken(this.sessionToken)
+            this.updateEntityChangeSessionToken(restoredToken)
             this.restartEntityChangeStreamForSessionReplacement()
+          } catch (error) {
+            activeHop.restorationError = error
           }
-        } catch (error) {
-          activeHop.restorationError = error
         }
       }
       const operations = activeHop.homeTeamOperations.splice(0)
@@ -3095,16 +2906,135 @@ export class AppService {
     return result
   }
 
+  private captureSessionRequestContextForOperation(): void {
+    const token = this.sessionToken
+    if (!token) throw new SessionRequestOwnershipError()
+    if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
+    const activeHop = this.activeTeamContextHop
+    if (
+      activeHop &&
+      this.sessionAuthority.isSessionRequestContextInCurrentLineage(
+        activeHop.homeRequestContext,
+        token
+      )
+    ) {
+      enterSessionRequestContext(activeHop.homeRequestContext)
+      return
+    }
+    enterSessionRequestContext(this.sessionAuthority.captureSessionRequestContext(token))
+  }
+
+  private applyApprovedTeamSwitchRequestTransition(
+    requestContext: unknown,
+    allowDuringQuit: boolean
+  ): unknown {
+    if (!requestContext || (this.quitPreparationStarted && !allowDuringQuit)) return requestContext
+    const transition = this.acceptedTeamSwitchRequestTransition
+    if (
+      !transition ||
+      getSessionRequestContext() !== requestContext ||
+      !this.sessionAuthority.sessionRequestContextsMatchOwner(
+        requestContext,
+        transition.previousRequestContext
+      ) ||
+      this.sessionToken !== transition.nextToken ||
+      this.sessionGeneration !== transition.nextGeneration ||
+      getActiveEnvKey() !== transition.envKey ||
+      this.me?.id !== transition.userId
+    )
+      return requestContext
+
+    this.sessionAuthority.assertTemporaryRequestAllowed(
+      transition.nextToken,
+      transition.nextRequestContext
+    )
+    enterSessionRequestContext(transition.nextRequestContext)
+    return transition.nextRequestContext
+  }
+
+  private preserveSessionRequestContextForOperation(): void {
+    const inheritedContext = getSessionRequestContext()
+    if (inheritedContext === undefined) {
+      this.captureSessionRequestContextForOperation()
+      return
+    }
+    const token = this.sessionToken
+    if (!token) throw new SessionRequestOwnershipError()
+    if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
+    const activeHop = this.activeTeamContextHop
+    if (
+      activeHop &&
+      inheritedContext === activeHop.homeRequestContext &&
+      this.sessionAuthority.isSessionRequestContextInCurrentLineage(inheritedContext, token)
+    ) {
+      return
+    }
+    this.sessionAuthority.assertTemporaryRequestAllowed(token, inheritedContext)
+  }
+
+  private assertCurrentSessionRequestContext(): void {
+    const requestContext = getSessionRequestContext()
+    if (requestContext === undefined) return
+    const token = this.sessionToken
+    if (!token) throw new SessionRequestOwnershipError()
+    this.sessionAuthority.assertTemporaryRequestAllowed(token, requestContext)
+  }
+
+  private assertTeamScopedRpcQueueAdmissionContext(): void {
+    const requestContext = getSessionRequestContext()
+    const token = this.sessionToken
+    if (requestContext === undefined || !token) throw new SessionRequestOwnershipError()
+    if (this.sessionAuthority.isSessionRequestContextInCurrentLineage(requestContext, token)) return
+    this.sessionAuthority.assertTemporaryRequestAllowed(token, requestContext)
+  }
+
+  private clearRpcTokenCacheForCurrentRequest(): void {
+    this.assertCurrentSessionRequestContext()
+    this.rpcTokenManager.clear()
+  }
+
+  private clearRpcTokenCacheForRequestContext(requestContext: unknown): boolean {
+    const token = this.sessionToken
+    if (!token || requestContext === undefined) return false
+    try {
+      this.sessionAuthority.assertTemporaryRequestAllowed(token, requestContext)
+    } catch {
+      return false
+    }
+    this.rpcTokenManager.clear()
+    return true
+  }
+
   private async issueRpcTokenForHostRefs(
     scopes: RpcScope[],
     hostRefs: string[],
     options: { teamId?: string | null } = {}
   ) {
+    this.preserveSessionRequestContextForOperation()
+    this.assertTeamScopedRpcQueueAdmissionContext()
+    let finalRequestContext = getSessionRequestContext()
     const targetTeamId =
       String(options.teamId || '').trim() || (await this.resolveTeamForHostRefs(hostRefs))
-    return this.runWithTeamContext(targetTeamId, token =>
-      this.getRpcTokenForCurrentSession(token, scopes, hostRefs)
+    this.assertTeamScopedRpcQueueAdmissionContext()
+    const result = await this.runWithTeamContext(
+      targetTeamId,
+      token => this.getRpcTokenForCurrentSession(token, scopes, hostRefs),
+      {
+        preserveRequestContext: true,
+        onRequestContextTransition: context => {
+          finalRequestContext = context
+        },
+      }
     )
+    if (finalRequestContext !== getSessionRequestContext()) {
+      const currentToken = this.sessionToken
+      if (!currentToken) throw new SessionRequestOwnershipError()
+      this.sessionAuthority.assertTemporaryRequestAllowed(currentToken, finalRequestContext)
+      enterSessionRequestContext(finalRequestContext)
+    }
+    this.assertCurrentSessionRequestContext()
+    this.sessionAuthority.bindRpcCredentialToRequestOwner(result.token, getSessionRequestContext())
+    return result
   }
 
   private async getRpcTokenForCurrentSession(
@@ -3112,18 +3042,30 @@ export class AppService {
     scopes: RpcScope[],
     hostRefs: string[]
   ) {
-    return this.sessionAuthority.issueRpcCredential(sessionToken, bindingKey =>
-      this.rpcTokenManager.getOrIssue(sessionToken, scopes, hostRefs, bindingKey)
-    )
+    try {
+      return await this.sessionAuthority.issueRpcCredential(
+        sessionToken,
+        bindingKey => this.rpcTokenManager.getOrIssue(sessionToken, scopes, hostRefs, bindingKey),
+        bindingKey => this.rpcTokenManager.peekCached(scopes, hostRefs, bindingKey)
+      )
+    } catch (error) {
+      // The coordinator detects a lease expiry/authority loss after an awaited mint, but
+      // AppService owns the observable session teardown and consumer unbinding effects.
+      this.handleMemoryOnlySessionAssertionFailure(error)
+      throw error
+    }
   }
 
-  private clearAuthenticatedSessionState(options: { notifySessionChanged?: boolean } = {}): void {
+  private clearAuthenticatedSessionState(
+    options: { notifySessionChanged?: boolean; advanceGeneration?: boolean } = {}
+  ): void {
     this.acceptedSessionSource = undefined
     this.memoryOnlySession = undefined
     this.sessionAuthority.clearRpcCredentialOwners()
     if (this.memoryOnlySessionExpiryTimer) clearTimeout(this.memoryOnlySessionExpiryTimer)
     this.memoryOnlySessionExpiryTimer = null
-    this.sessionGeneration += 1
+    if (options.advanceGeneration !== false)
+      this.sessionAuthority.advanceSessionGeneration(this.sessionGeneration)
     this.updateEntityChangeSessionToken(null)
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = true
@@ -3156,12 +3098,27 @@ export class AppService {
   /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
   private invalidateSandboxUiSession(): void {
     this.sandboxUiSessionEpoch += 1
+    this.scheduleSandboxUiTeardown()
+  }
+
+  /**
+   * Queue physical teardown without waiting for an in-flight sandbox mint.
+   * Session replacement has already revoked the outgoing epoch synchronously;
+   * awaiting the lifecycle queue here would deadlock a replacement whose caller
+   * is responsible for settling that mint.
+   */
+  private scheduleSandboxUiTeardown(): void {
     // The embed and its refresh loop run on the outgoing session. Queued rather
     // than awaited: callers must not wait on a pending open's mint; the serial
     // queue still tears down whatever that open mounts.
-    void this.closeSandboxUi().catch(error => {
+    try {
+      void Promise.resolve(this.closeSandboxUi()).catch(error => {
+        desktopRuntimeLog.error('[SandboxUI] Could not close the embed on session change:', error)
+      })
+    } catch (error) {
+      // Owner retirement is the synchronous security boundary; physical UI teardown is best effort.
       desktopRuntimeLog.error('[SandboxUI] Could not close the embed on session change:', error)
-    })
+    }
   }
 
   private activateGfsAuthScope(identityOverride?: DesktopGfsUploadIdentity): void {
@@ -3197,6 +3154,11 @@ export class AppService {
     if (this.gfsDispatchBlocked || !this.sessionToken || !this.me) {
       throw new Error('GFS upload dispatch is unavailable without an active authenticated scope')
     }
+    const marker = this.inspectPendingLogoutMarker(getActiveEnvKey())
+    if (marker?.intent.intent === 'logout-pending') {
+      throw new Error('GFS upload dispatch is unavailable while logout authority is pending')
+    }
+    if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
     if (!options.allowTransientTeamHop) this.assertGfsDispatchAllowed()
     const identity = this.gfsScopeIdentity
     if (!identity) {
@@ -3236,12 +3198,26 @@ export class AppService {
         : null)
     this.gfsDispatchBlocked = true
     this.gfsAuthEpoch += 1
+    const matchesIdentity = (scope: DesktopGfsUploadScope) =>
+      !oldIdentity ||
+      (scope.ownerId === oldIdentity.ownerId &&
+        scope.teamId === oldIdentity.teamId &&
+        scope.environmentKey === oldIdentity.environmentKey &&
+        scope.baseUrl === oldIdentity.baseUrl)
+    const activeEntries = [...this.gfsUploadJobs.entries()].filter(([, entry]) =>
+      matchesIdentity(entry.scope)
+    )
+    const pendingEntries = [...this.gfsPendingUploadJobs].filter(entry =>
+      matchesIdentity(entry.scope)
+    )
+    const legacyUploads = [...this.gfsPendingLegacyUploads].filter(upload =>
+      matchesIdentity(upload.scope)
+    )
     const jobs = new Set([
-      ...[...this.gfsUploadJobs.values()].map(entry => entry.job),
-      ...[...this.gfsPendingUploadJobs].map(entry => entry.job),
+      ...activeEntries.map(([, entry]) => entry.job),
+      ...pendingEntries.map(entry => entry.job),
     ])
     const jobSuspensions = [...jobs].map(job => job.suspendForAuth())
-    const legacyUploads = [...this.gfsPendingLegacyUploads]
     for (const upload of legacyUploads) {
       upload.controller.abort(new Error('GFS legacy upload suspended by authentication fence'))
     }
@@ -3249,9 +3225,11 @@ export class AppService {
       ...jobSuspensions,
       ...legacyUploads.map(upload => upload.promise.catch(() => undefined)),
     ])
-    this.gfsUploadJobs.clear()
-    this.gfsPendingUploadJobs.clear()
-    this.gfsPendingLegacyUploads.clear()
+    for (const [uploadId, entry] of activeEntries) {
+      if (this.gfsUploadJobs.get(uploadId) === entry) this.gfsUploadJobs.delete(uploadId)
+    }
+    for (const entry of pendingEntries) this.gfsPendingUploadJobs.delete(entry)
+    for (const upload of legacyUploads) this.gfsPendingLegacyUploads.delete(upload)
     if (!oldIdentity) return
     await this.updateDesktopGfsUploadState(state => {
       const updatedAt = new Date().toISOString()
@@ -3273,6 +3251,7 @@ export class AppService {
     if (this.restoreSavedSessionInFlight) {
       return await this.restoreSavedSessionInFlight
     }
+    if (this.quitPreparationStarted) throw new QuitAdmissionClosedError()
     const restore = (async () => {
       this.restoreSavedSessionReservationStarted = false
       await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
@@ -3314,12 +3293,65 @@ export class AppService {
   ): Promise<SavedSessionRestorePlan | null> {
     const userDataDirectory = this.getUserDataDirectory()
     const envKey = getActiveEnvKey()
+    const legacyNamespace = getActiveLegacyEnvKeyInventory()
     let marker: PendingExternalLogoutMarker | null
     try {
+      await SessionAuthorityAcceptanceTransaction.reconcilePendingAcceptanceProjection(
+        this.tokenStore,
+        userDataDirectory,
+        envKey,
+        legacyNamespace.keys,
+        legacyNamespace.complete
+      )
       marker = this.inspectPendingLogoutMarker(envKey)
     } catch (error) {
-      await this.handlePendingLogoutInspectionFailure(error)
+      const failure = this.sessionAuthority.planPersistenceAuthorityFailure(
+        error,
+        'restore-source-observation',
+        { priorRuntimeAvailable: Boolean(this.sessionToken && this.me) }
+      )
+      if (failure.kind === 'transient-read') {
+        // Unknown marker/journal I/O cannot authorize a cold restore, but it is not a
+        // new denial against an already accepted in-memory owner. Preserve that owner
+        // and let a later restore attempt retry the exact durable observation.
+        this.reportDeferredLogoutFailureSafely(error)
+      } else if (failure.kind !== 'ignore') {
+        await this.failClosedForPendingLogout(error)
+      }
       return null
+    }
+
+    let selectedAuthority: Awaited<
+      ReturnType<SessionAuthorityCoordinator['inspectAcceptedSessionRestore']>
+    >
+    try {
+      selectedAuthority = await this.sessionAuthority.inspectAcceptedSessionRestore(envKey)
+    } catch (error) {
+      // Source observation uncertainty is not absence and never permits sibling-provider
+      // fallback. Preserve an already-owned runtime, leave a cold process signed out, and retry
+      // on the next restore attempt. Confirmed authority/projection corruption still follows
+      // the coordinator's fail-closed path.
+      const failure = this.sessionAuthority.planPersistenceAuthorityFailure(
+        error,
+        'restore-source-observation',
+        { priorRuntimeAvailable: Boolean(this.sessionToken && this.me) }
+      )
+      if (failure.kind === 'fail-closed') await this.failClosedForPendingLogout(error)
+      else this.reportDeferredLogoutFailureSafely(error)
+      return null
+    }
+    if (
+      selectedAuthority.status === 'denied' &&
+      selectedAuthority.frameMode === 'logged-out' &&
+      marker?.intent.intent === 'logout-pending'
+    ) {
+      // V2 logout recovery is exact-debt-only. Do not re-enter the legacy clear-first path after
+      // a marker/authority crash window; retain the LP fence and retry only recorded sources.
+      return {
+        policy: 'deny-all',
+        pendingCleanupMarker: marker,
+        retireMarkerAfterRestore: false,
+      }
     }
     const action = this.sessionAuthority.restoreActionForMarker(marker)
     if (action.kind === 'restore' || action.kind === 'deny') return action.plan
@@ -3344,7 +3376,7 @@ export class AppService {
               preserveActiveEnvKey,
               restoreGeneration
             )
-            const cleanupVerified = result.keytarAvailable || result.keytarDisabled
+            const cleanupVerified = isKeytarCleanupEstablished(result.keytarDisposition)
             if (!cleanupVerified) {
               this.reportDeferredLogoutFailureSafely(
                 new Error('Keytar cleanup is unavailable while the cleanup marker remains')
@@ -3370,23 +3402,23 @@ export class AppService {
     }
 
     const logoutMarker = action.marker
+    if (
+      this.sessionGeneration !== restoreGeneration ||
+      !pendingExternalLogoutMarkersMatch(this.inspectPendingLogoutMarker(envKey), logoutMarker)
+    )
+      return null
     try {
-      await this.runCredentialProducer(() =>
-        this.runSessionPersistence(async () => {
-          if (
-            this.sessionGeneration !== restoreGeneration ||
-            !pendingExternalLogoutMarkersMatch(
-              this.inspectPendingLogoutMarker(envKey),
-              logoutMarker
-            )
-          )
-            return null
-          const result = await this.logoutOnce({ strictTokenClear: true })
-          if (result.keytarAvailable || result.keytarDisabled)
-            clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, logoutMarker)
-          return result
-        })
+      const recovered = await this.recoverObservedLogoutProjection(
+        envKey,
+        () => getActiveEnvKey() === envKey && this.sessionGeneration === restoreGeneration
       )
+      if (recovered?.kind === 'committed') {
+        return {
+          policy: 'deny-all',
+          pendingCleanupMarker: logoutMarker,
+          retireMarkerAfterRestore: false,
+        }
+      }
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
     }
@@ -3401,21 +3433,219 @@ export class AppService {
     }
   }
 
+  private scheduleSessionAuthorityLogoutCleanup(
+    transaction: SessionAuthorityLogoutTransaction
+  ): void {
+    const cleanup = transaction
+      .cleanExactSourceDebts()
+      .catch(error => this.reportDeferredLogoutFailureSafely(error))
+      .finally(() => transaction.close())
+    this.sessionAuthorityCleanupInFlight = cleanup
+    void cleanup.finally(() => {
+      if (this.sessionAuthorityCleanupInFlight === cleanup)
+        this.sessionAuthorityCleanupInFlight = null
+    })
+  }
+
   private async failClosedForPendingLogout(error: unknown): Promise<void> {
     const generation = this.sessionGeneration
     const token = this.sessionToken
-    if (this.sessionToken || this.me) {
-      try {
-        await this.suspendDesktopGfsUploadsForAuthBoundary()
-      } catch (suspendError) {
-        this.reportDeferredLogoutFailureSafely(suspendError)
-      }
-    }
-    if (this.sessionGeneration === generation && this.sessionToken === token) {
-      if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+    const gfsIdentity = this.gfsScopeIdentity ?? undefined
+    const ownsRuntime = this.sessionGeneration === generation && this.sessionToken === token
+    const hasAuthenticatedRuntime = this.sessionToken !== null || this.me !== null
+
+    // Revoke the in-memory authorization synchronously. Draining GFS work is cleanup, not the
+    // boundary: if durable logout intent already exists (or authority is unverifiable), no
+    // protected consumer may continue using the old session while a suspension promise waits.
+    if (ownsRuntime) {
+      if (hasAuthenticatedRuntime) this.clearAuthenticatedSessionState()
       else this.notifySessionChangedSafely(false)
     }
+
+    try {
+      await this.suspendDesktopGfsUploadsForAuthBoundary(gfsIdentity)
+    } catch (suspendError) {
+      this.reportDeferredLogoutFailureSafely(suspendError)
+    }
     this.reportDeferredLogoutFailureSafely(error)
+  }
+
+  /**
+   * A failed logout preflight is not itself logout success. However, an observed durable LP (or
+   * a confirmed authority/marker projection mismatch) is an independent denial that must revoke
+   * this process's stale runtime before returning the failure to its caller.
+   */
+  private async failClosedForObservedLogoutDenial(envKey: string, error: unknown): Promise<void> {
+    let marker: PendingExternalLogoutMarker | null
+    try {
+      marker = this.inspectPendingLogoutMarker(envKey)
+    } catch (markerError) {
+      // An unreadable sidecar cannot prove that a durable LP is absent.
+      await this.failClosedForPendingLogout(markerError)
+      return
+    }
+    const authorityDenial =
+      error instanceof SessionAuthorityProjectionIntegrityError ||
+      error instanceof SessionAuthorityLogoutPreflightError
+    if (marker?.intent.intent === 'logout-pending' || authorityDenial) {
+      if (authorityDenial && marker?.intent.intent !== 'logout-pending') {
+        try {
+          // A confirmed invalid/recovery-fenced authority is not a transient read failure. Keep
+          // restart restore denied with a legacy-visible LP even though this logout call fails.
+          this.persistLogoutIntentFallback(envKey)
+        } catch (fenceError) {
+          await this.failClosedForPendingLogout(fenceError)
+          return
+        }
+      }
+      await this.failClosedForPendingLogout(error)
+    }
+  }
+
+  /**
+   * Finish a durable sidecar LP that was published before this process could create its logout
+   * transaction. The marker denies the old runtime immediately; only the reconciled V2 LP plus
+   * exact-source debt is reported as logout success.
+   */
+  private async recoverObservedLogoutProjection(
+    envKey: string,
+    isOwnerCurrent: () => boolean
+  ): Promise<DesktopLogoutOutcome | null> {
+    let marker: PendingExternalLogoutMarker | null
+    try {
+      marker = this.inspectPendingLogoutMarker(envKey)
+    } catch (error) {
+      // An unreadable/corrupt marker cannot prove that an LP is absent. Revoke the
+      // in-process runtime before the caller propagates the failed logout preflight.
+      await this.failClosedForPendingLogout(error)
+      throw error
+    }
+    if (marker?.intent.intent !== 'logout-pending') return null
+    if (!isOwnerCurrent()) throw new SessionTokenStorageSupersededBeforeWriteError()
+
+    const previousGfsIdentity = this.gfsScopeIdentity ?? undefined
+    const previousMemorySessionId = this.memoryOnlySession?.volatileSessionId
+    const initialScope = await this.tokenStore.createSessionAuthorityStorageScope()
+    const initialAuthority = new SessionAuthorityRecordRepository(
+      initialScope,
+      envKey,
+      this.tokenStore
+    ).observe()
+    if (
+      initialAuthority.status === 'absent' ||
+      (initialAuthority.status === 'observed' &&
+        (initialAuthority.record.frame.mode === 'uninitialized' ||
+          initialAuthority.record.frame.source?.format === 'v0'))
+    ) {
+      // A historical marker without a supported accepted source cannot authorize deletion of
+      // old-protocol credentials or be reported as a committed current-session logout.
+      return this.logoutNotCommitted(new SessionAuthorityRecordConflictError())
+    }
+    if (initialAuthority.status === 'transient' || initialAuthority.status === 'invalid')
+      throw initialAuthority.error
+    if (initialAuthority.status === 'recovery-fenced')
+      throw new SessionAuthorityRecordConflictError()
+    const recoveryAuthoritySource =
+      initialAuthority.status === 'observed' && initialAuthority.record.frame.mode === 'persistent'
+        ? (initialAuthority.record.frame.source ?? undefined)
+        : undefined
+    // The external LP is already durable, so make the old lease and every synchronous consumer
+    // unusable before reconciliation performs any await or further filesystem work.
+    if (this.sessionToken !== null || this.me !== null || this.memoryOnlySession !== undefined)
+      this.clearAuthenticatedSessionState()
+    const fencedGeneration = this.sessionGeneration
+    try {
+      await this.suspendDesktopGfsUploadsForAuthBoundary(previousGfsIdentity)
+    } catch (error) {
+      this.reportDeferredLogoutFailureSafely(error)
+    }
+
+    let cleanupTransaction: SessionAuthorityLogoutTransaction | null = null
+    try {
+      const legacyNamespace = getActiveLegacyEnvKeyInventory()
+      await SessionAuthorityAcceptanceTransaction.reconcilePendingAcceptanceProjection(
+        this.tokenStore,
+        this.getUserDataDirectory(),
+        envKey,
+        legacyNamespace.keys,
+        legacyNamespace.complete
+      )
+      cleanupTransaction = await SessionAuthorityLogoutTransaction.begin({
+        tokenStore: this.tokenStore,
+        userDataDirectory: this.getUserDataDirectory(),
+        envKey,
+        expectedToken: null,
+        cleanupOnly: true,
+      })
+      if (!cleanupTransaction) {
+        // The selected V1 or memory lease is already denied by the observed LP. Reconcile only
+        // that exact authority; never inventory or delete historical credential namespaces.
+        cleanupTransaction = await SessionAuthorityLogoutTransaction.begin({
+          tokenStore: this.tokenStore,
+          userDataDirectory: this.getUserDataDirectory(),
+          envKey,
+          expectedToken: null,
+          expectedAuthoritySource: recoveryAuthoritySource,
+          expectedVolatileSessionId: previousMemorySessionId,
+        })
+      }
+      if (!cleanupTransaction) throw new SessionAuthorityRecordConflictError()
+      if (
+        this.sessionGeneration !== fencedGeneration ||
+        this.sessionToken !== null ||
+        this.me !== null ||
+        this.memoryOnlySession !== undefined
+      )
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+
+      // The marker may have reached durable storage before its producer observed the write.
+      // Convert that LP into the V2 logged-out frame and exact cleanup debt before scheduling
+      // source deletion. This is a recovery acceptance boundary, not a second marker write.
+      const committedRecord = await cleanupTransaction.commit(
+        () =>
+          this.sessionGeneration === fencedGeneration &&
+          this.sessionToken === null &&
+          this.me === null &&
+          this.memoryOnlySession === undefined
+      )
+      this.scheduleSessionAuthorityLogoutCleanup(cleanupTransaction)
+      return {
+        kind: 'committed',
+        sessionGeneration: this.sessionGeneration,
+        cleanup: committedRecord.cleanupDebts.length > 0 ? 'pending' : 'not-required',
+      }
+    } catch (error) {
+      cleanupTransaction?.close()
+      await this.failClosedForPendingLogout(error)
+      throw error
+    }
+  }
+
+  /** Persist a deny-only fallback against the exact marker image it observed. */
+  private persistLogoutIntentFallback(envKey: string): void {
+    const userDataDirectory = this.getUserDataDirectory()
+    const observed = this.inspectPendingLogoutMarker(envKey)
+    if (observed) {
+      // A repeated logout is a newer producer, even when the current intent is already LP.
+      // Advance its exact revision so an in-flight candidate planned against the old receipt
+      // cannot consume the earlier denial and publish after this request.
+      if (!recordPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, observed))
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      return
+    }
+    recordPendingExternalLogout(userDataDirectory, envKey)
+  }
+
+  /** Persisted LP has already denied restore; synchronously revoke its live runtime as well. */
+  private recordLogoutIntentFallback(envKey: string): void {
+    this.persistLogoutIntentFallback(envKey)
+    if (getActiveEnvKey() !== envKey) return
+    const gfsIdentity = this.gfsScopeIdentity ?? undefined
+    if (this.sessionToken !== null || this.me !== null || this.memoryOnlySession !== undefined)
+      this.clearAuthenticatedSessionState()
+    void this.suspendDesktopGfsUploadsForAuthBoundary(gfsIdentity).catch(error =>
+      this.reportDeferredLogoutFailureSafely(error)
+    )
   }
 
   private async applyPendingExternalLogoutBeforeLogin(
@@ -3423,11 +3653,26 @@ export class AppService {
     envKey: string
   ): Promise<PendingLogoutLoginPlan> {
     let marker: PendingExternalLogoutMarker | null
+    const legacyNamespace = getActiveLegacyEnvKeyInventory()
     try {
+      await SessionAuthorityAcceptanceTransaction.reconcilePendingAcceptanceProjection(
+        this.tokenStore,
+        userDataDirectory,
+        envKey,
+        legacyNamespace.keys,
+        legacyNamespace.complete
+      )
       marker = this.inspectPendingLogoutMarker(envKey)
     } catch (markerError) {
-      if (isTransientPendingLogoutReadError(markerError)) {
+      const initialRecovery = this.sessionAuthority.planMalformedMarkerLoginReadFailure({
+        error: markerError,
+      })
+      if (initialRecovery.kind === 'reject-transient-read') {
         this.reportDeferredLogoutFailureSafely(markerError)
+        throw markerError
+      }
+      if (initialRecovery.kind !== 'read-observed-revision') {
+        await this.failClosedForPendingLogout(markerError)
         throw markerError
       }
       let malformedMarkerContentsRevision: string | null
@@ -3440,7 +3685,15 @@ export class AppService {
         await this.failClosedForPendingLogout(markerError)
         throw markerError
       }
-      if (!malformedMarkerContentsRevision) {
+      const recoveryPlan = this.sessionAuthority.planMalformedMarkerLoginReadFailure({
+        error: markerError,
+        contentsRevision: malformedMarkerContentsRevision,
+      })
+      if (recoveryPlan.kind === 'deny-unverifiable-marker') {
+        await this.failClosedForPendingLogout(markerError)
+        throw markerError
+      }
+      if (recoveryPlan.kind !== 'normalize-observed-bytes') {
         await this.failClosedForPendingLogout(markerError)
         throw markerError
       }
@@ -3453,7 +3706,7 @@ export class AppService {
           !recordPendingExternalLogoutIfContentsUnchanged(
             userDataDirectory,
             envKey,
-            malformedMarkerContentsRevision
+            recoveryPlan.contentsRevision
           )
         ) {
           throw new Error('Pending logout intent changed before login recovery')
@@ -3465,23 +3718,24 @@ export class AppService {
         throw clearError
       }
     }
-    const loginPlan = this.sessionAuthority.planFreshLogin(marker)
-    if (loginPlan) return loginPlan
+    const loginAction = this.sessionAuthority.planFreshLogin(marker)
+    if (loginAction.kind === 'ready') return loginAction.plan
 
-    if (!marker || marker.intent.intent !== 'keytar-cleanup-pending')
-      throw new Error('Session authority returned no login plan for a non-cleanup marker')
-    const intent = marker.intent
-
-    if (intent.intent === 'keytar-cleanup-pending') {
-      const preserveActiveEnvKey = intent.credentialSource === 'active-keytar'
+    if (loginAction.kind === 'cleanup-source') {
+      const cleanupMarker = loginAction.marker
+      const preserveActiveEnvKey = loginAction.source === 'active-keytar'
       try {
-        const result = await this.clearKeytarForObservedMarker(envKey, marker, preserveActiveEnvKey)
-        return this.sessionAuthority.loginPlanAfterKeytarCleanup(marker, result)
+        const result = await this.clearKeytarForObservedMarker(
+          envKey,
+          cleanupMarker,
+          preserveActiveEnvKey
+        )
+        return this.sessionAuthority.loginPlanAfterKeytarCleanup(cleanupMarker, result)
       } catch (error) {
         if (error instanceof SessionTokenStorageSupersededBeforeWriteError) throw error
         const recovered = this.sessionAuthority.loginPlanAfterCleanupFailure(
           'keytar-cleanup',
-          marker,
+          cleanupMarker,
           envKey,
           error
         )
@@ -3491,22 +3745,241 @@ export class AppService {
       }
     }
 
+    if (loginAction.kind !== 'finalize-logout')
+      throw new Error('Session authority returned an unsupported fresh-login plan')
+    // Every supported marker state has an explicit plan above. An unknown future marker is
+    // not permission to clear credentials before authentication; preserve the durable fence
+    // and fail closed until its authority contract is implemented.
+    const error = new SessionAuthorityProjectionIntegrityError('marker')
+    await this.failClosedForPendingLogout(error)
+    throw error
+  }
+
+  private async restoreSelectedSessionAuthoritySource(
+    restorePlan: import('./sessionAuthorityAcceptance.js').SessionAuthorityRestoreExistingPlan,
+    environmentBinding: ReturnType<AppService['captureAuthEnvironmentBinding']>,
+    legacyEnvKeys: readonly string[],
+    restoreGeneration: number,
+    runLaunchMaintenance: boolean
+  ): Promise<SessionState> {
+    const envKey = environmentBinding.environmentKey
+    const previousRuntimeToken = this.sessionToken
+    const previousRuntimeUser = this.me
+    const transaction =
+      await SessionAuthorityAcceptanceTransaction.beginRestoreExisting(restorePlan)
+    const token = transaction.sessionToken
+    const ownerIsCurrent = () =>
+      this.sessionGeneration === restoreGeneration &&
+      this.sessionToken === previousRuntimeToken &&
+      this.me === previousRuntimeUser &&
+      (previousRuntimeToken === null || previousRuntimeToken === token) &&
+      this.interactiveLoginAttempts === 0 &&
+      !this.logoutInProgress &&
+      getActiveEnvKey() === envKey
+    const environmentIsCurrent = () => {
+      try {
+        this.assertAuthEnvironmentBinding(environmentBinding)
+        return true
+      } catch {
+        return false
+      }
+    }
+
     try {
-      // Keep the marker until a fresh credential is durably installed. If only
-      // the active Keytar slot resisted deletion, a successful write to that
-      // same slot safely replaces the old credential.
-      const result = await this.logoutOnce({ strictTokenClear: true })
-      return this.sessionAuthority.loginPlanAfterLogoutCleanup(marker, result)
+      const { identity: user } = await transaction.executeRestoreExisting({
+        assertOwned: () => {
+          if (!ownerIsCurrent()) throw new SessionTokenStorageSupersededBeforeWriteError()
+          this.assertAuthEnvironmentBinding(environmentBinding)
+        },
+        verifyIdentity: async () => {
+          const identity = await this.withCandidateSessionRequest(
+            token,
+            envKey,
+            restoreGeneration,
+            () => {
+              try {
+                restorePlan.assertSourceCurrent()
+                return ownerIsCurrent() && environmentIsCurrent()
+              } catch {
+                return false
+              }
+            },
+            () => this.authClient.getMe(token)
+          )
+          if (!ownerIsCurrent()) throw new SessionTokenStorageSupersededBeforeWriteError()
+          this.assertAuthEnvironmentBinding(environmentBinding)
+          return identity
+        },
+        onRestoreRejected: async error => {
+          if (
+            (restorePlan.source.format === 'v0' || restorePlan.source.format === 'v1') &&
+            error instanceof ApiError &&
+            (error.status === 401 || error.status === 403 || error.status === 410)
+          ) {
+            try {
+              await this.fenceRejectedAcceptedRestoreSource({
+                plan: restorePlan,
+                token,
+                envKey,
+                restoreGeneration,
+                previousRuntimeToken,
+                previousRuntimeUser,
+                environmentBinding,
+              })
+            } catch (cleanupError) {
+              if (
+                this.sessionGeneration === restoreGeneration &&
+                this.sessionToken === previousRuntimeToken &&
+                this.me === previousRuntimeUser
+              )
+                await this.failClosedForPendingLogout(cleanupError)
+              this.reportDeferredLogoutFailureSafely(cleanupError)
+            }
+          }
+        },
+        prepareConsumers: async identity => {
+          const preparedChat = await prepareChatStoreBindingForUser(identity.id, envKey, {
+            legacyEnvKeys,
+            teamId: identity.teamId,
+          })
+          if (!ownerIsCurrent() || !environmentIsCurrent() || !preparedChat.canPublish()) {
+            preparedChat.discard()
+            throw new SessionTokenStorageSupersededBeforeWriteError()
+          }
+          return preparedChat
+        },
+        consumersReady: preparedChat => preparedChat.canPublish(),
+        isStillOwned: (_identity, preparedChat) =>
+          ownerIsCurrent() && environmentIsCurrent() && preparedChat.canPublish(),
+        preparePublication: (_accepted, identity, preparedChat) => {
+          const publishChat = preparedChat.reservePublication()
+          const generation = restoreGeneration + 1
+          const acceptedSource = restorePlan.runtimeSource
+            ? { selected: restorePlan.runtimeSource, envKey, generation }
+            : undefined
+          const acceptedMarker = restorePlan.accepted.record.projectionReceipt
+            ? acceptancePendingExternalMarker(restorePlan.accepted.record.projectionReceipt.marker)
+            : undefined
+          const runtimeOwnerPublication = this.sessionAuthority.prepareRuntimeOwnerPublication({
+            expectedGeneration: restoreGeneration,
+            generation,
+            token,
+            user: identity,
+            acceptedSource,
+            acceptedAuthoritySource: restorePlan.source,
+            acceptedProjectionMarker: acceptedMarker,
+            memoryLease: undefined,
+          })
+          if (!publishChat || !runtimeOwnerPublication)
+            throw new SessionTokenStorageSupersededBeforeWriteError()
+          const nextGfsIdentity = desktopGfsUploadIdentity(identity)
+          return {
+            isCurrent: () => runtimeOwnerPublication.isCurrent(),
+            publish: () => {
+              publishChat()
+              runtimeOwnerPublication.publish()
+              this.updateEntityChangeSessionToken(token)
+              this.accessCatalog = null
+              this.teamDirectoryCache = null
+              this.workflowApprovalTeamById.clear()
+              this.workflowTeamByKey.clear()
+              this.gfsAuthEpoch += 1
+              this.gfsDispatchBlocked = false
+              this.gfsScopeIdentity = nextGfsIdentity
+              return undefined
+            },
+          }
+        },
+        afterPublication: (_identity, preparedChat) => {
+          preparedChat.afterPublication()
+          this.restartEntityChangeStreamForSessionReplacement()
+        },
+        discardConsumers: preparedChat => preparedChat.discard(),
+        onPublicationFailure: () => this.clearAuthenticatedSessionState(),
+        rollbackBeforeAcceptance: () => {
+          // A rejected cold restore must leave no staged chat authorization behind. A repeated
+          // restore attempt over the same already authenticated owner must preserve its existing
+          // runtime/consumer binding while discarding only the newly staged resources.
+          if (ownerIsCurrent() && previousRuntimeToken === null && previousRuntimeUser === null) {
+            unbindChatStore()
+            this.gfsAuthEpoch += 1
+            this.gfsDispatchBlocked = true
+            this.gfsScopeIdentity = null
+          }
+        },
+      })
+      if (runLaunchMaintenance) void this.runSandboxUiPartitionGcSafely()
+      return { authenticated: true, me: user }
     } catch (error) {
-      const recovered = this.sessionAuthority.loginPlanAfterCleanupFailure(
-        'logout',
-        marker,
-        envKey,
+      desktopRuntimeLog.warn(
+        '[AppService] Selected session authority could not be restored:',
         error
       )
-      if (recovered) return recovered
-      await this.failClosedForPendingLogout(error)
       throw error
+    }
+  }
+
+  /**
+   * A definitively server-rejected accepted source must be durably denied before exact cleanup.
+   * Otherwise the authority frame retries the rejected credential on every subsequent startup.
+   */
+  private async fenceRejectedAcceptedRestoreSource(input: {
+    plan: import('./sessionAuthorityAcceptance.js').SessionAuthorityRestoreExistingPlan
+    token: string
+    envKey: string
+    restoreGeneration: number
+    previousRuntimeToken: string | null
+    previousRuntimeUser: SessionMe | null
+    environmentBinding: ReturnType<AppService['captureAuthEnvironmentBinding']>
+  }): Promise<void> {
+    input.plan.assertSourceCurrent()
+    const runtimeOwnerIsCurrent = () =>
+      this.sessionGeneration === input.restoreGeneration &&
+      this.sessionToken === input.previousRuntimeToken &&
+      this.me === input.previousRuntimeUser &&
+      getActiveEnvKey() === input.envKey
+    const previousGfsIdentity = this.gfsScopeIdentity ?? undefined
+    let cleanupOwnsLease = false
+    this.logoutInProgress = true
+    // Revoke new GFS dispatch synchronously before any repository or marker observation can
+    // await. GFS draining/persistence is fallible cleanup and must not delay the durable deny.
+    this.gfsDispatchBlocked = true
+    this.gfsAuthEpoch += 1
+    let logout: SessionAuthorityLogoutTransaction | null = null
+    try {
+      const legacyNamespace = getActiveLegacyEnvKeyInventory()
+      logout = await SessionAuthorityLogoutTransaction.begin({
+        tokenStore: this.tokenStore,
+        userDataDirectory: this.getUserDataDirectory(),
+        envKey: input.envKey,
+        expectedToken: input.token,
+        expectedAuthoritySource: input.plan.source,
+        legacyEnvKeys: legacyNamespace.keys,
+        legacyNamespaceComplete: legacyNamespace.complete,
+        isStillOwned: runtimeOwnerIsCurrent,
+      })
+      if (!logout) throw new SessionAuthorityRecordConflictError()
+
+      await logout.commit(() => {
+        if (!runtimeOwnerIsCurrent()) return false
+        try {
+          this.assertAuthEnvironmentBinding(input.environmentBinding)
+          return true
+        } catch {
+          return false
+        }
+      })
+      // LP plus exact-source debt is now durable. Kick off GFS drain only after that boundary;
+      // its state-file write can fail or wait, but cannot undo denial or make restore retry.
+      void this.suspendDesktopGfsUploadsForAuthBoundary(previousGfsIdentity).catch(error =>
+        this.reportDeferredLogoutFailureSafely(error)
+      )
+      this.clearAuthenticatedSessionState()
+      this.scheduleSessionAuthorityLogoutCleanup(logout)
+      cleanupOwnsLease = true
+    } finally {
+      this.logoutInProgress = false
+      if (!cleanupOwnsLease) logout?.close()
     }
   }
 
@@ -3522,419 +3995,92 @@ export class AppService {
     if (this.logoutInProgress) return { authenticated: false, me: null }
     if (this.interactiveLoginAttempts > 0)
       return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
-    // A memory-only marker is durable denial state, never a restore source.
-    // Return before TokenStore can inspect an older Keytar/safeStorage value.
     if (restorePlan.policy === 'deny-all') return { authenticated: false, me: null }
+
     const previousRuntimeToken = this.sessionToken
     const previousRuntimeMe = this.me
     hydrateDesktopRuntimeConfig()
     const environmentBinding = this.captureAuthEnvironmentBinding()
     const envKey = environmentBinding.environmentKey
-    const legacyEnvKeys = getActiveLegacyEnvKeys()
-    this.savedSessionRestoreAttemptedEnvKey = envKey
-    this.savedSessionRestoreAttemptedAtMs = Date.now()
-    let token: string | null
-    let sourcePlanSuperseded = false
-    let restoreRequiresLogoutFinalization = false
-    let dispatchInspectionError: unknown
-    let producedSource: 'keytar' | 'safe-storage' | 'isolated-plaintext' | null = null
-    const migrationPublications = new Map<SessionTokenReadSource, VerifiedSessionTokenSource>()
-    const migrationCandidates = new Map<SessionTokenMutationSource, string>()
-    let selectedSource: 'keytar' | 'safe-storage' | 'historical-plaintext' | null = null
-    let readAuthority: SessionTokenReadAuthority | undefined
-    let selected: VerifiedSessionTokenSource | undefined
-    const onTokenRead = (source: SessionTokenReadSource, authority: SessionTokenReadAuthority) => {
-      selectedSource = source
-      readAuthority = authority
-    }
-    let attemptedRestoreMarker: PendingExternalLogoutMarker | null = null
-    let restoreOwnedRuntimeToken = previousRuntimeToken
-    const restoreOwnership = () =>
-      this.sessionAuthority.inspectOwnership(
-        envKey,
-        attemptedRestoreMarker
-          ? [restorePlan.pendingCleanupMarker, attemptedRestoreMarker]
-          : [restorePlan.pendingCleanupMarker],
-        this.sessionGeneration === restoreGeneration &&
-          this.interactiveLoginAttempts === 0 &&
-          !this.logoutInProgress &&
-          getActiveEnvKey() === envKey &&
-          (() => {
-            try {
-              this.assertAuthEnvironmentBinding(environmentBinding)
-              return true
-            } catch {
-              return false
-            }
-          })() &&
-          this.sessionToken === restoreOwnedRuntimeToken
-      )
-    const mayContinueRestore = () => {
-      try {
-        this.assertAuthEnvironmentBinding(environmentBinding)
-      } catch {
-        sourcePlanSuperseded = true
-        return false
-      }
-      if (this.interactiveLoginAttempts > 0) {
-        sourcePlanSuperseded = true
-        return false
-      }
-      const observation = restoreOwnership()
-      if (observation.status === 'transient' || observation.status === 'invalid') {
-        dispatchInspectionError = observation.error
-        return false
-      }
-      if (observation.status !== 'owned') {
-        sourcePlanSuperseded = true
-        if (
-          this.sessionGeneration === restoreGeneration &&
-          this.inspectPendingLogoutMarker(envKey)?.intent.intent === 'logout-pending'
-        )
-          restoreRequiresLogoutFinalization = true
-        return false
-      }
-      return true
-    }
-    const requireRestoreSource = () => {
-      if (!mayContinueRestore()) {
-        if (dispatchInspectionError !== undefined) throw dispatchInspectionError
-        throw new SessionTokenStorageSupersededBeforeWriteError()
-      }
-    }
-    const producer = this.sessionAuthority.createPersistenceProducer(
-      this.getUserDataDirectory(),
-      envKey,
-      restorePlan.pendingCleanupMarker,
-      requireRestoreSource,
-      false
-    )
+    const legacyNamespace = getActiveLegacyEnvKeyInventory()
+    const legacyEnvKeys = legacyNamespace.keys
     const currentRestoreState = () => ({
       authenticated: Boolean(this.sessionToken && this.me),
       me: this.me,
     })
-    const finalizeUnacceptedRestore = async (
-      options: { rejectedToken?: string; notifySessionChanged?: boolean } = {}
-    ) => {
-      // This is the original selected resource's in-lane observation, not a
-      // later snapshot of whatever another producer published during getMe.
-      const rejectedReadAuthority = readAuthority
-      // Every old async completion joins the same source gate before it can
-      // clear runtime. Persist-before-install leaves a younger admitted writer
-      // over the old token until it installs; token equality alone is not a
-      // reason to advance that writer's epoch from outside its transaction.
-      await this.runSessionPersistence(async () => {
-        if (
-          this.sessionGeneration !== restoreGeneration ||
-          this.sessionToken !== restoreOwnedRuntimeToken ||
-          getActiveEnvKey() !== envKey
-        )
-          return
-        if (this.sessionToken || this.me) {
-          this.clearAuthenticatedSessionState(
-            options.notifySessionChanged === undefined
-              ? {}
-              : { notifySessionChanged: options.notifySessionChanged }
-          )
-        } else if (options.notifySessionChanged !== false) {
-          this.notifySessionChangedSafely(false)
-        }
-        restoreGeneration = this.sessionGeneration
-        restoreOwnedRuntimeToken = null
-        const rejectedToken = options.rejectedToken
-        if (!rejectedToken) return
-        if (!rejectedReadAuthority) {
-          this.reportDeferredLogoutFailureSafely(
-            new Error('Rejected stored credential has no verified read authority')
-          )
-          return
-        }
-        const mayCleanRejectedSource = () => {
-          const observation = restoreOwnership()
-          if (observation.status === 'transient' || observation.status === 'invalid')
-            throw observation.error
-          return observation.status === 'owned'
-        }
-        if (!mayCleanRejectedSource()) return
-        const snapshot = await this.tokenStore.snapshotSessionTokenFallbackFiles(envKey, {
-          legacyEnvKeys,
-          mayWrite: mayCleanRejectedSource,
-        })
-        const native = await this.tokenStore.clearKeytarSessionTokensStrictly(envKey, {
-          legacyEnvKeys,
-          onlyIfMatches: rejectedToken,
-          readAuthority: rejectedReadAuthority,
-          mayWrite: mayCleanRejectedSource,
-        })
-        const filesRetired = await this.tokenStore.retireSessionTokenFallbackFilesIfUnchanged(
-          snapshot,
-          {
-            onlyIfMatches: rejectedToken,
-            readAuthority: rejectedReadAuthority,
-            mayWrite: mayCleanRejectedSource,
-          }
-        )
-        if (
-          (native.keytarAvailable || native.keytarDisabled) &&
-          native.sourceAuthorityVerified === true &&
-          filesRetired &&
-          mayCleanRejectedSource()
-        )
-          await this.retireRepairedPersistenceProducer(producer)
-        else
-          this.reportDeferredLogoutFailureSafely(
-            new Error('Rejected stored credential cleanup could not be fully verified')
-          )
-      }).catch(cleanupError => this.reportDeferredLogoutFailureSafely(cleanupError))
-      return currentRestoreState()
-    }
-    try {
-      token = await this.withNativeAuthEnvironmentCommit(() =>
-        this.runSessionPersistence(async () => {
-          if (this.sessionGeneration !== restoreGeneration) return this.sessionToken
-          const currentMarker = this.inspectPendingLogoutMarker(envKey)
-          if (
-            restorePlan.pendingCleanupMarker
-              ? !pendingExternalLogoutMarkersMatch(currentMarker, restorePlan.pendingCleanupMarker)
-              : currentMarker !== null
-          ) {
-            sourcePlanSuperseded = true
-            restoreRequiresLogoutFinalization = currentMarker?.intent.intent === 'logout-pending'
-            return this.sessionToken
-          }
-          const mayWrite = mayContinueRestore
-          const fallbackBeforeRestore =
-            restorePlan.policy === 'normal'
-              ? await this.tokenStore.snapshotSessionTokenFallbackFiles(envKey, {
-                  legacyEnvKeys,
-                  mayWrite,
-                })
-              : undefined
-          const storedToken =
-            restorePlan.policy === 'safe-storage-only'
-              ? await this.sessionAuthority.readSessionTokenFromSource('safe-storage', envKey, {
-                  legacyEnvKeys,
-                  onTokenRead,
-                })
-              : restorePlan.policy === 'keytar-active-only'
-                ? await this.sessionAuthority.readSessionTokenFromSource('active-keytar', envKey, {
-                    legacyEnvKeys,
-                    onTokenRead,
-                  })
-                : await this.sessionAuthority.readPreferredSessionToken(envKey, {
-                    legacyEnvKeys,
-                    mayWrite,
-                    onMutationDispatched: (source, candidate) => {
-                      this.sessionAuthority.prepareCandidate(producer, source, candidate)
-                      producedSource = source
-                      migrationCandidates.set(source, candidate)
-                    },
-                    onMutationSettled: (source, authority) => {
-                      const candidate = migrationCandidates.get(source)
-                      if (!candidate)
-                        throw new Error('Migration publication has no admitted candidate')
-                      const published = sessionTokenPublicationSource(source, candidate, authority)
-                      migrationPublications.set(published.source, published)
-                    },
-                    onTokenRead,
-                  })
-          requireRestoreSource()
-          if (storedToken && selectedSource && readAuthority) {
-            selected = migrationPublications.get(selectedSource) ?? {
-              token: storedToken,
-              source: selectedSource,
-              authority: readAuthority,
-            }
-            await this.verifySessionTokenSource(selected, envKey, mayContinueRestore)
-          }
-          if (storedToken)
-            this.sessionAuthority.assertCandidateMayAuthenticate(producer, storedToken)
-          if (
-            storedToken &&
-            (producedSource === 'safe-storage' || selectedSource === 'safe-storage')
-          ) {
-            if (restorePlan.pendingCleanupMarker === null) {
-              const bound = await this.bindVerifiedEncryptedCredentialIfMarkerMissing(
-                storedToken,
-                envKey,
-                mayContinueRestore,
-                attempted => {
-                  this.sessionAuthority.declarePlannedMarker(producer, attempted)
-                  attemptedRestoreMarker = attempted
-                },
-                selected
-              )
-              restorePlan = {
-                policy: 'safe-storage-only',
-                pendingCleanupMarker: bound,
-                retireMarkerAfterRestore: false,
-              }
-              attemptedRestoreMarker = null
-            } else if (
-              (await this.sessionAuthority.readSessionTokenFromSource('safe-storage', envKey)) !==
-              storedToken
-            )
-              throw new Error('Migrated encrypted credential could not be verified')
-          } else if (
-            storedToken &&
-            producedSource === 'keytar' &&
-            (await this.sessionAuthority.readSessionTokenFromSource('active-keytar', envKey)) !==
-              storedToken
-          ) {
-            throw new Error('Migrated native credential could not be verified')
-          }
-          if (
-            storedToken &&
-            fallbackBeforeRestore &&
-            (producedSource === 'keytar' || selectedSource === 'keytar')
-          ) {
-            const bound = await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
-              storedToken,
-              envKey,
-              restorePlan.pendingCleanupMarker,
-              fallbackBeforeRestore,
-              mayContinueRestore,
-              attempted => {
-                this.sessionAuthority.declarePlannedMarker(producer, attempted)
-                attemptedRestoreMarker = attempted
-              },
-              selected
-            )
-            if (bound) {
-              restorePlan = {
-                policy: 'keytar-active-only',
-                pendingCleanupMarker: bound,
-                retireMarkerAfterRestore: false,
-              }
-              attemptedRestoreMarker = null
-            }
-          }
-          requireRestoreSource()
-          if (storedToken) await this.verifySessionTokenSource(selected, envKey, mayContinueRestore)
-          return storedToken
-        })
-      )
-    } catch (error) {
-      if (dispatchInspectionError !== undefined) error = dispatchInspectionError
-      error = this.unwrapPersistenceAuthorityError(error)
-      desktopRuntimeLog.warn('[AppService] Failed to read the saved session token:', error)
-      if (this.isTransientPersistenceAuthorityRead(error)) {
-        this.reportDeferredLogoutFailureSafely(error)
-        if (previousRuntimeToken && previousRuntimeMe) return currentRestoreState()
-        return finalizeUnacceptedRestore({ notifySessionChanged: false })
-      }
-      return finalizeUnacceptedRestore({
-        notifySessionChanged: Boolean(previousRuntimeToken && previousRuntimeMe),
-      })
-    }
-    if (sourcePlanSuperseded || this.sessionGeneration !== restoreGeneration) {
-      return restoreRequiresLogoutFinalization ? finalizeUnacceptedRestore() : currentRestoreState()
-    }
-    if (this.logoutInProgress) return { authenticated: false, me: null }
-    if (!token) {
-      return finalizeUnacceptedRestore()
-    }
-
-    if (this.sessionGeneration !== restoreGeneration) {
-      return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
-    }
-    try {
-      await this.verifySessionTokenSource(selected, envKey, mayContinueRestore)
-      this.sessionAuthority.assertCandidateMayAuthenticate(producer, token)
-      const restoredMe = await this.authClient.getMe(token)
-      // Network validation may overlap a younger login, but its completion
-      // cannot install auth/chat/GFS scope over that producer's source gate.
-      const accepted = await this.withNativeAuthEnvironmentCommit(() =>
-        this.runSessionPersistence(async () => {
-          if (
-            this.sessionGeneration !== restoreGeneration ||
-            this.sessionToken !== restoreOwnedRuntimeToken ||
-            getActiveEnvKey() !== envKey
-          )
-            return false
-          requireRestoreSource()
-          await this.verifySessionTokenSource(selected, envKey, mayContinueRestore)
-          await bindChatStoreForUser(restoredMe.id, envKey, {
-            legacyEnvKeys,
-            teamId: restoredMe.teamId,
-          })
-          requireRestoreSource()
-          await this.verifySessionTokenSource(selected, envKey, mayContinueRestore)
-          if (
-            this.sessionGeneration !== restoreGeneration ||
-            this.sessionToken !== restoreOwnedRuntimeToken ||
-            getActiveEnvKey() !== envKey
-          )
-            return false
-          this.sessionAuthority.assertCandidateMayAuthenticate(producer, token)
-          this.requireSessionTokenSourceCurrent(selected, envKey, mayContinueRestore)
-          this.sessionToken = token
-          restoreOwnedRuntimeToken = token
-          this.me = restoredMe
-          this.updateEntityChangeSessionToken(token)
-          this.restartEntityChangeStreamForSessionReplacement()
-          this.accessCatalog = null
-          this.teamDirectoryCache = null
-          this.workflowApprovalTeamById.clear()
-          this.workflowTeamByKey.clear()
-          // Persisted uploads are never auto-resumed. Explicit resume rebinds
-          // only this accepted owner/team/env to the activated auth epoch.
-          const restoredGfsIdentity: DesktopGfsUploadIdentity = {
-            ownerId: restoredMe.id,
-            teamId: restoredMe.teamId ? String(restoredMe.teamId).trim() : null,
-            environmentKey: envKey,
-            baseUrl: normalizeDesktopUploadBaseUrl(environmentBinding.restBaseUrl),
-          }
-          this.activateGfsAuthScope(restoredGfsIdentity)
-          await this.migrateLegacyDesktopGfsUploadScopes(restoredGfsIdentity, legacyEnvKeys).catch(
-            () => undefined
-          )
-          this.requireSessionTokenSourceCurrent(selected, envKey, mayContinueRestore)
-          this.sessionAuthority.acceptCandidate(producer, token)
-          this.recordAcceptedSessionSource(selected, envKey)
-          this.sessionGeneration += 1
-          restoreGeneration = this.sessionGeneration
-          return true
-        })
-      )
-      if (!accepted) return currentRestoreState()
-      // Launch-time sandbox-ui partition GC. Fire-and-forget: a failure
-      // here must not block the user from logging in. Any network or fs
-      // error is logged inside the module.
-      if (options.runLaunchMaintenance) {
-        void this.runSandboxUiPartitionGcSafely()
-      }
-      await this.retirePendingKeytarCleanupAfterRestore(restorePlan, envKey)
-      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
-        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
-      }
-      return { authenticated: true, me: this.me }
-    } catch (error) {
+    const isRestoreAdmitted = () => {
       if (
         this.sessionGeneration !== restoreGeneration ||
-        this.sessionToken !== restoreOwnedRuntimeToken
-      ) {
-        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+        this.interactiveLoginAttempts > 0 ||
+        this.logoutInProgress ||
+        getActiveEnvKey() !== envKey
+      )
+        return false
+      try {
+        this.assertAuthEnvironmentBinding(environmentBinding)
+        return true
+      } catch {
+        return false
       }
-      if (this.isTransientPersistenceAuthorityRead(error)) {
-        this.reportDeferredLogoutFailureSafely(error)
-        if (previousRuntimeMe && previousRuntimeToken === token) {
-          this.me = previousRuntimeMe
-          return { authenticated: true, me: previousRuntimeMe }
-        }
-        // A partial cold restore has no previously authenticated identity to
-        // preserve. Leave its credential untouched, but do not announce new auth.
-        return finalizeUnacceptedRestore()
+    }
+    const leaveColdRestoreUnauthenticated = () => {
+      if (!previousRuntimeToken && !previousRuntimeMe) {
+        unbindChatStore()
+        this.gfsAuthEpoch += 1
+        this.gfsDispatchBlocked = true
+        this.gfsScopeIdentity = null
       }
-      if (AppService.isRejectedStoredSessionError(error)) {
-        return finalizeUnacceptedRestore({ rejectedToken: token })
-      } else {
-        desktopRuntimeLog.warn(
-          '[AppService] Saved session restore failed; keeping token for retry:',
-          error
-        )
-      }
-      return finalizeUnacceptedRestore()
+      return currentRestoreState()
+    }
+
+    if (!isRestoreAdmitted()) return currentRestoreState()
+    this.savedSessionRestoreAttemptedEnvKey = envKey
+    this.savedSessionRestoreAttemptedAtMs = Date.now()
+
+    let selectedPlan:
+      | import('./sessionAuthorityAcceptance.js').SessionAuthorityRestoreExistingPlan
+      | null = null
+    try {
+      // The current storage protocol restores only a source explicitly selected by the
+      // authoritative V2 frame. Historical Keytar/safeStorage selectors belong to older Desktop
+      // protocols and are never imported or used as a fallback by this client.
+      const selection = await this.sessionAuthority.beginAcceptedSessionRestore(
+        envKey,
+        restorePlan.policy
+      )
+
+      if (selection.status !== 'accepted') return leaveColdRestoreUnauthenticated()
+      selectedPlan = selection.plan
+
+      const restored = await this.restoreSelectedSessionAuthoritySource(
+        selection.plan,
+        environmentBinding,
+        legacyEnvKeys,
+        restoreGeneration,
+        Boolean(options.runLaunchMaintenance)
+      )
+      if (!restored.authenticated) return currentRestoreState()
+      await this.retirePendingKeytarCleanupAfterRestore(restorePlan, envKey)
+      return currentRestoreState()
+    } catch (error) {
+      const normalized = this.unwrapPersistenceAuthorityError(error)
+      if (!isRestoreAdmitted()) return currentRestoreState()
+
+      const observationFailure = this.sessionAuthority.planPersistenceAuthorityFailure(
+        normalized,
+        'restore-source-observation',
+        { priorRuntimeAvailable: Boolean(previousRuntimeToken && previousRuntimeMe) }
+      )
+      if (observationFailure.kind === 'transient-read')
+        this.reportDeferredLogoutFailureSafely(normalized)
+
+      // A confirmed server rejection invalidates only the exact legacy V0 value selected by this
+      // restore receipt. It never scans or clears another provider or a newer source revision.
+      desktopRuntimeLog.warn(
+        '[AppService] Selected session authority could not be restored:',
+        error
+      )
+      return leaveColdRestoreUnauthenticated()
     }
   }
 
@@ -3948,20 +4094,23 @@ export class AppService {
       fallbackSnapshot?: SessionTokenFallbackSnapshot
       selectedSource?: VerifiedSessionTokenSource
     } = {}
-  ): Promise<boolean> {
+  ): Promise<SessionSourceCleanupOutcome> {
+    const cleanupToken = expectedToken
+    const plan = this.sessionAuthority.planSourceCleanup(source, cleanupToken)
+    if (!cleanupToken || !plan) return { source, kind: 'incomplete' }
     const generation = this.sessionGeneration
     let selected = options.selectedSource
     const ownsCleanup = () =>
-      this.sessionGeneration === generation &&
-      (!selected ||
-        isSessionTokenReadAuthorityCurrent(selected.authority, selected.source, envKey)) &&
-      (!options.mayContinue || options.mayContinue()) &&
-      (!options.marker ||
-        pendingExternalLogoutMarkersMatch(this.inspectPendingLogoutMarker(envKey), options.marker))
+      this.sessionAuthority.isSourceCleanupOwnerCurrent({
+        envKey,
+        generation,
+        selectedSource: selected,
+        marker: options.marker,
+        mayContinue: options.mayContinue,
+      })
     try {
-      if (!expectedToken) return false
       selected ??= await this.readVerifiedSessionTokenSource(
-        expectedToken,
+        cleanupToken,
         envKey,
         source === 'active-keytar' ? 'keytar' : 'safe-storage',
         ownsCleanup
@@ -3975,23 +4124,57 @@ export class AppService {
         }))
       const cleared = await this.tokenStore.clearKeytarSessionTokensStrictly(envKey, {
         legacyEnvKeys: getActiveLegacyEnvKeys(),
-        preserveActiveEnvKey: source === 'active-keytar',
+        preserveActiveEnvKey: plan.preserveActiveEnvKey,
         mayWrite: ownsCleanup,
       })
-      if (!(cleared.keytarAvailable || cleared.keytarDisabled) || !ownsCleanup()) return false
+      const keytarCleanupSettled = isKeytarCleanupEstablished(cleared.keytarDisposition)
+      const keytarOwnerCurrent = ownsCleanup()
+      if (!keytarCleanupSettled || !keytarOwnerCurrent)
+        return this.sessionAuthority.planSourceCleanupOutcome(plan, {
+          sourceVerified: false,
+          keytarCleanupSettled,
+          fallbackRetirementVerified: false,
+          ownerCurrent: keytarOwnerCurrent,
+        })
       const retired = await this.tokenStore.retireSessionTokenFallbackFilesIfUnchanged(snapshot, {
         mayWrite: ownsCleanup,
-        ...(source === 'safe-storage' ? { preserveActiveEncryptedToken: expectedToken } : {}),
+        ...(plan.preserveActiveEncryptedToken
+          ? { preserveActiveEncryptedToken: plan.preserveActiveEncryptedToken }
+          : {}),
       })
-      if (!retired || !ownsCleanup()) return false
+      const fallbackRetirementVerified = Boolean(retired)
+      const fallbackOwnerCurrent = ownsCleanup()
+      if (!fallbackRetirementVerified || !fallbackOwnerCurrent)
+        return this.sessionAuthority.planSourceCleanupOutcome(plan, {
+          sourceVerified: false,
+          keytarCleanupSettled: true,
+          fallbackRetirementVerified,
+          ownerCurrent: fallbackOwnerCurrent,
+        })
       await this.verifySessionTokenSource(selected, envKey, ownsCleanup)
-      return true
+      return this.sessionAuthority.planSourceCleanupOutcome(plan, {
+        sourceVerified: true,
+        keytarCleanupSettled: true,
+        fallbackRetirementVerified: true,
+        ownerCurrent: ownsCleanup(),
+      })
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
-      if (isPendingExternalLogoutReadFailure(error) && !isTransientPendingLogoutReadError(error))
-        await this.failClosedForPendingLogout(error)
+      const failure = this.sessionAuthority.planPersistenceAuthorityFailure(error, 'source-cleanup')
+      if (failure.kind === 'fail-closed') await this.failClosedForPendingLogout(error)
+      let ownerCurrent = true
+      try {
+        ownerCurrent = ownsCleanup()
+      } catch {
+        // An unclassifiable/transient ownership read is incomplete, not proof of supersession.
+      }
+      return this.sessionAuthority.planSourceCleanupOutcome(plan, {
+        sourceVerified: false,
+        keytarCleanupSettled: false,
+        fallbackRetirementVerified: false,
+        ownerCurrent,
+      })
     }
-    return false
   }
 
   private async bindVerifiedNativeCredentialAfterFallbackCleanup(
@@ -4006,39 +4189,22 @@ export class AppService {
     if (!mayContinue()) throw new SessionTokenStorageSupersededBeforeWriteError()
     selected ??= await this.readVerifiedSessionTokenSource(token, envKey, 'keytar', mayContinue)
     await this.verifySessionTokenSource(selected, envKey, mayContinue)
-    const cleaned = await this.canRetireSourceCleanup(envKey, token, 'active-keytar', {
+    const cleanup = await this.canRetireSourceCleanup(envKey, token, 'active-keytar', {
       marker: marker ?? undefined,
       mayContinue,
       fallbackSnapshot,
       selectedSource: selected,
     })
     await this.verifySessionTokenSource(selected, envKey, mayContinue)
-    if (
-      cleaned ||
-      (marker?.intent.intent === 'keytar-cleanup-pending' &&
-        marker.intent.credentialSource === 'active-keytar')
-    )
-      return marker
-    const revision = randomUUID()
-    const quarantine: PendingExternalLogoutMarker = {
-      intent: { intent: 'keytar-cleanup-pending', credentialSource: 'active-keytar' },
-      revision,
-    }
+    const bindingPlan = this.sessionAuthority.planSourceBindingAfterFallbackCleanup(cleanup, marker)
+    if (bindingPlan.kind === 'retain') return bindingPlan.marker
+    if (bindingPlan.kind === 'conflict') throw new SessionTokenStorageSupersededBeforeWriteError()
+    const quarantine = bindingPlan.next
     markerAttempted(quarantine)
-    const written = marker
-      ? recordPendingKeytarCleanupIfUnchanged(
-          this.getUserDataDirectory(),
-          envKey,
-          marker,
-          'active-keytar',
-          revision
-        )
-      : recordPendingKeytarCleanupIfMissing(
-          this.getUserDataDirectory(),
-          envKey,
-          'active-keytar',
-          revision
-        )
+    const written = applyPendingExternalLogoutCas(this.getUserDataDirectory(), envKey, {
+      expected: bindingPlan.kind === 'replace-if-unchanged' ? bindingPlan.expected : null,
+      next: quarantine,
+    })
     if (!written) throw new SessionTokenStorageSupersededBeforeWriteError()
     return quarantine
   }
@@ -4069,27 +4235,41 @@ export class AppService {
     if (intent.intent !== 'keytar-cleanup-pending') return
 
     const userDataDirectory = this.getUserDataDirectory()
-    if (
-      !(await this.canRetireSourceCleanup(envKey, this.sessionToken, intent.credentialSource, {
+    const cleanup = await this.canRetireSourceCleanup(
+      envKey,
+      this.sessionToken,
+      intent.credentialSource,
+      {
         marker,
-      }))
+      }
     )
-      return
+    if (cleanup.kind !== 'verified') return
     try {
-      clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker)
+      const retirement = this.sessionAuthority.planMarkerRetirement(
+        marker,
+        this.inspectPendingLogoutMarker(envKey),
+        true
+      )
+      if (
+        retirement.kind === 'retire' &&
+        !applyPendingExternalLogoutCas(userDataDirectory, envKey, retirement.cas)
+      )
+        throw new SessionTokenStorageSupersededBeforeWriteError()
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
-      if (isTransientPendingLogoutReadError(error) && isPendingExternalLogoutReadFailure(error))
-        return
+      const failure = this.sessionAuthority.planPersistenceAuthorityFailure(
+        error,
+        'marker-retirement'
+      )
+      if (failure.kind === 'transient-read' && failure.source === 'marker') return
       try {
-        const markerRewritten = recordPendingKeytarCleanupIfUnchanged(
-          userDataDirectory,
-          envKey,
-          marker,
-          intent.credentialSource
-        )
-        if (!markerRewritten) {
-          recordPendingKeytarCleanupIfMissing(userDataDirectory, envKey, intent.credentialSource)
+        const current = this.inspectPendingLogoutMarker(envKey)
+        const recovery = this.sessionAuthority.planMarkerRetirementFailure(marker, current)
+        if (recovery.kind === 'restore-cleanup-if-missing') {
+          applyPendingExternalLogoutCas(userDataDirectory, envKey, {
+            expected: null,
+            next: recovery.next,
+          })
         }
       } catch (markerError) {
         this.reportDeferredLogoutFailureSafely(markerError)
@@ -4098,50 +4278,242 @@ export class AppService {
   }
 
   async initialize(): Promise<SessionState> {
+    await this.alignRuntimeEnvironmentWithAcceptedSession()
     return this.restoreSavedSession({ runLaunchMaintenance: true })
   }
 
+  /** The durable profile selector, not the last UI selection, chooses startup restore. */
+  private async alignRuntimeEnvironmentWithAcceptedSession(): Promise<void> {
+    const acceptedEnvKey = await this.sessionAuthority.getProfileSelectedEnvironmentKey()
+    if (!acceptedEnvKey || acceptedEnvKey === getActiveEnvKey()) return
+
+    const state = getDesktopRuntimeConfigState()
+    const selected = state.options.find(
+      option =>
+        resolveEnvKey(option.externalRestApiBaseUrl, option.rpcProxyBaseUrl) === acceptedEnvKey
+    )
+    if (!selected) throw new SessionAuthorityRecordConflictError()
+
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      if ((await this.sessionAuthority.getProfileSelectedEnvironmentKey()) !== acceptedEnvKey)
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      await selectDesktopRuntimeConfigOption(selected.id)
+      this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
+    })
+  }
+
   async applyPendingExternalLogoutIntent(): Promise<boolean> {
+    // Quit has already closed credential-producer admission. Pending marker work is left for
+    // the next process; do not enter authority reconciliation or native storage during drain.
+    if (this.quitPreparationStarted) return false
     const userDataDirectory = this.getUserDataDirectory()
     const envKey = getActiveEnvKey()
+    const legacyNamespace = getActiveLegacyEnvKeyInventory()
     let marker: PendingExternalLogoutMarker | null
+
+    // LP is a deny-only runtime boundary too. Inspect it synchronously and revoke every
+    // authenticated in-memory consumer before projection reconciliation or any other await.
+    // The durable GFS record update may wait for existing uploads, but authorization does not.
+    let pendingLogoutDrain: Promise<void> | null = null
+    const revokeForPendingLogout = (observed: PendingExternalLogoutMarker | null): void => {
+      if (
+        observed?.intent.intent !== 'logout-pending' ||
+        (this.sessionToken === null && this.me === null && this.memoryOnlySession === undefined)
+      )
+        return
+      const previousGfsIdentity =
+        this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+      this.clearAuthenticatedSessionState()
+      pendingLogoutDrain = this.suspendDesktopGfsUploadsForAuthBoundary(previousGfsIdentity).catch(
+        error => this.reportDeferredLogoutFailureSafely(error)
+      )
+    }
+
     try {
       marker = this.inspectPendingLogoutMarker(envKey)
+      revokeForPendingLogout(marker)
+    } catch {
+      // Do not treat an unreadable/invalid marker as absence. The full projection reconciliation
+      // immediately below repeats the authoritative read and preserves its more specific
+      // projection/corruption error. A valid LP is handled synchronously by the successful read.
+      marker = null
+    }
+
+    try {
+      await SessionAuthorityAcceptanceTransaction.reconcilePendingAcceptanceProjection(
+        this.tokenStore,
+        userDataDirectory,
+        envKey,
+        legacyNamespace.keys,
+        legacyNamespace.complete
+      )
+      marker = this.inspectPendingLogoutMarker(envKey)
+      // A writer may have installed LP while projection reconciliation was awaiting I/O.
+      // Fence it immediately after observing it, before inspecting authority or entering IPC work.
+      revokeForPendingLogout(marker)
     } catch (error) {
-      if (isTransientPendingLogoutReadError(error)) {
-        this.reportDeferredLogoutFailureSafely(error)
-        return false
+      if (pendingLogoutDrain) await pendingLogoutDrain
+      const disposition = await this.handlePendingLogoutInspectionFailure(
+        error,
+        'marker-inspection'
+      )
+      if (disposition === 'transient') return false
+      throw error
+    }
+    if (pendingLogoutDrain) await pendingLogoutDrain
+
+    // V2 LP is already the durable local-logout boundary. Never route it through the legacy
+    // clear-first marker policy below: the authority frame and exact cleanup receipts are the
+    // source of truth, and physical deletion may safely finish after sign-out.
+    type AuthorityInspection =
+      | {
+          status: 'observed'
+          selection: Awaited<
+            ReturnType<SessionAuthorityCoordinator['inspectAcceptedSessionRestore']>
+          >
+        }
+      | { status: 'failed'; error: unknown }
+    let authorityInspection: AuthorityInspection
+    try {
+      authorityInspection = {
+        status: 'observed',
+        selection: await this.sessionAuthority.inspectAcceptedSessionRestore(envKey),
       }
+    } catch (error) {
+      authorityInspection = { status: 'failed', error }
+    }
+    let markerAfterAuthorityInspection: PendingExternalLogoutMarker | null
+    try {
+      markerAfterAuthorityInspection = this.inspectPendingLogoutMarker(envKey)
+    } catch (error) {
+      // Authority inspection is asynchronous. If the marker cannot be observed again after it
+      // settles, the earlier marker image cannot authorize a no-op or cleanup decision.
       await this.failClosedForPendingLogout(error)
       throw error
     }
-    if (!marker) return false
-    const intent = marker.intent
+    if (!pendingExternalLogoutMarkersMatch(markerAfterAuthorityInspection, marker)) {
+      marker = markerAfterAuthorityInspection
+      revokeForPendingLogout(marker)
+      if (marker?.intent.intent === 'logout-pending') {
+        const fencedGeneration = this.sessionGeneration
+        if (pendingLogoutDrain) await pendingLogoutDrain
+        const recovered = await this.recoverObservedLogoutProjection(
+          envKey,
+          () =>
+            getActiveEnvKey() === envKey &&
+            this.sessionGeneration === fencedGeneration &&
+            this.sessionToken === null &&
+            this.me === null &&
+            this.memoryOnlySession === undefined
+        )
+        if (recovered !== null) return true
+      }
+      // A marker transition during authority inspection invalidates that inspection's result.
+      // Re-entry may make a new decision from the current receipt; never apply a stale `null`
+      // marker to the legacy logout planner.
+      throw new SessionTokenStorageSupersededBeforeWriteError()
+    }
+    if (authorityInspection.status === 'failed') throw authorityInspection.error
+    const authoritySelection = authorityInspection.selection
+    const hasLoggedOutAuthority =
+      authoritySelection.status === 'denied' && authoritySelection.frameMode === 'logged-out'
+    // An absent frame is not a V2 logout receipt; it follows the coordinator-owned legacy marker
+    // plan below rather than being synthesized into a logged-out authority selection.
+    if (marker?.intent.intent === 'logout-pending' && hasLoggedOutAuthority) {
+      const logoutMarker = marker
+      const owner = {
+        generation: this.sessionGeneration,
+        token: this.sessionToken,
+        user: this.me,
+      }
+      const applied = await this.runCredentialProducer(() =>
+        this.runSessionPersistence(async () => {
+          if (
+            this.sessionGeneration !== owner.generation ||
+            this.sessionToken !== owner.token ||
+            this.me !== owner.user ||
+            !pendingExternalLogoutMarkersMatch(
+              this.inspectPendingLogoutMarker(envKey),
+              logoutMarker
+            )
+          )
+            return false
 
-    if (intent.intent === 'keytar-cleanup-pending') {
-      const preserveActiveEnvKey = intent.credentialSource === 'active-keytar'
+          const currentAuthority = await this.sessionAuthority.inspectAcceptedSessionRestore(envKey)
+          if (
+            currentAuthority.status !== 'denied' ||
+            currentAuthority.frameMode !== 'logged-out' ||
+            !pendingExternalLogoutMarkersMatch(
+              this.inspectPendingLogoutMarker(envKey),
+              logoutMarker
+            )
+          )
+            return false
+
+          if (owner.token || owner.user) {
+            try {
+              await this.suspendDesktopGfsUploadsForAuthBoundary()
+            } catch (error) {
+              // The durable LP already denies restore and consumers are synchronously fenced by
+              // clearAuthenticatedSessionState below; suspension is best-effort cleanup now.
+              this.reportDeferredLogoutFailureSafely(error)
+            }
+          }
+          if (
+            this.sessionGeneration !== owner.generation ||
+            this.sessionToken !== owner.token ||
+            this.me !== owner.user ||
+            !pendingExternalLogoutMarkersMatch(
+              this.inspectPendingLogoutMarker(envKey),
+              logoutMarker
+            )
+          )
+            return false
+          if (owner.token || owner.user) this.clearAuthenticatedSessionState()
+          return true
+        })
+      )
+      return applied
+    }
+
+    const logoutPlan = this.sessionAuthority.planPendingLogoutApplication(marker)
+    if (logoutPlan.kind === 'none') return false
+
+    if (logoutPlan.kind === 'cleanup-source') {
+      const cleanupMarker = logoutPlan.marker
+      const preserveActiveEnvKey = logoutPlan.source === 'active-keytar'
       const cleanupGeneration = this.sessionGeneration
       return this.runCredentialProducer(() =>
         this.runSessionPersistence(async () => {
           if (
             this.sessionGeneration !== cleanupGeneration ||
-            !pendingExternalLogoutMarkersMatch(this.inspectPendingLogoutMarker(envKey), marker)
+            !pendingExternalLogoutMarkersMatch(
+              this.inspectPendingLogoutMarker(envKey),
+              cleanupMarker
+            )
           ) {
             return false
           }
           try {
             const result = await this.clearKeytarForObservedMarker(
               envKey,
-              marker,
+              cleanupMarker,
               preserveActiveEnvKey,
               cleanupGeneration
             )
-            if (result.keytarAvailable || result.keytarDisabled) {
-              await this.retirePendingKeytarCleanupWithinPersistence(marker, envKey)
+            if (isKeytarCleanupEstablished(result.keytarDisposition)) {
+              await this.retirePendingKeytarCleanupWithinPersistence(cleanupMarker, envKey)
             }
           } catch (error) {
-            if (isPendingExternalLogoutReadFailure(error))
-              await this.handlePendingLogoutInspectionFailure(error)
+            const failure = this.sessionAuthority.planPersistenceAuthorityFailure(
+              error,
+              'marker-cleanup'
+            )
+            if (
+              failure.kind === 'fail-closed' ||
+              (failure.kind === 'transient-read' && failure.source === 'marker')
+            )
+              await this.handlePendingLogoutInspectionFailure(error, 'marker-cleanup')
             else this.reportDeferredLogoutFailureSafely(error)
           }
           return false
@@ -4152,33 +4524,20 @@ export class AppService {
       })
     }
 
+    marker = logoutPlan.marker
     const cleanupGeneration = this.sessionGeneration
-    let logoutApplied = false
-    const result = await this.runCredentialProducer(() =>
-      this.runSessionPersistence(async () => {
-        if (
-          this.sessionGeneration !== cleanupGeneration ||
-          !pendingExternalLogoutMarkersMatch(this.inspectPendingLogoutMarker(envKey), marker)
-        )
-          return null
-        const result = await this.logoutOnce({ strictTokenClear: true })
-        logoutApplied = true
-        if (result.keytarAvailable || result.keytarDisabled)
-          clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker)
-        return result
-      })
-    ).catch(async error => {
-      await this.handlePendingLogoutInspectionFailure(error)
-      if (
-        !logoutApplied &&
-        isTransientPendingLogoutReadError(error) &&
-        isPendingExternalLogoutReadFailure(error)
-      )
-        return null
-      throw error
-    })
-    if (!result) return false
-    return true
+    if (!pendingExternalLogoutMarkersMatch(this.inspectPendingLogoutMarker(envKey), marker))
+      return false
+    const recovered = await this.recoverObservedLogoutProjection(
+      envKey,
+      () =>
+        getActiveEnvKey() === envKey &&
+        this.sessionGeneration === cleanupGeneration &&
+        this.sessionToken === null &&
+        this.me === null &&
+        this.memoryOnlySession === undefined
+    )
+    return recovered?.kind === 'committed'
   }
 
   async prepareForQuit(): Promise<void> {
@@ -4244,804 +4603,292 @@ export class AppService {
     )
   }
 
+  private async installAuthenticatedLoginWithAcceptanceTransaction(
+    result: { token: string; me: SessionMe },
+    envKey: string,
+    pendingLogout: PendingLogoutLoginPlan,
+    authenticatedAt: number
+  ): Promise<SessionState> {
+    const legacyNamespace = getActiveLegacyEnvKeyInventory()
+    const legacyEnvKeys = legacyNamespace.keys
+    // Login preflight can establish a revisioned LP after first reconciling the old
+    // marker/source view (for example, while recovering malformed marker bytes). Reconcile
+    // that newly established deny state before the coordinator snapshots the authority
+    // revision for this candidate; otherwise begin() can legitimately recover LP into a
+    // logged-out V2 frame and make the plan's earlier revision stale.
+    await SessionAuthorityAcceptanceTransaction.reconcilePendingAcceptanceProjection(
+      this.tokenStore,
+      this.getUserDataDirectory(),
+      envKey,
+      legacyEnvKeys,
+      legacyNamespace.complete
+    )
+    const plan = await this.sessionAuthority.planFreshSessionAcceptance({
+      envKey,
+      token: result.token,
+      authenticatedAt,
+      pendingLogout,
+      legacyEnvKeys,
+      legacyNamespaceComplete: legacyNamespace.complete,
+    })
+    if (plan.generation !== this.sessionGeneration)
+      throw new SessionTokenStorageSupersededBeforeWriteError()
+    if (plan.source === 'memory-only' && (!plan.volatileSessionId || plan.expiresAt === undefined))
+      throw new Error('Temporary session acceptance plan is incomplete')
+
+    const assertOwned = () =>
+      this.sessionAuthority.assertFreshSessionAcceptancePlanCurrent(plan, this.logoutInProgress)
+    const runtimeOwnerIsCurrent = () =>
+      this.sessionAuthority.isFreshSessionAcceptanceRuntimeOwnerCurrent(plan, this.logoutInProgress)
+    const runtimeOwnerIsUnchanged = () =>
+      this.sessionAuthority.isFreshSessionAcceptanceRuntimeOwnerUnchanged(
+        plan,
+        this.logoutInProgress
+      )
+    assertOwned()
+    const transaction = await SessionAuthorityAcceptanceTransaction.begin({
+      tokenStore: this.tokenStore,
+      userDataDirectory: this.getUserDataDirectory(),
+      envKey,
+      legacyEnvKeys: plan.legacyEnvKeys,
+      legacyNamespaceComplete: plan.legacyNamespaceComplete,
+      token: result.token,
+      accountId: result.me.id,
+      source: plan.source,
+      purpose: plan.purpose,
+      priorToken: plan.priorToken,
+      ...(plan.priorVolatileSessionId
+        ? { priorVolatileSessionId: plan.priorVolatileSessionId }
+        : {}),
+      ...(plan.volatileSessionId ? { volatileSessionId: plan.volatileSessionId } : {}),
+      expectedAuthorityRevision: plan.authorityRevision,
+      ownerEpoch: plan.generation,
+    })
+    let gfsPrepared = false
+    let acceptanceOutcomeIndeterminate = false
+    let retireSandboxOwner = false
+    let previousPrewarmControllers: AbortController[] = []
+    const priorGfsIdentity = plan.ownerUser
+      ? (this.gfsScopeIdentity ?? desktopGfsUploadIdentity(plan.ownerUser))
+      : undefined
+    const priorChatScope = plan.ownerUser ? currentChatAuthorityScopeOrNull() : null
+
+    try {
+      const { identity: verifiedUser } = await transaction.execute({
+        assertOwned,
+        isProducerStillCurrent: runtimeOwnerIsCurrent,
+        isPriorConsumerOwnerCurrent: () =>
+          sameChatAuthorityScope(currentChatAuthorityScopeOrNull(), priorChatScope),
+        onRollbackFailure: error => this.reportDeferredLogoutFailureSafely(error),
+        verifyIdentity: async () => {
+          const validateIdentity = () => this.authClient.getMe(result.token)
+          const user =
+            plan.ownerMemoryLease && plan.ownerToken && result.token !== plan.ownerToken
+              ? await this.sessionAuthority.withTemporarySessionCandidateValidation(
+                  plan.ownerToken,
+                  result.token,
+                  () =>
+                    runWithSessionRequestContext(
+                      this.sessionAuthority.captureSessionRequestContext(plan.ownerToken!),
+                      validateIdentity
+                    )
+                )
+              : await this.withCandidateSessionRequest(
+                  result.token,
+                  envKey,
+                  plan.generation,
+                  runtimeOwnerIsCurrent,
+                  validateIdentity
+                )
+          assertOwned()
+          if (!user.id || user.id !== result.me.id)
+            throw new Error('Authenticated candidate identity does not match the login result')
+          return user
+        },
+        prepareConsumers: async user => {
+          const preparedChat = await prepareChatStoreBindingForUser(user.id, envKey, {
+            legacyEnvKeys: getActiveLegacyEnvKeys(),
+            teamId: user.teamId,
+          })
+          assertOwned()
+          if (!preparedChat.canPublish()) throw new SessionTokenStorageSupersededBeforeWriteError()
+
+          gfsPrepared = true
+          await this.suspendDesktopGfsUploadsForAuthBoundary(priorGfsIdentity)
+          assertOwned()
+          return preparedChat
+        },
+        consumersReady: preparedChat => preparedChat.canPublish(),
+        isStillOwned: (_user, preparedChat) => preparedChat.canPublish() && runtimeOwnerIsCurrent(),
+        // AppService must not perform a second marker/journal CAS after the authority record
+        // accepts the candidate. The transaction stages the exact deny-only compatibility
+        // marker and binds it into the V2 acceptance receipt before this reservation is made.
+        preparePublication: (user, preparedChat) => {
+          const publishChat = preparedChat.reservePublication()
+          const acceptedMarker = transaction.stagedAcceptanceMarker
+          if (!publishChat || !acceptedMarker || !runtimeOwnerIsCurrent())
+            throw new SessionTokenStorageSupersededBeforeWriteError()
+
+          const nextMemoryLease: MemoryOnlySessionLease | undefined =
+            plan.source === 'memory-only'
+              ? {
+                  envKey,
+                  volatileSessionId: plan.volatileSessionId!,
+                  marker: acceptedMarker,
+                  expiresAt: plan.expiresAt!,
+                }
+              : undefined
+          const nextGeneration = plan.generation + 1
+          const runtimeOwnerPublication = this.sessionAuthority.prepareRuntimeOwnerPublication({
+            expectedGeneration: plan.generation,
+            generation: nextGeneration,
+            token: result.token,
+            user,
+            acceptedSource: undefined,
+            acceptedAuthoritySource: transaction.candidateAuthoritySource ?? undefined,
+            acceptedProjectionMarker: acceptedMarker,
+            memoryLease: nextMemoryLease,
+          })
+          if (!runtimeOwnerPublication) throw new SessionTokenStorageSupersededBeforeWriteError()
+          const nextGfsIdentity = desktopGfsUploadIdentity(user)
+          const nextTeamDirectoryCache = this.teamDirectoryCache
+            ? { ...this.teamDirectoryCache, currentTeamId: String(user.teamId || '') }
+            : this.teamDirectoryCache
+          const previousSessionEnvironment =
+            plan.ownerMemoryLease?.envKey ??
+            this.sessionAuthority.acceptedSessionSource?.envKey ??
+            this.sessionAuthority.acceptedSessionAuthoritySource?.envKey
+          retireSandboxOwner = Boolean(
+            plan.ownerToken &&
+            (plan.ownerUser?.id !== user.id ||
+              (previousSessionEnvironment && previousSessionEnvironment !== envKey))
+          )
+          previousPrewarmControllers = [...this.prewarmReemitAbortControllers.values()]
+          const nextPrewarmAuthEpoch = this.prewarmAuthEpoch + 1
+
+          const publish = () => {
+            publishChat()
+            if (retireSandboxOwner) this.sandboxUiSessionEpoch += 1
+            runtimeOwnerPublication.publish()
+            this.sessionAuthority.clearRpcCredentialOwnerRecords()
+            this.rpcTokenManager.clear()
+            this.profileUiBaseUrlCache = null
+            this.accessCatalog = null
+            this.teamDirectoryCache = nextTeamDirectoryCache
+            this.workflowApprovalTeamById.clear()
+            this.workflowTeamByKey.clear()
+            this.updateEntityChangeSessionToken(result.token)
+            this.prewarmAuthEpoch = nextPrewarmAuthEpoch
+            this.prewarmAttemptAtByHostRef.clear()
+            this.prewarmReemitLoopHostRefs.clear()
+            this.prewarmReemitAbortControllers.clear()
+            this.gfsAuthEpoch += 1
+            this.gfsDispatchBlocked = false
+            this.gfsScopeIdentity = nextGfsIdentity
+            return undefined
+          }
+          return {
+            isCurrent: () => runtimeOwnerPublication.isCurrent() && runtimeOwnerIsCurrent(),
+            publish,
+          }
+        },
+        onAcceptanceIndeterminate: () => {
+          acceptanceOutcomeIndeterminate = true
+          if (runtimeOwnerIsCurrent()) this.clearAuthenticatedSessionState()
+        },
+        onAcceptancePublicationFailure: () => {
+          acceptanceOutcomeIndeterminate = true
+          this.clearAuthenticatedSessionState()
+        },
+        afterAcceptance: async (_accepted, _user, preparedChat) => {
+          preparedChat.afterPublication()
+          if (retireSandboxOwner) this.scheduleSandboxUiTeardown()
+          for (const controller of previousPrewarmControllers) {
+            try {
+              controller.abort()
+            } catch {
+              // Epoch checks already deny stale re-emission; abort is best effort.
+            }
+          }
+          if (plan.source === 'memory-only' && this.memoryOnlySession)
+            this.scheduleMemoryOnlySessionExpiry(this.memoryOnlySession)
+          else {
+            if (this.memoryOnlySessionExpiryTimer) clearTimeout(this.memoryOnlySessionExpiryTimer)
+            this.memoryOnlySessionExpiryTimer = null
+          }
+          this.notifySessionChangedSafely(true)
+          try {
+            this.restartEntityChangeStreamForSessionReplacement()
+          } catch (error) {
+            this.reportDeferredLogoutFailureSafely(error)
+          }
+          try {
+            await transaction.cleanSupersededSources()
+          } catch (error) {
+            this.reportDeferredLogoutFailureSafely(error)
+          }
+          if (this.gfsScopeIdentity) {
+            await this.migrateLegacyDesktopGfsUploadScopes(
+              this.gfsScopeIdentity,
+              getActiveLegacyEnvKeys()
+            ).catch(() => undefined)
+          }
+        },
+        discardConsumers: preparedChat => preparedChat.discard(),
+        rollbackBeforeAcceptance: authorization => {
+          if (!authorization.canRestorePriorConsumers) {
+            if (
+              runtimeOwnerIsUnchanged() &&
+              (this.sessionToken !== null ||
+                this.me !== null ||
+                this.memoryOnlySession !== undefined)
+            )
+              this.clearAuthenticatedSessionState()
+            return
+          }
+          if (
+            !acceptanceOutcomeIndeterminate &&
+            gfsPrepared &&
+            plan.ownerUser &&
+            runtimeOwnerIsCurrent()
+          )
+            this.activateGfsAuthScope(priorGfsIdentity)
+        },
+      })
+      return {
+        authenticated: true,
+        me: verifiedUser,
+        ...this.temporarySessionState(),
+      }
+    } finally {
+      // execute() normally closes its transaction. This idempotent close also covers failures
+      // thrown while constructing producer effects or before execute() starts.
+      await transaction.close()
+    }
+  }
+
   private async installAuthenticatedLoginWithinPersistence(
-    result: {
-      token: string
-      me: SessionMe
-    },
+    result: { token: string; me: SessionMe },
     authenticatedAt = Date.now(),
     expectedSessionGeneration?: number
   ): Promise<SessionState> {
-    if (expectedSessionGeneration !== undefined) {
+    if (expectedSessionGeneration !== undefined)
       this.assertSessionGeneration(expectedSessionGeneration)
-    }
     if (this.memoryOnlySessionTermination) await this.memoryOnlySessionTermination
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const envKey = getActiveEnvKey()
-      const userDataDirectory = this.getUserDataDirectory()
+      const legacyNamespace = getActiveLegacyEnvKeyInventory()
       const pendingLogout = await this.applyPendingExternalLogoutBeforeLogin(
-        userDataDirectory,
+        this.getUserDataDirectory(),
         envKey
       )
-      let pendingCredentialPersisted = false
-      let retirePendingLogoutMarker = pendingLogout.retireMarker
-      let requireSafeStorage = pendingLogout.requireSafeStorage
-      let freshTokenUsesSafeStorageOnly = false
-      let freshTokenUsesActiveKeytar = false
-      let memoryOnlyAccepted = false
-      let memoryOnlyMarker: PendingExternalLogoutMarker | null = null
-      let memoryOnlyExpiresAt: number | null = null
-      let credentialSource = pendingLogout.credentialSource
-      let attemptedCleanupMarker: PendingExternalLogoutMarker | null = null
-      let completedMarker: PendingExternalLogoutMarker | null | undefined
-      let dispatchInspectionError: unknown
-      let fallbackBeforePersistence: SessionTokenFallbackSnapshot | undefined
-      let selected: VerifiedSessionTokenSource | undefined
-      const publications = new Map<SessionTokenReadSource, VerifiedSessionTokenSource>()
-      const priorPublications = new Map<SessionTokenReadSource, VerifiedSessionTokenSource>()
-      let recoveredPriorSource: VerifiedSessionTokenSource | undefined
-      const onSourceVerified = (source: VerifiedSessionTokenSource) => {
-        selected = source
-      }
-      const previousToken = this.sessionToken
-      const previousMe = this.me
-      const previousGeneration = this.sessionGeneration
-      const previousMemoryOnlySession = this.memoryOnlySession
-      const previouslyAcceptedSource = this.captureAcceptedSessionSource(envKey)
-      let installedGeneration: number | null = null
-      let ownedRuntime = { generation: previousGeneration, token: previousToken }
-      const transactionOwned = () =>
-        !this.logoutInProgress &&
-        getActiveEnvKey() === envKey &&
-        this.sessionGeneration === ownedRuntime.generation &&
-        this.sessionToken === ownedRuntime.token
-      const requireOwnedTransaction = () => {
-        if (!transactionOwned()) throw new SessionTokenStorageSupersededBeforeWriteError()
-      }
-      const observeTransactionSource = () =>
-        this.sessionAuthority.inspectOwnership(
-          envKey,
-          completedMarker !== undefined
-            ? [completedMarker]
-            : attemptedCleanupMarker
-              ? [pendingLogout.marker, attemptedCleanupMarker]
-              : [pendingLogout.marker],
-          transactionOwned()
-        )
-      const transactionMayWrite = () => {
-        const observation = observeTransactionSource()
-        if (observation.status === 'transient' || observation.status === 'invalid') {
-          dispatchInspectionError = observation.error
-          return false
-        }
-        return observation.status === 'owned'
-      }
-      const requireOwnedSource = () => {
-        const observation = observeTransactionSource()
-        if (observation.status === 'transient' || observation.status === 'invalid')
-          throw observation.error
-        if (observation.status !== 'owned')
-          throw new SessionTokenStorageSupersededBeforeWriteError()
-      }
-      const mayRepairRejectedSource = (source: 'active-keytar' | 'safe-storage') => {
-        // The leaf checks original candidate authority inside its source lane.
-        // This envelope remains valid after that leaf's own deletion advances
-        // the publication epoch and performs its post-delete absence check.
-        const observation = observeTransactionSource()
-        if (observation.status === 'transient' || observation.status === 'invalid')
-          throw observation.error
-        if (observation.status === 'owned') return true
-        if (!transactionOwned()) return false
-        const current = this.inspectPendingLogoutMarker(envKey)
-        // LP has no credential authority. A cleanup marker authorizes only its
-        // named source, so exact rejected-value cleanup may touch the other
-        // source but never erase a newer same-source producer's value.
-        return (
-          current?.intent.intent === 'logout-pending' ||
-          (current?.intent.intent === 'keytar-cleanup-pending' &&
-            current.intent.credentialSource !== source)
-        )
-      }
-      const producer = this.sessionAuthority.createPersistenceProducer(
-        userDataDirectory,
+      return await this.installAuthenticatedLoginWithAcceptanceTransaction(
+        result,
         envKey,
-        pendingLogout.marker,
-        requireOwnedSource,
-        true,
-        previousToken,
-        requireOwnedTransaction
+        pendingLogout,
+        authenticatedAt
       )
-      const onPriorMutation = (source: SessionTokenMutationSource, prior: string) =>
-        this.sessionAuthority.preparePriorRepair(producer, source, result.token, prior)
-      const onPriorMutationSettled = (
-        source: SessionTokenMutationSource,
-        authority: SessionTokenReadAuthority
-      ) => {
-        if (!previousToken) return
-        const prior = sessionTokenPublicationSource(source, previousToken, authority)
-        priorPublications.set(prior.source, prior)
-      }
-      const onMutationDispatched = (source: SessionTokenMutationSource, candidate: string) => {
-        this.sessionAuthority.prepareCandidate(producer, source, candidate)
-        pendingCredentialPersisted = true
-      }
-      const onMutationSettled = (
-        source: SessionTokenMutationSource,
-        authority: SessionTokenReadAuthority
-      ) => {
-        const candidate = sessionTokenPublicationSource(source, result.token, authority)
-        publications.set(candidate.source, candidate)
-      }
-      try {
-        const hadAuthenticatedScope = Boolean(previousToken && previousMe)
-        if (hadAuthenticatedScope) {
-          try {
-            await this.suspendDesktopGfsUploadsForAuthBoundary()
-          } catch (error) {
-            if (
-              this.sessionGeneration === previousGeneration &&
-              this.sessionToken === previousToken &&
-              this.me === previousMe
-            ) {
-              this.activateGfsAuthScope()
-            }
-            throw error
-          }
-          if (
-            this.sessionGeneration !== previousGeneration ||
-            this.sessionToken !== previousToken ||
-            this.me !== previousMe
-          ) {
-            throw new Error(
-              'stale_auth_epoch: authenticated scope changed during login replacement'
-            )
-          }
-        }
-        requireOwnedTransaction()
-        if (!this.sessionAuthority.isIsolatedDevelopmentStorage()) {
-          fallbackBeforePersistence = await this.tokenStore.snapshotSessionTokenFallbackFiles(
-            envKey,
-            {
-              legacyEnvKeys: getActiveLegacyEnvKeys(),
-              mayWrite: transactionMayWrite,
-            }
-          )
-          requireOwnedTransaction()
-        }
-        try {
-          if (
-            pendingLogout.intent &&
-            pendingLogout.writeKeytar &&
-            !this.sessionAuthority.isIsolatedDevelopmentStorage()
-          ) {
-            const writtenSource = await this.persistRequiredKeytarOrSafeStorage(
-              result.token,
-              envKey,
-              transactionMayWrite,
-              () => {},
-              () => {},
-              {
-                keytarUnavailableBeforeWrite: false,
-                onMutationDispatched,
-                onSourceVerified,
-                onMutationSettled,
-                publications,
-              }
-            )
-            freshTokenUsesActiveKeytar = writtenSource === 'active-keytar'
-            freshTokenUsesSafeStorageOnly = writtenSource === 'safe-storage'
-            if (writtenSource === 'safe-storage') {
-              retirePendingLogoutMarker = false
-              credentialSource = 'safe-storage'
-            }
-          } else if (pendingLogout.intent) {
-            if (requireSafeStorage) {
-              await this.sessionAuthority.writeSessionTokenToSource(
-                'safe-storage',
-                result.token,
-                envKey,
-                {
-                  mayWrite: transactionMayWrite,
-                  onMutationDispatched,
-                  onMutationSettled,
-                }
-              )
-              freshTokenUsesSafeStorageOnly = true
-              credentialSource = 'safe-storage'
-            } else {
-              // Isolated development storage preserves its separately approved
-              // unpackaged plaintext exception; production uses the temporary mode.
-              await this.sessionAuthority.writeSessionTokenToSource(
-                'isolated-development',
-                result.token,
-                envKey,
-                {
-                  mayWrite: transactionMayWrite,
-                  onMutationDispatched,
-                  onMutationSettled,
-                }
-              )
-              if (this.sessionAuthority.isIsolatedDevelopmentStorage()) {
-                retirePendingLogoutMarker = true
-              }
-            }
-          } else {
-            if (this.sessionAuthority.isIsolatedDevelopmentStorage()) {
-              await this.sessionAuthority.writeSessionTokenToSource(
-                'isolated-development',
-                result.token,
-                envKey,
-                {
-                  mayWrite: transactionMayWrite,
-                  onMutationDispatched,
-                  onMutationSettled,
-                }
-              )
-            } else {
-              const writtenSource = await this.persistRequiredKeytarOrSafeStorage(
-                result.token,
-                envKey,
-                transactionMayWrite,
-                () => {},
-                () => {},
-                {
-                  keytarUnavailableBeforeWrite: false,
-                  onMutationDispatched,
-                  onSourceVerified,
-                  onMutationSettled,
-                  publications,
-                }
-              )
-              freshTokenUsesActiveKeytar = writtenSource === 'active-keytar'
-              freshTokenUsesSafeStorageOnly = writtenSource === 'safe-storage'
-            }
-          }
-          requireOwnedTransaction()
-          {
-            selected ??= await this.readVerifiedSessionTokenSource(
-              result.token,
-              envKey,
-              freshTokenUsesSafeStorageOnly
-                ? 'safe-storage'
-                : freshTokenUsesActiveKeytar
-                  ? 'keytar'
-                  : 'default',
-              transactionMayWrite,
-              freshTokenUsesSafeStorageOnly
-                ? publications.get('safe-storage')
-                : freshTokenUsesActiveKeytar
-                  ? publications.get('keytar')
-                  : (publications.get('safe-storage') ?? publications.get('historical-plaintext'))
-            )
-            await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
-          }
-        } catch (storageError) {
-          if (!canAdmitMemoryOnlyAfterStorageFailure(storageError)) throw storageError
-          requireOwnedTransaction()
-          memoryOnlyExpiresAt = this.sessionAuthority.memoryOnlySessionDeadline(
-            result.token,
-            authenticatedAt
-          )
-          const volatileSessionId = randomUUID()
-          const markerRevision = randomUUID()
-          const plannedMarker: PendingExternalLogoutMarker = {
-            intent: { intent: 'memory-only-session', volatileSessionId },
-            revision: markerRevision,
-          }
-          // The candidate denial is recorded before a possible partial provider
-          // write. M then durably denies all saved sources before runtime install.
-          this.sessionAuthority.declarePlannedMarker(producer, plannedMarker)
-          memoryOnlyMarker = pendingLogout.marker
-            ? recordMemoryOnlySessionIfUnchanged(
-                userDataDirectory,
-                envKey,
-                pendingLogout.marker,
-                volatileSessionId,
-                markerRevision
-              )
-            : recordMemoryOnlySessionIfMissing(
-                userDataDirectory,
-                envKey,
-                volatileSessionId,
-                markerRevision
-              )
-          if (!memoryOnlyMarker) {
-            throw new SessionTokenStorageSupersededBeforeWriteError()
-          }
-          this.reportDeferredLogoutFailureSafely(
-            new Error('Secure session persistence unavailable; admitted temporary session')
-          )
-          attemptedCleanupMarker = memoryOnlyMarker
-          completedMarker = memoryOnlyMarker
-          retirePendingLogoutMarker = false
-          credentialSource = null
-          memoryOnlyAccepted = true
-          selected = undefined
-        }
-        requireOwnedTransaction()
-        requireOwnedSource()
-        if (!memoryOnlyAccepted) {
-          if (
-            pendingLogout.intent &&
-            retirePendingLogoutMarker &&
-            (freshTokenUsesActiveKeytar || freshTokenUsesSafeStorageOnly) &&
-            (!fallbackBeforePersistence ||
-              !(await this.canRetireSourceCleanup(
-                envKey,
-                result.token,
-                freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage',
-                {
-                  marker: pendingLogout.marker ?? undefined,
-                  mayContinue: transactionOwned,
-                  fallbackSnapshot: fallbackBeforePersistence,
-                  selectedSource: selected,
-                }
-              )))
-          ) {
-            retirePendingLogoutMarker = false
-            credentialSource = freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage'
-          }
-          requireOwnedTransaction()
-          await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
-          if (pendingLogout.intent && retirePendingLogoutMarker) {
-            this.sessionAuthority.declarePlannedMarker(producer, null)
-            const markerRetired =
-              pendingLogout.marker &&
-              clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, pendingLogout.marker)
-            if (!markerRetired) {
-              throw new Error('Pending logout intent changed while login was completing')
-            }
-            completedMarker = null
-          } else if (pendingLogout.intent) {
-            const cleanupCredentialSource = credentialSource ?? 'safe-storage'
-            const cleanupRevision = randomUUID()
-            attemptedCleanupMarker = {
-              intent: {
-                intent: 'keytar-cleanup-pending',
-                credentialSource: cleanupCredentialSource,
-              },
-              revision: cleanupRevision,
-            }
-            this.sessionAuthority.declarePlannedMarker(producer, attemptedCleanupMarker)
-            if (
-              !pendingLogout.marker ||
-              !recordPendingKeytarCleanupIfUnchanged(
-                userDataDirectory,
-                envKey,
-                pendingLogout.marker,
-                cleanupCredentialSource,
-                cleanupRevision
-              )
-            ) {
-              throw new Error('Pending logout intent changed while login was completing')
-            }
-            completedMarker = attemptedCleanupMarker
-          } else {
-            completedMarker = freshTokenUsesSafeStorageOnly
-              ? await this.bindVerifiedEncryptedCredentialIfMarkerMissing(
-                  result.token,
-                  envKey,
-                  transactionMayWrite,
-                  attempted => {
-                    this.sessionAuthority.declarePlannedMarker(producer, attempted)
-                    attemptedCleanupMarker = attempted
-                  },
-                  selected
-                )
-              : freshTokenUsesActiveKeytar && fallbackBeforePersistence
-                ? await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
-                    result.token,
-                    envKey,
-                    null,
-                    fallbackBeforePersistence,
-                    transactionMayWrite,
-                    attempted => {
-                      this.sessionAuthority.declarePlannedMarker(producer, attempted)
-                      attemptedCleanupMarker = attempted
-                    },
-                    selected
-                  )
-                : null
-          }
-          requireOwnedTransaction()
-          await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
-          this.requireSessionTokenSourceCurrent(selected, envKey, transactionMayWrite)
-        }
-        const acceptedMemoryOnlyMarker =
-          memoryOnlyAccepted && isMemoryOnlySessionMarker(memoryOnlyMarker)
-            ? memoryOnlyMarker
-            : null
-        if (memoryOnlyAccepted && (!acceptedMemoryOnlyMarker || memoryOnlyExpiresAt === null)) {
-          throw new Error('Temporary session authority was not durably established')
-        }
-        this.sessionAuthority.assertCandidateMayAuthenticate(producer, result.token)
-        // Persist, verify and complete source authority before replacing runtime.
-        this.sessionGeneration += 1
-        installedGeneration = this.sessionGeneration
-        this.memoryOnlySession =
-          acceptedMemoryOnlyMarker && memoryOnlyExpiresAt !== null
-            ? {
-                envKey,
-                volatileSessionId: acceptedMemoryOnlyMarker.intent.volatileSessionId,
-                marker: acceptedMemoryOnlyMarker,
-                expiresAt: memoryOnlyExpiresAt,
-              }
-            : undefined
-        if (memoryOnlyAccepted) this.acceptedSessionSource = undefined
-        if (this.memoryOnlySession) this.scheduleMemoryOnlySessionExpiry(this.memoryOnlySession)
-        else {
-          if (this.memoryOnlySessionExpiryTimer) clearTimeout(this.memoryOnlySessionExpiryTimer)
-          this.memoryOnlySessionExpiryTimer = null
-        }
-        if (hadAuthenticatedScope) this.invalidateSandboxUiSession()
-        this.sessionToken = result.token
-        ownedRuntime = { generation: installedGeneration, token: result.token }
-        this.me = result.me
-        this.updateEntityChangeSessionToken(result.token)
-        this.restartEntityChangeStreamForSessionReplacement()
-        await this.bindCurrentChatStore(result.me.id)
-        requireOwnedTransaction()
-        requireOwnedSource()
-        if (!memoryOnlyAccepted) {
-          await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
-          this.requireSessionTokenSourceCurrent(selected, envKey, transactionMayWrite)
-        } else {
-          this.assertMemoryOnlySessionCurrent()
-        }
-        this.accessCatalog = null
-        this.teamDirectoryCache = null
-        this.workflowApprovalTeamById.clear()
-        this.workflowTeamByKey.clear()
-        this.rpcTokenManager.clear()
-        this.activateGfsAuthScope()
-        if (this.gfsScopeIdentity) {
-          await this.migrateLegacyDesktopGfsUploadScopes(
-            this.gfsScopeIdentity,
-            getActiveLegacyEnvKeys()
-          ).catch(() => undefined)
-        }
-        this.sessionAuthority.acceptCandidate(producer, result.token)
-        if (!memoryOnlyAccepted) this.recordAcceptedSessionSource(selected!, envKey)
-        return {
-          authenticated: true,
-          me: result.me,
-          ...this.temporarySessionState(),
-        }
-      } catch (error) {
-        if (dispatchInspectionError !== undefined) error = dispatchInspectionError
-        error = this.unwrapPersistenceAuthorityError(error)
-        if (memoryOnlyAccepted) {
-          if (
-            transactionOwned() &&
-            previousMemoryOnlySession &&
-            previousToken &&
-            previousMe &&
-            !this.sessionAuthority.isMemoryOnlySessionExpired(
-              previousMemoryOnlySession.expiresAt
-            ) &&
-            memoryOnlyMarker
-          ) {
-            try {
-              const restoredMarker = recordMemoryOnlySessionIfUnchanged(
-                userDataDirectory,
-                envKey,
-                memoryOnlyMarker,
-                previousMemoryOnlySession.volatileSessionId,
-                randomUUID()
-              )
-              if (restoredMarker) {
-                this.clearAuthenticatedSessionState({ notifySessionChanged: false })
-                this.sessionToken = previousToken
-                this.me = previousMe
-                this.memoryOnlySession = { ...previousMemoryOnlySession, marker: restoredMarker }
-                this.scheduleMemoryOnlySessionExpiry(this.memoryOnlySession)
-                this.updateEntityChangeSessionToken(previousToken)
-                this.restartEntityChangeStreamForSessionReplacement()
-                await this.bindCurrentChatStore(previousMe.id)
-                this.activateGfsAuthScope()
-              } else if (transactionOwned()) {
-                // The failed replacement no longer owns the denial fence; do
-                // not leave its predecessor authenticated under a newer marker.
-                this.clearAuthenticatedSessionState()
-              }
-            } catch (restoreError) {
-              if (transactionOwned()) this.clearAuthenticatedSessionState()
-              this.reportDeferredLogoutFailureSafely(restoreError)
-            }
-          } else if (transactionOwned() && (previousToken || previousMe)) {
-            // The newly committed M fence denies the prior persisted source.
-            this.clearAuthenticatedSessionState()
-          }
-          throw error
-        }
-        if (expectedSessionGeneration !== undefined) {
-          this.assertSessionGeneration(expectedSessionGeneration)
-        }
-        if (
-          error instanceof SelectedSessionSourceSupersededError ||
-          (selected &&
-            !isSessionTokenReadAuthorityCurrent(selected.authority, selected.source, envKey))
-        ) {
-          // Losing the originally selected publication is not stale-cleanup
-          // uncertainty. Never manufacture CP authority or repair a winner.
-          if (transactionOwned()) this.clearAuthenticatedSessionState()
-          throw error
-        }
-        if (
-          isSessionPersistenceJournalReadFailure(error) &&
-          !isTransientPendingLogoutReadError(error)
-        ) {
-          if (transactionOwned()) await this.failClosedForPendingLogout(error)
-          throw error
-        }
-        if (this.isTransientPersistenceAuthorityRead(error)) {
-          this.reportDeferredLogoutFailureSafely(error)
-          if (transactionOwned()) {
-            try {
-              // A dispatch receipt is conservative: even a rejecting native
-              // setter may have published. No receipt means the old source was
-              // untouched, including when its secure store is temporarily locked.
-              if (pendingCredentialPersisted) {
-                let coldCleanupVerified = publications.size > 0
-                if (publications.has('keytar'))
-                  coldCleanupVerified =
-                    (await this.tokenStore.repairKeytarSessionTokenIfMatches(
-                      result.token,
-                      pendingLogout.marker?.intent.intent === 'keytar-cleanup-pending' &&
-                        pendingLogout.marker.intent.credentialSource === 'safe-storage'
-                        ? null
-                        : previousToken,
-                      envKey,
-                      {
-                        mayWrite: transactionOwned,
-                        onMutationDispatched: onPriorMutation,
-                        onMutationSettled: onPriorMutationSettled,
-                        candidateAuthority: publications.get('keytar')?.authority,
-                      }
-                    )) && coldCleanupVerified
-                if (publications.has('safe-storage'))
-                  coldCleanupVerified =
-                    (await this.tokenStore.repairSafeStorageSessionTokenIfMatches(
-                      result.token,
-                      previousToken,
-                      envKey,
-                      {
-                        mayWrite: transactionOwned,
-                        onMutationDispatched: onPriorMutation,
-                        onMutationSettled: onPriorMutationSettled,
-                        candidateAuthority: publications.get('safe-storage')?.authority,
-                      }
-                    )) && coldCleanupVerified
-                if (previousToken) {
-                  const priorKind =
-                    pendingLogout.marker?.intent.intent === 'keytar-cleanup-pending'
-                      ? pendingLogout.marker.intent.credentialSource === 'safe-storage'
-                        ? 'safe-storage'
-                        : 'keytar'
-                      : pendingLogout.intent
-                        ? freshTokenUsesSafeStorageOnly
-                          ? 'safe-storage'
-                          : 'keytar'
-                        : 'default'
-                  recoveredPriorSource = await this.readVerifiedSessionTokenSource(
-                    previousToken,
-                    envKey,
-                    priorKind,
-                    transactionOwned,
-                    this.priorSessionSource(
-                      previousToken,
-                      envKey,
-                      priorKind,
-                      priorPublications,
-                      publications,
-                      previouslyAcceptedSource
-                    )
-                  )
-                } else {
-                  if (publications.has('historical-plaintext') || !coldCleanupVerified)
-                    throw new Error('Rejected cold login credential cleanup could not be verified')
-                }
-                await this.retireRepairedPersistenceProducer(producer)
-              }
-              if (transactionOwned()) {
-                if (installedGeneration !== null) {
-                  this.clearAuthenticatedSessionState({
-                    notifySessionChanged: !(previousToken && previousMe),
-                  })
-                  if (previousToken && previousMe) {
-                    this.sessionToken = previousToken
-                    ownedRuntime = { generation: this.sessionGeneration, token: previousToken }
-                    this.me = previousMe
-                    this.updateEntityChangeSessionToken(previousToken)
-                    this.restartEntityChangeStreamForSessionReplacement()
-                    const recoveryGeneration = this.sessionGeneration
-                    try {
-                      await this.bindCurrentChatStore(previousMe.id)
-                      if (recoveredPriorSource)
-                        await this.verifySessionTokenSource(
-                          recoveredPriorSource,
-                          envKey,
-                          transactionOwned
-                        )
-                      if (recoveredPriorSource)
-                        this.requireSessionTokenSourceCurrent(
-                          recoveredPriorSource,
-                          envKey,
-                          transactionOwned
-                        )
-                    } catch (bindingError) {
-                      // Storage was repaired and verified already. An actual
-                      // chat rebind failure denies only this recovery runtime;
-                      // it is not credential corruption and must not invent LP.
-                      if (transactionOwned()) this.clearAuthenticatedSessionState()
-                      throw bindingError
-                    }
-                    if (
-                      this.sessionGeneration !== recoveryGeneration ||
-                      this.sessionToken !== previousToken
-                    ) {
-                      if (this.me) await this.bindCurrentChatStore(this.me.id)
-                      else unbindChatStore()
-                      throw new SessionTokenStorageSupersededBeforeWriteError()
-                    }
-                  }
-                }
-                if (previousToken && previousMe) this.activateGfsAuthScope()
-                if (previousToken && previousMe && recoveredPriorSource)
-                  this.recordAcceptedSessionSource(recoveredPriorSource, envKey)
-              }
-            } catch (repairError) {
-              this.reportDeferredLogoutFailureSafely(repairError)
-              if (transactionOwned()) await this.failClosedForPendingLogout(repairError)
-            }
-          }
-          throw error
-        }
-        if (
-          isPendingExternalLogoutReadFailure(error) &&
-          !isTransientPendingLogoutReadError(error)
-        ) {
-          if (transactionOwned()) await this.failClosedForPendingLogout(error)
-          throw error
-        }
-        if (!pendingCredentialPersisted && transactionOwned() && previousToken && previousMe)
-          this.activateGfsAuthScope()
-        if (!pendingCredentialPersisted) {
-          const observation = observeTransactionSource()
-          if (observation.status === 'invalid' && transactionOwned())
-            await this.failClosedForPendingLogout(observation.error)
-          // No native dispatch/credential rename occurred. A file snapshot or
-          // secure-store precondition failure cannot change the prior authority.
-          if (observation.status !== 'invalid') this.reportDeferredLogoutFailureSafely(error)
-          if (observation.status === 'owned') await this.retireRepairedPersistenceProducer(producer)
-          throw error
-        }
-        if (pendingLogout.intent && transactionOwned()) {
-          // The candidate journal remains authoritative through failed source
-          // commitment. An actual originally observed LP still represents every
-          // pre-logout credential, not just this failed candidate's hash.
-          if (pendingLogout.marker?.intent.intent === 'logout-pending') {
-            try {
-              const current = this.inspectPendingLogoutMarker(envKey)
-              if (current === null && transactionOwned())
-                recordPendingExternalLogout(userDataDirectory, envKey)
-              else if (
-                current &&
-                (pendingExternalLogoutMarkersMatch(current, pendingLogout.marker) ||
-                  (attemptedCleanupMarker &&
-                    pendingExternalLogoutMarkersMatch(current, attemptedCleanupMarker)))
-              )
-                recordPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, current)
-            } catch (markerError) {
-              this.reportDeferredLogoutFailureSafely(markerError)
-            }
-          }
-          if (pendingCredentialPersisted) {
-            await Promise.allSettled([
-              ...(publications.has('keytar')
-                ? [
-                    this.tokenStore.repairKeytarSessionTokenIfMatches(result.token, null, envKey, {
-                      mayWrite: () => mayRepairRejectedSource('active-keytar'),
-                      onMutationDispatched: onPriorMutation,
-                      candidateAuthority: publications.get('keytar')?.authority,
-                    }),
-                  ]
-                : []),
-              ...(publications.has('safe-storage')
-                ? [
-                    this.tokenStore.repairSafeStorageSessionTokenIfMatches(
-                      result.token,
-                      null,
-                      envKey,
-                      {
-                        mayWrite: () => mayRepairRejectedSource('safe-storage'),
-                        onMutationDispatched: onPriorMutation,
-                        candidateAuthority: publications.get('safe-storage')?.authority,
-                      }
-                    ),
-                  ]
-                : []),
-            ]).then(results => {
-              for (const cleanup of results)
-                if (cleanup.status === 'rejected')
-                  this.reportDeferredLogoutFailureSafely(cleanup.reason)
-            })
-          }
-          if (transactionOwned()) await this.failClosedForPendingLogout(error)
-        } else if (pendingCredentialPersisted && transactionOwned()) {
-          try {
-            let coldCleanupVerified = publications.size > 0
-            if (publications.has('keytar'))
-              coldCleanupVerified =
-                (await this.tokenStore.repairKeytarSessionTokenIfMatches(
-                  result.token,
-                  previousToken,
-                  envKey,
-                  {
-                    mayWrite: () => mayRepairRejectedSource('active-keytar'),
-                    onMutationDispatched: onPriorMutation,
-                    onMutationSettled: onPriorMutationSettled,
-                    candidateAuthority: publications.get('keytar')?.authority,
-                  }
-                )) && coldCleanupVerified
-            if (publications.has('safe-storage'))
-              coldCleanupVerified =
-                (await this.tokenStore.repairSafeStorageSessionTokenIfMatches(
-                  result.token,
-                  previousToken,
-                  envKey,
-                  {
-                    mayWrite: () => mayRepairRejectedSource('safe-storage'),
-                    onMutationDispatched: onPriorMutation,
-                    onMutationSettled: onPriorMutationSettled,
-                    candidateAuthority: publications.get('safe-storage')?.authority,
-                  }
-                )) && coldCleanupVerified
-            if (transactionOwned()) {
-              if (previousToken) {
-                recoveredPriorSource = await this.readVerifiedSessionTokenSource(
-                  previousToken,
-                  envKey,
-                  'default',
-                  transactionOwned,
-                  this.priorSessionSource(
-                    previousToken,
-                    envKey,
-                    'default',
-                    priorPublications,
-                    publications,
-                    previouslyAcceptedSource
-                  )
-                )
-              } else if (publications.has('historical-plaintext') || !coldCleanupVerified)
-                throw new Error('Rejected cold login credential cleanup could not be verified')
-              await this.retireRepairedPersistenceProducer(producer)
-              if (installedGeneration !== null) this.clearAuthenticatedSessionState()
-              else if (
-                previousToken &&
-                previousMe &&
-                this.me === previousMe &&
-                this.sessionGeneration === previousGeneration &&
-                recoveredPriorSource
-              ) {
-                this.requireSessionTokenSourceCurrent(
-                  recoveredPriorSource,
-                  envKey,
-                  transactionOwned
-                )
-                this.activateGfsAuthScope()
-                this.recordAcceptedSessionSource(recoveredPriorSource, envKey)
-              }
-            }
-          } catch (repairError) {
-            if (transactionOwned()) {
-              await this.failClosedForPendingLogout(repairError)
-            }
-          }
-        }
-        throw error
-      }
     } finally {
       releasePrewarm()
     }
@@ -5137,9 +4984,11 @@ export class AppService {
     if (expectedSessionGeneration !== undefined) {
       this.assertSessionGeneration(expectedSessionGeneration)
     }
+    // Every caller of this method changes the authentication environment. A
+    // runtime reset is not a substitute for durable LP plus exact-source debt.
+    this.assertProfileHandoffSessionIsSignedOut()
     const oldEnvKey = getActiveEnvKey()
     const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
-    const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
     const oldSessionToken = this.sessionToken
     const oldMe = this.me
     const releasePrewarm = this.beginPrewarmAuthTransition()
@@ -5149,8 +4998,9 @@ export class AppService {
       this.entityChangeConnectionStop?.({ silent: true })
       // Invalidate a restore that may still be awaiting keychain/getMe before it
       // can bind an old-environment token to the newly selected runtime.
-      this.sessionGeneration += 1
-      const transitionGeneration = this.sessionGeneration
+      const transitionGeneration = this.sessionAuthority.advanceSessionGeneration(
+        this.sessionGeneration
+      )
       if (hadAuthenticatedScope) await this.suspendDesktopGfsUploadsForAuthBoundary()
       this.assertSessionGeneration(transitionGeneration)
       try {
@@ -5164,9 +5014,6 @@ export class AppService {
         if (!environmentUnchanged) {
           this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
           this.clearAuthenticatedSessionState()
-          await this.tokenStore
-            .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
-            .catch(() => undefined)
         } else if (
           hadAuthenticatedScope &&
           this.sessionToken === oldSessionToken &&
@@ -5183,12 +5030,11 @@ export class AppService {
         normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) !== oldBaseUrl
       if (boundaryChanged) {
         this.clearAuthenticatedSessionState()
-        await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
       } else if (hadAuthenticatedScope && this.sessionToken && this.me) {
         this.activateGfsAuthScope()
-        this.sessionGeneration += 1
+        this.sessionAuthority.advanceSessionGeneration(this.sessionGeneration)
       } else {
-        this.sessionGeneration += 1
+        this.sessionAuthority.advanceSessionGeneration(this.sessionGeneration)
       }
       return this.sessionGeneration
     } finally {
@@ -5224,26 +5070,28 @@ export class AppService {
     return this.withNativeAuthEnvironmentCommit(async () => {
       if (expectedSessionGeneration !== undefined) {
         this.assertSessionGeneration(expectedSessionGeneration)
-        this.assertProfileHandoffSessionIsSignedOut()
       }
+      this.assertProfileHandoffSessionIsSignedOut()
       const state = getDesktopRuntimeConfigState()
       const selected = state.options.find(option => option.id === String(optionId || '').trim())
-      const nextEnvKey = selected
-        ? resolveEnvKey(selected.externalRestApiBaseUrl, selected.rpcProxyBaseUrl)
-        : null
+      if (!selected) throw new Error('runtime configuration not found')
+      const nextEnvKey = resolveEnvKey(selected.externalRestApiBaseUrl, selected.rpcProxyBaseUrl)
       const sameUploadBoundary =
         nextEnvKey === state.envKey &&
-        selected !== undefined &&
         normalizeDesktopUploadBaseUrl(selected.externalRestApiBaseUrl) ===
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
       if (sameUploadBoundary) {
-        this.sessionGeneration += 1
-        const transitionGeneration = this.sessionGeneration
+        const transitionGeneration = this.sessionAuthority.advanceSessionGeneration(
+          this.sessionGeneration
+        )
         await selectDesktopRuntimeConfigOption(optionId)
         this.assertSessionGeneration(transitionGeneration)
         this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
-        this.sessionGeneration += 1
+        this.sessionAuthority.advanceSessionGeneration(transitionGeneration)
       } else {
+        // A same-boundary selection is not an environment handoff and must not log out an
+        // authenticated session. Boundary-changing operations enforce the durable-LP policy
+        // inside applyRuntimeEnvironmentChangeOnce before mutating runtime state.
         await this.applyRuntimeEnvironmentChange(
           () => selectDesktopRuntimeConfigOption(optionId),
           expectedSessionGeneration
@@ -5258,6 +5106,7 @@ export class AppService {
 
   async clearRuntimeConfigSelection() {
     return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertProfileHandoffSessionIsSignedOut()
       await this.applyRuntimeEnvironmentChange(clearDesktopRuntimeConfigSelection)
       return getDesktopRuntimeConfigState()
     })
@@ -5270,8 +5119,8 @@ export class AppService {
           throw new Error('invalid_session_generation')
         }
         this.assertSessionGeneration(expectedSessionGeneration)
-        this.assertProfileHandoffSessionIsSignedOut()
       }
+      this.assertProfileHandoffSessionIsSignedOut()
       const nextEnvKey = resolveEnvKey(next.externalRestApiBaseUrl, next.rpcProxyBaseUrl || '')
       const sameUploadBoundary =
         nextEnvKey === getActiveEnvKey() &&
@@ -5280,7 +5129,11 @@ export class AppService {
       if (sameUploadBoundary) {
         await saveDesktopRuntimeConfig(next)
         this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
-      } else await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
+      } else
+        await this.applyRuntimeEnvironmentChange(
+          () => saveDesktopRuntimeConfig(next),
+          expectedSessionGeneration
+        )
     })
     await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
     return getDesktopRuntimeConfigState()
@@ -5288,8 +5141,12 @@ export class AppService {
 
   async deleteRuntimeConfig(optionId: string) {
     return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertProfileHandoffSessionIsSignedOut()
       const state = getDesktopRuntimeConfigState()
-      if (state.activeOptionId === String(optionId || '').trim())
+      const normalizedOptionId = String(optionId || '').trim()
+      const selected = state.options.find(option => option.id === normalizedOptionId)
+      if (!selected) throw new Error('runtime configuration not found')
+      if (state.activeOptionId === normalizedOptionId)
         await this.applyRuntimeEnvironmentChange(() => deleteDesktopRuntimeConfigOption(optionId))
       else await deleteDesktopRuntimeConfigOption(optionId)
       return getDesktopRuntimeConfigState()
@@ -5301,7 +5158,9 @@ export class AppService {
     let registered = false
     try {
       const sessionGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
-        const sessionGeneration = ++this.sessionGeneration
+        const sessionGeneration = this.sessionAuthority.advanceSessionGeneration(
+          this.sessionGeneration
+        )
         this.interactiveLoginAttempts += 1
         registered = true
         return sessionGeneration
@@ -5454,7 +5313,7 @@ export class AppService {
     }
     const setupGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
       this.assertProfileHandoffSessionIsSignedOut()
-      return ++this.sessionGeneration
+      return this.sessionAuthority.advanceSessionGeneration(this.sessionGeneration)
     })
     let setupRequest:
       | ReturnType<MemberRegistrationServiceClient['completeDesktopSetup']>
@@ -5483,8 +5342,7 @@ export class AppService {
         })
         this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
         this.assertSessionGeneration(setupGeneration)
-        this.sessionGeneration += 1
-        return this.sessionGeneration
+        return this.sessionAuthority.advanceSessionGeneration(setupGeneration)
       })
       const shouldResolve = await this.withNativeAuthEnvironmentCommit(
         async () => this.sessionGeneration === committedGeneration
@@ -5502,8 +5360,8 @@ export class AppService {
   async passwordLogin(email: string, password: string): Promise<PasswordLoginResult> {
     let registered = false
     try {
-      const loginGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
-        const generation = ++this.sessionGeneration
+      const currentLoginGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
+        const generation = this.sessionAuthority.advanceSessionGeneration(this.sessionGeneration)
         hydrateDesktopRuntimeConfig()
         if (!isDesktopRuntimeConfigured()) {
           throw new Error('desktop_setup_required')
@@ -5513,12 +5371,17 @@ export class AppService {
         return generation
       })
       await this.withNativeAuthEnvironmentCommit(async () => {
-        this.assertSessionGeneration(loginGeneration)
+        this.assertSessionGeneration(currentLoginGeneration)
       })
       await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
-      this.assertSessionGeneration(loginGeneration)
+      this.assertSessionGeneration(currentLoginGeneration)
       const normalizedEmail = email.trim().toLowerCase()
-      return await this.completePasswordLogin(normalizedEmail, password, loginGeneration)
+      const accepted = await this.completePasswordLogin(
+        normalizedEmail,
+        password,
+        currentLoginGeneration
+      )
+      return accepted
     } finally {
       if (registered) {
         await this.withNativeAuthEnvironmentCommit(async () => {
@@ -5747,9 +5610,9 @@ export class AppService {
   }
 
   async getDesktopReleaseStatus(): Promise<DesktopReleaseStatus> {
+    const token = this.requireSessionToken()
     const { app } = await import('electron')
     const currentVersion = resolveDesktopAppVersion(app)
-    const token = this.requireSessionToken()
     const policy = await this.authClient.getDesktopReleasePolicy(token)
     const updateRequired = compareSemverLike(currentVersion, policy.minimumDesktopVersion) < 0
     return {
@@ -5783,227 +5646,341 @@ export class AppService {
     return { opened: true }
   }
 
-  logout(): Promise<number> {
+  logout(): Promise<DesktopLogoutOutcome> {
     const requestedEnvKey = getActiveEnvKey()
-    return this.runCredentialProducer(
+    const authoritySource =
+      this.sessionAuthority.acceptedSessionAuthoritySource ??
+      (this.pendingLogoutAuthoritySource?.envKey === requestedEnvKey
+        ? this.pendingLogoutAuthoritySource.source
+        : undefined)
+    const volatileOwner = this.memoryOnlySession
+    if (volatileOwner && this.volatileLogoutInFlight?.sessionId === volatileOwner.volatileSessionId)
+      return this.volatileLogoutInFlight.promise
+    if (volatileOwner && this.sessionToken && this.me) {
+      const owner = {
+        envKey: volatileOwner.envKey,
+        generation: this.sessionGeneration,
+        token: this.sessionToken,
+        user: this.me,
+        authoritySource,
+        volatileSessionId: volatileOwner.volatileSessionId,
+        gfsIdentity: this.gfsScopeIdentity,
+      }
+      this.logoutInProgress = true
+      this.clearAuthenticatedSessionState()
+      const runtimeRevokedGeneration = this.sessionGeneration
+      void this.suspendDesktopGfsUploadsForAuthBoundary(owner.gfsIdentity ?? undefined).catch(
+        error => this.reportDeferredLogoutFailureSafely(error)
+      )
+      const operation = this.runCredentialProducer(
+        () =>
+          this.withNativeAuthEnvironmentCommit(async () => {
+            let runtimeRevokedByUnframedProjection: number | null = runtimeRevokedGeneration
+            const stillOwnsVolatileRuntime = () =>
+              getActiveEnvKey() === owner.envKey &&
+              runtimeRevokedByUnframedProjection !== null &&
+              this.sessionGeneration === runtimeRevokedByUnframedProjection &&
+              this.sessionToken === null &&
+              this.me === null &&
+              this.memoryOnlySession === undefined
+            const recoveredLogout = await this.recoverObservedLogoutProjection(
+              owner.envKey,
+              stillOwnsVolatileRuntime
+            )
+            if (recoveredLogout !== null) return recoveredLogout
+
+            let authorityLogout: SessionAuthorityLogoutTransaction | null
+            try {
+              authorityLogout = await SessionAuthorityLogoutTransaction.begin({
+                tokenStore: this.tokenStore,
+                userDataDirectory: this.getUserDataDirectory(),
+                envKey: owner.envKey,
+                expectedToken: null,
+                expectedVolatileSessionId: owner.volatileSessionId,
+                onLogoutIntentStaged: () => {
+                  runtimeRevokedByUnframedProjection = this.sessionGeneration
+                },
+              })
+            } catch (error) {
+              const recovered = await this.recoverObservedLogoutProjection(
+                owner.envKey,
+                stillOwnsVolatileRuntime
+              )
+              if (recovered !== null) return recovered
+              await this.failClosedForObservedLogoutDenial(owner.envKey, error)
+              throw error
+            }
+            if (!authorityLogout) throw new SessionAuthorityRecordConflictError()
+
+            let cleanupOwnsLease = false
+            let logoutCommitted = false
+            let committedCleanupPending = false
+            try {
+              const committedRecord = await authorityLogout.commit(stillOwnsVolatileRuntime)
+              logoutCommitted = true
+              committedCleanupPending = committedRecord.cleanupDebts.length > 0
+              cleanupOwnsLease = true
+              this.scheduleSessionAuthorityLogoutCleanup(authorityLogout)
+              return {
+                kind: 'committed',
+                sessionGeneration: this.sessionGeneration,
+                cleanup: committedCleanupPending ? 'pending' : 'not-required',
+              } satisfies DesktopLogoutOutcome
+            } catch (error) {
+              if (logoutCommitted) {
+                await this.failClosedForPendingLogout(error)
+                cleanupOwnsLease = true
+                this.scheduleSessionAuthorityLogoutCleanup(authorityLogout)
+                return {
+                  kind: 'committed',
+                  sessionGeneration: this.sessionGeneration,
+                  cleanup: committedCleanupPending ? 'pending' : 'not-required',
+                } satisfies DesktopLogoutOutcome
+              }
+              if (stillOwnsVolatileRuntime()) {
+                if (authorityLogout.requiresFailClosedAfterLogoutFailure()) {
+                  authorityLogout.close()
+                  cleanupOwnsLease = true
+                  const recovered = await this.recoverObservedLogoutProjection(
+                    owner.envKey,
+                    stillOwnsVolatileRuntime
+                  )
+                  if (recovered !== null) return recovered
+                  await this.failClosedForPendingLogout(error)
+                }
+              }
+              throw error
+            } finally {
+              if (!cleanupOwnsLease) authorityLogout.close()
+            }
+          }),
+        () =>
+          this.commitLogoutAfterAdmissionClosed({
+            envKey: owner.envKey,
+            token: null,
+            volatileSessionId: owner.volatileSessionId,
+          })
+      )
+      const outcomeOperation = operation.catch(error => this.logoutNotCommitted(error))
+      const completedOperation = outcomeOperation.then(outcome => {
+        if (outcome.kind === 'committed') this.clearPendingLogoutAuthoritySource(owner.envKey)
+        return outcome
+      })
+      let trackedOperation!: Promise<DesktopLogoutOutcome>
+      trackedOperation = completedOperation.finally(() => {
+        if (this.volatileLogoutInFlight?.promise === trackedOperation)
+          this.volatileLogoutInFlight = null
+        this.finishLogoutFence()
+      })
+      this.volatileLogoutInFlight = {
+        sessionId: owner.volatileSessionId,
+        promise: trackedOperation,
+      }
+      return trackedOperation
+    }
+
+    // Publish an in-memory cancellation fence before joining the native auth/config queue. A team
+    // producer may be holding that queue while awaiting a server identity check; it must observe
+    // the logout request and release the queue rather than making logout wait behind stale work.
+    const owner = {
+      generation: this.sessionGeneration,
+      token: this.sessionToken,
+      user: this.me,
+      authoritySource,
+      volatileSessionId: this.memoryOnlySession?.volatileSessionId,
+      gfsIdentity: this.gfsScopeIdentity,
+    }
+    if (authoritySource) {
+      this.pendingLogoutAuthoritySource = { envKey: requestedEnvKey, source: authoritySource }
+    }
+    this.logoutInProgress = true
+    this.clearAuthenticatedSessionState()
+    const runtimeRevokedGeneration = this.sessionGeneration
+    void this.suspendDesktopGfsUploadsForAuthBoundary(owner.gfsIdentity ?? undefined).catch(error =>
+      this.reportDeferredLogoutFailureSafely(error)
+    )
+    const operation = this.runCredentialProducer(
       () =>
         this.withNativeAuthEnvironmentCommit(async () => {
           const envKey = getActiveEnvKey()
-          await this.runSessionPersistence(async () => {
-            const userDataDirectory = this.getUserDataDirectory()
-            let marker: PendingExternalLogoutMarker | null = null
-            let markerInspectionFailed = false
+          const committedOutcome = await this.runSessionPersistence(async () => {
+            let runtimeRevokedByUnframedProjection: number | null = runtimeRevokedGeneration
+            const stillOwnsRuntime = () =>
+              getActiveEnvKey() === envKey &&
+              runtimeRevokedByUnframedProjection !== null &&
+              this.sessionGeneration === runtimeRevokedByUnframedProjection &&
+              this.sessionToken === null &&
+              this.me === null &&
+              this.memoryOnlySession === undefined
+            const recoveredLogout = await this.recoverObservedLogoutProjection(
+              envKey,
+              stillOwnsRuntime
+            )
+            if (recoveredLogout !== null) return recoveredLogout
+
+            let authorityLogout: SessionAuthorityLogoutTransaction | null
             try {
-              marker = this.inspectPendingLogoutMarker(envKey)
-            } catch (error) {
-              markerInspectionFailed = true
-              this.reportDeferredLogoutFailureSafely(error)
-            }
-
-            if (marker?.intent.intent === 'memory-only-session') {
-              const owner = { generation: this.sessionGeneration, token: this.sessionToken }
-              await this.suspendMemoryOnlySessionForAuthBoundary()
-              const current = this.sessionAuthority.observeMarker(envKey)
-              if (current.status !== 'observed') throw current.error
-              if (!pendingExternalLogoutMarkersMatch(current.marker, marker)) {
-                throw new SessionTokenStorageSupersededBeforeWriteError()
-              }
-              if (
-                this.sessionGeneration !== owner.generation ||
-                this.sessionToken !== owner.token ||
-                getActiveEnvKey() !== envKey
-              ) {
-                // Expiry may have ended this exact M-owned session while the
-                // shared auth-boundary suspension was draining. Keep logout
-                // idempotent only if no newer runtime session took ownership.
-                if (!this.sessionToken && !this.me && !this.memoryOnlySession) return
-                throw new SessionTokenStorageSupersededBeforeWriteError()
-              }
-              // M already durably denies every persisted source. Keep that fence
-              // after logout; clearing it could revive a credential from an older
-              // Keytar/safeStorage session when a provider later recovers.
-              this.clearAuthenticatedSessionState()
-              return
-            }
-
-            if (marker?.intent.intent === 'keytar-cleanup-pending') {
-              try {
-                if (!recordPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker))
-                  throw new SessionTokenStorageSupersededBeforeWriteError()
-                marker = this.inspectPendingLogoutMarker(envKey)
-              } catch (error) {
-                markerInspectionFailed = true
-                this.reportDeferredLogoutFailureSafely(error)
-              }
-            }
-
-            let journalSnapshot: ReturnType<typeof snapshotSessionPersistenceJournal> | undefined
-            try {
-              journalSnapshot = snapshotSessionPersistenceJournal(userDataDirectory, envKey)
-            } catch (error) {
-              this.reportDeferredLogoutFailureSafely(error)
-            }
-            const owner = { generation: this.sessionGeneration, token: this.sessionToken }
-            const requireLogoutOwnership = () => {
-              const observation = this.sessionAuthority.inspectOwnership(
+              const legacyNamespace = getActiveLegacyEnvKeyInventory()
+              authorityLogout = await SessionAuthorityLogoutTransaction.begin({
+                tokenStore: this.tokenStore,
+                userDataDirectory: this.getUserDataDirectory(),
                 envKey,
-                [marker],
-                getActiveEnvKey() === envKey &&
-                  this.sessionGeneration === owner.generation &&
-                  this.sessionToken === owner.token
-              )
-              if (observation.status === 'transient' || observation.status === 'invalid')
-                throw observation.error
-              if (observation.status !== 'owned')
-                throw new SessionTokenStorageSupersededBeforeWriteError()
-            }
-
-            try {
-              const result = await this.logoutOnce({
-                // A UI logout may resolve only after every credential source was
-                // removed or a durable logout-pending marker will block recovery.
-                strictTokenClear: true,
-                mayWrite: () => {
-                  requireLogoutOwnership()
-                  return true
-                },
-                onRuntimeCleared: () => {
-                  owner.generation = this.sessionGeneration
-                  owner.token = this.sessionToken
+                expectedToken: owner.token,
+                expectedAuthoritySource: owner.authoritySource,
+                expectedVolatileSessionId: owner.volatileSessionId,
+                legacyEnvKeys: legacyNamespace.keys,
+                legacyNamespaceComplete: legacyNamespace.complete,
+                isStillOwned: stillOwnsRuntime,
+                onLogoutIntentStaged: () => {
+                  runtimeRevokedByUnframedProjection = this.sessionGeneration
                 },
               })
-              requireLogoutOwnership()
-              if (!result.keytarAvailable && !result.keytarDisabled) {
-                const current = this.inspectPendingLogoutMarker(envKey)
-                if (current?.intent.intent === 'keytar-cleanup-pending')
-                  throw new SessionTokenStorageSupersededBeforeWriteError()
-                if (current?.intent.intent !== 'logout-pending')
-                  recordPendingExternalLogout(userDataDirectory, envKey)
-                return
-              }
-              if (journalSnapshot) {
-                const retired = retireSessionPersistenceJournalAfterVerifiedLogout(
-                  journalSnapshot,
-                  requireLogoutOwnership
-                )
-                if (!retired) {
-                  this.reportDeferredLogoutFailureSafely(
-                    new Error('Logout preserved a newer session persistence journal revision')
-                  )
-                  requireLogoutOwnership()
-                  if (marker?.intent.intent !== 'logout-pending')
-                    recordPendingExternalLogout(userDataDirectory, envKey)
-                  return
-                }
-              } else {
-                requireLogoutOwnership()
-                if (marker?.intent.intent !== 'logout-pending')
-                  recordPendingExternalLogout(userDataDirectory, envKey)
-                return
-              }
-              if (
-                marker &&
-                (result.keytarAvailable || result.keytarDisabled) &&
-                !markerInspectionFailed
-              ) {
-                if (!clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker))
-                  throw new SessionTokenStorageSupersededBeforeWriteError()
-              }
             } catch (error) {
-              if (error instanceof SessionTokenStorageSupersededBeforeWriteError) throw error
-              // Once a logout marker is durable, a later Keytar cleanup failure is
-              // recoverable on the next launch. Marker I/O failures also must not
-              // leave the renderer over an authenticated main-process session.
-              // A normal logout has no marker yet, so persist its intent before
-              // reporting success after an earlier GFS or credential-clear failure.
-              // Otherwise the next launch could restore the credential that the
-              // renderer was told had been logged out.
-              try {
-                // Cleanup awaited other producers: an admitted login may have
-                // retired the earlier marker. Confirm current intent before claiming
-                // success, including after unlink or a transient inspection failure.
-                let currentMarker: PendingExternalLogoutMarker | null = null
-                try {
-                  currentMarker = this.inspectPendingLogoutMarker(envKey)
-                } catch (markerError) {
-                  this.reportDeferredLogoutFailureSafely(markerError)
-                  throw markerError
-                }
-                if (
-                  currentMarker &&
-                  (!marker || !pendingExternalLogoutMarkersMatch(currentMarker, marker))
-                )
-                  throw new SessionTokenStorageSupersededBeforeWriteError()
-                if (currentMarker?.intent.intent !== 'logout-pending') {
-                  if (currentMarker) throw new SessionTokenStorageSupersededBeforeWriteError()
-                  recordPendingExternalLogout(userDataDirectory, envKey)
-                }
-              } catch (markerError) {
-                if (markerError instanceof SessionTokenStorageSupersededBeforeWriteError)
-                  throw markerError
-                this.reportDeferredLogoutFailureSafely(markerError)
-                await this.failClosedForPendingLogout(error)
-                throw markerError
-              }
-              await this.failClosedForPendingLogout(error)
+              const recovered = await this.recoverObservedLogoutProjection(envKey, stillOwnsRuntime)
+              if (recovered !== null) return recovered
+              await this.failClosedForObservedLogoutDenial(envKey, error)
+              throw error
             }
+            if (!authorityLogout) throw new SessionAuthorityRecordConflictError()
+
+            let cleanupOwnsLease = false
+            let logoutCommitted = false
+            let committedCleanupPending = false
+            try {
+              const committedRecord = await authorityLogout.commit(stillOwnsRuntime)
+              logoutCommitted = true
+              committedCleanupPending = committedRecord.cleanupDebts.length > 0
+              cleanupOwnsLease = true
+              this.scheduleSessionAuthorityLogoutCleanup(authorityLogout)
+            } catch (error) {
+              if (logoutCommitted) {
+                await this.failClosedForPendingLogout(error)
+                cleanupOwnsLease = true
+                this.scheduleSessionAuthorityLogoutCleanup(authorityLogout)
+                return {
+                  kind: 'committed',
+                  sessionGeneration: this.sessionGeneration,
+                  cleanup: committedCleanupPending ? 'pending' : 'not-required',
+                } satisfies DesktopLogoutOutcome
+              }
+              if (stillOwnsRuntime()) {
+                if (authorityLogout.requiresFailClosedAfterLogoutFailure()) {
+                  authorityLogout.close()
+                  cleanupOwnsLease = true
+                  const recovered = await this.recoverObservedLogoutProjection(
+                    envKey,
+                    stillOwnsRuntime
+                  )
+                  if (recovered !== null) return recovered
+                  await this.failClosedForPendingLogout(error)
+                }
+              }
+              throw error
+            } finally {
+              if (!cleanupOwnsLease) authorityLogout.close()
+            }
+            return {
+              kind: 'committed',
+              sessionGeneration: this.sessionGeneration,
+              cleanup: committedCleanupPending ? 'pending' : 'not-required',
+            } satisfies DesktopLogoutOutcome
           })
           await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
-          return this.sessionGeneration
+          return committedOutcome
         }),
-      () => {
-        recordPendingExternalLogout(this.getUserDataDirectory(), requestedEnvKey)
-      }
+      () =>
+        this.commitLogoutAfterAdmissionClosed({
+          envKey: requestedEnvKey,
+          token: owner.token,
+          authoritySource: owner.authoritySource ?? undefined,
+          volatileSessionId: owner.volatileSessionId,
+        })
     )
+    return operation
+      .catch(error => this.logoutNotCommitted(error))
+      .then(outcome => {
+        if (outcome.kind === 'committed') this.clearPendingLogoutAuthoritySource(requestedEnvKey)
+        return outcome
+      })
+      .finally(() => {
+        this.finishLogoutFence()
+      })
   }
 
-  private async logoutOnce(
-    options: {
-      strictTokenClear?: boolean
-      mayWrite?: () => boolean
-      onRuntimeCleared?: () => void
-    } = {}
-  ): Promise<{ keytarAvailable: boolean | null; keytarDisabled: boolean }> {
-    this.logoutInProgress = true
-    const releasePrewarm = this.beginPrewarmAuthTransition()
+  private clearPendingLogoutAuthoritySource(envKey: string): void {
+    if (this.pendingLogoutAuthoritySource?.envKey === envKey)
+      this.pendingLogoutAuthoritySource = null
+  }
+
+  private logoutNotCommitted(error: unknown): DesktopLogoutOutcome {
+    const reason =
+      error instanceof QuitAdmissionClosedError
+        ? 'deferred'
+        : error instanceof SessionTokenStorageSupersededBeforeWriteError ||
+            error instanceof SessionAuthorityRecordConflictError
+          ? 'superseded'
+          : 'failed'
+    return { kind: 'not-committed', sessionGeneration: this.sessionGeneration, reason }
+  }
+
+  /** Complete durable logout after normal credential-producer admission has closed for quit. */
+  private async commitLogoutAfterAdmissionClosed(input: {
+    envKey: string
+    token: string | null
+    authoritySource?: SessionAuthorityCredentialSource
+    volatileSessionId?: string
+  }): Promise<DesktopLogoutOutcome | void> {
+    // A logout rejected while another producer is draining may only publish the ordinary LP
+    // cancellation fence. It must not start a second authority transaction beside that producer.
+    // Likewise, a UI logout with no accepted owner remains a deferred intent, not a committed
+    // logout transaction for a session that never existed.
+    if (
+      this.pendingCredentialProducers.size > 0 ||
+      (input.token === null && !input.authoritySource && !input.volatileSessionId)
+    ) {
+      this.recordLogoutIntentFallback(input.envKey)
+      return
+    }
     const generation = this.sessionGeneration
-    const token = this.sessionToken
+    const isStillOwned = () =>
+      getActiveEnvKey() === input.envKey &&
+      this.sessionGeneration === generation &&
+      this.sessionToken === null &&
+      this.me === null &&
+      this.memoryOnlySession === undefined
+    const legacyNamespace = getActiveLegacyEnvKeyInventory()
+    const transaction = await SessionAuthorityLogoutTransaction.begin({
+      tokenStore: this.tokenStore,
+      userDataDirectory: this.getUserDataDirectory(),
+      envKey: input.envKey,
+      expectedToken: input.token,
+      expectedAuthoritySource: input.authoritySource,
+      expectedVolatileSessionId: input.volatileSessionId,
+      legacyEnvKeys: legacyNamespace.keys,
+      legacyNamespaceComplete: legacyNamespace.complete,
+      isStillOwned,
+    })
+    if (!transaction) throw new SessionAuthorityRecordConflictError()
+    let cleanupOwnsTransaction = false
     try {
-      const envKey = getActiveEnvKey()
-      const legacyEnvKeys = getActiveLegacyEnvKeys()
-      const marker = this.inspectPendingLogoutMarker(envKey)
-      let ownedGeneration = generation
-      let ownedToken = token
-      const mayWrite = () => {
-        const observation = this.sessionAuthority.inspectOwnership(
-          envKey,
-          [marker],
-          getActiveEnvKey() === envKey &&
-            this.sessionGeneration === ownedGeneration &&
-            this.sessionToken === ownedToken
-        )
-        if (observation.status === 'transient' || observation.status === 'invalid')
-          throw observation.error
-        return observation.status === 'owned' && (options.mayWrite?.() ?? true)
-      }
-      await this.suspendDesktopGfsUploadsForAuthBoundary()
-      if (!mayWrite()) throw new SessionTokenStorageSupersededBeforeWriteError()
-      this.clearAuthenticatedSessionState()
-      ownedGeneration = this.sessionGeneration
-      ownedToken = this.sessionToken
-      options.onRuntimeCleared?.()
-      const clearResult = options.strictTokenClear
-        ? await this.tokenStore.clearSessionTokenStrictly(envKey, { legacyEnvKeys, mayWrite })
-        : (await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys }), null)
-      if (!mayWrite()) throw new SessionTokenStorageSupersededBeforeWriteError()
+      const record = await transaction.commit(isStillOwned)
+      cleanupOwnsTransaction = true
+      this.scheduleSessionAuthorityLogoutCleanup(transaction)
       return {
-        keytarAvailable: clearResult?.keytarAvailable ?? null,
-        keytarDisabled: clearResult?.keytarDisabled ?? false,
+        kind: 'committed',
+        sessionGeneration: this.sessionGeneration,
+        cleanup: record.cleanupDebts.length > 0 ? 'pending' : 'not-required',
       }
     } finally {
-      releasePrewarm()
-      this.logoutInProgress = false
+      if (!cleanupOwnsTransaction) transaction.close()
     }
+  }
+
+  private finishLogoutFence(): void {
+    this.logoutInProgress = false
+    if (this.logoutInProgress || !this.memoryOnlyExpiryDeferredDuringLogout) return
+    this.memoryOnlyExpiryDeferredDuringLogout = false
+    if (this.memoryOnlySession) this.endExpiredMemoryOnlySession()
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
@@ -6311,7 +6288,7 @@ export class AppService {
     operation: (token: string, signal: AbortSignal) => Promise<T>
   ): Promise<T> {
     const controller = new AbortController()
-    const pending = { controller, promise: Promise.resolve() as Promise<unknown> }
+    const pending = { controller, promise: Promise.resolve() as Promise<unknown>, scope }
     this.gfsPendingLegacyUploads.add(pending)
     const promise = (async () => {
       this.assertCurrentDesktopGfsUploadScope(scope)
@@ -6744,11 +6721,11 @@ export class AppService {
   }
 
   private requireSessionToken(): string {
-    if (!this.sessionToken) {
-      throw new Error('Not authenticated')
-    }
+    const token = this.sessionToken
+    if (!token) throw new Error('Not authenticated')
     if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
-    return this.sessionToken
+    enterSessionRequestContext(this.sessionAuthority.captureSessionRequestContext(token))
+    return token
   }
 
   private scheduleMemoryOnlySessionExpiry(
@@ -6804,29 +6781,61 @@ export class AppService {
   }
 
   private endInvalidatedMemoryOnlySession(token: string, requestOwner?: unknown): void {
-    if (!this.sessionAuthority.isCurrentMemorySessionTokenRequest(token, requestOwner)) return
+    const ownership = this.sessionAuthority.inspectMemorySessionTokenRequest(token, requestOwner)
+    if (ownership.status === 'stale') return
+    if (ownership.status === 'invalid') {
+      this.handleMemoryOnlySessionAssertionFailure(ownership.error)
+      return
+    }
     this.endMemoryOnlySession()
   }
 
-  private assertTemporarySessionRequestAllowed(token: string): unknown {
-    if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
-    return this.sessionAuthority.assertTemporaryRequestAllowed(token)
+  private assertTemporarySessionRequestAllowed(token: string, requestContext?: unknown): unknown {
+    if (!this.memoryOnlySession) return undefined
+    if (requestContext === undefined) throw new SessionRequestOwnershipError()
+    try {
+      return this.sessionAuthority.assertTemporaryRequestAllowed(token, requestContext)
+    } catch (error) {
+      this.handleMemoryOnlySessionAssertionFailure(error)
+      throw error
+    }
+  }
+
+  private withCandidateSessionRequest<T>(
+    token: string,
+    envKey: string,
+    generation: number,
+    isOwnerCurrent: () => boolean,
+    operation: () => T
+  ): T {
+    const requestContext = this.sessionAuthority.createCandidateSessionRequestContext({
+      token,
+      envKey,
+      generation,
+      isOwnerCurrent,
+    })
+    return runWithSessionRequestContext(requestContext, operation)
   }
 
   private assertMemoryOnlySessionCurrent(expected = this.memoryOnlySession): void {
     try {
       this.sessionAuthority.assertMemoryOnlySessionCurrent(expected)
     } catch (error) {
-      if (error instanceof TemporarySessionExpiredError) {
-        this.endExpiredMemoryOnlySession()
-      } else if (
-        error instanceof TemporarySessionEnvironmentChangedError ||
-        error instanceof TemporarySessionAuthorityUnavailableError
-      ) {
-        this.clearAuthenticatedSessionState()
-        this.notifyTemporarySessionEnded()
-      }
+      this.handleMemoryOnlySessionAssertionFailure(error)
       throw error
+    }
+  }
+
+  private handleMemoryOnlySessionAssertionFailure(error: unknown): void {
+    if (error instanceof TemporarySessionExpiredError) {
+      if (this.logoutInProgress) this.memoryOnlyExpiryDeferredDuringLogout = true
+      else this.endExpiredMemoryOnlySession()
+    } else if (
+      error instanceof TemporarySessionEnvironmentChangedError ||
+      error instanceof TemporarySessionAuthorityUnavailableError
+    ) {
+      this.clearAuthenticatedSessionState()
+      this.notifyTemporarySessionEnded()
     }
   }
 
@@ -7015,8 +7024,20 @@ export class AppService {
   }
 
   private updateEntityChangeSessionToken(token: string | null): void {
-    if (this.entityChangeSessionToken === token) return
+    const requestContext = token ? this.sessionAuthority.captureSessionRequestContext(token) : null
+    if (
+      this.entityChangeSessionToken === token &&
+      ((requestContext === null && this.entityChangeSessionRequestContext === null) ||
+        (requestContext !== null &&
+          this.entityChangeSessionRequestContext !== null &&
+          this.sessionAuthority.sessionRequestContextsMatchOwner(
+            this.entityChangeSessionRequestContext,
+            requestContext
+          )))
+    )
+      return
     this.entityChangeSessionToken = token
+    this.entityChangeSessionRequestContext = requestContext
     this.entityChangeSessionGeneration += 1
   }
 
@@ -7097,40 +7118,48 @@ export class AppService {
     const connect = async () => {
       if (closed) return
       const connectionToken = this.entityChangeSessionToken
+      const connectionRequestContext = this.entityChangeSessionRequestContext
       const connectionGeneration = this.entityChangeSessionGeneration
-      if (!connectionToken) return
+      if (!connectionToken || !connectionRequestContext) {
+        stop({ silent: true })
+        return
+      }
       const attemptController = new AbortController()
       abortController = attemptController
       armIdleTimer(attemptController)
       try {
-        await this.authClient.openEntityChangeStream(
-          connectionToken,
-          this.entityChangeCursor,
-          event => {
-            if (closed) return
-            if (
-              event.type === 'heartbeat' ||
-              event.type === 'scope.invalidated' ||
-              event.type === 'resync_required' ||
-              event.type === 'stream.closing'
-            ) {
-              armIdleTimer(attemptController)
-              // Transport-open is synthetic: it proves only that fetch
-              // returned headers. Reset retry pressure only after the server
-              // produces a validated schema-v1 frame.
-              backoffMs = 1000
-            }
-            if (event.type === 'stream.closing' && event.reason === 'session_expired') {
-              this.handleEntityChangeSessionExpiry(connectionGeneration)
-              return
-            }
-            this.emitEntityChangeEvent(event)
-          },
-          attemptController.signal
+        await runWithSessionRequestContext(connectionRequestContext, () =>
+          this.authClient.openEntityChangeStream(
+            connectionToken,
+            this.entityChangeCursor,
+            event => {
+              if (closed) return
+              if (
+                event.type === 'heartbeat' ||
+                event.type === 'scope.invalidated' ||
+                event.type === 'resync_required' ||
+                event.type === 'stream.closing'
+              ) {
+                armIdleTimer(attemptController)
+                // Transport-open is synthetic: it proves only that fetch
+                // returned headers. Reset retry pressure only after the server
+                // produces a validated schema-v1 frame.
+                backoffMs = 1000
+              }
+              if (event.type === 'stream.closing' && event.reason === 'session_expired') {
+                this.handleEntityChangeSessionExpiry(connectionGeneration)
+                return
+              }
+              this.emitEntityChangeEvent(event)
+            },
+            attemptController.signal
+          )
         )
       } catch (error) {
         if (!closed) {
-          if (error instanceof ApiError && error.status === 401) {
+          if (error instanceof SessionRequestOwnershipError) {
+            stop({ silent: true })
+          } else if (error instanceof ApiError && error.status === 401) {
             this.handleEntityChangeSessionExpiry(connectionGeneration)
           } else {
             serverRetryAfterMs =
@@ -7510,12 +7539,19 @@ export class AppService {
     // and GFS activation.
     const releaseTransientHop = this.enterGfsTransientTeamHop()
     let previousToken = ''
-    let installedReceipt: SessionPersistenceReceipt | null = null
+    let previousRequestContext: unknown
+    let previousGeneration = 0
+    let previousEnvKey = ''
+    let previousUserId = ''
     try {
       return await this.withNativeAuthEnvironmentCommit(async () => {
         const previousIdentity =
           this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
         previousToken = this.requireSessionToken()
+        previousRequestContext = this.sessionAuthority.captureSessionRequestContext(previousToken)
+        previousGeneration = this.sessionGeneration
+        previousEnvKey = getActiveEnvKey()
+        previousUserId = this.me?.id ?? ''
         // §4.5-3 (GAP-N4 main half): a deliberate team switch tears down every live
         // stream — the old team's progress/activity/status/notification sockets must
         // not survive it. Done AFTER the switch SUCCEEDS (silently), mirroring the
@@ -7527,59 +7563,53 @@ export class AppService {
         // per-operation team hops in `runWithTeamContext`/`switchSessionToTeam` (e.g.
         // minting a cross-team RPC token to decide an approval) must NOT.
         await this.switchSessionToTeam(targetTeamId, previousToken, {
-          deferAcceptance: true,
-          onInstalled: receipt => {
-            installedReceipt = receipt
+          activateGfsScope: true,
+          beforeAcceptance: async () => {
+            await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
           },
         })
         // A deliberate user switch is the only team-context boundary that fences
         // in-flight uploads. Transient runWithTeamContext hops intentionally use
         // switchSessionToTeam directly and must leave those jobs untouched.
-        try {
-          if (!this.me) throw new Error('Team switch ended without an authenticated session')
-          const installedToken = this.sessionToken
-          const installedGeneration = this.sessionGeneration
-          await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
-          if (
-            this.sessionGeneration !== installedGeneration ||
-            this.sessionToken !== installedToken
-          )
-            throw new SessionTokenStorageSupersededBeforeWriteError()
-          this.activateGfsAuthScope()
-          this.updateEntityChangeSessionToken(this.sessionToken)
-          this.stopAllStreams()
-          // SDK delivery is optional; source ownership and acceptance are not.
+        const installedUser = this.me
+        const installedToken = this.sessionToken
+        if (
+          !installedUser ||
+          !installedToken ||
+          String(installedUser.teamId || '').trim() !== targetTeamId
+        ) {
+          throw new SessionTokenStorageSupersededBeforeWriteError()
+        }
+        if (
+          installedUser.id === previousUserId &&
+          getActiveEnvKey() === previousEnvKey &&
+          this.sessionGeneration === previousGeneration + 1
+        ) {
+          const nextRequestContext =
+            this.sessionAuthority.captureSessionRequestContext(installedToken)
+          this.acceptedTeamSwitchRequestTransition = {
+            previousRequestContext,
+            nextRequestContext,
+            nextToken: installedToken,
+            nextGeneration: this.sessionGeneration,
+            envKey: getActiveEnvKey(),
+            userId: installedUser.id,
+          }
+        }
+        // The acceptance transaction already published the new owner and GFS scope. These
+        // stream/notification effects are best effort and must never restore the previous owner.
+        for (const effect of [
+          () => this.updateEntityChangeSessionToken(this.sessionToken),
+          () => this.stopAllStreams(),
+          () => tryGetPluginSdkRuntime()?.notifySessionChanged(true),
+        ]) {
           try {
-            tryGetPluginSdkRuntime()?.notifySessionChanged(true)
+            effect()
           } catch (error) {
             this.reportDeferredLogoutFailureSafely(error)
           }
-          const completedReceipt = installedReceipt as SessionPersistenceReceipt | null
-          if (completedReceipt) await this.verifySessionPersistenceReceipt(completedReceipt)
-          if (completedReceipt) {
-            this.requireSessionPersistenceReceipt(completedReceipt)
-            if (completedReceipt.mode === 'persistent') {
-              this.sessionAuthority.acceptCandidate(completedReceipt.producer, installedToken!)
-              this.recordAcceptedSessionSource(
-                completedReceipt.selectedSource,
-                completedReceipt.envKey
-              )
-            }
-          }
-          return { authenticated: true, me: this.me }
-        } catch (error) {
-          // The replacement session is already installed at this point. If the
-          // auth-boundary state write fails, do not leave that token/me paired
-          // with a blocked or stale GFS scope. Cleanup remains inside the outer
-          // transient-hop gate, and the original persistence error is preserved.
-          const rejectedReceipt = installedReceipt as SessionPersistenceReceipt | null
-          if (
-            rejectedReceipt &&
-            (rejectedReceipt.mode === 'temporary' || !rejectedReceipt.producer.isAccepted)
-          )
-            await this.clearOwnedPartialTeamSession(rejectedReceipt, previousToken)
-          throw error
         }
+        return { authenticated: true, me: installedUser, ...this.temporarySessionState() }
       })
     } finally {
       releasePrewarm()
@@ -7588,7 +7618,8 @@ export class AppService {
   }
 
   async refreshAccessCatalog(): Promise<AccessCatalog> {
-    this.rpcTokenManager.clear()
+    this.captureSessionRequestContextForOperation()
+    this.clearRpcTokenCacheForCurrentRequest()
     const token = this.requireSessionToken()
     const me = this.me ?? (await this.authClient.getMe(token))
     this.me = me
@@ -7768,7 +7799,7 @@ export class AppService {
       return await this.rpcClient.listServers(rpc.token)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(
           MCP_SERVERS_LIST_SCOPES,
           effectiveHostRefs
@@ -7804,6 +7835,7 @@ export class AppService {
       throw new Error('File references must be a list.')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(
       HOST_WAKEABLE_OPERATION_SCOPES,
       effectiveHostRefs
@@ -7849,7 +7881,7 @@ export class AppService {
       const availabilityError = AppService.toHostAvailabilityError(targetHostRef, error)
       if (availabilityError) throw availabilityError
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(
           HOST_WAKEABLE_OPERATION_SCOPES,
           effectiveHostRefs
@@ -7888,6 +7920,7 @@ export class AppService {
       throw new Error('taskId is required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(
       HOST_WAKEABLE_OPERATION_SCOPES,
       effectiveHostRefs
@@ -7896,7 +7929,7 @@ export class AppService {
       return await this.rpcClient.getTaskResult(rpc.token, targetHostRef, targetTaskId)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(
           HOST_WAKEABLE_OPERATION_SCOPES,
           effectiveHostRefs
@@ -7913,12 +7946,13 @@ export class AppService {
       throw new Error('hostRef is required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_STATUS_SCOPES, effectiveHostRefs)
     try {
       return await this.rpcClient.getHostStatus(rpc.token, targetHostRef)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(HOST_STATUS_SCOPES, effectiveHostRefs)
         return this.rpcClient.getHostStatus(retried.token, targetHostRef)
       }
@@ -7975,6 +8009,7 @@ export class AppService {
     this.prewarmAttemptAtByHostRef.set(targetHostRef, now)
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     try {
+      this.captureSessionRequestContextForOperation()
       const rpc = await this.issueRpcTokenForHostRefs(
         HOST_WAKEABLE_OPERATION_SCOPES,
         effectiveHostRefs
@@ -8085,6 +8120,7 @@ export class AppService {
     }
     const effectiveHostRefs =
       options?.hostRefs && options.hostRefs.length > 0 ? options.hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_ACTIVITY_SCOPES, effectiveHostRefs)
     try {
       return await this.rpcClient.getHostActivity(rpc.token, targetHostRef, {
@@ -8093,7 +8129,7 @@ export class AppService {
       })
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(HOST_ACTIVITY_SCOPES, effectiveHostRefs)
         return this.rpcClient.getHostActivity(retried.token, targetHostRef, {
           limit: options?.limit,
@@ -8116,7 +8152,9 @@ export class AppService {
       throw new Error('hostRef is required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     this.requireSessionToken()
+    let streamRequestContext = getSessionRequestContext()
 
     let closed = false
     let abortController: AbortController | null = null
@@ -8147,6 +8185,7 @@ export class AppService {
       abortController = new AbortController()
       try {
         const rpc = await this.issueRpcTokenForHostRefs(HOST_STATUS_SCOPES, effectiveHostRefs)
+        streamRequestContext = getSessionRequestContext() ?? streamRequestContext
         await this.rpcClient.openHostStatusStream(
           rpc.token,
           targetHostRef,
@@ -8173,7 +8212,7 @@ export class AppService {
               // is normal on long-lived sessions). Drop the cached token so
               // the upcoming retry calls authClient.issueRpcToken with the
               // long-lived session and gets a fresh one — no relogin needed.
-              this.rpcTokenManager.clear()
+              this.clearRpcTokenCacheForRequestContext(streamRequestContext)
               const payload = data as { message?: string }
               onEvent({
                 type: 'error',
@@ -8195,7 +8234,7 @@ export class AppService {
       } catch (error) {
         if (closed) return
         if (error instanceof ApiError && error.status === 401) {
-          this.rpcTokenManager.clear()
+          this.clearRpcTokenCacheForRequestContext(streamRequestContext)
         }
         onEvent({ type: 'error', message: error instanceof Error ? error.message : String(error) })
       } finally {
@@ -8244,7 +8283,9 @@ export class AppService {
       throw new Error('hostRef is required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     this.requireSessionToken()
+    let streamRequestContext = getSessionRequestContext()
 
     let closed = false
     let abortController: AbortController | null = null
@@ -8273,6 +8314,7 @@ export class AppService {
       abortController = new AbortController()
       try {
         const rpc = await this.issueRpcTokenForHostRefs(HOST_ACTIVITY_SCOPES, effectiveHostRefs)
+        streamRequestContext = getSessionRequestContext() ?? streamRequestContext
         await this.rpcClient.openHostActivityStream(
           rpc.token,
           targetHostRef,
@@ -8300,7 +8342,7 @@ export class AppService {
               // a fresh one, then surface an error to drive the reconnect. Without
               // this the retry re-used the still-"valid" (client-side) dead token.
               // The token is never forwarded to the renderer.
-              this.rpcTokenManager.clear()
+              this.clearRpcTokenCacheForRequestContext(streamRequestContext)
               const payload = data as { message?: string }
               onEvent({
                 type: 'error',
@@ -8320,7 +8362,7 @@ export class AppService {
       } catch (error) {
         if (closed) return
         if (error instanceof ApiError && error.status === 401) {
-          this.rpcTokenManager.clear()
+          this.clearRpcTokenCacheForRequestContext(streamRequestContext)
         }
         onEvent({ type: 'error', message: error instanceof Error ? error.message : String(error) })
       } finally {
@@ -8374,7 +8416,9 @@ export class AppService {
       throw new Error('taskId is required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     this.requireSessionToken()
+    let streamRequestContext = getSessionRequestContext()
 
     let closed = false
     // Reassigned per reconnect attempt; `stop()` aborts whichever attempt is live.
@@ -8472,7 +8516,7 @@ export class AppService {
         // reconnect re-used the still-"valid" (client-side) dead token and looped
         // until the budget exhausted. The token never crosses to the renderer.
         if (event === 'auth-expired') {
-          this.rpcTokenManager.clear()
+          this.clearRpcTokenCacheForRequestContext(streamRequestContext)
           return
         }
         // §4.5-1: a real reporter-live `open` (the mcp-host waiting→open handshake
@@ -8573,6 +8617,7 @@ export class AppService {
           attemptTimer = setTimeout(() => abortController.abort(), RECONNECT_ATTEMPT_TIMEOUT_MS)
           try {
             const rpc = await this.issueRpcTokenForHostRefs(HOST_ACTIVITY_SCOPES, effectiveHostRefs)
+            streamRequestContext = getSessionRequestContext() ?? streamRequestContext
             await this.rpcClient.openTaskProgressStream(
               rpc.token,
               targetHostRef,
@@ -8589,7 +8634,7 @@ export class AppService {
             // task-error path above keeps its own `giveUp` for truly non-retryable
             // failures.
             if (error instanceof ApiError && error.status === 401) {
-              this.rpcTokenManager.clear()
+              this.clearRpcTokenCacheForRequestContext(streamRequestContext)
             }
             // Otherwise transient (network/abort) — fall through to retry.
           } finally {
@@ -8652,6 +8697,7 @@ export class AppService {
       throw new Error('hostRef, taskId, and toolCallId are required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(
       HOST_APPROVAL_SCOPES,
       effectiveHostRefs,
@@ -8680,7 +8726,7 @@ export class AppService {
       // 500, neither of which triggers a refresh-retry — so a retried error is
       // always a pre-mutation rejection and the approval is never double-applied.
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(
           HOST_APPROVAL_SCOPES,
           effectiveHostRefs,
@@ -8702,6 +8748,7 @@ export class AppService {
     const targetTaskId = String(taskId || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
     if (!targetTaskId) throw new Error('taskId is required')
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_WAKEABLE_OPERATION_SCOPES, [targetHostRef])
     try {
       await this.rpcClient.cancelTask(rpc.token, targetHostRef, targetTaskId)
@@ -8709,7 +8756,7 @@ export class AppService {
       // §4.5-7: retry once after a token refresh (previously a 401 here failed
       // outright, unlike invoke/getTaskResult).
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(HOST_WAKEABLE_OPERATION_SCOPES, [
           targetHostRef,
         ])
@@ -8735,6 +8782,7 @@ export class AppService {
       throw new Error('hostRef, taskId, and toolCallId are required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(
       HOST_APPROVAL_SCOPES,
       effectiveHostRefs,
@@ -8751,7 +8799,7 @@ export class AppService {
     } catch (error) {
       // §4.5-7: retry once after a token refresh, preserving `options`/team.
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(
           HOST_APPROVAL_SCOPES,
           effectiveHostRefs,
@@ -8778,6 +8826,7 @@ export class AppService {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_ARTIFACT_SCOPES, effectiveHostRefs)
     return this.rpcClient.listArtifacts(rpc.token, targetHostRef)
   }
@@ -8786,6 +8835,7 @@ export class AppService {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef || !filename) throw new Error('hostRef and filename are required')
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_ARTIFACT_SCOPES, effectiveHostRefs)
     return this.rpcClient.downloadArtifact(rpc.token, targetHostRef, filename)
   }
@@ -8798,12 +8848,13 @@ export class AppService {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
       return await this.rpcClient.listSessions(rpc.token, targetHostRef, query)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
         return this.rpcClient.listSessions(retried.token, targetHostRef, query)
       }
@@ -8823,6 +8874,7 @@ export class AppService {
       throw new Error('hostRef, agent, and chatId are required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
       return await this.rpcClient.loadSessionMessages(
@@ -8834,7 +8886,7 @@ export class AppService {
       )
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
         return this.rpcClient.loadSessionMessages(
           retried.token,
@@ -8865,6 +8917,7 @@ export class AppService {
       throw new Error('hostRef, agent, and chatId are required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
       return await this.rpcClient.getContextBreakdown(rpc.token, targetHostRef, agent, chatId)
@@ -8901,6 +8954,7 @@ export class AppService {
       throw new Error('hostRef is required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
       return await this.rpcClient.getHostModels(rpc.token, targetHostRef, targetChatId)
@@ -8935,6 +8989,7 @@ export class AppService {
       throw new Error('hostRef, chatId, and model are required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_MODEL_SCOPES, effectiveHostRefs)
     return this.rpcClient.setHostModel(
       rpc.token,
@@ -8969,6 +9024,7 @@ export class AppService {
     // for that single hostRef only — never a caller-supplied fleet list, which would
     // widen an intentionally narrow token. (Unlike setHostModel, which is multi-host.)
     const effectiveHostRefs = [targetHostRef]
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_TITLE_SCOPES, effectiveHostRefs)
     try {
       return await this.rpcClient.renameSession(
@@ -8980,7 +9036,7 @@ export class AppService {
       )
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(
           HOST_SESSION_TITLE_SCOPES,
           effectiveHostRefs
@@ -9012,12 +9068,13 @@ export class AppService {
   ): Promise<{ hostRef: string; status: string; message?: string }> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(DESKTOP_VIEW_SCOPES, [targetHostRef])
     try {
       return await this.rpcClient.getDesktopStatus(rpc.token, targetHostRef)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(DESKTOP_VIEW_SCOPES, [targetHostRef])
         return this.rpcClient.getDesktopStatus(retried.token, targetHostRef)
       }
@@ -9031,6 +9088,7 @@ export class AppService {
   ): Promise<void> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
+    this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(DESKTOP_VIEW_SCOPES, [targetHostRef])
     const { openDesktopWindow } = await import('./desktopWindow.js')
     await openDesktopWindow({
@@ -9060,7 +9118,7 @@ export class AppService {
       return await this.rpcClient.listSandboxUiApps(rpc.token)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.getRpcTokenForCurrentSession(token, SANDBOX_UI_VIEW_SCOPES, [
           SANDBOX_UI_HOST_REF_SENTINEL,
         ])
@@ -9087,7 +9145,7 @@ export class AppService {
       return await this.rpcClient.mintSandboxUiSession(rpc.token, ns, name)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.getRpcTokenForCurrentSession(token, SANDBOX_UI_VIEW_SCOPES, [
           SANDBOX_UI_HOST_REF_SENTINEL,
         ])
@@ -9137,7 +9195,7 @@ export class AppService {
       )
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         rpc = await issueRpc()
         result = await this.rpcClient.requestSandboxUiOauthAuthorizeUrl(
           rpc.token,
@@ -9203,6 +9261,7 @@ export class AppService {
     if (!server) throw new Error('mcpServerName is required')
     if (!targetHostRef) throw new Error('hostRef is required')
     const ctx = contextId ? String(contextId).trim() || undefined : undefined
+    this.captureSessionRequestContextForOperation()
     if (options?.confirmShared) {
       const confirmed = await this.confirmSharedConnectorAction('connect', server)
       if (!confirmed) return
@@ -9218,7 +9277,7 @@ export class AppService {
       // mutation, so a retried error is always a pre-effect rejection — the
       // authorize-url mint is idempotent regardless.
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
         result = await this.rpcClient.requestMcpOauthAuthorizeUrl(rpc.token, server, ctx)
       } else {
@@ -9252,7 +9311,7 @@ export class AppService {
       return await this.rpcClient.getConnectors(rpc.token)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         const retried = await this.issueRpcTokenForHostRefs(MCP_SERVERS_LIST_SCOPES, hostRefs)
         return this.rpcClient.getConnectors(retried.token)
       }
@@ -9280,6 +9339,7 @@ export class AppService {
     if (!server) throw new Error('mcpServerName is required')
     if (!targetHostRef) throw new Error('hostRef is required')
     const ctx = contextId ? String(contextId).trim() || undefined : undefined
+    this.captureSessionRequestContextForOperation()
     const confirmed = await this.confirmSharedConnectorAction(
       'disconnect',
       server,
@@ -9294,7 +9354,7 @@ export class AppService {
       // from its auth middleware BEFORE the upstream call, so a retried error is
       // always a pre-effect rejection — safe to re-mint (same hostRef) and retry.
       if (AppService.shouldRefreshRpcToken(error)) {
-        this.rpcTokenManager.clear()
+        this.clearRpcTokenCacheForCurrentRequest()
         rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
         await this.rpcClient.deleteMcpOauthGrant(rpc.token, server, ctx)
       } else {

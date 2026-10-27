@@ -23,21 +23,20 @@ vi.mock('electron', () => ({
     decryptString: vi.fn((value: Buffer) => value.toString('utf8')),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({ notifySessionChanged, unpinAllSandboxUiSurfaces: vi.fn() }),
 }))
 
 let userDataDirectory = ''
 let AppServiceClass: typeof import('../appService.js').AppService
-let QuitAdmissionClosedErrorClass: typeof import('../appService.js').QuitAdmissionClosedError
 let TokenStoreClass: typeof import('../tokenStore.js').TokenStore
 let activeEnvKey = ''
 let markerStore: typeof import('../pendingExternalLogout.js')
+let serviceForCleanup: InstanceType<typeof AppServiceClass> | null = null
 
 const user = {
   id: 'user-1',
@@ -67,83 +66,136 @@ beforeEach(async () => {
     import('../config.js'),
   ])
   AppServiceClass = appService.AppService
-  QuitAdmissionClosedErrorClass = appService.QuitAdmissionClosedError
   TokenStoreClass = tokenStore.TokenStore
   markerStore = marker
   activeEnvKey = config.getActiveEnvKey()
   const { safeStorage } = await import('electron')
   vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/me'))
+        return new Response(JSON.stringify(user), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      throw new Error(`unexpected HTTP request in isolated fixture: ${url}`)
+    })
+  )
 })
 
 afterEach(async () => {
-  if (userDataDirectory) await rm(userDataDirectory, { recursive: true, force: true })
+  if (serviceForCleanup) await serviceForCleanup.prepareForQuit()
+  serviceForCleanup = null
+  if (userDataDirectory)
+    await rm(userDataDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 })
   userDataDirectory = ''
   testRuntime.userDataDirectory = ''
   vi.resetModules()
 })
 
-describe('AppService pending logout when Keytar is unavailable', () => {
-  it('keeps a cleanup marker and restores verified safeStorage login while Keytar is unavailable', async () => {
-    const tokenStore = new TokenStoreClass()
+function createIsolatedTokenStore(): InstanceType<typeof TokenStoreClass> {
+  // These tests model an unavailable OS credential provider. Keep the profile
+  // isolated instead of mocking an invalid Keytar module shape, which correctly
+  // classifies as unknown and fails closed.
+  return new TokenStoreClass({ isolatedUserDataPath: userDataDirectory })
+}
+
+async function expectMemoryOnlyRestartFence(): Promise<void> {
+  const [{ getActiveEnvKey }, { readSessionAuthoritySourceSelection }] = await Promise.all([
+    import('../config.js'),
+    import('../sessionAuthorityAcceptance.js'),
+  ])
+  const selection = await readSessionAuthoritySourceSelection({
+    tokenStore: createIsolatedTokenStore(),
+    envKey: getActiveEnvKey(),
+  })
+  expect(selection).toMatchObject({ status: 'denied', frameMode: 'memory-only' })
+
+  const restarted = new AppServiceClass({
+    tokenStore: createIsolatedTokenStore(),
+    getUserDataDirectory: () => userDataDirectory,
+  })
+  const getMe = vi.spyOn(
+    (restarted as unknown as { authClient: { getMe: (token: string) => Promise<typeof user> } })
+      .authClient,
+    'getMe'
+  )
+  await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
+  expect(getMe).not.toHaveBeenCalled()
+}
+
+describe('AppService logout when Keytar is unavailable', () => {
+  it('keeps a durably signed-out V1 session denied when exact cleanup fails', async () => {
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://auth.example.test/api',
+      rpcProxyBaseUrl: '',
+    })
+    activeEnvKey = config.getActiveEnvKey()
+    const tokenStore = createIsolatedTokenStore()
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
     const service = new AppServiceClass({
       tokenStore,
       getUserDataDirectory: () => userDataDirectory,
     })
+    serviceForCleanup = service
+    const loginToken = 'test-token-new-file-backed-session'
     const authClient = (
       service as unknown as {
-        authClient: { getMe: (token: string) => Promise<typeof user> }
+        authClient: {
+          getMe: (token: string) => Promise<typeof user>
+          passwordLogin: (email: string, password: string) => Promise<unknown>
+        }
       }
     ).authClient
     vi.spyOn(authClient, 'getMe').mockResolvedValue(user)
-    const internals = service as unknown as {
-      sessionToken: string | null
-      me: typeof user | null
-      quitPreparationStarted: boolean
-      installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
-    }
-
-    await tokenStore.setSessionToken('test-token-old-keychain-session', activeEnvKey)
-    internals.sessionToken = 'test-token-old-keychain-session'
-    internals.me = user
-    internals.quitPreparationStarted = true
-
-    await expect(service.logout()).rejects.toBeInstanceOf(QuitAdmissionClosedErrorClass)
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-
-    service.cancelQuitPreparation()
-    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
-
-    await expect(
-      internals.installAuthenticatedLogin({ token: 'test-token-new-file-backed-session', me: user })
-    ).resolves.toEqual({ authenticated: true, me: user })
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(
-      'test-token-new-file-backed-session'
-    )
-    const files = await readdir(userDataDirectory)
-    expect(files).toContain(`session-token-${activeEnvKey}.enc`)
-    expect(files).not.toContain(`session-token-${activeEnvKey}.json`)
-    await expect(service.initialize()).resolves.toEqual({ authenticated: true, me: user })
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(
-      'test-token-new-file-backed-session'
-    )
-
-    const environmentId = createHash('sha256').update(activeEnvKey).digest('hex')
-    const marker = await readFile(
-      path.join(userDataDirectory, `pending-external-logout-${environmentId}`),
-      'utf8'
-    )
-    expect(marker).toContain('"intent":"keytar-cleanup-pending"')
+    vi.spyOn(authClient, 'passwordLogin').mockResolvedValue({ token: loginToken, me: user })
+    await expect(service.passwordLogin(user.email, 'synthetic-password')).resolves.toMatchObject({
+      authenticated: true,
+      me: user,
+    })
+    const [{ getActiveEnvKey }, { readSessionAuthoritySourceSelection }] = await Promise.all([
+      import('../config.js'),
+      import('../sessionAuthorityAcceptance.js'),
+    ])
+    const accepted = await readSessionAuthoritySourceSelection({
+      tokenStore,
+      envKey: getActiveEnvKey(),
+    })
+    expect(accepted.status).toBe('accepted')
+    if (accepted.status !== 'accepted') throw new Error('Fresh login was not accepted')
+    expect(accepted.session.token).toBe(loginToken)
+    expect(accepted.session.accepted.record.frame.source).toMatchObject({
+      format: 'v1',
+      kind: 'safe-storage',
+    })
+    const deleteSource = vi
+      .spyOn(tokenStore, 'deleteSessionCredentialSourceIfUnselectedWithProof')
+      .mockRejectedValue(new Error('synthetic secure-store deletion failure'))
+    await expect(service.logout()).resolves.toMatchObject({ kind: 'committed' })
+    expect(deleteSource).toHaveBeenCalledOnce()
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
+
+    const restarted = new AppServiceClass({
+      tokenStore: createIsolatedTokenStore(),
+      getUserDataDirectory: () => userDataDirectory,
+    })
+    const restartedAuthClient = (
+      restarted as unknown as {
+        authClient: { getMe: (token: string) => Promise<typeof user> }
+      }
+    ).authClient
+    const getMe = vi.spyOn(restartedAuthClient, 'getMe')
+    await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(getMe).not.toHaveBeenCalled()
+    await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBeNull()
   })
 
   it('does not restore a safeStorage token for an active-Keytar cleanup marker', async () => {
-    const tokenStore = new TokenStoreClass()
+    const tokenStore = createIsolatedTokenStore()
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
     await tokenStore.setSafeStorageSessionToken('stale-safe-storage-token', activeEnvKey)
@@ -171,7 +223,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
   it('retains a cleanup marker when canceled-quit retry cannot access Keytar', async () => {
     markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
     const service = new AppServiceClass({
-      tokenStore: new TokenStoreClass(),
+      tokenStore: createIsolatedTokenStore(),
       getUserDataDirectory: () => userDataDirectory,
     })
 
@@ -193,7 +245,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       })
       activeEnvKey = config.getActiveEnvKey()
       const token = validSessionToken()
-      const tokenStore = new TokenStoreClass()
+      const tokenStore = createIsolatedTokenStore()
       const service = new AppServiceClass({
         tokenStore,
         getUserDataDirectory: () => userDataDirectory,
@@ -231,7 +283,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       expect(state.sessionToken).toBe(token)
       expect(state.me).toEqual(user)
       expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual(
-        expect.objectContaining({ intent: 'memory-only-session' })
+        expect.objectContaining({ intent: 'acceptance-pending' })
       )
       const entries = await readdir(userDataDirectory, { withFileTypes: true })
       const files = entries.map(entry => entry.name)
@@ -242,8 +294,42 @@ describe('AppService pending logout when Keytar is unavailable', () => {
         const contents = await readFile(path.join(userDataDirectory, entry.name))
         expect(contents.includes(Buffer.from(token))).toBe(false)
       }
+      await expectMemoryOnlyRestartFence()
     }
   )
+
+  it('denies GFS session metadata reads after a memory-only lease expires', async () => {
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://auth.example.test/api',
+      rpcProxyBaseUrl: '',
+    })
+    activeEnvKey = config.getActiveEnvKey()
+    const tokenStore = createIsolatedTokenStore()
+    const service = new AppServiceClass({
+      tokenStore,
+      getUserDataDirectory: () => userDataDirectory,
+    })
+    const authClient = (
+      service as unknown as {
+        authClient: { passwordLogin: (email: string, password: string) => Promise<unknown> }
+      }
+    ).authClient
+    vi.spyOn(authClient, 'passwordLogin').mockResolvedValue({
+      token: validSessionToken(),
+      me: user,
+    })
+    await service.passwordLogin('user@example.com', 'synthetic-password')
+
+    const runtime = service as unknown as { memoryOnlySession: { expiresAt: number } | undefined }
+    expect(runtime.memoryOnlySession).toBeDefined()
+    runtime.memoryOnlySession!.expiresAt = Date.now() - 1
+
+    await expect(service.listGfsUploadSessions()).rejects.toThrow('Temporary session expired')
+    await expect(service.getGfsUploadSnapshot('synthetic-upload')).rejects.toThrow(
+      'GFS upload dispatch is unavailable without an active authenticated scope'
+    )
+  })
 
   it('uses memory-only mode when Linux safeStorage selects the basic_text backend', async () => {
     const hostPlatform = process.platform
@@ -253,7 +339,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       const { safeStorage } = await import('electron')
       vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
       const token = validSessionToken()
-      const tokenStore = new TokenStoreClass()
+      const tokenStore = createIsolatedTokenStore()
       const service = new AppServiceClass({
         tokenStore,
         getUserDataDirectory: () => userDataDirectory,
@@ -271,50 +357,73 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       expect(state.sessionToken).toBe(token)
       expect(
         markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
-      ).toMatchObject({ intent: 'memory-only-session' })
+      ).toMatchObject({ intent: 'acceptance-pending' })
       await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBeNull()
-      for (const file of await readdir(userDataDirectory)) {
+      for (const entry of await readdir(userDataDirectory, { withFileTypes: true })) {
+        if (!entry.isFile()) continue
         expect(
-          (await readFile(path.join(userDataDirectory, file))).includes(Buffer.from(token))
+          (await readFile(path.join(userDataDirectory, entry.name))).includes(Buffer.from(token))
         ).toBe(false)
       }
+      await expectMemoryOnlyRestartFence()
     } finally {
       Object.defineProperty(process, 'platform', { value: hostPlatform, configurable: true })
     }
   })
 
-  it('rejects temporary admission when the durable credential-source snapshot is unreadable', async () => {
+  it('ignores an unreadable legacy V0 fallback during fresh memory-only authentication', async () => {
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://auth.example.test/api',
+      rpcProxyBaseUrl: '',
+    })
+    activeEnvKey = config.getActiveEnvKey()
     const token = validSessionToken()
     const fallbackPath = path.join(userDataDirectory, `session-token-${activeEnvKey}.enc`)
     const targetPath = path.join(userDataDirectory, 'stale-fallback-target')
     await writeFile(targetPath, 'stale-fallback-value')
     await symlink(targetPath, fallbackPath)
     const service = new AppServiceClass({
-      tokenStore: new TokenStoreClass(),
+      tokenStore: createIsolatedTokenStore(),
       getUserDataDirectory: () => userDataDirectory,
     })
-    const state = service as unknown as {
-      installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
-      sessionToken: string | null
-      me: typeof user | null
-    }
-
-    await expect(state.installAuthenticatedLogin({ token, me: user })).rejects.toThrow(
-      'Session-token fallback is not a regular file'
+    const state = service as unknown as { sessionToken: string | null; me: typeof user | null }
+    const authClient = (
+      service as unknown as {
+        authClient: { passwordLogin: (email: string, password: string) => Promise<unknown> }
+      }
+    ).authClient
+    vi.spyOn(authClient, 'passwordLogin').mockResolvedValue({ token, me: user })
+    const getMe = vi.spyOn(
+      (
+        service as unknown as {
+          authClient: { getMe: (sessionToken: string) => Promise<typeof user> }
+        }
+      ).authClient,
+      'getMe'
     )
 
-    expect(state.sessionToken).toBeNull()
-    expect(state.me).toBeNull()
+    await expect(service.passwordLogin(user.email, 'synthetic-password')).resolves.toMatchObject({
+      authenticated: true,
+      sessionMode: 'temporary',
+      me: user,
+    })
+
+    expect(state.sessionToken).toBe(token)
+    expect(state.me).toEqual(user)
+    expect(getMe).not.toHaveBeenCalledWith('stale-fallback-value')
+    expect(await readFile(targetPath, 'utf8')).toBe('stale-fallback-value')
     expect(
-      markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)?.intent
-    ).not.toBe('memory-only-session')
+      markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+    ).toMatchObject({ intent: 'acceptance-pending' })
+    await expectMemoryOnlyRestartFence()
   })
 
-  it('converts a durable logout intent to a temporary-session fence after fresh authentication', async () => {
+  it('allows fresh memory-only authentication after LP and keeps restart denied after logout', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const token = validSessionToken()
     const service = new AppServiceClass({
-      tokenStore: new TokenStoreClass(),
+      tokenStore: createIsolatedTokenStore(),
       getUserDataDirectory: () => userDataDirectory,
     })
     const state = service as unknown as {
@@ -332,42 +441,73 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     expect(state.me).toEqual(user)
     expect(
       markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
-    ).toMatchObject({ intent: 'memory-only-session' })
+    ).toMatchObject({ intent: 'acceptance-pending' })
     expect(await readdir(userDataDirectory)).not.toContain(`session-token-${activeEnvKey}.json`)
-    await service.logout()
+    await expect(service.logout()).resolves.toMatchObject({ kind: 'committed' })
     expect(state.sessionToken).toBeNull()
     expect(
       markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
-    ).toMatchObject({ intent: 'memory-only-session' })
+    ).toMatchObject({ intent: 'logout-pending' })
+    const restarted = new AppServiceClass({
+      tokenStore: createIsolatedTokenStore(),
+      getUserDataDirectory: () => userDataDirectory,
+    })
+    await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
   })
 
-  it('does not extend the temporary absolute deadline during an in-memory team-token replacement', async () => {
-    const tokenStore = new TokenStoreClass()
+  it('does not extend the temporary deadline during a public memory-only team transition', async () => {
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://auth.example.test/api',
+      rpcProxyBaseUrl: '',
+    })
+    activeEnvKey = config.getActiveEnvKey()
+    const tokenStore = createIsolatedTokenStore()
     const service = new AppServiceClass({
       tokenStore,
       getUserDataDirectory: () => userDataDirectory,
     })
-    const internals = service as unknown as {
-      installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
-      commitSessionToken: (token: string) => Promise<void>
-      sessionToken: string | null
-      memoryOnlySession: { expiresAt: number } | undefined
-    }
-    await internals.installAuthenticatedLogin({ token: validSessionToken(), me: user })
-    const originalDeadline = internals.memoryOnlySession!.expiresAt
-
-    await internals.commitSessionToken(
-      validSessionToken(Math.floor(Date.now() / 1000) + 20 * 60 * 60)
+    const switchedUser = { ...user, teamId: 'team-2', teamName: 'Team 2' }
+    const initialToken = validSessionToken(Math.floor(Date.now() / 1000) + 3600)
+    const switchedToken = validSessionToken(Math.floor(Date.now() / 1000) + 7200)
+    const authClient = (
+      service as unknown as {
+        authClient: {
+          passwordLogin: (email: string, password: string) => Promise<unknown>
+          switchTeam: (token: string, teamId: string) => Promise<unknown>
+          getMe: (token: string) => Promise<typeof user>
+        }
+      }
+    ).authClient
+    vi.spyOn(authClient, 'passwordLogin').mockResolvedValue({ token: initialToken, me: user })
+    vi.spyOn(authClient, 'switchTeam').mockResolvedValue({ token: switchedToken })
+    vi.spyOn(authClient, 'getMe').mockImplementation(async token =>
+      token === switchedToken ? switchedUser : user
     )
+    await expect(service.passwordLogin(user.email, 'synthetic-password')).resolves.toMatchObject({
+      authenticated: true,
+      sessionMode: 'temporary',
+      me: user,
+    })
+    const originalDeadline = (service as unknown as { memoryOnlySession: { expiresAt: number } })
+      .memoryOnlySession.expiresAt
 
-    expect(internals.memoryOnlySession?.expiresAt).toBe(originalDeadline)
-    expect(internals.sessionToken).not.toBeNull()
+    await expect(service.switchTeam('team-2')).resolves.toMatchObject({
+      authenticated: true,
+      sessionMode: 'temporary',
+      me: switchedUser,
+    })
+
+    expect(
+      (service as unknown as { memoryOnlySession: { expiresAt: number } }).memoryOnlySession
+        .expiresAt
+    ).toBe(originalDeadline)
     await service.logout()
   })
 
   it('does not use an RPC token returned after the temporary session expires', async () => {
     const service = new AppServiceClass({
-      tokenStore: new TokenStoreClass(),
+      tokenStore: createIsolatedTokenStore(),
       getUserDataDirectory: () => userDataDirectory,
     })
     const internals = service as unknown as {
@@ -424,7 +564,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
 
   it('anchors the temporary deadline to server authentication, before persistence work', async () => {
     const service = new AppServiceClass({
-      tokenStore: new TokenStoreClass(),
+      tokenStore: createIsolatedTokenStore(),
       getUserDataDirectory: () => userDataDirectory,
     })
     const authenticatedAt = Date.now() - 30 * 60 * 1000
@@ -446,7 +586,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
   it('ends an expired temporary lease and leaves the durable restart fence in place', async () => {
     const notifySessionExpired = vi.fn()
     const service = new AppServiceClass({
-      tokenStore: new TokenStoreClass(),
+      tokenStore: createIsolatedTokenStore(),
       getUserDataDirectory: () => userDataDirectory,
       notifySessionExpired,
     })
@@ -469,20 +609,24 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     expect(notifySessionExpired).toHaveBeenCalledOnce()
     expect(
       markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
-    ).toMatchObject({ intent: 'memory-only-session' })
+    ).toMatchObject({ intent: 'acceptance-pending' })
+    await expectMemoryOnlyRestartFence()
   })
 
-  it('shares the auth-boundary drain when logout overlaps temporary-session expiry', async () => {
+  it('signs out before an asynchronous GFS drain and ignores stale temporary expiry', async () => {
     const service = new AppServiceClass({
-      tokenStore: new TokenStoreClass(),
+      tokenStore: createIsolatedTokenStore(),
       getUserDataDirectory: () => userDataDirectory,
     })
     const internals = service as unknown as {
       installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
       memoryOnlySession: { expiresAt: number } | undefined
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+      sessionToken: string | null
+      me: typeof user | null
     }
     await internals.installAuthenticatedLogin({ token: validSessionToken(), me: user })
+    expect(internals.memoryOnlySession).toBeDefined()
 
     let releaseDrain!: () => void
     let markDrainEntered!: () => void
@@ -503,21 +647,23 @@ describe('AppService pending logout when Keytar is unavailable', () => {
 
     const logout = service.logout()
     await drainEntered
-    internals.memoryOnlySession!.expiresAt = Date.now() - 1
-    expect(service.checkTemporarySessionExpiry()).toBe(true)
+    expect(internals.sessionToken).toBeNull()
+    expect(internals.me).toBeNull()
+    expect(internals.memoryOnlySession).toBeUndefined()
+    expect(service.checkTemporarySessionExpiry()).toBe(false)
     releaseDrain()
 
-    await expect(logout).resolves.toBeTypeOf('number')
+    await expect(logout).resolves.toMatchObject({ kind: 'committed' })
     expect(suspension).toHaveBeenCalledOnce()
     expect(
       markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
-    ).toMatchObject({ intent: 'memory-only-session' })
+    ).toMatchObject({ intent: 'logout-pending' })
   })
 
   it('rejects a token-bearing request before dispatch when the temporary lease has expired', async () => {
     const notifySessionExpired = vi.fn()
     const service = new AppServiceClass({
-      tokenStore: new TokenStoreClass(),
+      tokenStore: createIsolatedTokenStore(),
       getUserDataDirectory: () => userDataDirectory,
       notifySessionExpired,
     })
@@ -543,8 +689,9 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     expect(notifySessionExpired).toHaveBeenCalledOnce()
     expect(
       markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
-    ).toMatchObject({ intent: 'memory-only-session' })
+    ).toMatchObject({ intent: 'acceptance-pending' })
     await internals.memoryOnlySessionTermination
+    await expectMemoryOnlyRestartFence()
     vi.unstubAllGlobals()
   })
 
@@ -556,7 +703,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       { mode: 0o600 }
     )
     markerStore.recordMemoryOnlySessionIfMissing(userDataDirectory, activeEnvKey)
-    const tokenStore = new TokenStoreClass()
+    const tokenStore = createIsolatedTokenStore()
     const readSavedCredential = vi.spyOn(tokenStore, 'getSessionToken')
     const restarted = new AppServiceClass({
       tokenStore,

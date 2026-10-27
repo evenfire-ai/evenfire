@@ -10,6 +10,7 @@ const boundary = vi.hoisted(() => ({
   deletePassword: vi.fn(),
   notifySessionChanged: vi.fn(),
   openExternal: vi.fn(),
+  activeChatUserId: '' as string,
 }))
 const keyOf = (service: string, account: string) => `${service}::${account}`
 vi.mock('keytar', () => boundary)
@@ -24,8 +25,27 @@ vi.mock('electron', () => ({
   shell: { openExternal: boundary.openExternal },
 }))
 vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
+  bindChatStoreForUser: vi.fn(async (userId: string) => {
+    boundary.activeChatUserId = userId
+  }),
+  prepareChatStoreBindingForUser: vi.fn(async (userId: string) => ({
+    canPublish: () => true,
+    reservePublication: () => () => {
+      boundary.activeChatUserId = userId
+      return 1
+    },
+    afterPublication: vi.fn(),
+    discard: vi.fn(),
+  })),
+  unbindChatStore: vi.fn(() => {
+    boundary.activeChatUserId = ''
+  }),
+  requireChatStore: vi.fn(() => ({
+    getAuthorityScope: () =>
+      boundary.activeChatUserId
+        ? { environmentKey: 'fixture-r21', userId: boundary.activeChatUserId, teamId: null }
+        : null,
+  })),
   __setChatStoreBaseDirForTests: vi.fn(),
 }))
 vi.mock('../pluginSdkRuntime.js', () => ({
@@ -50,6 +70,7 @@ const homeMe = {
 beforeEach(async () => {
   vi.resetModules()
   vi.clearAllMocks()
+  boundary.activeChatUserId = ''
   boundary.openExternal.mockResolvedValue(undefined)
   vi.doMock('keytar', () => boundary)
   runtime.keychain.clear()
@@ -156,14 +177,27 @@ async function enteredWithin(promise: Promise<void>, label: string) {
 }
 
 describe('R9-M2 cold restore authentication authority', () => {
+  it('does not read a historical Keytar selector during current-client startup', async () => {
+    const h = await harness()
+    const historicalAccount = `Evenfire::session-token::${h.envKey}`
+    runtime.keychain.set(historicalAccount, 'fixture-historical-session-token')
+    const getMe = vi.spyOn(h.state.authClient, 'getMe')
+
+    await expect(h.service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+
+    expect(boundary.getPassword).not.toHaveBeenCalledWith('Evenfire', `session-token::${h.envKey}`)
+    expect(getMe).not.toHaveBeenCalled()
+    expect(runtime.keychain.get(historicalAccount)).toBe('fixture-historical-session-token')
+  })
+
   it('does not expose a saved token to OAuth before authentication and binding accept it', async () => {
     const previous = await harness()
     await previous.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
     const h = await harness()
     const getMeStarted = deferred()
     const releaseGetMe = deferred()
-    const setterStarted = deferred()
-    const releaseSetter = deferred()
+    const candidateWriteStarted = deferred()
+    const releaseCandidateWrite = deferred()
     const consentStarted = deferred()
     const releaseConsent = deferred()
     const fresh = 'fixture-admitted-fresh-session'
@@ -175,6 +209,9 @@ describe('R9-M2 cold restore authentication authority', () => {
       await releaseGetMe.promise
       return homeMe
     })
+    vi.mocked(h.state.authClient.getMe).mockImplementation(async token =>
+      token === fresh ? freshMe : homeMe
+    )
     vi.spyOn(h.state.authClient, 'issueRpcToken').mockImplementation(
       async (token, scopes, hosts) => {
         expect(token).toBe(homeToken)
@@ -195,12 +232,13 @@ describe('R9-M2 cold restore authentication authority', () => {
         return { authorizeUrl: homeConsent }
       }
     )
-    boundary.setPassword.mockImplementation(async (service, account, token) => {
-      if (token === fresh) {
-        setterStarted.resolve()
-        await releaseSetter.promise
+    const writeCandidate = h.tokenStore.writeSessionTokenCandidate.bind(h.tokenStore)
+    vi.spyOn(h.tokenStore, 'writeSessionTokenCandidate').mockImplementation(async input => {
+      if (input.token === fresh) {
+        candidateWriteStarted.resolve()
+        await releaseCandidateWrite.promise
       }
-      runtime.keychain.set(keyOf(service, account), token)
+      return writeCandidate(input)
     })
     const restore = h.service.initialize()
     let login: Promise<unknown> | undefined
@@ -218,15 +256,24 @@ describe('R9-M2 cold restore authentication authority', () => {
         'real cold-token consumer admission or rejection'
       )
       login = h.state.installAuthenticatedLogin({ token: fresh, me: freshMe })
-      await enteredWithin(setterStarted.promise, 'admitted Fresh native setter')
-      releaseSetter.resolve()
+      const freshLoginPhase = await Promise.race([
+        candidateWriteStarted.promise.then(() => 'candidate-source-write' as const),
+        login.then(
+          () => 'completed-before-candidate-source-write' as const,
+          error => {
+            throw error
+          }
+        ),
+      ])
+      expect(freshLoginPhase).toBe('candidate-source-write')
+      releaseCandidateWrite.resolve()
       await login
       releaseGetMe.resolve()
       releaseConsent.resolve()
       consentOutcome = await observedConsent
     } finally {
       releaseGetMe.resolve()
-      releaseSetter.resolve()
+      releaseCandidateWrite.resolve()
       releaseConsent.resolve()
       await Promise.allSettled([restore, login, consent])
     }
@@ -240,7 +287,14 @@ describe('R9-M2 cold restore authentication authority', () => {
     })
     expect(h.state.sessionToken).toBe(fresh)
     expect(h.state.me).toEqual(freshMe)
-    await expect(h.tokenStore.getKeytarSessionToken(h.envKey)).resolves.toBe(fresh)
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const selected = await readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Fresh session source was not accepted')
+    expect(selected.session.token).toBe(fresh)
     expect(boundary.openExternal).not.toHaveBeenCalledWith(homeConsent)
     expect(consentOutcome).toMatchObject({ status: 'rejected', error: expect.any(Error) })
   })

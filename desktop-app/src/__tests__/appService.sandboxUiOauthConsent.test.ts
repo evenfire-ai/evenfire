@@ -93,7 +93,7 @@ const AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth?...'
 describe('AppService.requestSandboxUiOauthAuthorize', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.getOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mocks.getOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
     mocks.requestSandboxUiOauthAuthorizeUrl.mockResolvedValue({ authorizeUrl: AUTHORIZE_URL })
     mocks.getFocusedWindow.mockReturnValue(null)
     // Default: user clicks Allow (response=1)
@@ -237,8 +237,8 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
       .mockRejectedValueOnce(new ApiError('Unauthorized', 401, ''))
       .mockResolvedValueOnce({ authorizeUrl: AUTHORIZE_URL })
     mocks.getOrIssue
-      .mockResolvedValueOnce({ token: 'rpc-token-old' })
-      .mockResolvedValueOnce({ token: 'rpc-token-new' })
+      .mockResolvedValueOnce({ token: 'rpc-token-old', expiresInSeconds: 300 })
+      .mockResolvedValueOnce({ token: 'rpc-token-new', expiresInSeconds: 300 })
     mocks.showMessageBox.mockResolvedValue({ response: 1 })
 
     const svc = makeService()

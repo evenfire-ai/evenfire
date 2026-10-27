@@ -16,12 +16,11 @@ import {
   reportDesktopEnvironmentSelected,
   resolveDesktopEnvironmentRestMatch,
 } from './desktopEnvironmentHandoff'
-import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
+import type { SetStatusFn } from './types'
 
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
-  logoutForEnvironmentMismatch: () => Promise<number | null>
 }
 
 function isInvitationExpiredError(error: unknown) {
@@ -58,11 +57,7 @@ function getDesktopSetupErrorMessage(error: unknown) {
   return 'Desktop setup could not be completed.'
 }
 
-export function useAuthController({
-  setStatus,
-  onSessionNeedsLoad,
-  logoutForEnvironmentMismatch,
-}: UseAuthControllerParams) {
+export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthControllerParams) {
   const [booting, setBootingState] = useState(true)
   const bootingRef = useRef(true)
   const setBooting = useCallback((next: boolean) => {
@@ -110,30 +105,6 @@ export function useAuthController({
   const [desktopEnvironmentSetupComplete, setDesktopEnvironmentSetupComplete] = useState(false)
   const [pendingDesktopEnvironmentSetup, setPendingDesktopEnvironmentSetup] =
     useState<DesktopRuntimeConfig | null>(null)
-  const [
-    pendingDesktopEnvironmentSwitchConfirmation,
-    setPendingDesktopEnvironmentSwitchConfirmation,
-  ] = useState<DesktopEnvironmentSwitchConfirmation | null>(null)
-  const desktopEnvironmentSwitchConfirmationResolver = useRef<
-    ((confirmed: boolean) => void) | null
-  >(null)
-
-  const requestEnvironmentSwitchConfirmation = useCallback(
-    (details: DesktopEnvironmentSwitchConfirmation) =>
-      new Promise<boolean>(resolve => {
-        desktopEnvironmentSwitchConfirmationResolver.current?.(false)
-        desktopEnvironmentSwitchConfirmationResolver.current = resolve
-        setPendingDesktopEnvironmentSwitchConfirmation(details)
-      }),
-    []
-  )
-
-  const resolveEnvironmentSwitchConfirmation = useCallback((confirmed: boolean) => {
-    const resolve = desktopEnvironmentSwitchConfirmationResolver.current
-    desktopEnvironmentSwitchConfirmationResolver.current = null
-    setPendingDesktopEnvironmentSwitchConfirmation(null)
-    resolve?.(confirmed)
-  }, [])
 
   const runtimeConfigMissing = Boolean(runtimeConfigState && !runtimeConfigState.configured)
   const showRuntimeConfigSelector = Boolean(
@@ -156,6 +127,13 @@ export function useAuthController({
     }),
     []
   )
+
+  const clearAuthAfterSessionReloadFailure = useCallback(() => {
+    setIsAuthenticated(false)
+    setMe(null)
+    setPassword('')
+    setTemporarySessionExpiresAt(null)
+  }, [setIsAuthenticated])
 
   const refreshRuntimeConfigState = useCallback(async () => {
     const state = await window.clerum.auth.getRuntimeConfigState()
@@ -225,6 +203,23 @@ export function useAuthController({
       setStatus('Signed out after password update.', 'info')
     })
   }, [setStatus])
+
+  useEffect(() => {
+    return window.clerum.auth.onSessionStateChanged(() => {
+      void onSessionNeedsLoad({ preserveNav: true }).catch(error => {
+        // A state-change notification follows an authoritative main-process read. If the
+        // renderer's reconciliation read fails, do not retain a stale authenticated view.
+        setIsAuthenticated(false)
+        setMe(null)
+        setPassword('')
+        setTemporarySessionExpiresAt(null)
+        setStatus(
+          `Could not verify the current session. Please sign in again. ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+      })
+    })
+  }, [onSessionNeedsLoad, setStatus])
 
   useEffect(() => {
     return window.clerum.auth.onSessionExpired(() => {
@@ -508,26 +503,20 @@ export function useAuthController({
         refreshRuntimeConfigState,
         handleSelectRuntimeConfig: handleSelectRuntimeConfigForHandoff,
         onSessionNeedsLoad,
-        requestEnvironmentSwitchConfirmation,
-        logoutForEnvironmentMismatch,
+        onSessionReloadFailed: clearAuthAfterSessionReloadFailure,
         setPendingDesktopEnvironmentSetup,
         setStatus,
       })
     )
     return () => {
       unsubscribe()
-      const resolve = desktopEnvironmentSwitchConfirmationResolver.current
-      desktopEnvironmentSwitchConfirmationResolver.current = null
-      setPendingDesktopEnvironmentSwitchConfirmation(null)
-      resolve?.(false)
     }
   }, [
     getDesktopEnvironmentHandoffAuthState,
     getSessionGeneration,
     handleSelectRuntimeConfigForHandoff,
-    logoutForEnvironmentMismatch,
+    clearAuthAfterSessionReloadFailure,
     onSessionNeedsLoad,
-    requestEnvironmentSwitchConfirmation,
     refreshRuntimeConfigState,
     setStatus,
   ])
@@ -560,23 +549,6 @@ export function useAuthController({
       toast: true,
     })
   }
-
-  const handleCancelDesktopEnvironmentSwitchConfirmation = useCallback(() => {
-    resolveEnvironmentSwitchConfirmation(false)
-    setStatus(
-      'Environment switch cancelled. Your current session remains active.',
-      'info',
-      undefined,
-      {
-        global: false,
-        toast: true,
-      }
-    )
-  }, [resolveEnvironmentSwitchConfirmation, setStatus])
-
-  const handleConfirmDesktopEnvironmentSwitchConfirmation = useCallback(() => {
-    resolveEnvironmentSwitchConfirmation(true)
-  }, [resolveEnvironmentSwitchConfirmation])
 
   const handleConfirmDesktopEnvironmentSetup = async (): Promise<void> => {
     const nextConfig = pendingDesktopEnvironmentSetup
@@ -711,11 +683,30 @@ export function useAuthController({
         }
         setPendingDesktopEnvironmentSetup(null)
         reportDesktopEnvironmentSelected(selection.runtimeConfigState, setStatus)
+        let reloadError: unknown
         try {
           await onSessionNeedsLoad({ preserveNav: true })
         } catch (error) {
+          reloadError = error
+        }
+        let reloadedSessionGeneration: number
+        try {
+          reloadedSessionGeneration = await getSessionGeneration()
+        } catch {
+          setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
+          return
+        }
+        if (reloadedSessionGeneration !== selection.sessionGeneration) {
+          reportSessionChanged()
+          return
+        }
+        if (reloadError !== undefined) {
+          setIsAuthenticated(false)
+          setMe(null)
+          setPassword('')
+          setTemporarySessionExpiresAt(null)
           setStatus(
-            `Could not load the selected desktop environment: ${error instanceof Error ? error.message : String(error)}`,
+            `Could not load the selected desktop environment: ${reloadError instanceof Error ? reloadError.message : String(reloadError)}`,
             'error'
           )
         }
@@ -785,7 +776,6 @@ export function useAuthController({
     desktopReleaseStatus,
     desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup,
-    pendingDesktopEnvironmentSwitchConfirmation,
     backendSwitchHint,
     runtimeConfigMissing,
     showRuntimeConfigSelector,
@@ -820,8 +810,6 @@ export function useAuthController({
     handleClearRuntimeConfigSelection,
     handleCancelDesktopEnvironmentSetup,
     handleConfirmDesktopEnvironmentSetup,
-    handleCancelDesktopEnvironmentSwitchConfirmation,
-    handleConfirmDesktopEnvironmentSwitchConfirmation,
     refreshDesktopReleaseStatus,
     handleOpenDesktopRelease,
   }

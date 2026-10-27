@@ -1,8 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { establishAcceptedPasswordSession } from '../../testSupport/acceptedPasswordSession.js'
+import { testSessionMe, testSessionTokenForIdentity } from '../../testSupport/authTestFixtures.js'
 // ── import after mocks are set up ─────────────────────────────────────────────
 
 import { AppService } from '../appService.js'
 import { ApiError } from '../httpClient.js'
+import { TokenStore } from '../tokenStore.js'
+
+const fixture = vi.hoisted(() => ({ directory: '' }))
+const sessionMe = testSessionMe({ id: '7', teamId: 'team-1' })
+const sessionToken = testSessionTokenForIdentity(sessionMe.id, sessionMe.teamId)
 
 // ── mock dependencies before AppService is imported ──────────────────────────
 
@@ -10,6 +20,9 @@ vi.mock('../config.js', () => ({
   getActiveEnvKey: () => 'test_env-000000000000',
   getActiveRuntimeConfigOptionId: () => null,
   getActiveLegacyEnvKeys: () => [],
+  getActiveLegacyEnvKeyInventory: () => ({ keys: [], complete: true }),
+  hydrateDesktopRuntimeConfig: vi.fn(),
+  isDesktopRuntimeConfigured: () => true,
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -17,6 +30,15 @@ vi.mock('../config.js', () => ({
     requestTimeoutMs: 60000,
     appName: 'test',
   },
+}))
+
+vi.mock('electron', () => ({
+  app: {
+    getPath: () => fixture.directory,
+    isPackaged: false,
+    isReady: () => true,
+  },
+  safeStorage: { isEncryptionAvailable: () => false },
 }))
 
 const mockGetOrIssue = vi.fn()
@@ -49,15 +71,29 @@ vi.mock('../authClient.js', () => ({
   AuthClient: class {
     health = vi.fn().mockResolvedValue({ status: 'ok' })
     getMe = vi.fn()
+    passwordLogin = vi.fn()
   },
 }))
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-function makeService(): AppService {
-  const svc = new AppService()
-  ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
-  ;(svc as unknown as { me: unknown }).me = { id: 1, teamId: 'team-1' }
+const tempDirectories: string[] = []
+
+async function makeService(): Promise<AppService> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-host-waking-'))
+  tempDirectories.push(directory)
+  fixture.directory = directory
+  const svc = new AppService({
+    tokenStore: new TokenStore({ isolatedUserDataPath: directory }),
+    getUserDataDirectory: () => directory,
+  })
+  await establishAcceptedPasswordSession(svc, { token: sessionToken, me: sessionMe })
+  mockRpcTokenManagerClear.mockClear()
+  ;(svc as any).rpcTokenManager = {
+    getOrIssue: mockGetOrIssue,
+    clear: mockRpcTokenManagerClear,
+    getMetadata: mockRpcTokenManagerGetMetadata,
+  }
   return svc
 }
 
@@ -87,11 +123,18 @@ function drainingApiError(): ApiError {
 describe('AppService.invokeHostMessage host-availability plumbing', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
+  })
+
+  afterEach(async () => {
+    vi.useRealTimers()
+    await Promise.all(
+      tempDirectories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true }))
+    )
   })
 
   it('maps a structured host_waking 503 to a stable error carrying the code token', async () => {
-    const svc = makeService()
+    const svc = await makeService()
     mockInvokeHostMessage.mockRejectedValue(wakingApiError())
 
     await expect(svc.invokeHostMessage('myhost', { content: 'hi' })).rejects.toThrow(
@@ -103,7 +146,7 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
   })
 
   it('maps a structured host_draining 503 to a stable error carrying the code token', async () => {
-    const svc = makeService()
+    const svc = await makeService()
     mockInvokeHostMessage.mockRejectedValue(drainingApiError())
 
     await expect(svc.invokeHostMessage('myhost', { content: 'hi' })).rejects.toThrow(
@@ -112,7 +155,7 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
   })
 
   it('maps host_waking thrown on the post-refresh retry as well', async () => {
-    const svc = makeService()
+    const svc = await makeService()
     mockInvokeHostMessage
       .mockRejectedValueOnce(new ApiError('401 Unauthorized: bad token', 401, ''))
       .mockRejectedValueOnce(wakingApiError())
@@ -124,14 +167,14 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
     expect(mockInvokeHostMessage).toHaveBeenCalledTimes(2)
     expect(mockGetOrIssue).toHaveBeenNthCalledWith(
       1,
-      'session-token',
+      sessionToken,
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
       ['myhost'],
       expect.any(String)
     )
     expect(mockGetOrIssue).toHaveBeenNthCalledWith(
       2,
-      'session-token',
+      sessionToken,
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
       ['myhost'],
       expect.any(String)
@@ -139,7 +182,7 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
   })
 
   it('leaves a plain 503 without an availability code untouched', async () => {
-    const svc = makeService()
+    const svc = await makeService()
     const plain = new ApiError('503 Service Unavailable: overloaded', 503, '{"error":"busy"}')
     mockInvokeHostMessage.mockRejectedValue(plain)
 
@@ -147,7 +190,7 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
   })
 
   it('forwards an optional piggybacked model through the field allow-list (R2 Option A)', async () => {
-    const svc = makeService()
+    const svc = await makeService()
     mockInvokeHostMessage.mockResolvedValue({ taskId: 't1', status: 'pending' })
 
     await svc.invokeHostMessage('myhost', { content: 'hi', model: 'claude-opus-4-8' })
@@ -163,7 +206,7 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
   })
 
   it('omits model when no selection is piggybacked (additive/optional)', async () => {
-    const svc = makeService()
+    const svc = await makeService()
     mockInvokeHostMessage.mockResolvedValue({ taskId: 't2', status: 'pending' })
 
     await svc.invokeHostMessage('myhost', { content: 'hi' })

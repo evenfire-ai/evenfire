@@ -54,10 +54,8 @@ describe('actual selected credential read provenance', () => {
   it.each([
     { source: 'keytar', scope: 'environment' },
     { source: 'safe-storage', scope: 'environment' },
-    { source: 'historical-plaintext', scope: 'environment' },
     { source: 'keytar', scope: 'global' },
     { source: 'safe-storage', scope: 'global' },
-    { source: 'historical-plaintext', scope: 'global' },
   ] as const)(
     'does not adopt or mutate a legacy $scope $source during verification-only selection',
     async ({ source, scope }) => {
@@ -66,14 +64,7 @@ describe('actual selected credential read provenance', () => {
         await store.setSessionToken('fixture-legacy-only', LEGACY_ENV, { requireKeytar: true })
       else if (source === 'safe-storage')
         await store.setSafeStorageSessionToken('fixture-legacy-only', LEGACY_ENV)
-      else {
-        fixture.encryptionAvailable = false
-        await new TokenStore({ isolatedUserDataPath: fixture.directory }).setSessionToken(
-          'fixture-legacy-only',
-          LEGACY_ENV
-        )
-        fixture.encryptionAvailable = true
-      }
+      else await store.setSafeStorageSessionToken('fixture-legacy-only', LEGACY_ENV)
       const keytar = await import('keytar')
       if (scope === 'global') {
         if (source === 'keytar') {
@@ -81,7 +72,7 @@ describe('actual selected credential read provenance', () => {
           await keytar.setPassword('Evenfire', 'session-token', 'fixture-legacy-only')
           await keytar.deletePassword('Evenfire', `session-token::${LEGACY_ENV}`)
         } else {
-          const extension = source === 'safe-storage' ? 'enc' : 'json'
+          const extension = 'enc'
           await fs.rename(
             path.join(fixture.directory, `session-token-${LEGACY_ENV}.${extension}`),
             path.join(fixture.directory, `session-token.${extension}`)
@@ -121,15 +112,7 @@ describe('actual selected credential read provenance', () => {
         expect(await store.getKeytarSessionToken(LEGACY_ENV)).toBe('fixture-legacy-only')
       else if (source === 'safe-storage')
         expect(await store.getSafeStorageSessionToken(LEGACY_ENV)).toBe('fixture-legacy-only')
-      else
-        expect(
-          JSON.parse(
-            await fs.readFile(
-              path.join(fixture.directory, `session-token-${LEGACY_ENV}.json`),
-              'utf8'
-            )
-          ).token
-        ).toBe('fixture-legacy-only')
+      else expect(await store.getSafeStorageSessionToken(LEGACY_ENV)).toBe('fixture-legacy-only')
     }
   )
   it('reports native selection rather than the coincidental presence of a different encrypted value', async () => {
@@ -150,7 +133,7 @@ describe('actual selected credential read provenance', () => {
     expect(await store.getSafeStorageSessionToken(ENV)).toBe('fixture-encrypted-unselected')
   })
 
-  it('reports the real encrypted selection while an older native credential is locked', async () => {
+  it('does not select safeStorage while the preferred Keytar credential is locked', async () => {
     const store = new TokenStore()
     await store.setSessionToken('fixture-native-older', ENV, { requireKeytar: true })
     await store.setSafeStorageSessionToken('fixture-encrypted-selected', ENV)
@@ -159,14 +142,15 @@ describe('actual selected credential read provenance', () => {
     const onMutationDispatched = vi.fn()
     await expect(
       new TokenStore().getSessionToken(ENV, { onTokenRead, onMutationDispatched })
-    ).resolves.toBe('fixture-encrypted-selected')
-    expect(onTokenRead.mock.calls).toEqual([['safe-storage', expect.any(Object)]])
+    ).rejects.toMatchObject({ name: 'SessionCredentialSourceObservationError' })
+    expect(onTokenRead).not.toHaveBeenCalled()
     expect(onMutationDispatched).not.toHaveBeenCalled()
     fixture.nativeReadLocked = false
     expect(await store.getKeytarSessionToken(ENV)).toBe('fixture-native-older')
+    expect(await store.getSafeStorageSessionToken(ENV)).toBe('fixture-encrypted-selected')
   })
 
-  it('reports historical plaintext distinctly without dispatching a new write', async () => {
+  it('does not read or report historical plaintext as production credential authority', async () => {
     fixture.encryptionAvailable = false
     await new TokenStore({ isolatedUserDataPath: fixture.directory }).setSessionToken(
       'fixture-historical',
@@ -174,12 +158,14 @@ describe('actual selected credential read provenance', () => {
     )
     const onTokenRead = vi.fn()
     const onMutationDispatched = vi.fn()
+    const plaintextPath = path.join(fixture.directory, `session-token-${ENV}.json`)
+    const originalBytes = await fs.readFile(plaintextPath)
     await expect(
       new TokenStore().getSessionToken(ENV, { onTokenRead, onMutationDispatched })
-    ).resolves.toBe('fixture-historical')
-    expect(onTokenRead.mock.calls).toEqual([['historical-plaintext', expect.any(Object)]])
+    ).resolves.toBeNull()
+    expect(onTokenRead).not.toHaveBeenCalled()
     expect(onMutationDispatched).not.toHaveBeenCalled()
-    expect(await fs.readdir(fixture.directory)).toEqual([`session-token-${ENV}.json`])
+    await expect(fs.readFile(plaintextPath)).resolves.toEqual(originalBytes)
   })
 
   it('does not report a source when the actual credential is absent', async () => {
@@ -219,20 +205,14 @@ describe('actual selected credential read provenance', () => {
     expect(restartedRead.mock.calls).toEqual([['safe-storage', expect.any(Object)]])
   })
 
-  it.each(['keytar', 'safe-storage', 'historical-plaintext', 'migration'] as const)(
+  it.each(['keytar', 'safe-storage', 'migration'] as const)(
     'propagates %s metadata failure instead of authorizing another source',
     async source => {
       const store = new TokenStore()
       if (source === 'keytar') await store.setSessionToken('fixture-selected', ENV)
       else if (source === 'safe-storage')
         await store.setSafeStorageSessionToken('fixture-selected', ENV)
-      else if (source === 'historical-plaintext') {
-        fixture.encryptionAvailable = false
-        await new TokenStore({ isolatedUserDataPath: fixture.directory }).setSessionToken(
-          'fixture-selected',
-          ENV
-        )
-      } else await store.setSessionToken('fixture-selected', LEGACY_ENV)
+      else await store.setSessionToken('fixture-selected', LEGACY_ENV)
       const failure = new Error('fixture-metadata observer rejected')
       const onTokenRead = vi.fn(() => {
         throw failure

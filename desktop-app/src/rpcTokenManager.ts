@@ -8,6 +8,7 @@ type RpcCache = {
   scopes: RpcScope[]
   hostRefs: string[]
   expiresAtMs: number
+  expiresAtMonotonicMs: number
   bindingKey: string
 }
 
@@ -23,7 +24,10 @@ export class RpcTokenManager {
   private cacheGeneration = 0
   private activeBindingKey = ''
 
-  constructor(private readonly authClient: AuthClient) {}
+  constructor(
+    private readonly authClient: AuthClient,
+    private readonly nowMonotonic: () => number = () => performance.now()
+  ) {}
 
   clear(): void {
     this.cacheGeneration += 1
@@ -44,13 +48,39 @@ export class RpcTokenManager {
 
   private satisfies(requiredScopes: RpcScope[], requestedHostRefs?: string[]): boolean {
     if (!this.cache) return false
-    if (Date.now() >= this.cache.expiresAtMs - 5000) return false
+    if (this.nowMonotonic() >= this.cache.expiresAtMonotonicMs - 5000) return false
     if (!requiredScopes.every(scope => this.cache!.scopes.includes(scope))) return false
     if (requestedHostRefs && requestedHostRefs.length > 0) {
       if (this.cache.hostRefs.length === 0) return false
       return requestedHostRefs.every(ref => this.cache!.hostRefs.includes(ref))
     }
     return true
+  }
+
+  /** Read an already cached credential without minting or mutating cache state. */
+  peekCached(
+    requiredScopes: RpcScope[],
+    requestedHostRefs: string[] | undefined,
+    bindingKey: string
+  ): RpcTokenResult | null {
+    if (
+      !this.cache ||
+      this.activeBindingKey !== bindingKey ||
+      this.cache.bindingKey !== bindingKey ||
+      !this.satisfies(requiredScopes, requestedHostRefs)
+    )
+      return null
+    return {
+      token: this.cache.token,
+      accessScope: this.cache.accessScope,
+      teamId: this.cache.teamId,
+      scopes: this.cache.scopes,
+      hostRefs: this.cache.hostRefs,
+      expiresInSeconds: Math.max(
+        0,
+        Math.floor((this.cache.expiresAtMonotonicMs - this.nowMonotonic()) / 1000)
+      ),
+    }
   }
 
   async getOrIssue(
@@ -75,7 +105,10 @@ export class RpcTokenManager {
         teamId: this.cache.teamId,
         scopes: this.cache.scopes,
         hostRefs: this.cache.hostRefs,
-        expiresInSeconds: Math.max(0, Math.floor((this.cache.expiresAtMs - Date.now()) / 1000)),
+        expiresInSeconds: Math.max(
+          0,
+          Math.floor((this.cache.expiresAtMonotonicMs - this.nowMonotonic()) / 1000)
+        ),
       }
     }
 
@@ -88,6 +121,10 @@ export class RpcTokenManager {
     if (generation !== this.cacheGeneration || this.activeBindingKey !== bindingKey) {
       throw new RpcTokenIssuanceSupersededError()
     }
+    if (!Number.isSafeInteger(issued.expiresInSeconds) || issued.expiresInSeconds <= 0) {
+      throw new Error('RPC token issuer returned an invalid expiration interval')
+    }
+    const issuedAtMonotonicMs = this.nowMonotonic()
     this.cache = {
       token: issued.token,
       accessScope: issued.accessScope,
@@ -95,6 +132,7 @@ export class RpcTokenManager {
       scopes: issued.scopes,
       hostRefs: issued.hostRefs,
       expiresAtMs: Date.now() + issued.expiresInSeconds * 1000,
+      expiresAtMonotonicMs: issuedAtMonotonicMs + issued.expiresInSeconds * 1000,
       bindingKey,
     }
     return issued

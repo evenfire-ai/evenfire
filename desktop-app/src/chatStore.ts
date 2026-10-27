@@ -406,8 +406,20 @@ export class ChatStore {
   }
 
   setAuthorityScope(scope: ChatAuthorityScope): void {
-    this.authorityScope = Object.freeze({ ...scope })
-    this.pendingCleanupSweep = true
+    this.prepareAuthorityScopePublication(scope)()
+  }
+
+  /**
+   * Freeze and allocate a new authorization scope before a durable session commit. The returned
+   * publisher contains only pointer/flag assignments, so transaction callbacks do not allocate or
+   * perform fallible validation after the authority linearization point.
+   */
+  prepareAuthorityScopePublication(scope: ChatAuthorityScope): () => void {
+    const preparedScope = Object.freeze({ ...scope })
+    return () => {
+      this.authorityScope = preparedScope
+      this.pendingCleanupSweep = true
+    }
   }
 
   getAuthorityScope(): ChatAuthorityScope | null {
@@ -617,7 +629,8 @@ export class ChatStore {
   }
 
   private async syncFile(filePath: string): Promise<void> {
-    const handle = await fs.open(filePath, 'r')
+    // Windows FlushFileBuffers requires a handle opened with write access.
+    const handle = await fs.open(filePath, 'r+')
     try {
       await handle.sync()
     } finally {

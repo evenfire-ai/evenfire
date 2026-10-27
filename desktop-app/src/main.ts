@@ -21,6 +21,8 @@ import {
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import {
+  createDeferredExternalLogoutFailureHandler,
+  createDeferredExternalLogoutStateRefreshHandler,
   createMainWindowCoordinator,
   createRetryableInitializer,
   isQuitAdmissionClosedError,
@@ -96,13 +98,22 @@ registerQuitDrain(
           mainWindow.webContents.send('auth:externalLogout')
         }
       },
-      error => {
-        const errorName = error instanceof Error && error.name ? error.name : typeof error
-        console.error(`[Desktop] Deferred external logout failed (${errorName}).`)
-        if (!appService.getCachedUserId() && mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('auth:externalLogout')
-        }
-      }
+      createDeferredExternalLogoutFailureHandler({
+        getCachedUserId: () => appService.getCachedUserId(),
+        getWindow: () => mainWindow,
+        reportFailure: error => {
+          const errorName = error instanceof Error && error.name ? error.name : typeof error
+          console.error(`[Desktop] Deferred external logout failed (${errorName}).`)
+        },
+      }),
+      createDeferredExternalLogoutStateRefreshHandler({
+        getCachedUserId: () => appService.getCachedUserId(),
+        getWindow: () => mainWindow,
+      }),
+      createDeferredExternalLogoutStateRefreshHandler({
+        getCachedUserId: () => appService.getCachedUserId(),
+        getWindow: () => mainWindow,
+      })
     )
   },
   error => {
