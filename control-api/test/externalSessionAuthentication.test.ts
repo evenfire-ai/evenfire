@@ -5,6 +5,7 @@ import { config } from '../src/config.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import {
   authenticateExternalUserSession,
+  externalSessionUserIdForRateLimit,
   renewExternalUserSession,
 } from '../src/services/auth/externalSessionAuthentication.js'
 import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
@@ -222,5 +223,14 @@ describe('external user-session authentication boundary', () => {
         policy: policy({ issueV2: true, renewV2: true }),
       })
     ).resolves.toMatchObject({ status: 'renewed', session: { token: 'synthetic-successor' } })
+  })
+})
+
+describe('externalSessionUserIdForRateLimit', () => {
+  it('keys V1 and V2 sessions on the signed user, never on a shared fallback', () => {
+    const identity = validIdentity()
+    expect(externalSessionUserIdForRateLimit(v2Token(identity))).toBe(identity.userId)
+    expect(externalSessionUserIdForRateLimit(v1Token())).toBe(userId)
+    expect(externalSessionUserIdForRateLimit('not-a-session-token')).toBeNull()
   })
 })

@@ -85,8 +85,13 @@ export type ExternalSessionAuthorityContext = Readonly<
  * This does not establish current session authority; protected work must still
  * pass through authenticateExternalUserSession and its live lifecycle checks.
  */
+/**
+ * Signature-only subject for limiters that run before live authentication.
+ * Both session contracts key on the user, so V2 sessions never fall back to a
+ * shared source-IP bucket. No database work happens here.
+ */
 export function externalSessionUserIdForRateLimit(token: string): string | null {
-  return verifyExternalSessionToken(token)?.userId ?? null
+  return verifyUserSessionV2Token(token)?.sub ?? verifyExternalSessionToken(token)?.userId ?? null
 }
 
 function clientMeetsMinimum(
