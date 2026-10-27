@@ -4,7 +4,7 @@
   "description": "gfs-controller (gfsc) — brokered HTTP file API over the Global File System drive",
   "main": "dist/index.js",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "build": "tsc",

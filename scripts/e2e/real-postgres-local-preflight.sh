@@ -19,7 +19,7 @@ real_pg_local_preflight() {
   local project_dir="${1:-}"
   local require_docker="${2:-true}"
   local started_seconds="${SECONDS:-0}"
-  local command_name node_major package package_dir docker_timeout docker_kill_grace
+  local command_name node_major node_version package package_dir docker_timeout docker_kill_grace
 
   REAL_PG_PREFLIGHT_ERROR_CODE=""
   REAL_PG_PREFLIGHT_ERROR_MESSAGE=""
@@ -43,9 +43,11 @@ real_pg_local_preflight() {
   # CI and the local runtime contract pin Node 24. Newer majors have already
   # changed deep-JSON behavior and must fail before T0 rather than pass the
   # old ">=24" check and break package suites mid-flight.
-  if ! [[ "$node_major" =~ ^[0-9]+$ ]] || (( node_major != 24 )); then
+  if ! [[ "$node_major" =~ ^[0-9]+$ ]] || (( node_major != 24 )) ||
+    ! node "$REAL_PG_PREFLIGHT_SCRIPT_DIR/../check-node-version.cjs" --major=24 >/dev/null 2>&1; then
+    node_version="$(node --version 2>/dev/null || true)"
     real_pg_preflight_fail LOCAL_DEPENDENCY_MISSING \
-      "Node.js 24.x is required for the canonical T0/T1/T2 harness; found ${node_major:-unknown}"
+      "Node.js 24.x at or above the .nvmrc security patch is required for the canonical T0/T1/T2 harness; found ${node_version:-unknown}"
     return 1
   fi
 

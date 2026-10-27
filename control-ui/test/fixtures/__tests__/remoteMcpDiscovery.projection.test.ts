@@ -15,6 +15,7 @@ import {
   LINEAR_DISCOVER,
   NOTION_DISCOVER,
   PRE_REGISTERED_PER_SERVER_DISCOVER,
+  WORKIQ_DISCOVER,
 } from '../remoteMcpWire'
 
 /**
@@ -33,6 +34,10 @@ describe('remote MCP `/discover` goldens carry the callback contract the wizard 
     expect(NOTION_DISCOVER.callback?.variant).toBe('per-server')
     expect(ATLASSIAN_DISCOVER.detected.registrationMode).toBe('dcr')
     expect(PRE_REGISTERED_PER_SERVER_DISCOVER.detected.registrationMode).toBe('manual')
+    // Entra offers neither CIMD nor DCR; its tenant issuer carries the entra-v2 profile.
+    expect(WORKIQ_DISCOVER.detected.registrationMode).toBe('manual')
+    expect(WORKIQ_DISCOVER.detected.asProfile).toBe('entra-v2')
+    expect(WORKIQ_DISCOVER.detected.quirks.supportsRefresh).toBe(true)
   })
 
   for (const { name, body } of ALL_DISCOVER_BODIES) {

@@ -1,13 +1,33 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { PinnedRawResponse, PinnedTransport } from '../src/http/pinnedFetch.js'
+import type {
+  PinnedRawResponse,
+  PinnedTransport,
+  PinnedTransportInput,
+} from '../src/http/pinnedFetch.js'
 import {
+  type AuthorizationServerMetadata,
   type DiscoveryDeps,
+  type ProtectedResourceMetadata,
   asMetadataUrls,
+  defaultScopes,
   discoverRemoteOAuth,
   parseResourceMetadataChallenge,
   wellKnownPrmUrls,
 } from '../src/oauth/discovery.js'
-import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
+import {
+  ENTRA_AGENT365_MAIL_PILOT,
+  ENTRA_GRAPH_SCOPE_PILOT,
+  ENTRA_NO_SCOPES_PILOT,
+  ENTRA_SHAREPOINT_SCOPE_PILOT,
+  ENTRA_TENANT_PRM_PILOT,
+  ENTRA_UNKNOWN_GUID_PILOT,
+  ENTRA_WORKIQ_PILOT,
+  PILOTS,
+  type PilotFixture,
+  makeDiscoveryTransport,
+  recordingTransport,
+  workIqPilotWithPrm,
+} from './fixtures/remoteOAuthDiscovery.js'
 
 /**
  * Discovery client (spec 19 §4/§5 C1 + C1.5 H2 pin). Fixtures are the real
@@ -417,6 +437,31 @@ describe('discoverRemoteOAuth — third-party metadata self-consistency (C2/C3)'
     if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
   })
 
+  // Table row 11: RFC 8414 §2 forbids query and fragment in an issuer, and userinfo is
+  // no part of an identifier. URL origin+pathname ignore all three, so an issuer that
+  // carries them must be compared as written, even when the `?` or `#` is empty.
+  for (const issuer of [
+    'https://mcp.notion.com?',
+    'https://mcp.notion.com#',
+    'https://mcp.notion.com/?q=1',
+    'https://mcp.notion.com#f',
+    'https://u:p@mcp.notion.com',
+  ]) {
+    it(`C3: rejects an issuer with query, fragment or userinfo (${issuer})`, async () => {
+      const asJson = JSON.stringify({ ...JSON.parse(PILOTS.notion.as.json), issuer })
+      const [oauthUrl, oidcUrl] = asMetadataUrls(new URL('https://mcp.notion.com'))
+      const pilot = {
+        ...PILOTS.notion,
+        as: { url: oauthUrl, json: asJson },
+        // Served on both AS-metadata candidates so neither clears the check.
+        asExtra: [{ url: oidcUrl, status: 200, json: asJson }],
+      }
+      const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(makeDiscoveryTransport(pilot)))
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
+    })
+  }
+
   it('C3: accepts the real pilots (issuer == authorization server base)', async () => {
     for (const key of ['notion', 'sentry'] as const) {
       const outcome = await discoverRemoteOAuth(
@@ -487,5 +532,357 @@ describe('parseResourceMetadataChallenge', () => {
   it('returns undefined when no header / no field', () => {
     expect(parseResourceMetadataChallenge(null)).toBeUndefined()
     expect(parseResourceMetadataChallenge('Bearer realm="x"')).toBeUndefined()
+  })
+})
+
+describe('Entra pilot transport (asExtra + recordingTransport)', () => {
+  it('serves each extra AS metadata URL with its captured status and records every request', async () => {
+    const { transport, requestedUrls } = recordingTransport(
+      makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)
+    )
+    const get = (url: string) =>
+      transport({ url, method: 'GET', headers: {} } as PinnedTransportInput)
+    const rfc8414Url =
+      'https://login.microsoftonline.com/.well-known/oauth-authorization-server/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+    const [organizations, unknownTenant] = ENTRA_WORKIQ_PILOT.asExtra ?? []
+    const ok = await get(organizations.url)
+    const rejected = await get(unknownTenant.url)
+    const unserved = await get(rfc8414Url)
+    expect([ok.status, rejected.status, unserved.status]).toEqual([200, 400, 404])
+    expect(JSON.parse(ok.bodyText).issuer).toBe('https://login.microsoftonline.com/{tenantid}/v2.0')
+    expect(JSON.parse(rejected.bodyText).error).toBe('invalid_tenant')
+    expect(requestedUrls).toEqual([organizations.url, unknownTenant.url, rfc8414Url])
+  })
+})
+
+describe('discoverRemoteOAuth — Microsoft Entra tenant authority (tenant_required + override)', () => {
+  const TENANT_AUTHORITY =
+    'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+  const ORGANIZATIONS = 'https://login.microsoftonline.com/organizations/v2.0'
+
+  function hostsOf(urls: string[]): string[] {
+    return urls.map(url => new URL(url).hostname)
+  }
+
+  for (const pilot of [ENTRA_WORKIQ_PILOT, ENTRA_AGENT365_MAIL_PILOT]) {
+    it(`row 1 (${pilot.name}): the multi-tenant authority → tenant_required, nothing fetched from Entra`, async () => {
+      const { transport, requestedUrls } = recordingTransport(makeDiscoveryTransport(pilot))
+      const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(transport))
+      expect(outcome).toEqual({
+        ok: false,
+        error: {
+          kind: 'tenant_required',
+          authorizationServer: ORGANIZATIONS,
+          tenantAuthorityTemplate: 'https://login.microsoftonline.com/{tenantId}/v2.0',
+          detail:
+            'authorization server is the Microsoft Entra ID multi-tenant authority; name the tenant',
+        },
+      })
+      expect(requestedUrls.length).toBeGreaterThan(0)
+      expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+    })
+  }
+
+  const NOT_A_TENANT_AUTHORITY =
+    'authorizationServer must be a Microsoft Entra ID tenant authority (https://login.microsoftonline.com/<tenant-id>/v2.0)'
+
+  it('row 3: an upper-case tenant GUID is not a tenant authority → override rejected', async () => {
+    const { transport, requestedUrls } = recordingTransport(
+      makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)
+    )
+    const outcome = await discoverRemoteOAuth(ENTRA_WORKIQ_PILOT.mcpUrl, deps(transport), {
+      authorizationServer:
+        'https://login.microsoftonline.com/72F988BF-86F1-41AF-91AB-2D7CD011DB47/v2.0',
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      error: { kind: 'authorization_server_override_rejected', detail: NOT_A_TENANT_AUTHORITY },
+    })
+    expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+  })
+
+  it('row 4: an unknown tenant → fetch_failed carrying the Entra 400 and its URL', async () => {
+    const unknownTenant =
+      'https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0'
+    const outcome = await discoverRemoteOAuth(
+      ENTRA_WORKIQ_PILOT.mcpUrl,
+      deps(makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)),
+      { authorizationServer: unknownTenant }
+    )
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.error).toMatchObject({
+      kind: 'fetch_failed',
+      status: 400,
+      url: `${unknownTenant}/.well-known/openid-configuration`,
+    })
+  })
+
+  it('row 5: an override on another host is rejected and that host is never fetched', async () => {
+    const { transport, requestedUrls } = recordingTransport(
+      makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)
+    )
+    const outcome = await discoverRemoteOAuth(ENTRA_WORKIQ_PILOT.mcpUrl, deps(transport), {
+      authorizationServer: 'https://evil.example/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0',
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      error: { kind: 'authorization_server_override_rejected', detail: NOT_A_TENANT_AUTHORITY },
+    })
+    expect(hostsOf(requestedUrls)).not.toContain('evil.example')
+    expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+  })
+
+  it('row 6: the multi-tenant authority itself is not a tenant authority → override rejected', async () => {
+    const outcome = await discoverRemoteOAuth(
+      ENTRA_WORKIQ_PILOT.mcpUrl,
+      deps(makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)),
+      { authorizationServer: ORGANIZATIONS }
+    )
+    expect(outcome).toEqual({
+      ok: false,
+      error: { kind: 'authorization_server_override_rejected', detail: NOT_A_TENANT_AUTHORITY },
+    })
+  })
+
+  it('row 10: a resource that does not advertise Entra (Linear) rejects a tenant authority', async () => {
+    const { transport, requestedUrls } = recordingTransport(makeDiscoveryTransport(PILOTS.linear))
+    const outcome = await discoverRemoteOAuth(PILOTS.linear.mcpUrl, deps(transport), {
+      authorizationServer: TENANT_AUTHORITY,
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        kind: 'authorization_server_override_rejected',
+        detail:
+          "the protected resource's first authorization server is not the Microsoft Entra ID multi-tenant authority",
+      },
+    })
+    expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+  })
+
+  it('the multi-tenant authority listed after another authorization server does not license the override', async () => {
+    const pilot = workIqPilotWithPrm('entra-organizations-second', prm => {
+      prm.authorization_servers = ['https://other-as.example', ORGANIZATIONS]
+    })
+    const { transport, requestedUrls } = recordingTransport(makeDiscoveryTransport(pilot))
+    const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(transport), {
+      authorizationServer: TENANT_AUTHORITY,
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        kind: 'authorization_server_override_rejected',
+        detail:
+          "the protected resource's first authorization server is not the Microsoft Entra ID multi-tenant authority",
+      },
+    })
+    expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+  })
+
+  it('a valid override fetches the tenant authority, not the advertised multi-tenant one', async () => {
+    const { transport, requestedUrls } = recordingTransport(
+      makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)
+    )
+    await discoverRemoteOAuth(ENTRA_WORKIQ_PILOT.mcpUrl, deps(transport), {
+      authorizationServer: TENANT_AUTHORITY,
+    })
+    const entraUrls = requestedUrls.filter(
+      url => new URL(url).hostname === 'login.microsoftonline.com'
+    )
+    expect(entraUrls).toContain(`${TENANT_AUTHORITY}/.well-known/openid-configuration`)
+    expect(entraUrls.some(url => url.includes('/organizations/'))).toBe(false)
+  })
+})
+
+describe('discoverRemoteOAuth — entra-v2 profile (PKCE, refresh, scope audience)', () => {
+  const TENANT_GUID = '72f988bf-86f1-41af-91ab-2d7cd011db47'
+  const TENANT_AUTHORITY = `https://login.microsoftonline.com/${TENANT_GUID}/v2.0`
+
+  async function discoverWithTenant(pilot: PilotFixture) {
+    const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(makeDiscoveryTransport(pilot)), {
+      authorizationServer: TENANT_AUTHORITY,
+    })
+    if (!outcome.ok) throw new Error(`discovery failed: ${outcome.error.kind}`)
+    return outcome.result
+  }
+
+  it('row 2: Work IQ with the tenant authority → profile, manual registration, refresh, no iss', async () => {
+    const r = await discoverWithTenant(ENTRA_WORKIQ_PILOT)
+    expect(r.asProfile).toBe('entra-v2')
+    expect(r.registrationMode).toBe('manual')
+    expect(r.quirks).toEqual({ bearerInBody: false, supportsRefresh: true })
+    expect(r.issuer).toBe(TENANT_AUTHORITY)
+    expect(r.issForCallback).toBeUndefined()
+    expect(r.resource).toBe('https://workiq.svc.cloud.microsoft/mcp')
+    // The real Entra metadata advertises neither S256 nor refresh_token: the profile is
+    // what lets discovery through the gate and what turns refresh on.
+    expect(r.as.code_challenge_methods_supported).toBeUndefined()
+    expect(r.as.grant_types_supported).toBeUndefined()
+  })
+
+  it('row 8: a PRM that already names the tenant authority → profile without an override', async () => {
+    const outcome = await discoverRemoteOAuth(
+      ENTRA_TENANT_PRM_PILOT.mcpUrl,
+      deps(makeDiscoveryTransport(ENTRA_TENANT_PRM_PILOT))
+    )
+    expect(outcome.ok && outcome.result.asProfile).toBe('entra-v2')
+  })
+
+  it('row 13: Work IQ (GUID of the app known for its host) → no audience findings', async () => {
+    const r = await discoverWithTenant(ENTRA_WORKIQ_PILOT)
+    expect(r.scopeAudienceViolation).toBeUndefined()
+    expect(r.unverifiedScopes).toBeUndefined()
+    expect(r.scopeAudienceMissing).toBeUndefined()
+  })
+
+  it('Agent 365 Mail (URL-form scope on its host) → no audience findings', async () => {
+    const r = await discoverWithTenant(ENTRA_AGENT365_MAIL_PILOT)
+    expect(r.asProfile).toBe('entra-v2')
+    expect(r.scopeAudienceViolation).toBeUndefined()
+    expect(r.unverifiedScopes).toBeUndefined()
+    expect(r.scopeAudienceMissing).toBeUndefined()
+  })
+
+  it('row 12: a Microsoft Graph URL scope → scopeAudienceViolation (warning, discovery still ok)', async () => {
+    const r = await discoverWithTenant(ENTRA_GRAPH_SCOPE_PILOT)
+    expect(r.scopeAudienceViolation).toBe('https://graph.microsoft.com/Mail.ReadWrite')
+  })
+
+  it('row 14: a GUID the platform cannot tie to the host → unverifiedScopes', async () => {
+    const r = await discoverWithTenant(ENTRA_UNKNOWN_GUID_PILOT)
+    expect(r.unverifiedScopes).toEqual(['11111111-2222-3333-4444-555555555555/Tools.Read'])
+    expect(r.scopeAudienceViolation).toBeUndefined()
+    expect(r.scopeAudienceMissing).toBeUndefined()
+  })
+
+  it('row 15: a SharePoint Online GUID scope → scopeAudienceViolation, never unverified', async () => {
+    const r = await discoverWithTenant(ENTRA_SHAREPOINT_SCOPE_PILOT)
+    expect(r.scopeAudienceViolation).toBe('00000003-0000-0ff1-ce00-000000000000/AllSites.Read')
+    expect(r.unverifiedScopes).toBeUndefined()
+  })
+
+  it('row 16: the Agent 365 GUID advertised by the Work IQ host → scopeAudienceViolation, never unverified', async () => {
+    const agent365Scope = '05879165-0320-489e-b644-f72b33f3edf0/McpServers.Mail.All'
+    const pilot = workIqPilotWithPrm('entra-agent365-guid-on-workiq', prm => {
+      prm.scopes_supported = [agent365Scope]
+    })
+    const r = await discoverWithTenant(pilot)
+    expect(r.scopeAudienceViolation).toBe(agent365Scope)
+    expect(r.unverifiedScopes).toBeUndefined()
+  })
+
+  it('row 17: no PRM scopes (sign-in scopes of the AS only) → scopeAudienceMissing', async () => {
+    const r = await discoverWithTenant(ENTRA_NO_SCOPES_PILOT)
+    expect(r.scopeAudienceMissing).toBe(true)
+    expect(r.scopeAudienceViolation).toBeUndefined()
+    expect(r.unverifiedScopes).toBeUndefined()
+  })
+
+  it('row 18: a Graph GUID smuggled as userinfo before the MCP host → scopeAudienceViolation', async () => {
+    const smuggled =
+      'api://00000003-0000-0000-c000-000000000000@workiq.svc.cloud.microsoft/Mail.Read'
+    const pilot = workIqPilotWithPrm('entra-userinfo-scope', prm => {
+      prm.scopes_supported = [smuggled]
+    })
+    const r = await discoverWithTenant(pilot)
+    expect(r.scopeAudienceViolation).toBe(smuggled)
+  })
+
+  it('an empty advertised scope is reported as the violation (empty string, not dropped)', async () => {
+    const pilot = workIqPilotWithPrm('entra-empty-scope', prm => {
+      prm.scopes_supported = ['', 'https://graph.microsoft.com/x']
+    })
+    const r = await discoverWithTenant(pilot)
+    expect(r.scopeAudienceViolation).toBe('')
+    expect('scopeAudienceViolation' in r).toBe(true)
+  })
+
+  it('without a profile, no audience fields appear (Linear)', async () => {
+    const outcome = await discoverRemoteOAuth(
+      PILOTS.linear.mcpUrl,
+      deps(makeDiscoveryTransport(PILOTS.linear))
+    )
+    if (!outcome.ok) throw new Error(outcome.error.kind)
+    for (const key of [
+      'asProfile',
+      'scopeAudienceViolation',
+      'unverifiedScopes',
+      'scopeAudienceMissing',
+    ]) {
+      expect(key in outcome.result).toBe(false)
+    }
+  })
+
+  // I3: the profile needs the exact lower-case tenant issuer. An upper-case GUID still
+  // passes the issuer comparison (base and issuer agree) but is not the profile, so the
+  // missing S256 advertisement is fatal again. Derived from the real tenant bytes with
+  // only the GUID's case changed, everywhere it appears.
+  it('I3: an upper-case tenant issuer is not the profile → no_s256', async () => {
+    const upper = (json: string) => json.split(TENANT_GUID).join(TENANT_GUID.toUpperCase())
+    const pilot: PilotFixture = {
+      ...ENTRA_TENANT_PRM_PILOT,
+      name: 'entra-upper-case-tenant',
+      prm: { ...ENTRA_TENANT_PRM_PILOT.prm, json: upper(ENTRA_TENANT_PRM_PILOT.prm.json) },
+      as: {
+        url: upper(ENTRA_TENANT_PRM_PILOT.as.url),
+        json: upper(ENTRA_TENANT_PRM_PILOT.as.json),
+      },
+      asExtra: [],
+    }
+    const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(makeDiscoveryTransport(pilot)))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.error.kind).toBe('no_s256')
+  })
+
+  // Row 11 with the profile in play: a decorated tenant issuer is still an issuer
+  // mismatch, never a profile. Real tenant bytes with only `issuer` changed.
+  for (const decorated of [`${TENANT_AUTHORITY}?`, `${TENANT_AUTHORITY}#`]) {
+    it(`row 11: a decorated tenant issuer (${decorated}) → issuer_mismatch`, async () => {
+      const as = JSON.parse(ENTRA_TENANT_PRM_PILOT.as.json) as Record<string, unknown>
+      as.issuer = decorated
+      const pilot: PilotFixture = {
+        ...ENTRA_TENANT_PRM_PILOT,
+        as: { ...ENTRA_TENANT_PRM_PILOT.as, json: JSON.stringify(as) },
+      }
+      const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(makeDiscoveryTransport(pilot)))
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) return
+      expect(outcome.error.kind).toBe('issuer_mismatch')
+    })
+  }
+})
+
+describe('defaultScopes — untrusted scopes_supported', () => {
+  // The metadata is third-party JSON, so these shapes are what a hostile or broken server
+  // can send, typed loosely on purpose.
+  const prm = (scopes: unknown) =>
+    ({
+      resource: 'https://mcp.example.com/mcp',
+      scopes_supported: scopes,
+    }) as unknown as ProtectedResourceMetadata
+  const as = (scopes?: unknown) =>
+    ({
+      issuer: 'https://as.example.com',
+      authorization_endpoint: 'https://as.example.com/authorize',
+      token_endpoint: 'https://as.example.com/token',
+      ...(scopes === undefined ? {} : { scopes_supported: scopes }),
+    }) as unknown as AuthorizationServerMetadata
+
+  it('a non-array PRM value is ignored and the AS list is used', () => {
+    expect(defaultScopes(prm('a b'), as(['x']))).toEqual(['x'])
+  })
+
+  it('non-string entries are dropped', () => {
+    expect(defaultScopes(prm(['a', 1, null]), as(['x']))).toEqual(['a'])
+  })
+
+  it('an empty PRM list is an answer: it does not fall back to the AS', () => {
+    expect(defaultScopes(prm([]), as(['x']))).toEqual([])
+  })
+
+  it('neither side advertises scopes → []', () => {
+    expect(defaultScopes(prm(undefined), as())).toEqual([])
   })
 })
