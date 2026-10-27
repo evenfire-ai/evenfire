@@ -70,10 +70,13 @@ describe('dragPolicy: decideDragStructure — unit behavior', () => {
   const target = (overrides = {}) => ({ resourceId: 'T', drive: 'main', ...overrides })
 
   it('denies self, cross-drive, root-source and same-parent in that priority', () => {
-    assert.deepEqual(decideDragStructure({ source: source(), target: target({ resourceId: 'S' }) }), {
-      kind: 'deny',
-      reason: 'self',
-    })
+    assert.deepEqual(
+      decideDragStructure({ source: source(), target: target({ resourceId: 'S' }) }),
+      {
+        kind: 'deny',
+        reason: 'self',
+      }
+    )
     assert.deepEqual(
       decideDragStructure({ source: source({ drive: 'other' }), target: target() }),
       { kind: 'deny', reason: 'cross-drive' }
@@ -309,34 +312,38 @@ describe('dragPolicy: decideDragAuthority', () => {
   it('an unanswerable probe is unavailable, never a denial', () => {
     for (const reason of ['rate-limit', 'transport', 'session']) {
       assert.deepEqual(
-        decideDragAuthority({ sourceParentHeld: ['write'], destinationHeld: [], unavailable: reason }),
+        decideDragAuthority({
+          sourceParentHeld: ['write'],
+          destinationHeld: [],
+          unavailable: reason,
+        }),
         { kind: 'unavailable', reason }
       )
     }
   })
 
   it('destination is evaluated first, then source-write before source-delete', () => {
-    assert.deepEqual(
-      decideDragAuthority({ sourceParentHeld: [], destinationHeld: [] }),
-      { kind: 'deny', reason: 'destination-write' }
-    )
-    assert.deepEqual(
-      decideDragAuthority({ sourceParentHeld: [], destinationHeld: ['write'] }),
-      { kind: 'deny', reason: 'source-write' }
-    )
+    assert.deepEqual(decideDragAuthority({ sourceParentHeld: [], destinationHeld: [] }), {
+      kind: 'deny',
+      reason: 'destination-write',
+    })
+    assert.deepEqual(decideDragAuthority({ sourceParentHeld: [], destinationHeld: ['write'] }), {
+      kind: 'deny',
+      reason: 'source-write',
+    })
   })
 })
 
 describe('dragPolicy: planMoveConvergence', () => {
   it('refetches exactly the old and new parent listings, deduped', () => {
-    assert.deepEqual(
-      planMoveConvergence({ resourceId: 'M', oldParentId: 'A', newParentId: 'B' }),
-      { refetchChildIds: ['A', 'B'], staleResourceIds: ['M'] }
-    )
-    assert.deepEqual(
-      planMoveConvergence({ resourceId: 'M', oldParentId: 'A', newParentId: 'A' }),
-      { refetchChildIds: ['A'], staleResourceIds: ['M'] }
-    )
+    assert.deepEqual(planMoveConvergence({ resourceId: 'M', oldParentId: 'A', newParentId: 'B' }), {
+      refetchChildIds: ['A', 'B'],
+      staleResourceIds: ['M'],
+    })
+    assert.deepEqual(planMoveConvergence({ resourceId: 'M', oldParentId: 'A', newParentId: 'A' }), {
+      refetchChildIds: ['A'],
+      staleResourceIds: ['M'],
+    })
     assert.deepEqual(
       planMoveConvergence({ resourceId: 'M', oldParentId: null, newParentId: 'B' }),
       { refetchChildIds: ['B'], staleResourceIds: ['M'] }
@@ -361,7 +368,12 @@ describe('dragPolicy: planMoveConvergence', () => {
   it('never claims unknown descendants: unlinked rows stay untouched', () => {
     const plan = planMoveConvergence(
       { resourceId: 'M', oldParentId: 'A', newParentId: 'B' },
-      { childParentByResourceId: new Map([['x', 'y'], ['y', null]]) }
+      {
+        childParentByResourceId: new Map([
+          ['x', 'y'],
+          ['y', null],
+        ]),
+      }
     )
     assert.deepEqual(plan.staleResourceIds, ['M'])
   })
