@@ -45,6 +45,9 @@ it('exchanges, installs cookies and navigates through the same effective RPC URL
     hostRef: 'transport-host',
     jwt: 'synthetic-rpc-token',
     rpcProxyUrl: 'https://effective-rpc.example.test',
+    requestOwnerContext: Object.freeze({ owner: 'transport-test' }),
+    sessionRequestContextsMatchOwner: (left, right) => left === right,
+    assertRequestOwnerCurrent: () => undefined,
   })
   expect(fetch).toHaveBeenCalledWith(
     'https://effective-rpc.example.test/api/v1/desktop/transport-host/session',

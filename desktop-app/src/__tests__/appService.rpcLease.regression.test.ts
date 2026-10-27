@@ -59,6 +59,8 @@ describe('temporary AppService RPC lease', () => {
   let AppService: typeof import('../appService.js').AppService
   let TokenStore: typeof import('../tokenStore.js').TokenStore
   let setSessionInvalidationHandler: typeof import('../httpClient.js').setSessionInvalidationHandler
+  let requestJson: typeof import('../httpClient.js').requestJson
+  let runWithSessionRequestContext: typeof import('../httpClient.js').runWithSessionRequestContext
 
   beforeEach(async () => {
     vi.resetModules()
@@ -85,6 +87,8 @@ describe('temporary AppService RPC lease', () => {
     AppService = appServiceModule.AppService
     TokenStore = tokenStoreModule.TokenStore
     setSessionInvalidationHandler = httpModule.setSessionInvalidationHandler
+    requestJson = httpModule.requestJson
+    runWithSessionRequestContext = httpModule.runWithSessionRequestContext
     // Keep the compiler-visible originals for the exact-environment cleanup below.
     ;(
       fixture as typeof fixture & { oldRest?: string; oldRpc?: string; oldConfigPath?: string }
@@ -407,5 +411,796 @@ describe('temporary AppService RPC lease', () => {
     expect(fetchMock).toHaveBeenCalledTimes(callsBeforeMintCompletion)
     expect(downstream).not.toHaveBeenCalled()
     expect(service.getCachedUserId()).toBe(secondUser.id)
+  })
+
+  it('rejects a persistent session bearer held before logout at the final HTTP dispatch guard', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = firstToken
+    let loginNumber = 0
+    let meReadNumber = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return credentialResponse(
+          loginNumber === 1 ? firstToken : secondToken,
+          loginNumber === 1 ? me : secondUser
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        meReadNumber += 1
+        return meResponse(meReadNumber === 1 ? me : secondUser)
+      }
+      if (url.endsWith('/api/v1/me/agents'))
+        return new Response(JSON.stringify({ agents: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const entered = deferred<string>()
+    const release = deferred<void>()
+    const authClient = (service as any).authClient
+    const getMyAgents = authClient.getMyAgents.bind(authClient)
+    vi.spyOn(authClient, 'getMyAgents').mockImplementation(async (token: string) => {
+      if (token === firstToken) {
+        entered.resolve(token)
+        await release.promise
+      }
+      return getMyAgents(token)
+    })
+    const pendingA = service.listMyAgents()
+    await expect(entered.promise).resolves.toBe(firstToken)
+
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    const callsBeforeRelease = fetchMock.mock.calls.length
+    release.resolve()
+
+    await expect(pendingA).rejects.toThrow(
+      'The credential is not owned by the current authenticated session'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeRelease)
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+    await expect(service.listMyAgents()).resolves.toEqual([])
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('/api/v1/me/agents')
+    expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('authorization')).toBe(
+      `Bearer ${secondToken}`
+    )
+  })
+
+  it('rejects a persistent bearer without its captured owner at the final HTTP dispatch guard', async () => {
+    const token = sessionToken('rpc-lease-user-a')
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) return credentialResponse(token)
+      if (url.endsWith('/api/v1/me')) return meResponse()
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'fixture-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const callsBeforeDispatch = fetchMock.mock.calls.length
+    await expect(
+      runWithSessionRequestContext(undefined, () =>
+        requestJson('GET', 'http://rest.rpc-lease.test/api/v1/me', { token })
+      )
+    ).rejects.toThrow('The credential is not owned by the current authenticated session')
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeDispatch)
+  })
+
+  it('rejects a persistent derived RPC bearer held before logout and keeps session B usable', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = firstToken
+    let loginNumber = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return credentialResponse(
+          loginNumber === 1 ? firstToken : secondToken,
+          loginNumber === 1 ? me : secondUser
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        return meResponse(url.includes('rest.rpc-lease-b.test') ? secondUser : me)
+      }
+      if (url.endsWith('/api/v1/rpc/token')) return rpcTokenResponse('derived-rpc-bearer-shared')
+      if (url.endsWith('/api/v1/sandbox-ui/apps'))
+        return new Response(JSON.stringify({ apps: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const entered = deferred<string>()
+    const release = deferred<void>()
+    let heldA = false
+    const rpcClient = (service as any).rpcClient
+    const listSandboxUiApps = rpcClient.listSandboxUiApps.bind(rpcClient)
+    vi.spyOn(rpcClient, 'listSandboxUiApps').mockImplementation(async (token: string) => {
+      if (token === 'derived-rpc-bearer-shared' && !heldA) {
+        heldA = true
+        entered.resolve(token)
+        await release.promise
+      }
+      return listSandboxUiApps(token)
+    })
+    const pendingA = service.listSandboxUiApps()
+    await expect(entered.promise).resolves.toBe('derived-rpc-bearer-shared')
+
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await service.saveRuntimeConfig(
+      {
+        externalRestApiBaseUrl: 'http://rest.rpc-lease-b.test',
+        rpcProxyBaseUrl: 'http://proxy.rpc-lease-b.test',
+        appName: 'Environment B',
+      },
+      logout.sessionGeneration
+    )
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    await expect(service.listSandboxUiApps()).resolves.toEqual({ apps: [] })
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toMatch('proxy.rpc-lease-b.test')
+    expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('authorization')).toBe(
+      'Bearer derived-rpc-bearer-shared'
+    )
+    const callsBeforeRelease = fetchMock.mock.calls.length
+    release.resolve()
+
+    await expect(pendingA).rejects.toThrow(
+      'The credential is not owned by the current authenticated session'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeRelease)
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+    await expect(service.listSandboxUiApps()).resolves.toEqual({ apps: [] })
+    expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('authorization')).toBe(
+      'Bearer derived-rpc-bearer-shared'
+    )
+  })
+
+  it('rejects invokeHostMessage from A held before dispatch after logout and a fresh B login', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = sessionToken(secondUser.id)
+    let loginNumber = 0
+    let meReadNumber = 0
+    let rpcTokenCount = 0
+    let messageDispatchCount = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return Promise.resolve(
+          credentialResponse(
+            loginNumber === 1 ? firstToken : secondToken,
+            loginNumber === 1 ? me : secondUser
+          )
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        meReadNumber += 1
+        return Promise.resolve(meResponse(meReadNumber === 1 ? me : secondUser))
+      }
+      if (url.endsWith('/api/v1/rpc/token')) {
+        rpcTokenCount += 1
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          scopes?: string[]
+          hostRefs?: string[]
+        }
+        return Promise.resolve(
+          rpcTokenResponse(
+            'derived-rpc-bearer-shared',
+            body.scopes,
+            body.hostRefs,
+            secondUser.teamId
+          )
+        )
+      }
+      if (url.includes('/api/v1/rpc/hosts/') && url.endsWith('/messages')) {
+        messageDispatchCount += 1
+        return Promise.resolve(
+          new Response(JSON.stringify({ success: true, response: 'ok' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        )
+      }
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const entered = deferred<string>()
+    const release = deferred<void>()
+    let heldA = false
+    const rpcClient = (service as any).rpcClient
+    const invokeHostMessage = rpcClient.invokeHostMessage.bind(rpcClient)
+    vi.spyOn(rpcClient, 'invokeHostMessage').mockImplementation(
+      async (token: string, ...args: unknown[]) => {
+        if (token === 'derived-rpc-bearer-shared' && !heldA) {
+          heldA = true
+          entered.resolve(token)
+          await release.promise
+        }
+        return invokeHostMessage(token, ...(args as [string, any, { async?: boolean }?]))
+      }
+    )
+    const pendingA = service.invokeHostMessage('chatllm', { content: 'A' }, ['chatllm'])
+    await expect(entered.promise).resolves.toBe('derived-rpc-bearer-shared')
+
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    await expect(
+      service.invokeHostMessage('chatllm', { content: 'B' }, ['chatllm'])
+    ).resolves.toMatchObject({ success: true })
+    expect(messageDispatchCount).toBe(1)
+    const callsBeforeRelease = fetchMock.mock.calls.length
+    release.resolve()
+
+    await expect(pendingA).rejects.toThrow(
+      'The credential is not owned by the current authenticated session'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeRelease)
+    expect(messageDispatchCount).toBe(1)
+    expect(rpcTokenCount).toBe(2)
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+    await expect(
+      service.invokeHostMessage('chatllm', { content: 'B again' }, ['chatllm'])
+    ).resolves.toMatchObject({ success: true })
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+  })
+
+  it('does not refresh or redispatch a delayed A RPC 401 after B is accepted', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = sessionToken(secondUser.id)
+    const firstResponse = deferred<Response>()
+    let loginNumber = 0
+    let meReadNumber = 0
+    let rpcTokenCount = 0
+    let messageDispatchCount = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return Promise.resolve(
+          credentialResponse(
+            loginNumber === 1 ? firstToken : secondToken,
+            loginNumber === 1 ? me : secondUser
+          )
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        meReadNumber += 1
+        return Promise.resolve(meResponse(meReadNumber === 1 ? me : secondUser))
+      }
+      if (url.endsWith('/api/v1/rpc/token')) {
+        rpcTokenCount += 1
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          scopes?: string[]
+          hostRefs?: string[]
+        }
+        return Promise.resolve(
+          rpcTokenResponse(
+            'derived-rpc-bearer-shared',
+            body.scopes,
+            body.hostRefs,
+            secondUser.teamId
+          )
+        )
+      }
+      if (url.includes('/api/v1/rpc/hosts/') && url.endsWith('/messages')) {
+        messageDispatchCount += 1
+        return messageDispatchCount === 1
+          ? firstResponse.promise
+          : Promise.resolve(
+              new Response(JSON.stringify({ success: true, response: 'ok' }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+              })
+            )
+      }
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const pendingA = service.invokeHostMessage('chatllm', { content: 'A' }, ['chatllm'])
+    await vi.waitFor(() => expect(messageDispatchCount).toBe(1))
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    await expect(
+      service.invokeHostMessage('chatllm', { content: 'B' }, ['chatllm'])
+    ).resolves.toMatchObject({ success: true })
+    expect(rpcTokenCount).toBe(2)
+    const callsBefore401 = fetchMock.mock.calls.length
+    firstResponse.resolve(new Response('unauthorized', { status: 401 }))
+
+    await expect(pendingA).rejects.toThrow(
+      'The credential is not owned by the current authenticated session'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(callsBefore401)
+    expect(rpcTokenCount).toBe(2)
+    expect(messageDispatchCount).toBe(2)
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+    await expect(
+      service.invokeHostMessage('chatllm', { content: 'B again' }, ['chatllm'])
+    ).resolves.toMatchObject({ success: true })
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+  })
+
+  it('rejects a late public openDesktop session exchange after logout and session replacement', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = sessionToken(secondUser.id)
+    let loginNumber = 0
+    let meReadNumber = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return Promise.resolve(
+          credentialResponse(
+            loginNumber === 1 ? firstToken : secondToken,
+            loginNumber === 1 ? me : secondUser
+          )
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        meReadNumber += 1
+        return Promise.resolve(meResponse(meReadNumber === 1 ? me : secondUser))
+      }
+      if (url.endsWith('/api/v1/rpc/token')) {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          scopes?: string[]
+          hostRefs?: string[]
+        }
+        return Promise.resolve(
+          rpcTokenResponse('desktop-rpc-bearer', body.scopes, body.hostRefs, me.teamId)
+        )
+      }
+      if (url.endsWith('/api/v1/me/agents'))
+        return Promise.resolve(
+          new Response(JSON.stringify({ agents: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        )
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const entered = deferred<{
+      assertRequestOwnerCurrent?: () => void
+    }>()
+    const release = deferred<void>()
+    const publishWindow = vi.fn()
+    const closeAllDesktopWindows = vi.fn().mockResolvedValue(undefined)
+    const openDesktopWindow = vi.fn(async (args: { assertRequestOwnerCurrent?: () => void }) => {
+      entered.resolve(args)
+      await release.promise
+      args.assertRequestOwnerCurrent?.()
+      publishWindow()
+    })
+    vi.doMock('../desktopWindow.js', () => ({ openDesktopWindow, closeAllDesktopWindows }))
+    let pendingAError: unknown
+    const pendingA = service.openDesktop('chatllm').then(
+      () => undefined,
+      error => {
+        pendingAError = error
+      }
+    )
+    await entered.promise
+
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    await expect(service.listMyAgents()).resolves.toEqual([])
+    release.resolve()
+
+    await pendingA
+    expect(publishWindow).not.toHaveBeenCalled()
+    expect(pendingAError).toMatchObject({
+      message: 'The credential is not owned by the current authenticated session',
+    })
+    expect(closeAllDesktopWindows).toHaveBeenCalledOnce()
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+    await expect(service.listMyAgents()).resolves.toEqual([])
+  })
+
+  it('retires prior Desktop windows before publishing an accepted session replacement', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondToken = sessionToken('rpc-lease-user-a-next')
+    let loginNumber = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return credentialResponse(loginNumber === 1 ? firstToken : secondToken)
+      }
+      if (url.endsWith('/api/v1/me')) return meResponse()
+      if (url.endsWith('/api/v1/rpc/token')) {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          scopes?: string[]
+          hostRefs?: string[]
+        }
+        return rpcTokenResponse('desktop-rpc-bearer', body.scopes, body.hostRefs, me.teamId)
+      }
+      if (url.endsWith('/api/v1/me/agents'))
+        return new Response(JSON.stringify({ agents: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    let openWindowOwner: unknown
+    let retiredWindowOwner: unknown
+    let tokenAtRetirement: string | null | undefined
+    const openDesktopWindow = vi.fn(async (args: { requestOwnerContext?: unknown }) => {
+      openWindowOwner = args.requestOwnerContext
+    })
+    const closeAllDesktopWindows = vi.fn(async () => {
+      retiredWindowOwner = openWindowOwner
+      tokenAtRetirement = (service as any).sessionToken
+      openWindowOwner = undefined
+    })
+    vi.doMock('../desktopWindow.js', () => ({ openDesktopWindow, closeAllDesktopWindows }))
+
+    await service.openDesktop('chatllm')
+    expect(openDesktopWindow).toHaveBeenCalledOnce()
+    const priorGeneration = (service as any).sessionGeneration
+
+    await expect(service.passwordLogin(me.email, 'second-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    expect(closeAllDesktopWindows).toHaveBeenCalledOnce()
+    expect(retiredWindowOwner).toBeDefined()
+    expect(openWindowOwner).toBeUndefined()
+    expect(tokenAtRetirement).toBe(firstToken)
+    expect((service as any).sessionToken).toBe(secondToken)
+    expect((service as any).sessionGeneration).toBeGreaterThan(priorGeneration)
+    await expect(service.listMyAgents()).resolves.toEqual([])
+    expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('authorization')).toBe(
+      `Bearer ${secondToken}`
+    )
+  })
+
+  it('keeps session B usable when an already-dispatched session A request returns 401', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = sessionToken(secondUser.id)
+    const firstAgentResponse = deferred<Response>()
+    let loginNumber = 0
+    let agentRequestCount = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return Promise.resolve(
+          credentialResponse(
+            loginNumber === 1 ? firstToken : secondToken,
+            loginNumber === 1 ? me : secondUser
+          )
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        const authorization = new Headers(init?.headers).get('authorization')
+        return Promise.resolve(
+          meResponse(authorization === `Bearer ${secondToken}` ? secondUser : me)
+        )
+      }
+      if (url.endsWith('/api/v1/me/agents')) {
+        agentRequestCount += 1
+        if (agentRequestCount === 1) return firstAgentResponse.promise
+        return Promise.resolve(
+          new Response(JSON.stringify({ agents: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        )
+      }
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const pendingA = service.listMyAgents()
+    await vi.waitFor(() => expect(agentRequestCount).toBe(1))
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    firstAgentResponse.resolve(new Response('unauthorized', { status: 401 }))
+
+    await expect(pendingA).rejects.toMatchObject({ status: 401 })
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+    await expect(service.listMyAgents()).resolves.toEqual([])
+    expect(agentRequestCount).toBe(2)
+    expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('authorization')).toBe(
+      `Bearer ${secondToken}`
+    )
+  })
+
+  it('does not retry a dispatched session A request after logout and session B acceptance', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = sessionToken(secondUser.id)
+    const firstHealthResponse = deferred<Response>()
+    let loginNumber = 0
+    let healthRequestCount = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return Promise.resolve(
+          credentialResponse(
+            loginNumber === 1 ? firstToken : secondToken,
+            loginNumber === 1 ? me : secondUser
+          )
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        const authorization = new Headers(init?.headers).get('authorization')
+        return Promise.resolve(
+          meResponse(authorization === `Bearer ${secondToken}` ? secondUser : me)
+        )
+      }
+      if (url.endsWith('/api/v1/workflows/example/workflow/health')) {
+        healthRequestCount += 1
+        return firstHealthResponse.promise
+      }
+      if (url.endsWith('/api/v1/me/agents'))
+        return Promise.resolve(
+          new Response(JSON.stringify({ agents: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        )
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const pendingRetryA = service.getWorkflowHealth('example', 'workflow')
+    await vi.waitFor(() => expect(healthRequestCount).toBe(1))
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    const callsBeforeRetry = fetchMock.mock.calls.length
+    firstHealthResponse.reject(new TypeError('fetch failed'))
+
+    await expect(pendingRetryA).rejects.toThrow(
+      'The credential is not owned by the current authenticated session'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeRetry)
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+    await expect(service.listMyAgents()).resolves.toEqual([])
   })
 })

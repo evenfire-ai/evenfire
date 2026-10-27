@@ -1042,6 +1042,7 @@ export class AppService {
   private teamContextQueue: Promise<void> = Promise.resolve()
   private activeTeamContextHop: ActiveTeamContextHop | null = null
   private acceptedTeamSwitchRequestTransition: AcceptedTeamSwitchRequestTransition | null = null
+  private closeDesktopWindowsForSession?: () => Promise<void>
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private restoreSavedSessionReservationStarted = false
   private runtimeConfigResolutionInFlight = new Map<string, { promise: Promise<void> }>()
@@ -3066,6 +3067,7 @@ export class AppService {
     this.acceptedSessionSource = undefined
     this.memoryOnlySession = undefined
     this.sessionAuthority.clearRpcCredentialOwners()
+    this.scheduleDesktopWindowTeardown()
     if (this.memoryOnlySessionExpiryTimer) clearTimeout(this.memoryOnlySessionExpiryTimer)
     this.memoryOnlySessionExpiryTimer = null
     if (options.advanceGeneration !== false)
@@ -3089,6 +3091,18 @@ export class AppService {
     this.invalidateSandboxUiSession()
     if (options.notifySessionChanged === false) return
     this.notifySessionChangedSafely(false)
+  }
+
+  private scheduleDesktopWindowTeardown(): void {
+    const closeWindows = this.closeDesktopWindowsForSession
+    if (!closeWindows) return
+    try {
+      void Promise.resolve(closeWindows()).catch(error => {
+        desktopRuntimeLog.warn('[Desktop] Could not close host windows on session change:', error)
+      })
+    } catch (error) {
+      desktopRuntimeLog.warn('[Desktop] Could not close host windows on session change:', error)
+    }
   }
 
   private notifySessionChangedSafely(isAuthenticated: boolean): void {
@@ -4758,6 +4772,7 @@ export class AppService {
           const nextTeamDirectoryCache = this.teamDirectoryCache
             ? { ...this.teamDirectoryCache, currentTeamId: String(user.teamId || '') }
             : this.teamDirectoryCache
+          const retireDesktopWindowOwner = Boolean(plan.ownerToken)
           const previousSessionEnvironment =
             plan.ownerMemoryLease?.envKey ??
             this.sessionAuthority.acceptedSessionSource?.envKey ??
@@ -4771,6 +4786,7 @@ export class AppService {
           const nextPrewarmAuthEpoch = this.prewarmAuthEpoch + 1
 
           const publish = () => {
+            if (retireDesktopWindowOwner) this.scheduleDesktopWindowTeardown()
             publishChat()
             if (retireSandboxOwner) this.sandboxUiSessionEpoch += 1
             runtimeOwnerPublication.publish()
@@ -6833,7 +6849,6 @@ export class AppService {
   }
 
   private assertTemporarySessionRequestAllowed(token: string, requestContext?: unknown): unknown {
-    if (!this.memoryOnlySession) return undefined
     if (requestContext === undefined) throw new SessionRequestOwnershipError()
     try {
       return this.sessionAuthority.assertTemporaryRequestAllowed(token, requestContext)
@@ -9132,11 +9147,19 @@ export class AppService {
     if (!targetHostRef) throw new Error('hostRef is required')
     this.captureSessionRequestContextForOperation()
     const rpc = await this.issueRpcTokenForHostRefs(DESKTOP_VIEW_SCOPES, [targetHostRef])
-    const { openDesktopWindow } = await import('./desktopWindow.js')
+    const { closeAllDesktopWindows, openDesktopWindow } = await import('./desktopWindow.js')
+    this.closeDesktopWindowsForSession = closeAllDesktopWindows
+    this.assertCurrentSessionRequestContext()
+    const requestOwnerContext = getSessionRequestContext()
+    if (requestOwnerContext === undefined) throw new SessionRequestOwnershipError()
     await openDesktopWindow({
       hostRef: targetHostRef,
       jwt: rpc.token,
       rpcProxyUrl: this.getEffectiveRpcProxyBaseUrl(),
+      requestOwnerContext,
+      sessionRequestContextsMatchOwner: (left, right) =>
+        this.sessionAuthority.sessionRequestContextsMatchOwner(left, right),
+      assertRequestOwnerCurrent: () => this.assertCurrentSessionRequestContext(),
       onClose: onWindowClosed,
     })
   }
