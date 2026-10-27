@@ -8,7 +8,9 @@ import {
   getContexts,
   getMcpServer,
   getMcpServers,
+  listMcpSecrets,
   updateMcpSecret,
+  updateMcpServer,
 } from '../../lib/api'
 import type { McpServerCondition, McpServerResource } from '../../lib/api'
 import {
@@ -63,6 +65,7 @@ vi.mock('../../lib/api', async () => {
     getContexts: vi.fn(),
     getMcpServer: vi.fn(),
     getMcpServers: vi.fn(),
+    listMcpSecrets: vi.fn(),
     updateMcpServer: vi.fn(),
     updateMcpSecret: vi.fn(),
     createMcpSecret: vi.fn(),
@@ -72,6 +75,8 @@ vi.mock('../../lib/api', async () => {
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockGetMcpServers = vi.mocked(getMcpServers)
 const mockGetContexts = vi.mocked(getContexts)
+const mockListMcpSecrets = vi.mocked(listMcpSecrets)
+const mockUpdateMcpServer = vi.mocked(updateMcpServer)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
 const mockCreateMcpSecret = vi.mocked(createMcpSecret)
 
@@ -89,6 +94,7 @@ const CONNECTOR_IMAGE = 'ghcr.io/acme/linear-mcp:1.4.0'
 function mcpServer(options: {
   managed?: boolean
   status?: { conditions?: McpServerCondition[] }
+  secretName?: string
 }): McpServerResource {
   return {
     metadata: { name: SERVER_NAME, namespace: NAMESPACE },
@@ -97,7 +103,7 @@ function mcpServer(options: {
       contextRef: 'default',
       ...(options.managed === undefined ? {} : { managed: options.managed }),
       envSecret: {
-        name: SECRET_NAME,
+        name: options.secretName ?? SECRET_NAME,
         keys: [
           { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
           { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
@@ -144,10 +150,12 @@ async function submitPartialRotateAndGet404() {
       status: 404,
     })
   )
-  fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'partial-value' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
-  const dialog = await screen.findByRole('alertdialog')
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate & restart' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Rotate api-key' }))
+  const dialog = screen.getByRole('dialog', { name: 'Rotate api-key' })
+  fireEvent.change(within(dialog).getByLabelText('New value', { exact: false }), {
+    target: { value: 'partial-value' },
+  })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate', exact: true }))
 }
 
 /** Invariant O2 at the page level: explanation only. */
@@ -194,6 +202,23 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+})
+
+it('shows an error instead of a credential form for a non-canonical Secret reference', async () => {
+  mockGetMcpServer.mockResolvedValue(
+    mcpServer({ secretName: '  linear-credentials  ', status: { conditions: [] } })
+  )
+  render(
+    <ToastProvider>
+      <EditMcpServerPage />
+    </ToastProvider>
+  )
+
+  expect((await screen.findByRole('alert')).textContent).toContain('"  linear-credentials  "')
+  expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+  expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  expect(mockCreateMcpSecret).not.toHaveBeenCalled()
 })
 
 // ─── R1-H2 / mini-spec §1: ownership is a function of `spec` alone ─────────
@@ -270,7 +295,7 @@ describe('EditMcpServerPage — ownership survives a late 404 for every status s
 
       // It starts as an ordinary rotate form: nothing observable says the
       // Secret is missing, so the resolver can only answer 'rotate'.
-      expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
 
       await submitPartialRotateAndGet404()
 
@@ -286,7 +311,7 @@ describe('EditMcpServerPage — ownership survives a late 404 for every status s
     it(`still recovers a managed:true connector into the create form — ${shape.name}`, async () => {
       await renderPage(mcpServer({ managed: true, status: shape.status }))
 
-      expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
 
       await submitPartialRotateAndGet404()
 
@@ -341,9 +366,9 @@ describe('EditMcpServerPage — credential surface wiring', () => {
       })
     )
 
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
-    expect(screen.getByText(/Rotate values stored in Secret/i)).toBeInTheDocument()
+    expect(screen.getByText(/Rotate a key to replace its value in Secret/i)).toBeInTheDocument()
   })
 
   it('renders the recipe explanation, and no form, for an unmanaged connector with a missing Secret', async () => {
@@ -384,7 +409,7 @@ describe('EditMcpServerPage — credential surface wiring', () => {
     )
 
     // The stale SecretNotFound and the DeploymentReady noise must both lose.
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
   })
 
@@ -472,7 +497,202 @@ describe('EditMcpServerPage — credential surface wiring', () => {
       })
     )
 
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+  })
+})
+
+// ─── Change assigned Secret — page wiring ───────────────────────────────────
+//
+// The component suites cover the form in isolation; these tests pin the wiring
+// the page owns: eligibility gating, the busy navigation interlock, the
+// spec-only write, and keyboard focus surviving the panel swap.
+
+/** The picker is a SelectionDropdown button: open it, then click the option. */
+async function chooseExistingSecret(name: string) {
+  const trigger = await screen.findByLabelText(/^Existing Secret/)
+  await waitFor(() => expect(trigger).toBeEnabled())
+  fireEvent.click(trigger)
+  fireEvent.click(await screen.findByRole('option', { name }))
+}
+
+describe('EditMcpServerPage — Change assigned Secret', () => {
+  const OTHER_SECRET = {
+    name: 'other-credentials',
+    uid: 'other-uid',
+    keys: ['api-key', 'workspace-id'],
+  }
+
+  function eligibleServer(): McpServerResource {
+    return {
+      metadata: {
+        name: SERVER_NAME,
+        namespace: NAMESPACE,
+        uid: 'server-uid',
+        resourceVersion: '10',
+        generation: 2,
+      },
+      spec: {
+        image: CONNECTOR_IMAGE,
+        contextRef: 'default',
+        managed: true,
+        envSecret: {
+          name: SECRET_NAME,
+          keys: [
+            { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
+            { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
+          ],
+        },
+      },
+      status: { conditions: [] },
+    }
+  }
+
+  function reassignedServer(): McpServerResource {
+    return {
+      ...eligibleServer(),
+      metadata: { ...eligibleServer().metadata, resourceVersion: '11', generation: 3 },
+      spec: {
+        ...eligibleServer().spec,
+        envSecret: {
+          name: OTHER_SECRET.name,
+          keys: [
+            { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
+            { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
+          ],
+        },
+      },
+    }
+  }
+
+  beforeEach(() => {
+    mockListMcpSecrets.mockResolvedValue({
+      items: [
+        { name: SECRET_NAME, uid: 'secret-uid', keys: ['api-key', 'workspace-id'] },
+        OTHER_SECRET,
+      ],
+    })
+    mockUpdateMcpServer.mockResolvedValue(reassignedServer())
+  })
+
+  it('offers reassignment beside rotation for an eligible managed connector', async () => {
+    await renderPage(eligibleServer())
+    expect(screen.getByRole('button', { name: 'Change assigned Secret' })).toBeInTheDocument()
+    // Value rotation keeps its separate surface on the same tab.
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
+  })
+
+  it('hides reassignment when the WorkflowRecipe owns the credentials', async () => {
+    await renderPage(mcpServer({ managed: false, status: { conditions: [] } }))
+    expect(screen.queryByRole('button', { name: 'Change assigned Secret' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
+  })
+
+  it('returns focus to the trigger after the change flow is cancelled', async () => {
+    await renderPage(eligibleServer())
+    fireEvent.click(screen.getByRole('button', { name: 'Change assigned Secret' }))
+    await chooseExistingSecret(OTHER_SECRET.name)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel assignment change' }))
+    const trigger = await screen.findByRole('button', { name: 'Change assigned Secret' })
+    expect(trigger).toHaveFocus()
+    // Cancelling never wrote anything.
+    expect(mockUpdateMcpServer).not.toHaveBeenCalled()
+  })
+
+  it('locks navigation during the assignment, writes only envSecret, and reloads', async () => {
+    await renderPage(eligibleServer())
+    fireEvent.click(screen.getByRole('button', { name: 'Change assigned Secret' }))
+    await chooseExistingSecret(OTHER_SECRET.name)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Assign and restart' }))
+    const dialog = await screen.findByRole('alertdialog')
+    // The busy interlock: every tab is locked while the mutation is pending.
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab).toBeDisabled()
+    }
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Assign and restart' }))
+
+    await waitFor(() => expect(mockUpdateMcpServer).toHaveBeenCalledOnce())
+    expect(mockUpdateMcpServer).toHaveBeenCalledWith(SERVER_NAME, {
+      metadata: { uid: 'server-uid', resourceVersion: '10' },
+      spec: {
+        ...eligibleServer().spec,
+        envSecret: {
+          name: OTHER_SECRET.name,
+          keys: [
+            { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
+            { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
+          ],
+        },
+      },
+    })
+    // Reference-only: shared Secret values are never written by this flow.
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
+    expect(await screen.findByText(/Assignment saved/)).toBeInTheDocument()
+    // Saved is not ready: the operator can leave while the rollout is observed.
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab).toBeDisabled()
+    }
+
+    // Leaving releases the panel and reloads the connector's new reference.
+    mockGetMcpServer.mockResolvedValue(reassignedServer())
+    fireEvent.click(screen.getByRole('button', { name: 'Check credentials later' }))
+    const currentAssignment = await screen.findByRole('group', { name: 'Current Secret' })
+    expect(currentAssignment.textContent).toContain(OTHER_SECRET.name)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Change assigned Secret' })).toHaveFocus()
+    )
+  })
+})
+
+describe('Installed connector credential row editing', () => {
+  it('shows a Rotate action per credential with no idle inputs or aggregate rotate button', async () => {
+    await renderPage(mcpServer({ status: { conditions: [] } }))
+    const panel = credentialPanel()
+    expect(within(panel).getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: 'Rotate workspace-id' })).toBeInTheDocument()
+    expect(panel.querySelector('input')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Add key' })).toBeNull()
+    expect(within(panel).getByRole('columnheader', { name: 'Secret key' })).toBeInTheDocument()
+    expect(within(panel).getByRole('columnheader', { name: 'Env var' })).toBeInTheDocument()
+  })
+
+  it('opens a blank masked editor and discards the draft on cancel', async () => {
+    await renderPage(mcpServer({ status: { conditions: [] } }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate workspace-id' }))
+    const dialog = screen.getByRole('dialog', { name: 'Rotate workspace-id' })
+    const input = within(dialog).getByLabelText('New value', { exact: false })
+    expect(input).toHaveAttribute('type', 'password')
+    expect(input).toHaveValue('')
+    expect(within(dialog).getByRole('button', { name: 'Rotate', exact: true })).toBeDisabled()
+    fireEvent.change(input, { target: { value: 'unsaved' } })
+    expect(screen.getByRole('button', { name: 'Change assigned Secret' })).toBeDisabled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate workspace-id' }))
+    expect(screen.getByLabelText('New value', { exact: false })).toHaveValue('')
+  })
+
+  it('saves only the selected value and keeps the dialog draft after failure', async () => {
+    mockUpdateMcpSecret.mockRejectedValueOnce(new Error('Update unavailable'))
+    await renderPage(mcpServer({ status: { conditions: [] } }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate workspace-id' }))
+    const dialog = screen.getByRole('dialog', { name: 'Rotate workspace-id' })
+    fireEvent.change(within(dialog).getByLabelText('New value', { exact: false }), {
+      target: { value: '  next-value  ' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate', exact: true }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Update unavailable'))
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith(SECRET_NAME, {
+      'workspace-id': '  next-value  ',
+    })
+    expect(within(dialog).getByLabelText('New value', { exact: false })).toHaveValue(
+      '  next-value  '
+    )
+    expect(screen.queryByRole('alertdialog')).toBeNull()
   })
 })

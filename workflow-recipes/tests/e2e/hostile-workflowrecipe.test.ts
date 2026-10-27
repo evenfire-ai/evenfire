@@ -54,7 +54,7 @@ spec:
   workloads:
     - id: hostile-agent
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
       port: 3000
       transport:
         type: streamableHttp
@@ -85,7 +85,7 @@ spec:
   workloads:
     - id: hostile-agent
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
       port: 3000
       transport:
         type: streamableHttp
@@ -127,7 +127,7 @@ spec:
   workloads:
     - id: downgraded
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
       port: 8080
   security:
     isolationLevel: minimal

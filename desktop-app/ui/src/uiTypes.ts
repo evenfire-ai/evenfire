@@ -106,6 +106,13 @@ export type ToastMessage = {
   tone: Tone
   text: string
   durationMs?: number
+  /** Optional inline action (e.g. "Discard all" after a kept-payload event). */
+  action?: ToastMessageAction
+}
+
+export type ToastMessageAction = {
+  label: string
+  onAction: () => void
 }
 
 export type AppNotificationKind =

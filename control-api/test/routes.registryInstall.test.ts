@@ -5703,8 +5703,7 @@ describe('authHeaders template on remote installs', () => {
 
     // 3. The actual secret values landed in the K8s Secret only.
     const secretCall = secretSpy.mock.calls[0]?.[0] as
-      | { name?: string; stringData?: Record<string, string> }
-      | undefined
+      { name?: string; stringData?: Record<string, string> } | undefined
     expect(secretCall?.name).toBe('sentry-separation-credentials')
     expect(secretCall?.stringData).toEqual({
       SENTRY_AUTH_TOKEN: 'super-secret-token-value',
@@ -6509,6 +6508,44 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
     )
     const [secretRequest, secretOptions] = createSecretSpy.mock.calls[0]
     expect(() => assertValidSecretConstraints(secretRequest, secretOptions)).not.toThrow()
+  })
+
+  it('names the tool-lane points in the content_access_conflict reason', async () => {
+    const gw = new MockGateway()
+    await gw.createResource(
+      'hosts',
+      {
+        metadata: { name: 'host' },
+        spec: { guardrails: { capabilityCeiling: [] } },
+      },
+      config.hostsNamespace
+    )
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      hookEntry({
+        trust_level: 'high',
+        hook_meta: {
+          target: { image: { ref: IMG_A, port: 8080 } },
+          lifecyclePoints: ['preToolUse'],
+          contentAccess: 'metadata',
+        },
+      }) as any
+    )
+
+    const res = await request(makeApp(gw))
+      .post('/admin/registry/install-hook')
+      .send({
+        hostRef: 'host',
+        hookName: 'tool-lane-hook',
+        registryEntryName: '@acme/hook',
+        registryEntryVersion: '2.0.0',
+      })
+      .expect(400)
+
+    expect(res.body.error).toBe('content_access_conflict')
+    expect(res.body.reason).toBe(
+      'contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError/preToolUse/postToolUse (§8.4)'
+    )
   })
 
   it('preserves an ambiguous hook dependency', async () => {

@@ -10,12 +10,14 @@ import {
   MCP_HOST_CREDENTIAL_CAPABILITY,
   MCP_HOST_HCC_AUDIENCE,
   MCP_HOST_WORKFLOW_AUDIENCE,
+  type McpHostControlScope,
   issueMcpHostAccessJwt,
   issueMcpHostRefreshJwt,
   verifyMcpHostAccessJwt,
   verifyMcpHostControlJwt,
   verifyMcpHostRefreshJwt,
 } from '../src/utils/auth/mcpHostJwtToken.js'
+import { captureRequestLogs } from './helpers/requestLogCapture.js'
 import { MockGateway } from './mockGateway.js'
 
 // Mock userApprovalRequestService for all tests
@@ -40,10 +42,24 @@ vi.mock('../src/services/notificationEmitter.js', () => ({
 // is only consumed for NON-rate-limit queries. This keeps each test focused on
 // its actual invariant instead of having to stub the rate limiter too.
 const mockPoolQuery = vi.fn<(sql: string, params?: unknown[]) => Promise<unknown>>()
+// Refresh-jti revocation table, modelled by SQL shape so the refresh route's
+// verify (SELECT) and consume (INSERT ... ON CONFLICT DO NOTHING) see the same
+// state a real table would give them.
+const consumedRefreshJtis = new Set<string>()
 const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => {
   const text = typeof sql === 'string' ? sql : ''
   if (/rate_limit_buckets/i.test(text)) {
     return { rows: [{ count: 1 }], rowCount: 1 }
+  }
+  if (/workflow_revoked_refresh_jtis/i.test(text)) {
+    const jti = Array.isArray(params) && typeof params[0] === 'string' ? params[0] : ''
+    if (/^\s*SELECT/i.test(text)) {
+      const hit = consumedRefreshJtis.has(jti)
+      return { rows: hit ? [{ '?column?': 1 }] : [], rowCount: hit ? 1 : 0 }
+    }
+    if (consumedRefreshJtis.has(jti)) return { rows: [], rowCount: 0 }
+    consumedRefreshJtis.add(jti)
+    return { rows: [{ jti }], rowCount: 1 }
   }
   if (/lifecycle_state/i.test(text)) {
     return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
@@ -542,22 +558,47 @@ describe('Security: /auth/mcp-host/:namespace/:name/tokens access control', () =
  */
 describe('Security: Refresh token rotation', () => {
   let app: ReturnType<typeof createApp>
+  let gateway: MockGateway
+  const HOST = 'chatllm'
 
   beforeEach(() => {
     vi.clearAllMocks()
     mockPoolQuery.mockReset()
     mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
-    app = createApp(new MockGateway('mcp-server') as never)
+    consumedRefreshJtis.clear()
+    gateway = new MockGateway('mcp-server')
+    app = createApp(gateway as never)
   })
+
+  async function seedHost(name = HOST): Promise<string> {
+    const created = (await gateway.createResource(
+      'hosts',
+      { metadata: { name }, spec: { host: name, contextRef: 'ctx-a', secretRef: `${name}-llm` } },
+      config.hostsNamespace
+    )) as { metadata: { uid: string } }
+    return created.metadata.uid
+  }
+
+  function issueHccRefresh(
+    hostUid: string,
+    workflowControlScopes: McpHostControlScope[] = ['workflow:list', 'oauth:user-token']
+  ): string {
+    return issueMcpHostRefreshJwt(config.hostsNamespace, 'standalone', [HOST], {
+      workflowControlScopes,
+      hccCredential: { hostUid },
+    }).token
+  }
+
+  function refresh(token: string, body: Record<string, unknown> = {}) {
+    return request(app)
+      .post('/api/v1/workflow-auth/refresh')
+      .set('Authorization', `Bearer ${token}`)
+      .send(body)
+  }
 
   it('issues new tokens with valid refresh token', async () => {
     const { token: refreshToken } = issueMcpHostRefreshJwt('ns', 'recipe')
-    // Mock: INSERT revocation row succeeds, so this request wins the one-time-use race.
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ jti: 'jti-1' }], rowCount: 1 })
-    const res = await request(app)
-      .post('/api/v1/workflow-auth/refresh')
-      .set('Authorization', `Bearer ${refreshToken}`)
-      .send()
+    const res = await refresh(refreshToken)
     expect(res.status).toBe(200)
     expect(res.body.accessToken).toBeDefined()
     expect(res.body.refreshToken).toBeDefined()
@@ -569,31 +610,18 @@ describe('Security: Refresh token rotation', () => {
     }
   })
 
-  it('preserves signed HCC lineage across ordinary rotation and keeps the control token separate', async () => {
+  it('preserves signed HCC lineage across ordinary rotation and binds the control token to the Host uid (F2b)', async () => {
     const workflowControlScopes = ['workflow:list' as const, 'workflow:read' as const]
-    const hostRef = 'chatllm'
-    const hostUid = 'signed-host-uid'
-    const { token: refreshToken } = issueMcpHostRefreshJwt(
-      config.hostsNamespace,
-      'standalone',
-      [hostRef],
-      {
-        workflowControlScopes,
-        hccCredential: { hostUid },
-      }
-    )
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ jti: 'hcc-refresh-jti' }], rowCount: 1 })
+    const hostUid = await seedHost()
+    const refreshToken = issueHccRefresh(hostUid, workflowControlScopes)
 
-    const res = await request(app)
-      .post('/api/v1/workflow-auth/refresh')
-      .set('Authorization', `Bearer ${refreshToken}`)
-      .send({ hostUid: 'body-controlled-uid', mcpCapabilities: [] })
+    const res = await refresh(refreshToken, { hostUid: 'body-controlled-uid', mcpCapabilities: [] })
 
     expect(res.status).toBe(200)
     for (const encoded of [res.body.accessToken, res.body.refreshToken]) {
       const claims = jwt.decode(encoded) as Record<string, unknown>
       expect(claims.aud).toEqual([MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE])
-      expect(claims.hostRefs).toEqual([hostRef])
+      expect(claims.hostRefs).toEqual([HOST])
       expect(claims.host_uid).toBe(hostUid)
       expect(claims.mcpCapabilities).toEqual([MCP_HOST_CREDENTIAL_CAPABILITY])
       expect(claims.workflowControlScopes).toEqual(workflowControlScopes)
@@ -601,10 +629,11 @@ describe('Security: Refresh token rotation', () => {
 
     const control = jwt.decode(res.body.mcpHostControlToken) as Record<string, unknown>
     expect(control.aud).toBe('mcp-host')
-    expect(control.hostRefs).toEqual([hostRef])
+    expect(control.hostRefs).toEqual([HOST])
     expect(control.scopes).toEqual(workflowControlScopes)
-    expect(control.host_uid).toBeUndefined()
+    expect(control.host_uid).toBe(hostUid)
     expect(control.mcpCapabilities).toBeUndefined()
+    expect(verifyMcpHostControlJwt(res.body.mcpHostControlToken)?.host_uid).toBe(hostUid)
 
     expect(verifyMcpHostAccessJwt(res.body.mcpHostControlToken)).toBeNull()
     await expect(verifyMcpHostRefreshJwt(res.body.mcpHostControlToken)).resolves.toBeNull()
@@ -612,52 +641,118 @@ describe('Security: Refresh token rotation', () => {
     expect(verifyMcpHostControlJwt(res.body.refreshToken)).toBeNull()
   })
 
+  it('keeps oauth:user-token on an HCC control token after rotation', async () => {
+    const hostUid = await seedHost()
+    const res = await refresh(issueHccRefresh(hostUid))
+    expect(res.status).toBe(200)
+    expect(verifyMcpHostControlJwt(res.body.mcpHostControlToken)?.scopes).toEqual([
+      'workflow:list',
+      'oauth:user-token',
+    ])
+  })
+
+  it('E2: strips oauth:user-token from the control token of a rotated WRC chain, keeps it on access/refresh', async () => {
+    const { token: refreshToken } = issueMcpHostRefreshJwt(
+      config.sandboxNamespace,
+      'crm',
+      undefined,
+      { workflowControlScopes: ['workflow:list', 'oauth:user-token'] }
+    )
+    const logs = captureRequestLogs()
+    let res: Awaited<ReturnType<typeof refresh>>
+    try {
+      res = await refresh(refreshToken)
+    } finally {
+      logs.restore()
+    }
+    expect(res.status).toBe(200)
+    expect(verifyMcpHostControlJwt(res.body.mcpHostControlToken)?.scopes).toEqual(['workflow:list'])
+    for (const encoded of [res.body.accessToken, res.body.refreshToken]) {
+      const claims = jwt.decode(encoded) as Record<string, unknown>
+      expect(claims.workflowControlScopes).toEqual(['workflow:list', 'oauth:user-token'])
+    }
+    expect(logs.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'oauth_user_token_scope_stripped', route: 'refresh' }),
+      expect.any(String)
+    )
+  })
+
+  it('F2c: rejects an HCC refresh whose Host no longer exists', async () => {
+    const hostUid = await seedHost()
+    const refreshToken = issueHccRefresh(hostUid)
+    await gateway.deleteResource('hosts', HOST, config.hostsNamespace)
+
+    const res = await refresh(refreshToken)
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('F2c: rejects an HCC refresh after the Host was recreated under the same name (uid changed)', async () => {
+    const oldUid = await seedHost()
+    const refreshToken = issueHccRefresh(oldUid)
+    await gateway.deleteResource('hosts', HOST, config.hostsNamespace)
+    const newUid = await seedHost()
+    expect(newUid).not.toBe(oldUid)
+
+    const res = await refresh(refreshToken)
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('F2d: answers 503 on a transient Host read error and leaves the refresh token reusable', async () => {
+    const hostUid = await seedHost()
+    const refreshToken = issueHccRefresh(hostUid)
+    gateway.failGetResource(
+      'hosts',
+      Object.assign(new Error('apiserver down'), { statusCode: 503 })
+    )
+
+    const failed = await refresh(refreshToken)
+    expect(failed.status).toBe(503)
+    expect(failed.body).toEqual({ error: 'host_state_unavailable' })
+
+    const retried = await refresh(refreshToken)
+    expect(retried.status).toBe(200)
+    expect(verifyMcpHostControlJwt(retried.body.mcpHostControlToken)?.host_uid).toBe(hostUid)
+  })
+
+  it('F2e: rejects a hosts-namespace standalone refresh that lacks the HCC audience', async () => {
+    await seedHost()
+    // The producer still emits this pre-host_uid shape when called without an
+    // HCC credential; only the renewal routes refuse to rotate it.
+    const { token: refreshToken } = issueMcpHostRefreshJwt(
+      config.hostsNamespace,
+      'standalone',
+      [HOST],
+      { workflowControlScopes: ['workflow:list'] }
+    )
+    const res = await refresh(refreshToken, { host_ref: HOST })
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
   it('rejects access token used as refresh token (scope mismatch)', async () => {
     const { token: accessToken } = issueMcpHostAccessJwt('ns', 'recipe')
-    const res = await request(app)
-      .post('/api/v1/workflow-auth/refresh')
-      .set('Authorization', `Bearer ${accessToken}`)
-      .send()
+    const res = await refresh(accessToken)
     expect(res.status).toBe(401)
   })
 
   it('rejects reused refresh token (old JTI revoked after rotation)', async () => {
     const { token: refreshToken } = issueMcpHostRefreshJwt('ns', 'recipe')
 
-    // First use - should succeed and consume the old JTI.
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ jti: 'jti-1' }], rowCount: 1 })
-
-    const res1 = await request(app)
-      .post('/api/v1/workflow-auth/refresh')
-      .set('Authorization', `Bearer ${refreshToken}`)
-      .send()
+    const res1 = await refresh(refreshToken)
     expect(res1.status).toBe(200)
     expect(res1.body.refreshToken).toBeDefined()
 
-    const res2 = await request(app)
-      .post('/api/v1/workflow-auth/refresh')
-      .set('Authorization', `Bearer ${refreshToken}`)
-      .send()
+    const res2 = await refresh(refreshToken)
     expect(res2.status).toBe(401)
   })
 
   it('allows only one winner when two refresh requests race on the same token', async () => {
-    const { token: refreshToken } = issueMcpHostRefreshJwt('ns', 'recipe')
+    const hostUid = await seedHost()
+    const refreshToken = issueHccRefresh(hostUid)
 
-    mockPoolQuery
-      .mockResolvedValueOnce({ rows: [{ jti: 'jti-1' }], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-
-    const [res1, res2] = await Promise.all([
-      request(app)
-        .post('/api/v1/workflow-auth/refresh')
-        .set('Authorization', `Bearer ${refreshToken}`)
-        .send(),
-      request(app)
-        .post('/api/v1/workflow-auth/refresh')
-        .set('Authorization', `Bearer ${refreshToken}`)
-        .send(),
-    ])
+    const [res1, res2] = await Promise.all([refresh(refreshToken), refresh(refreshToken)])
 
     expect([res1.status, res2.status].sort()).toEqual([200, 401])
   })

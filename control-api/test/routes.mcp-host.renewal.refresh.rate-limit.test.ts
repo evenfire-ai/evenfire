@@ -19,7 +19,7 @@ vi.mock('../src/services/notificationEmitter.js', () => ({
 
 // DB pool is now called for TWO things by the refresh endpoint:
 //   1. rate_limit_buckets INSERT ... RETURNING count  (rate limiter middleware)
-//   2. workflow_revoked_refresh_jtis INSERT            (JTI consumption)
+//   2. workflow_revoked_refresh_jtis SELECT / INSERT   (JTI verify, then consumption)
 // The mock dispatches on SQL fragment so each call returns the right shape.
 const rateLimitCounts = new Map<string, number>()
 const consumedJtis = new Set<string>()
@@ -40,6 +40,11 @@ const mockPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
       Array.isArray(params) && typeof params[0] === 'string'
         ? params[0]
         : `unknown-${mockPoolQuery.mock.calls.length}`
+    // The route verifies (SELECT, read-only) before it consumes (INSERT).
+    if (/^\s*SELECT/i.test(text)) {
+      const hit = consumedJtis.has(jti)
+      return { rows: hit ? [{ '?column?': 1 }] : [], rowCount: hit ? 1 : 0 }
+    }
     if (consumedJtis.has(jti)) {
       return { rows: [], rowCount: 0 }
     }

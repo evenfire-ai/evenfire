@@ -4,6 +4,9 @@ export const PROTECTED_WORKSPACE_DIRS: ReadonlySet<string> = new Set([
   '.clerum-state',
   '.gfs-download-store',
   '.gfs-downloads',
+  // Each caller's generated files (callerOutputs.ts): written only by the
+  // document generators and read through the artifact routes.
+  '.clerum-outputs',
 ])
 
 /**
@@ -31,11 +34,15 @@ function isProtectedSegment(segment: string): boolean {
   return PROTECTED_WORKSPACE_DIRS.has(segment) || isRetiredGfsStoreSegment(segment)
 }
 
-export const PROTECTED_STATE_DB_FILES: ReadonlySet<string> = new Set([
-  'state.db',
-  'state.db-wal',
-  'state.db-shm',
-])
+/**
+ * True for every name of the conversation database family: the database, its
+ * journals, and copies such as `state.db.pre-<ts>.bak` an older layout left
+ * next to it at the workspace root. `mystate.db.txt` and `state.database` are
+ * ordinary files.
+ */
+export function isStateDbName(name: string): boolean {
+  return name.startsWith('state.db')
+}
 
 function normalizeWorkspacePath(relativePath: string): string {
   let normalized = path.posix.normalize(relativePath || '')
@@ -57,7 +64,7 @@ export function isProtectedWorkspacePath(relativePath: string): boolean {
     .filter(segment => segment.length > 0 && segment !== '.')
   if (segments.some(isProtectedSegment)) return true
   const base = segments[segments.length - 1]
-  return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
+  return base !== undefined && isStateDbName(base)
 }
 
 /** Backward-compatible helper for callers that specifically report state-db access. */
@@ -68,7 +75,7 @@ export function isStateDbPath(relativePath: string): boolean {
     .filter(segment => segment.length > 0 && segment !== '.')
   if (segments.includes('.clerum-state')) return true
   const base = segments[segments.length - 1]
-  return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
+  return base !== undefined && isStateDbName(base)
 }
 
 export function isGfsDownloadPath(relativePath: string): boolean {
@@ -111,8 +118,26 @@ export class GfsDownloadPathError extends ProtectedWorkspacePathError {
   }
 }
 
+export function isGeneratedOutputsPath(relativePath: string): boolean {
+  if (typeof relativePath !== 'string' || relativePath.length === 0) return false
+  return normalizeWorkspacePath(relativePath)
+    .split('/')
+    .some(segment => segment === '.clerum-outputs')
+}
+
+export class GeneratedOutputsPathError extends ProtectedWorkspacePathError {
+  constructor(filename: string) {
+    super(
+      `${filename} is in the folder of generated documents, which only the clerum__generate_* tools write; ` +
+        'pass a generated file by name to the generator that embeds it instead.'
+    )
+    this.name = 'GeneratedOutputsPathError'
+  }
+}
+
 export function protectedWorkspacePathError(relativePath: string): ProtectedWorkspacePathError {
   if (isGfsDownloadPath(relativePath)) return new GfsDownloadPathError(relativePath)
+  if (isGeneratedOutputsPath(relativePath)) return new GeneratedOutputsPathError(relativePath)
   return new StateDbPathError(relativePath)
 }
 
@@ -131,7 +156,7 @@ function isProtectedAbsoluteRealPath(realPath: string): boolean {
   const segments = realPath.split(path.sep).filter(segment => segment.length > 0)
   if (segments.some(isProtectedSegment)) return true
   const base = segments[segments.length - 1]
-  return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
+  return base !== undefined && isStateDbName(base)
 }
 
 export function isProtectedGfsRealPath(realPath: string): boolean {
@@ -157,5 +182,5 @@ export function isProtectedRealPath(realPath: string, realWorkspaceRoot: string)
   const segments = relative.split(path.sep).filter(segment => segment.length > 0)
   if (segments.some(isProtectedSegment)) return true
   const base = segments[segments.length - 1]
-  return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
+  return base !== undefined && isStateDbName(base)
 }

@@ -4,7 +4,7 @@
   "description": "External-facing RPC proxy for tenant-scoped MCP access",
   "main": "dist/main.js",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "build": "tsc",
