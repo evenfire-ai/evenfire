@@ -1220,7 +1220,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const currentCache = desktopQueryKeys.gfsChildren(currentScope, parentId, 'main')
       queryClient.setQueryDefaults(currentCache, { gcTime: 60_000 })
       try {
-        const dialog = await dispatchArchiveMove()
+        await dispatchArchiveMove()
         queryClient.setQueryData(currentCache, { items: [], nextCursor: null })
 
         if (contextChange === 'session') {
