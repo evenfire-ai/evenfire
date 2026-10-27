@@ -44,6 +44,13 @@ export function clearSandboxUiDeepLinkProcessingOwner(
   return currentOwnerId === completedLinkId ? null : currentOwnerId
 }
 
+export function isSandboxUiDeepLinkProcessingOwner(
+  currentOwnerId: number | null,
+  linkId: number
+): boolean {
+  return currentOwnerId === linkId
+}
+
 export function getSandboxUiDeepLinkMetadataIdsToPrune(
   metadataIds: Iterable<number>,
   pendingLinkIds: Iterable<number>,

@@ -81,6 +81,7 @@ import {
   getSandboxUiDeepLinkMetadataIdsToPrune,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
+  isSandboxUiDeepLinkProcessingOwner,
   removePendingSandboxUiDeepLink,
   resetPendingSandboxUiDeepLinkFailure,
   shouldPurgeSandboxUiDeepLinks,
@@ -2461,6 +2462,18 @@ export function App() {
       return
     }
     if (supersededPending) {
+      if (
+        isSandboxUiDeepLinkProcessingOwner(
+          processingSandboxUiDeepLinkIdRef.current,
+          supersededPending.link.id
+        )
+      ) {
+        // The active transaction will observe the stale intent when its
+        // awaited operation settles. Keep its exact processing turn until
+        // then; acknowledging here would admit a second link into an
+        // unresolved team/embed transaction.
+        return
+      }
       void cancelSupersededSandboxUiDeepLink(supersededPending.link.id)
       return
     }

@@ -1132,6 +1132,154 @@ describe('App deep-link orchestration', () => {
     })
   }
 
+  it('serializes confirmed app links across an in-flight team transition', async () => {
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actualControllerModule.useAppController()
+      return realController
+    })
+    const appBridge = window.clerum
+    const { clerum, handle } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+
+    let activeTeamId = 'team-a'
+    let releaseTeamB!: () => void
+    let releaseTeamC!: () => void
+    const teamBGate = new Promise<void>(resolve => {
+      releaseTeamB = resolve
+    })
+    const teamCGate = new Promise<void>(resolve => {
+      releaseTeamC = resolve
+    })
+    const switchTeamProducer = handle.switchTeam.getMockImplementation()
+    if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
+    handle.teamDirectory.mockImplementation(async () => ({
+      items: [],
+      currentTeamId: activeTeamId,
+    }))
+    const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation()
+    if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
+    handle.refreshCatalog.mockImplementation(async () => ({
+      ...(await refreshCatalogProducer()),
+      teamId: activeTeamId,
+    }))
+    handle.switchTeam.mockImplementation(async teamId => {
+      if (teamId === 'team-b') await teamBGate
+      if (teamId === 'team-c') await teamCGate
+      activeTeamId = teamId
+      return switchTeamProducer(teamId)
+    })
+
+    const appFor = (teamId: string) => ({
+      appRef: `ns/${teamId}`,
+      title: `App ${teamId}`,
+      defaultPath: '/',
+      ready: true,
+      phase: 'active',
+    })
+    listApps.mockImplementation(async () => ({ apps: [appFor(activeTeamId)] }))
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await launchAppFromSidebar('ns/team-a')
+    main.navigate('/origin-a')
+
+    const linkAtoBTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-b',
+        path: '/linked-b',
+        teamId: 'team-b',
+      })
+    )
+    if (!linkAtoBTarget) throw new Error('the production parser rejected the Team B link')
+    const linkAtoB = queue.enqueue(linkAtoBTarget)
+    act(() => emitDeepLink?.(linkAtoB))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenCalledWith('team-b'))
+    await waitFor(() => expect(main.live()).toBeNull())
+    await waitFor(() => expect(embedState().owner).toBeNull())
+
+    const linkBtoCTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-c',
+        path: '/linked-c',
+        teamId: 'team-c',
+      })
+    )
+    if (!linkBtoCTarget) throw new Error('the production parser rejected the Team C link')
+    const linkBtoC = queue.enqueue(linkBtoCTarget)
+    act(() => emitDeepLink?.(linkBtoC))
+    await confirmPendingAppLink()
+
+    // The first transport is still unresolved. The real controller must keep
+    // the second team switch behind it, and no Team A view may remain live.
+    expect(handle.switchTeam.mock.calls.map(([teamId]) => teamId)).toEqual(['team-b'])
+    expect(getController().getCurrentTeamId()).toBe('team-a')
+    expect(main.live()).toBeNull()
+    expect(openSandboxUi()).toHaveBeenCalledTimes(1)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(linkAtoB.id)
+
+    await act(async () => {
+      releaseTeamB()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenCalledWith('team-c'))
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-b'))
+
+    // Team B is now authenticated while Team C is held at the real bridge.
+    // The origin tab is retained, but no Team A native view is owned or live.
+    expect(main.live()?.appRef).not.toBe('ns/team-a')
+    expect(embedState().owner).toBeNull()
+
+    await act(async () => {
+      releaseTeamC()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-c'))
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+    await waitForMounted()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkBtoC.id))
+
+    expect(main.openCall(1)).toMatchObject({ recipeName: 'team-c', routePath: '/linked-c' })
+    expect(main.live()).toMatchObject({ appRef: 'ns/team-c', routePath: '/linked-c' })
+    expect(activeWorkspaceTab(getController().workspaceTabs)).toMatchObject({
+      kind: 'app',
+      app: { appRef: 'ns/team-c' },
+    })
+    expect(acknowledgeDeepLink).toHaveBeenCalledTimes(2)
+    expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkAtoB.id)
+    expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkBtoC.id)
+    queryClient.clear()
+  })
+
   it('continues after a superseded in-flight link is evicted from the bounded queue', async () => {
     let liveTeamId = 'team-a'
     let releaseFirstSwitch!: () => void

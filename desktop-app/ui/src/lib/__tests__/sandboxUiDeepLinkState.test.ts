@@ -15,6 +15,7 @@ import {
   getSandboxUiDeepLinkMetadataIdsToPrune,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
+  isSandboxUiDeepLinkProcessingOwner,
   nextSandboxUiDeepLinkRetryDelayMs,
   removePendingSandboxUiDeepLink,
   resetPendingSandboxUiDeepLinkFailure,
@@ -182,6 +183,53 @@ describe('pending sandbox UI deep-link state', () => {
     expect(clearSandboxUiDeepLinkProcessingOwner(1, 1)).toBeNull()
     expect(clearSandboxUiDeepLinkProcessingOwner(2, 1)).toBe(2)
     expect(clearSandboxUiDeepLinkProcessingOwner(null, 1)).toBeNull()
+  })
+
+  it('keeps a superseded in-flight owner until that exact transaction settles', () => {
+    type Event = { kind: 'supersede' | 'settle'; linkId: number }
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 100 }),
+        fc.array(
+          fc.record({
+            kind: fc.constantFrom<Event['kind']>('supersede', 'settle'),
+            linkId: fc.integer({ min: 1, max: 100 }),
+          }),
+          { maxLength: 100 }
+        ),
+        (initialOwner, events) => {
+          let actualOwner: number | null = initialOwner
+          let expectedOwner: number | null = initialOwner
+          let transactionSettled = false
+
+          for (const event of events) {
+            if (event.kind === 'supersede') {
+              const deferCancellation = isSandboxUiDeepLinkProcessingOwner(
+                actualOwner,
+                event.linkId
+              )
+              if (!deferCancellation) {
+                actualOwner = clearSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
+              }
+              // Contract reference: intent supersession changes eligibility,
+              // never the exclusive owner of unsettled asynchronous work.
+              if (event.linkId === expectedOwner && !transactionSettled) {
+                expectedOwner = event.linkId
+              }
+            } else {
+              actualOwner = clearSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
+              if (event.linkId === expectedOwner) {
+                expectedOwner = null
+                transactionSettled = true
+              }
+            }
+
+            expect(actualOwner).toBe(expectedOwner)
+          }
+        }
+      ),
+      { numRuns: 5_000 }
+    )
   })
 
   it('prunes only absent metadata that is not owned by the active processor', () => {
