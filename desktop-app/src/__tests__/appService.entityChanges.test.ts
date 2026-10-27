@@ -463,7 +463,7 @@ describe('AppService entity-change reconnect behavior', () => {
 
   it('does not strand subscribers when expiry is deferred through a transient hop', async () => {
     const service = new AppService() as any
-    setSyntheticSessionToken(service, 'committed-session-token')
+    setSyntheticSessionToken(service, 'fixture-committed-session-token')
     let publish!: (event: EntityChangeStreamEvent) => void
     service.authClient = {
       openEntityChangeStream: vi.fn((_token, _cursor, onEvent, signal) => {
@@ -508,7 +508,7 @@ describe('AppService entity-change stream team-context lifecycle', () => {
     let finishFirstStream!: () => void
     service.authClient = {
       passwordLogin: vi.fn(async () => ({
-        token: 'committed-session-token',
+        token: 'fixture-committed-session-token',
         me: { id: 'user-1', teamId: 'team-a' },
       })),
       openEntityChangeStream: vi.fn((token, _cursor, _onEvent, signal) => {
@@ -540,7 +540,7 @@ describe('AppService entity-change stream team-context lifecycle', () => {
       await service.passwordLogin('user@example.test', 'fixture-password')
       service.startEntityChangeStream('stream-1', 7, vi.fn())
       await flushAsyncWork()
-      expect(opened[0]?.token).toBe('committed-session-token')
+      expect(opened[0]?.token).toBe('fixture-committed-session-token')
 
       teamOperation = service.runWithTeamContext('team-b', async () => {
         markOperationEntered()

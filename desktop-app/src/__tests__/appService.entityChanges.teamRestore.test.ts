@@ -26,7 +26,7 @@ describe('AppService entity stream after failed team restore', () => {
     const { getSessionRequestContext } = await import('../httpClient.js')
     const me = testSessionMe()
     vi.spyOn(service.authClient, 'passwordLogin').mockResolvedValue({
-      token: 'accepted-entity-stream-token',
+      token: 'fixture-accepted-entity-stream-token',
       me,
     })
     vi.spyOn(service.authClient, 'getMe').mockResolvedValue(me)
@@ -75,7 +75,7 @@ describe('AppService entity stream after failed team restore', () => {
             exactOwner = false
           }
           reconnectOwnerStatus.resolve({
-            tokenMatches: token === 'accepted-entity-stream-token',
+            tokenMatches: token === 'fixture-accepted-entity-stream-token',
             contextPresent: requestContext !== undefined,
             sameLineage: ownerAuthority.isSessionRequestContextInCurrentLineage(
               requestContext,

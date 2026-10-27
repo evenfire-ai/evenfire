@@ -106,7 +106,7 @@ function makeService(): AppService {
 describe('AppService.prewarmHost', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],
@@ -134,7 +134,7 @@ describe('AppService.prewarmHost', () => {
       expect.any(String)
     )
     expect(mockPrewarmHost).toHaveBeenCalledTimes(1)
-    expect(mockPrewarmHost).toHaveBeenCalledWith('rpc-token', 'chatllm')
+    expect(mockPrewarmHost).toHaveBeenCalledWith('fixture-rpc-token', 'chatllm')
   })
 
   it('cooldown: a re-open inside the window makes no HTTP call; after the window it fires again', async () => {
@@ -196,7 +196,7 @@ describe('AppService.prewarmHost', () => {
     const logged = warnSpy.mock.calls.map(args => args.map(String).join(' ')).join('\n')
     expect(logged).toContain('missing-host')
     expect(logged).toContain('404')
-    expect(logged).not.toContain('rpc-token')
+    expect(logged).not.toContain('fixture-rpc-token')
     expect(logged).not.toContain('session-token')
     warnSpy.mockRestore()
   })
@@ -228,7 +228,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.useFakeTimers()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],
@@ -261,8 +261,8 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     expect(mockPrewarmHost).toHaveBeenCalledTimes(3)
 
     // Every re-emit reuses the invocation's token and hostRef.
-    expect(mockPrewarmHost.mock.calls[1]).toEqual(['rpc-token', 'chatllm'])
-    expect(mockPrewarmHost.mock.calls[2]).toEqual(['rpc-token', 'chatllm'])
+    expect(mockPrewarmHost.mock.calls[1]).toEqual(['fixture-rpc-token', 'chatllm'])
+    expect(mockPrewarmHost.mock.calls[2]).toEqual(['fixture-rpc-token', 'chatllm'])
 
     // Acknowledged by 200 active — nothing further is ever scheduled.
     expect(vi.getTimerCount()).toBe(0)
@@ -274,7 +274,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     expect(infoLogged).toContain('host=chatllm')
     expect(infoLogged).toContain('attempt=1')
     expect(infoLogged).toContain('attempt=2')
-    expect(infoLogged).not.toContain('rpc-token')
+    expect(infoLogged).not.toContain('fixture-rpc-token')
     infoSpy.mockRestore()
     warnSpy.mockRestore()
   })
@@ -519,7 +519,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     const warnLogged = warnSpy.mock.calls.map(args => args.map(String).join(' ')).join('\n')
     expect(warnLogged).toContain('host=chatllm')
     expect(warnLogged).toContain('reactive message path')
-    expect(warnLogged).not.toContain('rpc-token')
+    expect(warnLogged).not.toContain('fixture-rpc-token')
 
     // Loop is over: no pending timers, no fourth POST ever.
     expect(vi.getTimerCount()).toBe(0)
@@ -546,7 +546,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     const warnLogged = warnSpy.mock.calls.map(args => args.map(String).join(' ')).join('\n')
     expect(warnLogged).toContain('re-emit failed host=chatllm')
     expect(warnLogged).toContain('503')
-    expect(warnLogged).not.toContain('rpc-token')
+    expect(warnLogged).not.toContain('fixture-rpc-token')
 
     expect(vi.getTimerCount()).toBe(0)
     await vi.advanceTimersByTimeAsync(30_000)
@@ -616,7 +616,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
 describe('AppService host status stream — ANTI-FLAP invariant', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],

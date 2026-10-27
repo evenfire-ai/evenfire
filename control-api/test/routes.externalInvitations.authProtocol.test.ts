@@ -84,12 +84,12 @@ function acceptedPasswordReset() {
 function passwordResetPreview() {
   return invitationResponse(
     {
-      id: 'invitation-1',
+      id: 'fixture-invitation-1',
       team_id: null,
       invitee_name: null,
       email: 'user@example.com',
       role: 'member',
-      token: 'invitation-1',
+      token: 'fixture-invitation-1',
       status: 'pending',
       purpose: 'password_reset',
       created_at: new Date('2026-10-27T00:00:00.000Z'),
@@ -111,7 +111,7 @@ describe('unversioned invitation session producers', () => {
     vi.clearAllMocks()
     invitationFlow.validateInvitationFlowToken.mockResolvedValue({
       email: 'user@example.com',
-      invitationUuid: 'invitation-1',
+      invitationUuid: 'fixture-invitation-1',
     })
   })
 
@@ -124,7 +124,7 @@ describe('unversioned invitation session producers', () => {
 
     const response = await request(buildApp())
       .post('/external/invitations/accept')
-      .send({ email: 'user@example.com', token: 'valid-invitation-flow-token' })
+      .send({ email: 'user@example.com', token: 'fixture-valid-invitation-flow-token' })
       .expect(200)
     const claims = verifyExternalSessionToken(response.body.token)
 
@@ -149,7 +149,7 @@ describe('unversioned invitation session producers', () => {
 
     expect(response.status).toBe(200)
     expect(response.body).toMatchObject({
-      id: 'invitation-1',
+      id: 'fixture-invitation-1',
       purpose: 'password_reset',
       status: 'pending',
     })
@@ -164,9 +164,9 @@ describe('unversioned invitation session producers', () => {
       .post('/external/invitations/password-token')
       .send({
         email: 'user@example.com',
-        token: 'valid-invitation-flow-token',
-        invitationId: 'invitation-1',
-        password: 'Strong password 123!',
+        token: 'fixture-valid-invitation-flow-token',
+        invitationId: 'fixture-invitation-1',
+        password: 'fixture-Strong password 123!',
       })
       .expect(200)
     const claims = verifyExternalSessionToken(response.body.token)

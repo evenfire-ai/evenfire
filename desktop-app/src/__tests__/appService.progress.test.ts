@@ -63,7 +63,7 @@ async function makeService(): Promise<any> {
   await establishAcceptedPasswordSession(service, { me: sessionMe })
   service.rpcTokenManager = {
     getOrIssue: vi.fn().mockResolvedValue({
-      token: 'rpc-token',
+      token: 'fixture-rpc-token',
       expiresInSeconds: 300,
       scopes: ['host:activity:read'],
     }),
@@ -91,7 +91,7 @@ describe('AppService.startTaskProgressStream', () => {
     // RPC tokens); me.teamId short-circuits resolution without network calls.
     service.rpcTokenManager = {
       getOrIssue: vi.fn().mockResolvedValue({
-        token: 'rpc-token',
+        token: 'fixture-rpc-token',
         expiresInSeconds: 300,
         scopes: ['host:activity:read'],
       }),
@@ -150,7 +150,7 @@ describe('AppService.startTaskProgressStream', () => {
     // RPC tokens); me.teamId short-circuits resolution without network calls.
     service.rpcTokenManager = {
       getOrIssue: vi.fn().mockResolvedValue({
-        token: 'rpc-token',
+        token: 'fixture-rpc-token',
         expiresInSeconds: 300,
         scopes: ['host:activity:read'],
       }),
@@ -197,7 +197,7 @@ describe('AppService.startTaskProgressStream', () => {
     const service = await makeService()
     service.rpcTokenManager = {
       getOrIssue: vi.fn().mockResolvedValue({
-        token: 'rpc-token',
+        token: 'fixture-rpc-token',
         expiresInSeconds: 300,
         scopes: ['host:activity:read'],
       }),
@@ -266,7 +266,7 @@ describe('AppService.startTaskProgressStream', () => {
       // RPC tokens); me.teamId short-circuits resolution without network calls.
       service.rpcTokenManager = {
         getOrIssue: vi.fn().mockResolvedValue({
-          token: 'rpc-token',
+          token: 'fixture-rpc-token',
           expiresInSeconds: 300,
           scopes: ['host:activity:read'],
         }),
@@ -323,7 +323,7 @@ describe('AppService.startTaskProgressStream', () => {
       // RPC tokens); me.teamId short-circuits resolution without network calls.
       service.rpcTokenManager = {
         getOrIssue: vi.fn().mockResolvedValue({
-          token: 'rpc-token',
+          token: 'fixture-rpc-token',
           expiresInSeconds: 300,
           scopes: ['host:activity:read'],
         }),
@@ -373,7 +373,7 @@ describe('AppService.startTaskProgressStream', () => {
       // RPC tokens); me.teamId short-circuits resolution without network calls.
       service.rpcTokenManager = {
         getOrIssue: vi.fn().mockResolvedValue({
-          token: 'rpc-token',
+          token: 'fixture-rpc-token',
           expiresInSeconds: 300,
           scopes: ['host:activity:read'],
         }),
@@ -590,7 +590,11 @@ describe('AppService.startTaskProgressStream', () => {
           if (issueCalls === 1) {
             throw new ApiError('Unauthorized', 401, '')
           }
-          return { token: 'rpc-token-fresh', expiresInSeconds: 300, scopes: ['host:activity:read'] }
+          return {
+            token: 'fixture-rpc-token-fresh',
+            expiresInSeconds: 300,
+            scopes: ['host:activity:read'],
+          }
         }),
         clear: vi.fn(),
       }

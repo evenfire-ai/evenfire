@@ -123,7 +123,7 @@ function drainingApiError(): ApiError {
 describe('AppService.invokeHostMessage host-availability plumbing', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
   })
 
   afterEach(async () => {
@@ -198,7 +198,7 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
     // The contextualRequest is a field allow-list; `model` must be threaded
     // through explicitly so the runtime can validate+persist the session model.
     expect(mockInvokeHostMessage).toHaveBeenCalledWith(
-      'rpc-token',
+      'fixture-rpc-token',
       'myhost',
       expect.objectContaining({ content: 'hi', model: 'claude-opus-4-8' }),
       undefined

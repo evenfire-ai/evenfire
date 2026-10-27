@@ -632,7 +632,7 @@ describe('temporary AppService RPC lease', () => {
     await expect(service.listSandboxUiApps()).resolves.toEqual({ apps: [] })
     expect(fetchMock.mock.calls.at(-1)?.[0]).toMatch('proxy.rpc-lease-b.test')
     expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('authorization')).toBe(
-      'Bearer derived-rpc-bearer-shared'
+      'Bearer derived-rpc-bearer-shared' // PUBLIC_SYNTHETIC_BEARER_FIXTURE
     )
     const callsBeforeRelease = fetchMock.mock.calls.length
     release.resolve()
@@ -644,7 +644,7 @@ describe('temporary AppService RPC lease', () => {
     expect(service.getCachedUserId()).toBe(secondUser.id)
     await expect(service.listSandboxUiApps()).resolves.toEqual({ apps: [] })
     expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('authorization')).toBe(
-      'Bearer derived-rpc-bearer-shared'
+      'Bearer derived-rpc-bearer-shared' // PUBLIC_SYNTHETIC_BEARER_FIXTURE
     )
   })
 

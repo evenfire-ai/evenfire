@@ -690,10 +690,10 @@ describe('SessionAuthorityCoordinator source decisions', () => {
     for (let index = 0; index < 1024; index += 1) {
       await expect(
         owner.issueRpcCredential('guarded-persistent-session', async () => ({
-          token: `guarded-persistent-rpc-${index}`,
+          token: `fixture-guarded-persistent-rpc-${index}`,
           expiresInSeconds: 300,
         }))
-      ).resolves.toMatchObject({ token: `guarded-persistent-rpc-${index}` })
+      ).resolves.toMatchObject({ token: `fixture-guarded-persistent-rpc-${index}` })
     }
 
     // A manager cache hit is the same accepted bearer, not a new owner record;
@@ -702,27 +702,29 @@ describe('SessionAuthorityCoordinator source decisions', () => {
       owner.issueRpcCredential(
         'guarded-persistent-session',
         async () => ({
-          token: 'guarded-persistent-rpc-0',
+          token: 'fixture-guarded-persistent-rpc-0',
           expiresInSeconds: 300,
         }),
-        () => ({ token: 'guarded-persistent-rpc-0', expiresInSeconds: 300 })
+        () => ({ token: 'fixture-guarded-persistent-rpc-0', expiresInSeconds: 300 })
       )
-    ).resolves.toMatchObject({ token: 'guarded-persistent-rpc-0' })
-    expect(owner.assertTemporaryRequestAllowed('guarded-persistent-rpc-0')).toBeUndefined()
+    ).resolves.toMatchObject({ token: 'fixture-guarded-persistent-rpc-0' })
+    expect(owner.assertTemporaryRequestAllowed('fixture-guarded-persistent-rpc-0')).toBeUndefined()
     expect((owner as any).rpcCredentialOwners.size).toBe(1024)
 
     await expect(
       owner.issueRpcCredential('guarded-persistent-session', async () => ({
-        token: 'guarded-persistent-rpc-1024',
+        token: 'fixture-guarded-persistent-rpc-1024',
         expiresInSeconds: 300,
       }))
-    ).resolves.toMatchObject({ token: 'guarded-persistent-rpc-1024' })
+    ).resolves.toMatchObject({ token: 'fixture-guarded-persistent-rpc-1024' })
 
     expect((owner as any).rpcCredentialOwners.size).toBe(1024)
-    expect(() => owner.assertTemporaryRequestAllowed('guarded-persistent-rpc-0')).toThrow(
+    expect(() => owner.assertTemporaryRequestAllowed('fixture-guarded-persistent-rpc-0')).toThrow(
       'current authenticated session'
     )
-    expect(owner.assertTemporaryRequestAllowed('guarded-persistent-rpc-1024')).toBeUndefined()
+    expect(
+      owner.assertTemporaryRequestAllowed('fixture-guarded-persistent-rpc-1024')
+    ).toBeUndefined()
   })
 
   it('bounds live RPC credential ownership records and reclaims only after monotonic expiry', async () => {
@@ -761,7 +763,7 @@ describe('SessionAuthorityCoordinator source decisions', () => {
       let issued = 0
       for (let index = 0; index < 1024; index += 1) {
         await owner.issueRpcCredential('capacity-session-token', async () => ({
-          token: `rpc-capacity-${index}`,
+          token: `fixture-rpc-capacity-${index}`,
           expiresInSeconds: 300,
         }))
         issued += 1
@@ -770,7 +772,7 @@ describe('SessionAuthorityCoordinator source decisions', () => {
       await expect(
         owner.issueRpcCredential('capacity-session-token', async () => {
           issued += 1
-          return { token: 'rpc-over-capacity', expiresInSeconds: 300 }
+          return { token: 'fixture-rpc-over-capacity', expiresInSeconds: 300 }
         })
       ).rejects.toThrow('capacity')
       expect(issued).toBe(1024)
@@ -780,11 +782,11 @@ describe('SessionAuthorityCoordinator source decisions', () => {
           'capacity-session-token',
           async () => {
             issued += 1
-            return { token: 'rpc-unexpected-mint', expiresInSeconds: 300 }
+            return { token: 'fixture-rpc-unexpected-mint', expiresInSeconds: 300 }
           },
-          () => ({ token: 'rpc-capacity-0', expiresInSeconds: 300 })
+          () => ({ token: 'fixture-rpc-capacity-0', expiresInSeconds: 300 })
         )
-      ).resolves.toMatchObject({ token: 'rpc-capacity-0' })
+      ).resolves.toMatchObject({ token: 'fixture-rpc-capacity-0' })
       expect(issued).toBe(1024)
 
       await expect(
@@ -792,9 +794,9 @@ describe('SessionAuthorityCoordinator source decisions', () => {
           'capacity-session-token',
           async () => {
             issued += 1
-            return { token: 'rpc-unexpected-unowned-mint', expiresInSeconds: 300 }
+            return { token: 'fixture-rpc-unexpected-unowned-mint', expiresInSeconds: 300 }
           },
-          () => ({ token: 'rpc-unowned-cache-value', expiresInSeconds: 300 })
+          () => ({ token: 'fixture-rpc-unowned-cache-value', expiresInSeconds: 300 })
         )
       ).rejects.toThrow('capacity')
       expect(issued).toBe(1024)
@@ -803,7 +805,7 @@ describe('SessionAuthorityCoordinator source decisions', () => {
       await expect(
         owner.issueRpcCredential('capacity-session-token', async () => {
           issued += 1
-          return { token: 'rpc-before-expiry', expiresInSeconds: 300 }
+          return { token: 'fixture-rpc-before-expiry', expiresInSeconds: 300 }
         })
       ).rejects.toThrow('capacity')
       expect(issued).toBe(1024)
@@ -811,10 +813,10 @@ describe('SessionAuthorityCoordinator source decisions', () => {
       monotonicNow = 300_000
       await expect(
         owner.issueRpcCredential('capacity-session-token', async () => ({
-          token: 'rpc-after-expiry',
+          token: 'fixture-rpc-after-expiry',
           expiresInSeconds: 300,
         }))
-      ).resolves.toMatchObject({ token: 'rpc-after-expiry' })
+      ).resolves.toMatchObject({ token: 'fixture-rpc-after-expiry' })
     } finally {
       now.mockRestore()
     }
@@ -852,22 +854,26 @@ describe('SessionAuthorityCoordinator source decisions', () => {
     const homeRequestContext = owner.captureSessionRequestContext('home-team-session')
 
     await owner.issueRpcCredential('home-team-session', async () => ({
-      token: 'home-team-rpc',
+      token: 'fixture-home-team-rpc',
       expiresInSeconds: 300,
     }))
     owner.sessionToken = 'target-team-session'
     owner.me = { ...homeUser, teamId: 'target-team', teamName: 'Target team' }
     await owner.issueRpcCredential('target-team-session', async () => ({
-      token: 'target-team-rpc',
+      token: 'fixture-target-team-rpc',
       expiresInSeconds: 300,
     }))
     owner.sessionToken = 'home-team-session'
     owner.me = homeUser
-    owner.bindRpcCredentialToRequestOwner('target-team-rpc', homeRequestContext)
+    owner.bindRpcCredentialToRequestOwner('fixture-target-team-rpc', homeRequestContext)
 
-    expect(owner.assertTemporaryRequestAllowed('home-team-rpc', homeRequestContext)).toBeDefined()
-    expect(owner.assertTemporaryRequestAllowed('target-team-rpc', homeRequestContext)).toBeDefined()
-    expect(owner.assertTemporaryRequestAllowed('target-team-rpc')).toBeDefined()
+    expect(
+      owner.assertTemporaryRequestAllowed('fixture-home-team-rpc', homeRequestContext)
+    ).toBeDefined()
+    expect(
+      owner.assertTemporaryRequestAllowed('fixture-target-team-rpc', homeRequestContext)
+    ).toBeDefined()
+    expect(owner.assertTemporaryRequestAllowed('fixture-target-team-rpc')).toBeDefined()
   })
 
   it('rejects a memory-only RPC bearer from a previous team during the same lease', async () => {
@@ -900,19 +906,19 @@ describe('SessionAuthorityCoordinator source decisions', () => {
     }
     const homeRequestContext = owner.captureSessionRequestContext('memory-home-session')
     await owner.issueRpcCredential('memory-home-session', async () => ({
-      token: 'memory-home-rpc',
+      token: 'fixture-memory-home-rpc',
       expiresInSeconds: 300,
     }))
 
     owner.me = { ...homeUser, teamId: 'target-team', teamName: 'Target team' }
 
     expect(() =>
-      owner.assertTemporaryRequestAllowed('memory-home-rpc', homeRequestContext)
+      owner.assertTemporaryRequestAllowed('fixture-memory-home-rpc', homeRequestContext)
     ).toThrow('The credential is not owned by the current authenticated session')
     owner.me = homeUser
     owner.sessionToken = 'memory-replacement-session'
     expect(() =>
-      owner.assertTemporaryRequestAllowed('memory-home-rpc', homeRequestContext)
+      owner.assertTemporaryRequestAllowed('fixture-memory-home-rpc', homeRequestContext)
     ).toThrow('The credential is not owned by the current authenticated session')
   })
 
@@ -975,10 +981,10 @@ describe('SessionAuthorityCoordinator source decisions', () => {
 
       await expect(
         owner.issueRpcCredential('new-reservation-session', async () => ({
-          token: 'new-session-rpc-token',
+          token: 'fixture-new-session-rpc-token',
           expiresInSeconds: 300,
         }))
-      ).resolves.toMatchObject({ token: 'new-session-rpc-token' })
+      ).resolves.toMatchObject({ token: 'fixture-new-session-rpc-token' })
     } finally {
       for (let index = 0; index < gates.length; index += 1) {
         gates[index].resolve({ token: `stale-rpc-${index}`, expiresInSeconds: 300 })

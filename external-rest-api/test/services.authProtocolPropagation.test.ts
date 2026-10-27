@@ -17,7 +17,7 @@ describe('session protocol propagation to replacement tokens', () => {
   it('preserves v2 when switching teams', async () => {
     mock.controlApiRequest
       .mockResolvedValueOnce({ team_id: 'team-2', role: 'member', team_name: 'Beta' })
-      .mockResolvedValueOnce({ token: 'next-session-token' })
+      .mockResolvedValueOnce({ token: 'fixture-next-session-token' })
 
     await switchTeam('user-1', 'user@example.com', 'team-2', 'current-session', 2)
 
@@ -40,7 +40,7 @@ describe('session protocol propagation to replacement tokens', () => {
   it('preserves an absent version when switching a legacy session', async () => {
     mock.controlApiRequest
       .mockResolvedValueOnce({ team_id: 'team-2', role: 'member', team_name: 'Beta' })
-      .mockResolvedValueOnce({ token: 'next-session-token' })
+      .mockResolvedValueOnce({ token: 'fixture-next-session-token' })
 
     await switchTeam('user-1', 'user@example.com', 'team-2', 'current-session')
 
@@ -62,7 +62,7 @@ describe('session protocol propagation to replacement tokens', () => {
   it('preserves v2 when creating a team', async () => {
     mock.controlApiRequest
       .mockResolvedValueOnce({ id: 'team-2', name: 'Beta' })
-      .mockResolvedValueOnce({ token: 'next-session-token' })
+      .mockResolvedValueOnce({ token: 'fixture-next-session-token' })
 
     await createTeamForUser(
       {
@@ -93,7 +93,7 @@ describe('session protocol propagation to replacement tokens', () => {
   it('preserves an absent version when creating a team from a legacy session', async () => {
     mock.controlApiRequest
       .mockResolvedValueOnce({ id: 'team-2', name: 'Beta' })
-      .mockResolvedValueOnce({ token: 'next-session-token' })
+      .mockResolvedValueOnce({ token: 'fixture-next-session-token' })
 
     await createTeamForUser(
       {
@@ -123,7 +123,7 @@ describe('session protocol propagation to replacement tokens', () => {
 describe('versioned login protocol selection', () => {
   beforeEach(() => {
     mock.controlApiRequest.mockReset()
-    mock.controlApiRequest.mockResolvedValue({ token: 'session-token' })
+    mock.controlApiRequest.mockResolvedValue({ token: 'fixture-session-token' })
   })
 
   it('selects the protocol-v2 Google login producer', async () => {
@@ -135,12 +135,12 @@ describe('versioned login protocol selection', () => {
   })
 
   it('selects the protocol-v2 password login producer', async () => {
-    await loginWithPassword('user@example.com', 'password', 2)
+    await loginWithPassword('user@example.com', 'fixture-password', 2)
 
     expect(mock.controlApiRequest).toHaveBeenCalledWith(
       'POST',
       '/external/auth/v2/password-login',
-      { body: { email: 'user@example.com', password: 'password' } }
+      { body: { email: 'user@example.com', password: 'fixture-password' } }
     )
   })
 })

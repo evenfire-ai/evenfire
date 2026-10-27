@@ -24,13 +24,13 @@ describe('requestJson transient retry authorization failures', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const request = requestJson('GET', 'http://rest.example.test/me', {
-      token: 'session-token-for-retry',
+      token: 'fixture-session-token-for-retry',
       retryTransientOnce: true,
     }).catch(error => error)
     await vi.advanceTimersByTimeAsync(250)
 
     await expect(request).resolves.toBeInstanceOf(ApiError)
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(invalidate).toHaveBeenCalledExactlyOnceWith('session-token-for-retry', undefined)
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith('fixture-session-token-for-retry', undefined)
   })
 })

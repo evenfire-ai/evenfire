@@ -57,7 +57,7 @@ describe('routes/auth password-login', () => {
     async path => {
       const res = await request(buildApp()).post(path).send({
         email: 'user@example.invalid',
-        password: 'correct-password',
+        password: 'fixture-correct-password',
         idToken: 'synthetic-id-token',
       })
 
@@ -115,7 +115,7 @@ describe('routes/auth password-login', () => {
       .post('/api/v1/auth/v2/password-login')
       .set('origin', 'http://localhost:3001')
       .set('x-forwarded-proto', 'https')
-      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .send({ email: 'user@example.invalid', password: 'fixture-correct-password' })
       .expect(200)
 
     expect(res.body.token).toBeUndefined()
@@ -143,7 +143,7 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/v2/password-login')
-      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .send({ email: 'user@example.invalid', password: 'fixture-correct-password' })
       .expect(200)
 
     expect(res.body.token).toBe('desktop-session-jwt')
@@ -151,7 +151,7 @@ describe('routes/auth password-login', () => {
     expect(String(res.headers['set-cookie'])).toContain('profile_session=desktop-session-jwt')
     expect(authServiceMock.loginWithPassword).toHaveBeenCalledWith(
       'user@example.invalid',
-      'correct-password',
+      'fixture-correct-password',
       2
     )
   })
@@ -161,7 +161,7 @@ describe('routes/auth password-login', () => {
       getPayload: () => ({ email: 'user@example.invalid' }),
     })
     authServiceMock.loginWithGoogle.mockResolvedValueOnce({
-      token: 'google-v2-session-jwt',
+      token: 'fixture-google-v2-session-jwt',
       me: { email: 'user@example.invalid' },
     })
 
@@ -175,7 +175,7 @@ describe('routes/auth password-login', () => {
       audience: config.googleClientId,
     })
     expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith({ idToken: 'google-id-token' }, 2)
-    expect(res.body.token).toBe('google-v2-session-jwt')
+    expect(res.body.token).toBe('fixture-google-v2-session-jwt')
   })
 
   it('documents the password-reset limiter headers and client-IP contract', async () => {

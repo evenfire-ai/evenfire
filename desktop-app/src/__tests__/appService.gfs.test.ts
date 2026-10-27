@@ -902,7 +902,7 @@ describe('AppService GFS upload security scope', () => {
         role: null,
       }
       service.authClient.passwordLogin.mockResolvedValueOnce({
-        token: 'token-a-new',
+        token: 'fixture-token-a-new',
         me: originalOwner,
       })
       service.authClient.getMe.mockResolvedValue(originalOwner)

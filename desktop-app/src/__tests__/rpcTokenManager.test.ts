@@ -56,7 +56,7 @@ describe('RpcTokenManager', () => {
     const issueRpcToken = vi
       .fn()
       .mockReturnValueOnce(pending.promise)
-      .mockResolvedValueOnce(issuedToken('session-b-rpc-token'))
+      .mockResolvedValueOnce(issuedToken('fixture-session-b-rpc-token'))
     const manager = new RpcTokenManager({ issueRpcToken } as unknown as AuthClient)
 
     const sessionA = manager.getOrIssue(
@@ -67,13 +67,13 @@ describe('RpcTokenManager', () => {
     )
     await expect(
       manager.getOrIssue('session-b', ['host:activity:read'], ['chatllm'], 'session-b-generation')
-    ).resolves.toMatchObject({ token: 'session-b-rpc-token' })
+    ).resolves.toMatchObject({ token: 'fixture-session-b-rpc-token' })
 
     pending.resolve(issuedToken('session-a-late-rpc-token'))
     await expect(sessionA).rejects.toBeInstanceOf(RpcTokenIssuanceSupersededError)
     await expect(
       manager.getOrIssue('session-b', ['host:activity:read'], ['chatllm'], 'session-b-generation')
-    ).resolves.toMatchObject({ token: 'session-b-rpc-token' })
+    ).resolves.toMatchObject({ token: 'fixture-session-b-rpc-token' })
     expect(issueRpcToken).toHaveBeenCalledTimes(2)
   })
 })

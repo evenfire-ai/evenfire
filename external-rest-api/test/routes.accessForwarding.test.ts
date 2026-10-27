@@ -272,7 +272,7 @@ describe('routes/access forwarding', () => {
     authTokenMock.verifyToken.mockReturnValue({ ...claims, authProtocolVersion: 2 })
     meServiceMock.switchTeam.mockResolvedValue({
       team: { id: 'team-2', name: 'Beta', role: 'member' },
-      token: 'next-session-token',
+      token: 'fixture-next-session-token',
     })
     const app = appWith(createMeRouter)
 
@@ -295,7 +295,7 @@ describe('routes/access forwarding', () => {
     authTokenMock.verifyToken.mockReturnValue(claims)
     meServiceMock.switchTeam.mockResolvedValue({
       team: { id: 'team-2', name: 'Beta', role: 'member' },
-      token: 'next-session-token',
+      token: 'fixture-next-session-token',
     })
     const app = appWith(createMeRouter)
 
@@ -318,7 +318,7 @@ describe('routes/access forwarding', () => {
     authTokenMock.verifyToken.mockReturnValue({ ...claims, authProtocolVersion: 2 })
     teamServiceMock.createTeamForUser.mockResolvedValue({
       team: { id: 'team-2', name: 'Beta', role: 'admin' },
-      token: 'next-session-token',
+      token: 'fixture-next-session-token',
     })
     const app = appWith(createTeamRouter)
 
@@ -345,7 +345,7 @@ describe('routes/access forwarding', () => {
     authTokenMock.verifyToken.mockReturnValue(claims)
     teamServiceMock.createTeamForUser.mockResolvedValue({
       team: { id: 'team-2', name: 'Beta', role: 'admin' },
-      token: 'next-session-token',
+      token: 'fixture-next-session-token',
     })
     const app = appWith(createTeamRouter)
 

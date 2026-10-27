@@ -108,7 +108,7 @@ async function createAuthenticatedService() {
     role: 'member',
   }
   vi.spyOn(service.authClient, 'passwordLogin').mockResolvedValue({
-    token: 'team-home-token',
+    token: 'fixture-team-home-token',
     me: home,
   })
   vi.spyOn(service.authClient, 'switchTeam').mockImplementation(async (_token, teamId) => ({
@@ -116,7 +116,7 @@ async function createAuthenticatedService() {
     team: { id: teamId, name: teamId },
   }))
   vi.spyOn(service.authClient, 'getMe').mockImplementation(async token => {
-    const teamId = token.replace(/-token$/, '')
+    const teamId = teamIdFromToken(token)
     return {
       id: 'user-1',
       email: 'user@example.com',
@@ -129,6 +129,17 @@ async function createAuthenticatedService() {
   })
   await service.passwordLogin(home.email, 'fixture-password')
   return { service, tokenStore }
+}
+
+function teamIdFromToken(token: string): string {
+  if (
+    token === 'team-home-fresh-token' ||
+    token === 'team-home-restored-token' ||
+    token.startsWith('team-home-fresh-token-')
+  ) {
+    return 'team-home'
+  }
+  return token.replace(/^fixture-/, '').replace(/-token$/, '')
 }
 
 function deferred<T>() {
@@ -267,7 +278,7 @@ describe('AppService team-context quit lifecycle', () => {
       team: { id: teamId, name: teamId },
     }))
     vi.mocked(service.authClient.getMe).mockImplementation(async token => {
-      const teamId = token === 'team-home-fresh-token' ? 'team-home' : token.replace(/-token$/, '')
+      const teamId = teamIdFromToken(token)
       return {
         id: 'user-1',
         email: 'user@example.com',
@@ -323,9 +334,7 @@ describe('AppService team-context quit lifecycle', () => {
       team: { id: teamId, name: teamId },
     }))
     vi.mocked(app.authClient.getMe).mockImplementation(async token => {
-      const teamId = token.startsWith('team-home-fresh-token-')
-        ? 'team-home'
-        : token.replace(/-token$/, '')
+      const teamId = teamIdFromToken(token)
       return {
         id: 'user-1',
         email: 'user@example.com',
@@ -337,7 +346,7 @@ describe('AppService team-context quit lifecycle', () => {
       }
     })
     vi.spyOn(app.rpcTokenManager, 'getOrIssue').mockResolvedValue({
-      token: 'team-b-rpc-token',
+      token: 'fixture-team-b-rpc-token',
       expiresInSeconds: 300,
     })
     vi.spyOn(app.rpcClient, 'approveToolCall').mockResolvedValue({ approved: true })
@@ -363,7 +372,7 @@ describe('AppService team-context quit lifecycle', () => {
       expect.any(String)
     )
     expect(app.rpcClient.approveToolCall).toHaveBeenCalledWith(
-      'team-b-rpc-token',
+      'fixture-team-b-rpc-token',
       'chatllm',
       'task-1',
       'call-1'
@@ -401,9 +410,7 @@ describe('AppService team-context quit lifecycle', () => {
       team: { id: teamId, name: teamId },
     }))
     vi.mocked(app.authClient.getMe).mockImplementation(async token => {
-      const teamId = token.startsWith('team-home-fresh-token-')
-        ? 'team-home'
-        : token.replace(/-token$/, '')
+      const teamId = teamIdFromToken(token)
       return {
         id: 'user-1',
         email: 'user@example.com',
@@ -415,7 +422,7 @@ describe('AppService team-context quit lifecycle', () => {
       }
     })
     vi.spyOn(app.rpcTokenManager, 'getOrIssue').mockResolvedValue({
-      token: 'team-b-rpc-token',
+      token: 'fixture-team-b-rpc-token',
       expiresInSeconds: 300,
     })
     vi.spyOn(app.rpcClient, 'approveToolCall').mockResolvedValue({ approved: true })
@@ -471,8 +478,7 @@ describe('AppService team-context quit lifecycle', () => {
       team: { id: teamId, name: teamId },
     }))
     vi.mocked(app.authClient.getMe).mockImplementation(async token => {
-      const teamId =
-        token === 'team-home-restored-token' ? 'team-home' : token.replace(/-token$/, '')
+      const teamId = teamIdFromToken(token)
       return {
         id: 'user-1',
         email: 'user@example.com',
@@ -484,7 +490,7 @@ describe('AppService team-context quit lifecycle', () => {
       }
     })
     vi.spyOn(app.rpcTokenManager, 'getOrIssue').mockResolvedValue({
-      token: 'home-rpc-token',
+      token: 'fixture-home-rpc-token',
       expiresInSeconds: 300,
     })
     vi.spyOn(app.rpcClient, 'approveToolCall').mockResolvedValue({ approved: true })
@@ -546,8 +552,7 @@ describe('AppService team-context quit lifecycle', () => {
       team: { id: teamId, name: teamId },
     }))
     vi.mocked(app.authClient.getMe).mockImplementation(async token => {
-      const teamId =
-        token === 'team-home-restored-token' ? 'team-home' : token.replace(/-token$/, '')
+      const teamId = teamIdFromToken(token)
       return {
         id: 'user-1',
         email: 'user@example.com',
@@ -559,7 +564,7 @@ describe('AppService team-context quit lifecycle', () => {
       }
     })
     vi.spyOn(app.rpcTokenManager, 'getOrIssue').mockResolvedValue({
-      token: 'home-rpc-token',
+      token: 'fixture-home-rpc-token',
       expiresInSeconds: 300,
     })
     vi.spyOn(app.rpcClient, 'approveToolCall').mockResolvedValue({ approved: true })
@@ -602,7 +607,7 @@ describe('AppService team-context quit lifecycle', () => {
       expect.any(String)
     )
     expect(app.rpcClient.approveToolCall).toHaveBeenCalledWith(
-      'home-rpc-token',
+      'fixture-home-rpc-token',
       'chatllm',
       'task-1',
       'call-1'
@@ -725,7 +730,7 @@ describe('AppService team-context quit lifecycle', () => {
     finishFailedSwitch.resolve()
 
     await expect(firstHop).rejects.toThrow('initial team switch failed')
-    await expect(homeRead).resolves.toBe('team-home-token')
+    await expect(homeRead).resolves.toBe('fixture-team-home-token')
   })
 
   it('rejects a quit-time team hop promptly while an earlier team operation is queued', async () => {

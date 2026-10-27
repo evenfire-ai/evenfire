@@ -101,7 +101,7 @@ async function makeService(): Promise<AppService> {
 describe('AppService.cancelTask', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mockCancelTask.mockResolvedValue(undefined)
   })
 
@@ -122,7 +122,7 @@ describe('AppService.cancelTask', () => {
       ['myhost'],
       expect.any(String)
     )
-    expect(mockCancelTask).toHaveBeenCalledWith('rpc-token', 'myhost', 'abc')
+    expect(mockCancelTask).toHaveBeenCalledWith('fixture-rpc-token', 'myhost', 'abc')
   })
 
   it('throws if not authenticated', async () => {

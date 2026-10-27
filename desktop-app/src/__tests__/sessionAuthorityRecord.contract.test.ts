@@ -1278,7 +1278,7 @@ describe('session authority record repository contract', () => {
     const repo = repository()
     initialize(repo)
     const file = path.join(directory, `session-token-${envKey}.json`)
-    fs.writeFileSync(file, JSON.stringify({ token: 'historical bearer material' }), {
+    fs.writeFileSync(file, JSON.stringify({ token: 'fixture-historical bearer material' }), {
       mode: 0o600,
     })
     const priorObservation = await authorityStore.observeLegacySessionCredentialSources(

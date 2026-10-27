@@ -1074,7 +1074,7 @@ describe('routes/profile', () => {
 
     try {
       await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
-        .send({ email: 'user@example.com', password: 'correct-password' })
+        .send({ email: 'user@example.com', password: 'fixture-correct-password' })
         .expect(426)
         .expect({ error: 'supported_client_upgrade_required' })
       expect(svc.passwordLoginData).not.toHaveBeenCalled()
@@ -1082,7 +1082,7 @@ describe('routes/profile', () => {
       const response = await withInternalServiceAuth(
         request(app).post('/external/auth/v2/password-login')
       )
-        .send({ email: 'user@example.com', password: 'correct-password' })
+        .send({ email: 'user@example.com', password: 'fixture-correct-password' })
         .expect(200)
 
       expect(verifyExternalSessionToken(response.body.token)).toMatchObject({

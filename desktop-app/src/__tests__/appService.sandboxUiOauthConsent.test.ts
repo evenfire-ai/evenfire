@@ -93,7 +93,7 @@ const AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth?...'
 describe('AppService.requestSandboxUiOauthAuthorize', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.getOrIssue.mockResolvedValue({ token: 'rpc-token', expiresInSeconds: 300 })
+    mocks.getOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mocks.requestSandboxUiOauthAuthorizeUrl.mockResolvedValue({ authorizeUrl: AUTHORIZE_URL })
     mocks.getFocusedWindow.mockReturnValue(null)
     // Default: user clicks Allow (response=1)
@@ -118,7 +118,7 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
     await svc.requestSandboxUiOauthAuthorize(RECIPE_NS, RECIPE_NAME, CLIENT_ID, true)
 
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledWith(
-      'rpc-token',
+      'fixture-rpc-token',
       RECIPE_NS,
       RECIPE_NAME,
       CLIENT_ID,
@@ -149,7 +149,7 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
 
     expect(mocks.showMessageBox).not.toHaveBeenCalled()
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledWith(
-      'rpc-token',
+      'fixture-rpc-token',
       RECIPE_NS,
       RECIPE_NAME,
       CLIENT_ID,
@@ -237,8 +237,8 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
       .mockRejectedValueOnce(new ApiError('Unauthorized', 401, ''))
       .mockResolvedValueOnce({ authorizeUrl: AUTHORIZE_URL })
     mocks.getOrIssue
-      .mockResolvedValueOnce({ token: 'rpc-token-old', expiresInSeconds: 300 })
-      .mockResolvedValueOnce({ token: 'rpc-token-new', expiresInSeconds: 300 })
+      .mockResolvedValueOnce({ token: 'fixture-rpc-token-old', expiresInSeconds: 300 })
+      .mockResolvedValueOnce({ token: 'fixture-rpc-token-new', expiresInSeconds: 300 })
     mocks.showMessageBox.mockResolvedValue({ response: 1 })
 
     const svc = makeService()
@@ -247,7 +247,7 @@ describe('AppService.requestSandboxUiOauthAuthorize', () => {
     expect(mocks.rpcTokenManagerClear).toHaveBeenCalledOnce()
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenCalledTimes(2)
     expect(mocks.requestSandboxUiOauthAuthorizeUrl).toHaveBeenLastCalledWith(
-      'rpc-token-new',
+      'fixture-rpc-token-new',
       RECIPE_NS,
       RECIPE_NAME,
       CLIENT_ID,
