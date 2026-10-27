@@ -1,0 +1,281 @@
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { Pool } from 'pg'
+import request from 'supertest'
+import { initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
+
+const runtime = vi.hoisted(() => ({ pool: undefined as import('pg').Pool | undefined }))
+vi.mock('../src/db.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/db.js')>()
+  return {
+    ...actual,
+    pool: {
+      query: (...args: Parameters<import('pg').Pool['query']>) => runtime.pool!.query(...args),
+    },
+    withTransaction: (work: Parameters<typeof actual.withTransaction>[0]) =>
+      actual.withTransaction(work, runtime.pool!),
+  }
+})
+vi.mock('../src/middleware/controlUIAuth.js', () => ({
+  requireAuthForControlUI: (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    if (req.header('x-test-operator') !== 'yes')
+      return res.status(401).json({ error: 'Unauthorized' })
+    ;(req as express.Request & { adminAuth: { sub: string } }).adminAuth = { sub: 'operator-test' }
+    next()
+  },
+}))
+vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
+  rateLimitMiddleware: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+}))
+
+const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
+const describeRealPostgres = adminUrl ? describe : describe.skip
+
+function quoteIdent(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+type Fixture = { userId: string; resourceId: string; drive: string }
+
+describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
+  const database = `gfs_home_recovery_${randomBytes(6).toString('hex')}`
+  let adminPool: Pool
+  let fixturePool: Pool
+  let app: express.Express
+  let databaseCreated = false
+
+  beforeAll(async () => {
+    if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
+    adminPool = new Pool({ connectionString: adminUrl })
+    await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
+    databaseCreated = true
+    const url = new URL(adminUrl)
+    url.pathname = `/${database}`
+    fixturePool = new Pool({ connectionString: url.toString() })
+    await initDb({ connect: () => fixturePool.connect() })
+    runtime.pool = new Pool({
+      connectionString: url.toString(),
+      options: '-c role=control_api_runtime',
+    })
+    const identity = await runtime.pool.query('SELECT current_user')
+    expect(identity.rows[0].current_user).toBe('control_api_runtime')
+    const { registerGfsUserHomeRoutes } = await import('../src/routes/gfs/userHomes.js')
+    const router = express.Router()
+    registerGfsUserHomeRoutes(router)
+    app = express()
+    app.use(express.json())
+    app.use(router)
+    app.use(
+      (
+        _error: unknown,
+        _req: express.Request,
+        res: express.Response,
+        _next: express.NextFunction
+      ) => {
+        res.status(500).json({ error: 'internal_error' })
+      }
+    )
+  }, 60_000)
+
+  afterAll(async () => {
+    try {
+      await endPoolAndWaitForClients(runtime.pool)
+      await endPoolAndWaitForClients(fixturePool)
+      if (adminPool && databaseCreated) {
+        await adminPool.query(
+          'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE ${quoteIdent(database)}`)
+      }
+    } finally {
+      await endPoolAndWaitForClients(adminPool)
+    }
+  }, 60_000)
+
+  async function seedHome(
+    kind: 'missing' | 'narrowed' | 'no-inherit' = 'missing'
+  ): Promise<Fixture> {
+    const userId = randomUUID()
+    const root = randomUUID()
+    const users = randomUUID()
+    const resourceId = randomUUID()
+    const drive = `home-${randomUUID()}`
+    await fixturePool.query('INSERT INTO users (id, email, name) VALUES ($1, $2, $3)', [
+      userId,
+      `${userId}@example.test`,
+      'Owner',
+    ])
+    await fixturePool.query(
+      `INSERT INTO gfs_resources (resource_id, drive, parent_resource_id, name, kind, path_cache)
+       VALUES ($1, $4, NULL, '', 'directory', '/'),
+              ($2, $4, $1, 'Users', 'directory', '/Users'),
+              ($3, $4, $2, 'owner', 'directory', '/Users/owner')`,
+      [root, users, resourceId, drive]
+    )
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET drive = $2, storage_username = 'owner', resource_id = $3,
+              state = 'conflict', conflict_code = 'ownership_conflict', conflict_detail = $4::jsonb
+        WHERE user_id = $1`,
+      [userId, drive, resourceId, JSON.stringify({ resourceId })]
+    )
+    if (kind !== 'missing') {
+      await fixturePool.query(
+        `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
+         VALUES ($1, $2, 'user', $3, $4::text[], $5, 'operator')`,
+        [
+          drive,
+          resourceId,
+          userId,
+          kind === 'narrowed' ? ['read'] : ['read', 'write', 'delete', 'share', 'manage_acl'],
+          kind !== 'no-inherit',
+        ]
+      )
+    }
+    return { userId, resourceId, drive }
+  }
+
+  function restore(fixture: Fixture) {
+    return request(app)
+      .post(`/gfs/user-homes/${fixture.userId}/restore-owner`)
+      .set('x-test-operator', 'yes')
+  }
+
+  it.each(['missing', 'narrowed', 'no-inherit'] as const)(
+    'restores a %s owner grant atomically and rejects a second restore',
+    async kind => {
+      const fixture = await seedHome(kind)
+      const response = await restore(fixture)
+      expect(response.status).toBe(200)
+      expect(response.body.home).toMatchObject({
+        userId: fixture.userId,
+        drive: fixture.drive,
+        path: '/Users/owner',
+        state: 'ready',
+        conflictCode: null,
+      })
+      const grant = await fixturePool.query(
+        `SELECT permissions, inherit, granted_by FROM gfs_grants
+          WHERE drive = $1 AND resource_id = $2 AND subject_type = 'user' AND subject_id = $3`,
+        [fixture.drive, fixture.resourceId, fixture.userId]
+      )
+      expect(grant.rowCount).toBe(1)
+      expect(grant.rows[0].permissions.sort()).toEqual([
+        'delete',
+        'manage_acl',
+        'read',
+        'share',
+        'write',
+      ])
+      expect(grant.rows[0]).toMatchObject({ inherit: true, granted_by: 'platform:user-home' })
+      const persisted = await fixturePool.query(
+        'SELECT state, conflict_code, conflict_detail FROM gfs_user_homes WHERE user_id = $1',
+        [fixture.userId]
+      )
+      expect(persisted.rows[0]).toEqual({
+        state: 'ready',
+        conflict_code: null,
+        conflict_detail: null,
+      })
+      const audit = await fixturePool.query(
+        'SELECT op, actor_on_behalf_of, gfs_uri FROM gfs_audit WHERE subject = $1 ORDER BY sequence_no',
+        [`user:${fixture.userId}`]
+      )
+      expect(audit.rows).toEqual([
+        {
+          op: 'user_home.conflict_cleared.ownership_conflict',
+          actor_on_behalf_of: 'operator-test',
+          gfs_uri: `gfs://${fixture.drive}/${fixture.resourceId}`,
+        },
+        {
+          op: 'user_home.restore_owner',
+          actor_on_behalf_of: 'operator-test',
+          gfs_uri: `gfs://${fixture.drive}/${fixture.resourceId}`,
+        },
+      ])
+      const second = await restore(fixture)
+      expect(second.status).toBe(409)
+      expect(second.body).toEqual({ error: 'home_not_in_ownership_conflict' })
+    }
+  )
+
+  it('serializes concurrent restores without a deadlock or duplicate audit', async () => {
+    const fixture = await seedHome('narrowed')
+    const responses = await Promise.all([restore(fixture), restore(fixture)])
+    expect(responses.map(response => response.status).sort()).toEqual([200, 409])
+    expect(responses.find(response => response.status === 409)?.body).toEqual({
+      error: 'home_not_in_ownership_conflict',
+    })
+    const result = await fixturePool.query(
+      'SELECT count(*)::int AS count FROM gfs_audit WHERE subject = $1',
+      [`user:${fixture.userId}`]
+    )
+    expect(result.rows[0].count).toBe(2)
+  })
+
+  it('rolls back when the restored grant does not satisfy all bits, while another restore succeeds', async () => {
+    const broken = await seedHome()
+    const working = await seedHome()
+    await fixturePool.query(`CREATE FUNCTION s4_test_narrow_grant() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.resource_id = '${broken.resourceId}'::uuid THEN NEW.permissions := ARRAY['read']; END IF;
+        RETURN NEW;
+      END $$`)
+    await fixturePool.query(
+      'CREATE TRIGGER s4_test_narrow_grant BEFORE INSERT OR UPDATE ON gfs_grants FOR EACH ROW EXECUTE FUNCTION s4_test_narrow_grant()'
+    )
+    expect((await restore(working)).status).toBe(200)
+    expect((await restore(broken)).status).toBe(500)
+    const homeRow = await fixturePool.query(
+      'SELECT state, conflict_code FROM gfs_user_homes WHERE user_id = $1',
+      [broken.userId]
+    )
+    expect(homeRow.rows[0]).toEqual({ state: 'conflict', conflict_code: 'ownership_conflict' })
+    const grant = await fixturePool.query('SELECT id FROM gfs_grants WHERE resource_id = $1', [
+      broken.resourceId,
+    ])
+    expect(grant.rowCount).toBe(0)
+    const audit = await fixturePool.query('SELECT op FROM gfs_audit WHERE subject = $1', [
+      `user:${broken.userId}`,
+    ])
+    expect(audit.rowCount).toBe(0)
+  })
+
+  it('returns retained homes after hard deletion and 404 only for a missing home', async () => {
+    const fixture = await seedHome()
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET state = 'retired', conflict_code = NULL, conflict_detail = NULL WHERE user_id = $1`,
+      [fixture.userId]
+    )
+    await fixturePool.query('DELETE FROM users WHERE id = $1', [fixture.userId])
+    const detail = await request(app)
+      .get(`/gfs/user-homes/${fixture.userId}`)
+      .set('x-test-operator', 'yes')
+    expect(detail.status).toBe(200)
+    expect(detail.body.home).toMatchObject({
+      userId: fixture.userId,
+      email: null,
+      name: null,
+      state: 'retired',
+      path: '/Users/owner',
+    })
+    const list = await request(app)
+      .get('/gfs/user-homes?state=retired')
+      .set('x-test-operator', 'yes')
+    expect(list.status).toBe(200)
+    expect(list.body.items).toContainEqual(
+      expect.objectContaining({ userId: fixture.userId, email: null, name: null })
+    )
+    const missing = await request(app)
+      .get(`/gfs/user-homes/${randomUUID()}`)
+      .set('x-test-operator', 'yes')
+    expect(missing.status).toBe(404)
+    expect(missing.body).toEqual({ error: 'home_not_found' })
+  })
+})

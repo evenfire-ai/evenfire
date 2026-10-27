@@ -59,6 +59,73 @@ beforeEach(() => {
 })
 
 describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', () => {
+  it('relays the selector on home, JSON, byte and upload streams without adding it when absent', async () => {
+    const home = {
+      state: 'ready',
+      drive: 'archive',
+      path: '/Users/owner',
+      resourceId: REQUEST_ID,
+      heldPermissions: ['read'],
+    }
+    clientMock.controlApiRequest.mockResolvedValue(home)
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async () =>
+        new Response('content', { status: 200, headers: { 'content-type': 'text/plain' } })
+    )
+    const app = buildApp()
+    const auth = (test: request.Test) => test.set('authorization', 'Bearer sess-xyz')
+    const selected = (test: request.Test) => auth(test).set('X-Evenfire-Gfs-Authority', 'user')
+
+    const response = await selected(request(app).get('/me/gfs/home')).expect(200)
+    expect(response.body).toEqual(home)
+    await selected(request(app).get('/me/gfs/resources?drive=archive')).expect(200)
+    await selected(request(app).get(`/me/gfs/proxy/${REQUEST_ID}?drive=archive`)).expect(200)
+    await selected(request(app).post('/me/gfs/uploads?drive=archive'))
+      .send({ drive: 'archive', operation: 'create' })
+      .expect(200)
+    await selected(request(app).put(`/me/gfs/uploads/${REQUEST_ID}/parts/0?drive=archive`))
+      .set('content-type', 'application/offset+octet-stream')
+      .set('upload-chunk-length', '4')
+      .send(Buffer.from('test'))
+      .expect(200)
+    for (const call of [
+      ...clientMock.controlApiRequest.mock.calls,
+      ...clientMock.controlApiStreamRequest.mock.calls,
+    ]) {
+      expect(call[2].extraHeaders['x-evenfire-gfs-authority']).toBe('user')
+    }
+    expect(clientMock.controlApiRequest.mock.calls[0][1]).toBe('/external/gfs/home')
+
+    clientMock.controlApiRequest.mockClear()
+    await auth(request(app).get('/me/gfs/home')).expect(200)
+    expect(clientMock.controlApiRequest.mock.calls[0][2].extraHeaders).not.toHaveProperty(
+      'x-evenfire-gfs-authority'
+    )
+  })
+
+  it('forwards an unknown selector unchanged and propagates the control-api rejection', async () => {
+    clientMock.controlApiRequest.mockImplementation(async (_method, _path, options) => {
+      if (options.extraHeaders['x-evenfire-gfs-authority'] !== 'user') {
+        throw new ControlApiError('invalid', 400, { error: 'invalid_gfs_authority' })
+      }
+      return { state: 'pending', drive: null, path: null, resourceId: null, heldPermissions: [] }
+    })
+    const app = buildApp()
+    const allowed = await request(app)
+      .get('/me/gfs/home')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('X-Evenfire-Gfs-Authority', 'user')
+    expect(allowed.status).toBe(200)
+    const denied = await request(app)
+      .get('/me/gfs/home')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('X-Evenfire-Gfs-Authority', 'operator')
+    expect(denied.status).toBe(400)
+    expect(denied.body).toEqual({ error: 'invalid_gfs_authority' })
+    expect(
+      clientMock.controlApiRequest.mock.calls[1][2].extraHeaders['x-evenfire-gfs-authority']
+    ).toBe('operator')
+  })
   it('applies one shared local edge bucket across v2 methods before proxying', async () => {
     clientMock.controlApiStreamRequest.mockImplementation(
       async () =>

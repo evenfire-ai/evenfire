@@ -394,6 +394,18 @@ export async function handlePatch(req: Request, res: Response): Promise<void> {
     const { version } = patched
     res.status(200).json({ ok: true, data: { resourceId: id, version } })
   } catch (err) {
+    if (
+      typeof err === 'object' &&
+      err !== null &&
+      (err as { code?: unknown }).code === '23514' &&
+      (err as { constraint?: unknown }).constraint === 'gfs_governed_root_immutable'
+    ) {
+      res.status(409).json({
+        ok: false,
+        error: { code: 'governed_root_immutable', message: 'governed root is immutable' },
+      })
+      return
+    }
     if (err instanceof ResourcePatchError) {
       res.status(err.status).json({ ok: false, error: { code: err.code, message: err.code } })
       return

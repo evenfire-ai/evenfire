@@ -558,6 +558,7 @@ jobs:
             gfs.governedRoots.realPostgres.integration.test.ts \
             gfs.userHomeBackfill.realPostgres.integration.test.ts \
             gfs.userHomeProvisioning.realPostgres.integration.test.ts \
+            gfs.userHomeRecovery.realPostgres.integration.test.ts \
             routes.mcp-host.renewal.realPostgres.integration.test.ts \
             routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts

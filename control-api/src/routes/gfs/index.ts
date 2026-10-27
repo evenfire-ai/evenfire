@@ -10,6 +10,7 @@ import { registerGfsSeedRoute } from './seed.js'
 import { registerGfsShareRoutes } from './shares.js'
 import { registerGfsTokenRoute } from './token.js'
 import { registerGfsTreeRoutes } from './tree.js'
+import { registerGfsUserHomeRoutes } from './userHomes.js'
 
 /**
  * gfs (Global File System) router — mounted under /api/v1 BEFORE the internal
@@ -29,6 +30,7 @@ export function createGfsRouter(): Router {
   registerLegacyStandaloneGrantReportRoute(router)
   registerGfsShareRoutes(router)
   registerGfsResourceRoutes(router)
+  registerGfsUserHomeRoutes(router)
   registerGfsProxyRoute(router)
   return router
 }
