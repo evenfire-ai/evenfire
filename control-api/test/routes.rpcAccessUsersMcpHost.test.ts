@@ -34,8 +34,12 @@ const svc = vi.hoisted(() => ({
   getCurrentTeam: vi.fn(),
   getTeamAgents: vi.fn(),
 }))
+const profileLinkContextService = vi.hoisted(() => ({ resolve: vi.fn() }))
 
 vi.mock('../src/services/directory/index.js', () => svc)
+vi.mock('../src/services/profileLinkContext.js', () => ({
+  resolveProfileUiBaseUrlForUser: profileLinkContextService.resolve,
+}))
 
 // Bypass the middleware chain — we are testing the handler logic specifically.
 // The middleware's own tests live in middleware.rpcAccessAuth.test.ts.
@@ -95,11 +99,18 @@ afterEach(() => {
   authState.claims = {}
   authState.omitClaims = false
   authState.realMiddleware = false
+  profileLinkContextService.resolve.mockReset()
 })
 
 type HostCRD = { metadata: { name: string }; spec?: { enabled?: boolean } }
 
-function buildApp(hosts: HostCRD[], rpcAuth?: { teamId?: string }, bindingBudgetMs?: number) {
+function buildApp(
+  hosts: HostCRD[],
+  rpcAuth?: { teamId?: string },
+  bindingBudgetMs?: number,
+  profileLinkContextBudgetMs?: number,
+  profileLinkAuthorizationBudgetMs?: number
+) {
   const gatewayStub = {
     listResource: vi.fn(async () => hosts),
     getResource: vi.fn(async () => ({}) as never),
@@ -120,6 +131,8 @@ function buildApp(hosts: HostCRD[], rpcAuth?: { teamId?: string }, bindingBudget
     createRpcAccessUsersRouter(gatewayStub as unknown as K8sGateway, {
       bindingService,
       bindingBudgetMs,
+      profileLinkContextBudgetMs,
+      profileLinkAuthorizationBudgetMs,
     })
   )
   return { app, gatewayStub, bindingService }
@@ -181,6 +194,72 @@ describe('POST /rpc/access/users/:userId/mcp-hosts/:hostRef — atomic access an
       userId,
       teamId,
     })
+  })
+
+  it('returns the activation origin from verified claims on the message binding path', async () => {
+    const userId = '00000000-0000-4000-8000-000000000001'
+    const teamId = '00000000-0000-4000-8000-000000000002'
+    authState.claims = { scopes: ['host:message:invoke'], teamId }
+    svc.getUserAgents.mockResolvedValue({ userId, agentNames: ['host-a'] })
+    profileLinkContextService.resolve.mockResolvedValue('https://profile.tenant.example')
+    const { app, bindingService } = buildApp(
+      [{ metadata: { name: 'host-a' }, spec: { enabled: true } }],
+      { teamId }
+    )
+    bindingService.bind.mockResolvedValue({
+      runId: DIRECT_BINDING_BODY.runId,
+      status: 'created',
+      createdAt: '2026-07-16T10:00:00.000Z',
+    })
+
+    await request(app)
+      .post(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .send(DIRECT_BINDING_BODY)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.profileLinkContext).toEqual({
+          version: 1,
+          userId,
+          teamId,
+          hostRef: 'host-a',
+          profileUiBaseUrl: 'https://profile.tenant.example',
+        })
+      })
+
+    expect(profileLinkContextService.resolve).toHaveBeenCalledWith(userId, teamId)
+  })
+
+  it('preserves legacy POST authorization behavior when Profile context is not requested', async () => {
+    const userId = '00000000-0000-4000-8000-000000000001'
+    svc.getUserAgents.mockImplementation(
+      () =>
+        new Promise(resolve => setTimeout(() => resolve({ userId, agentNames: ['host-a'] }), 30))
+    )
+    const { app, bindingService } = buildApp(
+      [{ metadata: { name: 'host-a' }, spec: { enabled: true } }],
+      undefined,
+      undefined,
+      undefined,
+      5
+    )
+    bindingService.bind.mockResolvedValue({
+      runId: DIRECT_BINDING_BODY.runId,
+      status: 'created',
+      createdAt: '2026-07-16T10:00:00.000Z',
+    })
+
+    await request(app)
+      .post(`/rpc/access/users/${userId}/mcp-hosts/host-a`)
+      .send(DIRECT_BINDING_BODY)
+      .expect(200)
+      .expect({
+        userId,
+        hostRef: 'host-a',
+        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+        bindingStatus: 'recorded',
+      })
+
+    expect(profileLinkContextService.resolve).not.toHaveBeenCalled()
   })
 
   it('rejects body-supplied identity and never records a binding', async () => {
@@ -283,6 +362,207 @@ describe('POST /rpc/access/users/:userId/mcp-hosts/:hostRef — atomic access an
       .expect(({ body }) => {
         expect(body.bindingStatus).toBe('unavailable')
       })
+  })
+})
+
+describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — Profile link context', () => {
+  const userId = '00000000-0000-4000-8000-000000000001'
+  const teamId = '00000000-0000-4000-8000-000000000002'
+
+  beforeEach(() => {
+    authState.claims = { scopes: ['host:message:invoke'], teamId }
+    svc.getUserAgents.mockReset()
+    svc.getUserAgents.mockResolvedValue({ userId, agentNames: ['host-a'] })
+    profileLinkContextService.resolve.mockReset()
+  })
+
+  it('returns the activation origin bound to the authorized caller, team, and Host', async () => {
+    profileLinkContextService.resolve.mockResolvedValue('https://profile.tenant.example')
+    const { app } = buildApp([{ metadata: { name: 'host-a' }, spec: { enabled: true } }])
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .expect(200)
+      .expect({
+        userId,
+        hostRef: 'host-a',
+        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+        profileLinkContext: {
+          version: 1,
+          userId,
+          teamId,
+          hostRef: 'host-a',
+          profileUiBaseUrl: 'https://profile.tenant.example',
+        },
+      })
+
+    expect(profileLinkContextService.resolve).toHaveBeenCalledWith(userId, teamId)
+  })
+
+  it('waits for a cold activation lookup before forwarding the first message context', async () => {
+    let resolveLookup!: (value: string) => void
+    profileLinkContextService.resolve.mockReturnValue(
+      new Promise(resolve => {
+        resolveLookup = resolve
+      })
+    )
+    const { app } = buildApp([{ metadata: { name: 'host-a' }, spec: { enabled: true } }])
+
+    const response = request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .then(result => result)
+    await vi.waitFor(() =>
+      expect(profileLinkContextService.resolve).toHaveBeenCalledWith(userId, teamId)
+    )
+
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    const returnedBeforeLookup = await Promise.race([
+      response.then(() => true),
+      new Promise<boolean>(resolve => {
+        deadlineTimer = setTimeout(() => resolve(false), 1350)
+      }),
+    ])
+    if (deadlineTimer) clearTimeout(deadlineTimer)
+    expect(returnedBeforeLookup).toBe(false)
+
+    resolveLookup('https://profile.tenant.example')
+    const result = await response
+    expect(result.status).toBe(200)
+    expect(result.body.profileLinkContext).toEqual({
+      version: 1,
+      userId,
+      teamId,
+      hostRef: 'host-a',
+      profileUiBaseUrl: 'https://profile.tenant.example',
+    })
+  })
+
+  it('omits an unavailable origin without failing Host authorization', async () => {
+    profileLinkContextService.resolve.mockResolvedValue(null)
+    const { app } = buildApp([{ metadata: { name: 'host-a' }, spec: { enabled: true } }])
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .expect(200)
+      .expect({
+        userId,
+        hostRef: 'host-a',
+        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+      })
+
+    expect(profileLinkContextService.resolve).toHaveBeenCalledWith(userId, teamId)
+  })
+
+  it('omits context after a throttled lookup while retaining Host authorization', async () => {
+    profileLinkContextService.resolve.mockRejectedValue(new Error('MRS rate limited (429)'))
+    const { app } = buildApp([{ metadata: { name: 'host-a' }, spec: { enabled: true } }])
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .expect(200)
+      .expect({
+        userId,
+        hostRef: 'host-a',
+        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+      })
+
+    expect(profileLinkContextService.resolve).toHaveBeenCalledWith(userId, teamId)
+  })
+
+  it('bounds an activation lookup that stalls without failing Host authorization', async () => {
+    profileLinkContextService.resolve.mockReturnValue(new Promise(() => {}))
+    const { app } = buildApp(
+      [{ metadata: { name: 'host-a' }, spec: { enabled: true } }],
+      undefined,
+      undefined,
+      1
+    )
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .expect(200)
+      .expect({
+        userId,
+        hostRef: 'host-a',
+        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+      })
+
+    expect(profileLinkContextService.resolve).toHaveBeenCalledWith(userId, teamId)
+  })
+
+  it('fails closed when opt-in Host authorization exceeds its deadline', async () => {
+    svc.getUserAgents.mockImplementation(
+      () =>
+        new Promise(resolve => setTimeout(() => resolve({ userId, agentNames: ['host-a'] }), 30))
+    )
+    const { app, gatewayStub } = buildApp(
+      [{ metadata: { name: 'host-a' }, spec: { enabled: true } }],
+      undefined,
+      undefined,
+      undefined,
+      5
+    )
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .expect(504, { error: 'Gateway Timeout' })
+
+    expect(gatewayStub.listResource).not.toHaveBeenCalled()
+    expect(profileLinkContextService.resolve).not.toHaveBeenCalled()
+  })
+
+  it('aborts an in-flight Host CRD lookup when opt-in authorization times out', async () => {
+    svc.getUserAgents.mockResolvedValue({ userId, agentNames: ['host-a'] })
+    const { app, gatewayStub } = buildApp(
+      [{ metadata: { name: 'host-a' }, spec: { enabled: true } }],
+      undefined,
+      undefined,
+      undefined,
+      5
+    )
+    let listSignal: AbortSignal | undefined
+    gatewayStub.listResource.mockImplementation(
+      (_plural: unknown, _namespace: unknown, signal?: AbortSignal) => {
+        listSignal = signal
+        return new Promise<HostCRD[]>((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timeout)
+            reject(new Error('Host list aborted'))
+          }
+          const timeout = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort)
+            resolve([{ metadata: { name: 'host-a' }, spec: { enabled: true } }])
+          }, 30)
+          signal?.addEventListener('abort', onAbort, { once: true })
+        })
+      }
+    )
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .expect(504, { error: 'Gateway Timeout' })
+
+    expect(listSignal?.aborted).toBe(true)
+    expect(profileLinkContextService.resolve).not.toHaveBeenCalled()
+  })
+
+  it('does not expose the optional context without the message invoke scope', async () => {
+    authState.claims = { scopes: ['host:status:read'], teamId }
+    const { app } = buildApp([{ metadata: { name: 'host-a' }, spec: { enabled: true } }])
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/host-a?profileLinkContext=1`)
+      .expect(403)
+
+    expect(profileLinkContextService.resolve).not.toHaveBeenCalled()
+  })
+
+  it('does not perform the activation lookup for ordinary Host connection reads', async () => {
+    const { app } = buildApp([{ metadata: { name: 'host-a' }, spec: { enabled: true } }])
+
+    await request(app).get(`/rpc/access/users/${userId}/mcp-hosts/host-a`).expect(200)
+
+    expect(profileLinkContextService.resolve).not.toHaveBeenCalled()
   })
 })
 

@@ -1,5 +1,6 @@
 import express, { Router } from 'express'
 import type { Request, Response } from 'express'
+import type { ProfileLinkContextV1 } from '@clerum/desktop-app-links'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
@@ -14,11 +15,13 @@ import {
   resolveInvocableMcpServersForContexts,
 } from '../../services/access/mcpInvocable.js'
 import {
+  type RpcHostAccessAuthorization,
   type RpcHostAccessDenialReason,
   type RpcHostAccessDirectory,
   authorizeRpcHostAccess,
 } from '../../services/access/rpcHostAccessAuthorizer.js'
 import { getUserAgents, getUserContexts } from '../../services/directory/index.js'
+import { resolveProfileUiBaseUrlForUser } from '../../services/profileLinkContext.js'
 import {
   type DirectRunAttributionBindingService,
   DirectRunBindingConflictError,
@@ -29,9 +32,19 @@ type RpcAccessUsersRouterOptions = {
   bindingService: Pick<DirectRunAttributionBindingService, 'bind'>
   directory?: RpcHostAccessDirectory
   bindingBudgetMs?: number
+  profileLinkAuthorizationBudgetMs?: number
+  profileLinkContextBudgetMs?: number
 }
 
 const DEFAULT_DIRECT_RUN_BINDING_BUDGET_MS = 750
+// Bound the complete opt-in Host authorization phase before starting the
+// separate Profile-context budget. This does not change ordinary Host reads.
+const DEFAULT_PROFILE_LINK_AUTHORIZATION_BUDGET_MS = 20_000
+// Hosted member-registration enrollment can take up to 10 seconds before the
+// bounded 1-second profile lookup begins. Leave a small margin so cold callers
+// receive context before the first message is forwarded.
+const DEFAULT_PROFILE_LINK_CONTEXT_BUDGET_MS = 12_000
+const AUTHORIZATION_BUDGET_EXPIRED = Symbol('authorization-budget-expired')
 
 const HOST_ACCESS_SCOPES = [
   'host:message:invoke',
@@ -69,6 +82,85 @@ function denyHostAccess(
   res.status(403).json({ error: 'Forbidden' })
 }
 
+async function optionalProfileLinkContext(
+  req: RpcAuthedRequest,
+  claims: RpcAccessClaims,
+  userId: string,
+  hostRef: string,
+  budgetMs: number
+): Promise<ProfileLinkContextV1 | undefined> {
+  if (req.query.profileLinkContext !== '1') return undefined
+
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  let timedOut = false
+  try {
+    const lookup = resolveProfileUiBaseUrlForUser(userId, claims.teamId)
+    const deadline = new Promise<undefined>(resolve => {
+      timeout = setTimeout(() => {
+        timedOut = true
+        resolve(undefined)
+      }, budgetMs)
+    })
+    const profileUiBaseUrl = await Promise.race([lookup, deadline])
+    if (timedOut) {
+      req.log?.warn(
+        { event: 'rpc_profile_link_context_unavailable', hostRef },
+        'profile link context lookup timed out'
+      )
+    }
+    return profileUiBaseUrl
+      ? {
+          version: 1,
+          userId,
+          teamId: claims.teamId,
+          hostRef,
+          profileUiBaseUrl,
+        }
+      : undefined
+  } catch {
+    // Profile links are optional. A lookup failure must not prevent the
+    // already-authorized message from reaching the Host.
+    req.log?.warn(
+      { event: 'rpc_profile_link_context_unavailable', hostRef },
+      'profile link context lookup unavailable'
+    )
+    return undefined
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
+async function authorizeRpcHostAccessWithinBudget(
+  gateway: K8sGateway,
+  claims: RpcAccessClaims,
+  userId: string,
+  hostRef: string,
+  directory: RpcHostAccessDirectory | undefined,
+  budgetMs: number
+): Promise<RpcHostAccessAuthorization | typeof AUTHORIZATION_BUDGET_EXPIRED> {
+  const controller = new AbortController()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const authorization = authorizeRpcHostAccess(
+    gateway,
+    claims,
+    userId,
+    hostRef,
+    directory,
+    controller.signal
+  )
+  const deadline = new Promise<typeof AUTHORIZATION_BUDGET_EXPIRED>(resolve => {
+    timeout = setTimeout(() => {
+      controller.abort()
+      resolve(AUTHORIZATION_BUDGET_EXPIRED)
+    }, budgetMs)
+  })
+  try {
+    return await Promise.race([authorization, deadline])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
 async function bindDirectRunWithinBudget(
   bindingService: Pick<DirectRunAttributionBindingService, 'bind'>,
   input: Parameters<DirectRunAttributionBindingService['bind']>[0],
@@ -99,6 +191,10 @@ export function createRpcAccessUsersRouter(
   const router = Router()
   const { bindingService, directory } = options
   const bindingBudgetMs = options.bindingBudgetMs ?? DEFAULT_DIRECT_RUN_BINDING_BUDGET_MS
+  const profileLinkAuthorizationBudgetMs =
+    options.profileLinkAuthorizationBudgetMs ?? DEFAULT_PROFILE_LINK_AUTHORIZATION_BUDGET_MS
+  const profileLinkContextBudgetMs =
+    options.profileLinkContextBudgetMs ?? DEFAULT_PROFILE_LINK_CONTEXT_BUDGET_MS
 
   router.get(
     '/rpc/access/users/:userId/contexts',
@@ -201,18 +297,47 @@ export function createRpcAccessUsersRouter(
           denyHostAccess(req, res, 'claims_missing')
           return
         }
-        const authorization = await authorizeRpcHostAccess(
-          gateway,
-          claims,
-          userId,
-          hostRef,
-          directory
-        )
+        const includeProfileLinkContext = req.query.profileLinkContext === '1'
+        if (includeProfileLinkContext && !claims.scopes.includes('host:message:invoke')) {
+          res.status(403).json({ error: 'Forbidden' })
+          return
+        }
+        const authorization = includeProfileLinkContext
+          ? await authorizeRpcHostAccessWithinBudget(
+              gateway,
+              claims,
+              userId,
+              hostRef,
+              directory,
+              profileLinkAuthorizationBudgetMs
+            )
+          : await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
+        if (authorization === AUTHORIZATION_BUDGET_EXPIRED) {
+          req.log?.warn(
+            { event: 'rpc_host_access_timeout', hostRef, phase: 'profile_link_context' },
+            'Host authorization timed out before Profile link resolution'
+          )
+          res.status(504).json({ error: 'Gateway Timeout' })
+          return
+        }
         if (!authorization.authorized) {
           denyHostAccess(req, res, authorization.reason)
           return
         }
-        res.status(200).json(authorization.connection)
+
+        const profileLinkContext = includeProfileLinkContext
+          ? await optionalProfileLinkContext(
+              req,
+              claims,
+              userId,
+              hostRef,
+              profileLinkContextBudgetMs
+            )
+          : undefined
+        res.status(200).json({
+          ...authorization.connection,
+          ...(profileLinkContext ? { profileLinkContext } : {}),
+        })
       } catch (error) {
         next(error)
       }
@@ -238,13 +363,25 @@ export function createRpcAccessUsersRouter(
           return
         }
 
-        const authorization = await authorizeRpcHostAccess(
-          gateway,
-          claims,
-          userId,
-          hostRef,
-          directory
-        )
+        const includeProfileLinkContext = req.query.profileLinkContext === '1'
+        const authorization = includeProfileLinkContext
+          ? await authorizeRpcHostAccessWithinBudget(
+              gateway,
+              claims,
+              userId,
+              hostRef,
+              directory,
+              profileLinkAuthorizationBudgetMs
+            )
+          : await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
+        if (authorization === AUTHORIZATION_BUDGET_EXPIRED) {
+          req.log?.warn(
+            { event: 'rpc_host_access_timeout', hostRef, phase: 'profile_link_context' },
+            'Host authorization timed out before Profile link resolution'
+          )
+          res.status(504).json({ error: 'Gateway Timeout' })
+          return
+        }
         if (!authorization.authorized) {
           denyHostAccess(req, res, authorization.reason)
           return
@@ -263,9 +400,17 @@ export function createRpcAccessUsersRouter(
           bindingBudgetMs
         )
         if (bindingStatus === 'recorded') {
+          const profileLinkContext = await optionalProfileLinkContext(
+            req,
+            claims,
+            userId,
+            hostRef,
+            profileLinkContextBudgetMs
+          )
           res.status(200).json({
             ...authorization.connection,
             bindingStatus: 'recorded',
+            ...(profileLinkContext ? { profileLinkContext } : {}),
           })
           return
         }
@@ -281,9 +426,17 @@ export function createRpcAccessUsersRouter(
           },
           'direct run attribution binding unavailable after host authorization'
         )
+        const profileLinkContext = await optionalProfileLinkContext(
+          req,
+          claims,
+          userId,
+          hostRef,
+          profileLinkContextBudgetMs
+        )
         res.status(200).json({
           ...authorization.connection,
           bindingStatus: 'unavailable',
+          ...(profileLinkContext ? { profileLinkContext } : {}),
         })
       } catch (error) {
         next(error)

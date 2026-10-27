@@ -3,6 +3,7 @@
  * the enabled allowlist entry for the Host's provider; `models` is `[hostDefault]`
  * (name only) when the allowlist is unavailable (`degraded`).
  */
+import type { ProfileLinkContextV1 } from '@clerum/desktop-app-links'
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import type { ModelWireEntry } from '../config/modelResolution.js'
@@ -64,6 +65,8 @@ export interface IncomingMessage {
   fileReferences?: FileReferenceV1[]
   /** Server-owned: admission's resolution of `fileReferences`; callers cannot set it. */
   fileReferenceResolutions?: FileReferenceResolution[]
+  /** Server-owned, request-local Profile origin context; never accepted from message JSON. */
+  profileLinkContext?: ProfileLinkContextV1
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'
@@ -77,6 +80,7 @@ export interface RuntimeCallerContext {
   channelType?: string
   channelId?: string
   sender?: string
+  profileLinkContext?: ProfileLinkContextV1
 }
 
 export interface MessageResponse {

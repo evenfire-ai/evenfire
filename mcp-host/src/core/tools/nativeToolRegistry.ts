@@ -359,6 +359,7 @@ export class NativeToolRegistry implements ToolRegistry {
               callerIdentity: gfsDownload?.callerIdentity,
               callerWorkspacePath: gfsDownload?.callerWorkspacePath,
               retentionOwnerId: gfsDownload?.retentionOwnerId,
+              profileLinkContext: sourceMessage?.profileLinkContext,
             })
           : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),

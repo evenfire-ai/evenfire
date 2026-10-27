@@ -38,8 +38,10 @@ export async function authorizeRpcHostAccess(
   claims: RpcAccessClaims,
   userId: string,
   hostRef: string,
-  directory: RpcHostAccessDirectory = defaultDirectory
+  directory: RpcHostAccessDirectory = defaultDirectory,
+  signal?: AbortSignal
 ): Promise<RpcHostAccessAuthorization> {
+  signal?.throwIfAborted()
   if (claims.sub !== userId) {
     return { authorized: false, reason: 'subject_mismatch' }
   }
@@ -48,24 +50,31 @@ export async function authorizeRpcHostAccess(
   }
 
   const userAgents = await directory.getUserAgents(userId)
+  signal?.throwIfAborted()
   if (!userAgents.agentNames.includes(hostRef)) {
     if (!claims.teamId) {
       return { authorized: false, reason: 'directory_grant_missing' }
     }
     const activeTeam = await directory.getCurrentTeam(userId, claims.teamId)
+    signal?.throwIfAborted()
     if (!activeTeam) {
       return { authorized: false, reason: 'team_membership_missing' }
     }
     const teamAgents = await directory.getTeamAgents(claims.teamId)
+    signal?.throwIfAborted()
     if (!teamAgents.agentNames.includes(hostRef)) {
       return { authorized: false, reason: 'directory_grant_missing' }
     }
   }
 
-  const hosts = (await gateway.listResource('hosts', config.hostsNamespace)) as Array<{
+  const hostList = signal
+    ? gateway.listResource('hosts', config.hostsNamespace, signal)
+    : gateway.listResource('hosts', config.hostsNamespace)
+  const hosts = (await hostList) as Array<{
     metadata?: { name?: string }
     spec?: { enabled?: boolean }
   }>
+  signal?.throwIfAborted()
   const host = hosts.find(candidate => candidate.metadata?.name === hostRef)
   if (!host) {
     return { authorized: false, reason: 'host_missing' }

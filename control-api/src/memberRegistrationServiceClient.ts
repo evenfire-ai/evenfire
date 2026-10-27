@@ -68,7 +68,7 @@ async function resolveTarget(destinationBaseUrl: string): Promise<{
 // Log hygiene (mirrors memberRegistrationEnrollment.ts:100): status only —
 // never stringify the upstream response body into the log or the error.
 function unavailable(
-  context: { baseUrl: string; method: string; path: string; upstreamStatus?: number },
+  context: { method: string; path: string; upstreamStatus?: number },
   message: string,
   cause?: unknown
 ): MemberRegistrationUnavailableError {
@@ -76,7 +76,7 @@ function unavailable(
     {
       event: 'member_registration_request_failed',
       ...context,
-      cause: cause instanceof Error ? cause.message : undefined,
+      cause: cause instanceof Error ? cause.name : undefined,
     },
     message
   )
@@ -89,10 +89,15 @@ export async function memberRegistrationServiceRequest<T>(
   options: {
     body?: unknown
     destinationBaseUrl: string
+    timeoutMs?: number
   }
 ): Promise<T> {
+  const requestTimeoutMs =
+    typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs)
+      ? Math.min(Math.max(1, Math.floor(options.timeoutMs)), SEND_TIMEOUT_MS)
+      : SEND_TIMEOUT_MS
   const { baseUrl, credential } = await resolveTarget(options.destinationBaseUrl)
-  const context = { baseUrl, method, path }
+  const context = { method, path }
 
   let response: Response
   try {
@@ -103,7 +108,7 @@ export async function memberRegistrationServiceRequest<T>(
         authorization: `Bearer ${signMemberRegistrationJwt(credential)}`,
       },
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+      signal: AbortSignal.timeout(requestTimeoutMs),
     })
   } catch (cause) {
     throw unavailable(context, 'member-registration service is unreachable', cause)

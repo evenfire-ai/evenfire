@@ -306,6 +306,10 @@ export async function handleMessageRoute(
   try {
     const message = req.body as IncomingMessage
 
+    // A Profile-link origin is a trusted, request-local edge capability. Never
+    // accept a client-supplied value from the message body.
+    if (message && typeof message === 'object') delete message.profileLinkContext
+
     if (typeof message?.content !== 'string') {
       badRequest(res, 'content must be a string')
       return
@@ -327,6 +331,15 @@ export async function handleMessageRoute(
         message.sender = caller.userId
         if (caller.teamId) {
           message.metadata = { ...(message.metadata ?? {}), teamId: caller.teamId }
+        }
+        const profileLinkContext = caller.profileLinkContext
+        if (
+          profileLinkContext?.version === 1 &&
+          profileLinkContext.userId === caller.userId &&
+          profileLinkContext.teamId === (caller.teamId ?? null) &&
+          profileLinkContext.hostRef === caller.hostRef
+        ) {
+          message.profileLinkContext = profileLinkContext
         }
       } else {
         json(res, 401, { error: 'Missing rpc edge caller context' })

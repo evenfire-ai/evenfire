@@ -214,6 +214,31 @@ function normalizeGfsResourceUri(rawUri) {
   return `gfs://${drive}/${rid.toLowerCase()}`
 }
 
+function normalizeProfileUiBaseUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || rawUrl.length > 2048) return null
+  const candidate = rawUrl.trim()
+  if (!/^https?:\/\/[^/?#]+\/?$/i.test(candidate) || /[\u0000-\u001f\u007f]/.test(candidate)) {
+    return null
+  }
+  let parsed
+  try {
+    parsed = new URL(candidate)
+  } catch {
+    return null
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== '/' ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    return null
+  }
+  return parsed.origin
+}
+
 function buildGfsResourceDeepLink(uri) {
   const canonicalUri = normalizeGfsResourceUri(uri)
   if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
@@ -225,21 +250,43 @@ function buildGfsResourceDeepLink(uri) {
 function buildGfsResourceWebLink(profileUiBaseUrl, uri) {
   const canonicalUri = normalizeGfsResourceUri(uri)
   if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
-  let baseUrl
-  try {
-    baseUrl = new URL(profileUiBaseUrl)
-  } catch {
+  const normalizedOrigin = normalizeProfileUiBaseUrl(profileUiBaseUrl)
+  if (!normalizedOrigin) {
     throw new Error('Cannot create a shareable link for this desktop environment')
   }
-  if (!['http:', 'https:'].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password) {
-    throw new Error('Cannot create a shareable link for this desktop environment')
-  }
-  if (baseUrl.pathname !== '/' || baseUrl.search || baseUrl.hash) {
-    throw new Error('Cannot create a shareable link for this desktop environment')
-  }
+  const baseUrl = new URL(normalizedOrigin)
   baseUrl.pathname = GFS_RESOURCE_WEB_LINK_PATH
   baseUrl.searchParams.set('uri', canonicalUri)
   return baseUrl.toString()
+}
+
+function parseGfsResourceWebLink(rawUrl, profileUiBaseUrl) {
+  if (typeof rawUrl !== 'string' || rawUrl.length > 4096 || /[\u0000-\u001f\u007f]/.test(rawUrl)) {
+    return null
+  }
+  if (!/^https?:\/\/[^/?#]+\/open\/files\?uri=[^&#]+$/i.test(rawUrl)) return null
+  const trustedOrigin = normalizeProfileUiBaseUrl(profileUiBaseUrl)
+  if (!trustedOrigin) return null
+  let parsed
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  if (
+    parsed.origin !== trustedOrigin ||
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== GFS_RESOURCE_WEB_LINK_PATH ||
+    parsed.hash ||
+    [...parsed.searchParams.keys()].some(key => key !== 'uri') ||
+    parsed.searchParams.getAll('uri').length !== 1
+  ) {
+    return null
+  }
+  const uri = normalizeGfsResourceUri(parsed.searchParams.get('uri'))
+  return uri ? { uri } : null
 }
 
 function parseGfsResourceDeepLink(rawUrl) {
@@ -279,7 +326,9 @@ module.exports = {
   buildGfsResourceWebLink,
   normalizeSandboxUiRoute,
   normalizeGfsResourceUri,
+  normalizeProfileUiBaseUrl,
   parseGfsResourceDeepLink,
+  parseGfsResourceWebLink,
   parseSandboxUiDeepLink,
   sandboxUiDeepLinkTargetsEqual,
 }

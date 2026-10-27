@@ -3,8 +3,10 @@ import { createHash } from 'node:crypto'
 import type { ToolDefinition } from '../../types'
 import {
   DefaultPromptBuilder,
+  GFS_PROFILE_LINK_GUIDANCE_TEXT,
   MCP_SERVER_SELECTION_TEXT,
   TOOL_DISCOVERY_TEXT,
+  URL_REFERENCE_GUIDANCE_TEXT,
   WORKFLOW_RECIPES_TEXT,
 } from '../promptBuilder'
 import type { BuilderInput } from '../systemPrompt'
@@ -25,6 +27,8 @@ function makeInput(overrides: Partial<BuilderInput> = {}): BuilderInput {
     workflowGuidance: '',
     mcpServerGuidance: '',
     toolDiscoveryGuidance: '',
+    urlReferenceGuidance: '',
+    gfsProfileLinkGuidance: '',
     memoryGuidance: 'MEMORY guidance',
     ...overrides,
   }
@@ -164,6 +168,18 @@ describe('DefaultPromptBuilder.buildParts (T2.2)', () => {
     )
     expect(parts.context).not.toContain('WORKFLOW RECIPES:')
     expect(parts.context).not.toContain('MCP SERVER SELECTION:')
+  })
+
+  it('carries URL/resource identity guidance in the cacheable context tier', () => {
+    const parts = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
+      makeInput({
+        urlReferenceGuidance: URL_REFERENCE_GUIDANCE_TEXT,
+        gfsProfileLinkGuidance: GFS_PROFILE_LINK_GUIDANCE_TEXT,
+      })
+    )
+    expect(parts.context).toContain(URL_REFERENCE_GUIDANCE_TEXT)
+    expect(parts.context).toContain(GFS_PROFILE_LINK_GUIDANCE_TEXT)
+    expect(parts.stable).not.toContain(URL_REFERENCE_GUIDANCE_TEXT)
   })
 
   // F4.1 — TOOL_DISCOVERY_TEXT (dynamic-tool-loading).

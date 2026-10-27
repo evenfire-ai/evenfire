@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createCanvas } from '@napi-rs/canvas'
+import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { resolveOfficialVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { VisualInputBudget } from '../visualInput/policy'
 import {
@@ -40,8 +41,19 @@ function client(overrides?: Partial<GfscReadClient>): GfscReadClient {
   }
 }
 
-function toolMap(c: GfscReadClient) {
-  return new Map(buildGfsReadTools(c, { referencedFiles: new Map() }).map(t => [t.name, t]))
+function toolMap(
+  c: GfscReadClient,
+  profileLinkContext?: {
+    version: 1
+    userId: string
+    teamId: string | null
+    hostRef: string
+    profileUiBaseUrl: string
+  }
+) {
+  return new Map(
+    buildGfsReadTools(c, { referencedFiles: new Map(), profileLinkContext }).map(t => [t.name, t])
+  )
 }
 
 // A tool run with no caller context passes no cancel signal and no deadline to
@@ -100,11 +112,183 @@ describe('buildGfsReadTools', () => {
     expect(c.list).toHaveBeenCalledWith({ drive: 'main', resourceId: 'abc' }, NO_BOUNDS)
   })
 
-  it('gfs_resolve calls the resolver', async () => {
+  it('gfs_resolve preserves the legacy canonical GFS URI contract', async () => {
     const c = client()
-    const r = await toolMap(c).get('clerum__gfs_resolve')!.execute({ uri: 'gfs://main/abc' }, '')
+    const uri = `gfs://main/${'a'.repeat(32)}`
+    const r = await toolMap(c).get('clerum__gfs_resolve')!.execute({ uri }, '')
     expect(r.success).toBe(true)
-    expect(c.resolve).toHaveBeenCalledWith({ uri: 'gfs://main/abc' }, NO_BOUNDS)
+    expect(c.resolve).toHaveBeenCalledWith({ uri }, NO_BOUNDS)
+  })
+
+  it('resolves a producer-built Profile URL under its bound context and returns the same resource link', async () => {
+    const uri = `gfs://main/${'b'.repeat(32)}`
+    const profileOrigin = 'https://profile.tenant.example'
+    const profileUrl = buildGfsResourceWebLink(profileOrigin, uri)
+    const c = client({
+      resolve: vi.fn(async () => ({
+        ok: true,
+        data: { gfsUri: uri, name: 'Quarterly Plan.xlsx', kind: 'file', version: 5 },
+      })),
+    })
+    const tool = toolMap(c, {
+      version: 1,
+      userId: 'user-1',
+      teamId: 'team-1',
+      hostRef: 'chatllm',
+      profileUiBaseUrl: profileOrigin,
+    }).get('clerum__gfs_resolve')!
+
+    const result = await tool.execute({ uri: profileUrl }, '')
+
+    expect(result.success).toBe(true)
+    expect(c.resolve).toHaveBeenCalledWith({ uri }, NO_BOUNDS)
+    expect(JSON.parse(result.content ?? '')).toEqual({
+      ok: true,
+      data: {
+        gfsUri: uri,
+        name: 'Quarterly Plan.xlsx',
+        kind: 'file',
+        version: 5,
+        profileUrl,
+      },
+    })
+  })
+
+  it.each([
+    [403, 'forbidden'],
+    [404, 'not_found'],
+  ])(
+    'does not return a friendly name or Profile URL for a denied or missing Profile resource (%s)',
+    async (status, category) => {
+      const uri = `gfs://main/${'9'.repeat(32)}`
+      const profileOrigin = 'https://profile.tenant.example'
+      const profileUrl = buildGfsResourceWebLink(profileOrigin, uri)
+      const c = client({
+        resolve: vi.fn(async () => {
+          throw new GfscHttpError(status, 'private path=/internal/resources/secret')
+        }),
+      })
+      const tool = toolMap(c, {
+        version: 1,
+        userId: 'user-1',
+        teamId: 'team-1',
+        hostRef: 'chatllm',
+        profileUiBaseUrl: profileOrigin,
+      }).get('clerum__gfs_resolve')!
+
+      const result = await tool.execute({ uri: profileUrl }, '')
+
+      expect(result).toEqual({
+        success: false,
+        error: `GFS read failed (gfsc ${status}: ${category})`,
+      })
+      expect(result.error).not.toContain(profileUrl)
+      expect(result.error).not.toContain('/internal/resources/secret')
+      expect(c.resolve).toHaveBeenCalledWith({ uri }, NO_BOUNDS)
+    }
+  )
+
+  it('keeps the Profile link bound to the same GFS identity after a rename and move', async () => {
+    const uri = `gfs://main/${'f'.repeat(32)}`
+    const profileOrigin = 'https://profile.tenant.example'
+    const profileUrl = buildGfsResourceWebLink(profileOrigin, uri)
+    const c = client({
+      resolve: vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          data: {
+            gfsUri: uri,
+            name: 'Planning.xlsx',
+            path: '/Planning.xlsx',
+            kind: 'file',
+            version: 3,
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          data: {
+            gfsUri: uri,
+            name: 'Quarterly Plan.xlsx',
+            path: '/Finance/Quarterly Plan.xlsx',
+            kind: 'file',
+            version: 4,
+          },
+        }),
+    })
+    const tool = toolMap(c, {
+      version: 1,
+      userId: 'user-1',
+      teamId: 'team-1',
+      hostRef: 'chatllm',
+      profileUiBaseUrl: profileOrigin,
+    }).get('clerum__gfs_resolve')!
+
+    const before = await tool.execute({ uri }, '')
+    const after = await tool.execute({ uri }, '')
+
+    expect(JSON.parse(before.content ?? '')).toMatchObject({
+      data: { gfsUri: uri, name: 'Planning.xlsx', path: '/Planning.xlsx', profileUrl },
+    })
+    expect(JSON.parse(after.content ?? '')).toMatchObject({
+      data: {
+        gfsUri: uri,
+        name: 'Quarterly Plan.xlsx',
+        path: '/Finance/Quarterly Plan.xlsx',
+        profileUrl,
+      },
+    })
+    expect(vi.mocked(c.resolve).mock.calls).toEqual([
+      [{ uri }, NO_BOUNDS],
+      [{ uri }, NO_BOUNDS],
+    ])
+  })
+
+  it('rejects Profile URLs from another origin and does not call the GFS resolver', async () => {
+    const c = client()
+    const tool = toolMap(c, {
+      version: 1,
+      userId: 'user-1',
+      teamId: null,
+      hostRef: 'chatllm',
+      profileUiBaseUrl: 'https://profile.tenant.example',
+    }).get('clerum__gfs_resolve')!
+
+    const result = await tool.execute(
+      {
+        uri:
+          'https://profile.attacker.example/open/files?uri=' +
+          encodeURIComponent(`gfs://main/${'c'.repeat(32)}`),
+      },
+      ''
+    )
+
+    expect(result.success).toBe(false)
+    expect(c.resolve).not.toHaveBeenCalled()
+  })
+
+  it('does not add a Profile URL when the GFS response identity differs from the requested resource', async () => {
+    const uri = `gfs://main/${'d'.repeat(32)}`
+    const c = client({
+      resolve: vi.fn(async () => ({
+        ok: true,
+        data: { gfsUri: `gfs://main/${'e'.repeat(32)}`, name: 'Other file', kind: 'file' },
+      })),
+    })
+    const tool = toolMap(c, {
+      version: 1,
+      userId: 'user-1',
+      teamId: 'team-1',
+      hostRef: 'chatllm',
+      profileUiBaseUrl: 'https://profile.tenant.example',
+    }).get('clerum__gfs_resolve')!
+
+    const result = await tool.execute({ uri }, '')
+
+    expect(result).toEqual({
+      success: false,
+      error: 'GFS resolver returned a mismatched resource.',
+    })
   })
 
   it('surfaces a gfsc error as a redacted failed result (fail-loud, e.g. a revoked grant)', async () => {

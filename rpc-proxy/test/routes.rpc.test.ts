@@ -248,6 +248,7 @@ describe('routes/rpc', () => {
       'token',
       {
         teamId: 'team-1',
+        includeProfileLinkContext: true,
       }
     )
   })
@@ -284,6 +285,7 @@ describe('routes/rpc', () => {
       'rpc-token',
       {
         teamId: 'team-1',
+        includeProfileLinkContext: true,
         directRunBinding: {
           runId: expect.any(String),
           sessionId: 'session-1',

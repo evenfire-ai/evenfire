@@ -401,7 +401,7 @@ it('X2b: a store at workspace_unavailable still answers admitted inline reads, a
     version: 3,
   }
   const smallText = 'inline-admitted-sentinel region=north total=42'
-  const accessibleUri = 'gfs://main/accessible-sentinel'
+  const accessibleUri = `gfs://main/${'e'.repeat(32)}`
   const resolvedPath = '/reports/resolve-sentinel'
   gfsClient.readMetadata.mockImplementation(async () => ({
     source: structuredClone(smallSource),

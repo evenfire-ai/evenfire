@@ -1,3 +1,4 @@
+import { normalizeProfileUiBaseUrl } from '@clerum/desktop-app-links'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
@@ -7,6 +8,8 @@ import {
   fetchUserAllowedServersFromControlApi,
 } from './controlApiRestService.js'
 import { type HostAccessDenial, isHostAccessDenied } from './hostAccessDenial.js'
+
+const EDGE_PROFILE_LINK_CONTEXT_HEADER = 'x-clerum-edge-profile-link-context'
 
 export { validateRpcRequest, forwardRpcToServer } from './mcpRpcService.js'
 export {
@@ -83,10 +86,14 @@ export async function resolveHostConnectionForUser(
     teamId?: string | null
     requestId?: string
     directRunBinding?: DirectRunBindingRequest
+    includeProfileLinkContext?: boolean
   }
 ): Promise<ResolvedServerConnection | HostAccessDenial> {
   const host = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
     directRunBinding: edgeContext?.directRunBinding,
+    ...(edgeContext?.includeProfileLinkContext
+      ? { profileLinkContext: { teamId: edgeContext.teamId ?? null } }
+      : {}),
   })
   if (isHostAccessDenied(host)) return host
 
@@ -96,10 +103,29 @@ export async function resolveHostConnectionForUser(
     'x-clerum-edge-host-ref': hostRef,
     'x-clerum-edge-user-id': userId,
   }
+  // Profile context is server-owned; never forward an upstream value when
+  // this authenticated request did not receive a verified context.
+  delete headers[EDGE_PROFILE_LINK_CONTEXT_HEADER]
   if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
   headers['x-clerum-edge-access-scope'] =
     edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')
   if (edgeContext?.requestId) headers['x-clerum-edge-request-id'] = edgeContext.requestId
+  const profileLinkContext = host.profileLinkContext
+  const profileUiBaseUrl = profileLinkContext
+    ? normalizeProfileUiBaseUrl(profileLinkContext.profileUiBaseUrl)
+    : null
+  if (
+    edgeContext?.includeProfileLinkContext &&
+    profileLinkContext?.version === 1 &&
+    profileUiBaseUrl === profileLinkContext.profileUiBaseUrl &&
+    profileLinkContext.userId === userId &&
+    profileLinkContext.hostRef === hostRef &&
+    profileLinkContext.teamId === (edgeContext.teamId ?? null)
+  ) {
+    headers[EDGE_PROFILE_LINK_CONTEXT_HEADER] = Buffer.from(
+      JSON.stringify(profileLinkContext)
+    ).toString('base64url')
+  }
 
   return {
     ...host,
