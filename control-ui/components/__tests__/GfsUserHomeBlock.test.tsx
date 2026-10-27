@@ -56,10 +56,10 @@ describe('Home folder block', () => {
   )
 
   it.each([
-    ['path_conflict', 'Another item already exists at the reserved home path.'],
+    ['path_conflict', 'An item was found at the reserved home path.'],
     [
       'ancestor_grant_conflict',
-      'An inherited grant or share on the drive root or Users folder exposes home folders.',
+      'An inherited grant or share on the drive root or Users folder exposed home folders.',
     ],
   ] as const)('offers Retry with the reserved name for %s', async (conflictCode, message) => {
     const conflict: GfsUserHomeDetail = {
@@ -77,6 +77,9 @@ describe('Home folder block', () => {
     })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     expect(await screen.findByRole('alert')).toHaveTextContent(message)
+    if (conflictCode === 'path_conflict') {
+      expect(screen.getByText('The conflicting item no longer exists.')).toBeVisible()
+    }
     const name = screen.getByLabelText('Folder name')
     expect(name).toHaveValue('member')
     expect(screen.queryByRole('button', { name: 'Restore owner access' })).not.toBeInTheDocument()

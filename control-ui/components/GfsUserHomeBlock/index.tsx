@@ -17,9 +17,9 @@ const POLL_WINDOW_MS = 60_000
 const OWNER_PERMISSIONS = ['read', 'write', 'delete', 'share', 'manage_acl']
 
 const CONFLICT_CAUSES: Record<GfsUserHomeConflict, string> = {
-  path_conflict: 'Another item already exists at the reserved home path.',
+  path_conflict: 'An item was found at the reserved home path.',
   ancestor_grant_conflict:
-    'An inherited grant or share on the drive root or Users folder exposes home folders.',
+    'An inherited grant or share on the drive root or Users folder exposed home folders.',
   ownership_conflict: 'The owner’s access was removed or reduced by an operator.',
 }
 

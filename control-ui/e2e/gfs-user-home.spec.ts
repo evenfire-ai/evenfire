@@ -115,7 +115,7 @@ test.describe('Per-user GFS homes — Control UI', () => {
         await inventory.expectUserListed(user.id, 'conflict')
         await inventory.openUser(user.id)
         const block = page.getByRole('region', { name: 'Home folder' })
-        await expect(block.getByRole('alert')).toContainText('Another item already exists')
+        await expect(block.getByRole('alert')).toContainText('An item was found')
         await expect(block.getByLabel('Folder name')).toHaveValue(user.name)
         const details = block.getByRole('region', { name: 'Path conflict details' })
         await expect(details.getByText(`/Users/${user.name}`, { exact: true })).toBeVisible()
