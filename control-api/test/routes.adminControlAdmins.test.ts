@@ -313,7 +313,7 @@ describe('routes/adminControlAdmins', () => {
     })
   })
 
-  it('does not send a Desktop invitation when retirement wins the atomic creation lock', async () => {
+  it('returns 409 without sending when invitation creation reports an inactive inviter', async () => {
     adminSvc.createControlAdminInvitation.mockResolvedValue({ error: 'inviter_not_active' })
 
     const res = await request(createTestApp())
