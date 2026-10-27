@@ -38,6 +38,7 @@ type NativeHandoffProducer = {
   }
   tokenStore: TokenStore
   sessionToken: string | null
+  getCachedUserId: () => string | null
   passwordLogin: (email: string, password: string) => Promise<unknown>
   getSessionGeneration: () => number
   getRuntimeConfigState: () => DesktopRuntimeConfigState
