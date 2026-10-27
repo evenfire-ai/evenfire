@@ -175,6 +175,24 @@ realPg('team role authority on real PostgreSQL', () => {
       expect(await memberRole(teamId)).toEqual({ role: 'inviter', status: 'active' })
     })
 
+    it('reissues the invitation without a team or the original role', async () => {
+      await acceptedInvitation(teamId, 'admin')
+
+      const created = await createPasswordSetupInvitationForUser(userId)
+      if (!('id' in created)) throw new Error(`password setup failed: ${created.error}`)
+
+      const invitation = await holder.pool.query(
+        'SELECT team_id, role FROM invitations WHERE id = $1',
+        [created.id]
+      )
+      const teams = await holder.pool.query(
+        'SELECT team_id FROM invitation_teams WHERE invitation_id = $1',
+        [created.id]
+      )
+      expect(invitation.rows[0]).toEqual({ team_id: null, role: 'member' })
+      expect(teams.rows).toEqual([])
+    })
+
     it('does not restore a removed membership', async () => {
       await acceptedInvitation(teamId, 'admin')
       await holder.pool.query(

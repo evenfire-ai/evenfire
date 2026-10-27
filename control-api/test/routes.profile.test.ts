@@ -672,6 +672,30 @@ describe('routes/profile', () => {
       }
     )
 
+    it.each([
+      [
+        'role change',
+        'updateMemberRole',
+        (app: express.Express) =>
+          request(app).patch('/external/teams/t1/members/u2/role').send({ role: 'member' }),
+      ],
+      [
+        'member removal',
+        'softDeleteMember',
+        (app: express.Express) => request(app).delete('/external/teams/t1/members/u2'),
+      ],
+      [
+        'team rename',
+        'renameTeam',
+        (app: express.Express) =>
+          request(app).put('/external/teams/t1/name').send({ name: 'Renamed' }),
+      ],
+    ] as const)('fails without a %s when the role lookup fails', async (_name, write, send) => {
+      svc.findMemberRole.mockRejectedValue(new Error('db unavailable'))
+      await adminRequest(send(managementApp())).expect(500)
+      expect(svc[write]).not.toHaveBeenCalled()
+    })
+
     it('allows a team rename when the current team role is admin', async () => {
       svc.findMemberRole.mockResolvedValue({ role: 'admin' })
       svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed' })
