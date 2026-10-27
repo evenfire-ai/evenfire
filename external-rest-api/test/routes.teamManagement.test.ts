@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { createApp } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createTeamRouter } from '../src/routes/team.js'
 
@@ -91,7 +92,7 @@ describe('team management delegates authorization to the Control API', () => {
 
       await asRole(request(makeApp()).post('/team/members/invite'))
         .send({ email: 'new@example.com', role: 'member' })
-        .expect(500)
+        .expect(502, { error: 'Team service unavailable' })
     })
   })
 
@@ -139,7 +140,7 @@ describe('team management delegates authorization to the Control API', () => {
 
       await asRole(request(makeApp()).patch('/team/members/user-2/role'))
         .send({ role: 'admin' })
-        .expect(500)
+        .expect(502, { error: 'Team service unavailable' })
     })
   })
 
@@ -175,7 +176,9 @@ describe('team management delegates authorization to the Control API', () => {
     it('does not report a Control API outage as a missing member', async () => {
       controlApiClientMock.controlApiRequest.mockRejectedValue(controlApiFailure(503))
 
-      await asRole(request(makeApp()).delete('/team/members/user-2')).expect(500)
+      await asRole(request(makeApp()).delete('/team/members/user-2')).expect(502, {
+        error: 'Team service unavailable',
+      })
     })
   })
 
@@ -207,7 +210,54 @@ describe('team management delegates authorization to the Control API', () => {
     it('does not report a Control API outage as a missing team', async () => {
       controlApiClientMock.controlApiRequest.mockRejectedValue(controlApiFailure(503))
 
-      await asRole(request(makeApp()).put('/team/name')).send({ name: 'Renamed' }).expect(500)
+      await asRole(request(makeApp()).put('/team/name'))
+        .send({ name: 'Renamed' })
+        .expect(502, { error: 'Team service unavailable' })
     })
+  })
+
+  describe('other Control API failures', () => {
+    const upstreamFailure = (status: number) =>
+      new ControlApiError(
+        `Control API PUT /external/teams/team-1/members/user-2 failed (${status}): db detail`,
+        status,
+        { error: 'db detail with /internal/path' }
+      )
+
+    const routes: Array<[string, (app: express.Express) => request.Test]> = [
+      [
+        'invite',
+        app =>
+          request(app)
+            .post('/api/v1/team/members/invite')
+            .send({ email: 'new@example.com', role: 'member' }),
+      ],
+      [
+        'role change',
+        app => request(app).patch('/api/v1/team/members/user-2/role').send({ role: 'member' }),
+      ],
+      ['removal', app => request(app).delete('/api/v1/team/members/user-2')],
+      ['rename', app => request(app).put('/api/v1/team/name').send({ name: 'Renamed' })],
+    ]
+
+    for (const [name, send] of routes) {
+      it(`keeps the status of a client error without upstream details (${name})`, async () => {
+        controlApiClientMock.controlApiRequest.mockRejectedValue(upstreamFailure(409))
+
+        const response = await asRole(send(createApp()))
+
+        expect(response.status).toBe(409)
+        expect(response.body).toEqual({ error: 'Team request failed' })
+      })
+
+      it(`reports an upstream outage without upstream details (${name})`, async () => {
+        controlApiClientMock.controlApiRequest.mockRejectedValue(upstreamFailure(503))
+
+        const response = await asRole(send(createApp()))
+
+        expect(response.status).toBe(502)
+        expect(response.body).toEqual({ error: 'Team service unavailable' })
+      })
+    }
   })
 })

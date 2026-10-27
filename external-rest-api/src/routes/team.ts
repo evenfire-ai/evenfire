@@ -1,6 +1,7 @@
-import { Router } from 'express'
+import { type NextFunction, type Request, type Response, Router } from 'express'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
+  TeamRequestError,
   createTeamForUser,
   deleteMember,
   getCurrentTeam,
@@ -181,6 +182,11 @@ export function createTeamRouter(): Router {
     } catch (error) {
       next(error)
     }
+  })
+
+  router.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (!(error instanceof TeamRequestError)) return next(error)
+    res.status(error.status).json({ error: error.message })
   })
 
   return router

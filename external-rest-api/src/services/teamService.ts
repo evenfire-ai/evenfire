@@ -9,12 +9,23 @@ type AuthContext = {
   sessionToken: string
 }
 
+// A team management failure reported without the upstream path or message.
+export class TeamRequestError extends Error {
+  status: number
+  constructor(status: number) {
+    super(status >= 500 ? 'Team service unavailable' : 'Team request failed')
+    this.name = 'TeamRequestError'
+    this.status = status
+  }
+}
+
 // Control API authorizes team management from the caller's current team
 // membership; translate its refusals instead of re-deciding from the session.
 function controlApiRefusal(error: unknown): 'forbidden' | 'not_found' {
-  if (error instanceof ControlApiError && error.status === 403) return 'forbidden'
-  if (error instanceof ControlApiError && error.status === 404) return 'not_found'
-  throw error
+  if (!(error instanceof ControlApiError)) throw error
+  if (error.status === 403) return 'forbidden'
+  if (error.status === 404) return 'not_found'
+  throw new TeamRequestError(error.status >= 400 && error.status < 500 ? error.status : 502)
 }
 
 export async function getCurrentTeam(auth: AuthContext) {
@@ -168,7 +179,7 @@ export async function inviteMember(auth: AuthContext, email: string, role: TeamR
     return { invited }
   } catch (error) {
     if (controlApiRefusal(error) === 'forbidden') return { error: 'forbidden' as const }
-    throw error
+    throw new TeamRequestError(404)
   }
 }
 
