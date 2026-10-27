@@ -1954,7 +1954,6 @@ export function App() {
       message: string,
       tone: 'info' | 'error' = 'error'
     ): boolean => {
-      clearSandboxUiDeepLinkProcessing(pending.link.id)
       if ((pending.retryCount ?? 0) >= MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS) {
         const next = failPendingSandboxUiDeepLink(
           pendingSandboxUiDeepLinksRef.current,
@@ -1974,7 +1973,7 @@ export function App() {
       vm.pushToast(message, tone)
       return false
     },
-    [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState, vm.pushToast]
+    [setPendingSandboxUiDeepLinkState, vm.pushToast]
   )
 
   const markSandboxUiDeepLinkRetryableFailure = React.useCallback(
@@ -2138,8 +2137,25 @@ export function App() {
       restoreWhileRetryable = true
     ) => {
       const terminal = deferSandboxUiDeepLink(pending, message, tone)
-      if (!terminal && !restoreWhileRetryable) return
-      const outcome = await restoreSandboxUiDeepLinkTeam(launchContext)
+      if (!terminal && !restoreWhileRetryable) {
+        // The target team is intentionally retained for this retry. No async
+        // rollback remains in flight, so the exact processing turn can settle.
+        clearSandboxUiDeepLinkProcessing(pending.link.id)
+        return
+      }
+      let outcome: Awaited<ReturnType<typeof restoreSandboxUiDeepLinkTeam>>
+      try {
+        outcome = await restoreSandboxUiDeepLinkTeam(launchContext)
+      } catch {
+        // A rejected restore operation is settled but not safe to retry in the
+        // background. Surface it as retryable and release this exact owner so
+        // the queue cannot remain blocked indefinitely.
+        markSandboxUiDeepLinkRetryableFailure(
+          pending.link.id,
+          'Could not safely restore the previous workspace. Verify the active team, then retry.'
+        )
+        return
+      }
       if (outcome === 'retryable') markSandboxUiDeepLinkRetryableFailure(pending.link.id)
       else if (
         outcome === 'superseded' &&
@@ -2148,9 +2164,13 @@ export function App() {
       ) {
         await cancelSupersededSandboxUiDeepLink(pending.link.id)
       }
+      // Keep the queue turn through rollback and any supersession cleanup. A
+      // later confirmed link must not start under the team being rolled back.
+      clearSandboxUiDeepLinkProcessing(pending.link.id)
     },
     [
       cancelSupersededSandboxUiDeepLink,
+      clearSandboxUiDeepLinkProcessing,
       deferSandboxUiDeepLink,
       markSandboxUiDeepLinkRetryableFailure,
       restoreSandboxUiDeepLinkTeam,

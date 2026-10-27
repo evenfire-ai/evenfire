@@ -1135,8 +1135,18 @@ describe('App deep-link orchestration', () => {
   it('serializes confirmed app links across an in-flight team transition', async () => {
     const actualControllerModule =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    let failNextWorkspaceRestore = false
     vi.mocked(useAppController).mockImplementation(() => {
-      realController = actualControllerModule.useAppController()
+      const controller = actualControllerModule.useAppController()
+      const restoreWorkspaceNavigation = controller.restoreWorkspaceNavigation
+      controller.restoreWorkspaceNavigation = (...args) => {
+        if (failNextWorkspaceRestore) {
+          failNextWorkspaceRestore = false
+          throw new Error('workspace restore failed')
+        }
+        return restoreWorkspaceNavigation(...args)
+      }
+      realController = controller
       return realController
     })
     const appBridge = window.clerum
@@ -1155,6 +1165,8 @@ describe('App deep-link orchestration', () => {
     let releaseTeamB!: () => void
     let releaseTeamC!: () => void
     let releaseTeamD!: () => void
+    let releaseTeamDRollback!: () => void
+    let holdNextTeamDRollback = false
     const teamBGate = new Promise<void>(resolve => {
       releaseTeamB = resolve
     })
@@ -1163,6 +1175,9 @@ describe('App deep-link orchestration', () => {
     })
     const teamDGate = new Promise<void>(resolve => {
       releaseTeamD = resolve
+    })
+    const teamDRollbackGate = new Promise<void>(resolve => {
+      releaseTeamDRollback = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
       | ((teamId: string) => Promise<unknown>)
@@ -1183,7 +1198,14 @@ describe('App deep-link orchestration', () => {
     handle.switchTeam.mockImplementation(async teamId => {
       if (teamId === 'team-b') await teamBGate
       if (teamId === 'team-c') await teamCGate
-      if (teamId === 'team-d') await teamDGate
+      if (teamId === 'team-d') {
+        if (holdNextTeamDRollback) {
+          holdNextTeamDRollback = false
+          await teamDRollbackGate
+        } else {
+          await teamDGate
+        }
+      }
       activeTeamId = teamId
       return switchTeamProducer(teamId)
     })
@@ -1331,6 +1353,150 @@ describe('App deep-link orchestration', () => {
     expect(activeWorkspaceTab(getController().workspaceTabs)).toMatchObject({ kind: 'chat' })
     expect(main.live()).toBeNull()
     expect(embedState().owner).toBeNull()
+
+    // A failed Team E launch starts an asynchronous rollback to Team D. A
+    // later confirmed link cannot enter the shared app/team transaction until
+    // that rollback has settled, or it could launch under the team being left.
+    holdNextTeamDRollback = true
+    const linkDtoETarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-e',
+        path: '/failed-e',
+        teamId: 'team-e',
+      })
+    )
+    if (!linkDtoETarget) throw new Error('the production parser rejected the Team E link')
+    const switchesBeforeFailedE = handle.switchTeam.mock.calls.length
+    const opensBeforeFailedE = openSandboxUi().mock.calls.length
+    const listsBeforeFailedE = listApps.mock.calls.length
+    main.failNextOpen(new Error('Team E native app failed to open'))
+    const linkDtoE = queue.enqueue(linkDtoETarget)
+    act(() => emitDeepLink?.(linkDtoE))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeFailedE + 2))
+    await waitFor(() =>
+      expect(handle.switchTeam).toHaveBeenNthCalledWith(switchesBeforeFailedE + 1, 'team-e')
+    )
+    await waitFor(() => expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeFailedE + 2))
+    await waitFor(() =>
+      expect(handle.switchTeam).toHaveBeenNthCalledWith(switchesBeforeFailedE + 2, 'team-d')
+    )
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeFailedE + 1)
+
+    const listsWhileRollbackPending = listApps.mock.calls.length
+    const opensWhileRollbackPending = openSandboxUi().mock.calls.length
+    const linkEReadyTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-e',
+        path: '/ready-e',
+        teamId: 'team-e',
+      })
+    )
+    if (!linkEReadyTarget) throw new Error('the production parser rejected the ready Team E link')
+    const linkEReady = queue.enqueue(linkEReadyTarget)
+    act(() => emitDeepLink?.(linkEReady))
+    await confirmPendingAppLink()
+    const confirmationBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
+    expect(confirmationBody).toContain('ns/team-e')
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)))
+
+    const listsObservedDuringRollback = listApps.mock.calls.length
+    const opensObservedDuringRollback = openSandboxUi().mock.calls.length
+    const teamObservedDuringRollback = getController().getCurrentTeamId()
+    const switchesObservedDuringRollback = handle.switchTeam.mock.calls
+      .slice(switchesBeforeFailedE)
+      .map(([teamId]) => teamId)
+    expect(switchesObservedDuringRollback).toEqual(['team-e', 'team-d'])
+    expect(listsObservedDuringRollback).toBe(listsWhileRollbackPending)
+    expect(opensObservedDuringRollback).toBe(opensWhileRollbackPending)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(linkDtoE.id)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(linkEReady.id)
+    await act(async () => {
+      releaseTeamDRollback()
+      await Promise.resolve()
+    })
+
+    expect(teamObservedDuringRollback).toBe('team-e')
+    expect(listsObservedDuringRollback).toBe(listsWhileRollbackPending)
+    expect(opensObservedDuringRollback).toBe(opensWhileRollbackPending)
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkDtoE.id))
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-e'))
+    await waitFor(() =>
+      expect(openSandboxUi()).toHaveBeenCalledTimes(opensWhileRollbackPending + 1)
+    )
+    await waitForMounted()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkEReady.id))
+    expect(main.live()).toMatchObject({ appRef: 'ns/team-e', routePath: '/ready-e' })
+    expect(getController().getCurrentTeamId()).toBe('team-e')
+    expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkDtoE.id)
+
+    // A rejected workspace restore is surfaced as retryable and settles the
+    // processing owner; a later link must not be stranded behind the rejection.
+    failNextWorkspaceRestore = true
+    const switchesBeforeRestoreFailure = handle.switchTeam.mock.calls.length
+    const opensBeforeRestoreFailure = openSandboxUi().mock.calls.length
+    main.failNextOpen(new Error('Team F native app failed to open'))
+    const linkF = queue.enqueue(
+      parseSandboxUiDeepLink(
+        buildSandboxUiDeepLink({
+          recipeNs: 'ns',
+          recipeName: 'team-f',
+          path: '/failed-f',
+          teamId: 'team-f',
+        })
+      )!
+    )
+    act(() => emitDeepLink?.(linkF))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeRestoreFailure + 2)
+    )
+    await waitFor(() =>
+      expect(handle.switchTeam).toHaveBeenNthCalledWith(switchesBeforeRestoreFailure + 1, 'team-f')
+    )
+    await waitFor(() =>
+      expect(handle.switchTeam).toHaveBeenNthCalledWith(switchesBeforeRestoreFailure + 2, 'team-e')
+    )
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain(
+      'Could not safely restore the previous workspace'
+    )
+    expect(failNextWorkspaceRestore).toBe(false)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeRestoreFailure + 1)
+
+    const listsBeforeNextLink = listApps.mock.calls.length
+    const opensBeforeNextLink = openSandboxUi().mock.calls.length
+    const linkEAfterRestoreFailure = queue.enqueue(
+      parseSandboxUiDeepLink(
+        buildSandboxUiDeepLink({
+          recipeNs: 'ns',
+          recipeName: 'team-e',
+          path: '/after-restore-failure',
+          teamId: 'team-e',
+        })
+      )!
+    )
+    act(() => emitDeepLink?.(linkEAfterRestoreFailure))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps.mock.calls.length).toBeGreaterThan(listsBeforeNextLink))
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeNextLink + 1))
+    await waitForMounted()
+    await waitFor(() =>
+      expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkEAfterRestoreFailure.id)
+    )
+    expect(main.live()).toMatchObject({
+      appRef: 'ns/team-e',
+      routePath: '/after-restore-failure',
+    })
     queryClient.clear()
   })
 
