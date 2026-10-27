@@ -111,12 +111,17 @@ async function applyInvitationMemberships(
   const teams = await loadInvitationTeams(db, invitation.id, invitation)
   if (teams.length === 0) return teams
 
+  // Accepting never lowers the role of an active member (admin > inviter >
+  // member); lowering a role is a role change by a team admin.
   await db.query(
     `INSERT INTO team_members(team_id, user_id, role, status)
      SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
        FROM jsonb_to_recordset($1::jsonb) AS item(team_id text, role text)
      ON CONFLICT (team_id, user_id)
-     DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()`,
+     DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()
+     WHERE team_members.status <> 'active'
+        OR (CASE EXCLUDED.role WHEN 'admin' THEN 3 WHEN 'inviter' THEN 2 ELSE 1 END)
+         > (CASE team_members.role WHEN 'admin' THEN 3 WHEN 'inviter' THEN 2 ELSE 1 END)`,
     [JSON.stringify(teams.map(team => ({ team_id: team.team_id, role: team.role }))), userId]
   )
 

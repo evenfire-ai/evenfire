@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import {
   acceptInvitation,
+  createInvitation,
   createManagedInvitationForUser,
   createPasswordSetupInvitationForUser,
   findMemberRole,
@@ -297,6 +298,64 @@ realPg('team role authority on real PostgreSQL', () => {
         name: 'Chosen By Inviter',
         display_name: 'Chosen By Inviter',
       })
+    })
+  })
+
+  describe('invitation acceptance', () => {
+    async function inviteAndAccept(role: 'admin' | 'inviter' | 'member') {
+      const invitation = await createInvitation(teamId, 'Member', email, role)
+      const accepted = await acceptInvitation(userId, email, '', invitation.id)
+      expect(accepted).not.toHaveProperty('error')
+    }
+
+    it('does not lower the role of an active member', async () => {
+      await holder.pool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'admin', 'active')`,
+        [teamId, userId]
+      )
+
+      await inviteAndAccept('member')
+
+      expect(await memberRole(teamId)).toEqual({ role: 'admin', status: 'active' })
+    })
+
+    it('does not lower an active inviter to member', async () => {
+      await holder.pool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'inviter', 'active')`,
+        [teamId, userId]
+      )
+
+      await inviteAndAccept('member')
+
+      expect(await memberRole(teamId)).toEqual({ role: 'inviter', status: 'active' })
+    })
+
+    it('raises an active member to a higher invited role', async () => {
+      await holder.pool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')`,
+        [teamId, userId]
+      )
+
+      await inviteAndAccept('inviter')
+
+      expect(await memberRole(teamId)).toEqual({ role: 'inviter', status: 'active' })
+    })
+
+    it('re-adds a removed member with the invited role', async () => {
+      await holder.pool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'admin', 'deleted')`,
+        [teamId, userId]
+      )
+
+      await inviteAndAccept('inviter')
+
+      expect(await memberRole(teamId)).toEqual({ role: 'inviter', status: 'active' })
+    })
+
+    it('adds a new member with the invited role', async () => {
+      await inviteAndAccept('inviter')
+
+      expect(await memberRole(teamId)).toEqual({ role: 'inviter', status: 'active' })
     })
   })
 })
