@@ -8,6 +8,7 @@ const fixture = vi.hoisted(() => ({
   browserWindowVisible: false,
   browserWindowClosed: false,
   browserWindowDestroyed: false,
+  browserWindowDestroyedCount: 0,
   readyToShow: undefined as (() => void) | undefined,
   closed: undefined as (() => void) | undefined,
   loadUrl: undefined as (() => Promise<void>) | undefined,
@@ -17,6 +18,7 @@ vi.mock('electron', () => ({
   BrowserWindow: class {
     private destroyed = false
     private visible = false
+    private closedListener?: () => void
 
     constructor() {
       fixture.browserWindowCreated += 1
@@ -42,18 +44,22 @@ vi.mock('electron', () => ({
     close() {
       this.destroyed = true
       fixture.browserWindowClosed = true
-      fixture.closed?.()
+      this.closedListener?.()
     }
 
     destroy() {
       this.destroyed = true
       fixture.browserWindowClosed = true
       fixture.browserWindowDestroyed = true
-      fixture.closed?.()
+      fixture.browserWindowDestroyedCount += 1
+      this.closedListener?.()
     }
 
     on(event: string, listener: () => void) {
-      if (event === 'closed') fixture.closed = listener
+      if (event === 'closed') {
+        this.closedListener = listener
+        fixture.closed = listener
+      }
     }
 
     once(event: string, listener: () => void) {
@@ -97,6 +103,7 @@ afterEach(() => {
   fixture.browserWindowVisible = false
   fixture.browserWindowClosed = false
   fixture.browserWindowDestroyed = false
+  fixture.browserWindowDestroyedCount = 0
   fixture.readyToShow = undefined
   fixture.closed = undefined
   fixture.loadUrl = undefined
@@ -393,6 +400,55 @@ describe('desktop window session ownership', () => {
     expect(fixture.cookieRemove).toHaveBeenCalledWith(
       'https://rpc.example.test/api/v1/desktop/logout-window-host',
       'clerum_desktop_session'
+    )
+  })
+
+  it('continues retiring every host when one renderer close notification throws', async () => {
+    fixture.postDesktopSession.mockResolvedValue({
+      setCookie: 'clerum_desktop_session=session-cookie; Path=/; HttpOnly',
+    })
+    fixture.cookieSet.mockResolvedValue(undefined)
+    fixture.cookieRemove.mockResolvedValue(undefined)
+    const { closeAllDesktopWindows, openDesktopWindow } = await import('../desktopWindow.js')
+    const firstOwnerClosed = vi.fn(() => {
+      throw new Error('renderer already gone')
+    })
+    const secondOwnerClosed = vi.fn()
+
+    await openDesktopWindow({
+      hostRef: 'throwing-close-callback-host',
+      jwt: 'rpc-bearer-a',
+      rpcProxyUrl: 'https://rpc.example.test',
+      ...ownerArgs(Object.freeze({ owner: 'session-a' })),
+      assertRequestOwnerCurrent: () => {},
+      onClose: firstOwnerClosed,
+    })
+    await openDesktopWindow({
+      hostRef: 'healthy-close-callback-host',
+      jwt: 'rpc-bearer-b',
+      rpcProxyUrl: 'https://rpc.example.test',
+      ...ownerArgs(Object.freeze({ owner: 'session-b' })),
+      assertRequestOwnerCurrent: () => {},
+      onClose: secondOwnerClosed,
+    })
+
+    await expect(closeAllDesktopWindows()).resolves.toBeUndefined()
+
+    expect(firstOwnerClosed).toHaveBeenCalledOnce()
+    expect(secondOwnerClosed).toHaveBeenCalledOnce()
+    expect(fixture.browserWindowDestroyedCount).toBe(2)
+    expect(fixture.cookieRemove).toHaveBeenCalledTimes(2)
+    expect(fixture.cookieRemove.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          'https://rpc.example.test/api/v1/desktop/throwing-close-callback-host',
+          'clerum_desktop_session',
+        ],
+        [
+          'https://rpc.example.test/api/v1/desktop/healthy-close-callback-host',
+          'clerum_desktop_session',
+        ],
+      ])
     )
   })
 })

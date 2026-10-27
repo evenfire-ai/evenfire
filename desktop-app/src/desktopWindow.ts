@@ -1,4 +1,5 @@
 import { BrowserWindow, session } from 'electron'
+import { desktopRuntimeLog } from './desktopRuntimeLog.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
 
 export type OpenDesktopWindowArgs = {
@@ -185,7 +186,15 @@ async function openDesktopWindowOnce(args: OpenDesktopWindowArgs): Promise<void>
   const notifyWindowClosed = () => {
     if (closeNotified) return
     closeNotified = true
-    entry.onClose?.(hostRef)
+    try {
+      entry.onClose?.(hostRef)
+    } catch (error) {
+      // Renderer notification is best-effort and must not interrupt owner cleanup.
+      desktopRuntimeLog.warn(
+        '[Desktop] Could not notify the renderer that a host window closed:',
+        error
+      )
+    }
   }
 
   window.on('closed', () => {
@@ -256,8 +265,12 @@ export function closeDesktopWindow(hostRef: string): void {
 }
 
 export async function closeAllDesktopWindows(): Promise<void> {
-  const retirements = [...windows.values()].map(entry => entry.retire())
-  await Promise.all(retirements)
+  const retirements = [...windows.values()].map(async entry => entry.retire())
+  const results = await Promise.allSettled(retirements)
+  const failures = results.flatMap(result => (result.status === 'rejected' ? [result.reason] : []))
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Could not retire every desktop host window')
+  }
 }
 
 export function isDesktopWindowOpen(hostRef: string): boolean {
