@@ -246,7 +246,7 @@ describe('FilePreviewPage move permission contract', () => {
           )
         : refresh
     })
-    const { affordances, renameResource } = installGfs({
+    const { renameResource } = installGfs({
       resourceAffordances: () => produceAffordances(resourceId),
     })
     installController()
