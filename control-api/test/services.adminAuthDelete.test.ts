@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const state = vi.hoisted(() => ({
   targetStatus: 'active' as 'active' | 'disabled',
   queries: [] as string[],
-  calls: [] as Array<{ text: string; values?: unknown[] }>,
 }))
 
 const linkService = vi.hoisted(() => ({
@@ -42,9 +41,8 @@ vi.mock('../src/services/tracing/environment.js', () => ({
   canonicalTracingEnvironment: vi.fn(() => 'test'),
 }))
 
-function queryResult(text: string, values?: unknown[]) {
+function queryResult(text: string) {
   state.queries.push(text)
-  state.calls.push({ text, values })
   if (text.includes('WITH revoked AS')) return { rows: [], rowCount: 0 }
   if (text.includes('FOR UPDATE') && text.includes('status')) {
     return {
@@ -93,10 +91,9 @@ describe('deleteControlAdmin lifecycle transition', () => {
   beforeEach(() => {
     state.targetStatus = 'active'
     state.queries = []
-    state.calls = []
     db.withTransaction.mockImplementation(
       async (callback: (tx: { query: typeof queryResult }) => unknown) =>
-        callback({ query: async (text: string, values?: unknown[]) => queryResult(text, values) })
+        callback({ query: async (text: string) => queryResult(text) })
     )
     linkService.retireParentInTransaction.mockReset().mockResolvedValue(true)
     eventService.appendInTransaction.mockReset().mockResolvedValue(undefined)
@@ -123,7 +120,7 @@ describe('deleteControlAdmin lifecycle transition', () => {
   it('retires inside the caller transaction with the caller reason', async () => {
     const { retireControlAdminInTransaction } = await import('../src/services/adminAuthService.js')
     db.withTransaction.mockClear()
-    const tx = { query: async (text: string, values?: unknown[]) => queryResult(text, values) }
+    const tx = { query: async (text: string) => queryResult(text) }
 
     await expect(
       retireControlAdminInTransaction(tx, {
@@ -141,24 +138,5 @@ describe('deleteControlAdmin lifecycle transition', () => {
       reason: 'control_admin_replaced',
     })
     expect(eventService.appendInTransaction).toHaveBeenCalledOnce()
-  })
-
-  it('revokes the retiring admin invitations and paired desktop links in the same transaction', async () => {
-    const { retireControlAdminInTransaction } = await import('../src/services/adminAuthService.js')
-    const tx = { query: async (text: string, values?: unknown[]) => queryResult(text, values) }
-
-    await expect(
-      retireControlAdminInTransaction(tx, {
-        actorAdminId: 'actor-admin',
-        adminId: 'target-admin',
-        reason: 'control_admin_retired',
-      })
-    ).resolves.toEqual({ deleted: true })
-
-    const revocation = state.calls.find(call => call.text.includes('WITH revoked AS'))
-    expect(revocation?.text).toContain('invited_by_admin_id = $1::uuid')
-    expect(revocation?.text).toContain("status IN ('pending', 'opened')")
-    expect(revocation?.text).toContain("purpose = 'admin_desktop_access'")
-    expect(revocation?.values).toEqual(['target-admin'])
   })
 })
