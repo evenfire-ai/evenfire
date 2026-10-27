@@ -943,34 +943,49 @@ describe('AppService GFS upload security scope', () => {
           })
         })
       })
+      let legacySettled = false
       const settled = pending.then(
-        () => 'resolved',
-        error => String(error instanceof Error ? error.message : error)
+        () => {
+          legacySettled = true
+          return 'resolved'
+        },
+        error => {
+          legacySettled = true
+          return String(error instanceof Error ? error.message : error)
+        }
       )
       let logoutSettled = false
       const logout = service.logout().then(() => {
         logoutSettled = true
       })
       await vi.waitFor(() => expect(sawAbort).toBe(true))
-      expect(logoutSettled).toBe(false)
       const { SessionAuthorityRecordRepository: SessionAuthorityRecordRepositoryBeforeLogout } =
         await import('../sessionAuthorityRecord.js')
       const beforeLogoutScope = await service.tokenStore.createSessionAuthorityStorageScope()
-      const beforeLogoutCommit = new SessionAuthorityRecordRepositoryBeforeLogout(
+      const beforeLogoutRepository = new SessionAuthorityRecordRepositoryBeforeLogout(
         beforeLogoutScope,
         getActiveEnvKey(),
         service.tokenStore
-      ).observe()
-      expect(beforeLogoutCommit.status).toBe('observed')
-      if (beforeLogoutCommit.status !== 'observed')
-        throw new Error('Expected logout authority to remain observable while GFS drains')
-      expect(beforeLogoutCommit.record.frame.mode).toBe('logged-out')
+      )
+      await vi.waitFor(
+        () => {
+          const beforeLogoutCommit = beforeLogoutRepository.observe()
+          expect(beforeLogoutCommit.status).toBe('observed')
+          if (beforeLogoutCommit.status !== 'observed')
+            throw new Error('Expected logout authority to remain observable while GFS drains')
+          expect(beforeLogoutCommit.record.frame.mode).toBe('logged-out')
+        },
+        { timeout: 5_000 }
+      )
+      await vi.waitFor(() => expect(logoutSettled).toBe(true), { timeout: 5_000 })
+      expect(legacySettled).toBe(false)
       expect(service.sessionToken).toBeNull()
       expect(service.me).toBeNull()
       releaseAbort()
       await logout
 
       await expect(settled).resolves.toContain('authentication fence')
+      expect(legacySettled).toBe(true)
       expect(service.sessionToken).toBeNull()
       expect(readPendingExternalLogoutMarker(root, getActiveEnvKey())).toMatchObject({
         intent: { intent: 'logout-pending' },
