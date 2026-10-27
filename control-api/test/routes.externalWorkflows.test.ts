@@ -293,7 +293,7 @@ describe('routes/external/workflows', () => {
 
   describe('authenticated workflow admission ordering', () => {
     it.each([['POST', `/external/workflows/${RECIPE_NS}/test-recipe/trigger`, 10]] as const)(
-      'limits %s %s before final authority or protected work',
+      'limits %s %s before any session work, as dev does',
       async (method, path, limit) => {
         mockRateLimitCheck.mockResolvedValue({
           allowed: false,
@@ -313,10 +313,28 @@ describe('routes/external/workflows', () => {
         expect(response.body).toMatchObject(
           method === 'POST' ? { error: 'Too Many Requests' } : { error: { code: 'rate_limited' } }
         )
-        expect(mockAuthenticateExternalUserSession).toHaveBeenCalledTimes(1)
+        expect(mockRateLimitCheck).toHaveBeenCalledOnce()
+        expect(mockAuthenticateExternalUserSession).not.toHaveBeenCalled()
         expect(mockPoolQuery).not.toHaveBeenCalled()
       }
     )
+
+    it('charges the trigger bucket even when the session is then rejected', async () => {
+      const response = await request(makeApp(gateway))
+        .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
+        .set('x-user-session-token', 'rejected-session-token')
+        .send({})
+
+      expect(response.status).toBe(401)
+      // Witness: the session was evaluated and rejected after the limiter ran.
+      expect(mockAuthenticateExternalUserSession).toHaveBeenCalledWith(
+        'rejected-session-token',
+        expect.anything()
+      )
+      expect(mockRateLimitCheck).toHaveBeenCalledOnce()
+      expect(String(mockRateLimitCheck.mock.calls[0][0])).toMatch(/^workflow_trigger:/)
+      expect(mockPoolQuery).not.toHaveBeenCalled()
+    })
 
     it.each([
       ['/external/workflows', 200],

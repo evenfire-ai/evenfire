@@ -233,8 +233,8 @@ export async function fetchHostConnectionFromControlApi(
 }
 
 /**
- * Resolves a Host connection after Control API has enforced the durable,
- * cross-replica artifact-read budget for this verified user and canonical Host.
+ * Resolves a Host connection through Control API's dedicated artifact-read
+ * operation, which authenticates the RPC token and live-authorizes the Host.
  */
 export async function fetchArtifactReadHostConnectionFromControlApi(
   userId: string,

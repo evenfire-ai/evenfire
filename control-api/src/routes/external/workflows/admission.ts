@@ -15,11 +15,13 @@ export const externalWorkflowReadAdmission = Object.freeze([
   bindCompletedExternalWorkflowCaller,
 ])
 
+// The trigger limiter runs before any live session work, as in dev: it keys on
+// the signature-verified user (or the source IP), so rejected sessions still pay.
 export const externalWorkflowTriggerAdmission = Object.freeze([
   attachAccessExecutionBudget,
+  workflowTriggerRateLimit(),
   requireExternalSessionLimiterIdentityWithPublicErrors,
   requireAuthenticatedExternalUserRateLimitContext,
-  workflowTriggerRateLimit(),
   requireCompletedExternalSessionAuthenticationWithPublicErrors,
   bindCompletedExternalWorkflowCaller,
 ])

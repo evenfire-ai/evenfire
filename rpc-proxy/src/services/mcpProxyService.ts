@@ -110,7 +110,7 @@ export async function resolveHostConnectionForUser(
   }
 }
 
-/** Resolve the Host only after the Control API's shared artifact-read budget. */
+/** Resolve the Host through the Control API's dedicated artifact-read operation. */
 export async function resolveArtifactReadHostConnectionForUser(
   userId: string,
   hostRef: string,
