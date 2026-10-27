@@ -91,6 +91,10 @@ const RPC_TOKEN = 'rpc-token'
 function makeService(): AppService {
   const svc = new AppService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
+  ;(svc as unknown as { me: { id: string; teamId: string } }).me = {
+    id: 'mcp-connector-test-user',
+    teamId: 'team-1',
+  }
   // Pin the token lane: these tests are about the dialog + DELETE, not minting.
   ;(
     svc as unknown as {

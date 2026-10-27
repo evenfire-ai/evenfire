@@ -344,6 +344,7 @@ describe('AppService quit preparation', () => {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
       sessionToken: string | null
+      me: { id: string; teamId: string }
       requireSessionToken: () => string
       runWithTeamContext: <T>(
         teamId: string | null | undefined,
@@ -352,6 +353,7 @@ describe('AppService quit preparation', () => {
     }
     service.quitPreparationStarted = true
     service.sessionToken = 'session-token'
+    service.me = { id: 'quit-preparation-test-user', teamId: 'team-1' }
     service.requireSessionToken = vi.fn(() => 'session-token')
     const read = vi.fn(async (token: string) => token)
 

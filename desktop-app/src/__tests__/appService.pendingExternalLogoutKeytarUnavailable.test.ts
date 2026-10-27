@@ -675,13 +675,17 @@ describe('AppService logout when Keytar is unavailable', () => {
     }
     const token = validSessionToken()
     await internals.installAuthenticatedLogin({ token, me: user })
+    const requestContext = (service as any).sessionAuthority.captureSessionRequestContext(token)
     internals.memoryOnlySession!.expiresAt = Date.now() - 1
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     const { requestJson } = await import('../httpClient.js')
 
+    const { runWithSessionRequestContext } = await import('../httpClient.js')
     await expect(
-      requestJson('GET', 'https://api.example.test/protected', { token })
+      runWithSessionRequestContext(requestContext, () =>
+        requestJson('GET', 'https://api.example.test/protected', { token })
+      )
     ).rejects.toThrow('Temporary session expired')
 
     expect(fetchMock).not.toHaveBeenCalled()

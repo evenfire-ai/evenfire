@@ -137,10 +137,15 @@ describe('AppService stale session invalidation', () => {
     const service = createService()
     vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
     await service.passwordLogin(firstMe.email, 'first-password')
-    const { requestJson } = await import('../httpClient.js')
-    const oldRequest = requestJson('GET', 'http://rest.rpc-lease.test/api/v1/probe', {
-      token: firstToken,
-    }).then(
+    const { requestJson, runWithSessionRequestContext } = await import('../httpClient.js')
+    const firstRequestContext = (service as any).sessionAuthority.captureSessionRequestContext(
+      firstToken
+    )
+    const oldRequest = runWithSessionRequestContext(firstRequestContext, () =>
+      requestJson('GET', 'http://rest.rpc-lease.test/api/v1/probe', {
+        token: firstToken,
+      })
+    ).then(
       value => ({ value }),
       error => ({ error })
     )
@@ -181,10 +186,15 @@ describe('AppService stale session invalidation', () => {
     const service = createService()
     vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
     await service.passwordLogin(firstMe.email, 'first-password')
-    const { requestJson } = await import('../httpClient.js')
-    const oldRequest = requestJson('GET', 'http://rest.rpc-lease.test/api/v1/probe', {
-      token: accessToken,
-    }).then(
+    const { requestJson, runWithSessionRequestContext } = await import('../httpClient.js')
+    const firstRequestContext = (service as any).sessionAuthority.captureSessionRequestContext(
+      accessToken
+    )
+    const oldRequest = runWithSessionRequestContext(firstRequestContext, () =>
+      requestJson('GET', 'http://rest.rpc-lease.test/api/v1/probe', {
+        token: accessToken,
+      })
+    ).then(
       value => ({ value }),
       error => ({ error })
     )

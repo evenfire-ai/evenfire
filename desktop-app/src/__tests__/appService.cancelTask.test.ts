@@ -127,8 +127,11 @@ describe('AppService.cancelTask', () => {
 
   it('throws if not authenticated', async () => {
     const svc = new AppService()
-    // No session token set
-    await expect(svc.cancelTask('myhost', 'abc')).rejects.toThrow('Not authenticated')
+    await expect(svc.cancelTask('myhost', 'abc')).rejects.toThrow(
+      'The credential is not owned by the current authenticated session'
+    )
+    expect(mockGetOrIssue).not.toHaveBeenCalled()
+    expect(mockCancelTask).not.toHaveBeenCalled()
   })
 
   it('throws if hostRef is empty', async () => {

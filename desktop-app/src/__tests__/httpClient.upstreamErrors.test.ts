@@ -115,7 +115,7 @@ describe('authenticated session invalidation', () => {
       requestJson('GET', 'http://rest/protected', { token: 'fixture-session-token' })
     ).rejects.toBe(dispatchError)
 
-    expect(guard).toHaveBeenCalledExactlyOnceWith('fixture-session-token')
+    expect(guard).toHaveBeenCalledExactlyOnceWith('fixture-session-token', undefined)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
