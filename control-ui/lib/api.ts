@@ -133,6 +133,7 @@ export type Metadata = {
    * optimistic-concurrency precondition (docs/architecture/stateless-invariants.md).
    */
   resourceVersion?: string
+  generation?: number
   /** K8s-standard creation timestamp (RFC3339). Not in the type for older
    *  endpoints but carried by the new admin payloads. */
   creationTimestamp?: string
@@ -669,13 +670,18 @@ export type GfsOperatorSubjectInput = { type: 'operator' }
 export type GfsContextSubjectInput = { type: 'context'; id: string }
 
 export type GfsBulkGrantSubjectInput =
-  GfsUserSubjectInput | GfsTeamSubjectInput | GfsHostSubjectInput
+  | GfsUserSubjectInput
+  | GfsTeamSubjectInput
+  | GfsHostSubjectInput
 export type GfsBulkShareSubjectInput = GfsUserSubjectInput | GfsTeamSubjectInput
 export type GfsSubjectInput =
-  GfsBulkGrantSubjectInput | GfsOperatorSubjectInput | GfsContextSubjectInput
+  | GfsBulkGrantSubjectInput
+  | GfsOperatorSubjectInput
+  | GfsContextSubjectInput
 
 type GfsSubjectMutationInput<TBulkSubject extends GfsSubjectInput> =
-  { subject: GfsSubjectInput; subjects?: never } | { subject?: never; subjects: TBulkSubject[] }
+  | { subject: GfsSubjectInput; subjects?: never }
+  | { subject?: never; subjects: TBulkSubject[] }
 
 type GfsMutationRequestBody = {
   drive?: string
@@ -1278,6 +1284,7 @@ export type HostResource = {
  * Fase 3 requisito 6).
  */
 export type McpServerCondition = {
+  observedGeneration?: number
   type: string
   status: 'True' | 'False' | 'Unknown'
   reason: string
@@ -1827,7 +1834,11 @@ export async function createMcpServer(payload: {
 
 /** Cleanup stages control-api reports as `pending` when an mcp-server uninstall stops. */
 export type McpServerUninstallStage =
-  'contexts' | 'dynamic_client' | 'oauth_grants' | 'secrets' | 'mcp_server'
+  | 'contexts'
+  | 'dynamic_client'
+  | 'oauth_grants'
+  | 'secrets'
+  | 'mcp_server'
 
 const MCP_SERVER_UNINSTALL_STAGE_LABELS: Record<McpServerUninstallStage, string> = {
   contexts: 'agent access',
@@ -1915,7 +1926,10 @@ export async function getMcpServer(name: string) {
   ) as Promise<McpServerResource>
 }
 
-export async function updateMcpServer(name: string, payload: { spec: Record<string, unknown> }) {
+export async function updateMcpServer(
+  name: string,
+  payload: { spec: Record<string, unknown>; metadata?: { uid?: string; resourceVersion?: string } }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`,
@@ -1997,7 +2011,9 @@ export async function updateMcpSecret(name: string, data: Record<string, string>
 }
 
 export type RecipeSecretOwnership =
-  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' }
+  | { kind: 'shared' }
+  | { kind: 'owner-recipe'; recipeName: string }
+  | { kind: 'unlabeled' }
 
 export type RecipeSecretItem = {
   name: string
@@ -3004,7 +3020,13 @@ export type WorkflowRecipePhase =
   | 'rollback-failed'
 
 export type WorkflowExecutionPhase =
-  'pending' | 'initializing' | 'running' | 'completed' | 'failed' | 'cancelled' | 'recovering'
+  | 'pending'
+  | 'initializing'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'recovering'
 
 export type WorkflowRecipeStatus = {
   phase?: WorkflowRecipePhase
@@ -3822,7 +3844,10 @@ export async function installRecipeFromRegistry(
 // capability ceiling, and the may_deny ⇒ fail-closed rule; error bodies arrive as
 // { error, reason? } (surfaced via the thrown Error's `.body`/`.code`).
 export type HookCapability =
-  'may_deny' | 'may_rewrite' | 'may_substitute_result' | 'may_add_context'
+  | 'may_deny'
+  | 'may_rewrite'
+  | 'may_substitute_result'
+  | 'may_add_context'
 
 export type InstallHookFromRegistryRequest = {
   hostRef: string
@@ -4021,7 +4046,8 @@ export async function listOrgGrants(pluginName?: string): Promise<{ grants: OrgG
 
 export async function createOrgGrant(input: CreateOrgGrantInput): Promise<OrgGrant> {
   const raw = (await registryCodedRequest('POST', '/api/v1/admin/registry/grants', input)) as
-    RawOrgGrant | undefined
+    | RawOrgGrant
+    | undefined
   return normalizeOrgGrant(raw ?? {})
 }
 
@@ -4339,7 +4365,12 @@ export type PluginWorkloadSdkQuotaCounter = {
 }
 
 export type PluginWorkloadSdkInvocationStatus =
-  'in_progress' | 'complete' | 'failed' | 'provider_unavailable' | 'accepted' | 'delivered'
+  | 'in_progress'
+  | 'complete'
+  | 'failed'
+  | 'provider_unavailable'
+  | 'accepted'
+  | 'delivered'
 
 export type PluginWorkloadSdkInvocation = {
   id: string
@@ -4560,7 +4591,12 @@ export async function listOrgImages(): Promise<{ org: string; images: OrgImage[]
 // registry_signing_material_unavailable.
 
 export type RegistryConnectionState =
-  'disconnected' | 'pending' | 'connecting' | 'approved' | 'rejected' | 'connected'
+  | 'disconnected'
+  | 'pending'
+  | 'connecting'
+  | 'approved'
+  | 'rejected'
+  | 'connected'
 
 export type RegistryRecoveryError =
   | 'already_claimed'
