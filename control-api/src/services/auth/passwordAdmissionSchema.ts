@@ -28,6 +28,31 @@ const PASSWORD_ADMISSION_ROLLOUT_GUARDS_SQL = `
       IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
       RETURN NEW;
     END IF;
+    -- A governed physical user retirement performs this exact FK action after
+    -- it records its durable pending operation. Allow only that nested detach;
+    -- direct or unrelated runtime edits remain fenced, and retained history is
+    -- otherwise byte-for-byte unchanged.
+    IF rollout_phase = 'v2'
+       AND TG_OP = 'UPDATE'
+       AND pg_trigger_depth() > 1
+       AND OLD.user_id IS NOT NULL
+       AND NEW.user_id IS NULL
+       AND (to_jsonb(NEW) - 'user_id') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'user_id')
+       AND NOT EXISTS (
+         SELECT 1 FROM public.users WHERE id = OLD.user_id
+       )
+       AND EXISTS (
+         SELECT 1
+           FROM public.desktop_user_retirement_operations AS retirement
+          WHERE retirement.operation = 'retire_desktop_user'
+            AND retirement.target_user_id = OLD.user_id
+            AND retirement.status = 'pending'
+            AND retirement.outcome IS NULL
+            AND retirement.completed_at IS NULL
+            AND retirement.xmin = pg_current_xact_id()::xid
+       ) THEN
+      RETURN NEW;
+    END IF;
     IF rollout_phase = 'v2'
        AND current_setting('app.password_admission_protocol', true) = 'v2' THEN
       IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;

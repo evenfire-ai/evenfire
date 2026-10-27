@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import bcrypt from 'bcryptjs'
-import { createPublicKey, randomBytes } from 'node:crypto'
+import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import { passwordAdmissionDenialsTotal } from '../src/observability/metrics.js'
@@ -12,10 +12,12 @@ import { PASSWORD_DUMMY_HASH } from '../src/services/auth/passwordCredentialVeri
 import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
 import { verifyUserPassword } from '../src/services/directory/login.js'
 import {
+  deleteManagedUserForUser,
   setInvitationPasswordForEmail,
   updateUserPassword,
 } from '../src/services/directory/membership.js'
 import { createPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
+import { adminDeleteUser, retireDesktopUser } from '../src/services/directory/users.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import {
   type ExternalRestHttpProcess,
@@ -87,6 +89,8 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
   const database = `bug192_${randomBytes(6).toString('hex')}`
   let admin: Pool
   let app: express.Express
+  let runtimePool: Pool
+  let runtimeLeaseClient: import('pg').PoolClient
   let realHash: string
   let userId: string
   let compare: ReturnType<typeof vi.spyOn>
@@ -108,6 +112,29 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       .post('/external/auth/password-login')
       .set('x-external-client-ip', ip)
       .send({ email, password: submitted })
+  }
+  async function withRuntime<T>(work: () => Promise<T>): Promise<T> {
+    const previousPool = holder.pool
+    const previousLeaseClient = holder.leaseClient
+    holder.pool = runtimePool
+    holder.leaseClient = runtimeLeaseClient
+    try {
+      return await work()
+    } finally {
+      holder.pool = previousPool
+      holder.leaseClient = previousLeaseClient
+    }
+  }
+  async function stateFor(email: string) {
+    const key = passwordIdentifierKey(email)
+    return (
+      await holder.pool.query(
+        `SELECT user_id::text, to_jsonb(state) - 'user_id' AS retained
+           FROM password_identifier_state AS state
+          WHERE identifier_key = $1`,
+        [key]
+      )
+    ).rows[0]
   }
   async function denialCount(reason: string) {
     const metric = await passwordAdmissionDenialsTotal.get()
@@ -189,6 +216,13 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     holder.pool = new Pool({ connectionString: url.toString() })
     await initDb(holder.pool)
     holder.leaseClient = await holder.pool.connect()
+    runtimePool = new Pool({
+      connectionString: url.toString(),
+      options: '-c role=control_api_runtime',
+    })
+    const runtimeIdentity = await runtimePool.query('SELECT current_user')
+    expect(runtimeIdentity.rows[0].current_user).toBe('control_api_runtime')
+    runtimeLeaseClient = await runtimePool.connect()
     realHash = await bcrypt.hash(password, 12)
     app = express()
     app.use(express.json())
@@ -226,7 +260,9 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
   afterAll(async () => {
     try {
       vi.restoreAllMocks()
+      runtimeLeaseClient?.release()
       holder.leaseClient?.release()
+      await endPoolAndWaitForClients(runtimePool)
       await endPoolAndWaitForClients(holder.pool)
       if (admin) await admin.query(`DROP DATABASE IF EXISTS "${database}"`)
     } finally {
@@ -861,6 +897,230 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       role: 'member',
       teamId: null,
     })
+  })
+  it.each(['admin', 'managed-user'] as const)(
+    'preserves password admission history when %s retirement deletes the bound user',
+    async producer => {
+      const email = `${producer}-${randomBytes(6).toString('hex')}@example.invalid`
+      const targetId = (
+        await holder.pool.query(
+          'INSERT INTO users(email, password_hash) VALUES ($1, $2) RETURNING id::text AS id',
+          [email, realHash]
+        )
+      ).rows[0].id as string
+      let managerId: string | undefined
+      let teamId: string | undefined
+      if (producer === 'managed-user') {
+        managerId = (
+          await holder.pool.query(
+            'INSERT INTO users(email, password_hash) VALUES ($1, $2) RETURNING id::text AS id',
+            [`manager-${randomBytes(6).toString('hex')}@example.invalid`, realHash]
+          )
+        ).rows[0].id as string
+        teamId = (
+          await holder.pool.query(
+            "INSERT INTO teams(name) VALUES ('Retirement fixture') RETURNING id"
+          )
+        ).rows[0].id as string
+        await holder.pool.query(
+          `INSERT INTO team_members(team_id, user_id, role, status)
+           VALUES ($1, $2, 'admin', 'active'), ($1, $3, 'member', 'active')`,
+          [teamId, managerId, targetId]
+        )
+      }
+
+      await openPace()
+      const authenticated = await withRuntime(() => login(email, password, '192.0.2.4'))
+      expect(authenticated.status).toBe(200)
+      expect(authenticated.body).toMatchObject({ me: { id: targetId } })
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await openPace()
+        const failed = await withRuntime(() =>
+          login(
+            ' ' + email.toUpperCase() + ' ',
+            'Synthetic-wrong-password',
+            `192.0.2.${50 + attempt}`
+          )
+        )
+        expect(failed.status).toBe(401)
+      }
+      const before = await stateFor(email)
+      expect(before.user_id).toBe(targetId)
+      expect(before.retained.failures).toHaveLength(5)
+      expect(before.retained.successes).toHaveLength(1)
+      expect(Number(before.retained.locked_until_ms)).toBeGreaterThan(Date.now())
+
+      const legacyDelete = await withRuntime(async () => {
+        try {
+          return await adminDeleteUser(targetId)
+        } catch (error) {
+          return { errorCode: String((error as { code?: unknown }).code ?? 'unknown') }
+        }
+      })
+      expect(legacyDelete).toEqual({ errorCode: '55000' })
+      expect(
+        (await holder.pool.query('SELECT id FROM users WHERE id = $1', [targetId])).rowCount
+      ).toBe(1)
+      expect(await stateFor(email)).toEqual(before)
+
+      await withRuntime(() =>
+        holder.pool.query(
+          `INSERT INTO desktop_user_retirement_operations(
+             operation, actor_type, actor_control_admin_id, actor_desktop_user_id,
+             target_user_id, idempotency_key_hash, request_fingerprint, reason
+           ) VALUES (
+             'retire_desktop_user', 'control_admin', $1::uuid, NULL, $2::uuid,
+             repeat('a', 64), repeat('b', 64), 'stale ungoverned retirement'
+           )`,
+          [randomUUID(), targetId]
+        )
+      )
+      const staleOperationDelete = await withRuntime(async () => {
+        try {
+          await adminDeleteUser(targetId)
+          return { outcome: 'deleted' }
+        } catch (error) {
+          return { errorCode: String((error as { code?: unknown }).code ?? 'unknown') }
+        }
+      })
+      expect(staleOperationDelete).toEqual({ errorCode: '55000' })
+      expect(
+        (await holder.pool.query('SELECT id FROM users WHERE id = $1', [targetId])).rowCount
+      ).toBe(1)
+      expect(await stateFor(email)).toEqual(before)
+
+      let retirementResult: { outcome: string } | { errorCode: string }
+      if (producer === 'admin') {
+        retirementResult = await withRuntime(async () => {
+          try {
+            const retired = await retireDesktopUser(
+              { kind: 'control_admin', controlAdminId: randomUUID() },
+              targetId,
+              'Synthetic admission-state retirement',
+              `retirement-${randomBytes(12).toString('hex')}`,
+              null
+            )
+            return { outcome: retired.outcome }
+          } catch (error) {
+            return { errorCode: String((error as { code?: unknown }).code ?? 'unknown') }
+          }
+        })
+      } else {
+        retirementResult = await withRuntime(async () => {
+          try {
+            const retired = await deleteManagedUserForUser(managerId!, targetId, {
+              reason: 'Synthetic admission-state retirement',
+              idempotencyKey: `retirement-${randomBytes(12).toString('hex')}`,
+              requestId: null,
+            })
+            if ('error' in retired) return { errorCode: retired.error }
+            return { outcome: retired.outcome.outcome }
+          } catch (error) {
+            return { errorCode: String((error as { code?: unknown }).code ?? 'unknown') }
+          }
+        })
+      }
+      expect(retirementResult).toEqual({ outcome: 'deleted' })
+
+      expect(
+        (await holder.pool.query('SELECT id FROM users WHERE id = $1', [targetId])).rowCount
+      ).toBe(0)
+      const after = await stateFor(email)
+      expect(after.user_id).toBeNull()
+      expect(after.retained).toEqual(before.retained)
+
+      const survivingUser = (
+        await holder.pool.query(
+          'INSERT INTO users(email, password_hash) VALUES ($1, $2) RETURNING id::text AS id',
+          [`survivor-${randomBytes(6).toString('hex')}@example.invalid`, realHash]
+        )
+      ).rows[0].id as string
+      await expect(
+        withRuntime(() =>
+          holder.pool.query(
+            `UPDATE password_identifier_state SET user_id = $2::uuid
+              WHERE identifier_key = $1`,
+            [passwordIdentifierKey(email), survivingUser]
+          )
+        )
+      ).rejects.toMatchObject({ code: '55000' })
+      const stillProtected = await stateFor(email)
+      expect(stillProtected.user_id).toBeNull()
+      expect(stillProtected.retained).toEqual(before.retained)
+    }
+  )
+  it('preserves running admission state while an authenticated verification is retired', async () => {
+    const email = 'member@example.invalid'
+    let markEntered!: () => void
+    let releaseComparison!: () => void
+    const entered = new Promise<void>(resolve => {
+      markEntered = resolve
+    })
+    const comparisonMayFinish = new Promise<void>(resolve => {
+      releaseComparison = resolve
+    })
+    await openPace()
+    expect((await withRuntime(() => login(email, password, '192.0.2.200'))).status).toBe(200)
+    await openPace()
+    compare.mockImplementationOnce(async (submitted, storedHash) => {
+      markEntered()
+      await comparisonMayFinish
+      return realBcryptCompare(submitted, storedHash)
+    })
+    const verification = withRuntime(() => login(email, password, '192.0.2.201'))
+    try {
+      await entered
+      const before = await stateFor(email)
+      expect(before.user_id).toBe(userId)
+      expect(before.retained.provisional_phase).toBe('running')
+      expect(before.retained.provisional_operation).toEqual(expect.any(String))
+      const ownerBefore = (
+        await holder.pool.query(
+          'SELECT to_jsonb(owner) AS owner FROM password_verification_work AS owner'
+        )
+      ).rows[0]?.owner
+      expect(ownerBefore).toEqual(expect.any(Object))
+
+      const retirementResult = await withRuntime(async () => {
+        try {
+          const retired = await retireDesktopUser(
+            { kind: 'control_admin', controlAdminId: randomUUID() },
+            userId,
+            'Synthetic in-flight admission retirement',
+            `retirement-${randomBytes(12).toString('hex')}`,
+            null
+          )
+          return { outcome: retired.outcome }
+        } catch (error) {
+          return { errorCode: String((error as { code?: unknown }).code ?? 'unknown') }
+        }
+      })
+      expect(retirementResult).toEqual({ outcome: 'deleted' })
+      const detached = await stateFor(email)
+      expect(detached.user_id).toBeNull()
+      expect(detached.retained).toEqual(before.retained)
+      const ownerDuring = (
+        await holder.pool.query(
+          'SELECT to_jsonb(owner) AS owner FROM password_verification_work AS owner'
+        )
+      ).rows[0]?.owner
+      expect(ownerDuring).toEqual(ownerBefore)
+
+      releaseComparison()
+      const response = await verification
+      expect(response.status).toBe(401)
+      expect(compare).toHaveBeenCalledTimes(2)
+      const terminal = await stateFor(email)
+      expect(terminal.user_id).toBeNull()
+      expect(terminal.retained.provisional_phase).toBeNull()
+      expect(
+        (await holder.pool.query('SELECT count(*)::int AS count FROM password_verification_work'))
+          .rows[0].count
+      ).toBe(0)
+    } finally {
+      releaseComparison()
+      await verification.catch(() => undefined)
+    }
   })
   it('fails closed before bcrypt when credential persistence is unavailable', async () => {
     // Real database producer: temporarily revoke table access by making its
