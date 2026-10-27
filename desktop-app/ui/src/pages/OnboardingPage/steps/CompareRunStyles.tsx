@@ -1,4 +1,4 @@
-import { Button } from '@components/Common'
+import { Button, Card, Flex, Typography } from 'antd'
 
 interface CompareRunStylesProps {
   onChooseHosted: () => void
@@ -49,47 +49,36 @@ const RUN_STYLES: RunStyleSummary[] = [
 export function CompareRunStyles({ onChooseHosted, onChooseSelfHosted }: CompareRunStylesProps) {
   return (
     <>
-      <h1>Which one is right for you?</h1>
-      <div className="onboarding-compare">
+      <Typography.Title level={1}>Which one is right for you?</Typography.Title>
+      <Flex vertical gap="middle">
         {RUN_STYLES.map(style => (
-          <section className="onboarding-compare__group" key={style.title}>
-            <h2 className="onboarding-compare__title">{style.title}</h2>
-            <p className="onboarding-compare__lead">{style.lead}</p>
-            <ul className="onboarding-compare__list">
-              {style.pros.map(point => (
-                <li className="onboarding-compare__item" key={point}>
-                  <span
-                    className="onboarding-compare__mark onboarding-compare__mark--pro"
-                    aria-hidden="true"
-                  >
-                    +
-                  </span>
-                  <span>{point}</span>
-                </li>
-              ))}
-              {style.cons.map(point => (
-                <li className="onboarding-compare__item" key={point}>
-                  <span
-                    className="onboarding-compare__mark onboarding-compare__mark--con"
-                    aria-hidden="true"
-                  >
-                    −
-                  </span>
-                  <span>{point}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
+          <Card key={style.title} size="small" title={style.title}>
+            <Flex vertical gap="small">
+              <Typography.Paragraph type="secondary">{style.lead}</Typography.Paragraph>
+              <ul>
+                {style.pros.map(point => (
+                  <li key={point}>
+                    <Typography.Text type="success">+ {point}</Typography.Text>
+                  </li>
+                ))}
+                {style.cons.map(point => (
+                  <li key={point}>
+                    <Typography.Text type="warning">− {point}</Typography.Text>
+                  </li>
+                ))}
+              </ul>
+            </Flex>
+          </Card>
         ))}
-      </div>
-      <div className="auth-flow-card__actions">
-        <Button block onClick={onChooseHosted}>
+      </Flex>
+      <Flex vertical gap="small">
+        <Button block htmlType="button" onClick={onChooseHosted} type="primary">
           Evenfire hosts it
         </Button>
-        <Button block variant="soft" onClick={onChooseSelfHosted}>
+        <Button block htmlType="button" onClick={onChooseSelfHosted}>
           I’ll run it myself
         </Button>
-      </div>
+      </Flex>
     </>
   )
 }

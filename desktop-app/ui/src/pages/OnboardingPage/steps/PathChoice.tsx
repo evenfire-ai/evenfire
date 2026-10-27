@@ -1,4 +1,4 @@
-import { SelectableOption } from '@components/Common'
+import { Button, Flex, Typography } from 'antd'
 import type { OnboardingOriginAnswer, OnboardingRunStyleAnswer } from '../types'
 
 interface PathChoiceProps {
@@ -17,77 +17,69 @@ export function PathChoice({ step, onAnswerOrigin, onAnswerRunStyle }: PathChoic
   if (step === 'runStyle') {
     return (
       <>
-        <h1>How do you want to run Evenfire?</h1>
-        <div className="onboarding-options">
-          <SelectableOption
-            className="onboarding-option"
-            size="lg"
-            onClick={() => onAnswerRunStyle('hosted')}
-          >
-            <span className="onboarding-option__title">Evenfire hosts it for me</span>
-            <span className="onboarding-option__hint">
-              We run and operate it for you. Nothing to deploy.
-            </span>
-          </SelectableOption>
-          <SelectableOption
-            className="onboarding-option"
-            size="lg"
-            onClick={() => onAnswerRunStyle('selfHosted')}
-          >
-            <span className="onboarding-option__title">I’ll run it myself</span>
-            <span className="onboarding-option__hint">
-              Deploy Evenfire to a cluster you control.
-            </span>
-          </SelectableOption>
-          <SelectableOption
-            className="onboarding-option"
-            size="lg"
-            onClick={() => onAnswerRunStyle('compare')}
-          >
-            <span className="onboarding-option__title">I have no idea</span>
-            <span className="onboarding-option__hint">
-              Tell me more about the other two options.
-            </span>
-          </SelectableOption>
-        </div>
+        <Typography.Title level={1}>How do you want to run Evenfire?</Typography.Title>
+        <Flex vertical gap="small">
+          <Button block htmlType="button" onClick={() => onAnswerRunStyle('hosted')}>
+            <Flex vertical align="start" gap="small">
+              <Typography.Text strong>Evenfire hosts it for me</Typography.Text>
+              <Typography.Text type="secondary">
+                We run and operate it for you. Nothing to deploy.
+              </Typography.Text>
+            </Flex>
+          </Button>
+          <Button block htmlType="button" onClick={() => onAnswerRunStyle('selfHosted')}>
+            <Flex vertical align="start" gap="small">
+              <Typography.Text strong>I’ll run it myself</Typography.Text>
+              <Typography.Text type="secondary">
+                Deploy Evenfire to a cluster you control.
+              </Typography.Text>
+            </Flex>
+          </Button>
+          <Button block htmlType="button" onClick={() => onAnswerRunStyle('compare')}>
+            <Flex vertical align="start" gap="small">
+              <Typography.Text strong>I have no idea</Typography.Text>
+              <Typography.Text type="secondary">
+                Tell me more about the other two options.
+              </Typography.Text>
+            </Flex>
+          </Button>
+        </Flex>
       </>
     )
   }
 
   return (
     <>
-      <h1>Do you already have an Evenfire server?</h1>
-      <p className="muted">
+      <Typography.Title level={1}>Do you already have an Evenfire server?</Typography.Title>
+      <Typography.Paragraph type="secondary">
         The desktop app connects to an Evenfire server. Tell us which one and we’ll get you there.
-      </p>
-      <div className="onboarding-options">
-        <SelectableOption
-          className="onboarding-option"
-          size="lg"
-          onClick={() => onAnswerOrigin('invited')}
-        >
-          <span className="onboarding-option__title">My team already uses Evenfire</span>
-          <span className="onboarding-option__hint">
-            Finish setup with the email your team invited.
-          </span>
-        </SelectableOption>
-        <SelectableOption
-          className="onboarding-option"
-          size="lg"
-          onClick={() => onAnswerOrigin('haveAddress')}
-        >
-          <span className="onboarding-option__title">I have a server address</span>
-          <span className="onboarding-option__hint">Connect to a server you already know.</span>
-        </SelectableOption>
-        <SelectableOption
-          className="onboarding-option"
-          size="lg"
-          onClick={() => onAnswerOrigin('gettingStarted')}
-        >
-          <span className="onboarding-option__title">No, I’m just getting started</span>
-          <span className="onboarding-option__hint">See your options for running Evenfire.</span>
-        </SelectableOption>
-      </div>
+      </Typography.Paragraph>
+      <Flex vertical gap="small">
+        <Button block htmlType="button" onClick={() => onAnswerOrigin('invited')}>
+          <Flex vertical align="start" gap="small">
+            <Typography.Text strong>My team already uses Evenfire</Typography.Text>
+            <Typography.Text type="secondary">
+              Finish setup with the email your team invited.
+            </Typography.Text>
+          </Flex>
+        </Button>
+        <Button block htmlType="button" onClick={() => onAnswerOrigin('haveAddress')}>
+          <Flex vertical align="start" gap="small">
+            <Typography.Text strong>I have a server address</Typography.Text>
+            <Typography.Text type="secondary">
+              Connect to a server you already know.
+            </Typography.Text>
+          </Flex>
+        </Button>
+        <Button block htmlType="button" onClick={() => onAnswerOrigin('gettingStarted')}>
+          <Flex vertical align="start" gap="small">
+            <Typography.Text strong>No, I’m just getting started</Typography.Text>
+            <Typography.Text type="secondary">
+              See your options for running Evenfire.
+            </Typography.Text>
+          </Flex>
+        </Button>
+      </Flex>
     </>
   )
 }

@@ -48,6 +48,7 @@
     "make:linux:arm64": "electron-forge make --platform=linux --arch=arm64"
   },
   "dependencies": {
+    "@ant-design/icons": "6.3.4",
     "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
     "@clerum/gfs-interaction-policy": "file:../packages/gfs-interaction-policy",
     "@tanstack/react-query": "5.100.10",

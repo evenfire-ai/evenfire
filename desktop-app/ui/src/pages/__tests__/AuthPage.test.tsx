@@ -3,9 +3,11 @@ import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { ConfigProvider } from 'antd'
 import { LOCALHOST_RUNTIME_CONFIG_OPTION_ID } from '../../constants/runtimeConfig'
 import { AuthContext } from '../../contexts/AuthContext'
 import type { AuthContextValue } from '../../contexts/AuthContext'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { AuthPage } from '../AuthPage'
 
 afterEach(() => {
@@ -17,6 +19,7 @@ afterEach(() => {
 let probeLocalhostReachable = vi.fn()
 
 beforeEach(() => {
+  installAntdDomEnvironment()
   probeLocalhostReachable = vi.fn().mockResolvedValue(false)
   ;(window as unknown as { clerum: unknown }).clerum = { auth: { probeLocalhostReachable } }
 })
@@ -83,6 +86,16 @@ function renderAuthPage(auth?: Partial<AuthContextValue>) {
   return render(
     <AuthContext.Provider value={makeAuthValue(auth)}>
       <AuthPage />
+    </AuthContext.Provider>
+  )
+}
+
+function renderAuthPageWithoutMotion(auth?: Partial<AuthContextValue>) {
+  return render(
+    <AuthContext.Provider value={makeAuthValue(auth)}>
+      <ConfigProvider theme={{ token: { motion: false } }}>
+        <AuthPage />
+      </ConfigProvider>
     </AuthContext.Provider>
   )
 }
@@ -177,7 +190,7 @@ describe('AuthPage', () => {
     await user.click(screen.getByLabelText('Open environment selector'))
 
     const localhost = await screen.findByRole('button', { name: 'Localhost' })
-    expect(localhost.getAttribute('aria-current')).toBeNull()
+    expect(localhost.getAttribute('aria-pressed')).toBe('false')
 
     await user.click(localhost)
 
@@ -214,6 +227,79 @@ describe('AuthPage', () => {
     await user.click(screen.getByLabelText('Open environment selector'))
 
     expect(screen.getByRole('button', { name: 'Localhost' })).toBeTruthy()
+  })
+
+  it('preserves selection, keyboard dismissal, delete confirmation, and outside-click dismissal', async () => {
+    const user = userEvent.setup()
+    const handleDeleteRuntimeConfig = vi.fn().mockResolvedValue(undefined)
+    const option = {
+      id: 'production',
+      label: 'Production',
+      source: 'file' as const,
+      configPath: '/profile/production.json',
+      externalRestApiBaseUrl: 'https://evenfire.example.com',
+      rpcProxyBaseUrl: 'https://rpc.evenfire.example.com',
+      appName: 'Production',
+    }
+
+    renderAuthPageWithoutMotion({
+      runtimeConfigState: {
+        configured: true,
+        isLocalhost: false,
+        selectorVisible: true,
+        activeOptionId: option.id,
+        envKey: 'env-test-key',
+        storagePath: '/tmp/evenfire-runtime-config',
+        options: [option],
+      },
+      handleDeleteRuntimeConfig,
+    })
+
+    const toggle = screen.getByRole('button', { name: 'Open environment selector' })
+    await user.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Production' }).getAttribute('aria-pressed')).toBe(
+      'true'
+    )
+
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(toggle.getAttribute('aria-expanded')).toBe('false'))
+    expect(document.activeElement).toBe(toggle)
+
+    await user.click(toggle)
+    await user.click(screen.getByRole('button', { name: 'Delete Production environment' }))
+    const dialog = screen.getByRole('dialog', { name: 'Delete environment?' })
+    expect(dialog).toBeTruthy()
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBe(document.activeElement)
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+
+    await user.click(toggle)
+    await user.click(screen.getByRole('button', { name: 'Delete Production environment' }))
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(handleDeleteRuntimeConfig).toHaveBeenCalledTimes(1)
+    expect(handleDeleteRuntimeConfig).toHaveBeenCalledWith(option.id)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('closes the environment popup on outside click without stealing the new focus', async () => {
+    const user = userEvent.setup()
+    renderAuthPage()
+
+    const toggle = screen.getByRole('button', { name: 'Open environment selector' })
+    const email = screen.getByLabelText('Email')
+    await user.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+
+    await user.click(email)
+
+    await waitFor(() => expect(toggle.getAttribute('aria-expanded')).toBe('false'))
+    expect(document.activeElement).toBe(email)
   })
 
   it('offers a switch-and-retry action when a backend-mismatch hint is present', async () => {

@@ -6,6 +6,7 @@ import { LOCALHOST_RUNTIME_CONFIG_OPTION_ID } from '../../constants/runtimeConfi
 import { AuthContext } from '../../contexts/AuthContext'
 import type { AuthContextValue } from '../../contexts/AuthContext'
 import { useOnboardingController } from '../../hooks/domain/useOnboardingController'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { OnboardingPage } from '../OnboardingPage'
 
 afterEach(() => {
@@ -17,6 +18,7 @@ let openDeploymentDocs = vi.fn()
 let openHostedSignup = vi.fn()
 
 beforeEach(() => {
+  installAntdDomEnvironment()
   probeLocalhostReachable = vi.fn().mockResolvedValue(false)
   openDeploymentDocs = vi.fn().mockResolvedValue({ opened: true })
   openHostedSignup = vi.fn().mockResolvedValue({ opened: true })
@@ -168,12 +170,11 @@ describe('OnboardingPage', () => {
 
     // Both options are described, each with an upside and a downside — a
     // comparison that only lists benefits is an advert, not a comparison.
-    const compare = screen.getByText('Which one is right for you?').closest('section')
-    const copy = compare?.textContent || ''
+    const copy = screen.getByRole('main').textContent || ''
     expect(copy).toContain('Evenfire hosts it')
     expect(copy).toContain('You run it yourself')
-    expect(screen.getAllByText('+').length).toBeGreaterThanOrEqual(2)
-    expect(screen.getAllByText('−').length).toBe(2)
+    expect(copy.match(/\+ /g)?.length).toBeGreaterThanOrEqual(2)
+    expect(copy.match(/− /g)?.length).toBe(2)
   })
 
   it('makes no cost claims while hosted signup does not exist', async () => {
@@ -183,7 +184,7 @@ describe('OnboardingPage', () => {
     await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
     await user.click(screen.getByRole('button', { name: /I have no idea/ }))
 
-    const copy = screen.getByText('Which one is right for you?').closest('section')?.textContent
+    const copy = screen.getByRole('main').textContent
     expect(copy).not.toMatch(/free|trial|price|pricing|\$|per seat|subscription/i)
   })
 
@@ -231,8 +232,7 @@ describe('OnboardingPage', () => {
     await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
     await user.click(screen.getByRole('button', { name: /I’ll run it myself/ }))
 
-    const step = screen.getByText('Run Evenfire yourself').closest('section')
-    const copy = step?.textContent || ''
+    const copy = screen.getByRole('main').textContent || ''
     // Self-hosting means any cluster the user controls. No install
     // command, no RAM figure, no loopback default, no single deployment shape.
     expect(copy).not.toMatch(/minikube|docker|127\.0\.0\.1|localhost|GB|RAM|your machine/i)

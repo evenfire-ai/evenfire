@@ -1,6 +1,6 @@
 import type { FormEvent } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
-import { Button, Field, SelectableOption, TextInput } from '@components/Common'
+import { Button, Flex, Input, Typography } from 'antd'
 import {
   LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
   createLocalhostRuntimeConfigOption,
@@ -44,55 +44,53 @@ export function ManualEnvironment() {
 
   return (
     <>
-      <h1>Connect to a server</h1>
-      <p className="muted">
+      <Typography.Title level={1}>Connect to a server</Typography.Title>
+      <Typography.Paragraph type="secondary">
         Enter the address of your Evenfire server. You can add more environments later.
-      </p>
+      </Typography.Paragraph>
       {localhostReachable ? (
-        <div className="onboarding-options">
-          <SelectableOption
-            className="onboarding-option"
-            size="lg"
+        <Flex vertical gap="small">
+          <Button
+            block
+            htmlType="button"
             disabled={busy}
             onClick={() => void handleSelectRuntimeConfig(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)}
           >
-            <span className="onboarding-option__title">Localhost</span>
-            <span className="onboarding-option__hint">
-              {localhostOption.externalRestApiBaseUrl}
-            </span>
-          </SelectableOption>
-        </div>
+            <Flex vertical align="start" gap="small">
+              <Typography.Text strong>Localhost</Typography.Text>
+              <Typography.Text type="secondary">
+                {localhostOption.externalRestApiBaseUrl}
+              </Typography.Text>
+            </Flex>
+          </Button>
+        </Flex>
       ) : null}
-      <form className="auth-form-stack" onSubmit={handleSubmit}>
-        <Field
-          label="Environment name"
-          htmlFor="runtime-config-name-input"
-          wrapperClassName="auth-form-row"
-        >
-          <TextInput
-            id="runtime-config-name-input"
-            type="text"
-            placeholder="Production"
-            value={runtimeConfigSetupName}
-            onChange={event => setRuntimeConfigSetupName(event.target.value)}
-          />
-        </Field>
-        <Field
-          label="External REST API"
-          htmlFor="runtime-config-external-rest-api-input"
-          wrapperClassName="auth-form-row"
-        >
-          <TextInput
-            id="runtime-config-external-rest-api-input"
-            type="url"
-            placeholder="https://evenfire.example.com"
-            value={runtimeConfigSetupExternalRestApiBaseUrl}
-            onChange={event => setRuntimeConfigSetupExternalRestApiBaseUrl(event.target.value)}
-          />
-        </Field>
-        <Button block disabled={!hasRuntimeSetupValues || busy} type="submit">
-          Save environment
-        </Button>
+      <form onSubmit={handleSubmit}>
+        <Flex vertical gap="middle">
+          <Flex vertical gap="small">
+            <label htmlFor="runtime-config-name-input">Environment name</label>
+            <Input
+              id="runtime-config-name-input"
+              type="text"
+              placeholder="Production"
+              value={runtimeConfigSetupName}
+              onChange={event => setRuntimeConfigSetupName(event.target.value)}
+            />
+          </Flex>
+          <Flex vertical gap="small">
+            <label htmlFor="runtime-config-external-rest-api-input">External REST API</label>
+            <Input
+              id="runtime-config-external-rest-api-input"
+              type="url"
+              placeholder="https://evenfire.example.com"
+              value={runtimeConfigSetupExternalRestApiBaseUrl}
+              onChange={event => setRuntimeConfigSetupExternalRestApiBaseUrl(event.target.value)}
+            />
+          </Flex>
+          <Button block disabled={!hasRuntimeSetupValues || busy} htmlType="submit" type="primary">
+            Save environment
+          </Button>
+        </Flex>
       </form>
     </>
   )

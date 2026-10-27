@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { CheckOutlined, DeleteOutlined, PlusOutlined, SettingOutlined } from '@ant-design/icons'
 import { useAuthContext } from '@contexts/AuthContext'
-import { IconButton, MenuItem } from '@components/Common'
-import { ConfirmDialog } from '@components/ConfirmDialog'
+import { Button, Card, Dropdown, Flex, FloatButton, Modal, Typography } from 'antd'
 import {
   LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
   createLocalhostRuntimeConfigOption,
@@ -20,6 +20,9 @@ interface RuntimeConfigDockProps {
   onAddEnvironment: () => void
 }
 
+const runtimeDockPanelId = 'auth-runtime-dock-panel'
+const runtimeDockCancelDeleteButtonId = 'auth-runtime-dock-cancel-delete'
+
 export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) {
   const {
     busy,
@@ -34,7 +37,7 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
   const [pendingDeleteOption, setPendingDeleteOption] = useState<DesktopRuntimeConfigOption | null>(
     null
   )
-  const runtimeDockRef = useRef<HTMLDivElement | null>(null)
+  const runtimeDockTriggerRef = useRef<HTMLButtonElement | null>(null)
 
   const runtimeConfigOptions = runtimeConfigState?.options || []
   const activeRuntimeConfigId = runtimeConfigState?.activeOptionId ?? null
@@ -61,6 +64,7 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
 
   const handleRuntimeOptionSelect = (optionId: string) => {
     setRuntimeMenuOpen(false)
+    runtimeDockTriggerRef.current?.focus()
     if (
       optionId === activeRuntimeConfigId &&
       (selectedRuntimeConfig?.source === 'localhost' ||
@@ -79,171 +83,137 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
   }
 
   useEffect(() => {
-    if (!runtimeMenuOpen) {
-      return
-    }
-
-    const handleDocumentPointerDown = (event: PointerEvent) => {
-      if (runtimeDockRef.current?.contains(event.target as Node)) {
-        return
-      }
-
-      setRuntimeMenuOpen(false)
-    }
+    if (!runtimeMenuOpen) return
 
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setRuntimeMenuOpen(false)
-      }
+      if (event.key !== 'Escape') return
+      setRuntimeMenuOpen(false)
+      runtimeDockTriggerRef.current?.focus()
     }
 
-    document.addEventListener('pointerdown', handleDocumentPointerDown)
     document.addEventListener('keydown', handleEscape)
-
-    return () => {
-      document.removeEventListener('pointerdown', handleDocumentPointerDown)
-      document.removeEventListener('keydown', handleEscape)
-    }
+    return () => document.removeEventListener('keydown', handleEscape)
   }, [runtimeMenuOpen])
 
   if (!runtimeConfigState) return null
 
+  const renderRuntimeOption = (option: DesktopRuntimeConfigOption, deletable = false) => {
+    const selected = option.id === activeRuntimeConfigId
+    return (
+      <Flex key={option.id} align="center" gap="small">
+        <Button
+          aria-pressed={selected}
+          block
+          disabled={busy || authTransitioning}
+          htmlType="button"
+          onClick={() => handleRuntimeOptionSelect(option.id)}
+          type={selected ? 'primary' : 'default'}
+        >
+          <Flex align="center" gap="small">
+            {selected ? <CheckOutlined aria-hidden="true" /> : null}
+            <Typography.Text>{option.label}</Typography.Text>
+          </Flex>
+        </Button>
+        {deletable ? (
+          <Button
+            aria-label={`Delete ${option.appName} environment`}
+            danger
+            disabled={busy || authTransitioning}
+            htmlType="button"
+            icon={<DeleteOutlined aria-hidden="true" />}
+            onClick={() => setPendingDeleteOption(option)}
+            size="small"
+            title={`Delete ${option.appName}`}
+            type="text"
+          />
+        ) : null}
+      </Flex>
+    )
+  }
+
+  const popup = (
+    <Card
+      extra={
+        <Button
+          aria-label="Add environment"
+          disabled={busy || authTransitioning}
+          htmlType="button"
+          icon={<PlusOutlined aria-hidden="true" />}
+          onClick={() => {
+            setRuntimeMenuOpen(false)
+            onAddEnvironment()
+          }}
+          size="small"
+          title="Add environment"
+          type="text"
+        />
+      }
+      id={runtimeDockPanelId}
+      size="small"
+      title="Environment"
+    >
+      <Flex vertical gap="small">
+        {savedRuntimeConfigOptions.map(option => renderRuntimeOption(option, true))}
+        {displayedLocalhostRuntimeConfigOption
+          ? renderRuntimeOption(displayedLocalhostRuntimeConfigOption)
+          : null}
+      </Flex>
+    </Card>
+  )
+
   return (
     <>
-      <aside className="auth-runtime-dock" ref={runtimeDockRef}>
-        <IconButton
-          className="auth-runtime-dock__toggle"
-          aria-label="Open environment selector"
-          aria-expanded={runtimeMenuOpen}
-          aria-controls="auth-runtime-dock-panel"
-          label="Open environment selector"
-          onClick={() => setRuntimeMenuOpen(open => !open)}
-          variant="soft"
+      <aside>
+        <Dropdown
+          open={runtimeMenuOpen}
+          onOpenChange={open => setRuntimeMenuOpen(open)}
+          placement="topRight"
+          popupRender={() => popup}
+          trigger={['click']}
         >
-          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M19.43 12.98a7.9 7.9 0 0 0 .05-.98 7.9 7.9 0 0 0-.05-.98l2.11-1.65a.48.48 0 0 0 .12-.61l-2-3.46a.49.49 0 0 0-.58-.22l-2.49 1a7.2 7.2 0 0 0-1.7-.98l-.38-2.65A.49.49 0 0 0 14 2h-4a.49.49 0 0 0-.49.41l-.38 2.65a7.2 7.2 0 0 0-1.7.98l-2.49-1a.49.49 0 0 0-.58.22l-2 3.46a.48.48 0 0 0 .12.61l2.11 1.65a7.9 7.9 0 0 0-.05.98 7.9 7.9 0 0 0 .05.98l-2.11 1.65a.48.48 0 0 0-.12.61l2 3.46a.49.49 0 0 0 .58.22l2.49-1a7.2 7.2 0 0 0 1.7.98l.38 2.65A.49.49 0 0 0 10 22h4a.49.49 0 0 0 .49-.41l.38-2.65a7.2 7.2 0 0 0 1.7-.98l2.49 1a.49.49 0 0 0 .58-.22l2-3.46a.48.48 0 0 0-.12-.61Zm-7.43 2.52A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5Z" />
-          </svg>
-        </IconButton>
-        {runtimeMenuOpen ? (
-          <div className="auth-runtime-dock__panel glass-card" id="auth-runtime-dock-panel">
-            <div className="auth-runtime-menu__header">
-              <span className="auth-runtime-menu__label">Environment</span>
-              <IconButton
-                aria-label="Add environment"
-                disabled={busy || authTransitioning}
-                label="Add environment"
-                onClick={() => {
-                  setRuntimeMenuOpen(false)
-                  onAddEnvironment()
-                }}
-                size="sm"
-                variant="ghost"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M12 5v14" />
-                  <path d="M5 12h14" />
-                </svg>
-              </IconButton>
-            </div>
-            <div className="auth-runtime-menu">
-              {savedRuntimeConfigOptions.length > 0 ? (
-                <section className="auth-runtime-menu__section">
-                  {savedRuntimeConfigOptions.map(option => {
-                    const selected = option.id === activeRuntimeConfigId
-                    return (
-                      <div
-                        key={option.id}
-                        className={`auth-runtime-menu__row${selected ? ' selected' : ''}`}
-                      >
-                        <MenuItem
-                          className={`auth-runtime-menu__select${selected ? ' selected' : ''}`}
-                          active={selected}
-                          disabled={busy || authTransitioning}
-                          leadingIcon={
-                            <span className="auth-runtime-menu__check" aria-hidden="true">
-                              {selected ? (
-                                <svg viewBox="0 0 24 24" focusable="false">
-                                  <path d="M20 6 9 17l-5-5" />
-                                </svg>
-                              ) : null}
-                            </span>
-                          }
-                          onClick={() => handleRuntimeOptionSelect(option.id)}
-                        >
-                          {option.label}
-                        </MenuItem>
-                        <IconButton
-                          className="auth-runtime-menu__delete"
-                          aria-label={`Delete ${option.appName} environment`}
-                          color="danger"
-                          disabled={busy || authTransitioning}
-                          label={`Delete ${option.appName}`}
-                          onClick={() => setPendingDeleteOption(option)}
-                          size="sm"
-                          title={`Delete ${option.appName}`}
-                          variant="ghost"
-                        >
-                          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                            <path d="M3 6h18" />
-                            <path d="M8 6V4h8v2" />
-                            <path d="M6 6l1 15h10l1-15" />
-                            <path d="M10 10v7" />
-                            <path d="M14 10v7" />
-                          </svg>
-                        </IconButton>
-                      </div>
-                    )
-                  })}
-                </section>
-              ) : null}
-              {displayedLocalhostRuntimeConfigOption ? (
-                <section className="auth-runtime-menu__section">
-                  {(() => {
-                    const option = displayedLocalhostRuntimeConfigOption
-                    const selected = option.id === activeRuntimeConfigId
-                    return (
-                      <MenuItem
-                        className={`auth-runtime-menu__select auth-runtime-menu__select--standalone${
-                          selected ? ' selected' : ''
-                        }`}
-                        active={selected}
-                        disabled={busy || authTransitioning}
-                        leadingIcon={
-                          <span className="auth-runtime-menu__check" aria-hidden="true">
-                            {selected ? (
-                              <svg viewBox="0 0 24 24" focusable="false">
-                                <path d="M20 6 9 17l-5-5" />
-                              </svg>
-                            ) : null}
-                          </span>
-                        }
-                        onClick={() => handleRuntimeOptionSelect(option.id)}
-                      >
-                        Localhost
-                      </MenuItem>
-                    )
-                  })()}
-                </section>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
+          <FloatButton
+            {...{
+              'aria-controls': runtimeDockPanelId,
+              'aria-expanded': runtimeMenuOpen,
+              title: 'Open environment selector',
+            }}
+            aria-label="Open environment selector"
+            htmlType="button"
+            icon={<SettingOutlined aria-hidden="true" />}
+            ref={trigger => {
+              runtimeDockTriggerRef.current = trigger
+            }}
+            type="default"
+          />
+        </Dropdown>
       </aside>
-      {pendingDeleteOption ? (
-        <ConfirmDialog
-          title="Delete environment?"
-          body={
-            <p>
-              Delete <strong>{pendingDeleteOption.appName}</strong>? This only removes the local
-              desktop environment configuration.
-            </p>
-          }
-          confirmLabel="Delete"
-          tone="danger"
-          onCancel={() => setPendingDeleteOption(null)}
-          onConfirm={confirmDeleteRuntimeOption}
-        />
-      ) : null}
+      <Modal
+        centered
+        closable={false}
+        destroyOnHidden
+        open={Boolean(pendingDeleteOption)}
+        title="Delete environment?"
+        okText="Delete"
+        cancelText="Cancel"
+        okButtonProps={{ danger: true, htmlType: 'button' }}
+        cancelButtonProps={{ htmlType: 'button', id: runtimeDockCancelDeleteButtonId }}
+        focusable={{ focusTriggerAfterClose: true }}
+        keyboard
+        mask={{ closable: true }}
+        afterOpenChange={open => {
+          if (open) document.getElementById(runtimeDockCancelDeleteButtonId)?.focus()
+        }}
+        onCancel={() => setPendingDeleteOption(null)}
+        onOk={confirmDeleteRuntimeOption}
+        zIndex={2300}
+      >
+        {pendingDeleteOption ? (
+          <Typography.Paragraph>
+            Delete <Typography.Text strong>{pendingDeleteOption.appName}</Typography.Text>? This
+            only removes the local desktop environment configuration.
+          </Typography.Paragraph>
+        ) : null}
+      </Modal>
     </>
   )
 }

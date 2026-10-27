@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
-import { Button } from '@components/Common'
+import { Button, Flex, Typography } from 'antd'
 
 /** No-argument main-process calls that open a build-time URL in the browser. */
 type LinkOutChannel = 'openDeploymentDocs' | 'openHostedSignup'
@@ -59,16 +59,22 @@ export function LinkOutStep({
 
   return (
     <>
-      <h1>{title}</h1>
-      <p className="muted">{body}</p>
-      <div className="auth-flow-card__actions">
-        <Button block disabled={busy || opening} onClick={() => void handleOpen()}>
+      <Typography.Title level={1}>{title}</Typography.Title>
+      <Typography.Paragraph type="secondary">{body}</Typography.Paragraph>
+      <Flex vertical gap="small">
+        <Button
+          block
+          disabled={busy || opening}
+          htmlType="button"
+          onClick={() => void handleOpen()}
+          type="primary"
+        >
           {linkLabel}
         </Button>
-        <Button block disabled={busy} onClick={onContinue} variant="soft">
+        <Button block disabled={busy} htmlType="button" onClick={onContinue}>
           {continueLabel}
         </Button>
-      </div>
+      </Flex>
     </>
   )
 }

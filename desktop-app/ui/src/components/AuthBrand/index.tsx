@@ -1,3 +1,4 @@
+import { Flex } from 'antd'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 
 /**
@@ -17,7 +18,7 @@ export function AuthBrand() {
   const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
 
   return (
-    <div className="auth-brand" title={desktopVersionTooltip}>
+    <Flex align="center" justify="center" title={desktopVersionTooltip}>
       <img
         className="brand-lockup brand-lockup--light"
         src="./logotype-light.svg"
@@ -25,6 +26,6 @@ export function AuthBrand() {
         aria-hidden="true"
       />
       <img className="brand-lockup brand-lockup--dark" src="./logotype-dark.svg" alt="Evenfire" />
-    </div>
+    </Flex>
   )
 }
