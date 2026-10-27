@@ -23,10 +23,7 @@ import {
   findMemberByEmail,
   provisionMemberFromAdmin,
 } from '../../services/directory/adminProvisioning.js'
-import {
-  createSilentInvitationForTeams,
-  revokePendingInvitation,
-} from '../../services/directory/index.js'
+import { revokePendingInvitation } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
 import {
   GfsDesktopOperatorLinkError,
@@ -268,14 +265,6 @@ export function createAdminControlAdminsRouter(): Router {
         res.status(400).json({ error: 'replaceInviter must be a boolean' })
         return
       }
-      const invitation = await createControlAdminInvitation(email, invitedByAdminId, {
-        replaceInviter: replaceInviterInput === true,
-      })
-      if ('error' in invitation) {
-        res.status(409).json({ error: invitation.error })
-        return
-      }
-
       const createDesktopAccess = req.body?.createDesktopAccess === true
       const teamsInput: unknown[] =
         createDesktopAccess && Array.isArray(req.body?.teams) ? req.body.teams : []
@@ -289,19 +278,18 @@ export function createAdminControlAdminsRouter(): Router {
         .filter((item): item is { teamId: string; role: 'admin' | 'inviter' | 'member' } =>
           Boolean(item)
         )
-      let desktopInvitation: Awaited<ReturnType<typeof createSilentInvitationForTeams>> | null =
-        null
+      const created = await createControlAdminInvitation(email, invitedByAdminId, {
+        replaceInviter: replaceInviterInput === true,
+        ...(createDesktopAccess ? { desktopAccess: { teamAssignments } } : {}),
+      })
+      if ('error' in created) {
+        res.status(409).json({ error: created.error })
+        return
+      }
+      const invitation = 'invitation' in created ? created.invitation : created
+      const desktopInvitation = 'desktopInvitation' in created ? created.desktopInvitation : null
 
       try {
-        if (createDesktopAccess) {
-          desktopInvitation = await createSilentInvitationForTeams({
-            inviteeName: email,
-            email,
-            teamAssignments,
-            fallbackRole: 'member',
-            purpose: 'admin_desktop_access',
-          })
-        }
         await registerAndSendControlAdminInvitation(
           invitation.email,
           invitation.id,

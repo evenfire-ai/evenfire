@@ -63,7 +63,9 @@ export interface GfsDragPathStructureInput {
   targetPath: string | null | undefined
 }
 
-export declare function decideDragPathStructure(input: GfsDragPathStructureInput): GfsDragStructureVerdict
+export declare function decideDragPathStructure(
+  input: GfsDragPathStructureInput
+): GfsDragStructureVerdict
 
 export interface GfsDragAuthorityInput {
   /** Held bits on the physical source parent (affordances `held`), or null when unknown. */

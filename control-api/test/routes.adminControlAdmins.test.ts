@@ -62,7 +62,6 @@ vi.mock(
 vi.mock('../src/middleware/controlUIAuth.js', () => uiAuth)
 
 const directorySvc = vi.hoisted(() => ({
-  createSilentInvitationForTeams: vi.fn(),
   revokePendingInvitation: vi.fn(),
 }))
 vi.mock('../src/services/directory/index.js', async importOriginal => ({
@@ -280,11 +279,13 @@ describe('routes/adminControlAdmins', () => {
   })
 
   it('stores replaceInviter and echoes the stored flag on the 201 body', async () => {
-    adminSvc.createControlAdminInvitation.mockResolvedValue(storedInvitation(true))
-    directorySvc.createSilentInvitationForTeams.mockResolvedValue({
-      id: 'desktop-invitation-id',
-      team_id: null,
-      teams: [],
+    adminSvc.createControlAdminInvitation.mockResolvedValue({
+      invitation: storedInvitation(true),
+      desktopInvitation: {
+        id: 'desktop-invitation-id',
+        team_id: null,
+        teams: [],
+      },
     })
     controlAdminInvitationRegistrationSvc.registerAndSendControlAdminInvitation.mockResolvedValue(
       undefined
@@ -298,7 +299,7 @@ describe('routes/adminControlAdmins', () => {
     expect(adminSvc.createControlAdminInvitation).toHaveBeenCalledWith(
       'client@example.com',
       'current-admin-id',
-      { replaceInviter: true }
+      { replaceInviter: true, desktopAccess: { teamAssignments: [] } }
     )
     expect(res.body).toEqual({
       invitation: {
@@ -310,6 +311,25 @@ describe('routes/adminControlAdmins', () => {
         replaceInviter: true,
       },
     })
+  })
+
+  it('returns 409 without sending when invitation creation reports an inactive inviter', async () => {
+    adminSvc.createControlAdminInvitation.mockResolvedValue({ error: 'inviter_not_active' })
+
+    const res = await request(createTestApp())
+      .post('/admin/control-admin-invitations')
+      .send({ email: 'client@example.com', createDesktopAccess: true })
+      .expect(409)
+
+    expect(res.body).toEqual({ error: 'inviter_not_active' })
+    expect(adminSvc.createControlAdminInvitation).toHaveBeenCalledWith(
+      'client@example.com',
+      'current-admin-id',
+      { replaceInviter: false, desktopAccess: { teamAssignments: [] } }
+    )
+    expect(
+      controlAdminInvitationRegistrationSvc.registerAndSendControlAdminInvitation
+    ).not.toHaveBeenCalled()
   })
 
   it('defaults replaceInviter to false when the body omits it', async () => {
