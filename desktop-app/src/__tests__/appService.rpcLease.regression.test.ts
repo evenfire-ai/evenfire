@@ -9,11 +9,25 @@ const keytar = vi.hoisted(() => ({
   setPassword: vi.fn(),
   deletePassword: vi.fn(),
 }))
+const electronIpc = vi.hoisted(() => ({
+  handlers: new Map<string, (...args: unknown[]) => unknown>(),
+}))
 
 vi.mock('electron', () => ({
+  BrowserWindow: { fromWebContents: vi.fn(() => null), getAllWindows: vi.fn(() => []) },
+  Notification: Object.assign(vi.fn(), { isSupported: vi.fn(() => false) }),
   app: { getPath: vi.fn(() => fixture.directory), isReady: vi.fn(() => true) },
   safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
   shell: { openExternal: vi.fn() },
+  clipboard: { writeText: vi.fn() },
+  dialog: { showSaveDialog: vi.fn() },
+  ipcMain: {
+    handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+      electronIpc.handlers.set(channel, handler)
+    }),
+    on: vi.fn(),
+    removeHandler: vi.fn(),
+  },
 }))
 vi.mock('keytar', () => keytar)
 vi.mock('../chatStoreBinding.js', async () => {
@@ -65,6 +79,7 @@ describe('temporary AppService RPC lease', () => {
   beforeEach(async () => {
     vi.resetModules()
     vi.clearAllMocks()
+    electronIpc.handlers.clear()
     const oldRest = process.env.EXTERNAL_REST_API_BASE_URL
     const oldRpc = process.env.RPC_PROXY_BASE_URL
     const oldConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
@@ -635,6 +650,7 @@ describe('temporary AppService RPC lease', () => {
 
   it('rejects a persistent GFS stream bearer held before logout at the fetch dispatch boundary', async () => {
     const firstToken = sessionToken('rpc-lease-user-a')
+    const firstUser = { ...me, id: 'rpc-lease-user-a', email: 'first@example.test' }
     const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
     const secondToken = sessionToken(secondUser.id)
     let loginNumber = 0
@@ -645,10 +661,10 @@ describe('temporary AppService RPC lease', () => {
         loginNumber += 1
         return credentialResponse(
           loginNumber === 1 ? firstToken : secondToken,
-          loginNumber === 1 ? me : secondUser
+          loginNumber === 1 ? firstUser : secondUser
         )
       }
-      if (url.endsWith('/api/v1/me')) return meResponse(loginNumber === 1 ? me : secondUser)
+      if (url.endsWith('/api/v1/me')) return meResponse(loginNumber === 1 ? firstUser : secondUser)
       if (url.includes('/api/v1/me/gfs/resolve?uri=')) {
         return new Response(
           JSON.stringify({
@@ -689,8 +705,18 @@ describe('temporary AppService RPC lease', () => {
     keytar.deletePassword.mockImplementation(async (service, account) =>
       credentials.delete(`${service}::${account}`)
     )
-    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+    await expect(service.passwordLogin(firstUser.email, 'first-password')).resolves.toMatchObject({
       authenticated: true,
+    })
+    const { readSessionAuthoritySourceSelection } = await import('../sessionAuthorityAcceptance.js')
+    const envKey = await (service as any).sessionAuthority.getProfileSelectedEnvironmentKey()
+    await expect(
+      readSessionAuthoritySourceSelection({ tokenStore: new TokenStore(), envKey })
+    ).resolves.toMatchObject({
+      status: 'accepted',
+      session: {
+        accepted: { record: { frame: { mode: 'persistent', source: { kind: 'keytar' } } } },
+      },
     })
 
     const entered = deferred<string>()
@@ -748,6 +774,143 @@ describe('temporary AppService RPC lease', () => {
     expect(fetchMock).toHaveBeenCalledTimes(callsBeforeRelease)
     expect(proxyCalls).toHaveLength(1)
     expect(service.getCachedUserId()).toBe(secondUser.id)
+  })
+
+  it('rejects a queued ZIP GFS append admitted under A after logout before B can dispatch it', async () => {
+    const firstUser = { ...me, id: 'rpc-lease-user-a', email: 'first@example.test' }
+    const firstToken = sessionToken(firstUser.id)
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = sessionToken(secondUser.id)
+    let loginNumber = 0
+    const proxyCalls: string[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return credentialResponse(
+          loginNumber === 1 ? firstToken : secondToken,
+          loginNumber === 1 ? firstUser : secondUser
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        const authorization = new Headers(init?.headers).get('authorization')
+        return meResponse(authorization === `Bearer ${secondToken}` ? secondUser : firstUser)
+      }
+      if (url.includes('/api/v1/me/gfs/resolve?uri=')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              drive: 'main',
+              resourceId: 'resource-1',
+              parentResourceId: null,
+              gfsUri: 'gfs://main/resource-1',
+              name: 'file.bin',
+              kind: 'file',
+              version: 1,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+      }
+      if (url.includes('/api/v1/me/gfs/proxy/')) {
+        proxyCalls.push(new Headers(init?.headers).get('authorization') ?? '')
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 })
+      }
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(firstUser.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const { registerIpcHandlers } = await import('../ipc.js')
+    registerIpcHandlers(service as any)
+    const event = { senderFrame: { url: 'file:///app/index.html' }, sender: { id: 7 } }
+    const startHandler = electronIpc.handlers.get('gfs:zipStream:start')
+    const appendHandler = electronIpc.handlers.get('gfs:zipStream:appendFromUri')
+    const abortHandler = electronIpc.handlers.get('gfs:zipStream:abort')
+    if (!startHandler || !appendHandler || !abortHandler) {
+      throw new Error('ZIP stream IPC handlers were not registered')
+    }
+    const { jobId } = (await startHandler(event, {})) as { jobId: string }
+
+    const entered = deferred<string>()
+    const release = deferred<void>()
+    const transport = (service as any).gfsClient.transport as {
+      fetchByteStream: (
+        url: string,
+        token: string,
+        opts: { maxBytes: number; signal?: AbortSignal },
+        onChunk: (chunk: Uint8Array) => Promise<void>
+      ) => Promise<number>
+    }
+    const fetchByteStream = transport.fetchByteStream.bind(transport)
+    let heldA = false
+    transport.fetchByteStream = async (url, token, opts, onChunk) => {
+      if (token === firstToken && !heldA) {
+        heldA = true
+        entered.resolve(token)
+        await release.promise
+      }
+      return fetchByteStream(url, token, opts, onChunk)
+    }
+
+    try {
+      const firstAppend = appendHandler(event, {
+        jobId,
+        name: 'Docs/first.bin',
+        uri: 'gfs://main/first',
+        maxBytes: 1024,
+      })
+      await expect(entered.promise).resolves.toBe(firstToken)
+      const queuedAppend = appendHandler(event, {
+        jobId,
+        name: 'Docs/queued.bin',
+        uri: 'gfs://main/queued',
+        maxBytes: 1024,
+      })
+      expect(proxyCalls).toHaveLength(0)
+
+      const logout = await service.logout()
+      if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+      await expect(
+        service.passwordLogin(secondUser.email, 'second-password')
+      ).resolves.toMatchObject({ authenticated: true })
+      await expect(
+        service.downloadGfsUriInto('gfs://main/resource-1', 1024, undefined, async () => {})
+      ).resolves.toMatchObject({ bytes: 3 })
+      expect(proxyCalls).toEqual([`Bearer ${secondToken}`])
+
+      const callsBeforeRelease = fetchMock.mock.calls.length
+      release.resolve()
+      await expect(firstAppend).rejects.toThrow(
+        'The credential is not owned by the current authenticated session'
+      )
+      await expect(queuedAppend).rejects.toThrow(
+        'The credential is not owned by the current authenticated session'
+      )
+      expect(fetchMock).toHaveBeenCalledTimes(callsBeforeRelease)
+      expect(proxyCalls).toEqual([`Bearer ${secondToken}`])
+      expect(service.getCachedUserId()).toBe(secondUser.id)
+    } finally {
+      release.resolve()
+      await Promise.resolve(abortHandler(event, { jobId })).catch(() => undefined)
+      await service.logout().catch(() => undefined)
+    }
   })
 
   it('rejects invokeHostMessage from A held before dispatch after logout and a fresh B login', async () => {

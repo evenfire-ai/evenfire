@@ -788,13 +788,20 @@ export function registerIpcHandlers(service: AppService): void {
         throw new Error('zip entry exceeds the allowed maximum')
       }
       const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      const requestContext = service.captureGfsRequestContext()
       const result = await runWithGfsAbortSignal(requestId, signal =>
         appendZipEntryStreaming(
           sanitizeString(payload.jobId),
           zipJobOwnerId(event),
           name,
           async sink => {
-            await service.downloadGfsUriInto(uri, maxBytes, signal, chunk => sink.write(chunk))
+            await service.downloadGfsUriInto(
+              uri,
+              maxBytes,
+              signal,
+              chunk => sink.write(chunk),
+              requestContext
+            )
           },
           {}
         )

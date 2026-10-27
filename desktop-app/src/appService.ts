@@ -6061,6 +6061,11 @@ export class AppService {
     )
   }
 
+  /** Capture the accepted owner before an IPC producer can wait in a lifecycle queue. */
+  captureGfsRequestContext(): unknown {
+    return this.sessionAuthority.captureSessionRequestContext(this.requireSessionToken())
+  }
+
   /**
    * Resolve then STREAM a gfs:// resource's bytes into `onChunk` (R1-H2).
    *
@@ -6073,14 +6078,22 @@ export class AppService {
     uri: string,
     maxBytes: number,
     signal: AbortSignal | undefined,
-    onChunk: (chunk: Uint8Array) => Promise<void>
+    onChunk: (chunk: Uint8Array) => Promise<void>,
+    requestContext?: unknown
   ) {
-    return this.gfsClient.downloadInto(
-      uri,
-      this.requireSessionToken(),
-      signal ? { maxBytes, signal } : { maxBytes },
-      onChunk
-    )
+    const token = this.requireSessionToken()
+    if (
+      requestContext !== undefined &&
+      !this.sessionAuthority.isSessionRequestContextInCurrentLineage(requestContext, token)
+    ) {
+      throw new SessionRequestOwnershipError()
+    }
+
+    const download = () =>
+      this.gfsClient.downloadInto(uri, token, signal ? { maxBytes, signal } : { maxBytes }, onChunk)
+    return requestContext === undefined
+      ? download()
+      : runWithSessionRequestContext(requestContext, download)
   }
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
