@@ -64,6 +64,13 @@ describeRealPostgres('GFS governed roots on real PostgreSQL', () => {
     createdRoles.push(insertLogin)
     await pool.query(`GRANT USAGE ON SCHEMA public TO ${quoteIdent(insertLogin)}`)
     await pool.query(`GRANT INSERT ON TABLE public.users TO ${quoteIdent(insertLogin)}`)
+    // The pre-existing invoker-rights trigger password_credential_generation_fence
+    // (services/auth/passwordAdmissionSchema.ts) updates password_identifier_state on
+    // every users INSERT, so the inserting role needs exactly that. It still gets no
+    // privilege on gfs_user_homes or the enrollment function.
+    await pool.query(
+      `GRANT SELECT, UPDATE ON TABLE public.password_identifier_state TO ${quoteIdent(insertLogin)}`
+    )
 
     runtimePool = new Pool({
       connectionString: databaseUrl(adminUrl, database, runtimeLogin, runtimePassword),
