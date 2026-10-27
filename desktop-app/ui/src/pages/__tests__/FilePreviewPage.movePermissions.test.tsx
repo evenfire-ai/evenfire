@@ -1120,7 +1120,10 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   })
 
   it('does not dispatch or announce Move when the dialog closes during authorization', async () => {
-    const permission = heldPermissionResponse(['read', 'write', 'delete', 'manage_acl', 'share'])
+    const permission = delegationAffordances(
+      new Set(['read', 'write', 'delete', 'manage_acl', 'share']),
+      false
+    )
     let sourceReads = 0
     let resolveSource!: (value: typeof permission) => void
     const pendingSource = new Promise<typeof permission>(resolve => {
