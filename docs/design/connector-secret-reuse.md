@@ -213,6 +213,19 @@ milestones:
    reusable Secrets are assigned during connector creation or from the
    connector's Credentials tab via Change assigned Secret; other scopes keep
    the generic subtitle.
+6. **Custom Secret picker.** After operator feedback on the inherited
+   native `<select>` (unstyled popup and visible flicker on click in the
+   credentials tab), the Existing Secret picker now reuses the repository's
+   `SelectionDropdown` primitive in single-select mode: the popup renders
+   roughly four rows with its own scroll (the shared list cap of
+   `min(12rem, 30vh)`), keyboard and Escape still work, and the component
+   carries `aria-expanded`/`aria-haspopup`/`role="option"` semantics with
+   the same accessible name ("Existing Secret") as before. The "Manage
+   connector Secrets" entry point changed from a new-tab link to a plain
+   ghost button that navigates in the same tab and disables while the
+   flow is locked, so a pending assignment cannot be lost to a stray
+   click. The per-row Secret key selects remain native selects: their
+   option lists are small and they did not flicker.
 
 Validation evidence (Node 24 via
 `PATH=/home/pal/.nvm/versions/node/v24.22.1/bin:$PATH`, `UV_USE_IO_URING=0`

@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useId, useRef, useState } from 'react'
-import Link from 'next/link'
+import { useRouter } from 'next/navigation'
+import { SelectionDropdown } from '@components/SelectionDropdown'
 import { Button, Field, SelectInput, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { listMcpSecrets } from '@lib/api'
@@ -16,6 +17,7 @@ export function ExistingConnectorSecretFields({
   disabled = false,
   onChange,
 }: ExistingConnectorSecretFieldsProps) {
+  const router = useRouter()
   const prefix = useId()
   const counter = useRef(0)
   const [secrets, setSecrets] = useState<McpSecretSummary[]>([])
@@ -90,19 +92,19 @@ export function ExistingConnectorSecretFields({
         Reuse a Secret from Secrets → Connectors. Stored values stay unchanged and are never shown.
       </p>
       <Field label="Existing Secret" htmlFor={`${prefix}-secret`} required>
-        <SelectInput
+        <SelectionDropdown
           id={`${prefix}-secret`}
-          value={name}
+          ariaLabel="Existing Secret"
+          placeholder="Choose a Secret"
+          multiple={false}
+          searchable={false}
+          showSelectedChips={false}
           disabled={state !== 'ready'}
-          onChange={event => selectSecret(event.target.value)}
-        >
-          <option value="">Choose a Secret</option>
-          {secrets.map(secret => (
-            <option key={secret.name} value={secret.name}>
-              {secret.name}
-            </option>
-          ))}
-        </SelectInput>
+          invalid={invalid?.field === 'secret'}
+          options={secrets.map(secret => ({ label: secret.name, value: secret.name }))}
+          value={name ? [name] : []}
+          onChange={values => selectSecret(values[0] ?? '')}
+        />
       </Field>
       {state === 'loading' ? <p role="status">Loading Secrets…</p> : null}
       {state === 'error' ? (
@@ -121,9 +123,13 @@ export function ExistingConnectorSecretFields({
         <Button onClick={() => setRefresh(value => value + 1)} disabled={state === 'loading'}>
           Refresh Secrets
         </Button>
-        <Link href={CONTROL_ROUTES.secrets.connector} target="_blank" rel="noopener noreferrer">
-          Manage connector Secrets (opens in a new tab)
-        </Link>
+        <Button
+          variant="ghost"
+          disabled={disabled}
+          onClick={() => router.push(CONTROL_ROUTES.secrets.connector)}
+        >
+          Manage connector Secrets
+        </Button>
       </div>
       {selected && !selected.keys.length ? (
         <p role="alert">

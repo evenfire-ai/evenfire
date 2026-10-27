@@ -505,6 +505,15 @@ describe('EditMcpServerPage — credential surface wiring', () => {
 // The component suites cover the form in isolation; these tests pin the wiring
 // the page owns: eligibility gating, the busy navigation interlock, the
 // spec-only write, and keyboard focus surviving the panel swap.
+
+/** The picker is a SelectionDropdown button: open it, then click the option. */
+async function chooseExistingSecret(name: string) {
+  const trigger = await screen.findByLabelText(/^Existing Secret/)
+  await waitFor(() => expect(trigger).toBeEnabled())
+  fireEvent.click(trigger)
+  fireEvent.click(await screen.findByRole('option', { name }))
+}
+
 describe('EditMcpServerPage — Change assigned Secret', () => {
   const OTHER_SECRET = {
     name: 'other-credentials',
@@ -580,10 +589,7 @@ describe('EditMcpServerPage — Change assigned Secret', () => {
   it('returns focus to the trigger after the change flow is cancelled', async () => {
     await renderPage(eligibleServer())
     fireEvent.click(screen.getByRole('button', { name: 'Change assigned Secret' }))
-    await screen.findByLabelText(/^Existing Secret/)
-    fireEvent.change(screen.getByLabelText(/^Existing Secret/), {
-      target: { value: OTHER_SECRET.name },
-    })
+    await chooseExistingSecret(OTHER_SECRET.name)
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel assignment change' }))
     const trigger = await screen.findByRole('button', { name: 'Change assigned Secret' })
@@ -595,9 +601,7 @@ describe('EditMcpServerPage — Change assigned Secret', () => {
   it('locks navigation during the assignment, writes only envSecret, and reloads', async () => {
     await renderPage(eligibleServer())
     fireEvent.click(screen.getByRole('button', { name: 'Change assigned Secret' }))
-    fireEvent.change(await screen.findByLabelText(/^Existing Secret/), {
-      target: { value: OTHER_SECRET.name },
-    })
+    await chooseExistingSecret(OTHER_SECRET.name)
 
     fireEvent.click(screen.getByRole('button', { name: 'Assign and restart' }))
     const dialog = await screen.findByRole('alertdialog')

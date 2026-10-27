@@ -250,6 +250,13 @@ function appAlert(page: Page) {
 
 /** Drives the three-step create flow to a connector referencing the shared
  *  Secret, with no credential value ever typed. */
+
+/** The picker is a custom single-select dropdown: open, then click the option. */
+async function chooseExistingSecret(page: Page, name: string) {
+  await page.getByLabel(/^Existing Secret/).click()
+  await page.getByRole('option', { name }).click()
+}
+
 async function createConnectorUsingSharedSecret(page: Page, name: string) {
   await page.goto('/connectors/new')
   await page.getByPlaceholder('my-mcp-server').fill(name)
@@ -260,12 +267,11 @@ async function createConnectorUsingSharedSecret(page: Page, name: string) {
   await page.getByRole('button', { name: 'Continue' }).click()
 
   await page.getByRole('radio', { name: 'Use an existing Secret' }).click()
-  const selector = page.getByLabel(/^Existing Secret/)
-  await expect(selector).toBeEnabled()
+  await expect(page.getByLabel(/^Existing Secret/)).toBeEnabled()
   // Write-only contract at the browser level: no value input ever renders.
   await expect(page.locator('input[type="password"]')).toHaveCount(0)
 
-  await selector.selectOption(SHARED_SECRET.name)
+  await chooseExistingSecret(page, SHARED_SECRET.name)
   await expect(page.getByLabel(/^Environment variable 1/)).toHaveValue('API_KEY')
 
   await page.getByRole('button', { name: 'Create connector' }).click()
@@ -354,7 +360,7 @@ test.describe('Connector Secret reuse — creation', () => {
 
     await page.getByRole('button', { name: 'Retry loading Secrets' }).click()
     await expect(page.getByLabel(/^Existing Secret/)).toBeEnabled()
-    await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
+    await chooseExistingSecret(page, SHARED_SECRET.name)
     await expect(page.getByLabel(/^Environment variable 1/)).toHaveValue('API_KEY')
   })
 
@@ -415,7 +421,7 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
     ])
 
     await openChangeFlow(page)
-    await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
+    await chooseExistingSecret(page, SHARED_SECRET.name)
     // Destinations are the connector's contract and survive the reassignment.
     await expect(page.getByLabel(/^Environment variable 1/)).toHaveValue('LINEAR_API_KEY')
     await expect(page.getByLabel(/^Environment variable 2/)).toHaveValue('LINEAR_WORKSPACE')
@@ -472,7 +478,7 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
     const state = await prepare(page, [stale, stale, stale, savedNotReady])
 
     await openChangeFlow(page)
-    await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
+    await chooseExistingSecret(page, SHARED_SECRET.name)
     await page.getByRole('button', { name: 'Assign and restart' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Assign and restart' }).click()
 
@@ -498,7 +504,7 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
     const state = await prepare(page, [current, current, concurrentlyEdited])
 
     await openChangeFlow(page)
-    await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
+    await chooseExistingSecret(page, SHARED_SECRET.name)
     await page.getByRole('button', { name: 'Assign and restart' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Assign and restart' }).click()
 
@@ -518,12 +524,12 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
     await openChangeFlow(page)
 
     // No-op: re-choosing the currently assigned Secret disables assignment.
-    await page.getByLabel(/^Existing Secret/).selectOption(LEGACY_SECRET.name)
+    await chooseExistingSecret(page, LEGACY_SECRET.name)
     await expect(page.getByRole('button', { name: 'Assign and restart' })).toBeDisabled()
 
     // A Secret missing one stored key demands an explicit replacement key and
     // never a credential value.
-    await page.getByLabel(/^Existing Secret/).selectOption(PARTIAL_SECRET.name)
+    await chooseExistingSecret(page, PARTIAL_SECRET.name)
     await expect(page.getByLabel(/^Secret key 2/)).toHaveValue('')
     await expect(page.getByLabel(/^Environment variable 2/)).toHaveValue('LINEAR_WORKSPACE')
     await expect(appAlert(page)).toContainText('Choose a stored key')
@@ -596,7 +602,7 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
 
     await page.getByRole('button', { name: 'Retry loading Secrets' }).click()
     await expect(page.getByLabel(/^Existing Secret/)).toBeEnabled()
-    await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
+    await chooseExistingSecret(page, SHARED_SECRET.name)
     await expect(page.getByRole('button', { name: 'Assign and restart' })).toBeEnabled()
   })
 })
@@ -615,7 +621,7 @@ test.describe('Connector Secret reuse — narrow viewport', () => {
     await page.goto('/connectors/linear/edit/credentials')
     await page.getByRole('button', { name: 'Change assigned Secret' }).click()
     await expect(page.getByLabel(/^Existing Secret/)).toBeEnabled()
-    await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
+    await chooseExistingSecret(page, SHARED_SECRET.name)
     await expect(page.getByLabel(/^Environment variable 1/)).toHaveValue('LINEAR_API_KEY')
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       await page.evaluate(() => window.innerWidth)

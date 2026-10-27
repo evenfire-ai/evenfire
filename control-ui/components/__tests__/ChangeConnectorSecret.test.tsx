@@ -22,6 +22,10 @@ vi.mock('@lib/api', () => ({
   updateMcpServer: vi.fn(),
 }))
 
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}))
+
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockListMcpSecrets = vi.mocked(listMcpSecrets)
 const mockUpdateMcpServer = vi.mocked(updateMcpServer)
@@ -127,9 +131,8 @@ async function renderPanel(
 
 /** Chooses the replacement Secret and drains the state updates that follow. */
 async function chooseReplacement(secretName = NEW_SECRET.name) {
-  fireEvent.change(screen.getByLabelText(/^Existing Secret/), {
-    target: { value: secretName },
-  })
+  fireEvent.click(screen.getByLabelText(/^Existing Secret/))
+  fireEvent.click(screen.getByRole('option', { name: secretName }))
   await flush(2)
 }
 

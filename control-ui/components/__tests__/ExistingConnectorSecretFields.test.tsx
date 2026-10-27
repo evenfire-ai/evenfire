@@ -9,6 +9,10 @@ vi.mock('@lib/api', () => ({
   listMcpSecrets: vi.fn(),
 }))
 
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}))
+
 const mockListMcpSecrets = vi.mocked(listMcpSecrets)
 
 const SERVER: McpServerResource = {
@@ -39,6 +43,14 @@ function renderFields(props: Partial<Parameters<typeof ExistingConnectorSecretFi
 /** The latest onChange payload, so tests can assert the reported selection. */
 function lastSelection(onChange: ReturnType<typeof vi.fn>): ExistingCredentialSelection {
   return onChange.mock.calls.at(-1)?.[0] as ExistingCredentialSelection
+}
+
+/** The picker is a SelectionDropdown button: open it, then click the option. */
+async function chooseSecret(name: string) {
+  const trigger = await screen.findByLabelText(/^Existing Secret/)
+  await waitFor(() => expect(trigger).toBeEnabled())
+  fireEvent.click(trigger)
+  fireEvent.click(await screen.findByRole('option', { name }))
 }
 
 beforeEach(() => {
@@ -103,9 +115,7 @@ describe('ExistingConnectorSecretFields — metadata loading', () => {
 describe('ExistingConnectorSecretFields — reference-only key mapping', () => {
   it('auto-maps stored keys to environment variables and never renders a value input', async () => {
     const { onChange } = renderFields()
-    fireEvent.change(await screen.findByLabelText(/^Existing Secret/), {
-      target: { value: SECRET_A.name },
-    })
+    await chooseSecret(SECRET_A.name)
 
     expect(screen.getByLabelText(/^Environment variable 1/)).toHaveValue('API_KEY')
     // Write-only contract: no credential value is ever requested or rendered.
@@ -120,9 +130,7 @@ describe('ExistingConnectorSecretFields — reference-only key mapping', () => {
 
   it('preserves each destination and demands an explicit key when the new Secret lacks it', async () => {
     const { onChange } = renderFields({ initialReference: INITIAL_REFERENCE })
-    fireEvent.change(await screen.findByLabelText(/^Existing Secret/), {
-      target: { value: SECRET_B.name },
-    })
+    await chooseSecret(SECRET_B.name)
 
     // Destination names are the connector's contract: both survive the switch,
     // and the missing source key is an explicit choice, never a value prompt.
@@ -144,9 +152,7 @@ describe('ExistingConnectorSecretFields — reference-only key mapping', () => {
   it('clears the key error once an explicit stored key is chosen and keeps the destination', async () => {
     const singleKeyReference = { name: 'old-secret', keys: [INITIAL_REFERENCE.keys[0]] }
     renderFields({ initialReference: singleKeyReference })
-    fireEvent.change(await screen.findByLabelText(/^Existing Secret/), {
-      target: { value: SECRET_B.name },
-    })
+    await chooseSecret(SECRET_B.name)
     expect(screen.getByRole('alert')).toHaveTextContent('Choose a stored key')
 
     fireEvent.change(screen.getByLabelText(/^Secret key 1/), {
@@ -158,9 +164,7 @@ describe('ExistingConnectorSecretFields — reference-only key mapping', () => {
 
   it('flags a key that vanished from the selected Secret as a key problem after a refresh', async () => {
     const { onChange } = renderFields()
-    fireEvent.change(await screen.findByLabelText(/^Existing Secret/), {
-      target: { value: SECRET_A.name },
-    })
+    await chooseSecret(SECRET_A.name)
     expect(lastSelection(onChange).rows[0]?.secretKey).toBe('api-key')
 
     // Out-of-band: the stored key disappeared, then the operator refreshes.
@@ -184,9 +188,7 @@ describe('ExistingConnectorSecretFields — reference-only key mapping', () => {
       items: [{ name: 'hollow-credentials', uid: 'uid-hollow', keys: [] }],
     })
     renderFields()
-    fireEvent.change(await screen.findByLabelText(/^Existing Secret/), {
-      target: { value: 'hollow-credentials' },
-    })
+    await chooseSecret('hollow-credentials')
 
     expect(
       screen

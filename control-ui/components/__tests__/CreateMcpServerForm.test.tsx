@@ -11,6 +11,9 @@ import { CreateMcpServerForm } from '../CreateMcpServerForm'
 import { ToastProvider } from '../Toast'
 
 // vi.mock is hoisted before imports; factory runs lazily so references to `api` are safe.
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}))
 vi.mock('../../lib/api', async importOriginal => {
   const actual = await importOriginal<typeof import('../../lib/api')>()
   const { buildContextResource } = await import('../../test/fixtures/contextResource')
@@ -973,9 +976,8 @@ describe('CreateMcpServerForm — reusable Secrets', () => {
     continueToSecrets()
     fireEvent.click(screen.getByRole('radio', { name: /Use an existing Secret/ }))
     await waitFor(() => expect(screen.getByLabelText(/^Existing Secret/)).toBeEnabled())
-    fireEvent.change(screen.getByLabelText(/^Existing Secret/), {
-      target: { value: 'shared-credentials' },
-    })
+    fireEvent.click(screen.getByLabelText(/^Existing Secret/))
+    fireEvent.click(await screen.findByRole('option', { name: 'shared-credentials' }))
   }
   it('creates a connector referencing stored keys without requesting or writing values', async () => {
     await prepareExisting()
