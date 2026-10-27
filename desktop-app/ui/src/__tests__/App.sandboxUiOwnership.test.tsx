@@ -556,10 +556,10 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await flushMacrotask()
 
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
-    // The saved route lands with the deactivation continuation, which can
-    // commit a tick after the close under load: wait for the store write
-    // instead of sampling it once.
-    await waitFor(() => expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox'))
+    // The deactivation continuation persists the final route as main and both
+    // ownership lanes settle.
+    await act(() => main.settle())
+    expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox')
 
     fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
@@ -1133,6 +1133,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
 
     expect(controller.navItem).toBe(DESKTOP_ROUTES.preview)
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
+    await act(() => main.settle())
     expect(machine().getSnapshot().views.size).toBe(0)
   })
 
