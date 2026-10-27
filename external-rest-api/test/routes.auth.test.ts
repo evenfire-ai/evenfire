@@ -87,7 +87,7 @@ describe('routes/auth password-login', () => {
     )
 
     const res = await request(buildApp())
-      .post('/api/v1/auth/password-login')
+      .post('/api/v1/auth/v2/password-login')
       .send({ email: 'user@example.invalid', password: 'synthetic-password' })
 
     expect(res.status).toBe(500)
