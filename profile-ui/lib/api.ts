@@ -158,7 +158,7 @@ export async function loginWithPassword(
   email: string,
   password: string
 ): Promise<PasswordLoginResponse> {
-  const res = await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/password-login`, {
+  const res = await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/v2/password-login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',

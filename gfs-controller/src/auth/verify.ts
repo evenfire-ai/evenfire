@@ -32,6 +32,8 @@ export interface GfsVerifiedClaims {
   pathBindings: GfsPathBinding[];
   /** users.lifecycle_version or control_admin_users.session_version. */
   authGeneration?: number;
+  /** Required for user access tokens after the test-fleet authentication cutover. */
+  authProtocolVersion?: 2;
   brokeredAuthority?: GfsBrokeredAuthority;
   principalType?: "user" | "control-admin";
   iat: number;
@@ -116,6 +118,8 @@ export interface VerifyOptions {
   key: VerificationKey;
   audience: string;
   issuer?: string;
+  /** Require user tokens minted by the current supported client protocol. */
+  authProtocolCutoverEnabled?: boolean;
 }
 
 function parsePathBindings(raw: unknown): GfsPathBinding[] {
@@ -195,6 +199,7 @@ export function verifyGfsToken(token: string, opts: VerifyOptions): GfsVerifiedC
   const exp = record.exp;
   const principalType = record.principalType;
   const rawAuthGeneration = record.authGeneration;
+  const rawAuthProtocolVersion = record.authProtocolVersion;
 
   if (typeof sub !== "string" || sub.length === 0) throw new GfsAuthError("missing sub");
   if (typeof drive !== "string" || drive.length === 0) throw new GfsAuthError("missing drive");
@@ -221,6 +226,14 @@ export function verifyGfsToken(token: string, opts: VerifyOptions): GfsVerifiedC
   ) {
     throw new GfsAuthError("human principal authGeneration must be positive");
   }
+  if (
+    (principalType === "user" ||
+      (rawAuthGeneration !== undefined && principalType !== "control-admin")) &&
+    ((rawAuthProtocolVersion !== undefined && rawAuthProtocolVersion !== 2) ||
+      (opts.authProtocolCutoverEnabled === true && rawAuthProtocolVersion !== 2))
+  ) {
+    throw new GfsAuthError("user token requires authProtocolVersion 2");
+  }
   const issuedAt = iat as number;
   const expiresAt = exp as number;
   if (expiresAt <= issuedAt) throw new GfsAuthError("token exp must be after iat");
@@ -244,6 +257,7 @@ export function verifyGfsToken(token: string, opts: VerifyOptions): GfsVerifiedC
     scopes,
     pathBindings: parsePathBindings(record.pathBindings),
     ...(rawAuthGeneration === undefined ? {} : { authGeneration: Number(rawAuthGeneration) }),
+    ...(rawAuthProtocolVersion === 2 ? { authProtocolVersion: 2 as const } : {}),
     ...(brokeredAuthority ? { brokeredAuthority } : {}),
     ...(principalType ? { principalType } : {}),
     iat: issuedAt,

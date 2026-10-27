@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { config } from '../src/config.js'
 import {
   classifyRpcTokenDenial,
   issueRpcAccessToken,
@@ -92,6 +93,32 @@ describe('RPC access token scope binding', () => {
       accessScope: 'team',
       teamId: 'team-1',
     })
+  })
+
+  it('requires protocol-v2 claims at test-fleet cutover and preserves them on issued tokens', () => {
+    const priorCutover = config.authProtocolCutoverEnabled
+    config.authProtocolCutoverEnabled = true
+    try {
+      const legacy = signRpcAccessToken({
+        sub: 'user-1',
+        typ: 'user',
+        teamId: 'team-1',
+        role: 'member',
+        scopes: ['host:message:invoke'],
+        hostRefs: ['pro-agent'],
+        jti: 'legacy-token',
+      })
+      expect(verifyRpcAccessToken(legacy)).toBeNull()
+
+      const issued = issueRpcAccessToken(
+        { userId: 'user-1', teamId: 'team-1', role: 'member', authProtocolVersion: 2 },
+        ['host:message:invoke'],
+        ['pro-agent']
+      )
+      expect(verifyRpcAccessToken(issued!.token)).toMatchObject({ authProtocolVersion: 2 })
+    } finally {
+      config.authProtocolCutoverEnabled = priorCutover
+    }
   })
 
   it('rejects inconsistent scope/team combinations and wildcard hosts', () => {

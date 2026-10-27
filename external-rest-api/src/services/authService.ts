@@ -19,20 +19,28 @@ type LoginResult = {
   isNewUser: boolean
 }
 
-export async function loginWithGoogle(google: GoogleLoginInput): Promise<LoginResult> {
-  const payload = await controlApiRequest<LoginResult>('POST', '/external/auth/google-login', {
-    body: google,
-  })
+export async function loginWithGoogle(
+  google: GoogleLoginInput,
+  protocolVersion: 1 | 2 = 1
+): Promise<LoginResult> {
+  const payload = await controlApiRequest<LoginResult>(
+    'POST',
+    protocolVersion === 2 ? '/external/auth/v2/google-login' : '/external/auth/google-login',
+    {
+      body: google,
+    }
+  )
   return payload
 }
 
 export async function loginWithPassword(
   email: string,
-  password: string
+  password: string,
+  protocolVersion: 1 | 2 = 1
 ): Promise<Omit<LoginResult, 'isNewUser'>> {
   const payload = await controlApiRequest<Omit<LoginResult, 'isNewUser'>>(
     'POST',
-    '/external/auth/password-login',
+    protocolVersion === 2 ? '/external/auth/v2/password-login' : '/external/auth/password-login',
     {
       body: { email, password },
     }

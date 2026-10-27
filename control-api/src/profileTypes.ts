@@ -48,6 +48,8 @@ export type AuthClaims = {
   role: TeamRole
   /** Authoritative users.lifecycle_version captured when the session was issued. */
   authGeneration: number
+  /** Signed protocol capability required by the current test-fleet authentication cutover. */
+  authProtocolVersion?: 2
   exp: number
 }
 
@@ -61,6 +63,8 @@ export type RpcAccessClaims = {
   jti: string
   iat: number
   exp: number
+  /** Present on user RPC leases; service tokens use their independent authority. */
+  authProtocolVersion?: 2
   service?: string
   role?: TeamRole
 }

@@ -37,6 +37,25 @@ function legacySessionToken(): string {
   )
 }
 
+function unversionedCurrentGenerationToken(): string {
+  return jwt.sign(
+    {
+      userId: '11111111-1111-4111-8111-111111111111',
+      email: 'legacy@example.com',
+      teamId: null,
+      role: 'member',
+      authGeneration: 1,
+    },
+    config.sessionJwtPrivateKey,
+    {
+      algorithm: 'RS256',
+      expiresIn: 60 * 60,
+      issuer: config.jwtIssuer,
+      audience: config.jwtAudience,
+    }
+  )
+}
+
 function app() {
   const server = express()
   server.get(
@@ -52,6 +71,7 @@ function app() {
 
 describe('external session legacy token cut-over', () => {
   beforeEach(() => {
+    config.authProtocolCutoverEnabled = false
     poolQuery.mockClear()
     poolQuery.mockResolvedValue({
       rows: [{ lifecycle_state: 'active', lifecycle_version: '1' }],
@@ -70,6 +90,18 @@ describe('external session legacy token cut-over', () => {
     expect(cryptographicallyValidClaims.authGeneration).toBeUndefined()
     expect(verifyExternalSessionToken(token)).toBeNull()
 
+    const response = await request(app()).get('/protected').set('x-user-session-token', token)
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(poolQuery).not.toHaveBeenCalled()
+  })
+
+  it('rejects a current-generation legacy token after protocol cutover', async () => {
+    config.authProtocolCutoverEnabled = true
+    const token = unversionedCurrentGenerationToken()
+
+    expect(verifyExternalSessionToken(token)).toBeNull()
     const response = await request(app()).get('/protected').set('x-user-session-token', token)
 
     expect(response.status).toBe(401)

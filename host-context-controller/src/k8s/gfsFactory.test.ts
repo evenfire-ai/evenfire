@@ -39,6 +39,7 @@ const config: GfsFactoryConfig = {
   readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
+  authProtocolCutoverEnabled: false,
   agentReadRlPerMinPerReplica: 300,
   agentWriteRlPerMinPerReplica: 120,
 }
@@ -145,6 +146,7 @@ describe('gfsFactory writer Deployment', () => {
     expect(byName('GFS_PORT')?.value).toBe('8087')
     expect(byName('GFS_DRIVE_NAME')?.value).toBe('main')
     expect(byName('GFS_TOKEN_AUDIENCE')?.value).toBe('gfs-controller')
+    expect(byName('AUTH_PROTOCOL_CUTOVER_ENABLED')?.value).toBe('false')
     expect(byName('GFS_PG_CONNECTION_STRING')?.valueFrom?.secretKeyRef?.name).toBe(
       'gfs-controller-db'
     )
@@ -154,6 +156,15 @@ describe('gfsFactory writer Deployment', () => {
     expect(byName('GFS_SYNC_COPY_TIMEOUT_MS')).toBeUndefined()
     expect(byName('GFS_MAX_WRITE_BODY_BYTES')).toBeUndefined()
     expect(byName('GFS_UPLOAD_V2_ENABLED')).toBeUndefined()
+  })
+
+  it('passes the test-fleet auth cutover to both generated GFS roles', () => {
+    const cutoverConfig = { ...config, authProtocolCutoverEnabled: true }
+    for (const role of ['writer', 'reader'] as const) {
+      const deployment = buildDeployment(gfs(), cutoverConfig, role)
+      const env = deployment.spec?.template.spec?.containers[0].env ?? []
+      expect(env.find(entry => entry.name === 'AUTH_PROTOCOL_CUTOVER_ENABLED')?.value).toBe('true')
+    }
   })
 
   it('passes configured copy and exact upload-v2 limits to generated workloads', () => {

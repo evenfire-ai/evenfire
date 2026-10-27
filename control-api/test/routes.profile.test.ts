@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { createExternalRouter } from '../src/routes/external/index.js'
 import { createRpcAccessRouter } from '../src/routes/rpc-access/index.js'
-import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
+import {
+  signExternalSessionToken,
+  verifyExternalSessionToken,
+} from '../src/utils/auth/externalSessionAuthToken.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 
 const svc = vi.hoisted(() => ({
@@ -21,6 +25,7 @@ const svc = vi.hoisted(() => ({
   getUserAgents: vi.fn(),
   getUserContexts: vi.fn(),
   googleLoginData: vi.fn(),
+  passwordLoginData: vi.fn(),
   listMembers: vi.fn(),
   listPendingInvitations: vi.fn(),
   listTeams: vi.fn(),
@@ -1005,5 +1010,155 @@ describe('routes/profile', () => {
       name: 'User',
       picture: 'https://example.com/avatar.png',
     })
+  })
+
+  it('mints a protocol-v2 session from the v2 Google login producer at cutover', async () => {
+    const priorCutover = config.authProtocolCutoverEnabled
+    config.authProtocolCutoverEnabled = true
+    googleAuthMock.verifyGoogleIdToken.mockResolvedValue({
+      email: 'user@example.com',
+      name: 'User',
+      picture: 'https://example.com/avatar.png',
+    })
+    svc.googleLoginData.mockResolvedValue({
+      isNewUser: false,
+      user: {
+        id: 'u1',
+        email: 'user@example.com',
+        name: 'User',
+        picture: 'https://example.com/avatar.png',
+      },
+      membership: { team_id: 't1', team_name: 'team', role: 'member' },
+      authGeneration: 4,
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    try {
+      const response = await withInternalServiceAuth(
+        request(app).post('/external/auth/v2/google-login')
+      )
+        .send({ idToken: 'google-id-token' })
+        .expect(200)
+
+      expect(verifyExternalSessionToken(response.body.token)).toMatchObject({
+        userId: 'u1',
+        authGeneration: 4,
+        authProtocolVersion: 2,
+      })
+      expect(svc.googleLoginData).toHaveBeenCalledOnce()
+    } finally {
+      config.authProtocolCutoverEnabled = priorCutover
+    }
+  })
+
+  it('mints protocol-v2 password sessions and rejects the historical login route at cutover', async () => {
+    const priorCutover = config.authProtocolCutoverEnabled
+    config.authProtocolCutoverEnabled = true
+    svc.passwordLoginData.mockResolvedValue({
+      user: {
+        id: 'u1',
+        email: 'user@example.com',
+        name: 'User',
+        picture: null,
+      },
+      membership: { team_id: 't1', team_name: 'team', role: 'member' },
+      authGeneration: 4,
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    try {
+      await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
+        .send({ email: 'user@example.com', password: 'correct-password' })
+        .expect(426)
+        .expect({ error: 'supported_client_upgrade_required' })
+      expect(svc.passwordLoginData).not.toHaveBeenCalled()
+
+      const response = await withInternalServiceAuth(
+        request(app).post('/external/auth/v2/password-login')
+      )
+        .send({ email: 'user@example.com', password: 'correct-password' })
+        .expect(200)
+
+      expect(verifyExternalSessionToken(response.body.token)).toMatchObject({
+        userId: 'u1',
+        authGeneration: 4,
+        authProtocolVersion: 2,
+      })
+      expect(svc.passwordLoginData).toHaveBeenCalledOnce()
+    } finally {
+      config.authProtocolCutoverEnabled = priorCutover
+    }
+  })
+
+  it('preserves replacement-session protocol claims and rejects legacy minting at cutover', async () => {
+    const priorCutover = config.authProtocolCutoverEnabled
+    config.authProtocolCutoverEnabled = false
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    const payload = {
+      userId: 'u1',
+      email: 'user@example.com',
+      teamId: 't1',
+      role: 'member',
+    }
+
+    try {
+      const legacyResponse = await withInternalServiceAuth(
+        request(app).post('/external/auth/session-token')
+      )
+        .send(payload)
+        .expect(200)
+      const legacyClaims = verifyExternalSessionToken(legacyResponse.body.token)
+      expect(legacyClaims).toMatchObject({ userId: 'u1', authGeneration: 1 })
+      expect(legacyClaims).not.toHaveProperty('authProtocolVersion')
+
+      const currentResponse = await withInternalServiceAuth(
+        request(app).post('/external/auth/session-token')
+      )
+        .send({ ...payload, authProtocolVersion: 2 })
+        .expect(200)
+      expect(verifyExternalSessionToken(currentResponse.body.token)).toMatchObject({
+        userId: 'u1',
+        authGeneration: 1,
+        authProtocolVersion: 2,
+      })
+
+      const invalidProtocol = await withInternalServiceAuth(
+        request(app).post('/external/auth/session-token')
+      )
+        .send({ ...payload, authProtocolVersion: 1 })
+        .expect(400)
+      expect(invalidProtocol.body).toEqual({ error: 'invalid auth protocol version' })
+
+      config.authProtocolCutoverEnabled = true
+      await withInternalServiceAuth(request(app).post('/external/auth/verify'))
+        .send({ token: legacyResponse.body.token })
+        .expect(401)
+
+      await withInternalServiceAuth(request(app).post('/external/auth/session-token'))
+        .send(payload)
+        .expect(426)
+        .expect({ error: 'supported_client_upgrade_required' })
+
+      const v2AfterCutover = await withInternalServiceAuth(
+        request(app).post('/external/auth/session-token')
+      )
+        .send({ ...payload, authProtocolVersion: 2 })
+        .expect(200)
+      expect(verifyExternalSessionToken(v2AfterCutover.body.token)).toMatchObject({
+        authProtocolVersion: 2,
+      })
+    } finally {
+      config.authProtocolCutoverEnabled = priorCutover
+    }
   })
 })

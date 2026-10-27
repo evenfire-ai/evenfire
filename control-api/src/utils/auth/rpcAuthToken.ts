@@ -112,6 +112,13 @@ export function verifyRpcAccessToken(token: string): RpcAccessClaims | null {
     ) {
       return null
     }
+    if (
+      payload.typ === 'user' &&
+      ((payload.authProtocolVersion !== undefined && payload.authProtocolVersion !== 2) ||
+        (config.authProtocolCutoverEnabled && payload.authProtocolVersion !== 2))
+    ) {
+      return null
+    }
 
     const rawTeamId = payload.teamId
     const rawAccessScope = payload.accessScope
@@ -161,6 +168,7 @@ export function verifyRpcAccessToken(token: string): RpcAccessClaims | null {
       jti: payload.jti,
       iat: payload.iat,
       exp: payload.exp,
+      ...(payload.authProtocolVersion === 2 ? { authProtocolVersion: 2 as const } : {}),
       ...(typeof payload.service === 'string' ? { service: payload.service } : {}),
       ...(typeof payload.role === 'string' && ALLOWED_TEAM_ROLES.has(payload.role as TeamRole)
         ? { role: payload.role as TeamRole }
@@ -184,7 +192,12 @@ export function normalizeRequestedHostRefs(input: unknown): string[] {
 }
 
 export function issueRpcAccessToken(
-  auth: { userId: string; teamId: string | null; role: TeamRole },
+  auth: {
+    userId: string
+    teamId: string | null
+    role: TeamRole
+    authProtocolVersion?: 2
+  },
   requestedScopesInput: unknown,
   requestedHostRefsInput?: unknown,
   extraGrantedScopes: readonly RpcScope[] = []
@@ -228,6 +241,7 @@ export function issueRpcAccessToken(
     accessScope,
     teamId,
     role: auth.role,
+    ...(auth.authProtocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
     hostRefs,
     jti: randomUUID(),
     scopes,

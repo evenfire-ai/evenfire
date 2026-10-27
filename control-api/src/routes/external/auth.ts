@@ -1,5 +1,12 @@
-import { Router } from 'express'
+import {
+  type NextFunction,
+  type Request,
+  type RequestHandler,
+  type Response,
+  Router,
+} from 'express'
 import { createHash } from 'node:crypto'
+import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
@@ -35,51 +42,59 @@ const PASSWORD_RESET_RATE_LIMIT_PER_MINUTE = 5
 
 export function createExternalAuthRouter(gateway: K8sGateway): Router {
   const router = Router()
-
-  router.post('/external/auth/google-login', async (req, res, next) => {
-    try {
-      const idToken = String(req.body?.idToken || '').trim()
-      if (!idToken) return res.status(400).json({ error: 'idToken is required' })
-      const google = await verifyGoogleIdToken(idToken)
-      const login = await googleLoginData({
-        email: google.email,
-        name: google.name,
-        picture: google.picture,
-      })
-      if ('error' in login) {
-        return res.status(401).json({ error: 'Unauthorized' })
-      }
-      const role = login.membership.role
-      const token = signExternalSessionToken({
-        userId: login.user.id,
-        email: google.email,
-        teamId: login.membership.team_id || null,
-        role,
-        authGeneration: login.authGeneration,
-      })
-      return res.status(200).json({
-        token,
-        me: {
-          id: login.user.id,
-          email: google.email,
-          name: login.user.name,
-          picture: login.user.picture,
-          teamId: login.membership.team_id,
-          teamName: login.membership.team_name,
-          role,
-        },
-        isNewUser: login.isNewUser,
-      })
-    } catch (error) {
-      return next(error)
+  const rejectLegacyLoginAfterCutover: RequestHandler = (_req, res, next) => {
+    if (config.authProtocolCutoverEnabled) {
+      res.status(426).json({ error: 'supported_client_upgrade_required' })
+      return
     }
-  })
+    next()
+  }
 
-  router.post(
-    '/external/auth/password-login',
-    validatePasswordLogin,
-    passwordLoginSourceAdmission,
-    async (req, res, next) => {
+  const googleLogin =
+    (protocolVersion: 1 | 2) => async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const idToken = String(req.body?.idToken || '').trim()
+        if (!idToken) return res.status(400).json({ error: 'idToken is required' })
+        const google = await verifyGoogleIdToken(idToken)
+        const login = await googleLoginData({
+          email: google.email,
+          name: google.name,
+          picture: google.picture,
+        })
+        if ('error' in login) {
+          return res.status(401).json({ error: 'Unauthorized' })
+        }
+        const role = login.membership.role
+        const token = signExternalSessionToken({
+          userId: login.user.id,
+          email: google.email,
+          teamId: login.membership.team_id || null,
+          role,
+          authGeneration: login.authGeneration,
+          ...(protocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
+        })
+        return res.status(200).json({
+          token,
+          me: {
+            id: login.user.id,
+            email: google.email,
+            name: login.user.name,
+            picture: login.user.picture,
+            teamId: login.membership.team_id,
+            teamName: login.membership.team_name,
+            role,
+          },
+          isNewUser: login.isNewUser,
+        })
+      } catch (error) {
+        return next(error)
+      }
+    }
+  router.post('/external/auth/v2/google-login', googleLogin(2))
+  router.post('/external/auth/google-login', rejectLegacyLoginAfterCutover, googleLogin(1))
+
+  const passwordLogin =
+    (protocolVersion: 1 | 2) => async (req: Request, res: Response, next: NextFunction) => {
       try {
         const email = String(req.body?.email || '')
           .trim()
@@ -99,6 +114,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           teamId: login.membership.team_id || null,
           role,
           authGeneration: login.authGeneration,
+          ...(protocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
         })
         return res.status(200).json({
           token,
@@ -117,6 +133,13 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return next(error)
       }
     }
+  const passwordMiddlewares = [validatePasswordLogin, passwordLoginSourceAdmission] as const
+  router.post('/external/auth/v2/password-login', ...passwordMiddlewares, passwordLogin(2))
+  router.post(
+    '/external/auth/password-login',
+    rejectLegacyLoginAfterCutover,
+    ...passwordMiddlewares,
+    passwordLogin(1)
   )
 
   router.post(
@@ -173,8 +196,15 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         .trim()
         .toLowerCase()
       const teamId = String(req.body?.teamId || '').trim()
+      const authProtocolVersion = req.body?.authProtocolVersion
       if (!userId || !email || !teamId || !TEAM_ROLES.includes(role)) {
         return res.status(400).json({ error: 'invalid payload' })
+      }
+      if (authProtocolVersion !== undefined && authProtocolVersion !== 2) {
+        return res.status(400).json({ error: 'invalid auth protocol version' })
+      }
+      if (config.authProtocolCutoverEnabled && authProtocolVersion !== 2) {
+        return res.status(426).json({ error: 'supported_client_upgrade_required' })
       }
       const membership = await pool.query(
         `SELECT u.lifecycle_version
@@ -198,7 +228,14 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if (!Number.isSafeInteger(authGeneration) || authGeneration < 1) {
         return res.status(403).json({ error: 'membership_not_found' })
       }
-      const token = signExternalSessionToken({ userId, email, teamId, role, authGeneration })
+      const token = signExternalSessionToken({
+        userId,
+        email,
+        teamId,
+        role,
+        authGeneration,
+        ...(authProtocolVersion === 2 ? { authProtocolVersion: 2 } : {}),
+      })
       return res.status(200).json({ token })
     } catch (error) {
       return next(error)
@@ -258,7 +295,12 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       ) {
         extraScopes.push('sandbox:ui:view')
       }
-      const auth = { userId: claims.userId, teamId: claims.teamId, role: claims.role }
+      const auth = {
+        userId: claims.userId,
+        teamId: claims.teamId,
+        role: claims.role,
+        authProtocolVersion: claims.authProtocolVersion,
+      }
       const result = issueRpcAccessToken(auth, req.body?.scopes, hostRefs, extraScopes)
       if (!result) {
         // Distinguish "you need a team for this" from a generic scope failure so

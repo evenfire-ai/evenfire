@@ -551,6 +551,7 @@ export function createExternalGfsRouter(): Router {
         scopes,
         pathBindings: [],
         ...(claims.authGeneration === undefined ? {} : { authGeneration: claims.authGeneration }),
+        authProtocolVersion: claims.authProtocolVersion,
         principalType: 'user',
       })
       res.status(200).json({ token, expiresInSeconds })
@@ -1055,6 +1056,9 @@ async function proxyReadToGfsc(
     drive,
     scopes: [GFS_READ_SCOPE],
     ...(authority.authGeneration === undefined ? {} : { authGeneration: authority.authGeneration }),
+    ...(authority.kind === 'user-session'
+      ? { authProtocolVersion: authority.authProtocolVersion }
+      : {}),
     principalType: authority.kind === 'linked-admin' ? 'control-admin' : 'user',
     ...(authority.kind === 'linked-admin'
       ? {
@@ -1156,6 +1160,9 @@ async function proxyMutationToGfsc(
     drive,
     scopes: [scope],
     ...(authority.authGeneration === undefined ? {} : { authGeneration: authority.authGeneration }),
+    ...(authority.kind === 'user-session'
+      ? { authProtocolVersion: authority.authProtocolVersion }
+      : {}),
     principalType: authority.kind === 'linked-admin' ? 'control-admin' : 'user',
     ...(authority.kind === 'linked-admin'
       ? {
@@ -1253,6 +1260,7 @@ async function proxyUploadToGfsc(
     // request.  The session generation must cross this relay boundary or a
     // valid external session is rejected as an un-fenced user token.
     authGeneration: claims.authGeneration,
+    authProtocolVersion: claims.authProtocolVersion,
     principalType: 'user',
   })
   const targetUrl = new URL(`${config.gfscWriteBaseUrl.replace(/\/+$/, '')}${gfscPath}`)

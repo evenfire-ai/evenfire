@@ -40,6 +40,12 @@ export function verifyRpcToken(token: string): RpcAccessClaims | null {
     ) {
       return null
     }
+    if (
+      payload.typ === 'user' &&
+      ((payload.authProtocolVersion !== undefined && payload.authProtocolVersion !== 2) ||
+        (config.authProtocolCutoverEnabled && payload.authProtocolVersion !== 2))
+    )
+      return null
 
     const rawTeamId = payload.teamId
     const rawAccessScope = payload.accessScope
@@ -95,6 +101,7 @@ export function verifyRpcToken(token: string): RpcAccessClaims | null {
       jti: payload.jti,
       iat: payload.iat,
       exp: payload.exp,
+      ...(payload.authProtocolVersion === 2 ? { authProtocolVersion: 2 as const } : {}),
       ...(typeof payload.service === 'string' ? { service: payload.service } : {}),
       ...(typeof payload.role === 'string' ? { role: payload.role } : {}),
     }

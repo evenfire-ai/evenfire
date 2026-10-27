@@ -10,6 +10,7 @@ if (process.env.NODE_ENV === 'production' && DEV_MODE_ENABLED) {
 }
 
 type Config = {
+  authProtocolCutoverEnabled: boolean
   port: number
   corsOrigin: string[] | '*'
   jwtPublicKey: string
@@ -209,6 +210,7 @@ function resolveRpcJwtPublicKey(): string {
 }
 
 export const config: Config = {
+  authProtocolCutoverEnabled: process.env.AUTH_PROTOCOL_CUTOVER_ENABLED === 'true',
   port: Number(process.env.RPC_PROXY_PORT || 8094),
   corsOrigin: parseCorsOrigin(
     requiredOrDevDefault('RPC_PROXY_CORS_ORIGIN', 'http://localhost:3000')

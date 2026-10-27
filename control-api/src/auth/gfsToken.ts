@@ -48,6 +48,8 @@ export interface GfsTokenClaims extends jwt.JwtPayload {
   pathBindings: GfsPathBinding[]
   /** Current users.lifecycle_version or control-admin session_version. */
   authGeneration?: number
+  /** Required for user tokens issued after the test-fleet authentication cutover. */
+  authProtocolVersion?: 2
   brokeredAuthority?: GfsBrokeredAuthority
   principalType?: 'user' | 'control-admin'
 }
@@ -95,6 +97,7 @@ export function signGfsToken(input: {
   scopes: readonly GfsScope[]
   pathBindings?: readonly GfsPathBinding[]
   authGeneration?: number
+  authProtocolVersion?: 2
   brokeredAuthority?: GfsBrokeredAuthority
   principalType?: 'user' | 'control-admin'
 }): { token: string; expiresInSeconds: number } {
@@ -104,6 +107,9 @@ export function signGfsToken(input: {
     scopes: [...input.scopes],
     pathBindings: input.pathBindings ? input.pathBindings.map(b => ({ ...b })) : [],
     ...(input.authGeneration === undefined ? {} : { authGeneration: input.authGeneration }),
+    ...(input.authProtocolVersion === undefined
+      ? {}
+      : { authProtocolVersion: input.authProtocolVersion }),
     ...(input.brokeredAuthority ? { brokeredAuthority: { ...input.brokeredAuthority } } : {}),
     ...(input.principalType ? { principalType: input.principalType } : {}),
   }
