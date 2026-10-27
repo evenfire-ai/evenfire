@@ -87,6 +87,14 @@ describe('team management delegates authorization to the Control API', () => {
         .expect(403, { error: 'You are not allowed to invite members' })
     })
 
+    it('reports a missing team without upstream details', async () => {
+      controlApiClientMock.controlApiRequest.mockRejectedValue(controlApiFailure(404))
+
+      await asRole(request(makeApp()).post('/team/members/invite'))
+        .send({ email: 'new@example.com', role: 'member' })
+        .expect(404, { error: 'Team request failed' })
+    })
+
     it('does not report a Control API outage as a refusal', async () => {
       controlApiClientMock.controlApiRequest.mockRejectedValue(controlApiFailure(503))
 
@@ -133,6 +141,24 @@ describe('team management delegates authorization to the Control API', () => {
       await asRole(request(makeApp()).patch('/team/members/user-2/role'))
         .send({ role: 'admin' })
         .expect(404, { error: 'Target member not found' })
+    })
+
+    it('reports a member removed before the role change as not found', async () => {
+      roleLookupThen(async () => {
+        throw controlApiFailure(404)
+      })
+
+      await asRole(request(makeApp()).patch('/team/members/user-2/role'))
+        .send({ role: 'admin' })
+        .expect(404, { error: 'Target member not found' })
+    })
+
+    it('reports a refused role lookup with the documented message', async () => {
+      controlApiClientMock.controlApiRequest.mockRejectedValue(controlApiFailure(403))
+
+      await asRole(request(makeApp()).patch('/team/members/user-2/role'))
+        .send({ role: 'admin' })
+        .expect(403, { error: 'You are not allowed to change roles' })
     })
 
     it('does not report a Control API outage as a missing member', async () => {
