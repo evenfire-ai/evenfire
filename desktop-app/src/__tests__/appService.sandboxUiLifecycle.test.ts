@@ -22,6 +22,8 @@ import {
 import { TokenStore } from '../tokenStore.js'
 import { FakeParentWindow, electronMocks } from './__fixtures__/sandboxUiElectronFakes.js'
 
+const electronMockState = vi.hoisted(() => ({ userDataDir: '' }))
+
 // The open/close lifecycle is exercised end to end through the REAL AppService,
 // the REAL sandbox-ui driver, the REAL session-refresh loop, the REAL plugin
 // surface pin registry and the REAL RpcProxyClient. Only the Electron runtime
@@ -35,25 +37,17 @@ const authMocks = vi.hoisted(() => ({
   health: vi.fn(),
 }))
 
-vi.mock('electron', () => ({
-  WebContentsView: electronMocks.FakeWebContentsView,
-  BrowserWindow: { getAllWindows: () => [] },
-  Notification: class {
-    static isSupported(): boolean {
-      return false
-    }
-  },
-  app: { getPath: vi.fn(() => userDataDir), isReady: () => true },
-  safeStorage: {
-    isEncryptionAvailable: vi.fn(() => false),
-    getSelectedStorageBackend: () => 'gnome_libsecret',
-    encryptString: vi.fn(),
-    decryptString: vi.fn(),
-  },
-  screen: { getDisplayMatching: electronMocks.getDisplayMatching },
-  session: { fromPartition: electronMocks.fromPartition },
-  shell: { openExternal: vi.fn() },
-}))
+vi.mock('electron', async () => {
+  const { electronModule } = await import('./__fixtures__/sandboxUiElectronFakes.js')
+  return {
+    ...electronModule,
+    app: {
+      ...electronModule.app,
+      getPath: vi.fn(() => electronMockState.userDataDir),
+      isReady: () => true,
+    },
+  }
+})
 vi.mock('../config.js', async importOriginal => {
   const validatorDirectory = await mkdtemp(path.join(tmpdir(), 'sandbox-rpc-validator-'))
   const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
@@ -248,6 +242,7 @@ beforeEach(async () => {
   authorizeUrlResponders.clear()
   vi.stubGlobal('fetch', fetchMock)
   userDataDir = await mkdtemp(path.join(tmpdir(), 'clerum-sandbox-lifecycle-'))
+  electronMockState.userDataDir = userDataDir
 })
 
 afterEach(async () => {
