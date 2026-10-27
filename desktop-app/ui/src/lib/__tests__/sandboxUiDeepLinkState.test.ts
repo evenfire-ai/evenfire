@@ -185,43 +185,75 @@ describe('pending sandbox UI deep-link state', () => {
     expect(clearSandboxUiDeepLinkProcessingOwner(null, 1)).toBeNull()
   })
 
-  it('keeps a superseded in-flight owner until that exact transaction settles', () => {
-    type Event = { kind: 'supersede' | 'settle'; linkId: number }
+  it('models accepted intent, admission, supersession, and exact settlement', () => {
+    type Event =
+      | { kind: 'confirm' | 'admit' | 'cancel' | 'settle'; linkId: number }
+      | { kind: 'user-navigation' }
     fc.assert(
       fc.property(
-        fc.integer({ min: 1, max: 100 }),
         fc.array(
-          fc.record({
-            kind: fc.constantFrom<Event['kind']>('supersede', 'settle'),
-            linkId: fc.integer({ min: 1, max: 100 }),
-          }),
+          fc.oneof(
+            fc.record({
+              kind: fc.constantFrom<'confirm' | 'admit' | 'cancel' | 'settle'>(
+                'confirm',
+                'admit',
+                'cancel',
+                'settle'
+              ),
+              linkId: fc.integer({ min: 1, max: 8 }),
+            }),
+            fc.constant({ kind: 'user-navigation' } as const)
+          ),
           { maxLength: 100 }
         ),
-        (initialOwner, events) => {
-          let actualOwner: number | null = initialOwner
-          let expectedOwner: number | null = initialOwner
-          let transactionSettled = false
+        events => {
+          // Reference behavior follows the transaction contract, not App's
+          // helper implementation: accepted intent determines eligibility;
+          // admission takes an empty owner; supersession preserves an unsettled
+          // owner's turn; and only that exact transaction can release it.
+          const pendingLinks = new Set<number>()
+          let latestIntentLinkId: number | null = null
+          let actualOwner: number | null = null
+          let expectedOwner: number | null = null
 
           for (const event of events) {
-            if (event.kind === 'supersede') {
-              const deferCancellation = isSandboxUiDeepLinkProcessingOwner(
-                actualOwner,
-                event.linkId
-              )
-              if (!deferCancellation) {
+            switch (event.kind) {
+              case 'confirm':
+                pendingLinks.add(event.linkId)
+                latestIntentLinkId = event.linkId
+                break
+              case 'user-navigation':
+                latestIntentLinkId = null
+                break
+              case 'admit':
+                if (
+                  expectedOwner === null &&
+                  pendingLinks.has(event.linkId) &&
+                  latestIntentLinkId === event.linkId
+                ) {
+                  expectedOwner = event.linkId
+                  actualOwner = event.linkId
+                }
+                break
+              case 'cancel': {
+                // A non-owner can be removed now. A canceled active link is
+                // stale but still owns its unresolved asynchronous operation.
+                const canceledOwnerIsActive =
+                  actualOwner !== null &&
+                  isSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
+                if (!canceledOwnerIsActive) {
+                  actualOwner = clearSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
+                  pendingLinks.delete(event.linkId)
+                  if (latestIntentLinkId === event.linkId) latestIntentLinkId = null
+                }
+                break
+              }
+              case 'settle':
                 actualOwner = clearSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
-              }
-              // Contract reference: intent supersession changes eligibility,
-              // never the exclusive owner of unsettled asynchronous work.
-              if (event.linkId === expectedOwner && !transactionSettled) {
-                expectedOwner = event.linkId
-              }
-            } else {
-              actualOwner = clearSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
-              if (event.linkId === expectedOwner) {
-                expectedOwner = null
-                transactionSettled = true
-              }
+                pendingLinks.delete(event.linkId)
+                if (expectedOwner === event.linkId) expectedOwner = null
+                if (latestIntentLinkId === event.linkId) latestIntentLinkId = null
+                break
             }
 
             expect(actualOwner).toBe(expectedOwner)

@@ -1154,11 +1154,15 @@ describe('App deep-link orchestration', () => {
     let activeTeamId = 'team-a'
     let releaseTeamB!: () => void
     let releaseTeamC!: () => void
+    let releaseTeamD!: () => void
     const teamBGate = new Promise<void>(resolve => {
       releaseTeamB = resolve
     })
     const teamCGate = new Promise<void>(resolve => {
       releaseTeamC = resolve
+    })
+    const teamDGate = new Promise<void>(resolve => {
+      releaseTeamD = resolve
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
       | ((teamId: string) => Promise<unknown>)
@@ -1179,6 +1183,7 @@ describe('App deep-link orchestration', () => {
     handle.switchTeam.mockImplementation(async teamId => {
       if (teamId === 'team-b') await teamBGate
       if (teamId === 'team-c') await teamCGate
+      if (teamId === 'team-d') await teamDGate
       activeTeamId = teamId
       return switchTeamProducer(teamId)
     })
@@ -1281,6 +1286,51 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(2)
     expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkAtoB.id)
     expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkBtoC.id)
+
+    // A real user tab selection supersedes a pending app link while the real
+    // controller's team switch is held. When it settles, the stale link must
+    // not list or launch its target and must not steal the selected tab.
+    const userChatTab = getController().workspaceTabs.tabs.find(tab => tab.kind === 'chat')
+    if (!userChatTab) throw new Error('the authenticated workspace has no chat tab to select')
+    const listAppsBeforeUserSelection = listApps.mock.calls.length
+    const opensBeforeUserSelection = openSandboxUi().mock.calls.length
+    const linkCtoDTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-d',
+        path: '/linked-d',
+        teamId: 'team-d',
+      })
+    )
+    if (!linkCtoDTarget) throw new Error('the production parser rejected the Team D link')
+    const linkCtoD = queue.enqueue(linkCtoDTarget)
+    act(() => emitDeepLink?.(linkCtoD))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenCalledWith('team-d'))
+    await waitFor(() => expect(main.live()).toBeNull())
+
+    act(() => {
+      expect(getController().selectWorkspaceTabById(userChatTab.id)).toBe(true)
+    })
+    await waitFor(() => expect(getController().workspaceTabs.activeTabId).toBe(userChatTab.id))
+    await act(async () => {
+      releaseTeamD()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-d'))
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(linkCtoD.id))
+    await waitFor(() =>
+      expect(listApps.mock.calls.length).toBeGreaterThan(listAppsBeforeUserSelection)
+    )
+
+    // One list is the normal authenticated-team refresh. The stale link's
+    // post-switch continuation is fenced before its own listApps request.
+    expect(listApps.mock.calls.length).toBe(listAppsBeforeUserSelection + 1)
+    expect(openSandboxUi().mock.calls).toHaveLength(opensBeforeUserSelection)
+    expect(getController().workspaceTabs.activeTabId).toBe(userChatTab.id)
+    expect(activeWorkspaceTab(getController().workspaceTabs)).toMatchObject({ kind: 'chat' })
+    expect(main.live()).toBeNull()
+    expect(embedState().owner).toBeNull()
     queryClient.clear()
   })
 
