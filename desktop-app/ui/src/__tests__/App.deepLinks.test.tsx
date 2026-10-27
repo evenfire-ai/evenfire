@@ -1369,7 +1369,6 @@ describe('App deep-link orchestration', () => {
     if (!linkDtoETarget) throw new Error('the production parser rejected the Team E link')
     const switchesBeforeFailedE = handle.switchTeam.mock.calls.length
     const opensBeforeFailedE = openSandboxUi().mock.calls.length
-    const listsBeforeFailedE = listApps.mock.calls.length
     main.failNextOpen(new Error('Team E native app failed to open'))
     const linkDtoE = queue.enqueue(linkDtoETarget)
     act(() => emitDeepLink?.(linkDtoE))
