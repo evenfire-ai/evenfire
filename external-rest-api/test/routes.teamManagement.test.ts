@@ -260,4 +260,38 @@ describe('team management delegates authorization to the Control API', () => {
       })
     }
   })
+
+  describe('member ids in Control API paths', () => {
+    const memberId = '..%2F..%2Fusers%2Fuser-3'
+
+    it('keeps a member id inside its path segment on removal', async () => {
+      controlApiClientMock.controlApiRequest.mockResolvedValue({ user_id: 'user-3' })
+
+      await asRole(request(makeApp()).delete(`/team/members/${memberId}`)).expect(200)
+
+      expect(controlApiClientMock.controlApiRequest).toHaveBeenCalledWith(
+        'DELETE',
+        '/external/teams/team-1/members/..%2F..%2Fusers%2Fuser-3',
+        expect.anything()
+      )
+    })
+
+    it('keeps a member id inside its path segment on role change', async () => {
+      controlApiClientMock.controlApiRequest.mockImplementation(async (method: string) =>
+        method === 'GET' ? { role: 'member' } : { role: 'inviter' }
+      )
+
+      await asRole(request(makeApp()).patch(`/team/members/${memberId}/role`))
+        .send({ role: 'inviter' })
+        .expect(200)
+
+      for (const method of ['GET', 'PATCH']) {
+        expect(controlApiClientMock.controlApiRequest).toHaveBeenCalledWith(
+          method,
+          '/external/teams/team-1/members/..%2F..%2Fusers%2Fuser-3/role',
+          expect.anything()
+        )
+      }
+    })
+  })
 })
