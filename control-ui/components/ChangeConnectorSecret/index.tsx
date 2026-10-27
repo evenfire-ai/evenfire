@@ -130,7 +130,7 @@ export function ChangeConnectorSecret({
       description="Choose reusable credentials and map stored keys. This changes only this connector’s assignment."
     >
       {confirmDialog}
-      <form className="cu-connector-credentials-form cu-form-stack--wide" onSubmit={submit}>
+      <form className="cu-connector-credentials-form cu-secret-assignment-form" onSubmit={submit}>
         <p>
           Currently assigned: <code>{reference.name}</code>
         </p>

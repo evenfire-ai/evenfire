@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useRef, useState } from 'react'
-import { DataTable, TableViewport } from '@clerum/frontend-components'
+import { DataTable, SimpleEditDialog, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
@@ -77,6 +77,7 @@ export function UpdateConnectorCredentials({
   surface = 'rotate',
   recipeOwned = false,
   registryCredentialSource,
+  perKeyEditing = false,
   onBusyChange,
 }: UpdateConnectorCredentialsProps) {
   const { showToast } = useToast()
@@ -86,6 +87,8 @@ export function UpdateConnectorCredentials({
   busyCallback.current = onBusyChange
   const [confirming, setConfirming] = useState(false)
   const confirmLock = useRef(false)
+  const writeLock = useRef(false)
+  const [editingKey, setEditingKey] = useState<string | null>(null)
   const [draft, setDraft] = useState<CredentialMap>(emptyCredentialMap)
   const [validationError, setValidationError] = useState('')
   // The secretKeys the last submit rejected. Drives per-input `aria-invalid` /
@@ -172,9 +175,11 @@ export function UpdateConnectorCredentials({
   }, [registryCredentialSource])
 
   useEffect(() => {
-    busyCallback.current?.(confirming || phase === 'saving' || phase === 'rotating')
+    busyCallback.current?.(
+      editingKey !== null || confirming || phase === 'saving' || phase === 'rotating'
+    )
     return () => busyCallback.current?.(false)
-  }, [confirming, phase])
+  }, [editingKey, confirming, phase])
 
   // "The Secret is missing and this screen would have to create it." Two
   // sources feed it, and `secretCreated` gates BOTH — not just the `surface`
@@ -233,12 +238,14 @@ export function UpdateConnectorCredentials({
     if (target instanceof HTMLElement) target.focus()
   }
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (confirmLock.current || phase === 'saving' || phase === 'rotating') return
+  async function handleSubmit(event?: React.FormEvent<HTMLFormElement>) {
+    event?.preventDefault()
+    if (writeLock.current || confirmLock.current || phase === 'saving' || phase === 'rotating')
+      return
 
     const data = emptyCredentialMap()
     for (const key of envSecret!.keys) {
+      if (editingKey !== null && key.secretKey !== editingKey) continue
       const value = ownCredentialValue(draft, key.secretKey)
       if (typeof value === 'string' && value.trim() !== '') data[key.secretKey] = value
     }
@@ -264,23 +271,26 @@ export function UpdateConnectorCredentials({
 
     confirmLock.current = true
     setConfirming(true)
-    const confirmed = await confirm(
-      mode === 'set'
-        ? {
-            title: 'Set credentials',
-            message: `This creates Secret "${envSecret!.name}" and starts ${serverName}.`,
-            confirmLabel: 'Set & start',
-          }
-        : {
-            title: 'Rotate credentials',
-            message: buildConfirmMessage(envSecret!.name, previewAffected),
-            confirmLabel: 'Rotate & restart',
-            tone: 'danger',
-          }
-    )
+    const confirmed =
+      editingKey !== null ||
+      (await confirm(
+        mode === 'set'
+          ? {
+              title: 'Set credentials',
+              message: `This creates Secret "${envSecret!.name}" and starts ${serverName}.`,
+              confirmLabel: 'Set & start',
+            }
+          : {
+              title: 'Rotate credentials',
+              message: buildConfirmMessage(envSecret!.name, previewAffected),
+              confirmLabel: 'Rotate & restart',
+              tone: 'danger',
+            }
+      ))
     confirmLock.current = false
     setConfirming(false)
     if (!confirmed) return
+    writeLock.current = true
 
     // Captured BEFORE the PUT fires — the correlation anchor the poll below
     // uses to tell "this rotation's" DeploymentReady from a stale prior one.
@@ -324,6 +334,7 @@ export function UpdateConnectorCredentials({
             setRecreateRequired(true)
             setSecretCreated(false)
             setPhase('idle')
+            setEditingKey(null)
             setValidationError('This Secret no longer exists. Enter every key to recreate it.')
             return
           }
@@ -331,6 +342,7 @@ export function UpdateConnectorCredentials({
         }
       }
       setDraft(emptyCredentialMap())
+      setEditingKey(null)
       setRotationCutoff(cutoff)
       setPhase('rotating')
     } catch (e) {
@@ -339,6 +351,8 @@ export function UpdateConnectorCredentials({
       showToast(mode === 'set' ? 'Failed to set credentials.' : 'Failed to rotate credentials.', {
         tone: 'error',
       })
+    } finally {
+      writeLock.current = false
     }
   }
 
@@ -374,6 +388,11 @@ export function UpdateConnectorCredentials({
             This connector needs credentials before it can start. Values are write-only — this
             screen never shows a stored credential, only key names.
           </>
+        ) : perKeyEditing ? (
+          <>
+            Rotate a key to replace its value in Secret <code>{envSecret.name}</code>. Existing
+            values are never displayed.
+          </>
         ) : (
           <>
             Rotate values stored in Secret <code>{envSecret.name}</code>. Values are write-only —
@@ -384,12 +403,49 @@ export function UpdateConnectorCredentials({
     >
       {confirmDialog}
 
+      <SimpleEditDialog
+        open={editingKey !== null && mode === 'rotate'}
+        title={`Rotate ${editingKey === null ? 'credential' : (ownCredentialValue(credentialLabels, editingKey) ?? editingKey)}`}
+        description={buildConfirmMessage(envSecret.name, previewAffected)}
+        pending={phase === 'saving'}
+        error={validationError || (phase === 'failed' ? phaseMessage : undefined)}
+        isDirty={editingKey !== null && Boolean(ownCredentialValue(draft, editingKey))}
+        isValid={editingKey !== null && Boolean(ownCredentialValue(draft, editingKey)?.trim())}
+        saveLabel="Rotate"
+        onCancel={() => {
+          if (writeLock.current) return
+          setEditingKey(null)
+          setDraft(emptyCredentialMap())
+          setValidationError('')
+          resetToIdle()
+        }}
+        onSave={() => void handleSubmit()}
+      >
+        {editingKey !== null ? (
+          <Field label="New value" htmlFor={inputId(editingKey)} required>
+            <TextInput
+              id={inputId(editingKey)}
+              type="password"
+              autoComplete="new-password"
+              placeholder="Enter new value"
+              value={ownCredentialValue(draft, editingKey) ?? ''}
+              onChange={event => updateField(editingKey, event.target.value)}
+              disabled={phase === 'saving'}
+              required
+            />
+          </Field>
+        ) : null}
+      </SimpleEditDialog>
+
       <TableViewport className="cu-table-wrap">
-        <DataTable className="eft-table cu-table">
+        <DataTable className="eft-table cu-table cu-credential-key-table">
           <thead>
             <tr>
               <th>Secret key</th>
               <th>Env var</th>
+              {perKeyEditing && mode === 'rotate' ? (
+                <th className="cu-table__cell-actions">Actions</th>
+              ) : null}
             </tr>
           </thead>
           <tbody>
@@ -401,6 +457,24 @@ export function UpdateConnectorCredentials({
                 <td>
                   <code>{k.envVar}</code>
                 </td>
+                {perKeyEditing && mode === 'rotate' ? (
+                  <td className="cu-table__cell-actions">
+                    <Button
+                      size="sm"
+                      aria-label={`Rotate ${ownCredentialValue(credentialLabels, k.secretKey) ?? k.secretKey}`}
+                      disabled={busy}
+                      onClick={() => {
+                        resetToIdle()
+                        setValidationError('')
+                        setInvalidKeys([])
+                        setDraft(emptyCredentialMap())
+                        setEditingKey(k.secretKey)
+                      }}
+                    >
+                      Rotate
+                    </Button>
+                  </td>
+                ) : null}
               </tr>
             ))}
           </tbody>
@@ -412,38 +486,43 @@ export function UpdateConnectorCredentials({
           NAMES the missing keys. The `required` attributes below are kept for
           their programmatic semantics. */}
       <form
-        className="cu-connector-credentials-form cu-form-stack"
+        className={
+          perKeyEditing && mode === 'rotate'
+            ? 'cu-connector-credentials-status'
+            : 'cu-connector-credentials-form cu-form-stack'
+        }
         onSubmit={handleSubmit}
         noValidate
       >
-        {envSecret.keys.map(k => {
-          const isInvalid = invalidKeys.includes(k.secretKey)
-          return (
-            <Field
-              key={k.secretKey}
-              htmlFor={inputId(k.secretKey)}
-              label={ownCredentialValue(credentialLabels, k.secretKey) ?? k.secretKey}
-              required={mode === 'set'}
-            >
-              <TextInput
-                id={inputId(k.secretKey)}
-                type="password"
-                autoComplete="new-password"
-                placeholder={mode === 'set' ? 'Required' : 'Leave blank to keep current value'}
-                value={ownCredentialValue(draft, k.secretKey) ?? ''}
-                onChange={e => updateField(k.secretKey, e.target.value)}
-                disabled={busy}
+        {(!perKeyEditing || mode === 'set') &&
+          envSecret.keys.map(k => {
+            const isInvalid = invalidKeys.includes(k.secretKey)
+            return (
+              <Field
+                key={k.secretKey}
+                htmlFor={inputId(k.secretKey)}
+                label={ownCredentialValue(credentialLabels, k.secretKey) ?? k.secretKey}
                 required={mode === 'set'}
-                aria-required={mode === 'set' || undefined}
-                invalid={isInvalid}
-                aria-invalid={isInvalid || undefined}
-                aria-describedby={isInvalid ? VALIDATION_ERROR_ID : undefined}
-              />
-            </Field>
-          )
-        })}
+              >
+                <TextInput
+                  id={inputId(k.secretKey)}
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={mode === 'set' ? 'Required' : 'Leave blank to keep current value'}
+                  value={ownCredentialValue(draft, k.secretKey) ?? ''}
+                  onChange={e => updateField(k.secretKey, e.target.value)}
+                  disabled={busy}
+                  required={mode === 'set'}
+                  aria-required={mode === 'set' || undefined}
+                  invalid={isInvalid}
+                  aria-invalid={isInvalid || undefined}
+                  aria-describedby={isInvalid ? VALIDATION_ERROR_ID : undefined}
+                />
+              </Field>
+            )
+          })}
 
-        {validationError ? (
+        {validationError && editingKey === null ? (
           <div className="cu-banner cu-banner--error" role="alert" id={VALIDATION_ERROR_ID}>
             {validationError}
           </div>
@@ -467,7 +546,7 @@ export function UpdateConnectorCredentials({
           </div>
         ) : null}
 
-        {phase === 'failed' ? (
+        {phase === 'failed' && editingKey === null ? (
           <div className="cu-banner cu-banner--error" role="alert">
             {submittedMode === 'set'
               ? `Could not set credentials: ${phaseMessage}`
@@ -484,29 +563,31 @@ export function UpdateConnectorCredentials({
           </div>
         ) : null}
 
-        <div className="cu-create-actions">
-          {phase === 'success' || phase === 'failed' || phase === 'timeout' ? (
-            <Button type="button" onClick={resetToIdle}>
-              {phase === 'success'
-                ? 'Done'
-                : submittedMode === 'set'
-                  ? 'Try again'
-                  : 'Rotate again'}
-            </Button>
-          ) : (
-            <Button type="submit" variant="primary" disabled={busy}>
-              {phase === 'saving'
-                ? 'Saving…'
-                : phase === 'rotating'
-                  ? submittedMode === 'set'
-                    ? 'Starting…'
-                    : 'Rotating…'
-                  : mode === 'set'
-                    ? 'Set credentials'
-                    : 'Rotate credentials'}
-            </Button>
-          )}
-        </div>
+        {!perKeyEditing || mode === 'set' ? (
+          <div className="cu-create-actions">
+            {phase === 'success' || phase === 'failed' || phase === 'timeout' ? (
+              <Button type="button" onClick={resetToIdle}>
+                {phase === 'success'
+                  ? 'Done'
+                  : submittedMode === 'set'
+                    ? 'Try again'
+                    : 'Rotate again'}
+              </Button>
+            ) : (
+              <Button type="submit" variant="primary" disabled={busy}>
+                {phase === 'saving'
+                  ? 'Saving…'
+                  : phase === 'rotating'
+                    ? submittedMode === 'set'
+                      ? 'Starting…'
+                      : 'Rotating…'
+                    : mode === 'set'
+                      ? 'Set credentials'
+                      : 'Rotate credentials'}
+              </Button>
+            )}
+          </div>
+        ) : null}
       </form>
     </FormSection>
   )

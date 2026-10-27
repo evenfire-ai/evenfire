@@ -107,7 +107,7 @@ describe('ExistingConnectorSecretFields — metadata loading', () => {
   it('reloads metadata on demand through the explicit refresh control', async () => {
     renderFields()
     await waitFor(() => expect(screen.getByLabelText(/^Existing Secret/)).toBeEnabled())
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Secrets' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh secrets' }))
     await waitFor(() => expect(mockListMcpSecrets).toHaveBeenCalledTimes(2))
   })
 })
@@ -171,7 +171,7 @@ describe('ExistingConnectorSecretFields — reference-only key mapping', () => {
     mockListMcpSecrets.mockResolvedValue({
       items: [{ ...SECRET_A, keys: ['replacement-key'] }],
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Secrets' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh secrets' }))
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent('not stored in the selected Secret')
     )

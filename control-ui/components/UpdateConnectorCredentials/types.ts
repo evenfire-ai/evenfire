@@ -45,6 +45,8 @@ export type UpdateConnectorCredentialsProps = {
   recipeOwned?: boolean
   /** Marketplace source used to resolve operator-friendly credential labels. */
   registryCredentialSource?: RegistryCredentialSource
+  /** Installed connector view: open a value editor from each mapped key's Rotate action. */
+  perKeyEditing?: boolean
   onBusyChange?: (busy: boolean) => void
 }
 

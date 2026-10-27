@@ -163,6 +163,23 @@ export function suggestedCredentialEnvVar(key: string): string {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : ''
 }
 
+/** Mirrors the rotate route's key rule (control-api `invalidSecretDataKeyReason`):
+ *  Kubernetes Secret key names, up to 253 chars, never `.` or a `..` prefix.
+ *  Shared by attach validation and the add-key editor so the two cannot drift. */
+export function invalidSecretKeyNameReason(key: string): string | undefined {
+  const trimmed = key.trim()
+  if (!trimmed) return 'Enter a Secret key name.'
+  if (
+    !/^[-._a-zA-Z0-9]+$/.test(trimmed) ||
+    trimmed.length > 253 ||
+    trimmed === '.' ||
+    trimmed.startsWith('..')
+  ) {
+    return 'Enter a valid Secret key (letters, numbers, -, _, or .; not . or a .. prefix; up to 253 characters).'
+  }
+  return undefined
+}
+
 export function validateCredentialAttach(
   mode: AttachMode,
   secretName: string,
@@ -213,12 +230,9 @@ export function validateCredentialAttach(
         }
       }
     }
-    if (!/^[-._a-zA-Z0-9]+$/.test(key) || key.length > 253 || key === '.' || key.startsWith('..')) {
-      return {
-        message:
-          'Enter a valid Secret key (letters, numbers, -, _, or .; not . or a .. prefix; up to 253 characters).',
-        field: `${row.id}-key`,
-      }
+    const keyProblem = invalidSecretKeyNameReason(key)
+    if (keyProblem) {
+      return { message: keyProblem, field: `${row.id}-key` }
     }
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(env) || CREDENTIAL_FORBIDDEN_ENV.has(env.toUpperCase())) {
       return {

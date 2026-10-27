@@ -150,10 +150,12 @@ async function submitPartialRotateAndGet404() {
       status: 404,
     })
   )
-  fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'partial-value' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
-  const dialog = await screen.findByRole('alertdialog')
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate & restart' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Rotate api-key' }))
+  const dialog = screen.getByRole('dialog', { name: 'Rotate api-key' })
+  fireEvent.change(within(dialog).getByLabelText('New value', { exact: false }), {
+    target: { value: 'partial-value' },
+  })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate', exact: true }))
 }
 
 /** Invariant O2 at the page level: explanation only. */
@@ -293,7 +295,7 @@ describe('EditMcpServerPage — ownership survives a late 404 for every status s
 
       // It starts as an ordinary rotate form: nothing observable says the
       // Secret is missing, so the resolver can only answer 'rotate'.
-      expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
 
       await submitPartialRotateAndGet404()
 
@@ -309,7 +311,7 @@ describe('EditMcpServerPage — ownership survives a late 404 for every status s
     it(`still recovers a managed:true connector into the create form — ${shape.name}`, async () => {
       await renderPage(mcpServer({ managed: true, status: shape.status }))
 
-      expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
 
       await submitPartialRotateAndGet404()
 
@@ -364,9 +366,9 @@ describe('EditMcpServerPage — credential surface wiring', () => {
       })
     )
 
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
-    expect(screen.getByText(/Rotate values stored in Secret/i)).toBeInTheDocument()
+    expect(screen.getByText(/Rotate a key to replace its value in Secret/i)).toBeInTheDocument()
   })
 
   it('renders the recipe explanation, and no form, for an unmanaged connector with a missing Secret', async () => {
@@ -407,7 +409,7 @@ describe('EditMcpServerPage — credential surface wiring', () => {
     )
 
     // The stale SecretNotFound and the DeploymentReady noise must both lose.
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
   })
 
@@ -495,7 +497,7 @@ describe('EditMcpServerPage — credential surface wiring', () => {
       })
     )
 
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
   })
 })
@@ -577,13 +579,13 @@ describe('EditMcpServerPage — Change assigned Secret', () => {
     await renderPage(eligibleServer())
     expect(screen.getByRole('button', { name: 'Change assigned Secret' })).toBeInTheDocument()
     // Value rotation keeps its separate surface on the same tab.
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
   })
 
   it('hides reassignment when the WorkflowRecipe owns the credentials', async () => {
     await renderPage(mcpServer({ managed: false, status: { conditions: [] } }))
     expect(screen.queryByRole('button', { name: 'Change assigned Secret' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
   })
 
   it('returns focus to the trigger after the change flow is cancelled', async () => {
@@ -637,10 +639,60 @@ describe('EditMcpServerPage — Change assigned Secret', () => {
     // Leaving releases the panel and reloads the connector's new reference.
     mockGetMcpServer.mockResolvedValue(reassignedServer())
     fireEvent.click(screen.getByRole('button', { name: 'Check credentials later' }))
-    const currentAssignment = await screen.findByText(/Current Secret:/)
+    const currentAssignment = await screen.findByRole('group', { name: 'Current Secret' })
     expect(currentAssignment.textContent).toContain(OTHER_SECRET.name)
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Change assigned Secret' })).toHaveFocus()
     )
+  })
+})
+
+describe('Installed connector credential row editing', () => {
+  it('shows a Rotate action per credential with no idle inputs or aggregate rotate button', async () => {
+    await renderPage(mcpServer({ status: { conditions: [] } }))
+    const panel = credentialPanel()
+    expect(within(panel).getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: 'Rotate workspace-id' })).toBeInTheDocument()
+    expect(panel.querySelector('input')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Add key' })).toBeNull()
+    expect(within(panel).getByRole('columnheader', { name: 'Secret key' })).toBeInTheDocument()
+    expect(within(panel).getByRole('columnheader', { name: 'Env var' })).toBeInTheDocument()
+  })
+
+  it('opens a blank masked editor and discards the draft on cancel', async () => {
+    await renderPage(mcpServer({ status: { conditions: [] } }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate workspace-id' }))
+    const dialog = screen.getByRole('dialog', { name: 'Rotate workspace-id' })
+    const input = within(dialog).getByLabelText('New value', { exact: false })
+    expect(input).toHaveAttribute('type', 'password')
+    expect(input).toHaveValue('')
+    expect(within(dialog).getByRole('button', { name: 'Rotate', exact: true })).toBeDisabled()
+    fireEvent.change(input, { target: { value: 'unsaved' } })
+    expect(screen.getByRole('button', { name: 'Change assigned Secret' })).toBeDisabled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate workspace-id' }))
+    expect(screen.getByLabelText('New value', { exact: false })).toHaveValue('')
+  })
+
+  it('saves only the selected value and keeps the dialog draft after failure', async () => {
+    mockUpdateMcpSecret.mockRejectedValueOnce(new Error('Update unavailable'))
+    await renderPage(mcpServer({ status: { conditions: [] } }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate workspace-id' }))
+    const dialog = screen.getByRole('dialog', { name: 'Rotate workspace-id' })
+    fireEvent.change(within(dialog).getByLabelText('New value', { exact: false }), {
+      target: { value: '  next-value  ' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate', exact: true }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Update unavailable'))
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith(SECRET_NAME, {
+      'workspace-id': '  next-value  ',
+    })
+    expect(within(dialog).getByLabelText('New value', { exact: false })).toHaveValue(
+      '  next-value  '
+    )
+    expect(screen.queryByRole('alertdialog')).toBeNull()
   })
 })

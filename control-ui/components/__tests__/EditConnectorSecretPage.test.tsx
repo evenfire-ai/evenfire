@@ -12,14 +12,13 @@ import {
   getRegistryCredentialSchema,
   listMcpSecrets,
   updateMcpSecret,
+  updateMcpServer,
 } from '../../lib/api'
 import { buildMcpServerReference } from '../../test/fixtures/mcpServer'
 
-// These tests prove the PAGE wiring: the rotation form, its rollout
-// verification, and the 404→recreate latch all belong to the shared
-// UpdateConnectorCredentials component (covered by its own suite). Here we
-// assert that the secrets-page route lands the operator on that exact
-// component, bound to a connector that actually references the Secret.
+// Exercise the Secrets page against names-only Secret metadata. Stored keys
+// and connector mappings have separate ownership; rotation verifies rollout
+// only for a mapped key on the selected connector.
 
 const navigation = vi.hoisted(() => ({
   params: { name: 'linear-credentials' },
@@ -48,6 +47,7 @@ vi.mock('../../lib/api', () => ({
   getRegistryCredentialSchema: vi.fn(),
   listMcpSecrets: vi.fn(),
   updateMcpSecret: vi.fn(),
+  updateMcpServer: vi.fn(),
 }))
 
 const mockCreateMcpSecret = vi.mocked(createMcpSecret)
@@ -56,6 +56,7 @@ const mockGetMcpServers = vi.mocked(getMcpServers)
 const mockGetRegistryCredentialSchema = vi.mocked(getRegistryCredentialSchema)
 const mockListMcpSecrets = vi.mocked(listMcpSecrets)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
+const mockUpdateMcpServer = vi.mocked(updateMcpServer)
 
 function server(options: {
   name: string
@@ -63,7 +64,7 @@ function server(options: {
   secretKey?: string
   envVar?: string
 }) {
-  return buildMcpServerReference({
+  const resource = buildMcpServerReference({
     ...options,
     secretName: options.secretName ?? 'linear-credentials',
     annotations: {
@@ -71,6 +72,15 @@ function server(options: {
       'clerum.io/catalog-version': '1.4.0',
     },
   })
+  return {
+    ...resource,
+    metadata: {
+      ...resource.metadata,
+      uid: `uid-${options.name}`,
+      resourceVersion: '10',
+      generation: 1,
+    },
+  }
 }
 
 /** Drains chained microtasks without real timers — same contract as the
@@ -95,11 +105,13 @@ async function renderPage() {
   await flush(6)
 }
 
-async function submitRotation(label: string, value: string) {
-  fireEvent.change(screen.getByLabelText(label), { target: { value } })
-  fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
-  const dialog = screen.getByRole('alertdialog')
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate & restart' }))
+async function submitRotation(key: string, value: string) {
+  fireEvent.click(screen.getByRole('button', { name: `Rotate ${key}` }))
+  const dialog = screen.getByRole('dialog', { name: `Rotate ${key}` })
+  fireEvent.change(within(dialog).getByLabelText('New value', { exact: false }), {
+    target: { value },
+  })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate', exact: true }))
   await flush()
 }
 
@@ -115,29 +127,44 @@ beforeEach(() => {
     authType: 'api-key',
     keys: [{ name: 'api-key', label: 'API token', kind: 'api-key' }],
   })
-  mockGetMcpServer.mockResolvedValue({
-    metadata: { name: 'linear-conn' },
+  let currentServer = {
+    ...server({ name: 'linear-conn' }),
     status: {
       conditions: [
         {
           type: 'DeploymentReady',
-          status: 'True',
+          status: 'True' as const,
           reason: 'RolloutComplete',
           message: 'ready',
           lastTransitionTime: '2026-01-01T00:00:05.000Z',
+          observedGeneration: 1,
         },
       ],
     },
+  }
+  let storedKeys = ['api-key', 'refresh-token']
+  mockGetMcpServer.mockImplementation(async () => currentServer)
+  mockUpdateMcpServer.mockImplementation(async (_name, payload) => {
+    currentServer = {
+      ...currentServer,
+      spec: payload.spec,
+      metadata: { ...currentServer.metadata, resourceVersion: '11', generation: 2 },
+      status: { conditions: [{ ...currentServer.status.conditions[0], observedGeneration: 2 }] },
+    }
+    return currentServer
   })
-  mockUpdateMcpSecret.mockResolvedValue({
-    name: 'linear-credentials',
-    namespace: 'mcp-server',
-    keys: ['api-key'],
-    affectedConnectors: ['linear-conn'],
+  mockUpdateMcpSecret.mockImplementation(async (_name, data) => {
+    storedKeys = [...new Set([...storedKeys, ...Object.keys(data)])]
+    return {
+      name: 'linear-credentials',
+      namespace: 'mcp-server',
+      keys: storedKeys,
+      affectedConnectors: ['linear-conn'],
+    }
   })
-  mockListMcpSecrets.mockResolvedValue({
-    items: [{ name: 'linear-credentials', keys: ['api-key', 'refresh-token'] }],
-  })
+  mockListMcpSecrets.mockImplementation(async () => ({
+    items: [{ name: 'linear-credentials', keys: storedKeys }],
+  }))
 })
 
 afterEach(() => {
@@ -147,38 +174,36 @@ afterEach(() => {
 })
 
 describe('EditConnectorSecretPage', () => {
-  it('renders the shared rotation form for the single connector referencing the secret', async () => {
+  it('lists every stored key in separate key and environment columns without idle inputs', async () => {
     await renderPage()
 
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
-    // registryCredentialSource is derived from the connector's catalog
-    // annotations — the schema label proves it reached the shared component.
-    expect(screen.getByLabelText('API token')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Secret key' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /Environment variable/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate refresh-token' })).toBeInTheDocument()
     expect(screen.getByText('LINEAR_API_KEY')).toBeInTheDocument()
-    // Single connector: no chooser.
+    expect(screen.getByText('Not mapped')).toBeInTheDocument()
+    expect(document.querySelector('input')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).toBeNull()
     expect(screen.queryByRole('tablist', { name: 'Connectors referencing this secret' })).toBeNull()
   })
 
-  it('rotates through the shared flow and waits for the connector rollout before declaring success', async () => {
+  it('rotates only the chosen key and verifies the mapped connector rollout', async () => {
     await renderPage()
-
-    await submitRotation('API token', 'rotated')
+    await submitRotation('api-key', '  rotated  ')
 
     expect(mockUpdateMcpSecret).toHaveBeenCalledWith('linear-credentials', {
-      'api-key': 'rotated',
+      'api-key': '  rotated  ',
     })
-    // Success is derived from the connector's own fresh DeploymentReady, not
-    // the PUT's 200 — the banner only appears after the poll observes it.
-    expect(screen.getByText(/Rotating credentials/i)).toBeInTheDocument()
-    expect(screen.queryByText(/Credentials rotated/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByText(/Value saved. Waiting for linear-conn/)).toBeInTheDocument()
+    expect(screen.queryByText(/restarted and is serving/)).not.toBeInTheDocument()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
     })
     expect(
-      screen.getByText(
-        /Credentials rotated\. linear-conn restarted and is serving the new credential\./i
-      )
+      screen.getByText(/linear-conn restarted and is serving the new credential/)
     ).toBeInTheDocument()
   })
 
@@ -218,14 +243,17 @@ describe('EditConnectorSecretPage', () => {
     )
     await renderPage()
 
-    await submitRotation('API token', 'rotated')
+    await submitRotation('api-key', 'rotated')
 
-    expect(screen.getByText(/This Secret no longer exists\./)).toBeInTheDocument()
+    // The missing Secret returns to the existing recovery flow without creating it.
     expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
     expect(mockCreateMcpSecret).not.toHaveBeenCalled()
   })
 
   it('offers a connector chooser when several connectors reference the secret', async () => {
+    mockListMcpSecrets.mockResolvedValue({
+      items: [{ name: 'linear-credentials', keys: ['api-key', 'refresh-token', 'alpha-key'] }],
+    })
     mockGetMcpServers.mockResolvedValue({
       items: [
         server({ name: 'linear-conn' }),
@@ -255,7 +283,7 @@ describe('EditConnectorSecretPage', () => {
     cleanup()
     await renderPage()
     expect(screen.getByText('LINEAR_API_KEY')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
   })
 
   it.each([
@@ -291,68 +319,120 @@ describe('EditConnectorSecretPage', () => {
     expect(mockCreateMcpSecret).not.toHaveBeenCalled()
   })
 
-  it('rotates values directly when no connector references the secret yet', async () => {
-    mockGetMcpServers.mockResolvedValue({ items: [] })
+  it('rotates an unmapped key without waiting for an unrelated connector restart', async () => {
     await renderPage()
-
-    expect(screen.getByText('Rotate stored values')).toBeInTheDocument()
-    expect(screen.getByText(/No connector references this Secret yet/i)).toBeInTheDocument()
-    expect(screen.getByLabelText('api-key')).toBeInTheDocument()
-    expect(screen.getByLabelText('refresh-token')).toBeInTheDocument()
-
-    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'new-token' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-    await flush()
-
+    await submitRotation('refresh-token', 'next-token')
     expect(mockUpdateMcpSecret).toHaveBeenCalledWith('linear-credentials', {
-      'api-key': 'new-token',
+      'refresh-token': 'next-token',
     })
-    expect(navigation.push).toHaveBeenCalledWith('/secrets/connector')
+    expect(screen.queryByText(/Waiting for/)).toBeNull()
+    expect(mockGetMcpServer).not.toHaveBeenCalled()
+    expect(navigation.push).not.toHaveBeenCalled()
   })
 
-  it('adds new keys to the secret through the direct rotation merge', async () => {
+  it('rotates stored keys when no connector references the Secret', async () => {
     mockGetMcpServers.mockResolvedValue({ items: [] })
     await renderPage()
+    await submitRotation('api-key', 'next-value')
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith('linear-credentials', {
+      'api-key': 'next-value',
+    })
+    expect(screen.getByText('No connector currently uses this Secret.')).toBeInTheDocument()
+    expect(mockGetMcpServer).not.toHaveBeenCalled()
+  })
 
+  it('adds a key, retains it in the list and reloads it from stored metadata', async () => {
+    await renderPage()
     fireEvent.click(screen.getByRole('button', { name: 'Add key' }))
-    fireEvent.change(screen.getByLabelText('New key name 1'), {
+    const dialog = screen.getByRole('dialog', { name: 'Add key' })
+    fireEvent.change(within(dialog).getByLabelText('Key name', { exact: false }), {
       target: { value: 'webhook-secret' },
     })
-    fireEvent.change(screen.getByLabelText('New key value 1'), { target: { value: 'whv-1' } })
-    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'new-token' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(within(dialog).getByLabelText('Environment variable', { exact: false })).toHaveValue(
+      'WEBHOOK_SECRET'
+    )
+    fireEvent.change(within(dialog).getByLabelText('Value', { exact: false }), {
+      target: { value: 'whv-1' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add key' }))
     await flush()
-
     expect(mockUpdateMcpSecret).toHaveBeenCalledWith('linear-credentials', {
-      'api-key': 'new-token',
       'webhook-secret': 'whv-1',
     })
-    expect(navigation.push).toHaveBeenCalledWith('/secrets/connector')
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Rotate webhook-secret' })).toBeInTheDocument()
+    expect(screen.getByText(/Waiting for linear-conn/)).toBeInTheDocument()
+    expect(mockUpdateMcpServer).toHaveBeenCalledWith('linear-conn', {
+      metadata: { uid: 'uid-linear-conn', resourceVersion: '10' },
+      spec: {
+        ...server({ name: 'linear-conn' }).spec,
+        envSecret: {
+          name: 'linear-credentials',
+          keys: [
+            { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
+            { secretKey: 'webhook-secret', envVar: 'WEBHOOK_SECRET' },
+          ],
+        },
+      },
+    })
+    expect(screen.getByText('WEBHOOK_SECRET')).toBeInTheDocument()
+
+    mockListMcpSecrets.mockResolvedValue({
+      items: [{ name: 'linear-credentials', keys: ['api-key', 'refresh-token', 'webhook-secret'] }],
+    })
+    cleanup()
+    await renderPage()
+    expect(screen.getByRole('button', { name: 'Rotate webhook-secret' })).toBeInTheDocument()
   })
 
-  it('rejects a new key that duplicates an existing key instead of merging it', async () => {
-    mockGetMcpServers.mockResolvedValue({ items: [] })
+  it('rejects an existing unmapped key and disables empty add submissions', async () => {
     await renderPage()
-
     fireEvent.click(screen.getByRole('button', { name: 'Add key' }))
-    fireEvent.change(screen.getByLabelText('New key name 1'), { target: { value: 'api-key' } })
-    fireEvent.change(screen.getByLabelText('New key value 1'), { target: { value: 'dup' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-    await flush()
-
-    expect(screen.getByRole('alert')).toHaveTextContent('Key api-key already exists')
+    const dialog = screen.getByRole('dialog', { name: 'Add key' })
+    const save = within(dialog).getByRole('button', { name: 'Add key' })
+    expect(save).toBeDisabled()
+    fireEvent.change(within(dialog).getByLabelText('Key name', { exact: false }), {
+      target: { value: 'refresh-token' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Value', { exact: false }), {
+      target: { value: 'dup' },
+    })
+    expect(screen.getByText('This key already exists.')).toBeInTheDocument()
+    expect(save).toBeDisabled()
     expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
   })
 
-  it('keeps unfilled keys out of the direct rotation and refuses empty saves', async () => {
-    mockGetMcpServers.mockResolvedValue({ items: [] })
+  it('rechecks newly added keys before writing instead of replacing an unseen value', async () => {
     await renderPage()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    mockListMcpSecrets.mockResolvedValue({
+      items: [{ name: 'linear-credentials', keys: ['api-key', 'refresh-token', 'new-key'] }],
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Add key' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add key' })
+    fireEvent.change(within(dialog).getByLabelText('Key name', { exact: false }), {
+      target: { value: 'new-key' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Value', { exact: false }), {
+      target: { value: 'dup' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add key' }))
     await flush()
-
-    expect(screen.getByRole('alert')).toHaveTextContent('Fill in at least one key')
+    expect(screen.getByRole('alert')).toHaveTextContent('already exists')
     expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  })
+
+  it('preserves a failed rotation draft and cancels without writing', async () => {
+    mockUpdateMcpSecret.mockRejectedValueOnce(new Error('Save unavailable'))
+    await renderPage()
+    await submitRotation('api-key', 'retry-value')
+    const dialog = screen.getByRole('dialog', { name: 'Rotate api-key' })
+    expect(within(dialog).getByLabelText('New value', { exact: false })).toHaveValue('retry-value')
+    expect(screen.getByRole('alert')).toHaveTextContent('Save unavailable')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate api-key' }))
+    expect(screen.getByLabelText('New value', { exact: false })).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
   })
 
   it('explains when the secret itself no longer exists', async () => {
@@ -371,5 +451,55 @@ describe('EditConnectorSecretPage', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Connector list unavailable')
     expect(screen.queryByText(/No connector currently references Secret/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+  })
+  it('retries only mapping after the key was stored and the mapping was rejected', async () => {
+    mockUpdateMcpServer.mockRejectedValueOnce(Object.assign(new Error('Conflict'), { status: 409 }))
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Add key' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add key' })
+    fireEvent.change(within(dialog).getByLabelText('Key name', { exact: false }), {
+      target: { value: 'extra-key' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Environment variable', { exact: false }), {
+      target: { value: 'CUSTOM_TOKEN' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Value', { exact: false }), {
+      target: { value: 'value-once' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add key' }))
+    await flush(12)
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'is stored, but its environment mapping could not be confirmed'
+    )
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(within(dialog).getByLabelText('Value', { exact: false })).toHaveValue('')
+    expect(within(dialog).getByLabelText('Value', { exact: false })).toBeDisabled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry mapping' }))
+    await flush(12)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpServer).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('CUSTOM_TOKEN')).toBeInTheDocument()
+  })
+
+  it('rejects a colliding environment variable before writing the key', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Add key' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add key' })
+    fireEvent.change(within(dialog).getByLabelText('Key name', { exact: false }), {
+      target: { value: 'fresh-key' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Environment variable', { exact: false }), {
+      target: { value: 'LINEAR_API_KEY' },
+    })
+    fireEvent.change(within(dialog).getByLabelText('Value', { exact: false }), {
+      target: { value: 'never-save' },
+    })
+    expect(within(dialog).getByRole('button', { name: 'Add key' })).toBeDisabled()
+    expect(
+      screen.getByText(/Environment variable "LINEAR_API_KEY" is already mapped/)
+    ).toBeInTheDocument()
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(mockUpdateMcpServer).not.toHaveBeenCalled()
   })
 })

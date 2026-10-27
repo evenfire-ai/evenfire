@@ -2,28 +2,23 @@
 
 import React, { Suspense, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
-import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
+import { ConnectorSecretKeys } from '@components/ConnectorSecretKeys'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { IconKey } from '@components/Sidebar/icons'
 import { TabBar } from '@components/TabBar'
-import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import {
   nonCanonicalEnvSecretName,
   resolveEnvSecret,
   resolveRegistryCredentialSource,
 } from '@components/UpdateConnectorCredentials/mcpServerCredentialResolvers'
-import {
-  isRecipeOwned,
-  resolveCredentialSurface,
-} from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
-import { Button, Field, FormSection, TextInput } from '@components/ui'
+import { isRecipeOwned } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { getMcpServers, listMcpSecrets, updateMcpSecret } from '@lib/api'
+import { getMcpServers, listMcpSecrets } from '@lib/api'
 import type { McpServerResource } from '@lib/api'
 
 function serverRefersToSecret(server: McpServerResource, secretName: string): boolean {
@@ -61,12 +56,7 @@ function EditConnectorSecretContent() {
   const [secretSummary, setSecretSummary] = useState<
     { name: string; keys: string[] } | null | undefined
   >(undefined)
-  const [keyValues, setKeyValues] = useState<Record<string, string>>({})
-  const [extraKeys, setExtraKeys] = useState<Array<{ id: number; key: string; value: string }>>([])
-  const extraKeyId = React.useRef(0)
-  const [saving, setSaving] = useState(false)
-  const [saveError, setSaveError] = useState('')
-  const { showToast } = useToast()
+  const [secretLoadError, setSecretLoadError] = useState('')
 
   useEffect(() => {
     if (!secretName) {
@@ -95,8 +85,9 @@ function EditConnectorSecretContent() {
         const match = (result.items ?? []).find(item => item.name === secretName)
         setSecretSummary(match ? { name: match.name, keys: match.keys } : null)
       })
-      .catch(() => {
-        if (!cancelled) setSecretSummary(null)
+      .catch(error => {
+        if (!cancelled)
+          setSecretLoadError(error instanceof Error ? error.message : 'Failed to load Secret keys')
       })
     return () => {
       cancelled = true
@@ -163,64 +154,6 @@ function EditConnectorSecretContent() {
     router.push(CONTROL_ROUTES.secrets.connector)
   }
 
-  function addExtraKey() {
-    extraKeyId.current += 1
-    setExtraKeys(current => [...current, { id: extraKeyId.current, key: '', value: '' }])
-  }
-
-  function updateExtraKey(id: number, field: 'key' | 'value', value: string) {
-    setExtraKeys(current => current.map(row => (row.id === id ? { ...row, [field]: value } : row)))
-  }
-
-  function removeExtraKey(id: number) {
-    setExtraKeys(current => current.filter(row => row.id !== id))
-  }
-
-  const SECRET_KEY_NAME_PATTERN = /^[A-Za-z0-9._-]+$/
-
-  function collectRotationData(): Record<string, string> | string {
-    const data = Object.fromEntries(
-      Object.entries(keyValues).filter(([key, value]) => key.length > 0 && value.trim().length > 0)
-    )
-    const existingKeys = new Set(secretSummary?.keys ?? [])
-    for (const row of extraKeys) {
-      const name = row.key.trim()
-      const hasName = name.length > 0
-      const hasValue = row.value.trim().length > 0
-      if (!hasName && !hasValue) continue
-      if (!hasName) return 'Name the new key before saving.'
-      if (!hasValue) return `Fill in a value for the new key ${name}.`
-      if (!SECRET_KEY_NAME_PATTERN.test(name))
-        return `Key ${name} is invalid: use letters, numbers, dots, underscores, or hyphens.`
-      if (existingKeys.has(name) || name in data)
-        return `Key ${name} already exists on this Secret.`
-      data[name] = row.value
-    }
-    if (Object.keys(data).length === 0) {
-      return 'Fill in at least one key to rotate its value.'
-    }
-    return data
-  }
-
-  async function saveDirectRotation() {
-    const data = collectRotationData()
-    if (typeof data === 'string') {
-      setSaveError(data)
-      return
-    }
-    setSaving(true)
-    setSaveError('')
-    try {
-      await updateMcpSecret(secretName, data)
-      showToast(`Secret ${secretName} updated.`, { tone: 'success' })
-      backToList()
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Failed to update secret')
-    } finally {
-      setSaving(false)
-    }
-  }
-
   return (
     <AuthGate>
       <DashboardLayout isDetailPage>
@@ -229,13 +162,13 @@ function EditConnectorSecretContent() {
             <CreatePageHeader
               icon={<IconKey />}
               title={`Edit connector secret${secretName ? `: ${secretName}` : ''}`}
-              subtitle="Rotate the values stored in this Secret. Values are write-only; only the keys you fill in are replaced."
+              subtitle="Manage stored keys and rotate individual values."
               backLabel="Back to secrets"
               onBack={backToList}
             />
           }
         >
-          <div className="cu-connector-edit-form">
+          <div className="cu-connector-edit-form cu-connector-edit-content">
             {loadError ? (
               <div className="cu-banner cu-banner--error" role="alert">
                 {loadError}
@@ -257,180 +190,83 @@ function EditConnectorSecretContent() {
               </div>
             ) : null}
 
-            {servers === null ? (
-              <p className="cu-muted" role="status">
-                Loading attached connectors…
-              </p>
-            ) : attachedServers.length === 0 &&
-              !loadError &&
-              !identityError &&
-              !serverQueryError &&
-              !unknownServerError ? (
-              secretSummary === undefined ? (
+            {secretLoadError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                {secretLoadError}
+              </div>
+            ) : null}
+            {!loadError &&
+            !secretLoadError &&
+            !identityError &&
+            !serverQueryError &&
+            !unknownServerError ? (
+              servers === null || secretSummary === undefined ? (
                 <p className="cu-muted" role="status">
                   Loading connector secret…
                 </p>
-              ) : secretSummary === null ? (
-                <div className="cu-banner cu-banner--error">
-                  No connector secret named <code>{secretName || '(unnamed)'}</code> exists. It may
-                  have been deleted.
-                </div>
               ) : (
-                <FormSection
-                  title="Rotate stored values"
-                  description={
-                    <>
-                      No connector references this Secret yet, so changes take effect for the next
-                      connector that attaches it. Values are write-only — only the keys you fill in
-                      are replaced or added; every other key already on the Secret is kept.
-                    </>
-                  }
-                >
-                  <TableViewport className="cu-table-wrap">
-                    <DataTable className="eft-table cu-table">
-                      <thead>
-                        <tr>
-                          <th>Secret key</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {secretSummary.keys.length === 0 ? (
-                          <tr>
-                            <td>
-                              <span className="cu-muted">No keys yet.</span>
-                            </td>
-                          </tr>
-                        ) : (
-                          secretSummary.keys.map(key => (
-                            <tr key={key}>
-                              <td>
-                                <code>{key}</code>
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </DataTable>
-                  </TableViewport>
-
-                  <form
-                    className="cu-connector-credentials-form cu-form-stack"
-                    onSubmit={event => {
-                      event.preventDefault()
-                      void saveDirectRotation()
-                    }}
-                    noValidate
-                  >
-                    {secretSummary.keys.map(key => (
-                      <Field key={key} label={key} htmlFor={`secret-key-${key}`}>
-                        <TextInput
-                          id={`secret-key-${key}`}
-                          type="password"
-                          name={key}
-                          autoComplete="new-password"
-                          placeholder="Leave blank to keep current value"
-                          value={keyValues[key] ?? ''}
-                          onChange={e =>
-                            setKeyValues(current => ({ ...current, [key]: e.target.value }))
-                          }
-                          disabled={saving}
-                        />
-                      </Field>
-                    ))}
-
-                    {extraKeys.map(row => (
-                      <div className="cu-form-inline" key={row.id}>
-                        <TextInput
-                          monospace
-                          aria-label={`New key name ${row.id}`}
-                          value={row.key}
-                          onChange={e => updateExtraKey(row.id, 'key', e.target.value)}
-                          placeholder="NEW_API_KEY"
-                          disabled={saving}
-                        />
-                        <TextInput
-                          monospace
-                          aria-label={`New key value ${row.id}`}
-                          value={row.value}
-                          onChange={e => updateExtraKey(row.id, 'value', e.target.value)}
-                          placeholder="secret value"
-                          type="password"
-                          autoComplete="new-password"
-                          disabled={saving}
-                        />
-                        <Button
-                          type="button"
-                          onClick={() => removeExtraKey(row.id)}
-                          disabled={saving}
-                        >
-                          Remove
-                        </Button>
-                      </div>
-                    ))}
-
-                    <div>
-                      <Button type="button" onClick={addExtraKey} disabled={saving}>
-                        Add key
-                      </Button>
-                    </div>
-
-                    {saveError ? (
-                      <div className="cu-banner cu-banner--error" role="alert">
-                        {saveError}
-                      </div>
-                    ) : null}
-
-                    <div className="cu-create-actions">
-                      <Button type="button" onClick={backToList} disabled={saving}>
-                        Cancel
-                      </Button>
-                      <Button type="submit" variant="primary" disabled={saving}>
-                        {saving ? 'Saving…' : 'Save'}
-                      </Button>
-                    </div>
-                  </form>
-                </FormSection>
-              )
-            ) : (
-              <>
-                {attachedServers.length > 1 ? (
-                  <TabBar
-                    activeValue={selectedName}
-                    ariaLabel="Connectors referencing this secret"
-                    className="cu-tabs--flush"
-                    options={attachedServers.map(server => {
-                      const name = String(server.metadata?.name ?? '')
-                      return {
-                        value: name,
-                        label: name,
-                        href: CONTROL_ROUTES.secrets.editConnector(secretName, { server: name }),
+                <>
+                  {attachedServers.length > 1 ? (
+                    <TabBar
+                      activeValue={selectedName}
+                      ariaLabel="Connectors referencing this secret"
+                      className="cu-tabs--flush"
+                      options={attachedServers.map(server => {
+                        const name = String(server.metadata?.name ?? '')
+                        return {
+                          value: name,
+                          label: name,
+                          href: CONTROL_ROUTES.secrets.editConnector(secretName, { server: name }),
+                        }
+                      })}
+                    />
+                  ) : null}
+                  {secretSummary ? (
+                    <ConnectorSecretKeys
+                      key={`${secretName}:${selectedName}`}
+                      secretName={secretName}
+                      keys={secretSummary.keys}
+                      serverName={selectedName || undefined}
+                      envSecret={selectedEnvSecret}
+                      server={selected}
+                      referencingConnectors={attachedServers.map(server =>
+                        String(server.metadata?.name ?? '')
+                      )}
+                      onKeysChange={keys => setSecretSummary({ name: secretName, keys })}
+                      onMissing={() => setSecretSummary(null)}
+                      onServerChange={updated =>
+                        setServers(
+                          current =>
+                            current?.map(server =>
+                              server.metadata?.name === updated.metadata?.name ? updated : server
+                            ) ?? []
+                        )
                       }
-                    })}
-                  />
-                ) : null}
-
-                {selected && !secretMatches ? (
-                  <div className="cu-banner cu-banner--error" role="alert">
-                    This connector does not reference Secret <code>{secretName}</code>. Choose a
-                    connector that does.
-                  </div>
-                ) : null}
-
-                {selected && secretMatches ? (
-                  <UpdateConnectorCredentials
-                    key={selectedName}
-                    serverName={selectedName}
-                    envSecret={selectedEnvSecret}
-                    surface={resolveCredentialSurface(
-                      selected.status?.conditions,
-                      selected.spec as { managed?: boolean } | undefined
-                    )}
-                    recipeOwned={isRecipeOwned(selected.spec as { managed?: boolean } | undefined)}
-                    registryCredentialSource={resolveRegistryCredentialSource(selected.metadata)}
-                  />
-                ) : null}
-              </>
-            )}
+                    />
+                  ) : selected && secretMatches ? (
+                    <UpdateConnectorCredentials
+                      key={selectedName}
+                      serverName={selectedName}
+                      envSecret={selectedEnvSecret}
+                      surface={
+                        isRecipeOwned(selected.spec as { managed?: boolean } | undefined)
+                          ? 'recipe-owned'
+                          : 'set'
+                      }
+                      recipeOwned={isRecipeOwned(
+                        selected.spec as { managed?: boolean } | undefined
+                      )}
+                      registryCredentialSource={resolveRegistryCredentialSource(selected.metadata)}
+                    />
+                  ) : (
+                    <div className="cu-banner cu-banner--error" role="alert">
+                      No connector secret named <code>{secretName || '(unnamed)'}</code> exists. It
+                      may have been deleted.
+                    </div>
+                  )}
+                </>
+              )
+            ) : null}
           </div>
         </CreateFlowPanel>
       </DashboardLayout>

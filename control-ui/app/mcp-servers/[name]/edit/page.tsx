@@ -408,7 +408,7 @@ export default function EditMcpServerPage() {
             )
           ) : server ? (
             activeTab === 'credentials' ? (
-              <div className="cu-connector-edit-form">
+              <div className="cu-connector-edit-form cu-connector-edit-content">
                 {changeSource ? (
                   <ChangeConnectorSecret
                     serverName={name}
@@ -477,18 +477,31 @@ export default function EditMcpServerPage() {
                     {!credentialReferenceChangeUnavailable(server) ? (
                       <FormSection
                         title="Assigned Secret"
-                        description="Reuse stored credentials by choosing another Secret or changing its key mappings. Rotate credentials below to update values in the current shared Secret."
+                        description="Choose a Secret and its key mappings. Rotate individual values below."
                       >
-                        <p>
-                          Current Secret: <code>{envSecret.name}</code>
-                        </p>
-                        <Button
-                          id={CHANGE_SECRET_TRIGGER_ID}
-                          disabled={attachBusy || saving || egressDirty}
-                          onClick={() => setChangeSource(server)}
-                        >
-                          Change assigned Secret
-                        </Button>
+                        <div className="cu-assigned-secret-row">
+                          <div
+                            className="cu-assigned-secret-field"
+                            role="group"
+                            aria-labelledby="connector-current-secret-label"
+                          >
+                            <span
+                              className="cu-assigned-secret-field__label"
+                              id="connector-current-secret-label"
+                            >
+                              Current Secret
+                            </span>
+                            <div className="cu-assigned-secret-field__value">{envSecret.name}</div>
+                          </div>
+                          <Button
+                            id={CHANGE_SECRET_TRIGGER_ID}
+                            variant="primary"
+                            disabled={attachBusy || saving || egressDirty}
+                            onClick={() => setChangeSource(server)}
+                          >
+                            Change assigned Secret
+                          </Button>
+                        </div>
                         {egressDirty ? (
                           <p role="status">
                             Save or discard your egress changes before changing the assigned Secret.
@@ -497,6 +510,7 @@ export default function EditMcpServerPage() {
                       </FormSection>
                     ) : null}
                     <UpdateConnectorCredentials
+                      perKeyEditing
                       onBusyChange={setAttachBusy}
                       serverName={name}
                       envSecret={envSecret}

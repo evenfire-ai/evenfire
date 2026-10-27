@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { SelectionDropdown } from '@components/SelectionDropdown'
+import { IconRefresh } from '@components/icons'
 import { Button, Field, SelectInput, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { listMcpSecrets } from '@lib/api'
@@ -91,21 +92,39 @@ export function ExistingConnectorSecretFields({
       <p className="cu-muted">
         Reuse a Secret from Secrets → Connectors. Stored values stay unchanged and are never shown.
       </p>
-      <Field label="Existing Secret" htmlFor={`${prefix}-secret`} required>
-        <SelectionDropdown
-          id={`${prefix}-secret`}
-          ariaLabel="Existing Secret"
-          placeholder="Choose a Secret"
-          multiple={false}
-          searchable={false}
-          showSelectedChips={false}
-          disabled={state !== 'ready'}
-          invalid={invalid?.field === 'secret'}
-          options={secrets.map(secret => ({ label: secret.name, value: secret.name }))}
-          value={name ? [name] : []}
-          onChange={values => selectSecret(values[0] ?? '')}
-        />
-      </Field>
+      <div className="cu-existing-secret-control">
+        <Field label="Existing Secret" htmlFor={`${prefix}-secret`} required>
+          <SelectionDropdown
+            id={`${prefix}-secret`}
+            ariaLabel="Existing Secret"
+            placeholder="Choose a Secret"
+            multiple={false}
+            searchable={false}
+            showSelectedChips={false}
+            disabled={state !== 'ready'}
+            invalid={invalid?.field === 'secret'}
+            options={secrets.map(secret => ({ label: secret.name, value: secret.name }))}
+            value={name ? [name] : []}
+            onChange={values => selectSecret(values[0] ?? '')}
+          />
+        </Field>
+        <Button
+          icon
+          aria-label="Refresh secrets"
+          title="Refresh secrets"
+          onClick={() => setRefresh(value => value + 1)}
+          disabled={disabled || state === 'loading'}
+        >
+          <IconRefresh width={16} height={16} />
+        </Button>
+        <Button
+          variant="ghost"
+          disabled={disabled}
+          onClick={() => router.push(CONTROL_ROUTES.secrets.connector)}
+        >
+          Manage connector Secrets
+        </Button>
+      </div>
       {state === 'loading' ? <p role="status">Loading Secrets…</p> : null}
       {state === 'error' ? (
         <div role="alert">
@@ -119,18 +138,6 @@ export function ExistingConnectorSecretFields({
           list.
         </p>
       ) : null}
-      <div className="cu-create-actions">
-        <Button onClick={() => setRefresh(value => value + 1)} disabled={state === 'loading'}>
-          Refresh Secrets
-        </Button>
-        <Button
-          variant="ghost"
-          disabled={disabled}
-          onClick={() => router.push(CONTROL_ROUTES.secrets.connector)}
-        >
-          Manage connector Secrets
-        </Button>
-      </div>
       {selected && !selected.keys.length ? (
         <p role="alert">
           This Secret has no stored keys. Add keys in Secrets → Connectors, then refresh.
