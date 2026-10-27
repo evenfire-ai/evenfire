@@ -6,6 +6,9 @@ import { rootLogger } from '../src/observability/logger.js'
 const USER = '11111111-1111-4111-8111-111111111111'
 const RESOURCE = '22222222-2222-4222-8222-222222222222'
 const ADMIN = '33333333-3333-4333-8333-333333333333'
+const TEAM = '44444444-4444-4444-8444-444444444444'
+const GRANT = '55555555-5555-4555-8555-555555555555'
+const SHARE = '66666666-6666-4666-8666-666666666666'
 const mocks = vi.hoisted(() => ({ query: vi.fn(), limiter: vi.fn() }))
 
 vi.mock('../src/db.js', () => ({
@@ -40,7 +43,7 @@ const row = {
   resource_id: RESOURCE,
   path_cache: '/Users/owner',
   conflict_code: 'ownership_conflict',
-  conflict_detail: { resourceId: RESOURCE },
+  conflict_detail: { resourceIds: [RESOURCE] },
   attempts: 2,
   last_attempt_at: null,
   last_error: null,
@@ -72,6 +75,8 @@ beforeEach(() => {
     if (sql.includes('FROM gfs_user_homes WHERE')) return { rows: [row] }
     if (sql.includes('FROM gfs_resources') && sql.includes('FOR SHARE'))
       return { rows: [{ resource_id: RESOURCE }] }
+    if (sql.includes('SELECT permissions, inherit FROM gfs_grants'))
+      return { rows: [{ permissions: ['read'], inherit: false }] }
     if (sql.includes('INSERT INTO gfs_grants'))
       return {
         rows: [{ permissions: ['read', 'write', 'delete', 'share', 'manage_acl'], inherit: true }],
@@ -211,12 +216,220 @@ describe('operator user-home routes', () => {
       .get(`/gfs/user-homes/${USER}`)
       .set('x-test-operator', 'yes')
     expect(detail.status).toBe(200)
-    expect(detail.body.home).toMatchObject({ email: null, name: null, state: 'retired' })
+    expect(detail.body.home).toMatchObject({
+      email: null,
+      name: null,
+      state: 'retired',
+      conflictDetail: null,
+    })
     mocks.query.mockResolvedValue({ rows: [] })
     await request(application)
       .get(`/gfs/user-homes/${USER}`)
       .set('x-test-operator', 'yes')
       .expect(404)
+  })
+
+  it('shows a path conflict and its current direct access, then reports a vanished resource', async () => {
+    const application = await app()
+    let exists = true
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('count(*)')) return { rows: [{ state: 'conflict', count: 1 }] }
+      if (sql.includes('FROM gfs_user_homes h'))
+        return { rows: [{ ...row, conflict_code: 'path_conflict' }] }
+      if (sql.includes('SELECT resource_id, path_cache, kind, created_at FROM gfs_resources')) {
+        return {
+          rows: exists
+            ? [
+                {
+                  resource_id: RESOURCE,
+                  path_cache: '/Users/owner',
+                  kind: 'directory',
+                  created_at: '2026-10-27T00:00:00.000Z',
+                },
+              ]
+            : [],
+        }
+      }
+      if (sql.includes('WITH access AS'))
+        return {
+          rows: [
+            {
+              relation: 'grant',
+              resource_id: RESOURCE,
+              path: '/Users/owner',
+              subject_type: 'user',
+              subject_id: USER,
+              permissions: ['read'],
+              inherit: true,
+            },
+            {
+              relation: 'share',
+              resource_id: RESOURCE,
+              path: '/Users/owner',
+              subject_type: 'team',
+              subject_id: TEAM,
+              permissions: ['write'],
+              inherit: false,
+            },
+          ],
+        }
+      if (sql.includes('FROM users WHERE'))
+        return { rows: [{ id: USER, name: 'Owner', email: 'owner@example.test' }] }
+      if (sql.includes('FROM teams WHERE')) return { rows: [{ id: TEAM, name: 'Team' }] }
+      throw new Error('unexpected query')
+    })
+    const detail = await request(application)
+      .get(`/gfs/user-homes/${USER}`)
+      .set('x-test-operator', 'yes')
+    expect(detail.status).toBe(200)
+    expect(detail.body.home.conflictDetail).toEqual({
+      code: 'path_conflict',
+      resource: {
+        resourceId: RESOURCE,
+        path: '/Users/owner',
+        kind: 'directory',
+        createdAt: '2026-10-27T00:00:00.000Z',
+      },
+      access: [
+        {
+          relation: 'grant',
+          subjectType: 'user',
+          subjectId: USER,
+          subjectLabel: 'Owner',
+          permissions: ['read'],
+          inherit: true,
+        },
+        {
+          relation: 'share',
+          subjectType: 'team',
+          subjectId: TEAM,
+          subjectLabel: 'Team',
+          permissions: ['write'],
+          inherit: false,
+        },
+      ],
+    })
+    const inventory = await request(application)
+      .get('/gfs/user-homes')
+      .set('x-test-operator', 'yes')
+    expect(inventory.status).toBe(200)
+    expect(inventory.body.items[0]).not.toHaveProperty('conflictDetail')
+    exists = false
+    const vanished = await request(application)
+      .get(`/gfs/user-homes/${USER}`)
+      .set('x-test-operator', 'yes')
+    expect(vanished.body.home.conflictDetail).toEqual({
+      code: 'path_conflict',
+      resource: null,
+      access: [],
+    })
+  })
+
+  it('resolves ancestor grant and share identifiers with live paths and labels', async () => {
+    const application = await app()
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM gfs_user_homes h'))
+        return {
+          rows: [
+            {
+              ...row,
+              conflict_code: 'ancestor_grant_conflict',
+              conflict_detail: { resourceIds: [RESOURCE], grantIds: [GRANT], shareIds: [SHARE] },
+            },
+          ],
+        }
+      if (sql.includes('WITH access AS'))
+        return {
+          rows: [
+            {
+              relation: 'grant',
+              resource_id: RESOURCE,
+              path: '/Users',
+              subject_type: 'user',
+              subject_id: USER,
+              permissions: ['read'],
+              inherit: true,
+            },
+            {
+              relation: 'share',
+              resource_id: RESOURCE,
+              path: '/Users',
+              subject_type: 'host',
+              subject_id: '1st:mcp-host/agent',
+              permissions: ['read'],
+              inherit: true,
+            },
+          ],
+        }
+      if (sql.includes('FROM users WHERE'))
+        return { rows: [{ id: USER, name: null, email: 'owner@example.test' }] }
+      throw new Error('unexpected query')
+    })
+    const response = await request(application)
+      .get(`/gfs/user-homes/${USER}`)
+      .set('x-test-operator', 'yes')
+    expect(response.status).toBe(200)
+    expect(response.body.home.conflictDetail).toEqual({
+      code: 'ancestor_grant_conflict',
+      entries: [
+        {
+          relation: 'grant',
+          resourceId: RESOURCE,
+          path: '/Users',
+          subjectType: 'user',
+          subjectId: USER,
+          subjectLabel: 'owner@example.test',
+          permissions: ['read'],
+          inherit: true,
+        },
+        {
+          relation: 'share',
+          resourceId: RESOURCE,
+          path: '/Users',
+          subjectType: 'host',
+          subjectId: '1st:mcp-host/agent',
+          subjectLabel: null,
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+    })
+    const accessQuery = mocks.query.mock.calls.find(call =>
+      String(call[0]).includes('WITH access AS')
+    )
+    expect(accessQuery?.[1]).toEqual([[RESOURCE], 'archive', true, [GRANT], [SHARE]])
+  })
+
+  it('shows a narrowed owner grant and then null when that grant is removed', async () => {
+    const application = await app()
+    const get = () =>
+      request(application).get(`/gfs/user-homes/${USER}`).set('x-test-operator', 'yes')
+    const narrowed = await get()
+    expect(narrowed.body.home.conflictDetail).toEqual({
+      code: 'ownership_conflict',
+      ownerGrant: { permissions: ['read'], inherit: false },
+    })
+    mocks.query.mockImplementation(async (sql: string) =>
+      sql.includes('FROM gfs_user_homes h') ? { rows: [row] } : { rows: [] }
+    )
+    const removed = await get()
+    expect(removed.body.home.conflictDetail).toEqual({
+      code: 'ownership_conflict',
+      ownerGrant: null,
+    })
+  })
+
+  it('fails closed on malformed stored conflict identifiers while accepting a valid record', async () => {
+    const application = await app()
+    const get = () =>
+      request(application).get(`/gfs/user-homes/${USER}`).set('x-test-operator', 'yes')
+    expect((await get()).status).toBe(200)
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM gfs_user_homes h'))
+        return { rows: [{ ...row, conflict_detail: { resourceIds: ['invalid'] } }] }
+      throw new Error('invalid identifiers must not reach a lookup')
+    })
+    expect((await get()).status).toBe(500)
   })
 
   it('uses separate admin limits and refuses work on a denied bucket', async () => {
@@ -260,7 +473,7 @@ describe('operator user-home routes', () => {
       expect.objectContaining({
         userId: USER,
         conflictCode: 'ownership_conflict',
-        conflictDetail: { resourceId: RESOURCE },
+        conflictDetail: { resourceIds: [RESOURCE] },
       }),
       'user home conflict clearing'
     )

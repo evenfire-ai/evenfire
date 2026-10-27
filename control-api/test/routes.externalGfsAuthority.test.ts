@@ -310,12 +310,16 @@ describe('external GFS user authority selector', () => {
       resource_id: null,
       conflict_code: 'path_conflict',
       path_cache: null,
+      conflict_detail: { resourceIds: [RESOURCE] },
     }
-    expect((await get()).body).toMatchObject({
+    const conflict = await get()
+    expect(conflict.body).toMatchObject({
       state: 'conflict',
       conflictCode: 'path_conflict',
       heldPermissions: [],
     })
+    expect(conflict.body).not.toHaveProperty('conflictDetail')
+    expect(conflict.body).not.toHaveProperty('conflict_detail')
     home = null
     expect((await get()).status).toBe(404)
   })

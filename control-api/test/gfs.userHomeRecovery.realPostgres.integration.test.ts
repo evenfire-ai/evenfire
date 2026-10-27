@@ -41,7 +41,13 @@ function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
-type Fixture = { userId: string; resourceId: string; drive: string }
+type Fixture = {
+  userId: string
+  resourceId: string
+  drive: string
+  rootId: string
+  usersId: string
+}
 
 describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
   const database = `gfs_home_recovery_${randomBytes(6).toString('hex')}`
@@ -123,7 +129,7 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
       `UPDATE gfs_user_homes SET drive = $2, storage_username = 'owner', resource_id = $3,
               state = 'conflict', conflict_code = 'ownership_conflict', conflict_detail = $4::jsonb
         WHERE user_id = $1`,
-      [userId, drive, resourceId, JSON.stringify({ resourceId })]
+      [userId, drive, resourceId, JSON.stringify({ resourceIds: [resourceId] })]
     )
     if (kind !== 'missing') {
       await fixturePool.query(
@@ -138,7 +144,7 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
         ]
       )
     }
-    return { userId, resourceId, drive }
+    return { userId, resourceId, drive, rootId: root, usersId: users }
   }
 
   function restore(fixture: Fixture) {
@@ -151,6 +157,23 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
     'restores a %s owner grant atomically and rejects a second restore',
     async kind => {
       const fixture = await seedHome(kind)
+      const detail = await request(app)
+        .get(`/gfs/user-homes/${fixture.userId}`)
+        .set('x-test-operator', 'yes')
+      expect(detail.status).toBe(200)
+      expect(detail.body.home.conflictDetail).toEqual({
+        code: 'ownership_conflict',
+        ownerGrant:
+          kind === 'missing'
+            ? null
+            : {
+                permissions:
+                  kind === 'narrowed'
+                    ? ['read']
+                    : ['read', 'write', 'delete', 'share', 'manage_acl'],
+                inherit: kind !== 'no-inherit',
+              },
+      })
       const response = await restore(fixture)
       expect(response.status).toBe(200)
       expect(response.body.home).toMatchObject({
@@ -217,6 +240,150 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
       [`user:${fixture.userId}`]
     )
     expect(result.rows[0].count).toBe(2)
+  })
+
+  it('resolves path conflicts and live access, then reports a removed resource as absent', async () => {
+    const fixture = await seedHome('narrowed')
+    const teamId = randomUUID()
+    await fixturePool.query('INSERT INTO teams (id, name) VALUES ($1, $2)', [teamId, 'Review team'])
+    await fixturePool.query(
+      `INSERT INTO gfs_shares (drive, resource_id, subject_type, subject_id, permissions, include_descendants)
+       VALUES ($1, $2, 'team', $3, ARRAY['read'], true)`,
+      [fixture.drive, fixture.resourceId, teamId]
+    )
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET resource_id = NULL, conflict_code = 'path_conflict', conflict_detail = $2::jsonb WHERE user_id = $1`,
+      [fixture.userId, JSON.stringify({ resourceIds: [fixture.resourceId] })]
+    )
+    const get = () =>
+      request(app).get(`/gfs/user-homes/${fixture.userId}`).set('x-test-operator', 'yes')
+    const present = await get()
+    expect(present.status).toBe(200)
+    expect(present.body.home.conflictDetail).toEqual({
+      code: 'path_conflict',
+      resource: {
+        resourceId: fixture.resourceId,
+        path: '/Users/owner',
+        kind: 'directory',
+        createdAt: expect.any(String),
+      },
+      access: [
+        {
+          relation: 'grant',
+          subjectType: 'user',
+          subjectId: fixture.userId,
+          subjectLabel: 'Owner',
+          permissions: ['read'],
+          inherit: true,
+        },
+        {
+          relation: 'share',
+          subjectType: 'team',
+          subjectId: teamId,
+          subjectLabel: 'Review team',
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+    })
+    await fixturePool.query('DELETE FROM gfs_grants WHERE resource_id = $1', [fixture.resourceId])
+    await fixturePool.query('DELETE FROM gfs_shares WHERE resource_id = $1', [fixture.resourceId])
+    await fixturePool.query('DELETE FROM gfs_resources WHERE resource_id = $1', [
+      fixture.resourceId,
+    ])
+    const removed = await get()
+    expect(removed.status).toBe(200)
+    expect(removed.body.home.conflictDetail).toEqual({
+      code: 'path_conflict',
+      resource: null,
+      access: [],
+    })
+  })
+
+  it('resolves current ancestor conflicts and stops showing a share after inheritance is removed', async () => {
+    const fixture = await seedHome()
+    const teamId = randomUUID()
+    await fixturePool.query('INSERT INTO teams (id, name) VALUES ($1, $2)', [
+      teamId,
+      'Ancestor team',
+    ])
+    const grant = await fixturePool.query(
+      `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit)
+       VALUES ($1, $2, 'user', $3, ARRAY['read'], true) RETURNING id`,
+      [fixture.drive, fixture.usersId, fixture.userId]
+    )
+    const share = await fixturePool.query(
+      `INSERT INTO gfs_shares (drive, resource_id, subject_type, subject_id, permissions, include_descendants)
+       VALUES ($1, $2, 'team', $3, ARRAY['read'], true) RETURNING id`,
+      [fixture.drive, fixture.usersId, teamId]
+    )
+    await fixturePool.query(
+      `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit)
+       VALUES ($1, $2, 'host', '1st:mcp-host/agent', ARRAY['read'], true)`,
+      [fixture.drive, fixture.usersId]
+    )
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET conflict_code = 'ancestor_grant_conflict', conflict_detail = $2::jsonb WHERE user_id = $1`,
+      [
+        fixture.userId,
+        JSON.stringify({
+          resourceIds: [fixture.usersId],
+          grantIds: [grant.rows[0].id],
+          shareIds: [share.rows[0].id],
+        }),
+      ]
+    )
+    const get = () =>
+      request(app).get(`/gfs/user-homes/${fixture.userId}`).set('x-test-operator', 'yes')
+    const initial = await get()
+    expect(initial.status).toBe(200)
+    expect(initial.body.home.conflictDetail).toEqual({
+      code: 'ancestor_grant_conflict',
+      entries: [
+        {
+          relation: 'grant',
+          resourceId: fixture.usersId,
+          path: '/Users',
+          subjectType: 'user',
+          subjectId: fixture.userId,
+          subjectLabel: 'Owner',
+          permissions: ['read'],
+          inherit: true,
+        },
+        {
+          relation: 'share',
+          resourceId: fixture.usersId,
+          path: '/Users',
+          subjectType: 'team',
+          subjectId: teamId,
+          subjectLabel: 'Ancestor team',
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+    })
+    await fixturePool.query('UPDATE gfs_shares SET include_descendants = false WHERE id = $1', [
+      share.rows[0].id,
+    ])
+    const changed = await get()
+    expect(changed.status).toBe(200)
+    expect(changed.body.home.conflictDetail.entries).toHaveLength(1)
+    expect(changed.body.home.conflictDetail.entries[0].relation).toBe('grant')
+    await fixturePool.query(
+      'UPDATE gfs_user_homes SET conflict_detail = $2::jsonb WHERE user_id = $1',
+      [fixture.userId, JSON.stringify({ resourceIds: [fixture.usersId] })]
+    )
+    const withoutSpecificIds = await get()
+    expect(withoutSpecificIds.status).toBe(200)
+    expect(withoutSpecificIds.body.home.conflictDetail.entries).toHaveLength(2)
+    expect(withoutSpecificIds.body.home.conflictDetail.entries).toContainEqual(
+      expect.objectContaining({
+        relation: 'grant',
+        subjectType: 'host',
+        subjectId: '1st:mcp-host/agent',
+        subjectLabel: null,
+      })
+    )
   })
 
   it('rolls back when the restored grant does not satisfy all bits, while another restore succeeds', async () => {

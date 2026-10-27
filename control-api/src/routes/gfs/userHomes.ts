@@ -6,6 +6,7 @@ import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import { PERMISSIONS, UUID_RE, auditMutation, requestIdOf } from './grants.js'
+import { resolveUserHomeConflictDetail } from './userHomeConflictDetails.js'
 
 const HOME_STATES = ['pending', 'ready', 'conflict', 'retired'] as const
 const HOME_DEFAULT_PAGE_SIZE = 50
@@ -130,7 +131,17 @@ async function handleDetail(req: Request, res: Response): Promise<void> {
     res.status(404).json({ error: 'home_not_found' })
     return
   }
-  res.status(200).json({ home: homeView(home) })
+  const conflictDetail =
+    home.state === 'conflict'
+      ? await resolveUserHomeConflictDetail(pool, {
+          userId: home.user_id,
+          drive: home.drive,
+          resourceId: home.resource_id,
+          code: home.conflict_code,
+          detail: home.conflict_detail,
+        })
+      : null
+  res.status(200).json({ home: { ...homeView(home), conflictDetail } })
 }
 
 type RestoreResult =
