@@ -158,7 +158,7 @@ describe('keyless edit credentials journey', () => {
     expect(screen.getByRole('heading', { name: 'Attach credentials' })).toBeInTheDocument()
     current.status.conditions[0].observedGeneration = 3
     await tick()
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Attach credentials' })).not.toBeInTheDocument()
     expect(api.createMcpSecret).toHaveBeenCalledOnce()
     expect(api.deleteMcpSecret).not.toHaveBeenCalled()
@@ -169,7 +169,7 @@ describe('keyless edit credentials journey', () => {
     await tick(POLL_TIMEOUT_MS)
     fireEvent.click(screen.getByRole('button', { name: 'Refresh credentials' }))
     await flush()
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate api-key' })).toBeInTheDocument()
     expect(api.createMcpSecret).toHaveBeenCalledOnce()
     expect(api.deleteMcpSecret).not.toHaveBeenCalled()
   })

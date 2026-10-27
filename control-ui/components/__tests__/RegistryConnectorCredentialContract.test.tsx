@@ -9,6 +9,7 @@ import {
   listMcpSecrets,
   updateMcpSecret,
 } from '../../lib/api'
+import type { EnvSecret } from '../../lib/api'
 import { buildRegistryMcpServerReference } from '../../test/fixtures/mcpServer'
 import { ToastProvider } from '../Toast'
 
@@ -43,7 +44,10 @@ beforeEach(() => {
   // contract rather than being hidden by a fixture-owned `managed: true`.
   expect(connector.spec?.managed).toBe(true)
   vi.mocked(getMcpServers).mockResolvedValue({ items: [connector] })
-  vi.mocked(listMcpSecrets).mockResolvedValue({ items: [] })
+  const reference = connector.spec!.envSecret as EnvSecret
+  vi.mocked(listMcpSecrets).mockResolvedValue({
+    items: [{ name: reference.name, keys: reference.keys.map(mapping => mapping.secretKey) }],
+  })
   vi.mocked(getMcpServer).mockResolvedValue(connector)
   vi.mocked(getRegistryCredentialSchema).mockResolvedValue({
     required: true,
@@ -70,18 +74,27 @@ it('shows and rotates the registry-produced credential mapping for the attached 
     </ToastProvider>
   )
 
-  expect(await screen.findByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+  const rotate = await screen.findByRole('button', { name: 'Rotate api-key' })
+  expect(rotate).toBeInTheDocument()
   expect(screen.getByText('Edit connector secret: linear-credentials')).toBeInTheDocument()
-  // The credential fields render one effect pass after the button; wait for
-  // the label instead of assuming it settled with the button.
-  expect(await screen.findByLabelText('API token')).toBeInTheDocument()
-  expect(screen.getAllByText('api-key').length).toBeGreaterThan(0)
+  expect(
+    screen.getByRole('columnheader', { name: /Environment variable.*linear/ })
+  ).toBeInTheDocument()
+  // Registry-produced Secret keys and their environment destinations occupy
+  // separate cells. No stored value or idle value input is rendered.
+  const row = rotate.closest('tr')!
+  const cells = within(row).getAllByRole('cell')
+  expect(cells[0]).toHaveTextContent('api-key')
+  expect(cells[1]).toHaveTextContent('api-key')
+  expect(row.querySelector('input')).toBeNull()
 
-  fireEvent.change(screen.getByLabelText('API token'), { target: { value: 'rotated' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
-  const dialog = screen.getByRole('alertdialog')
-  expect(dialog).toHaveTextContent('restarts: linear.')
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate & restart' }))
+  fireEvent.click(rotate)
+  const dialog = screen.getByRole('dialog', { name: 'Rotate api-key' })
+  expect(dialog).toHaveTextContent('Connectors sharing this Secret may restart: linear.')
+  fireEvent.change(within(dialog).getByLabelText('New value', { exact: false }), {
+    target: { value: 'rotated' },
+  })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate', exact: true }))
   await waitFor(() => {
     expect(updateMcpSecret).toHaveBeenCalledWith('linear-credentials', { 'api-key': 'rotated' })
   })
