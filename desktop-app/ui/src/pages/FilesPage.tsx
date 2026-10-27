@@ -503,6 +503,10 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+  const accessibleRootResourceIds = useMemo(
+    () => new Set(accessibleResources.map(resource => resource.resourceId)),
+    [accessibleResources]
+  )
   const rowActionContextRef = useRef({
     sessionScope,
     currentResourceId: current?.resourceId ?? null,
@@ -524,6 +528,11 @@ export function FilesPage({
     ),
   }
   const rowPermissionNoticeFor = (resourceId: string, resourceName: string) => {
+    // Shared-root rows inherit status from one accessible-list query. A
+    // background refresh of that shared query is not a separate permission
+    // check for every row, and its page-level feedback must not be repeated
+    // in twenty row live regions.
+    if (!currentIsFolder && accessibleRootResourceIds.has(resourceId)) return null
     const statuses = ctrl.rowPermissionStatusByResourceId
     if (!statuses) return null
     const status = statuses[resourceId]
