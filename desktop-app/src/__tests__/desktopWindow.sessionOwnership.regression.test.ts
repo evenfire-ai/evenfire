@@ -222,6 +222,8 @@ describe('desktop window session ownership', () => {
     const ownerA = Object.freeze({ owner: 'session-a' })
     const ownerB = Object.freeze({ owner: 'session-b' })
     let currentOwner = ownerA
+    const onCloseA = vi.fn()
+    const onCloseB = vi.fn()
     const assertOwner = (owner: typeof ownerA | typeof ownerB) => () => {
       if (currentOwner !== owner) throw new Error('stale request owner')
     }
@@ -232,7 +234,9 @@ describe('desktop window session ownership', () => {
       rpcProxyUrl: 'https://rpc.example.test',
       ...ownerArgs(ownerA),
       assertRequestOwnerCurrent: assertOwner(ownerA),
+      onClose: onCloseA,
     })
+    const staleClosedCallbackA = fixture.closed
     expect(fixture.browserWindowCreated).toBe(1)
 
     currentOwner = ownerB
@@ -242,9 +246,15 @@ describe('desktop window session ownership', () => {
       rpcProxyUrl: 'https://rpc.example.test',
       ...ownerArgs(ownerB),
       assertRequestOwnerCurrent: assertOwner(ownerB),
+      onClose: onCloseB,
     })
 
+    staleClosedCallbackA?.()
+
     expect(fixture.browserWindowClosed).toBe(true)
+    expect(onCloseA).toHaveBeenCalledOnce()
+    expect(onCloseA).toHaveBeenCalledWith('shared-host')
+    expect(onCloseB).not.toHaveBeenCalled()
     expect(fixture.cookieRemove).toHaveBeenCalledWith(
       'https://rpc.example.test/api/v1/desktop/shared-host',
       'clerum_desktop_session'
@@ -358,18 +368,28 @@ describe('desktop window session ownership', () => {
     fixture.cookieSet.mockResolvedValue(undefined)
     fixture.cookieRemove.mockResolvedValue(undefined)
     const { closeAllDesktopWindows, openDesktopWindow } = await import('../desktopWindow.js')
+    let ownerIsCurrent = true
+    const onClose = vi.fn()
 
     await openDesktopWindow({
       hostRef: 'logout-window-host',
       jwt: 'rpc-bearer-a',
       rpcProxyUrl: 'https://rpc.example.test',
       ...ownerArgs(),
-      assertRequestOwnerCurrent: () => undefined,
+      assertRequestOwnerCurrent: () => {
+        if (!ownerIsCurrent) throw new Error('stale request owner')
+      },
+      onClose,
     })
+    ownerIsCurrent = false
     const closing = closeAllDesktopWindows()
 
     expect(fixture.browserWindowDestroyed).toBe(true)
+    expect(onClose).toHaveBeenCalledOnce()
+    expect(onClose).toHaveBeenCalledWith('logout-window-host')
     await closing
+    fixture.closed?.()
+    expect(onClose).toHaveBeenCalledOnce()
     expect(fixture.cookieRemove).toHaveBeenCalledWith(
       'https://rpc.example.test/api/v1/desktop/logout-window-host',
       'clerum_desktop_session'

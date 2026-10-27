@@ -181,26 +181,34 @@ async function openDesktopWindowOnce(args: OpenDesktopWindowArgs): Promise<void>
     onClose,
     retire: () => Promise.resolve(),
   }
+  let closeNotified = false
+  const notifyWindowClosed = () => {
+    if (closeNotified) return
+    closeNotified = true
+    entry.onClose?.(hostRef)
+  }
 
   window.on('closed', () => {
     const ownsCurrentWindow = windows.get(hostRef) === entry
     if (ownsCurrentWindow) windows.delete(hostRef)
     if (!ownsCurrentWindow) return
+    notifyWindowClosed()
     try {
       entry.assertRequestOwnerCurrent()
     } catch {
       return
     }
-    entry.onClose?.(hostRef)
   })
 
   let staleWindowCleanup: Promise<void> | undefined
-  const closeStaleWindow = (): Promise<void> => {
+  const closeStaleWindow = (notifyOwnerRetirement: boolean): Promise<void> => {
     if (staleWindowCleanup) return staleWindowCleanup
     const currentEntry = windows.get(hostRef)
     const newerWindowOwnsHost = currentEntry !== undefined && currentEntry !== entry
-    if (currentEntry === entry) windows.delete(hostRef)
+    const retiresCurrentWindow = currentEntry === entry
+    if (retiresCurrentWindow) windows.delete(hostRef)
     if (!window.isDestroyed()) window.destroy()
+    if (retiresCurrentWindow && notifyOwnerRetirement) notifyWindowClosed()
     staleWindowCleanup = newerWindowOwnsHost
       ? Promise.resolve()
       : removePartitionCookieIfOwnedBy({
@@ -211,7 +219,7 @@ async function openDesktopWindowOnce(args: OpenDesktopWindowArgs): Promise<void>
         })
     return staleWindowCleanup
   }
-  entry.retire = closeStaleWindow
+  entry.retire = () => closeStaleWindow(true)
   windows.set(hostRef, entry)
 
   // 4. Load the view URL
@@ -219,7 +227,7 @@ async function openDesktopWindowOnce(args: OpenDesktopWindowArgs): Promise<void>
     try {
       entry.assertRequestOwnerCurrent()
     } catch {
-      void closeStaleWindow()
+      void closeStaleWindow(false)
       return
     }
     if (window.isDestroyed()) return
@@ -234,7 +242,7 @@ async function openDesktopWindowOnce(args: OpenDesktopWindowArgs): Promise<void>
       window.show()
     }
   } catch (error) {
-    await entry.retire()
+    await closeStaleWindow(false)
     throw error
   }
 }
