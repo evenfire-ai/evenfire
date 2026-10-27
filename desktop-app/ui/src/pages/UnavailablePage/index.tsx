@@ -1,5 +1,6 @@
 import { useAuthContext } from '@contexts/AuthContext'
-import { Button, DetailRow } from '@components/Common'
+import { Button, Card, Descriptions, Flex, Typography } from 'antd'
+import { authCardWidth, authPageMinHeight } from '@constants/authLayout'
 
 export function UnavailablePage() {
   const { busy, dependencyHealth, setBooting, setStatus, loadSession } = useAuthContext()
@@ -16,24 +17,30 @@ export function UnavailablePage() {
   }
 
   return (
-    <main className="auth-page">
-      <section className="auth-card glass-card">
-        <h1>Services Unavailable</h1>
-        <p className="muted">
-          Cannot render authentication because one or more backend services are unavailable.
-        </p>
-        <DetailRow
-          label="external-rest-api"
-          value={dependencyHealth?.externalRestApi.ok ? 'healthy' : 'unavailable'}
-        />
-        <DetailRow
-          label="rpc-proxy"
-          value={dependencyHealth?.rpcProxy.ok ? 'healthy' : 'unavailable'}
-        />
-        <Button block disabled={busy} onClick={handleRetry}>
-          Retry Health Check
-        </Button>
-      </section>
+    <main>
+      <Flex align="center" justify="center" style={{ minHeight: authPageMinHeight }}>
+        <Card
+          style={{ width: authCardWidth }}
+          title={<Typography.Title level={1}>Services Unavailable</Typography.Title>}
+        >
+          <Flex vertical gap="middle">
+            <Typography.Paragraph>
+              Cannot render authentication because one or more backend services are unavailable.
+            </Typography.Paragraph>
+            <Descriptions column={1}>
+              <Descriptions.Item label="external-rest-api">
+                {dependencyHealth?.externalRestApi.ok ? 'healthy' : 'unavailable'}
+              </Descriptions.Item>
+              <Descriptions.Item label="rpc-proxy">
+                {dependencyHealth?.rpcProxy.ok ? 'healthy' : 'unavailable'}
+              </Descriptions.Item>
+            </Descriptions>
+            <Button block disabled={busy} htmlType="button" onClick={handleRetry}>
+              Retry Health Check
+            </Button>
+          </Flex>
+        </Card>
+      </Flex>
     </main>
   )
 }

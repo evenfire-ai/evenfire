@@ -56,6 +56,27 @@ test('optional QA recorder: Desktop auth and session journey — sign-in screen'
     await expect(passwordInput).toBeVisible()
     await expect(signInButton).toBeVisible()
 
+    const authCard = page.locator('.ant-card')
+    await expect(authCard).toBeVisible()
+    expect(await page.locator('style[data-css-hash]').count()).toBeGreaterThan(0)
+    const normalCardBounds = await authCard.boundingBox()
+    const normalViewportWidth = await page.evaluate(() => document.documentElement.clientWidth)
+    expect(normalCardBounds).not.toBeNull()
+    expect(normalCardBounds!.width).toBeLessThanOrEqual(normalViewportWidth)
+
+    const nativeWindow = await app.browserWindow(page)
+    await nativeWindow.evaluate(window => window.setSize(400, 640))
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.clientWidth))
+      .toBeLessThan(500)
+    const narrowCardBounds = await authCard.boundingBox()
+    const narrowViewportWidth = await page.evaluate(() => document.documentElement.clientWidth)
+    expect(narrowCardBounds).not.toBeNull()
+    expect(narrowCardBounds!.width).toBeLessThanOrEqual(narrowViewportWidth)
+    expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(
+      narrowViewportWidth
+    )
+
     await screenshotAndLog(page, testInfo, 'desktop-auth-signin-screen')
   } finally {
     await finalizeRecording(app, page)

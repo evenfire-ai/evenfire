@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { LOCALHOST_RUNTIME_CONFIG_OPTION_ID } from '../../constants/runtimeConfig'
 import { AuthContext } from '../../contexts/AuthContext'
@@ -84,6 +85,22 @@ function renderAuthPage(auth?: Partial<AuthContextValue>) {
       <AuthPage />
     </AuthContext.Provider>
   )
+}
+
+function StatefulAuthPage() {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+
+  return (
+    <AuthContext.Provider value={makeAuthValue({ email, password, setEmail, setPassword })}>
+      <AuthPage />
+    </AuthContext.Provider>
+  )
+}
+
+async function openEnvironmentSetup(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByLabelText('Open environment selector'))
+  await user.click(screen.getByLabelText('Add environment'))
 }
 
 describe('AuthPage', () => {
@@ -224,5 +241,226 @@ describe('AuthPage', () => {
     renderAuthPage({ backendSwitchHint: null })
 
     expect(screen.queryByRole('button', { name: /Switch to .* & retry/ })).toBeNull()
+  })
+
+  it('keeps native input types and context-owned email/password editing', async () => {
+    const user = userEvent.setup()
+    render(<StatefulAuthPage />)
+
+    const email = screen.getByRole('textbox', { name: 'Email' }) as HTMLInputElement
+    const password = screen.getByLabelText('Password') as HTMLInputElement
+    expect(email.id).toBe('email-input')
+    expect(email.type).toBe('email')
+    expect(password.id).toBe('password-input')
+    expect(password.type).toBe('password')
+
+    await user.tab()
+    expect(document.activeElement).toBe(email)
+    await user.type(email, 'person@example.com')
+    expect(document.activeElement).toBe(email)
+    await user.tab()
+    expect(document.activeElement).toBe(password)
+    await user.type(password, 'correct horse battery staple')
+
+    expect(email.value).toBe('person@example.com')
+    expect(password.value).toBe('correct horse battery staple')
+    expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(
+      false
+    )
+  })
+
+  it('submits valid credentials by Enter exactly once and blocks invalid or busy submits', async () => {
+    const user = userEvent.setup()
+    const handlePasswordLogin = vi.fn()
+    const { rerender } = renderAuthPage({
+      email: 'person@example.com',
+      password: 'secret',
+      handlePasswordLogin,
+    })
+
+    const password = screen.getByLabelText('Password')
+    password.focus()
+    await user.keyboard('{Enter}')
+    expect(handlePasswordLogin).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <AuthContext.Provider
+        value={makeAuthValue({ email: 'invalid-email', password: 'secret', handlePasswordLogin })}
+      >
+        <AuthPage />
+      </AuthContext.Provider>
+    )
+    screen.getByLabelText('Password').focus()
+    await user.keyboard('{Enter}')
+    expect(handlePasswordLogin).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <AuthContext.Provider
+        value={makeAuthValue({
+          email: 'person@example.com',
+          password: 'secret',
+          busy: true,
+          handlePasswordLogin,
+        })}
+      >
+        <AuthPage />
+      </AuthContext.Provider>
+    )
+    expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(
+      true
+    )
+    expect(handlePasswordLogin).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps sign-in progress visible without replacing its busy owner', () => {
+    renderAuthPage({ email: 'person@example.com', password: 'secret', authTransitioning: true })
+
+    expect((screen.getByRole('button', { name: /Signing in/ }) as HTMLButtonElement).disabled).toBe(
+      false
+    )
+    expect(screen.getByRole('button', { name: /Signing in/ }).textContent).toContain(
+      'Signing in...'
+    )
+  })
+
+  it('retains valid runtime values when save fails and preserves cancel behavior', async () => {
+    const user = userEvent.setup()
+    const handleSaveRuntimeConfig = vi.fn().mockResolvedValue(null)
+    const runtimeConfigSetupName = 'Production'
+    const runtimeConfigSetupExternalRestApiBaseUrl = 'https://api.example.com'
+    renderAuthPage({
+      runtimeConfigSetupName,
+      runtimeConfigSetupExternalRestApiBaseUrl,
+      handleSaveRuntimeConfig,
+    })
+
+    await openEnvironmentSetup(user)
+    const name = screen.getByLabelText('Environment name') as HTMLInputElement
+    const url = screen.getByLabelText('External REST API') as HTMLInputElement
+    expect(name.type).toBe('text')
+    expect(url.type).toBe('url')
+    expect(name.value).toBe(runtimeConfigSetupName)
+    expect(url.value).toBe(runtimeConfigSetupExternalRestApiBaseUrl)
+
+    await user.click(screen.getByRole('button', { name: 'Save environment' }))
+    expect(handleSaveRuntimeConfig).toHaveBeenCalledTimes(1)
+    expect(screen.getByLabelText('Environment name')).toBeTruthy()
+    expect((screen.getByLabelText('External REST API') as HTMLInputElement).value).toBe(
+      runtimeConfigSetupExternalRestApiBaseUrl
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Go back to login' }))
+    expect(screen.getByLabelText('Email')).toBeTruthy()
+    expect(screen.queryByLabelText('Environment name')).toBeNull()
+  })
+
+  it('saves valid runtime configuration exactly once from Enter', async () => {
+    const user = userEvent.setup()
+    const handleSaveRuntimeConfig = vi.fn().mockResolvedValue({ id: 'runtime-config' })
+    renderAuthPage({
+      runtimeConfigSetupName: 'Production',
+      runtimeConfigSetupExternalRestApiBaseUrl: 'https://api.example.com',
+      handleSaveRuntimeConfig,
+    })
+    await openEnvironmentSetup(user)
+
+    const url = screen.getByLabelText('External REST API')
+    url.focus()
+    await user.keyboard('{Enter}')
+
+    await waitFor(() => expect(handleSaveRuntimeConfig).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.queryByLabelText('Environment name')).toBeNull())
+  })
+
+  it('blocks a malformed environment URL and disables duplicate runtime submissions while busy', async () => {
+    const user = userEvent.setup()
+    const handleSaveRuntimeConfig = vi.fn()
+    renderAuthPage({
+      runtimeConfigSetupName: 'Production',
+      runtimeConfigSetupExternalRestApiBaseUrl: 'not-a-url',
+      handleSaveRuntimeConfig,
+    })
+    await openEnvironmentSetup(user)
+
+    await user.click(screen.getByRole('button', { name: 'Save environment' }))
+    expect(handleSaveRuntimeConfig).not.toHaveBeenCalled()
+
+    cleanup()
+    const { rerender } = renderAuthPage({
+      runtimeConfigSetupName: 'Production',
+      runtimeConfigSetupExternalRestApiBaseUrl: 'https://api.example.com',
+      handleSaveRuntimeConfig,
+    })
+    await openEnvironmentSetup(user)
+    rerender(
+      <AuthContext.Provider
+        value={makeAuthValue({
+          busy: true,
+          runtimeConfigSetupName: 'Production',
+          runtimeConfigSetupExternalRestApiBaseUrl: 'https://api.example.com',
+          handleSaveRuntimeConfig,
+        })}
+      >
+        <AuthPage />
+      </AuthContext.Provider>
+    )
+    expect(
+      (screen.getByRole('button', { name: 'Save environment' }) as HTMLButtonElement).disabled
+    ).toBe(true)
+    expect(
+      (screen.getByRole('button', { name: 'Go back to login' }) as HTMLButtonElement).disabled
+    ).toBe(true)
+  })
+
+  it('normalizes forgot-password email, reports success/failure and disables while pending', async () => {
+    const user = userEvent.setup()
+    let resolveForgotPassword!: () => void
+    const openForgotPassword = vi.fn(
+      () => new Promise<void>(resolve => (resolveForgotPassword = resolve))
+    )
+    ;(window as unknown as { clerum: { auth: Record<string, unknown> } }).clerum.auth = {
+      probeLocalhostReachable,
+      openForgotPassword,
+    }
+    const setStatus = vi.fn()
+    renderAuthPage({ email: ' Person@Example.COM ', setStatus })
+
+    await user.click(screen.getByRole('button', { name: 'Forgot password' }))
+    expect(openForgotPassword).toHaveBeenCalledWith('person@example.com')
+    expect(
+      (screen.getByRole('button', { name: 'Forgot password' }) as HTMLButtonElement).disabled
+    ).toBe(true)
+    resolveForgotPassword()
+    await screen.findByRole('button', { name: 'Forgot password' })
+    expect(
+      (screen.getByRole('button', { name: 'Forgot password' }) as HTMLButtonElement).disabled
+    ).toBe(false)
+    expect(setStatus).toHaveBeenCalledWith('Password reset opened in your browser.', 'success')
+
+    const rejected = vi.fn().mockRejectedValue(new Error('browser unavailable'))
+    ;(window as unknown as { clerum: { auth: Record<string, unknown> } }).clerum.auth = {
+      probeLocalhostReachable,
+      openForgotPassword: rejected,
+    }
+    await user.click(screen.getByRole('button', { name: 'Forgot password' }))
+    expect(setStatus).toHaveBeenCalledWith('Password reset could not be opened.', 'error')
+  })
+
+  it('retains the backend warning and disables its retry action while busy', () => {
+    renderAuthPage({
+      busy: true,
+      backendSwitchHint: {
+        targetOptionId: LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
+        targetLabel: 'Localhost',
+        activeLabel: 'Production',
+      },
+    })
+
+    expect(screen.getByText(/Couldn’t reach/)).toBeTruthy()
+    expect(screen.getByRole('alert')).toBeTruthy()
+    expect(
+      (screen.getByRole('button', { name: /Switch to Localhost & retry/ }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
   })
 })

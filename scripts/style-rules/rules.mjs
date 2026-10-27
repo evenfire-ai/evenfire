@@ -96,6 +96,10 @@ const INLINE_STYLE_DYNAMIC_HINTS = [
   '--seg-width',
   // Portaled flyout position computed from getBoundingClientRect (useFlyoutPosition).
   'FlyoutPosition',
+  // Responsive Ant Design auth viewport sizing retains the titlebar-safe page
+  // height and narrow-window card width without recreating them in CSS.
+  'authPageMinHeight',
+  'authCardWidth',
 ]
 
 function isCssTarget(file) {
@@ -369,7 +373,7 @@ export const rules = [
     id: 'da-no-static-inline-style',
     severity: 'warn',
     description:
-      'JSX inline styles are reserved for genuinely dynamic values. Static styling belongs in src/styles.css. The only documented inline-style use is `--da-grid-cols`.',
+      'JSX inline styles are reserved for genuinely dynamic values and documented layout geometry. Static styling belongs in src/styles.css.',
     applies(file) {
       return isTsxTarget(file)
     },
@@ -391,7 +395,7 @@ export const rules = [
         if (!isDynamic) {
           violations.push({
             line: blockStartLine,
-            message: `inline style without --da-grid-cols or runtime values — move to a class in src/styles.css`,
+            message: `inline style without --da-grid-cols or documented runtime/layout values — move static styling to src/styles.css`,
           })
         }
         inStyleBlock = false

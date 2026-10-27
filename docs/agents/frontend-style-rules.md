@@ -10,6 +10,27 @@ They do not apply to `desktop-app/**` outside `ui/**` or to other repository
 services. The applicable provider adapter also selects the provider-neutral
 application guidance that must be combined with this shared document.
 
+## Desktop Ant Design migration
+
+The approved Desktop renderer migration makes Ant Design the presentation
+system for each migrated Desktop surface. In `desktop-app/ui/**`, use native
+Ant Design components and layout primitives, with the application's existing
+state, handlers, validation, requests, and lifecycle behavior left in their
+current owners. Do not introduce Desktop Common controls, visual class systems,
+or CSS overrides on a migrated surface when Ant Design provides the equivalent.
+Use the Desktop root `ConfigProvider` and its small component size. Preserve
+specialized Markdown and embedded-content renderers only where their existing
+documented security or lifecycle contracts require them.
+
+This Desktop-only direction supersedes the shared primitive, token, and CSS
+presentation instructions below for migrated Desktop surfaces. Control UI and
+Profile UI continue to follow the shared instructions unchanged. During the
+multi-batch migration, unmigrated Desktop surfaces retain their current
+conventions and shared CSS/Common components stay until their consumers have
+migrated and Phase 3 authorizes removal. A migrated surface may retain semantic
+HTML such as `form`, `label`, `main`, or a heading when it carries behavior or
+accessibility semantics rather than a parallel visual primitive.
+
 ## Preserve behavior
 
 - Preserve established interaction behavior before simplifying structure or

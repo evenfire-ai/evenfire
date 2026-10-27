@@ -2,6 +2,7 @@ import React from 'react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
+import { AntDesignProvider } from './components/AntDesignProvider'
 import './components/ArtifactsBadge.css'
 import { AgentTaskTrackerProvider } from './contexts/AgentTaskTrackerContext'
 import { desktopQueryClient } from './lib/queryClient'
@@ -12,7 +13,9 @@ createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={desktopQueryClient}>
       <AgentTaskTrackerProvider>
-        <App />
+        <AntDesignProvider>
+          <App />
+        </AntDesignProvider>
       </AgentTaskTrackerProvider>
     </QueryClientProvider>
   </React.StrictMode>

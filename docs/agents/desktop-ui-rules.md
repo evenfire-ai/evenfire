@@ -38,6 +38,14 @@ Shared feedback and accessibility semantics, including toast versus inline
 status placement, are owned by
 [`frontend-style-rules.md`](./frontend-style-rules.md).
 `desktop-app/ui/docs/STYLE_STANDARDIZATION.md` is authoritative for
-Desktop-specific renderer tokens, shared CSS ownership, Common controls, page
-placement, page shells, tabs, DataGrid, visual/layout treatment for feedback
-components, and style-rule enforcement.
+Desktop-specific renderer architecture and migration boundaries. For an
+unmigrated surface, its legacy tokens, shared CSS ownership, Common controls,
+page placement, page shells, tabs, DataGrid, feedback treatment, and style-rule
+enforcement remain in force.
+
+For a migrated surface, follow the owner-approved Ant Design architecture
+documented in `STYLE_STANDARDIZATION.md`: Ant Design owns presentation, while
+existing Desktop code continues to own behavior. The legacy Common/CSS rules
+remain in force only for surfaces not yet migrated. Do not extend those legacy
+primitives or visual classes into a migrated surface, and do not remove their
+shared definitions while other consumers remain.

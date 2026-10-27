@@ -71,6 +71,22 @@ test('does not confuse RowActionsMenu with the retired RowActions component', ()
   )
 })
 
+test('allows documented responsive Ant Design auth layout dimensions only', () => {
+  assert.deepEqual(
+    violationsFor(
+      'desktop-app/ui/src/pages/AuthPage/index.tsx',
+      '<Flex style={{ minHeight: authPageMinHeight }} />\n' +
+        '<Card style={{ width: authCardWidth }} />'
+    ),
+    []
+  )
+  assert.equal(
+    violationsFor('desktop-app/ui/src/pages/AuthPage/index.tsx', '<Flex style={{ padding: 24 }} />')
+      .length,
+    1
+  )
+})
+
 test('allows shared sorting helpers and similarly named non-retired table symbols', () => {
   assert.deepEqual(
     violationsFor(

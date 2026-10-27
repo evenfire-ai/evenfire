@@ -1,9 +1,10 @@
 import type { FormEvent } from 'react'
 import { useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
+import { Alert, Button, Card, Flex, Input, Spin, Typography } from 'antd'
 import { AuthBrand } from '@components/AuthBrand'
-import { Button, Field, StatusBanner, TextInput } from '@components/Common'
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
+import { authCardWidth, authPageMinHeight } from '@constants/authLayout'
 
 /**
  * Sign-in for a configured environment.
@@ -74,117 +75,126 @@ export function AuthPage() {
   }
 
   return (
-    <main className="auth-page">
-      <section className="auth-card glass-card">
-        <header className="auth-card__header">
-          <AuthBrand />
-        </header>
+    <main>
+      <Flex align="center" justify="center" style={{ minHeight: authPageMinHeight }}>
+        <Card style={{ width: authCardWidth }}>
+          <Flex vertical gap="large">
+            <AuthBrand />
 
-        {/* Sign-in stays content-sized. The fixed height belongs to the
+            {/* Sign-in stays content-sized. The fixed height belongs to the
             onboarding wizard, which needs it because its steps differ wildly
             in length; sign-in has one short form and reads better snug. */}
-        {runtimeSetupVisible ? (
-          <form className="auth-form-stack" onSubmit={handleRuntimeSetupSubmit}>
-            <Field
-              label="Environment name"
-              htmlFor="runtime-config-name-input"
-              wrapperClassName="auth-form-row"
-            >
-              <TextInput
-                id="runtime-config-name-input"
-                type="text"
-                placeholder="Production"
-                value={runtimeConfigSetupName}
-                onChange={event => setRuntimeConfigSetupName(event.target.value)}
-              />
-            </Field>
-            <Field
-              label="External REST API"
-              htmlFor="runtime-config-external-rest-api-input"
-              wrapperClassName="auth-form-row"
-            >
-              <TextInput
-                id="runtime-config-external-rest-api-input"
-                type="url"
-                placeholder="https://example.com"
-                value={runtimeConfigSetupExternalRestApiBaseUrl}
-                onChange={event => setRuntimeConfigSetupExternalRestApiBaseUrl(event.target.value)}
-              />
-            </Field>
-            <Button block disabled={!hasRuntimeSetupValues || busy} type="submit">
-              Save environment
-            </Button>
-            <button
-              type="button"
-              className="auth-inline-link"
-              onClick={handleRuntimeSetupCancel}
-              disabled={busy}
-            >
-              Go back to login
-            </button>
-          </form>
-        ) : (
-          <form className="auth-form-stack" onSubmit={handlePasswordSubmit}>
-            <Field label="Email" htmlFor="email-input" wrapperClassName="auth-form-row">
-              <TextInput
-                id="email-input"
-                type="email"
-                placeholder="you@evenfire.com"
-                value={email}
-                onChange={event => setEmail(event.target.value)}
-              />
-            </Field>
-            <Field label="Password" htmlFor="password-input" wrapperClassName="auth-form-row">
-              <TextInput
-                id="password-input"
-                type="password"
-                placeholder="Your password"
-                value={password}
-                onChange={event => setPassword(event.target.value)}
-              />
-            </Field>
-            <Button block disabled={!hasPasswordLoginCredentials || busy} type="submit">
-              {authTransitioning ? (
-                <span className="auth-button-loading">
-                  <span className="auth-button-spinner" aria-hidden="true" />
-                  Signing in...
-                </span>
-              ) : (
-                'Sign in'
-              )}
-            </Button>
-            <button
-              type="button"
-              className="auth-inline-link"
-              onClick={() => void handleForgotPasswordClick()}
-              disabled={busy || forgotPasswordBusy}
-            >
-              Forgot password
-            </button>
-            {backendSwitchHint ? (
-              <StatusBanner tone="warn">
-                <span className="auth-backend-hint">
-                  <span>
-                    Couldn’t reach <strong>{backendSwitchHint.activeLabel}</strong>. A local
-                    Evenfire looks like it’s running — switch to{' '}
-                    <strong>{backendSwitchHint.targetLabel}</strong> and retry?
-                  </span>
+            {runtimeSetupVisible ? (
+              <form onSubmit={handleRuntimeSetupSubmit}>
+                <Flex vertical gap="middle">
+                  <Flex vertical gap="small">
+                    <label htmlFor="runtime-config-name-input">Environment name</label>
+                    <Input
+                      id="runtime-config-name-input"
+                      type="text"
+                      placeholder="Production"
+                      value={runtimeConfigSetupName}
+                      onChange={event => setRuntimeConfigSetupName(event.target.value)}
+                    />
+                  </Flex>
+                  <Flex vertical gap="small">
+                    <label htmlFor="runtime-config-external-rest-api-input">
+                      External REST API
+                    </label>
+                    <Input
+                      id="runtime-config-external-rest-api-input"
+                      type="url"
+                      placeholder="https://example.com"
+                      value={runtimeConfigSetupExternalRestApiBaseUrl}
+                      onChange={event =>
+                        setRuntimeConfigSetupExternalRestApiBaseUrl(event.target.value)
+                      }
+                    />
+                  </Flex>
+                  <Button block disabled={!hasRuntimeSetupValues || busy} htmlType="submit">
+                    Save environment
+                  </Button>
                   <Button
-                    type="button"
-                    size="sm"
-                    variant="soft"
                     block
                     disabled={busy}
-                    onClick={() => void handleSwitchLoginBackend()}
+                    htmlType="button"
+                    onClick={handleRuntimeSetupCancel}
+                    type="link"
                   >
-                    {`Switch to ${backendSwitchHint.targetLabel} & retry`}
+                    Go back to login
                   </Button>
-                </span>
-              </StatusBanner>
-            ) : null}
-          </form>
-        )}
-      </section>
+                </Flex>
+              </form>
+            ) : (
+              <form onSubmit={handlePasswordSubmit}>
+                <Flex vertical gap="middle">
+                  <Flex vertical gap="small">
+                    <label htmlFor="email-input">Email</label>
+                    <Input
+                      id="email-input"
+                      type="email"
+                      placeholder="you@evenfire.com"
+                      value={email}
+                      onChange={event => setEmail(event.target.value)}
+                    />
+                  </Flex>
+                  <Flex vertical gap="small">
+                    <label htmlFor="password-input">Password</label>
+                    <Input
+                      id="password-input"
+                      type="password"
+                      placeholder="Your password"
+                      value={password}
+                      onChange={event => setPassword(event.target.value)}
+                    />
+                  </Flex>
+                  <Button block disabled={!hasPasswordLoginCredentials || busy} htmlType="submit">
+                    {authTransitioning ? (
+                      <Flex align="center" gap="small" justify="center">
+                        <Spin aria-hidden="true" size="small" />
+                        <span>Signing in...</span>
+                      </Flex>
+                    ) : (
+                      'Sign in'
+                    )}
+                  </Button>
+                  <Button
+                    block
+                    disabled={busy || forgotPasswordBusy}
+                    htmlType="button"
+                    onClick={() => void handleForgotPasswordClick()}
+                    type="link"
+                  >
+                    Forgot password
+                  </Button>
+                  {backendSwitchHint ? (
+                    <Alert
+                      description={
+                        <Flex vertical gap="small">
+                          <Typography.Text>
+                            Couldn’t reach <strong>{backendSwitchHint.activeLabel}</strong>. A local
+                            Evenfire looks like it’s running — switch to{' '}
+                            <strong>{backendSwitchHint.targetLabel}</strong> and retry?
+                          </Typography.Text>
+                          <Button
+                            block
+                            disabled={busy}
+                            htmlType="button"
+                            onClick={() => void handleSwitchLoginBackend()}
+                          >
+                            {`Switch to ${backendSwitchHint.targetLabel} & retry`}
+                          </Button>
+                        </Flex>
+                      }
+                      type="warning"
+                    />
+                  ) : null}
+                </Flex>
+              </form>
+            )}
+          </Flex>
+        </Card>
+      </Flex>
       <RuntimeConfigDock onAddEnvironment={() => setRuntimeSetupVisible(true)} />
     </main>
   )

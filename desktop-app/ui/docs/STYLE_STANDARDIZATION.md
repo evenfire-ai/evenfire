@@ -2,6 +2,31 @@
 
 This document is the authoritative reference for **how a page is built in desktop-app/ui** after the layout/token consolidation refactor. It complements the cross-app rules in [`../../../docs/agents/frontend-style-rules.md`](../../../docs/agents/frontend-style-rules.md). Read the shared and renderer application rules selected by the provider adapter first; this document owns Desktop-specific visual and layout patterns.
 
+## Owner-approved Ant Design migration
+
+The Desktop renderer is migrating to Ant Design as its presentation system.
+For every migrated surface, use native Ant Design components (`ConfigProvider`,
+`Layout`/`Flex`, `Card`, `Input`, `Button`, `Alert`, `Descriptions`, and the
+other component that matches the control). Use the root provider's small
+component size and accept Ant Design's component geometry and spacing. Do not
+recreate the prior appearance with Desktop Common controls, custom visual
+classes, CSS, or inline style overrides when Ant Design supplies the surface.
+
+Existing feature components, context, hooks, state, callbacks, validation,
+requests, persistence, keyboard behavior, focus, and lifecycle remain owned by
+Evenfire. Keep semantic native form elements where they preserve browser submit
+and validation behavior; Ant Design Form state is not a replacement for existing
+application state. Keep content/embedded renderers that have a documented
+specialized contract. This migration does not authorize Phase 3 deletion:
+stylesheets, tokens, Common controls, and legacy rules remain while any
+consumer depends on them.
+
+The remainder of this document records the legacy architecture for surfaces
+that have not yet migrated. It is not a reason to extend that architecture to a
+migrated surface. Where its presentation instructions conflict with the owner-
+approved Ant Design direction above, the Ant Design direction governs only the
+migrated Desktop surface. Control UI and Profile UI are unaffected.
+
 When in doubt, mimic an existing post-refactor page (`WorkflowsPage`, `McpServersPage`, `AgentsPage`) before inventing.
 
 ## 1. Page shell
@@ -269,6 +294,9 @@ stacked-bar segment width in the context-window breakdown popover),
 `FlyoutPosition` (portaled flyout `left`/`top` computed from
 `getBoundingClientRect()` via `useFlyoutPosition`; matches the
 `*FlyoutPosition` result variables in `ComposerPanel` and `AgentTitleSelector`).
+`authPageMinHeight` and `authCardWidth` (viewport-dependent Ant Design auth
+layout dimensions that keep the page clear of the native titlebar and the card
+inside a narrow window; these do not tune Ant Design component spacing).
 
 ### Extending coverage
 

@@ -51,6 +51,7 @@
     "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
     "@clerum/gfs-interaction-policy": "file:../packages/gfs-interaction-policy",
     "@tanstack/react-query": "5.100.10",
+    "antd": "6.6.8",
     "hast-util-to-jsx-runtime": "^2.3.6",
     "js-yaml": "^4.3.2",
     "keytar": "^7.9.0",

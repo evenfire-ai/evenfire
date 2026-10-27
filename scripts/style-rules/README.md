@@ -26,7 +26,7 @@ source under `control-ui/**` and `profile-ui/**`.
 | `da-no-new-component-css`         | error    | New `.css` files under `desktop-app/ui/src/` other than the 5 allowlisted ones.                     |
 | `da-no-hover-motion`              | error    | Hover states that move, scale, or filter controls. Use background/border/text/shadow token changes. |
 | `da-no-hex-in-tsx`                | warn     | Hex literals in TS/TSX strings. Reviewer judgment for genuinely dynamic cases.                      |
-| `da-no-static-inline-style`       | warn     | JSX `style={{...}}` not containing `--da-grid-cols` or whitelisted runtime values.                  |
+| `da-no-static-inline-style`       | warn     | JSX `style={{...}}` not containing `--da-grid-cols` or documented runtime/layout values.            |
 | `web-no-app-local-table`          | error    | Raw production `<table>` shells in Control UI or Profile UI instead of the shared table system.     |
 | `web-no-app-local-table-viewport` | error    | Direct application authorship of `eft-table-viewport` instead of shared `TableViewport`.            |
 | `web-no-retired-table-pattern`    | error    | Production references to retired app-local table, row-action, tab, or expansion families.           |
