@@ -244,7 +244,6 @@ export function GfsMoveDialog({
     resourceId: target.resourceId,
     name: target.name,
     kind: target.kind,
-    parentResourceId: target.parentResourceId ?? null,
   }
   const dialogIdentityRef = useRef(dialogIdentity)
   dialogIdentityRef.current = dialogIdentity
@@ -342,8 +341,7 @@ export function GfsMoveDialog({
         currentIdentity.scope === expectedIdentity.scope &&
         currentIdentity.resourceId === expectedIdentity.resourceId &&
         currentIdentity.name === expectedIdentity.name &&
-        currentIdentity.kind === expectedIdentity.kind &&
-        currentIdentity.parentResourceId === expectedIdentity.parentResourceId
+        currentIdentity.kind === expectedIdentity.kind
       )
     }
   }

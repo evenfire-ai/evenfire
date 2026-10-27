@@ -624,6 +624,9 @@ export function useFilePreviewResourceActions({
       version: resource.version,
     }
     const isActiveMove = () => moveRequestRef.current === requestId
+    // Authorization is tied to the exact source snapshot until dispatch. After
+    // dispatch, a competing move may legitimately advance its parent/version;
+    // only a different Preview or principal should fence this result.
     const hasCurrentMoveContext = () => {
       const current = moveContextRef.current
       return (
@@ -633,6 +636,15 @@ export function useFilePreviewResourceActions({
         current.parentResourceId === moveContext.parentResourceId &&
         current.drive === moveContext.drive &&
         current.version === moveContext.version
+      )
+    }
+    const hasCurrentMovePresentationContext = () => {
+      const current = moveContextRef.current
+      return (
+        current.gfsUri === moveContext.gfsUri &&
+        current.sessionScope === moveContext.sessionScope &&
+        current.resourceId === moveContext.resourceId &&
+        current.drive === moveContext.drive
       )
     }
     setMovePermissionStatus('checking')
@@ -707,7 +719,7 @@ export function useFilePreviewResourceActions({
       if (moveContextRef.current.sessionScope === moveContext.sessionScope) {
         await invalidateResourceForSession(moveContext.sessionScope)
       }
-      if (!previewMountedRef.current || !hasCurrentMoveContext()) return
+      if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
       if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) setMoveOpen(false)
       pushToast?.(`Moved ${resource.name} to ${destinationName}`, 'success')
     } catch (error) {
@@ -726,7 +738,7 @@ export function useFilePreviewResourceActions({
         }
         return
       }
-      if (!previewMountedRef.current || !hasCurrentMoveContext()) return
+      if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
       if (onAuthorityFailure(errorMessage(error))) {
         if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
           setMoveOpen(false)

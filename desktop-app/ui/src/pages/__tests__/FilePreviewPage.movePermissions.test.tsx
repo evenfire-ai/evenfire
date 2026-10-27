@@ -1323,6 +1323,184 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     }
   })
 
+  it('keeps a dispatched success when its own refresh advances the resource version', async () => {
+    let settleArchive!: () => void
+    let settleWork!: () => void
+    let finishPermissionRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
+    let holdPermissionRefresh = false
+    let sourceReads = 0
+    const archiveMove = new Promise<void>(resolve => {
+      settleArchive = resolve
+    })
+    const workMove = new Promise<void>(resolve => {
+      settleWork = resolve
+    })
+    const permissionRefresh = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+      finishPermissionRefresh = resolve
+    })
+    const movedResource = await resolveResource({
+      resourceId,
+      rid: resourceId,
+      gfsUri: uri,
+      drive: 'main',
+      parentResourceId: 'destination-1',
+      name: 'diagram.png',
+      kind: 'file',
+      version: 8,
+      bytes: 1,
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+      accessibleResource('destination-2', 'Work', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource, resolve } = installGfs({
+      source: () => {
+        sourceReads += 1
+        return holdPermissionRefresh ? permissionRefresh : Promise.resolve(fullAccess)
+      },
+      listAccessible: async () => destinationPage,
+      move: (_id, destinationId) => (destinationId === 'destination-1' ? archiveMove : workMove),
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    const previewResourceKey = [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', uri]
+    try {
+      const archiveDialog = await dispatchArchiveMove()
+      fireEvent.click(within(archiveDialog).getByRole('button', { name: 'Close move dialog' }))
+
+      const workMenu = await openPreviewActions()
+      fireEvent.click(within(workMenu).getByRole('menuitem', { name: 'Move to' }))
+      const workDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      await fireEvent.click(await within(workDialog).findByRole('button', { name: 'Work' }))
+      await fireEvent.click(within(workDialog).getByRole('button', { name: 'Move here (Work)' }))
+      await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
+      expect(moveResource.mock.calls).toEqual([
+        [resourceId, 'destination-1', 'main', 7],
+        [resourceId, 'destination-2', 'main', 7],
+      ])
+
+      holdPermissionRefresh = true
+      resolve.mockResolvedValue(movedResource)
+      await act(async () => settleArchive())
+      await waitFor(() => expect(sourceReads).toBeGreaterThan(3))
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+      await waitFor(() =>
+        expect(queryClient.getQueryData(previewResourceKey)).toEqual(movedResource)
+      )
+      expect(screen.queryByText('Moved diagram.png to Archive')).toBeNull()
+
+      await act(async () => finishPermissionRefresh(fullAccess))
+      expect(await screen.findByText('Moved diagram.png to Archive')).toBeTruthy()
+      expect(screen.getAllByText('Moved diagram.png to Archive')).toHaveLength(1)
+      expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
+      expect(moveResource).toHaveBeenCalledTimes(2)
+    } finally {
+      await act(async () => {
+        settleArchive()
+        settleWork()
+        finishPermissionRefresh(fullAccess)
+      })
+      queryClient.clear()
+    }
+  })
+
+  it('shows a competing stale-version failure in the still-current Move dialog', async () => {
+    let settleArchive!: () => void
+    let rejectWork!: (error: Error) => void
+    let finishPermissionRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
+    let holdPermissionRefresh = false
+    let sourceReads = 0
+    const archiveMove = new Promise<void>(resolve => {
+      settleArchive = resolve
+    })
+    const workMove = new Promise<void>((_resolve, reject) => {
+      rejectWork = reject
+    })
+    const permissionRefresh = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+      finishPermissionRefresh = resolve
+    })
+    const movedResource = await resolveResource({
+      resourceId,
+      rid: resourceId,
+      gfsUri: uri,
+      drive: 'main',
+      parentResourceId: 'destination-1',
+      name: 'diagram.png',
+      kind: 'file',
+      version: 8,
+      bytes: 1,
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+      accessibleResource('destination-2', 'Work', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource, resolve } = installGfs({
+      source: () => {
+        sourceReads += 1
+        return holdPermissionRefresh ? permissionRefresh : Promise.resolve(fullAccess)
+      },
+      listAccessible: async () => destinationPage,
+      move: (_id, destinationId) => (destinationId === 'destination-1' ? archiveMove : workMove),
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    try {
+      const archiveDialog = await dispatchArchiveMove()
+      fireEvent.click(within(archiveDialog).getByRole('button', { name: 'Close move dialog' }))
+
+      const workMenu = await openPreviewActions()
+      fireEvent.click(within(workMenu).getByRole('menuitem', { name: 'Move to' }))
+      const workDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      await fireEvent.click(await within(workDialog).findByRole('button', { name: 'Work' }))
+      await fireEvent.click(within(workDialog).getByRole('button', { name: 'Move here (Work)' }))
+      await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
+      expect(moveResource.mock.calls).toEqual([
+        [resourceId, 'destination-1', 'main', 7],
+        [resourceId, 'destination-2', 'main', 7],
+      ])
+
+      holdPermissionRefresh = true
+      resolve.mockResolvedValue(movedResource)
+      await act(async () => settleArchive())
+      await waitFor(() => expect(sourceReads).toBeGreaterThan(3))
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+      await waitFor(() =>
+        expect(
+          queryClient.getQueryData([
+            ...desktopQueryKeys.gfsRoot,
+            sessionScope,
+            'preview-resource',
+            uri,
+          ])
+        ).toEqual(movedResource)
+      )
+
+      await act(async () => rejectWork(new Error('412 Precondition Failed: stale file version')))
+      expect(within(workDialog).getByText(/stale file version/i)).toBeTruthy()
+      expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(moveResource).toHaveBeenCalledTimes(2)
+
+      await act(async () => finishPermissionRefresh(fullAccess))
+      expect(await screen.findByText('Moved diagram.png to Archive')).toBeTruthy()
+    } finally {
+      await act(async () => {
+        settleArchive()
+        rejectWork(new Error('412 Precondition Failed: stale file version'))
+        finishPermissionRefresh(fullAccess)
+      })
+      queryClient.clear()
+    }
+  })
+
   it('identifies the captured destination for overlapping post-close Move failures', async () => {
     let rejectArchive!: (error: Error) => void
     let rejectWork!: (error: Error) => void
