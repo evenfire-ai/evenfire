@@ -1056,6 +1056,61 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     expect(admins.rowCount).toBe(0)
   }, 15_000)
 
+  it('does not complete an invitation revoked while the acceptance is in flight', async () => {
+    const inviter = await seedAdmin('race-ops')
+    const email = uniqueEmail('race-client')
+    const invitation = await createControlAdminInvitation(email, inviter.id)
+    if ('error' in invitation) throw new Error(invitation.error)
+
+    // Model a concurrent revoke that has updated the invitation but not yet committed.
+    const blocker = await testPool.connect()
+    try {
+      await blocker.query('BEGIN')
+      const blockerBackend = await blocker.query('SELECT pg_backend_pid() AS pid')
+      const blockerPid = Number((blockerBackend.rows[0] as { pid: number }).pid)
+      await blocker.query(
+        `UPDATE control_admin_invitations SET status = 'revoked' WHERE id = $1::uuid`,
+        [invitation.id]
+      )
+
+      const completion = completeControlAdminInvitation({
+        email,
+        invitationId: invitation.id,
+        username: `race-${randomUUID().slice(0, 8)}`,
+        passwordHash: 'real-pg-replace-client',
+      })
+      completion.catch(() => undefined)
+      for (let attempt = 0; ; attempt += 1) {
+        const waiting = await adminPool.query(
+          `SELECT 1
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND wait_event_type = 'Lock'
+              AND query ILIKE '%FROM control_admin_invitations%'
+              AND array_position(pg_blocking_pids(pid), $2::int) IS NOT NULL`,
+          [database, blockerPid]
+        )
+        if ((waiting.rowCount ?? 0) > 0) break
+        if (attempt >= 100)
+          throw new Error('acceptance did not wait on the concurrent invitation revocation')
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+
+      await blocker.query('COMMIT')
+      await expect(completion).resolves.toEqual({ error: 'not_found' })
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined)
+      blocker.release()
+    }
+
+    expect(await adminInvitationStatus(invitation.id)).toBe('revoked')
+    const admins = await testPool.query(
+      `SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)`,
+      [email]
+    )
+    expect(admins.rowCount).toBe(0)
+  }, 15_000)
+
   it('refuses a hand-over when a retired desktop user holds the invitee email', async () => {
     const inviter = await seedAdmin('retired-receiver-ops')
     const inviterDesktopId = await seedDesktopUser(inviter.email)
