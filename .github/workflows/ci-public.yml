@@ -251,7 +251,7 @@ jobs:
 
       - name: Build Profile UI image builder stage
         if: matrix.service == 'profile-ui'
-        run: timeout 900s docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24-alpine --target builder -f profile-ui/Dockerfile .
+        run: timeout 900s docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24.22.1-alpine --target builder -f profile-ui/Dockerfile .
 
       - name: Install Playwright Chromium
         if: matrix.service == 'desktop-app'
@@ -422,7 +422,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: desktop-app/package-lock.json
 

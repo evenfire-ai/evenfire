@@ -11,7 +11,7 @@ for (const service of ['profile-ui', 'mcp-servers/web-search']) {
     const dockerfile = readFileSync(new URL(`${service}/Dockerfile`, root), 'utf8')
     const stages = dockerfile.split('\n').filter(line => line.startsWith('FROM '))
     assert.equal(stages.length, 2)
-    assert.match(dockerfile, /^ARG NODE_IMAGE=node:24-alpine\n/)
+    assert.match(dockerfile, /^ARG NODE_IMAGE=node:24\.22\.1-alpine\n/)
     for (const stage of stages) assert.match(stage, /^FROM \$\{NODE_IMAGE\}(?: AS builder)?$/)
     const step =
       service === 'profile-ui'
@@ -19,7 +19,7 @@ for (const service of ['profile-ui', 'mcp-servers/web-search']) {
         : workflow.slice(workflow.indexOf('- name: Test web-search image'))
     const command = step.split('\n').find(line => line.includes('docker build'))
     assert.ok(command, 'CI build command must exist')
-    assert.match(command, /--build-arg NODE_IMAGE=mirror\.gcr\.io\/library\/node:24-alpine/)
+    assert.match(command, /--build-arg NODE_IMAGE=mirror\.gcr\.io\/library\/node:24\.22\.1-alpine/)
     assert.doesNotMatch(publish, /NODE_IMAGE/)
   })
 }
