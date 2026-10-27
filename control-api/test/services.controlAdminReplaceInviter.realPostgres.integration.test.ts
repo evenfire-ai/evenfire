@@ -10,10 +10,12 @@ import { authorizeRpcHostAccess } from '../src/services/access/rpcHostAccessAuth
 import {
   completeControlAdminInvitation,
   createControlAdminInvitation,
+  deleteControlAdmin,
   findAdminByLogin,
   getPendingControlAdminInvitation,
   listControlAdmins,
   markControlAdminInvitationOpened,
+  retireControlAdminInTransaction,
   revokeControlAdminInvitation,
 } from '../src/services/adminAuthService.js'
 import { getCurrentTeam } from '../src/services/directory/index.js'
@@ -130,6 +132,24 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     return invitation.id
   }
 
+  async function createControlAdminInvitationWithDesktopAccess(
+    email: string,
+    inviterId: string
+  ): Promise<{ invitation: { id: string; email: string }; desktopInvitationId: string }> {
+    const created = await createControlAdminInvitation(email, inviterId, {
+      desktopAccess: { teamAssignments: [] },
+    })
+    expect(created).toHaveProperty('invitation')
+    expect(created).toHaveProperty('desktopInvitation')
+    if (!('invitation' in created) || !('desktopInvitation' in created)) {
+      throw new Error('paired Control Admin invitation was not created atomically')
+    }
+    return {
+      invitation: created.invitation,
+      desktopInvitationId: created.desktopInvitation.id,
+    }
+  }
+
   async function teamRole(teamId: string, userId: string): Promise<string | undefined> {
     const result = await testPool.query(
       `SELECT role FROM team_members WHERE team_id = $1::uuid AND user_id = $2::uuid AND status = 'active'`,
@@ -191,6 +211,60 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     } finally {
       await adminPool?.end()
     }
+  })
+
+  it('keeps new invitations at seven days and legacy Control Admin inserts at 48 hours', async () => {
+    const inviter = await seedAdmin('ttl-inviter')
+    const controlAdminInvitation = await createControlAdminInvitation(
+      uniqueEmail('ttl-admin'),
+      inviter.id
+    )
+    if ('error' in controlAdminInvitation) throw new Error(controlAdminInvitation.error)
+
+    // This matches the pre-0131 writer's INSERT columns, which rely on the table default.
+    const legacyControlAdminInvitation = await testPool.query(
+      `INSERT INTO control_admin_invitations (email, invited_by_admin_id, replace_inviter)
+       VALUES ($1, $2, false)
+       RETURNING created_at, expires_at`,
+      [uniqueEmail('ttl-legacy-admin'), inviter.id]
+    )
+
+    const memberInvitation = await createSilentInvitationForTeams({
+      inviteeName: 'TTL member',
+      email: uniqueEmail('ttl-member'),
+      teamAssignments: [],
+      fallbackRole: 'member',
+      purpose: 'member_invitation',
+    })
+    const desktopInvitation = await createSilentInvitationForTeams({
+      inviteeName: 'TTL admin desktop access',
+      email: uniqueEmail('ttl-desktop'),
+      teamAssignments: [],
+      fallbackRole: 'member',
+      purpose: 'admin_desktop_access',
+    })
+
+    const memberRows = await testPool.query(
+      `SELECT purpose, EXTRACT(EPOCH FROM (expires_at - created_at))::int AS ttl_seconds
+         FROM invitations
+        WHERE id = ANY($1::uuid[])
+        ORDER BY purpose`,
+      [[memberInvitation.id, desktopInvitation.id]]
+    )
+    const memberTtls = Object.fromEntries(
+      memberRows.rows.map(row => [String(row.purpose), Number(row.ttl_seconds)])
+    )
+    expect(memberTtls).toEqual({ admin_desktop_access: 604_800, member_invitation: 604_800 })
+    expect(
+      controlAdminInvitation.expiresAt.getTime() - controlAdminInvitation.createdAt.getTime()
+    ).toBe(604_800_000)
+    const legacyControlAdminRow = legacyControlAdminInvitation.rows[0] as {
+      created_at: Date
+      expires_at: Date
+    }
+    expect(
+      legacyControlAdminRow.expires_at.getTime() - legacyControlAdminRow.created_at.getTime()
+    ).toBe(172_800_000)
   })
 
   it('stores replaceInviter and exposes it with the inviter on every invitation read', async () => {
@@ -731,7 +805,156 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     expect(await adminInvitationStatus(stray.id)).toBe('pending')
   })
 
-  it('still completes when the inviter is already disabled or gone', async () => {
+  it('revokes pending and opened invitations with their paired Desktop links on retirement', async () => {
+    const actor = await seedAdmin('retirement-actor')
+    const retiring = await seedAdmin('retiring-inviter')
+    const unrelated = await seedAdmin('unrelated-inviter')
+
+    const pendingEmail = uniqueEmail('retirement-pending')
+    const pendingPair = await createControlAdminInvitationWithDesktopAccess(
+      pendingEmail,
+      retiring.id
+    )
+    const pending = pendingPair.invitation
+
+    const openedEmail = uniqueEmail('retirement-opened')
+    const openedPair = await createControlAdminInvitationWithDesktopAccess(openedEmail, retiring.id)
+    const opened = openedPair.invitation
+    await markControlAdminInvitationOpened(opened.id)
+
+    const unrelatedEmail = uniqueEmail('unrelated-pending')
+    const unrelatedPair = await createControlAdminInvitationWithDesktopAccess(
+      unrelatedEmail,
+      unrelated.id
+    )
+    const unrelatedInvitation = unrelatedPair.invitation
+    const memberInvitation = await createSilentInvitationForTeams({
+      inviteeName: 'Preserved member invitation',
+      email: pendingEmail,
+      teamAssignments: [],
+      fallbackRole: 'member',
+      purpose: 'member_invitation',
+    })
+
+    await expect(deleteControlAdmin(actor.id, retiring.id)).resolves.toEqual({ deleted: true })
+
+    expect(await adminStatus(retiring.id)).toBe('disabled')
+    expect(await adminInvitationStatus(pending.id)).toBe('revoked')
+    expect(await adminInvitationStatus(opened.id)).toBe('revoked')
+    expect(await desktopInvitationStatus(pendingPair.desktopInvitationId)).toBe('revoked')
+    expect(await desktopInvitationStatus(openedPair.desktopInvitationId)).toBe('revoked')
+    expect(await adminInvitationStatus(unrelatedInvitation.id)).toBe('pending')
+    expect(await desktopInvitationStatus(unrelatedPair.desktopInvitationId)).toBe('pending')
+    expect(await desktopInvitationStatus(memberInvitation.id)).toBe('pending')
+
+    for (const [email, invitationId] of [
+      [pendingEmail, pending.id],
+      [openedEmail, opened.id],
+    ] as const) {
+      await expect(
+        completeControlAdminInvitation({
+          email,
+          invitationId,
+          username: `retired-${randomUUID().slice(0, 8)}`,
+          passwordHash: 'real-pg-retired-inviter',
+        })
+      ).resolves.toEqual({ error: 'not_found' })
+      const admins = await testPool.query(
+        `SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)`,
+        [email]
+      )
+      expect(admins.rowCount).toBe(0)
+    }
+  })
+
+  it('revokes a legacy paired Desktop invitation when its Control Admin inviter retires', async () => {
+    const actor = await seedAdmin('legacy-retirement-actor')
+    const retiring = await seedAdmin('legacy-retiring-inviter')
+    const email = uniqueEmail('legacy-retirement')
+    const invitation = await createControlAdminInvitation(email, retiring.id)
+    if ('error' in invitation) throw new Error(invitation.error)
+    const desktopInvitationId = await inviteDesktopAccess(email)
+
+    await expect(deleteControlAdmin(actor.id, retiring.id)).resolves.toEqual({ deleted: true })
+
+    expect(await adminInvitationStatus(invitation.id)).toBe('revoked')
+    expect(await desktopInvitationStatus(desktopInvitationId)).toBe('revoked')
+    await expect(
+      completeControlAdminInvitation({
+        email,
+        invitationId: invitation.id,
+        username: `legacy-${randomUUID().slice(0, 8)}`,
+        passwordHash: 'real-pg-retired-inviter',
+      })
+    ).resolves.toEqual({ error: 'not_found' })
+  })
+
+  it('serializes paired invitation creation with inviter retirement', async () => {
+    const actor = await seedAdmin('paired-race-actor')
+    const inviter = await seedAdmin('paired-race-ops')
+    const email = uniqueEmail('paired-race-client')
+    const blocker = await testPool.connect()
+    let creation: ReturnType<typeof createControlAdminInvitation> | undefined
+    let retirement: ReturnType<typeof deleteControlAdmin> | undefined
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query('LOCK TABLE invitations IN ACCESS EXCLUSIVE MODE')
+
+      // Creation locks the inviter before inserting the Control Admin row, then
+      // blocks on the Desktop table while keeping that inviter lock open.
+      creation = createControlAdminInvitation(email, inviter.id, {
+        desktopAccess: { teamAssignments: [] },
+      })
+      creation.catch(() => undefined)
+      for (let attempt = 0; ; attempt += 1) {
+        const waiting = await adminPool.query(
+          `SELECT 1
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND wait_event_type = 'Lock'
+              AND query ILIKE '%INSERT INTO invitations%'`,
+          [database]
+        )
+        if ((waiting.rowCount ?? 0) > 0) break
+        if (attempt >= 100)
+          throw new Error('paired invitation insert did not wait on the table lock')
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+
+      retirement = deleteControlAdmin(actor.id, inviter.id)
+      retirement.catch(() => undefined)
+      for (let attempt = 0; ; attempt += 1) {
+        const waiting = await adminPool.query(
+          `SELECT 1
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND wait_event_type = 'Lock'
+              AND query ILIKE '%control_admin_users%'
+              AND query ILIKE '%FOR UPDATE%'`,
+          [database]
+        )
+        if ((waiting.rowCount ?? 0) > 0) break
+        if (attempt >= 100) throw new Error('retirement did not wait on the inviter row lock')
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+
+      await blocker.query('COMMIT')
+      const created = await creation
+      if ('error' in created || !('desktopInvitation' in created)) {
+        throw new Error('paired invitation creation failed before retirement')
+      }
+      await expect(retirement).resolves.toEqual({ deleted: true })
+
+      expect(await adminInvitationStatus(created.invitation.id)).toBe('revoked')
+      expect(await desktopInvitationStatus(created.desktopInvitation.id)).toBe('revoked')
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined)
+      blocker.release()
+      await Promise.allSettled([creation, retirement].filter(Boolean))
+    }
+  }, 20_000)
+
+  it('rejects stale invitations from disabled inviters but keeps legacy orphan invites redeemable', async () => {
     const inviter = await seedAdmin('gone-ops')
     const inviterDesktopId = await seedDesktopUser(inviter.email)
     const disabledEmail = uniqueEmail('after-disable')
@@ -739,6 +962,7 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
       replaceInviter: true,
     })
     if ('error' in afterDisable) throw new Error(afterDisable.error)
+    const disabledDesktopId = await inviteDesktopAccess(disabledEmail)
     await testPool.query(`UPDATE control_admin_users SET status = 'disabled' WHERE id = $1::uuid`, [
       inviter.id,
     ])
@@ -750,37 +974,49 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     )
     const orphanId = (orphan.rows[0] as { id: string }).id
 
-    for (const [email, invitationId] of [
-      [disabledEmail, afterDisable.id],
-      [orphanEmail, orphanId],
-    ] as const) {
-      const completed = await completeControlAdminInvitation({
-        email,
-        invitationId,
+    await expect(
+      completeControlAdminInvitation({
+        email: disabledEmail,
+        invitationId: afterDisable.id,
         username: `late-${randomUUID().slice(0, 8)}`,
-        passwordHash: 'real-pg-replace-client',
+        passwordHash: 'real-pg-retired-inviter',
       })
-      expect(completed).toMatchObject({ email, status: 'active' })
-      expect(await adminInvitationStatus(invitationId)).toBe('accepted')
-    }
+    ).resolves.toEqual({ error: 'not_found' })
+    expect(await adminInvitationStatus(afterDisable.id)).toBe('revoked')
+    expect(await desktopInvitationStatus(disabledDesktopId)).toBe('revoked')
+    const disabledAdmins = await testPool.query(
+      `SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)`,
+      [disabledEmail]
+    )
+    expect(disabledAdmins.rowCount).toBe(0)
+
+    const orphanCompleted = await completeControlAdminInvitation({
+      email: orphanEmail,
+      invitationId: orphanId,
+      username: `late-${randomUUID().slice(0, 8)}`,
+      passwordHash: 'real-pg-replace-client',
+    })
+    expect(orphanCompleted).toMatchObject({ email: orphanEmail, status: 'active' })
+    expect(await adminInvitationStatus(orphanId)).toBe('accepted')
     expect(await desktopLifecycle(inviterDesktopId)).toBe('active')
   })
 
-  it('does not complete an invitation revoked while the acceptance is in flight', async () => {
+  it('serializes ordinary invitation redemption with inviter retirement', async () => {
+    const actor = await seedAdmin('retirement-race-actor')
     const inviter = await seedAdmin('race-ops')
     const email = uniqueEmail('race-client')
     const invitation = await createControlAdminInvitation(email, inviter.id)
     if ('error' in invitation) throw new Error(invitation.error)
+    const desktopInvitationId = await inviteDesktopAccess(email)
 
     // A revoke (DELETE route, MCC cancel, or another invitation's replace step 4)
-    // holds the row while the client's acceptance starts, then commits.
+    // holds the inviter row while an ordinary invite redemption starts.
     const blocker = await testPool.connect()
     try {
       await blocker.query('BEGIN')
-      await blocker.query(
-        `UPDATE control_admin_invitations SET status = 'revoked' WHERE id = $1::uuid`,
-        [invitation.id]
-      )
+      await blocker.query(`SELECT id FROM control_admin_users WHERE id = $1::uuid FOR UPDATE`, [
+        inviter.id,
+      ])
       const completion = completeControlAdminInvitation({
         email,
         invitationId: invitation.id,
@@ -796,9 +1032,70 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
         )
         if ((waiting.rowCount ?? 0) > 0) break
         if (attempt >= 100)
-          throw new Error('the acceptance never waited on the revoking transaction')
+          throw new Error('the acceptance never waited on the inviter retirement lock')
         await new Promise(resolve => setTimeout(resolve, 50))
       }
+      await retireControlAdminInTransaction(blocker, {
+        actorAdminId: actor.id,
+        adminId: inviter.id,
+        reason: 'control_admin_retired',
+      })
+      await blocker.query('COMMIT')
+      await expect(completion).resolves.toEqual({ error: 'not_found' })
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined)
+      blocker.release()
+    }
+
+    expect(await adminInvitationStatus(invitation.id)).toBe('revoked')
+    expect(await desktopInvitationStatus(desktopInvitationId)).toBe('revoked')
+    const admins = await testPool.query(
+      `SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)`,
+      [email]
+    )
+    expect(admins.rowCount).toBe(0)
+  }, 15_000)
+
+  it('does not complete an invitation revoked while the acceptance is in flight', async () => {
+    const inviter = await seedAdmin('race-ops')
+    const email = uniqueEmail('race-client')
+    const invitation = await createControlAdminInvitation(email, inviter.id)
+    if ('error' in invitation) throw new Error(invitation.error)
+
+    // Model a concurrent revoke that has updated the invitation but not yet committed.
+    const blocker = await testPool.connect()
+    try {
+      await blocker.query('BEGIN')
+      const blockerBackend = await blocker.query('SELECT pg_backend_pid() AS pid')
+      const blockerPid = Number((blockerBackend.rows[0] as { pid: number }).pid)
+      await blocker.query(
+        `UPDATE control_admin_invitations SET status = 'revoked' WHERE id = $1::uuid`,
+        [invitation.id]
+      )
+
+      const completion = completeControlAdminInvitation({
+        email,
+        invitationId: invitation.id,
+        username: `race-${randomUUID().slice(0, 8)}`,
+        passwordHash: 'real-pg-replace-client',
+      })
+      completion.catch(() => undefined)
+      for (let attempt = 0; ; attempt += 1) {
+        const waiting = await adminPool.query(
+          `SELECT 1
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND wait_event_type = 'Lock'
+              AND query ILIKE '%FROM control_admin_invitations%'
+              AND array_position(pg_blocking_pids(pid), $2::int) IS NOT NULL`,
+          [database, blockerPid]
+        )
+        if ((waiting.rowCount ?? 0) > 0) break
+        if (attempt >= 100)
+          throw new Error('acceptance did not wait on the concurrent invitation revocation')
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+
       await blocker.query('COMMIT')
       await expect(completion).resolves.toEqual({ error: 'not_found' })
     } finally {
@@ -1079,18 +1376,17 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     expect(await adminStatus(inviter.id)).toBe('active')
   })
 
-  it('logs a skip when the inviter is already inactive and still completes', async () => {
+  it('rejects stale replace-inviter links from a previously retired inviter', async () => {
     const inviter = await seedAdmin('skip-log-ops')
-    const inviterDesktopId = await seedDesktopUser(inviter.email)
     const email = uniqueEmail('skip-log-client')
     const invitation = await createControlAdminInvitation(email, inviter.id, {
       replaceInviter: true,
     })
     if ('error' in invitation) throw new Error(invitation.error)
+    const desktopInvitationId = await inviteDesktopAccess(email)
     await testPool.query(`UPDATE control_admin_users SET status = 'disabled' WHERE id = $1::uuid`, [
       inviter.id,
     ])
-    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined as never)
 
     const completed = await completeControlAdminInvitation({
       email,
@@ -1099,27 +1395,14 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
       passwordHash: 'real-pg-replace-client',
     })
 
-    expect(completed).toMatchObject({ email, status: 'active' })
-    expect(await desktopLifecycle(inviterDesktopId)).toBe('active')
-    expect(await adminInvitationStatus(invitation.id)).toBe('accepted')
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: 'control_admin_replace_inviter_skipped',
-        invitationId: invitation.id,
-        inviterAdminId: inviter.id,
-      }),
-      expect.any(String)
+    expect(completed).toEqual({ error: 'not_found' })
+    expect(await adminInvitationStatus(invitation.id)).toBe('revoked')
+    expect(await desktopInvitationStatus(desktopInvitationId)).toBe('revoked')
+    const admins = await testPool.query(
+      `SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)`,
+      [email]
     )
-    const payload = warn.mock.calls.find(
-      call =>
-        call[0] &&
-        typeof call[0] === 'object' &&
-        (call[0] as { event?: string }).event === 'control_admin_replace_inviter_skipped'
-    )?.[0] as Record<string, unknown>
-    expect(payload).not.toHaveProperty('email')
-    expect(JSON.stringify(payload)).not.toContain(email)
-    expect(JSON.stringify(payload)).not.toContain(inviter.email)
-    warn.mockRestore()
+    expect(admins.rowCount).toBe(0)
   })
 
   it('revokes an opened invitation the inviter still has in progress', async () => {

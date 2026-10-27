@@ -1,6 +1,13 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ExistingConnectorSecretFields } from '@components/ExistingConnectorSecretFields'
+import {
+  buildAttachPayload,
+  validateCredentialAttach,
+  verifyExistingCredentialSelection,
+} from '@lib/connectorCredentials'
+import type { ExistingCredentialSelection } from '@lib/connectorCredentials.types'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
@@ -224,7 +231,11 @@ export function CreateMcpServerForm({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [envVars, setEnvVars] = useState<EnvVar[]>([])
-  const [credentialMode, setCredentialMode] = useState<'secret' | 'none' | null>(null)
+  const [credentialMode, setCredentialMode] = useState<'secret' | 'existing' | 'none' | null>(null)
+  const [existingSelection, setExistingSelection] = useState<ExistingCredentialSelection>({
+    rows: [],
+    ready: false,
+  })
   const [envSecretName, setEnvSecretName] = useState('')
   const [envSecretKeys, setEnvSecretKeys] = useState<EnvSecretKeyMapping[]>([])
   const [secretValues, setSecretValues] = useState<string[]>([])
@@ -243,8 +254,21 @@ export function CreateMcpServerForm({
     const values = [row.secretKey.trim(), row.envVar.trim(), (secretValues[index] ?? '').trim()]
     return values.some(Boolean) && !values.every(Boolean)
   })
+  const existingServer = useMemo(() => ({ spec: { env: envVars } }), [envVars])
+  const existingValid =
+    existingSelection.ready &&
+    Boolean(existingSelection.secret) &&
+    !validateCredentialAttach(
+      'use-existing',
+      existingSelection.secret?.name ?? '',
+      existingSelection.rows,
+      existingServer,
+      existingSelection.secret,
+      { storedKeysOnly: true }
+    )
   const credentialsConfigured =
     credentialMode === 'none' ||
+    (credentialMode === 'existing' && existingValid) ||
     (credentialMode === 'secret' &&
       Boolean(envSecretName.trim()) &&
       hasCompleteSecretMapping &&
@@ -464,13 +488,7 @@ export function CreateMcpServerForm({
     }
     if (!canSubmit) return
 
-    // ── Client-side envSecret validation (PR-A / A2) ─────────────────────────
-    // If the operator chose a Secret, they must provide
-    // at least one key-value pair so we actually create the Secret in-band.
-    // Referencing a pre-existing Secret from this form is not supported here:
-    // it's the exact "Secret missing → HCC silent hang" class we're closing.
-    // Operators who need to reference an existing Secret should manage it via
-    // kubectl or the API directly.
+    // New Secrets require values; existing references use metadata-only validation.
     if (useEnvSecret && envSecretName.trim()) {
       const builtSecretData: Record<string, string> = {}
       envSecretKeys.forEach((row, index) => {
@@ -493,6 +511,24 @@ export function CreateMcpServerForm({
 
     setSubmitting(true)
     setError('')
+
+    if (credentialMode === 'existing') {
+      try {
+        await verifyExistingCredentialSelection(
+          existingSelection.secret?.name ?? '',
+          existingSelection.rows,
+          existingSelection.secret,
+          existingServer
+        )
+      } catch {
+        setError(
+          'The selected Secret or its keys could not be verified. Refresh Secrets and review the selection before creating the connector.'
+        )
+        setExistingSelection(current => ({ ...current, ready: false }))
+        setSubmitting(false)
+        return
+      }
+    }
 
     // Resolve the write targets: the distinct private scopes of the selected
     // agents. With no selection the connector gets its own private scope (an
@@ -550,6 +586,13 @@ export function CreateMcpServerForm({
       if (envSecretName.trim() && filteredKeys.length > 0) {
         spec.envSecret = { name: envSecretName.trim(), keys: filteredKeys }
       }
+    }
+
+    if (credentialMode === 'existing') {
+      spec.envSecret = buildAttachPayload(
+        existingSelection.secret!.name,
+        existingSelection.rows
+      ).reference
     }
 
     const parsedCommand = parseCommaSeparated(command)
@@ -686,7 +729,7 @@ export function CreateMcpServerForm({
       let cleanupError: unknown
       let cleanupSecretName = createdSecretName
       let cleanupSecretIdentity = createdSecretIdentity
-      if (!cleanupSecretName) {
+      if (!cleanupSecretName && willCreateSecret) {
         const repairIdentity = getMcpSecretRollbackRepairIdentity(submitError, envSecretName.trim())
         if (repairIdentity) {
           cleanupSecretName = repairIdentity.name
@@ -1072,6 +1115,21 @@ export function CreateMcpServerForm({
                     <input
                       name="credential-mode"
                       type="radio"
+                      checked={credentialMode === 'existing'}
+                      disabled={submitting}
+                      onChange={() => setCredentialMode('existing')}
+                    />
+                    <span className="cu-agent-radio__copy">
+                      <span className="cu-agent-radio__title">Use an existing Secret</span>
+                      <span className="cu-agent-radio__description">
+                        Reuse stored credentials from Secrets → Connectors and map their keys.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="cu-agent-radio cu-agent-radio--card">
+                    <input
+                      name="credential-mode"
+                      type="radio"
                       checked={credentialMode === 'none'}
                       disabled={submitting}
                       onChange={() => setCredentialMode('none')}
@@ -1092,19 +1150,29 @@ export function CreateMcpServerForm({
                   </p>
                 ) : null}
 
+                {credentialMode === 'existing' ? (
+                  <ExistingConnectorSecretFields
+                    server={existingServer}
+                    disabled={submitting}
+                    onChange={setExistingSelection}
+                  />
+                ) : null}
+
                 {useEnvSecret ? (
                   <>
                     <Field
                       description={
                         <>
-                          Name for the new Secret in the <code>mcp-server</code> namespace that will
-                          contain these credentials.
+                          Name for the new Secret. Choose “Use an existing Secret” to reuse stored
+                          credentials.
                         </>
                       }
                       label="Kubernetes Secret Name"
+                      htmlFor="connector-new-secret-name"
                     >
                       <TextInput
                         monospace
+                        id="connector-new-secret-name"
                         onChange={event => setEnvSecretName(event.target.value)}
                         placeholder="brave-search-credentials"
                         disabled={submitting}
@@ -1159,10 +1227,9 @@ export function CreateMcpServerForm({
                     </Button>
 
                     <p className="cu-form-section__description">
-                      Enter each secret value here to create a Kubernetes Opaque Secret in the{' '}
-                      <code>mcp-server</code> namespace. All values are required — the form creates
-                      the Secret in-band before the connector resource to avoid a missing-Secret
-                      reconcile hang.
+                      Enter each value to create a reusable Secret before the connector. To use
+                      credentials already stored in Secrets → Connectors, choose “Use an existing
+                      Secret”.
                     </p>
                   </>
                 ) : null}
@@ -1170,7 +1237,11 @@ export function CreateMcpServerForm({
             </div>
           ) : null}
 
-          {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
+          {error ? (
+            <div role="alert" className="cu-banner cu-banner--error">
+              {error}
+            </div>
+          ) : null}
 
           <div className={mode === 'page' ? 'cu-create-actions' : 'cu-modal-panel__foot'}>
             <Button

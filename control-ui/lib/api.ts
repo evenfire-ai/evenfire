@@ -133,6 +133,7 @@ export type Metadata = {
    * optimistic-concurrency precondition (docs/architecture/stateless-invariants.md).
    */
   resourceVersion?: string
+  generation?: number
   /** K8s-standard creation timestamp (RFC3339). Not in the type for older
    *  endpoints but carried by the new admin payloads. */
   creationTimestamp?: string
@@ -1283,6 +1284,7 @@ export type HostResource = {
  * Fase 3 requisito 6).
  */
 export type McpServerCondition = {
+  observedGeneration?: number
   type: string
   status: 'True' | 'False' | 'Unknown'
   reason: string
@@ -1924,7 +1926,10 @@ export async function getMcpServer(name: string) {
   ) as Promise<McpServerResource>
 }
 
-export async function updateMcpServer(name: string, payload: { spec: Record<string, unknown> }) {
+export async function updateMcpServer(
+  name: string,
+  payload: { spec: Record<string, unknown>; metadata?: { uid?: string; resourceVersion?: string } }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`,
