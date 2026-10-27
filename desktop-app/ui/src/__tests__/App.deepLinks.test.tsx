@@ -1160,13 +1160,17 @@ describe('App deep-link orchestration', () => {
     const teamCGate = new Promise<void>(resolve => {
       releaseTeamC = resolve
     })
-    const switchTeamProducer = handle.switchTeam.getMockImplementation()
+    const switchTeamProducer = handle.switchTeam.getMockImplementation() as
+      | ((teamId: string) => Promise<unknown>)
+      | undefined
     if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
     handle.teamDirectory.mockImplementation(async () => ({
       items: [],
       currentTeamId: activeTeamId,
     }))
-    const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation()
+    const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
+      | (() => Promise<Record<string, unknown>>)
+      | undefined
     if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
     handle.refreshCatalog.mockImplementation(async () => ({
       ...(await refreshCatalogProducer()),
