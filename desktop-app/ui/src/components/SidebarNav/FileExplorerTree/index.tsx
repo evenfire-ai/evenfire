@@ -932,15 +932,6 @@ export function FileExplorerTree({
         throw new Error('Could not verify the source folder for this move.')
       }
       const destinationKey = desktopQueryKeys.gfsAffordances(scope, destinationId, drive)
-      const previousSourceParentId = target.node.parentResourceId
-      if (previousSourceParentId) {
-        const previousSourceKey = desktopQueryKeys.gfsAffordances(
-          scope,
-          previousSourceParentId,
-          drive
-        )
-        assertGfsAuthorityRetryAllowed(queryClient, previousSourceKey)
-      }
       assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
 
       if (!ownsRetry()) {

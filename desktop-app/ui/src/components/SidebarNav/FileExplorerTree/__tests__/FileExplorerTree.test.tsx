@@ -13,6 +13,7 @@ import {
   accessibleResource,
   childView,
   downloadResult,
+  gfsRouteFailureMessage,
   listAccessiblePage,
   listChildrenPage,
   resolveResource,
@@ -1047,6 +1048,246 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     expect(affordances).not.toHaveBeenCalledWith(sourceParentId, 'main')
     expect(affordances).toHaveBeenCalledWith(destinationAId, 'main')
     expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries the resolved current parent after the former parent receives a 429', async () => {
+    let currentParentId = sourceParentId
+    let rateLimitNextSourceRetry = false
+    const listAccessible = vi.fn(async () => accessibleRows(currentParentId))
+    const resolve = vi.fn(async (uri: string) => {
+      if (uri !== `gfs://main/${sourceResourceId}`) {
+        throw new Error(`Unexpected resolve: ${uri}`)
+      }
+      return resolveResource(
+        resolvedFile(sourceResourceId, 'report.txt', {
+          parentResourceId: currentParentId,
+          version: currentParentId === sourceParentId ? 4 : 5,
+        })
+      )
+    })
+    const retryAfterMessage = await gfsRouteFailureMessage(
+      client => client.affordances(sourceParentId, 'fixture-session-token', 'main'),
+      429,
+      { code: 'rate_limited', message: 'too many requests' },
+      { 'Retry-After': '30' }
+    )
+    const successProducer = appServiceAffordanceProducer(async () =>
+      heldPermissionResponse(['read', 'write', 'delete'])
+    )
+    const affordances = vi.fn((resourceId: string, drive?: string) => {
+      if (resourceId === sourceParentId && rateLimitNextSourceRetry) {
+        rateLimitNextSourceRetry = false
+        return Promise.reject(new Error(retryAfterMessage))
+      }
+      return successProducer(resourceId, drive)
+    })
+    const moveResource = vi.fn(async () => {
+      throw new Error('403 Forbidden httpStatus=403')
+    })
+    installDndClerum({
+      listAccessible,
+      affordances,
+      resolve,
+      moveResource,
+    })
+    const { queryClient } = renderTreeWithSession()
+
+    const dialog = await openMoveDialog()
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+    await within(dialog).findByText(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.'
+    )
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    rateLimitNextSourceRetry = true
+    affordances.mockClear()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    expect(
+      await within(dialog).findByText('Too many file requests — try again in 30s.')
+    ).toBeTruthy()
+    expect(affordances).toHaveBeenCalledTimes(2)
+    expect(affordances).toHaveBeenNthCalledWith(1, sourceParentId, 'main')
+    expect(affordances).toHaveBeenNthCalledWith(2, destinationAId, 'main')
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    currentParentId = movedSourceParentId
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main'),
+      })
+    })
+    const listedSourceParent = () => {
+      const accessibleData = queryClient.getQueryData<{
+        pages: Array<{ items: Array<{ resourceId: string; parentResourceId: string | null }> }>
+      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main'))
+      return accessibleData?.pages
+        .flatMap(page => page.items)
+        .find(item => item.resourceId === sourceResourceId)?.parentResourceId
+    }
+    await waitFor(() => expect(listedSourceParent()).toBe(movedSourceParentId))
+    expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBeTruthy()
+
+    resolve.mockClear()
+    affordances.mockClear()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    expect(
+      await within(dialog).findByText('Permissions verified. Select Move to confirm.')
+    ).toBeTruthy()
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledWith(`gfs://main/${sourceResourceId}`)
+    expect(affordances).toHaveBeenCalledTimes(2)
+    expect(affordances).toHaveBeenNthCalledWith(1, movedSourceParentId, 'main')
+    expect(affordances).toHaveBeenNthCalledWith(2, destinationAId, 'main')
+    expect(affordances).not.toHaveBeenCalledWith(sourceParentId, 'main')
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    queryClient.clear()
+  })
+
+  it('keeps the active Retry-After pause for resolved parent B', async () => {
+    let currentParentId = sourceParentId
+    let rateLimitNextParentBRead = false
+    const listAccessible = vi.fn(async () => accessibleRows(currentParentId))
+    const resolve = vi.fn(async (uri: string) => {
+      if (uri !== `gfs://main/${sourceResourceId}`) {
+        throw new Error(`Unexpected resolve: ${uri}`)
+      }
+      return resolveResource(
+        resolvedFile(sourceResourceId, 'report.txt', {
+          parentResourceId: currentParentId,
+          version: currentParentId === sourceParentId ? 4 : 5,
+        })
+      )
+    })
+    const retryAfterMessage = await gfsRouteFailureMessage(
+      client => client.affordances(movedSourceParentId, 'fixture-session-token', 'main'),
+      429,
+      { code: 'rate_limited', message: 'too many requests' },
+      { 'Retry-After': '30' }
+    )
+    const successProducer = appServiceAffordanceProducer(async () =>
+      heldPermissionResponse(['read', 'write', 'delete'])
+    )
+    const affordances = vi.fn((resourceId: string, drive?: string) => {
+      if (resourceId === movedSourceParentId && rateLimitNextParentBRead) {
+        rateLimitNextParentBRead = false
+        return Promise.reject(new Error(retryAfterMessage))
+      }
+      return successProducer(resourceId, drive)
+    })
+    const moveResource = vi.fn(async () => {
+      throw new Error('403 Forbidden httpStatus=403')
+    })
+    installDndClerum({ listAccessible, affordances, resolve, moveResource })
+    const { queryClient } = renderTreeWithSession()
+
+    const dialog = await openMoveDialog()
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+    await within(dialog).findByText(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.'
+    )
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    currentParentId = movedSourceParentId
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main'),
+      })
+    })
+    const listedSourceParent = () => {
+      const accessibleData = queryClient.getQueryData<{
+        pages: Array<{ items: Array<{ resourceId: string; parentResourceId: string | null }> }>
+      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main'))
+      return accessibleData?.pages
+        .flatMap(page => page.items)
+        .find(item => item.resourceId === sourceResourceId)?.parentResourceId
+    }
+    await waitFor(() => expect(listedSourceParent()).toBe(movedSourceParentId))
+
+    rateLimitNextParentBRead = true
+    affordances.mockClear()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    expect(
+      await within(dialog).findByText('Too many file requests — try again in 30s.')
+    ).toBeTruthy()
+    expect(affordances).toHaveBeenCalledTimes(2)
+    expect(affordances).toHaveBeenNthCalledWith(1, movedSourceParentId, 'main')
+    expect(affordances).toHaveBeenNthCalledWith(2, destinationAId, 'main')
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    resolve.mockClear()
+    affordances.mockClear()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    expect(
+      await within(dialog).findByText('Too many file requests — try again in 30s.')
+    ).toBeTruthy()
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledWith(`gfs://main/${sourceResourceId}`)
+    expect(affordances).not.toHaveBeenCalled()
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    queryClient.clear()
+  })
+
+  it('keeps the destination Retry-After pause without rechecking permissions', async () => {
+    const retryAfterMessage = await gfsRouteFailureMessage(
+      client => client.affordances(destinationAId, 'fixture-session-token', 'main'),
+      429,
+      { code: 'rate_limited', message: 'too many requests' },
+      { 'Retry-After': '30' }
+    )
+    let rateLimitNextDestinationRead = false
+    const successProducer = appServiceAffordanceProducer(async () =>
+      heldPermissionResponse(['read', 'write', 'delete'])
+    )
+    const affordances = vi.fn((resourceId: string, drive?: string) => {
+      if (resourceId === destinationAId && rateLimitNextDestinationRead) {
+        rateLimitNextDestinationRead = false
+        return Promise.reject(new Error(retryAfterMessage))
+      }
+      return successProducer(resourceId, drive)
+    })
+    const resolve = vi.fn(async () => resolveSource())
+    const moveResource = vi.fn(async () => {
+      throw new Error('403 Forbidden httpStatus=403')
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    const { queryClient } = renderTreeWithSession()
+
+    const dialog = await openMoveDialog()
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+    await within(dialog).findByText(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.'
+    )
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    rateLimitNextDestinationRead = true
+    affordances.mockClear()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    expect(
+      await within(dialog).findByText('Too many file requests — try again in 30s.')
+    ).toBeTruthy()
+    expect(affordances).toHaveBeenCalledTimes(2)
+    expect(affordances).toHaveBeenCalledWith(sourceParentId, 'main')
+    expect(affordances).toHaveBeenCalledWith(destinationAId, 'main')
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    resolve.mockClear()
+    affordances.mockClear()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    expect(
+      await within(dialog).findByText('Too many file requests — try again in 30s.')
+    ).toBeTruthy()
+    expect(resolve).not.toHaveBeenCalled()
+    expect(affordances).not.toHaveBeenCalled()
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    queryClient.clear()
   })
 
   it('keeps an explicit Retry inside the existing 429 pause', async () => {
