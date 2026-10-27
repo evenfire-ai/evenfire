@@ -135,6 +135,15 @@ export function useFilePreviewResourceActions({
   const deletePendingRef = useRef(false)
   const renamePendingRef = useRef(false)
   const moveRequestRef = useRef(0)
+  const previewMountedRef = useRef(true)
+
+  useEffect(() => {
+    previewMountedRef.current = true
+    return () => {
+      previewMountedRef.current = false
+      moveRequestRef.current += 1
+    }
+  }, [])
 
   const resourceQuery = useQuery({
     queryKey: [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', gfsUri],
@@ -317,6 +326,14 @@ export function useFilePreviewResourceActions({
   const invalidateResource = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: desktopQueryKeys.gfsRoot })
   }, [queryClient])
+  const invalidateResourceForSession = useCallback(
+    async (scope: string) => {
+      await queryClient.invalidateQueries({
+        queryKey: [...desktopQueryKeys.gfsRoot, scope],
+      })
+    },
+    [queryClient]
+  )
 
   useEffect(() => {
     if (resourceQuery.error) onAuthorityFailure(errorMessage(resourceQuery.error))
@@ -620,6 +637,7 @@ export function useFilePreviewResourceActions({
     }
     setMovePermissionStatus('checking')
     setMutationPending(true)
+    let mutationDispatched = false
     let permissionsChecked = false
     try {
       assertGfsAuthorityRetryAllowed(
@@ -679,28 +697,49 @@ export function useFilePreviewResourceActions({
         setMovePermissionStatus(null)
         return
       }
+      mutationDispatched = true
       await window.clerum.gfs.moveResource(
         resource.resourceId,
         destinationId,
         resource.drive,
         resource.version
       )
-      if (!isActiveMove() || !hasCurrentMoveContext()) return
-      await invalidateResource()
-      setMoveOpen(false)
+      if (moveContextRef.current.sessionScope === moveContext.sessionScope) {
+        await invalidateResourceForSession(moveContext.sessionScope)
+      }
+      if (!previewMountedRef.current || !hasCurrentMoveContext()) return
+      if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) setMoveOpen(false)
       pushToast?.(`Moved ${resource.name} to ${destinationName}`, 'success')
     } catch (error) {
-      if (!isActiveMove()) return
-      if (isDialogCurrent && !isDialogCurrent()) {
-        setMovePermissionStatus(null)
+      if (!mutationDispatched) {
+        if (!isActiveMove()) return
+        if (isDialogCurrent && !isDialogCurrent()) {
+          setMovePermissionStatus(null)
+          return
+        }
+        if (onAuthorityFailure(errorMessage(error))) {
+          setMoveOpen(false)
+          setMovePermissionStatus(null)
+        } else {
+          setMovePermissionStatus(permissionsChecked ? null : 'failed')
+          throw error
+        }
         return
       }
+      if (!previewMountedRef.current || !hasCurrentMoveContext()) return
       if (onAuthorityFailure(errorMessage(error))) {
-        setMoveOpen(false)
-        setMovePermissionStatus(null)
-      } else {
+        if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
+          setMoveOpen(false)
+          setMovePermissionStatus(null)
+        }
+      } else if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
         setMovePermissionStatus(permissionsChecked ? null : 'failed')
         throw error
+      } else {
+        pushToast?.(
+          `Could not move ${resource.name}: ${describeGfsReadError(error).message}`,
+          'error'
+        )
       }
     } finally {
       if (isActiveMove()) {

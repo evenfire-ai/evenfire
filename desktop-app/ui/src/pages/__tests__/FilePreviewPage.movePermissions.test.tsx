@@ -2,7 +2,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { ToastStack } from '@components/Common/ToastStack'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { useToastController } from '@hooks/domain/useToastController'
 import {
   accessibleResource,
   listAccessiblePage,
@@ -111,10 +113,45 @@ function renderPreview(pushToast?: (message: string, tone: Tone) => void) {
   return { ...view, queryClient }
 }
 
-function installController() {
+function ToastingPreview({
+  gfsUri = uri,
+  fileName = 'diagram.png',
+  showPreview = true,
+}: { gfsUri?: string; fileName?: string; showPreview?: boolean } = {}) {
+  const toast = useToastController()
+  return (
+    <>
+      {showPreview ? (
+        <FilePreviewPage
+          gfsUri={gfsUri}
+          fileName={fileName}
+          fileKind="image"
+          mimeType="image/png"
+          byteLength={1}
+          pushToast={toast.pushToast}
+        />
+      ) : null}
+      <ToastStack items={toast.toasts} onDismiss={toast.dismissToast} />
+    </>
+  )
+}
+
+function renderPreviewWithToastStack(props: { gfsUri?: string; fileName?: string } = {}) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  })
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <ToastingPreview {...props} />
+    </QueryClientProvider>
+  )
+  return { ...view, queryClient }
+}
+
+function installController(sessionScope = 'preview-test-user:main') {
   hookMock.useGfsBrowserController.mockReturnValue({
     accessState: 'active',
-    sessionScope: 'preview-test-user:main',
+    sessionScope,
     authorityPending: false,
     handleAuthorityFailure: vi.fn(() => false),
   })
@@ -948,5 +985,360 @@ describe('FilePreviewPage move permission contract', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(window.clerum.gfs.moveResource).not.toHaveBeenCalled()
+  })
+})
+
+describe('FilePreviewPage dispatched Move outcome ownership', () => {
+  const moveMessage = 'Moved diagram.png to Archive'
+  const sessionScope = 'preview-test-user:main'
+
+  async function dispatchArchiveMove() {
+    await screen.findByAltText('Preview of diagram.png')
+    const menu = await openPreviewActions()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+    await waitFor(() => expect(window.clerum.gfs.moveResource).toHaveBeenCalledTimes(1))
+    return dialog
+  }
+
+  it('reports one confirmed success after close and invalidates only the captured session cache', async () => {
+    let settleMove!: () => void
+    const pendingMove = new Promise<void>(resolve => {
+      settleMove = resolve
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      destination: async () => fullAccess,
+      listAccessible: async () => destinationPage,
+      move: () => pendingMove,
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    const capturedSessionCache = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main')
+    const otherSessionCache = desktopQueryKeys.gfsChildren('other-user:main', parentId, 'main')
+    queryClient.setQueryDefaults(capturedSessionCache, { gcTime: 60_000 })
+    queryClient.setQueryDefaults(otherSessionCache, { gcTime: 60_000 })
+    try {
+      const dialog = await dispatchArchiveMove()
+      queryClient.setQueryData(capturedSessionCache, { items: [], nextCursor: null })
+      queryClient.setQueryData(otherSessionCache, { items: [], nextCursor: null })
+      expect(queryClient.getQueryState(capturedSessionCache)?.isInvalidated).toBe(false)
+      expect(queryClient.getQueryState(otherSessionCache)?.isInvalidated).toBe(false)
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(moveResource).toHaveBeenCalledWith(resourceId, 'destination-1', 'main', 7)
+      expect(screen.queryByText(moveMessage)).toBeNull()
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+      expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+      expect(screen.queryByText(moveMessage)).toBeNull()
+      expect(queryClient.getQueryState(capturedSessionCache)?.isInvalidated).toBe(false)
+
+      await act(async () => settleMove())
+
+      expect(await screen.findByText(moveMessage)).toBeTruthy()
+      expect(screen.getAllByText(moveMessage)).toHaveLength(1)
+      expect(queryClient.getQueryState(capturedSessionCache)?.isInvalidated).toBe(true)
+      expect(queryClient.getQueryState(otherSessionCache)?.isInvalidated).toBe(false)
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => settleMove())
+      queryClient.clear()
+    }
+  })
+
+  it('shows one safe failure after close without repeating the Move', async () => {
+    let rejectMove!: (error: Error) => void
+    const pendingMove = new Promise<void>((_resolve, reject) => {
+      rejectMove = reject
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      destination: async () => fullAccess,
+      listAccessible: async () => destinationPage,
+      move: () => pendingMove,
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    try {
+      const dialog = await dispatchArchiveMove()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('alert')).toBeNull()
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+      expect(screen.queryByRole('alert')).toBeNull()
+      await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
+
+      const failure = await screen.findByRole('alert')
+      expect(failure.textContent).toContain('Could not move diagram.png: Move rejected')
+      expect(screen.getAllByRole('alert')).toHaveLength(1)
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
+      queryClient.clear()
+    }
+  })
+
+  it('keeps a dispatched failure in the open dialog without duplicate toast feedback', async () => {
+    let rejectMove!: (error: Error) => void
+    const pendingMove = new Promise<void>((_resolve, reject) => {
+      rejectMove = reject
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      destination: async () => fullAccess,
+      listAccessible: async () => destinationPage,
+      move: () => pendingMove,
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    try {
+      const dialog = await dispatchArchiveMove()
+      await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
+
+      expect(within(dialog).getByText('Move rejected')).toBeTruthy()
+      expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
+      queryClient.clear()
+    }
+  })
+
+  it('does not dispatch or announce Move when the dialog closes during authorization', async () => {
+    const permission = heldPermissionResponse(['read', 'write', 'delete', 'manage_acl', 'share'])
+    let sourceReads = 0
+    let resolveSource!: (value: typeof permission) => void
+    const pendingSource = new Promise<typeof permission>(resolve => {
+      resolveSource = resolve
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      source: () => (++sourceReads === 1 ? Promise.resolve(permission) : pendingSource),
+      destination: async () => fullAccess,
+      listAccessible: async () => destinationPage,
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      const menu = await openPreviewActions()
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      await waitFor(() => expect(sourceReads).toBe(2))
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+      await act(async () => resolveSource(permission))
+
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+      expect(screen.queryByText(/Moved diagram\.png|Could not move diagram\.png/)).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+    } finally {
+      await act(async () => resolveSource(permission))
+      queryClient.clear()
+    }
+  })
+
+  it.each(['session', 'resource'] as const)(
+    'fences a settled result after the Preview %s context changes',
+    async contextChange => {
+      let settleMove!: () => void
+      const pendingMove = new Promise<void>(resolve => {
+        settleMove = resolve
+      })
+      const destinationPage = await listAccessiblePage([
+        accessibleResource('destination-1', 'Archive', 'directory', {
+          permissions: ['read', 'write'],
+        }),
+      ])
+      const { moveResource, resolve } = installGfs({
+        destination: async () => fullAccess,
+        listAccessible: async () => destinationPage,
+        move: () => pendingMove,
+      })
+      installController(sessionScope)
+      const { queryClient, rerender } = renderPreviewWithToastStack()
+      const newScope = 'other-user:main'
+      const currentScope = contextChange === 'session' ? newScope : sessionScope
+      const currentUri = 'gfs://main/fedcba9876543210fedcba9876543210'
+      const currentId = 'fedcba9876543210fedcba9876543210'
+      const currentResource = resolveResource({
+        resourceId: currentId,
+        rid: currentId,
+        gfsUri: currentUri,
+        drive: 'main',
+        parentResourceId: parentId,
+        name: 'current.png',
+        kind: 'file',
+        version: 2,
+        bytes: 1,
+      })
+      const currentCache = desktopQueryKeys.gfsChildren(currentScope, parentId, 'main')
+      queryClient.setQueryDefaults(currentCache, { gcTime: 60_000 })
+      try {
+        const dialog = await dispatchArchiveMove()
+        queryClient.setQueryData(currentCache, { items: [], nextCursor: null })
+
+        if (contextChange === 'session') {
+          installController(newScope)
+          rerender(
+            <QueryClientProvider client={queryClient}>
+              <ToastingPreview />
+            </QueryClientProvider>
+          )
+        } else {
+          resolve.mockImplementation(async () => currentResource)
+          rerender(
+            <QueryClientProvider client={queryClient}>
+              <ToastingPreview gfsUri={currentUri} fileName="current.png" />
+            </QueryClientProvider>
+          )
+        }
+        await screen.findByAltText(
+          `Preview of ${contextChange === 'session' ? 'diagram.png' : 'current.png'}`
+        )
+        expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+
+        await act(async () => settleMove())
+
+        expect(screen.queryByText(moveMessage)).toBeNull()
+        expect(moveResource).toHaveBeenCalledTimes(1)
+        if (contextChange === 'session') {
+          expect(queryClient.getQueryState(currentCache)?.isInvalidated).toBe(false)
+        } else {
+          expect(queryClient.getQueryState(currentCache)?.isInvalidated).toBe(true)
+        }
+      } finally {
+        await act(async () => settleMove())
+        queryClient.clear()
+      }
+    }
+  )
+
+  it('does not let an earlier completion close a newer Move dialog or misattribute results', async () => {
+    let settleArchive!: () => void
+    let settleWork!: () => void
+    const archiveMove = new Promise<void>(resolve => {
+      settleArchive = resolve
+    })
+    const workMove = new Promise<void>(resolve => {
+      settleWork = resolve
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+      accessibleResource('destination-2', 'Work', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      listAccessible: async () => destinationPage,
+      move: (_resourceId, destinationId) =>
+        destinationId === 'destination-1' ? archiveMove : workMove,
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      const firstMenu = await openPreviewActions()
+      fireEvent.click(within(firstMenu).getByRole('menuitem', { name: 'Move to' }))
+      const firstDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      await fireEvent.click(await within(firstDialog).findByRole('button', { name: 'Archive' }))
+      await fireEvent.click(
+        within(firstDialog).getByRole('button', { name: 'Move here (Archive)' })
+      )
+      await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
+      fireEvent.click(within(firstDialog).getByRole('button', { name: 'Close move dialog' }))
+
+      const secondMenu = await openPreviewActions()
+      fireEvent.click(within(secondMenu).getByRole('menuitem', { name: 'Move to' }))
+      const secondDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      await fireEvent.click(await within(secondDialog).findByRole('button', { name: 'Work' }))
+      await fireEvent.click(within(secondDialog).getByRole('button', { name: 'Move here (Work)' }))
+      await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
+      expect(moveResource.mock.calls[0]).toEqual([resourceId, 'destination-1', 'main', 7])
+      expect(moveResource.mock.calls[1]).toEqual([resourceId, 'destination-2', 'main', 7])
+
+      await act(async () => settleArchive())
+      expect(await screen.findByText('Moved diagram.png to Archive')).toBeTruthy()
+      expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
+      expect(screen.queryByText('Moved diagram.png to Work')).toBeNull()
+
+      await act(async () => settleWork())
+      expect(await screen.findByText('Moved diagram.png to Work')).toBeTruthy()
+      expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+      expect(screen.getAllByRole('status')).toHaveLength(2)
+      expect(moveResource).toHaveBeenCalledTimes(2)
+    } finally {
+      await act(async () => {
+        settleArchive()
+        settleWork()
+      })
+      queryClient.clear()
+    }
+  })
+
+  it('invalidates the same-session cache but does not toast after Preview unmounts', async () => {
+    let settleMove!: () => void
+    const pendingMove = new Promise<void>(resolve => {
+      settleMove = resolve
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      destination: async () => fullAccess,
+      listAccessible: async () => destinationPage,
+      move: () => pendingMove,
+    })
+    installController(sessionScope)
+    const { queryClient, rerender } = renderPreviewWithToastStack()
+    const cacheKey = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main')
+    queryClient.setQueryDefaults(cacheKey, { gcTime: 60_000 })
+    try {
+      await dispatchArchiveMove()
+      queryClient.setQueryData(cacheKey, { items: [], nextCursor: null })
+      expect(queryClient.getQueryState(cacheKey)?.isInvalidated).toBe(false)
+
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <ToastingPreview showPreview={false} />
+        </QueryClientProvider>
+      )
+      await act(async () => settleMove())
+
+      expect(queryClient.getQueryState(cacheKey)?.isInvalidated).toBe(true)
+      expect(screen.queryByText(moveMessage)).toBeNull()
+      expect(screen.queryByRole('status')).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => settleMove())
+      queryClient.clear()
+    }
   })
 })
