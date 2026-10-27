@@ -1150,7 +1150,7 @@ describe('App deep-link orchestration', () => {
       return realController
     })
     const appBridge = window.clerum
-    const { clerum, handle } = installAppControllerClerum({
+    const { handle } = installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
