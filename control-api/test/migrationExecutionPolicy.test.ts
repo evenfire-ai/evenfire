@@ -87,6 +87,20 @@ describe('D34 migration execution policy', () => {
     })
   })
 
+  // Deploy hosts that copy only deploy/ and scripts/ (evenfire-infra, operator
+  // overlays) run the migration script without control-api sources, so the
+  // script reads the copy kept next to it.
+  it('keeps the deploy script policy byte-identical to the runtime policy', async () => {
+    const [runtimePolicy, deployPolicy] = await Promise.all([
+      readFile(new URL('../src/migrations/migrationExecutionPolicy.json', import.meta.url)),
+      readFile(
+        new URL('../../deploy/scripts/control-api-migration-execution-policy.json', import.meta.url)
+      ),
+    ])
+    expect(JSON.parse(runtimePolicy.toString('utf8'))).toEqual(MIGRATION_EXECUTION_POLICY)
+    expect(deployPolicy.equals(runtimePolicy)).toBe(true)
+  })
+
   it('classifies all existing-table indexes and no fresh-table index', () => {
     expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(26)
     expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(26)

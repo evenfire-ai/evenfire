@@ -7,6 +7,7 @@ RUNNER_FILE="$ROOT_DIR/control-api/src/migrations/migrationRunner.ts"
 INDEX_PLAN_FILE="$ROOT_DIR/control-api/src/migrations/pr1OnlineIndexPlan.ts"
 DB_FILE="$ROOT_DIR/control-api/src/db.ts"
 DEPLOY_FILE="$ROOT_DIR/deploy/scripts/run-control-api-db-migration.sh"
+DEPLOY_POLICY_FILE="$ROOT_DIR/deploy/scripts/control-api-migration-execution-policy.json"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -16,6 +17,8 @@ fail() {
 [ -f "$POLICY_FILE" ] || fail "canonical migration policy is missing"
 [ -f "$RUNNER_FILE" ] || fail "bounded migration runner is missing"
 [ -f "$INDEX_PLAN_FILE" ] || fail "PR1 online index plan is missing"
+cmp -s "$POLICY_FILE" "$DEPLOY_POLICY_FILE" || \
+  fail "deploy migration policy differs from the canonical control-api policy"
 
 node - "$POLICY_FILE" <<'NODE'
 const fs = require('node:fs')
@@ -316,6 +319,40 @@ if run_fixture active-env-order-mismatch >/dev/null; then
   fail "active migration Job with reordered env entries was accepted"
 fi
 mv "$fixture_root/reordered-matched.json" "$capture"
+
+# The API server stores a defaulted Job, not the submitted manifest. These are the
+# fields a Kubernetes v1.35.1 apiserver added or dropped for this Job under
+# `create --dry-run=server` (T2 run1 on 92f6dc886 died on them): defaults are added
+# and empty env values are omitted. The stored Job must still be reused; a
+# non-default podReplacementPolicy must still be rejected.
+server_default_job() {
+  ruby -rjson -e '
+    job = JSON.parse(File.read(ARGV.fetch(0)))
+    spec = job["spec"]
+    spec.merge!("completionMode" => "NonIndexed", "completions" => 1, "manualSelector" => false,
+                "parallelism" => 1, "suspend" => false,
+                "podReplacementPolicy" => ARGV.fetch(1))
+    pod = spec["template"]["spec"]
+    pod.merge!("dnsPolicy" => "ClusterFirst", "schedulerName" => "default-scheduler",
+               "serviceAccount" => pod["serviceAccountName"], "terminationGracePeriodSeconds" => 30)
+    pod["containers"].each do |container|
+      container.merge!("terminationMessagePath" => "/dev/termination-log",
+                       "terminationMessagePolicy" => "File")
+      (container["env"] || []).each { |entry| entry.delete("value") if entry["value"] == "" }
+    end
+    File.write(ARGV.fetch(0), JSON.generate(job))
+  ' "$1" "$2"
+}
+cp "$capture" "$fixture_root/server-default-matched.json"
+server_default_job "$capture" "TerminatingOrFailed" || fail "could not build the server-defaulted fixture"
+run_fixture active-server-defaulted-matches >/dev/null || \
+  fail "active migration Job stored with API server defaults was not reused"
+cp "$fixture_root/server-default-matched.json" "$capture"
+server_default_job "$capture" "Failed" || fail "could not build the non-default fixture"
+if run_fixture active-server-defaulted-mismatch >/dev/null; then
+  fail "active migration Job with a non-default podReplacementPolicy was accepted"
+fi
+mv "$fixture_root/server-default-matched.json" "$capture"
 
 status_output="$(expect_fixture_failure 'existing migration Job status check' \
   run_fixture active-status-error)"

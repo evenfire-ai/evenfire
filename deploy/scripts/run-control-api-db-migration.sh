@@ -2,8 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-MIGRATION_POLICY_FILE="${REPO_ROOT}/control-api/src/migrations/migrationExecutionPolicy.json"
+MIGRATION_POLICY_FILE="${SCRIPT_DIR}/control-api-migration-execution-policy.json"
 RUNTIME_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/control-api-runtime-access-profiles.tsv"
 RUNTIME_SEQUENCE_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/control-api-runtime-sequence-access-profiles.tsv"
 MAINTENANCE_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/trace-maintenance-runtime-access-profiles.tsv"
@@ -245,6 +244,9 @@ verify_active_job_identity() {
       spec.delete("parallelism") if [nil, 1].include?(spec["parallelism"])
       spec.delete("completions") if [nil, 1].include?(spec["completions"])
       spec.delete("completionMode") if [nil, "NonIndexed"].include?(spec["completionMode"])
+      # API server default without a podFailurePolicy (Kubernetes 1.34+ stores it).
+      spec.delete("podReplacementPolicy") if
+        [nil, "TerminatingOrFailed"].include?(spec["podReplacementPolicy"])
       spec.delete("suspend") if [nil, false].include?(spec["suspend"])
       template = spec.fetch("template")
       metadata = Marshal.load(Marshal.dump(template["metadata"] || {}))
@@ -539,7 +541,10 @@ build_job_manifest() {
       }
     end
     migration_env.concat([
-      { "name" => "CONTROL_API_PG_CONNECTION_STRING", "value" => "" },
+      # No "value" key: the API server drops an empty value, and the stored Job
+      # must match this manifest for verify_active_job_identity. A name-only
+      # entry still overrides the envFrom value with an empty string.
+      { "name" => "CONTROL_API_PG_CONNECTION_STRING" },
       {
         "name" => "CONTROL_API_MIGRATION_PG_HOST",
         "value" => "control-postgres.control-plane.svc.cluster.local",
@@ -660,6 +665,9 @@ build_job_manifest() {
       normalized.delete("completions") if [nil, 1].include?(normalized["completions"])
       normalized.delete("completionMode") if
         [nil, "NonIndexed"].include?(normalized["completionMode"])
+      # API server default without a podFailurePolicy (Kubernetes 1.34+ stores it).
+      normalized.delete("podReplacementPolicy") if
+        [nil, "TerminatingOrFailed"].include?(normalized["podReplacementPolicy"])
       normalized.delete("suspend") if [nil, false].include?(normalized["suspend"])
       template = normalized.fetch("template")
       metadata = Marshal.load(Marshal.dump(template["metadata"] || {}))
