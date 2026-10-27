@@ -2964,9 +2964,13 @@ export class AppService {
     const activeHop = this.activeTeamContextHop
     if (
       activeHop &&
-      inheritedContext === activeHop.homeRequestContext &&
       this.sessionAuthority.isSessionRequestContextInCurrentLineage(inheritedContext, token)
     ) {
+      // Host-to-team resolution may finish after a transient hop has captured its
+      // pinned Home owner. Adopt that exact owner only when the request still belongs
+      // to the same accepted session lineage; queued dispatch revalidates the restored
+      // Home token against the current owner before it can reach the RPC transport.
+      enterSessionRequestContext(activeHop.homeRequestContext)
       return
     }
     this.sessionAuthority.assertTemporaryRequestAllowed(token, inheritedContext)

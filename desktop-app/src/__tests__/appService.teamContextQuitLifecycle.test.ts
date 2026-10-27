@@ -511,6 +511,104 @@ describe('AppService team-context quit lifecycle', () => {
     )
   })
 
+  it('preserves a home RPC owner captured before host resolution during an active hop', async () => {
+    const hopOperation = deferred<void>()
+    const hopStarted = deferred<void>()
+    const hostResolution = deferred<string | null>()
+    const hostResolutionStarted = deferred<void>()
+    const { service } = await createAuthenticatedService()
+    const app = service as unknown as {
+      sessionToken: string | null
+      authClient: {
+        getMe(token: string): Promise<TestSessionMe>
+        switchTeam(
+          token: string,
+          teamId: string
+        ): Promise<{ token: string; team: { id: string; name: string } }>
+      }
+      rpcTokenManager: { getOrIssue: ReturnType<typeof vi.fn> }
+      rpcClient: { approveToolCall: ReturnType<typeof vi.fn> }
+      resolveTeamForHostRefs(hostRefs: string[]): Promise<string | null>
+      approveToolCall(
+        hostRef: string,
+        taskId: string,
+        toolCallId: string,
+        hostRefs: string[]
+      ): Promise<{ approved: boolean }>
+      runWithTeamContext<T>(teamId: string, operation: (token: string) => Promise<T>): Promise<T>
+    }
+    vi.spyOn(app, 'resolveTeamForHostRefs').mockImplementation(async () => {
+      hostResolutionStarted.resolve()
+      return hostResolution.promise
+    })
+    vi.mocked(app.authClient.switchTeam).mockImplementation(async (_token, teamId) => ({
+      token: teamId === 'team-home' ? 'team-home-restored-token' : `${teamId}-token`,
+      team: { id: teamId, name: teamId },
+    }))
+    vi.mocked(app.authClient.getMe).mockImplementation(async token => {
+      const teamId =
+        token === 'team-home-restored-token' ? 'team-home' : token.replace(/-token$/, '')
+      return {
+        id: 'user-1',
+        email: 'user@example.com',
+        name: null,
+        picture: null,
+        teamId,
+        teamName: teamId,
+        role: 'member',
+      }
+    })
+    vi.spyOn(app.rpcTokenManager, 'getOrIssue').mockResolvedValue({
+      token: 'home-rpc-token',
+      expiresInSeconds: 300,
+    })
+    vi.spyOn(app.rpcClient, 'approveToolCall').mockResolvedValue({ approved: true })
+
+    const rpc = app.approveToolCall('chatllm', 'task-1', 'call-1', ['chatllm'])
+    let rpcSettled = false
+    const rpcOutcome = rpc.then(
+      value => {
+        rpcSettled = true
+        return { value }
+      },
+      error => {
+        rpcSettled = true
+        return { error }
+      }
+    )
+    await hostResolutionStarted.promise
+
+    const hop = app.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      await hopOperation.promise
+      return 'team-a-complete'
+    })
+    await hopStarted.promise
+    hostResolution.resolve('team-home')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(app.sessionToken).toBe('team-a-token')
+    expect(rpcSettled).toBe(false)
+    hopOperation.resolve()
+
+    await expect(hop).resolves.toBe('team-a-complete')
+    await expect(rpcOutcome).resolves.toEqual({ value: { approved: true } })
+    expect(app.sessionToken).toBe('team-home-restored-token')
+    expect(app.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
+      'team-home-restored-token',
+      expect.any(Array),
+      ['chatllm'],
+      expect.any(String)
+    )
+    expect(app.rpcClient.approveToolCall).toHaveBeenCalledWith(
+      'home-rpc-token',
+      'chatllm',
+      'task-1',
+      'call-1'
+    )
+  })
+
   it('restores queued home joins after the first team restoration fails', async () => {
     const teamSwitch = deferred<void>()
     const teamSwitchStarted = deferred<void>()
