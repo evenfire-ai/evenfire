@@ -383,7 +383,9 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
             {home.state === 'pending' ? (
               <div>
                 {stillPending ? <p role="status">Still pending</p> : null}
-                {!polling ? (
+                {polling ? (
+                  <p role="status">Checking home folder status…</p>
+                ) : (
                   <button
                     className="cu-btn cu-btn--ghost"
                     type="button"
@@ -392,7 +394,7 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
                   >
                     Refresh
                   </button>
-                ) : null}
+                )}
               </div>
             ) : null}
           </>

@@ -55,6 +55,8 @@ describe('Home folder block', () => {
     const busy = card.getAttribute('aria-busy')
     card.scrollTop = 100
     expect(screen.getByText('pending', { exact: true })).toBeVisible()
+    // One steady status line for the whole polling window, not one per request.
+    const checking = screen.getByText('Checking home folder status…')
 
     await act(async () => vi.advanceTimersByTimeAsync(5_000))
     expect(getGfsUserHome).toHaveBeenCalledTimes(2)
@@ -62,11 +64,11 @@ describe('Home folder block', () => {
     expect(card.getAttribute('aria-busy')).toBe(busy)
     expect(card.scrollTop).toBe(100)
     expect(screen.queryByText('Loading home folder…')).not.toBeInTheDocument()
-    expect(screen.queryByText('Checking home folder status…')).not.toBeInTheDocument()
-    expect(within(card).queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByText('Checking home folder status…')).toBe(checking)
 
     await act(async () => finishPoll({ home: { ...pending } }))
     expect(screen.getByTestId('home-resource-id')).toBe(content)
+    expect(screen.getByText('Checking home folder status…')).toBe(checking)
     expect(card.scrollTop).toBe(100)
     await act(async () => vi.advanceTimersByTimeAsync(5_000))
     expect(screen.getByText('ready', { exact: true })).toBeVisible()

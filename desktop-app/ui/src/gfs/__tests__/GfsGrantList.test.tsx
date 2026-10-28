@@ -382,6 +382,8 @@ describe('GfsGrantList', () => {
     expect(within(owner).queryByRole('button', { name: 'Access role for Home Owner' })).toBeNull()
     expect(within(owner).queryByRole('button', { name: 'Actions for Home Owner' })).toBeNull()
     expect(within(owner).getByText('Owner')).toBeTruthy()
+    // A viewer whose directory names the owner keeps seeing that name.
+    expect(within(owner).getByText('Home Owner')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Actions for Test Two' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Access role for Test Two' })).toBeTruthy()
   })
@@ -472,6 +474,7 @@ describe('GfsGrantList', () => {
       expect(within(row).queryByRole('button', { name: 'Access role for Home Owner' })).toBeNull()
       expect(within(row).queryByRole('button', { name: 'Actions for Home Owner' })).toBeNull()
       expect(within(row).getByText('Owner')).toBeTruthy()
+      expect(within(row).getByText('Home Owner')).toBeTruthy()
       expect(screen.getByRole('button', { name: 'Actions for Test Two' })).toBeTruthy()
       expect(screen.getByRole('button', { name: 'Access role for Test Two' })).toBeTruthy()
     }

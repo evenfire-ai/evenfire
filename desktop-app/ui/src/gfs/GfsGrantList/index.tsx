@@ -291,7 +291,8 @@ export function GfsGrantList({
                     >
                       <AccessSubjectIcon kind={kind} />
                     </span>
-                    {ownerProtected && !item.subjectProfile ? null : (
+                    {ownerProtected &&
+                    isHiddenSubject(item.subject, subjects, item.subjectProfile) ? null : (
                       <span className="da-gfs-grant-list__identity">
                         <span className="da-gfs-grant-list__label">{label}</span>
                         {item.subjectProfile?.email ? (
@@ -356,7 +357,7 @@ export function GfsGrantList({
                     >
                       <AccessSubjectIcon kind={kind} />
                     </span>
-                    {ownerProtected && !profile ? null : (
+                    {ownerProtected && isHiddenSubject(row.subject, subjects, profile) ? null : (
                       <span className="da-gfs-grant-list__identity">
                         <span className="da-gfs-grant-list__label">{label}</span>
                         {profile?.email ? <span className="muted">{profile.email}</span> : null}
