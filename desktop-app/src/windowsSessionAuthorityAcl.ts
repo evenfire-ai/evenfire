@@ -777,7 +777,9 @@ function runWindowsAclOperation(request: Request): WindowsSessionAuthorityAclEvi
     },
     input: SCRIPT,
     maxBuffer: 1024 * 1024,
-    timeout: 15_000,
+    // Add-Type compiles the fixed native verifier per invocation; keep a finite bound while
+    // allowing the Windows PowerShell compiler to finish on the supported Windows runner.
+    timeout: 30_000,
     windowsHide: true,
   })
   if (result.error || result.status !== 0 || result.signal || !result.stdout) {

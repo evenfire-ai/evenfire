@@ -74,6 +74,7 @@ describe('Windows session authority PowerShell launcher', () => {
     ).toBe(true)
     expect(typeof options.input).toBe('string')
     expect(options.input.length).toBeGreaterThan(16_384)
+    expect(options.timeout).toBe(30_000)
     expect(options.env.EVENFIRE_TEST_SECRET).toBeUndefined()
     expect(Object.keys(options.env).sort()).toEqual([
       'COMSPEC',
