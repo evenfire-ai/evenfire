@@ -643,10 +643,7 @@ export function useFilePreviewResourceActions({
     const hasCurrentMovePresentationContext = () => {
       const current = moveContextRef.current
       return (
-        current.gfsUri === moveContext.gfsUri &&
-        current.sessionScope === moveContext.sessionScope &&
-        current.resourceId === moveContext.resourceId &&
-        current.drive === moveContext.drive
+        current.gfsUri === moveContext.gfsUri && current.sessionScope === moveContext.sessionScope
       )
     }
     setMovePermissionStatus('checking')
@@ -754,7 +751,11 @@ export function useFilePreviewResourceActions({
 
       if (outcome.status === 'committed') {
         if (moveContextRef.current.sessionScope === moveContext.sessionScope) {
-          await invalidateResourceForSession(moveContext.sessionScope)
+          try {
+            await invalidateResourceForSession(moveContext.sessionScope)
+          } catch {
+            // A failed follow-up read cannot downgrade the confirmed Move.
+          }
         }
         if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
         if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) setMoveOpen(false)

@@ -1248,6 +1248,62 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     }
   })
 
+  it('keeps a confirmed Move success visible when its resource refetch fails', async () => {
+    let settleMove!: (receipt: MoveReceipt) => void
+    const pendingMove = new Promise<MoveReceipt>(resolve => {
+      settleMove = resolve
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource, resolve } = installGfs({
+      destination: async () => fullAccess,
+      listAccessible: async () => destinationPage,
+      move: () => pendingMove,
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    const previewResourceKey = [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', uri]
+    try {
+      const dialog = await dispatchArchiveMove()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+      expect(screen.queryByText(moveMessage)).toBeNull()
+      expect(queryClient.getQueryData(previewResourceKey)).toEqual(
+        expect.objectContaining({ resourceId })
+      )
+      resolve.mockRejectedValue(new Error('preview refetch failed httpStatus=500'))
+
+      await act(async () => {
+        await expect(
+          queryClient.refetchQueries(
+            { queryKey: previewResourceKey, exact: true },
+            { throwOnError: true }
+          )
+        ).rejects.toThrow('preview refetch failed')
+      })
+      expect(queryClient.getQueryState(previewResourceKey)?.status).toBe('error')
+      const resourceUnavailableMenu = await openPreviewActions()
+      expect(
+        within(resourceUnavailableMenu).queryByRole('menuitem', { name: 'Move to' })
+      ).toBeNull()
+      fireEvent.keyDown(resourceUnavailableMenu, { key: 'Escape' })
+      expect(screen.queryByText(moveMessage)).toBeNull()
+
+      await act(async () => settleMove(successfulMoveReceipt))
+      expect(queryClient.getQueryState(previewResourceKey)?.status).toBe('error')
+
+      expect(await screen.findByText(moveMessage)).toBeTruthy()
+      expect(screen.getAllByText(moveMessage)).toHaveLength(1)
+      expect(resolve.mock.calls.length).toBeGreaterThan(1)
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => settleMove(successfulMoveReceipt))
+      queryClient.clear()
+    }
+  })
+
   it('keeps a dispatched failure in the open dialog without duplicate toast feedback', async () => {
     let rejectMove!: (error: Error) => void
     const pendingMove = new Promise<MoveReceipt>((_resolve, reject) => {
