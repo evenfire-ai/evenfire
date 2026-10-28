@@ -912,16 +912,43 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
   it('shares public failure cooldown with authenticated reverification', async () => {
     for (let i = 0; i < 5; i++) {
       await openPace()
-      await verifyUserPassword({
-        userId,
-        email: 'member@example.invalid',
-        password: 'wrong',
-      })
+      const comparisonsBefore = compare.mock.calls.length
+      expect(
+        await verifyUserPassword({
+          userId,
+          email: 'member@example.invalid',
+          password: 'wrong',
+        })
+      ).toBe(false)
+      expect(compare.mock.calls).toHaveLength(comparisonsBefore + 1)
+      expect(compare.mock.calls[comparisonsBefore]).toEqual(['wrong', realHash])
     }
+
+    const identifier = passwordIdentifierKey('member@example.invalid')
+    expect(passwordIdentifierKey(' MEMBER@example.invalid ')).toBe(identifier)
+    const state = await stateFor(' MEMBER@example.invalid ')
+    expect(state.user_id).toBe(userId)
+    expect(state.retained.failures).toHaveLength(5)
+    const cooldown = await holder.pool.query(
+      `SELECT $1::bigint > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS active`,
+      [state.retained.locked_until_ms]
+    )
+    expect(cooldown.rows[0].active).toBe(true)
+
+    await openPace()
+    const cooldownDenials = await denialCount('identifier_cooldown')
+    const globalPaceDenials = await denialCount('global_pace')
+    const sourceRateDenials = await denialCount('source_rate')
     const before = compare.mock.calls.length
-    const response = await login('member@example.invalid', 'wrong')
+    const response = await login('member@example.invalid', 'wrong', '203.0.113.239')
     expect(response.status).toBe(429)
+    expect(response.body.error).toBe('rate_limited')
+    expect(response.body).not.toHaveProperty('reason')
+    expect(response.body).not.toHaveProperty('email')
     expect(compare.mock.calls.length).toBe(before)
+    expect(await denialCount('identifier_cooldown')).toBe(cooldownDenials + 1)
+    expect(await denialCount('global_pace')).toBe(globalPaceDenials)
+    expect(await denialCount('source_rate')).toBe(sourceRateDenials)
   })
   it('gates a correct canonical password behind the same aggregate authority', async () => {
     await login('unknown@example.invalid')
