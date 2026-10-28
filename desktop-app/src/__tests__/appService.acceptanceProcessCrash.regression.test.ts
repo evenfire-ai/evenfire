@@ -59,6 +59,7 @@ type WorkerReport = {
       transactionId: string
       sourceRef: string
     }>
+    legacyDenialHashes?: string[]
   }
   candidateSource?: { accountId: string; sourceRef: string; sourceRevision: string }
   candidateSourceRef?: string | null
@@ -79,6 +80,16 @@ type WorkerReport = {
     sourceRef?: string | null
   }
   priorEnvironmentRestoreStatus?: { status: string; frameMode: string | null } | null
+  denialHash?: string
+  corruptedJournal?: boolean
+  corruptedJournalDigest?: string
+  corruptedJournalBytes?: number
+  coldWasSignedOut?: boolean
+  startupGetMeOwners?: string[]
+  protectedHttpDispatches?: number
+  protectedRpcDispatches?: number
+  deniedCandidateRejected?: boolean
+  quarantineFiles?: Array<{ digest: string; byteLength: number }>
 }
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -103,7 +114,14 @@ function waitForChildClose(child: ChildProcess, timeoutMs: number): Promise<bool
 }
 
 async function runWorker(
-  role: 'seed' | 'candidate' | 'recover' | 'memory-seed' | 'memory-recover',
+  role:
+    | 'seed'
+    | 'candidate'
+    | 'recover'
+    | 'memory-seed'
+    | 'memory-recover'
+    | 'journal-seed'
+    | 'journal-recover',
   profileRoot: string,
   phase?: string,
   scenario: 'same-environment' | 'environment-switch' = 'same-environment'
@@ -170,6 +188,60 @@ async function runWorker(
     )
   }
   return { code, report }
+}
+
+async function runKilledJournalRecoveryWorker(
+  profileRoot: string
+): Promise<{ signal: NodeJS.Signals | null; report: WorkerReport }> {
+  const reportPath = path.join(profileRoot, 'journal-recovery-crash-after-lp.json')
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH,
+    HOME: profileRoot,
+    TMPDIR: profileRoot,
+    TMP: profileRoot,
+    TEMP: profileRoot,
+    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+    ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
+  }
+  const child = spawn(
+    process.execPath,
+    [workerPath, 'journal-recovery-crash', profileRoot, 'after-lp'],
+    { cwd: desktopRoot, env, stdio: ['ignore', 'pipe', 'pipe'] }
+  )
+  activeChildren.set(child, profileRoot)
+  child.once('close', () => activeChildren.delete(child))
+  let outputBytes = 0
+  child.stdout.on('data', chunk => {
+    outputBytes += chunk.length
+  })
+  child.stderr.on('data', chunk => {
+    outputBytes += chunk.length
+  })
+
+  const deadline = Date.now() + 30_000
+  let report: WorkerReport | undefined
+  while (Date.now() < deadline) {
+    try {
+      report = JSON.parse(await fs.readFile(reportPath, 'utf8')) as WorkerReport
+      break
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      if (child.exitCode !== null || child.signalCode !== null) break
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+  }
+
+  if (!report || report.crashReached !== 'after-lp-sidecar-cas') {
+    child.kill('SIGKILL')
+    await waitForChildClose(child, 5_000)
+    throw new Error(
+      `journal recovery crash child missed the LP boundary; output bytes=${outputBytes}`
+    )
+  }
+  child.kill('SIGKILL')
+  if (!(await waitForChildClose(child, 5_000)))
+    throw new Error('journal recovery crash child did not close after SIGKILL')
+  return { signal: child.signalCode, report }
 }
 
 describe('public password login acceptance across process crashes', () => {
@@ -382,6 +454,64 @@ describe('public password login acceptance across process crashes', () => {
     },
     120_000
   )
+
+  it('stays signed out after process death between logout-marker CAS and journal recovery commit', async () => {
+    const profileRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), `evenfire-session-journal-recovery-crash-${randomUUID()}-`)
+    )
+    profileRoots.add(profileRoot)
+    await fs.chmod(profileRoot, 0o700)
+
+    const seeded = await runWorker('journal-seed', profileRoot)
+    expect(seeded.code).toBe(0)
+    expect(seeded.report).toMatchObject({
+      ok: true,
+      corruptedJournal: true,
+      denialHash: expect.any(String),
+      corruptedJournalDigest: expect.any(String),
+      corruptedJournalBytes: expect.any(Number),
+    })
+
+    const crashed = await runKilledJournalRecoveryWorker(profileRoot)
+    expect(crashed.signal).toBe('SIGKILL')
+    expect(crashed.report).toMatchObject({
+      ok: true,
+      crashReached: 'after-lp-sidecar-cas',
+      frameMode: 'uninitialized',
+      markerIntent: 'logout-pending',
+      markerRevisionPresent: true,
+    })
+
+    const recovered = await runWorker('journal-recover', profileRoot)
+    expect(recovered.code).toBe(0)
+    expect(recovered.report).toMatchObject({
+      ok: true,
+      coldWasSignedOut: true,
+      startupGetMeOwners: [],
+      protectedHttpDispatches: 0,
+      protectedRpcDispatches: 0,
+      deniedCandidateRejected: true,
+      authenticated: true,
+      owner: 'crash-owner-B',
+      getMeOwners: ['B'],
+      authority: {
+        frameMode: 'persistent',
+        source: {
+          accountId: 'crash-owner-B',
+          sourceBytesPresent: true,
+          sourceBytesMatchReceipt: true,
+        },
+        legacyDenialHashes: [seeded.report.denialHash],
+      },
+      quarantineFiles: [
+        {
+          digest: seeded.report.corruptedJournalDigest,
+          byteLength: seeded.report.corruptedJournalBytes,
+        },
+      ],
+    })
+    expect(recovered.report.getMeOwners).not.toContain('A')
+  }, 120_000)
 
   it('keeps memory-only login signed out after restart with prior persistent-source residue', async () => {
     const profileRoot = await fs.mkdtemp(

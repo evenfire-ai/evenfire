@@ -12,6 +12,7 @@ import {
 } from './sessionAuthorityDurableFileOps.js'
 import { digestSessionAuthoritySource } from './sessionCredentialSource.js'
 import {
+  type SessionPersistenceJournalQuarantineReceipt,
   observeSessionPersistenceLegacySnapshot,
   sessionPersistenceLegacySnapshotMatches,
 } from './sessionPersistenceJournal.js'
@@ -121,11 +122,14 @@ export type SessionAuthorityCleanupDebt = {
   supersedingFrameRevision: string
 }
 
-export type SessionAuthorityQuarantine = {
-  id: string
-  digest: string | null
-  locator: string
-}
+export type SessionAuthorityQuarantine =
+  | {
+      id: string
+      digest: string | null
+      locator: string
+      kind?: never
+    }
+  | ({ kind: 'legacy-journal' } & SessionPersistenceJournalQuarantineReceipt)
 
 export type SessionAuthorityLegacyJournalReceipt = {
   schemaVersion: 0 | 1
@@ -1408,15 +1412,55 @@ function validateRecord(value: unknown, envKey: string): SessionAuthorityRecord 
   )
     throw new Error('Cleanup-pending marker must match its selected persistent source')
   for (const item of value.quarantines) {
-    if (
-      !isRecord(item) ||
-      typeof item.id !== 'string' ||
-      !UUID.test(item.id) ||
-      !(item.digest === null || (typeof item.digest === 'string' && HASH.test(item.digest))) ||
-      typeof item.locator !== 'string' ||
-      !/^session-authority-corrupt-[0-9a-f-]{36}$/.test(item.locator) ||
-      !exactKeys(item, ['id', 'digest', 'locator'])
-    )
+    const validAuthorityQuarantine =
+      isRecord(item) &&
+      item.kind === undefined &&
+      typeof item.id === 'string' &&
+      UUID.test(item.id) &&
+      (item.digest === null || (typeof item.digest === 'string' && HASH.test(item.digest))) &&
+      typeof item.locator === 'string' &&
+      /^session-authority-corrupt-[0-9a-f-]{36}$/.test(item.locator) &&
+      exactKeys(item, ['id', 'digest', 'locator'])
+    const validJournalQuarantine =
+      isRecord(item) &&
+      item.kind === 'legacy-journal' &&
+      typeof item.id === 'string' &&
+      UUID.test(item.id) &&
+      typeof item.digest === 'string' &&
+      HASH.test(item.digest) &&
+      item.locator === `session-persistence-journal-corrupt-${item.id}` &&
+      isRecord(item.identity) &&
+      typeof item.identity.dev === 'number' &&
+      Number.isFinite(item.identity.dev) &&
+      typeof item.identity.ino === 'number' &&
+      Number.isFinite(item.identity.ino) &&
+      typeof item.identity.mode === 'number' &&
+      Number.isInteger(item.identity.mode) &&
+      typeof item.identity.size === 'number' &&
+      Number.isInteger(item.identity.size) &&
+      item.identity.size >= 0 &&
+      item.identity.size <= 128 * 1024 &&
+      typeof item.identity.mtimeMs === 'number' &&
+      Number.isFinite(item.identity.mtimeMs) &&
+      Array.isArray(item.denials) &&
+      item.denials.length <= 128 &&
+      item.denials.every(
+        (denial: unknown) =>
+          isRecord(denial) &&
+          typeof denial.producer === 'string' &&
+          UUID.test(denial.producer) &&
+          typeof denial.candidateHash === 'string' &&
+          HASH.test(denial.candidateHash) &&
+          exactKeys(denial, ['producer', 'candidateHash'])
+      ) &&
+      new Set(
+        item.denials.map(
+          (denial: { producer: string; candidateHash: string }) =>
+            `${denial.producer}:${denial.candidateHash}`
+        )
+      ).size === item.denials.length &&
+      exactKeys(item, ['kind', 'id', 'digest', 'locator', 'identity', 'denials'])
+    if (!validAuthorityQuarantine && !validJournalQuarantine)
       throw new Error('Session authority record contains an invalid quarantine receipt')
   }
   const quarantineIds = new Set<string>()
@@ -1427,6 +1471,17 @@ function validateRecord(value: unknown, envKey: string): SessionAuthorityRecord 
     quarantineIds.add(item.id)
     quarantinePaths.add(item.locator)
   }
+  const pendingJournalRecovery = (value.quarantines as SessionAuthorityQuarantine[]).find(
+    item => item.kind === 'legacy-journal' && item.id === frame.recoveryId
+  )
+  if (
+    pendingJournalRecovery &&
+    (frame.mode !== 'logged-out' ||
+      value.marker?.intent !== 'logout-pending' ||
+      value.logoutReceipt === null ||
+      value.projectionIntent !== null)
+  )
+    throw new Error('Legacy journal quarantine requires its durable logged-out recovery fence')
   if (
     value.candidates.length + value.cleanupDebts.length + (frame.source === null ? 0 : 1) >
     MAX_RECEIPTS
@@ -2334,7 +2389,12 @@ export class SessionAuthorityRecordRepository {
       (current.legacyJournalReceipt === null &&
         current.frame.mode !== 'uninitialized' &&
         current.frame.mode !== 'logged-out') ||
-      journal.receipt.denials.some(denial => denial.candidateHash === input.candidateHash)
+      journal.receipt.denials.some(denial => denial.candidateHash === input.candidateHash) ||
+      current.quarantines.some(
+        quarantine =>
+          quarantine.kind === 'legacy-journal' &&
+          quarantine.denials.some(denial => denial.candidateHash === input.candidateHash)
+      )
     )
       throw new SessionAuthorityRecordConflictError()
     // A persistent candidate stays at `denied` only until beginCandidatePublication durably moves
@@ -3180,6 +3240,147 @@ export class SessionAuthorityRecordRepository {
         )
     }
     return result
+  }
+
+  /**
+   * Persist a deny-only LP and exact journal quarantine receipt before moving corrupt bytes.
+   * This is available only when no credential source is selected; normal candidates still pass
+   * through the single acceptance transaction after recovery finishes.
+   */
+  beginSessionPersistenceJournalRecovery(
+    snapshot: SessionAuthorityRecordSnapshot,
+    input: {
+      quarantine: SessionPersistenceJournalQuarantineReceipt
+      operationId: string
+      markerRevision: string
+      markerDigest: string
+    }
+  ): SessionAuthorityCasResult {
+    const current = this.requireCurrentRecord(snapshot)
+    const captured = this.requireSnapshot(snapshot)
+    if (
+      current.frame.mode === 'persistent' ||
+      current.frame.source !== null ||
+      current.projectionIntent !== null ||
+      current.projectionReceipt !== null ||
+      current.frame.recoveryId !== null ||
+      current.quarantines.length >= MAX_RECEIPTS ||
+      current.quarantines.some(
+        item => item.id === input.quarantine.id || item.locator === input.quarantine.locator
+      ) ||
+      !UUID.test(input.quarantine.id) ||
+      input.quarantine.locator !== `session-persistence-journal-corrupt-${input.quarantine.id}` ||
+      !HASH.test(input.quarantine.digest) ||
+      !UUID.test(input.operationId) ||
+      !UUID.test(input.markerRevision) ||
+      !HASH.test(input.markerDigest) ||
+      !['uninitialized', 'memory-only', 'logged-out'].includes(current.frame.mode) ||
+      (current.frame.mode === 'uninitialized' && current.marker !== null) ||
+      (current.frame.mode === 'memory-only' && current.marker?.intent !== 'memory-only-session') ||
+      (current.frame.mode === 'logged-out' && current.marker?.intent !== 'logout-pending')
+    )
+      throw new SessionAuthorityRecordConflictError()
+
+    const revision = randomUUID()
+    const quarantine: SessionAuthorityQuarantine = {
+      kind: 'legacy-journal',
+      ...JSON.parse(JSON.stringify(input.quarantine)),
+    }
+    const frame: SessionAuthorityFrame = {
+      revision,
+      envKey: this.envKey,
+      mode: 'logged-out',
+      transactionId: null,
+      source: null,
+      volatileSessionId: null,
+      denyUnframedSources: true,
+      recoveryId: input.quarantine.id,
+    }
+    const marker: SessionAuthorityMarker = { intent: 'logout-pending', revision }
+    const logoutReceipt: SessionAuthorityLogoutReceipt = {
+      operationId: input.operationId,
+      baseAuthorityRevision: current.revision,
+      baseAuthorityDigest: digest(captured.bytes ?? 'session-authority:absent:v2'),
+      projectionKind: 'marker',
+      markerRevision: input.markerRevision,
+      markerDigest: input.markerDigest,
+      priorMarker: null,
+      cleanupDebtIds: current.cleanupDebts.map(debt => debt.id),
+    }
+    const candidates = current.candidates.map(candidate =>
+      candidate.sourceKind !== 'memory-only' &&
+      (candidate.phase === 'writing' ||
+        candidate.phase === 'published' ||
+        candidate.phase === 'verified')
+        ? { ...candidate, phase: 'cleanup-pending' as const }
+        : candidate
+    )
+    const result = this.commit(
+      snapshot,
+      this.next(current, {
+        marker,
+        frame,
+        candidates,
+        latestCandidateTransactionId: null,
+        quarantines: [...current.quarantines, quarantine],
+        projectionIntent: null,
+        projectionReceipt: null,
+        logoutReceipt,
+      })
+    )
+    if (result.status === 'committed' || result.status === 'indeterminate') {
+      for (const candidate of current.candidates)
+        activeCandidatePublicationMap(this.tokenStore).delete(
+          candidatePublicationKey(this.envKey, candidate.transactionId)
+        )
+    }
+    return result
+  }
+
+  /** Complete a journal quarantine only after the exact source is absent and its bytes verified. */
+  completeSessionPersistenceJournalRecovery(
+    snapshot: SessionAuthorityRecordSnapshot,
+    recoveryId: string,
+    legacyJournalReceipt: SessionAuthorityLegacyJournalReceipt
+  ): SessionAuthorityCasResult {
+    const current = this.requireCurrentRecord(snapshot)
+    const quarantine = current.quarantines.find(
+      item => item.kind === 'legacy-journal' && item.id === recoveryId
+    )
+    if (
+      current.frame.mode !== 'logged-out' ||
+      current.frame.recoveryId !== recoveryId ||
+      current.marker?.intent !== 'logout-pending' ||
+      current.projectionIntent !== null ||
+      current.projectionReceipt !== null ||
+      !quarantine ||
+      !validLegacyJournalReceipt(legacyJournalReceipt) ||
+      legacyJournalReceipt.schemaVersion !== 0 ||
+      legacyJournalReceipt.byteLength !== 0 ||
+      legacyJournalReceipt.denials.length !== 0
+    )
+      throw new SessionAuthorityRecordConflictError()
+    return this.commit(
+      snapshot,
+      this.next(current, {
+        frame: { ...current.frame, recoveryId: null },
+        // The quarantined file is now absent from the active journal namespace. Rebase only
+        // the candidate journal precondition so existing exact-source cleanup can continue;
+        // original denial semantics remain in the immutable quarantine receipt above.
+        candidates: current.candidates.map(candidate => ({
+          ...candidate,
+          observedLegacyJournal: {
+            schemaVersion: legacyJournalReceipt.schemaVersion,
+            revision: legacyJournalReceipt.revision,
+            byteLength: legacyJournalReceipt.byteLength,
+            digest: legacyJournalReceipt.digest,
+          },
+        })),
+        legacyJournalReceipt: JSON.parse(
+          JSON.stringify(legacyJournalReceipt)
+        ) as SessionAuthorityLegacyJournalReceipt,
+      })
+    )
   }
 
   /**

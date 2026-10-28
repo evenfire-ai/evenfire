@@ -4900,6 +4900,17 @@ export class AppService {
     try {
       const envKey = getActiveEnvKey()
       const legacyNamespace = getActiveLegacyEnvKeyInventory()
+      if (this.sessionToken === null && this.me === null && this.memoryOnlySession === undefined) {
+        await SessionAuthorityAcceptanceTransaction.recoverCorruptLegacyJournalAfterFreshAuthentication(
+          {
+            tokenStore: this.tokenStore,
+            userDataDirectory: this.getUserDataDirectory(),
+            envKey,
+            legacyEnvKeys: legacyNamespace.keys,
+            legacyNamespaceComplete: legacyNamespace.complete,
+          }
+        )
+      }
       const pendingLogout = await this.applyPendingExternalLogoutBeforeLogin(
         this.getUserDataDirectory(),
         envKey

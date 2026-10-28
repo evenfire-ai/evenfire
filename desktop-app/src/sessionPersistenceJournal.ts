@@ -55,6 +55,27 @@ export type SessionPersistenceLegacySnapshotObservation =
   | { status: 'observed'; receipt: SessionPersistenceLegacySnapshotReceipt }
   | { status: 'transient' | 'invalid'; error: unknown }
 
+export type SessionPersistenceJournalRecoveryIdentity = {
+  dev: number
+  ino: number
+  mode: number
+  size: number
+  mtimeMs: number
+}
+
+export type SessionPersistenceJournalQuarantineReceipt = {
+  id: string
+  digest: string
+  locator: string
+  identity: SessionPersistenceJournalRecoveryIdentity
+  denials: Array<{ producer: string; candidateHash: string }>
+}
+
+export type SessionPersistenceJournalRecoveryCapture =
+  | { status: 'clean' }
+  | { status: 'corrupt'; quarantine: SessionPersistenceJournalQuarantineReceipt }
+  | { status: 'transient' | 'unrecoverable'; error: unknown }
+
 export class SessionPersistenceJournalAdmissionError extends Error {
   constructor(cause: unknown) {
     super('Session persistence journal admission failed', { cause })
@@ -159,9 +180,53 @@ function readContents(file: string): string | null {
   }
 }
 
+/** JSON.parse keeps the last duplicate key, which can erase an earlier credential denial. */
+function hasDuplicateJsonObjectKeys(contents: string): boolean {
+  const objectKeys: Set<string>[] = []
+  let stringStart = -1
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < contents.length; index += 1) {
+    const char = contents[index]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') {
+        inString = false
+        let next = index + 1
+        while (/\s/.test(contents[next] ?? '')) next += 1
+        if (contents[next] === ':') {
+          const current = objectKeys[objectKeys.length - 1]
+          if (current) {
+            let key: string
+            try {
+              key = JSON.parse(contents.slice(stringStart, index + 1)) as string
+            } catch {
+              continue
+            }
+            if (current.has(key)) return true
+            current.add(key)
+          }
+        }
+      }
+      continue
+    }
+    if (char === '"') {
+      inString = true
+      stringStart = index
+    } else if (char === '{') {
+      objectKeys.push(new Set())
+    } else if (char === '}') {
+      objectKeys.pop()
+    }
+  }
+  return false
+}
+
 function parse(contents: string | null): SessionPersistenceJournal | null {
   if (contents === null) return null
   try {
+    if (hasDuplicateJsonObjectKeys(contents)) throw new Error()
     const value = JSON.parse(contents) as SessionPersistenceJournal
     if (
       value?.version !== 1 ||
@@ -255,6 +320,362 @@ export function observeSessionPersistenceLegacySnapshot(
       error,
     }
   }
+}
+
+function recoveryIdentity(stat: fs.Stats): SessionPersistenceJournalRecoveryIdentity {
+  return { dev: stat.dev, ino: stat.ino, mode: stat.mode, size: stat.size, mtimeMs: stat.mtimeMs }
+}
+
+function sameRecoveryIdentity(
+  left: SessionPersistenceJournalRecoveryIdentity,
+  right: SessionPersistenceJournalRecoveryIdentity,
+  includeMode: boolean
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    (!includeMode || left.mode === right.mode)
+  )
+}
+
+function readRecoveryBytes(file: string):
+  | { status: 'absent' }
+  | {
+      status: 'observed'
+      bytes: Buffer
+      identity: SessionPersistenceJournalRecoveryIdentity
+      ownerMatches: boolean
+    } {
+  let descriptor: number | undefined
+  let primaryFailure = false
+  try {
+    const before = fs.lstatSync(file)
+    if (!before.isFile() || before.isSymbolicLink())
+      throw new Error('Session persistence journal recovery requires a regular file')
+    if (before.size > MAX_BYTES)
+      throw new Error('Session persistence journal is too large for exact recovery')
+    const flags =
+      fs.constants.O_RDONLY |
+      fs.constants.O_NONBLOCK |
+      (process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW)
+    descriptor = fs.openSync(file, flags)
+    const opened = fs.fstatSync(descriptor)
+    const beforeIdentity = recoveryIdentity(before)
+    const openedIdentity = recoveryIdentity(opened)
+    if (
+      !opened.isFile() ||
+      !sameRecoveryIdentity(beforeIdentity, openedIdentity, true) ||
+      opened.size > MAX_BYTES
+    )
+      throw new Error('Session persistence journal changed during recovery observation')
+    const bytes = fs.readFileSync(descriptor)
+    const after = fs.fstatSync(descriptor)
+    let currentPath: fs.Stats
+    try {
+      currentPath = fs.lstatSync(file)
+    } catch (error) {
+      throw new Error('Session persistence journal disappeared during recovery observation', {
+        cause: error,
+      })
+    }
+    if (
+      bytes.length > MAX_BYTES ||
+      !sameRecoveryIdentity(openedIdentity, recoveryIdentity(after), true) ||
+      !sameRecoveryIdentity(openedIdentity, recoveryIdentity(currentPath), true)
+    )
+      throw new Error('Session persistence journal changed during recovery observation')
+    return {
+      status: 'observed',
+      bytes,
+      identity: openedIdentity,
+      ownerMatches: typeof process.getuid !== 'function' || opened.uid === process.getuid(),
+    }
+  } catch (error) {
+    primaryFailure = true
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { status: 'absent' }
+    throw error
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor)
+      } catch (error) {
+        if (!primaryFailure) throw error
+      }
+    }
+  }
+}
+
+function knownDenialsFromBytes(bytes: Buffer): {
+  recoverable: boolean
+  denials: Array<{ producer: string; candidateHash: string }>
+} {
+  const text = bytes.toString('utf8')
+  const denials = new Map<string, { producer: string; candidateHash: string }>()
+  if (hasDuplicateJsonObjectKeys(text)) return { recoverable: false, denials: [] }
+  const addWriterEntry = (entry: unknown): boolean => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false
+    const candidate = entry as Record<string, unknown>
+    if (
+      Object.keys(candidate).some(
+        key =>
+          ![
+            'producer',
+            'candidateHash',
+            'sources',
+            'observedMarkerHash',
+            'plannedMarkerHashes',
+          ].includes(key)
+      ) ||
+      Object.keys(candidate).length !== 5
+    )
+      return false
+    if (
+      typeof candidate.producer !== 'string' ||
+      !UUID.test(candidate.producer) ||
+      typeof candidate.candidateHash !== 'string' ||
+      !HASH.test(candidate.candidateHash) ||
+      !Array.isArray(candidate.sources) ||
+      candidate.sources.length < 1 ||
+      candidate.sources.length > 3 ||
+      new Set(candidate.sources).size !== candidate.sources.length ||
+      candidate.sources.some(source => typeof source !== 'string' || !SOURCES.has(source)) ||
+      typeof candidate.observedMarkerHash !== 'string' ||
+      !HASH.test(candidate.observedMarkerHash) ||
+      !Array.isArray(candidate.plannedMarkerHashes) ||
+      candidate.plannedMarkerHashes.length > 64 ||
+      candidate.plannedMarkerHashes.some(hash => typeof hash !== 'string' || !HASH.test(hash))
+    )
+      return false
+    const denial = { producer: candidate.producer, candidateHash: candidate.candidateHash }
+    const identity = `${denial.producer}:${denial.candidateHash}`
+    if (denials.has(identity)) return false
+    denials.set(identity, denial)
+    return true
+  }
+  try {
+    const value = JSON.parse(text) as Record<string, unknown>
+    if (
+      value?.version !== 1 ||
+      typeof value.revision !== 'string' ||
+      !UUID.test(value.revision) ||
+      !Array.isArray(value.pending) ||
+      value.pending.length > MAX_ENTRIES ||
+      Object.keys(value).length !== 3 ||
+      Object.keys(value).some(key => !['version', 'revision', 'pending'].includes(key))
+    )
+      return { recoverable: false, denials: [] }
+    for (const entry of value.pending)
+      if (!addWriterEntry(entry)) return { recoverable: false, denials: [] }
+    if (denials.size > MAX_ENTRIES) return { recoverable: false, denials: [] }
+    return { recoverable: true, denials: [...denials.values()] }
+  } catch {
+    // Salvage only the exact prefix emitted by the v1 writer. Valid JSON with unknown fields was
+    // handled above and is never reduced to the known `pending` list. The pending array itself
+    // must be closed: an open array cannot prove that truncation did not remove later denials.
+    const prefix = new RegExp(
+      `^\\{"version":1,"revision":"${UUID.source.slice(1, -1)}","pending":\\[`,
+      'i'
+    ).exec(text)
+    if (!prefix) return { recoverable: false, denials: [] }
+    let entryStart = -1
+    let depth = 0
+    let inString = false
+    let escaped = false
+    let recoverable = true
+    let previousWasEntry = false
+    let pendingClosed = false
+    for (let index = prefix[0].length; index < text.length; index += 1) {
+      const char = text[index]!
+      if (inString) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') inString = false
+        continue
+      }
+      if (char === '"') {
+        if (depth === 0) recoverable = false
+        inString = true
+        continue
+      }
+      if (char === '{') {
+        if (depth === 0) {
+          if (previousWasEntry) recoverable = false
+          entryStart = index
+        }
+        depth += 1
+      } else if (char === '}' && depth > 0) {
+        depth -= 1
+        if (depth === 0 && entryStart >= 0) {
+          try {
+            if (!addWriterEntry(JSON.parse(text.slice(entryStart, index + 1)))) recoverable = false
+            else previousWasEntry = true
+          } catch {
+            recoverable = false
+          }
+          entryStart = -1
+        }
+      } else if (depth === 0) {
+        if (char === ',') {
+          if (!previousWasEntry) recoverable = false
+          previousWasEntry = false
+        } else if (char === ']') {
+          pendingClosed = true
+          const trailing = text.slice(index + 1)
+          if (trailing !== '' && trailing !== '}') recoverable = false
+          break
+        } else if (!/\s/.test(char)) {
+          recoverable = false
+        }
+      }
+    }
+    if (
+      depth !== 0 ||
+      entryStart >= 0 ||
+      inString ||
+      !pendingClosed ||
+      !previousWasEntry ||
+      (pendingClosed && denials.size === 0) ||
+      denials.size > MAX_ENTRIES
+    )
+      recoverable = false
+    // A writer cannot persist an empty `pending` journal, so a torn empty prefix is ambiguous.
+    if (denials.size === 0) recoverable = false
+    if (!recoverable) return { recoverable: false, denials: [] }
+    return { recoverable: true, denials: [...denials.values()] }
+  }
+}
+
+/**
+ * Capture a bounded invalid journal for explicit fresh-authentication recovery. Transient reads
+ * stay retryable, and unsupported paths/oversized files remain untouched and fail closed.
+ */
+export function captureSessionPersistenceJournalRecovery(
+  directory: string,
+  envKey: string
+): SessionPersistenceJournalRecoveryCapture {
+  let file: string
+  try {
+    file = journalPath(directory, envKey)
+    const observation = readRecoveryBytes(file)
+    if (observation.status === 'absent') return { status: 'clean' }
+    const decoded = observation.bytes.toString('utf8')
+    let schemaValid = true
+    try {
+      parse(decoded)
+    } catch {
+      schemaValid = false
+    }
+    const modeValid = process.platform === 'win32' || (observation.identity.mode & 0o077) === 0
+    if (schemaValid && modeValid) return { status: 'clean' }
+    if (schemaValid === false) {
+      try {
+        const parsed = JSON.parse(decoded) as { version?: unknown }
+        if (parsed?.version !== 1)
+          return {
+            status: 'unrecoverable',
+            error: new Error('Session persistence journal uses an unsupported schema version'),
+          }
+      } catch {
+        if (!/^\s*\{\s*"version"\s*:\s*1\s*,/.test(decoded))
+          return {
+            status: 'unrecoverable',
+            error: new Error('Session persistence journal version cannot be established'),
+          }
+      }
+    }
+    if (!observation.ownerMatches)
+      return {
+        status: 'unrecoverable',
+        error: new Error('Session persistence journal is not owned by this user'),
+      }
+    const denialRecovery = knownDenialsFromBytes(observation.bytes)
+    if (!denialRecovery.recoverable)
+      return {
+        status: 'unrecoverable',
+        error: new Error('Session persistence journal denial state cannot be recovered exactly'),
+      }
+    const id = randomUUID()
+    return {
+      status: 'corrupt',
+      quarantine: {
+        id,
+        digest: createHash('sha256').update(observation.bytes).digest('hex'),
+        locator: `session-persistence-journal-corrupt-${id}`,
+        identity: observation.identity,
+        denials: denialRecovery.denials,
+      },
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    return {
+      status:
+        typeof code === 'string' &&
+        ['EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EINTR', 'EIO'].includes(code)
+          ? 'transient'
+          : 'unrecoverable',
+      error,
+    }
+  }
+}
+
+/** Move only the exact captured corruption after the caller proves a durable deny fence. */
+export function resumeSessionPersistenceJournalQuarantine(
+  directory: string,
+  envKey: string,
+  quarantine: SessionPersistenceJournalQuarantineReceipt,
+  assertDurableDenial: () => void
+): void {
+  if (
+    !/^[0-9a-f-]{36}$/i.test(quarantine.id) ||
+    quarantine.locator !== `session-persistence-journal-corrupt-${quarantine.id}` ||
+    !HASH.test(quarantine.digest) ||
+    quarantine.denials.length > MAX_ENTRIES
+  )
+    throw new Error('Session persistence journal quarantine receipt is invalid')
+  const file = journalPath(directory, envKey)
+  const quarantined = path.join(directory, quarantine.locator)
+  const readExpected = (target: string, includeMode: boolean) => {
+    const observed = readRecoveryBytes(target)
+    if (
+      observed.status !== 'observed' ||
+      !sameRecoveryIdentity(quarantine.identity, observed.identity, includeMode) ||
+      createHash('sha256').update(observed.bytes).digest('hex') !== quarantine.digest
+    )
+      throw new Error('Session persistence journal quarantine bytes changed')
+    return observed
+  }
+  const exists = (target: string): boolean => {
+    try {
+      fs.lstatSync(target)
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false
+      throw error
+    }
+  }
+
+  assertDurableDenial()
+  const hasSource = exists(file)
+  const hasQuarantine = exists(quarantined)
+  if (hasSource && hasQuarantine)
+    throw new Error('Session persistence journal recovery has conflicting source paths')
+  if (hasSource) {
+    readExpected(file, true)
+    assertDurableDenial()
+    renameSessionAuthorityFileDurablySync(file, quarantined, false)
+  } else if (!hasQuarantine) {
+    throw new Error('Session persistence journal recovery lost its exact source')
+  }
+
+  const preserved = readExpected(quarantined, false)
+  if (process.platform !== 'win32' && (preserved.identity.mode & 0o077) !== 0)
+    fs.chmodSync(quarantined, 0o600)
+  const verified = readExpected(quarantined, false)
+  if (process.platform !== 'win32' && (verified.identity.mode & 0o077) !== 0)
+    throw new Error('Session persistence journal quarantine is not private')
+  assertDurableDenial()
 }
 
 export function sessionPersistenceLegacySnapshotMatches(

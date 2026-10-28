@@ -9,9 +9,11 @@ import {
   type SessionPersistenceJournal,
   SessionPersistenceJournalAdmissionError,
   SessionPersistenceProducer,
+  captureSessionPersistenceJournalRecovery,
   isSessionPersistenceCandidateDenied,
   isSessionPersistenceJournalReadFailure,
   readSessionPersistenceJournal,
+  resumeSessionPersistenceJournalQuarantine,
   sessionPersistenceCandidateHash,
   sessionPersistenceMarkerHash,
 } from '../sessionPersistenceJournal.js'
@@ -185,10 +187,218 @@ describe('write-ahead denial journal', () => {
   it('refuses quota exhaustion without removing older unresolved denials', () => {
     for (let index = 0; index < 128; index++) producer().prepare('keytar', `fixture-${index}`)
     const before = fs.readFileSync(journalPath(), 'utf8')
+    expect(captureSessionPersistenceJournalRecovery(directory, envKey)).toEqual({ status: 'clean' })
     expect(() => producer().prepare('keytar', 'fixture-overflow')).toThrow(
       SessionPersistenceJournalAdmissionError
     )
     expect(fs.readFileSync(journalPath(), 'utf8')).toBe(before)
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'quarantines only a confirmed wrong-mode writer journal after its denial fence callback',
+    () => {
+      const denied = 'fixture-wrong-mode-denial'
+      const owner = producer()
+      owner.prepare('keytar', denied)
+      const bytes = fs.readFileSync(journalPath())
+      fs.chmodSync(journalPath(), 0o644)
+
+      const capture = captureSessionPersistenceJournalRecovery(directory, envKey)
+      expect(capture.status).toBe('corrupt')
+      if (capture.status !== 'corrupt') throw new Error('Expected confirmed wrong-mode journal')
+      expect(capture.quarantine.denials).toContainEqual({
+        producer: owner.producer,
+        candidateHash: sessionPersistenceCandidateHash(denied),
+      })
+
+      expect(() =>
+        resumeSessionPersistenceJournalQuarantine(directory, envKey, capture.quarantine, () => {
+          throw new Error('durable denial has not committed')
+        })
+      ).toThrow('durable denial has not committed')
+      expect(fs.readFileSync(journalPath())).toEqual(bytes)
+      expect(fs.existsSync(path.join(directory, capture.quarantine.locator))).toBe(false)
+
+      resumeSessionPersistenceJournalQuarantine(directory, envKey, capture.quarantine, () => {})
+      expect(fs.existsSync(journalPath())).toBe(false)
+      expect(fs.readFileSync(path.join(directory, capture.quarantine.locator))).toEqual(bytes)
+      expect(fs.statSync(path.join(directory, capture.quarantine.locator)).mode & 0o077).toBe(0)
+    }
+  )
+
+  it('fails closed on an unsupported future journal version with a distinct denial shape', () => {
+    const owner = producer()
+    owner.prepare('keytar', 'fixture-v1-denial')
+    const journal = JSON.parse(fs.readFileSync(journalPath(), 'utf8')) as Record<string, unknown>
+    journal.version = 2
+    journal.futureDenials = [
+      {
+        denialId: randomUUID(),
+        candidateHash: sessionPersistenceCandidateHash('fixture-future-denial'),
+      },
+    ]
+    const contents = JSON.stringify(journal)
+    fs.writeFileSync(journalPath(), contents, { mode: 0o600 })
+
+    expect(captureSessionPersistenceJournalRecovery(directory, envKey)).toMatchObject({
+      status: 'unrecoverable',
+      error: expect.objectContaining({
+        message: 'Session persistence journal uses an unsupported schema version',
+      }),
+    })
+    expect(fs.readFileSync(journalPath(), 'utf8')).toBe(contents)
+    expect(
+      fs
+        .readdirSync(directory)
+        .filter(name => name.startsWith('session-persistence-journal-corrupt-'))
+    ).toEqual([])
+  })
+
+  it.each(['top-level', 'denial-entry'] as const)(
+    'fails closed when a well-formed v1 journal contains an unknown %s denial field',
+    location => {
+      const owner = producer()
+      owner.prepare('keytar', 'fixture-known-v1-denial')
+      const journal = JSON.parse(fs.readFileSync(journalPath(), 'utf8')) as Record<string, any>
+      const unknownDenial = {
+        producer: randomUUID(),
+        candidateHash: sessionPersistenceCandidateHash('fixture-unknown-denial-shape'),
+      }
+      if (location === 'top-level') journal.futureDenials = [unknownDenial]
+      else journal.pending[0].futureDenial = unknownDenial
+      const contents = JSON.stringify(journal)
+      fs.writeFileSync(journalPath(), contents, { mode: 0o600 })
+
+      expect(captureSessionPersistenceJournalRecovery(directory, envKey)).toMatchObject({
+        status: 'unrecoverable',
+      })
+      expect(fs.readFileSync(journalPath(), 'utf8')).toBe(contents)
+      expect(
+        fs
+          .readdirSync(directory)
+          .filter(name => name.startsWith('session-persistence-journal-corrupt-'))
+      ).toEqual([])
+    }
+  )
+
+  it('does not salvage a known denial when bytes follow a closed v1 pending array', () => {
+    producer().prepare('keytar', 'fixture-trailing-data-denial')
+    fs.appendFileSync(journalPath(), 'x')
+    const contents = fs.readFileSync(journalPath(), 'utf8')
+
+    expect(captureSessionPersistenceJournalRecovery(directory, envKey)).toMatchObject({
+      status: 'unrecoverable',
+    })
+    expect(fs.readFileSync(journalPath(), 'utf8')).toBe(contents)
+  })
+
+  it.each(['before-separator', 'after-separator', 'before-array-close'] as const)(
+    'fails closed when a writer-produced multi-entry journal is truncated %s',
+    truncation => {
+      producer().prepare('keytar', 'fixture-first-truncated-denial')
+      producer().prepare('safe-storage', 'fixture-second-truncated-denial')
+      const contents = fs.readFileSync(journalPath(), 'utf8')
+      const pendingStart = contents.indexOf('"pending":[') + '"pending":['.length
+      const entrySeparator = contents.indexOf('},{', pendingStart)
+      expect(entrySeparator).toBeGreaterThan(pendingStart)
+
+      const truncated =
+        truncation === 'before-separator'
+          ? contents.slice(0, entrySeparator + 1)
+          : truncation === 'after-separator'
+            ? contents.slice(0, entrySeparator + 2)
+            : `${contents.slice(0, entrySeparator + 2)}]}`
+      fs.writeFileSync(journalPath(), truncated, { mode: 0o600 })
+
+      expect(captureSessionPersistenceJournalRecovery(directory, envKey)).toMatchObject({
+        status: 'unrecoverable',
+      })
+      expect(fs.readFileSync(journalPath(), 'utf8')).toBe(truncated)
+      expect(
+        fs
+          .readdirSync(directory)
+          .filter(name => name.startsWith('session-persistence-journal-corrupt-'))
+      ).toEqual([])
+    }
+  )
+
+  it('recovers every denial when truncation occurs after the complete writer-produced pending array', () => {
+    const first = producer()
+    const second = producer()
+    first.prepare('keytar', 'fixture-first-closed-array-denial')
+    second.prepare('safe-storage', 'fixture-second-closed-array-denial')
+    const contents = fs.readFileSync(journalPath(), 'utf8')
+    const pendingArrayEnd = contents.lastIndexOf(']')
+    expect(pendingArrayEnd).toBeGreaterThan(contents.indexOf('"pending":['))
+    const truncated = contents.slice(0, pendingArrayEnd + 1)
+    expect(() => JSON.parse(truncated)).toThrow()
+    fs.writeFileSync(journalPath(), truncated, { mode: 0o600 })
+
+    const capture = captureSessionPersistenceJournalRecovery(directory, envKey)
+    expect(capture.status).toBe('corrupt')
+    if (capture.status !== 'corrupt')
+      throw new Error('Expected recoverable outer-document truncation')
+    expect(capture.quarantine.denials).toEqual([
+      {
+        producer: first.producer,
+        candidateHash: sessionPersistenceCandidateHash('fixture-first-closed-array-denial'),
+      },
+      {
+        producer: second.producer,
+        candidateHash: sessionPersistenceCandidateHash('fixture-second-closed-array-denial'),
+      },
+    ])
+  })
+
+  it('fails closed when duplicate top-level pending keys hide a writer-produced denial', () => {
+    producer().prepare('keytar', 'fixture-first-pending-denial')
+    producer().prepare('safe-storage', 'fixture-second-pending-denial')
+    const journal = JSON.parse(fs.readFileSync(journalPath(), 'utf8')) as SessionPersistenceJournal
+    const contents =
+      `{"version":1,"revision":"${journal.revision}",` +
+      `"pending":[${JSON.stringify(journal.pending[0])}],` +
+      `"pending":[${JSON.stringify(journal.pending[1])}]}`
+    fs.writeFileSync(journalPath(), contents, { mode: 0o600 })
+
+    expect(() => readSessionPersistenceJournal(directory, envKey)).toThrow('invalid bounded schema')
+    expect(captureSessionPersistenceJournalRecovery(directory, envKey)).toMatchObject({
+      status: 'unrecoverable',
+    })
+    expect(fs.readFileSync(journalPath(), 'utf8')).toBe(contents)
+  })
+
+  it('fails closed when duplicate denial-entry keys replace a writer-produced hash', () => {
+    producer().prepare('keytar', 'fixture-original-entry-denial')
+    const journal = JSON.parse(fs.readFileSync(journalPath(), 'utf8')) as SessionPersistenceJournal
+    const originalHash = journal.pending[0]!.candidateHash
+    const hiddenHash = sessionPersistenceCandidateHash('fixture-hidden-duplicate-denial')
+    const entry = JSON.stringify(journal.pending[0]).replace(
+      `"candidateHash":"${originalHash}"`,
+      `"candidateHash":"${originalHash}","candidateHash":"${hiddenHash}"`
+    )
+    const contents = `{"version":1,"revision":"${journal.revision}","pending":[${entry}]}`
+    fs.writeFileSync(journalPath(), contents, { mode: 0o600 })
+
+    expect(() => readSessionPersistenceJournal(directory, envKey)).toThrow('invalid bounded schema')
+    expect(captureSessionPersistenceJournalRecovery(directory, envKey)).toMatchObject({
+      status: 'unrecoverable',
+    })
+    expect(fs.readFileSync(journalPath(), 'utf8')).toBe(contents)
+  })
+
+  it('keeps transient recovery reads retryable and leaves the journal bytes untouched', () => {
+    producer().prepare('keytar', 'fixture-transient-recovery')
+    const before = fs.readFileSync(journalPath())
+    const transient = Object.assign(new Error('fixture descriptor exhaustion'), { code: 'EMFILE' })
+    vi.spyOn(fs, 'openSync').mockImplementationOnce(() => {
+      throw transient
+    })
+
+    expect(captureSessionPersistenceJournalRecovery(directory, envKey)).toEqual({
+      status: 'transient',
+      error: transient,
+    })
+    expect(fs.readFileSync(journalPath())).toEqual(before)
   })
 
   it('bounds self-planned marker revisions before writing an invalid journal', () => {

@@ -1002,6 +1002,308 @@ describe('Stage 4 public login candidate acceptance', () => {
     expect(authority).toEqual({ status: 'denied', frameMode: 'logged-out' })
   })
 
+  it('recovers a writer-produced truncated denial journal only after fresh public authentication', async () => {
+    const h = await harness()
+    await h.tokenStore.setSessionToken(homeToken, h.envKey)
+    const { SessionPersistenceProducer } = await import('../sessionPersistenceJournal.js')
+    const deniedCandidate = new SessionPersistenceProducer(
+      boundary.directory,
+      h.envKey,
+      null,
+      () => {},
+      () => {}
+    )
+    deniedCandidate.prepare('keytar', homeToken)
+    const journalPath = path.join(
+      boundary.directory,
+      `session-persistence-journal-${createHash('sha256').update(h.envKey).digest('hex')}`
+    )
+    const validJournal = await fs.readFile(journalPath)
+    expect(validJournal.length).toBeGreaterThan(0)
+    const pendingArrayEnd = validJournal.lastIndexOf(Buffer.from(']'))
+    expect(pendingArrayEnd).toBeGreaterThan(0)
+    const corruptedJournal = validJournal.subarray(0, pendingArrayEnd + 1)
+    expect(() => JSON.parse(corruptedJournal.toString('utf8'))).toThrow()
+    expect(corruptedJournal.toString('utf8')).toContain(
+      createHash('sha256').update(homeToken).digest('hex')
+    )
+    await fs.truncate(journalPath, corruptedJournal.length)
+    expect((await fs.stat(journalPath).then(stat => stat.mode)) & 0o077).toBe(0)
+
+    await expect(h.service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(h.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+    expect(h.state.sessionToken).toBeNull()
+    expect(() => h.chatBinding.requireChatStore()).toThrow('Not authenticated')
+    expect(await fs.readFile(journalPath)).toEqual(corruptedJournal)
+    const rejectedLogin = vi
+      .spyOn(h.state.authClient, 'passwordLogin')
+      .mockRejectedValueOnce(new Error('fixture credentials rejected'))
+    await expect(h.service.passwordLogin('owner-b@example.test', 'wrong-password')).rejects.toThrow(
+      'fixture credentials rejected'
+    )
+    expect(rejectedLogin).toHaveBeenCalledOnce()
+    expect(await fs.readFile(journalPath)).toEqual(corruptedJournal)
+    expect(
+      (await fs.readdir(boundary.directory)).filter(name =>
+        name.startsWith('session-persistence-journal-corrupt-')
+      )
+    ).toEqual([])
+
+    rejectedLogin.mockResolvedValueOnce({
+      token: replacementToken,
+      me: replacementUser,
+    })
+    await expect(
+      h.service.passwordLogin('owner-b@example.test', 'fixture-password')
+    ).resolves.toMatchObject({ authenticated: true, me: replacementUser })
+    expect(h.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+
+    const quarantines = (await fs.readdir(boundary.directory)).filter(name =>
+      name.startsWith('session-persistence-journal-corrupt-')
+    )
+    expect(quarantines).toHaveLength(1)
+    expect(await fs.readFile(path.join(boundary.directory, quarantines[0]!))).toEqual(
+      corruptedJournal
+    )
+
+    const restarted = await restartHarness()
+    await expect(restarted.service.initialize()).resolves.toMatchObject({
+      authenticated: true,
+      me: replacementUser,
+    })
+    const { SessionAuthorityRecordConflictError } = await import('../sessionAuthorityRecord.js')
+    vi.spyOn(restarted.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeUser,
+    })
+    await expect(
+      restarted.service.passwordLogin('owner-a@example.test', 'fixture-password')
+    ).rejects.toBeInstanceOf(SessionAuthorityRecordConflictError)
+    await expect(restarted.service.getSessionState()).resolves.toMatchObject({
+      authenticated: true,
+      me: replacementUser,
+    })
+  })
+
+  it('resumes corrupt-journal recovery after interruption immediately following quarantine rename', async () => {
+    const h = await harness()
+    await h.tokenStore.setSessionToken(homeToken, h.envKey)
+    const { SessionPersistenceProducer } = await import('../sessionPersistenceJournal.js')
+    const deniedCandidate = new SessionPersistenceProducer(
+      boundary.directory,
+      h.envKey,
+      null,
+      () => {},
+      () => {}
+    )
+    deniedCandidate.prepare('keytar', homeToken)
+    const journalPath = path.join(
+      boundary.directory,
+      `session-persistence-journal-${createHash('sha256').update(h.envKey).digest('hex')}`
+    )
+    const validJournal = await fs.readFile(journalPath)
+    const pendingArrayEnd = validJournal.lastIndexOf(Buffer.from(']'))
+    expect(pendingArrayEnd).toBeGreaterThan(0)
+    const corruptedJournal = validJournal.subarray(0, pendingArrayEnd + 1)
+    await fs.truncate(journalPath, corruptedJournal.length)
+
+    const rename = fsSync.renameSync.bind(fsSync)
+    vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
+      const result = rename(source, destination)
+      if (path.basename(String(destination)).startsWith('session-persistence-journal-corrupt-'))
+        throw new Error('fixture interruption after quarantine rename')
+      return result
+    })
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: replacementToken,
+      me: replacementUser,
+    })
+    await expect(
+      h.service.passwordLogin('owner-b@example.test', 'fixture-password')
+    ).rejects.toThrow('fixture interruption after quarantine rename')
+    expect(h.state.sessionToken).toBeNull()
+    expect(fsSync.existsSync(journalPath)).toBe(false)
+    const quarantinedPath = path.join(
+      boundary.directory,
+      (await fs.readdir(boundary.directory)).find(name =>
+        name.startsWith('session-persistence-journal-corrupt-')
+      )!
+    )
+    expect(await fs.readFile(quarantinedPath)).toEqual(corruptedJournal)
+
+    const restarted = await restartHarness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    vi.spyOn(restarted.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: replacementToken,
+      me: replacementUser,
+    })
+    await expect(
+      restarted.service.passwordLogin('owner-b@example.test', 'fixture-password')
+    ).resolves.toMatchObject({ authenticated: true, me: replacementUser })
+    await expect(restarted.service.getSessionState()).resolves.toMatchObject({
+      authenticated: true,
+      me: replacementUser,
+    })
+  })
+
+  it('recovers corrupt journal without losing retained candidate or logout cleanup receipts', async () => {
+    const h = await harness()
+    vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: homeToken,
+      me: homeUser,
+    })
+    await h.service.passwordLogin('owner-a@example.test', 'fixture-password')
+    const selected = await h.acceptance.readSessionAuthoritySourceSelection({
+      tokenStore: h.tokenStore,
+      envKey: h.envKey,
+    })
+    expect(selected.status).toBe('accepted')
+    if (selected.status !== 'accepted') throw new Error('Expected the initial accepted source')
+    const priorSource = selected.session.accepted.record.frame.source
+    if (!priorSource) throw new Error('Expected the initial source receipt')
+
+    const cleanupFailure = new Error('fixture exact-source cleanup stays pending')
+    vi.spyOn(h.tokenStore, 'deleteSessionCredentialSourceIfUnselectedWithProof').mockRejectedValue(
+      cleanupFailure
+    )
+    await expect(h.service.logout()).resolves.toMatchObject({ kind: 'committed' })
+
+    const { SessionAuthorityAcceptanceTransaction } =
+      await import('../sessionAuthorityAcceptance.js')
+    const orphanCandidate = await SessionAuthorityAcceptanceTransaction.begin({
+      tokenStore: h.tokenStore,
+      userDataDirectory: boundary.directory,
+      envKey: h.envKey,
+      token: replacementToken,
+      accountId: replacementUser.id,
+      source: 'keytar',
+      priorToken: null,
+      purpose: 'fresh-authentication',
+      ownerEpoch: h.service.getSessionGeneration(),
+    })
+    const orphanCandidateSource = await orphanCandidate.publishAndVerify()
+    await orphanCandidate.close()
+    expect(orphanCandidateSource).toMatchObject({
+      accountId: replacementUser.id,
+      kind: 'keytar',
+    })
+    if (!orphanCandidateSource) throw new Error('Expected a persisted orphan candidate source')
+    const { SessionPersistenceProducer } = await import('../sessionPersistenceJournal.js')
+    const candidateDenial = new SessionPersistenceProducer(
+      boundary.directory,
+      h.envKey,
+      null,
+      () => {},
+      () => {}
+    )
+    candidateDenial.prepare('keytar', replacementToken)
+
+    const { SessionAuthorityRecordRepository } = await import('../sessionAuthorityRecord.js')
+    const storageScope = await h.tokenStore.createSessionAuthorityStorageScope()
+    const repository = new SessionAuthorityRecordRepository(storageScope, h.envKey, h.tokenStore)
+    const beforeRecovery = repository.observe()
+    expect(beforeRecovery.status).toBe('observed')
+    if (beforeRecovery.status !== 'observed') throw new Error('Expected retained cleanup state')
+    const retainedCandidate = beforeRecovery.record.candidates.find(
+      candidate => candidate.accountId === replacementUser.id
+    )
+    if (!retainedCandidate)
+      throw new Error(
+        `Missing retained candidate: ${JSON.stringify({
+          frame: beforeRecovery.record.frame,
+          candidates: beforeRecovery.record.candidates,
+          cleanupDebts: beforeRecovery.record.cleanupDebts,
+        })}`
+      )
+    expect(beforeRecovery.record.frame.mode).toBe('logged-out')
+    expect(retainedCandidate).toMatchObject({
+      phase: 'verified',
+      sourceKind: 'keytar',
+    })
+    expect(beforeRecovery.record.cleanupDebts).toContainEqual(
+      expect.objectContaining({ source: priorSource })
+    )
+
+    const journalPath = path.join(
+      boundary.directory,
+      `session-persistence-journal-${createHash('sha256').update(h.envKey).digest('hex')}`
+    )
+    const writerBytes = await fs.readFile(journalPath)
+    const pendingArrayEnd = writerBytes.lastIndexOf(Buffer.from(']'))
+    expect(pendingArrayEnd).toBeGreaterThan(0)
+    const corruptedJournal = writerBytes.subarray(0, pendingArrayEnd + 1)
+    await fs.truncate(journalPath, corruptedJournal.length)
+    expect(await fs.readFile(journalPath)).toEqual(corruptedJournal)
+
+    const freshToken = 'fixture-recovery-owner-token'
+    const freshUser = { ...replacementUser, id: 'login-owner-c' }
+    const publicLogin = vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
+      token: freshToken,
+      me: freshUser,
+    })
+    h.state.authClient.getMe.mockResolvedValueOnce(freshUser)
+    vi.spyOn(h.tokenStore, 'discardUnacceptedSessionTokenCandidate').mockRejectedValueOnce(
+      new Error('fixture orphan cleanup interruption')
+    )
+    await expect(
+      h.service.passwordLogin('owner-c@example.test', 'fixture-password')
+    ).resolves.toMatchObject({ authenticated: true, me: freshUser })
+
+    const afterRecovery = repository.observe()
+    expect(afterRecovery.status).toBe('observed')
+    if (afterRecovery.status !== 'observed') throw new Error('Expected recovered cleanup state')
+    expect(afterRecovery.record.frame).toMatchObject({
+      mode: 'persistent',
+      source: { accountId: freshUser.id },
+      recoveryId: null,
+    })
+    expect(afterRecovery.record.cleanupDebts).toContainEqual(
+      expect.objectContaining({ source: priorSource })
+    )
+    expect(
+      afterRecovery.record.quarantines.flatMap(item =>
+        item.kind === 'legacy-journal' ? item.denials.map(denial => denial.candidateHash) : []
+      )
+    ).toContain(createHash('sha256').update(replacementToken).digest('hex'))
+
+    const retainedSourceAccount = `Evenfire::session-v1:${orphanCandidateSource.sourceRef}`
+    if (
+      afterRecovery.record.candidates.some(
+        candidate => candidate.sourceRef === orphanCandidateSource.sourceRef
+      )
+    ) {
+      expect(boundary.keychain.has(keyOf('Evenfire', retainedSourceAccount))).toBe(true)
+      const { SessionAuthorityAcceptanceTransaction } =
+        await import('../sessionAuthorityAcceptance.js')
+      await SessionAuthorityAcceptanceTransaction.reconcilePendingAcceptanceProjection(
+        h.tokenStore,
+        boundary.directory,
+        h.envKey
+      )
+    }
+    const completedRecovery = repository.observe()
+    expect(completedRecovery.status).toBe('observed')
+    if (completedRecovery.status !== 'observed')
+      throw new Error('Expected completed recovered cleanup state')
+    expect(completedRecovery.record.frame).toMatchObject({
+      mode: 'persistent',
+      source: { accountId: freshUser.id },
+    })
+    expect(completedRecovery.record.cleanupDebts).toContainEqual(
+      expect.objectContaining({ source: priorSource })
+    )
+    expect(completedRecovery.record.candidates).not.toContainEqual(
+      expect.objectContaining({ sourceRef: orphanCandidateSource.sourceRef })
+    )
+    expect(boundary.keychain.has(keyOf('Evenfire', retainedSourceAccount))).toBe(false)
+    expect(boundary.keychain.has(keyOf('Evenfire', `session-v1:${priorSource.sourceRef}`))).toBe(
+      true
+    )
+  })
+
   it('does not publish a delayed V1 restore after a newer public login owns the runtime', async () => {
     const seed = await harness()
     vi.spyOn(seed.state.authClient, 'passwordLogin').mockResolvedValueOnce({

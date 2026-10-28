@@ -18,16 +18,26 @@ const crashPhases = new Set([
   'after-profile-selection',
   'after-acceptance',
 ])
+const journalRecoveryRoles = new Set(['journal-seed', 'journal-recovery-crash', 'journal-recover'])
 const memoryOnlyRole = role === 'memory-seed' || role === 'memory-recover'
 
 if (
-  !['seed', 'candidate', 'recover', 'memory-seed', 'memory-recover'].includes(role) ||
+  ![
+    'seed',
+    'candidate',
+    'recover',
+    'memory-seed',
+    'memory-recover',
+    ...journalRecoveryRoles,
+  ].includes(role) ||
   !path.isAbsolute(profileRoot)
 )
   process.exit(64)
 if ((role === 'candidate' || role === 'recover') && !crashPhases.has(phase)) process.exit(64)
 if (role === 'seed' && phase !== 'none') process.exit(64)
 if (memoryOnlyRole && phase !== 'none') process.exit(64)
+if (role === 'journal-recovery-crash' && phase !== 'after-lp') process.exit(64)
+if ((role === 'journal-seed' || role === 'journal-recover') && phase !== 'none') process.exit(64)
 
 if (memoryOnlyRole)
   Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
@@ -194,6 +204,9 @@ function authoritySummary(tokenStore, envKey) {
         transactionId: candidate.transactionId,
         sourceRef: candidate.sourceRef,
       })),
+      legacyDenialHashes: record.quarantines.flatMap(item =>
+        item.kind === 'legacy-journal' ? item.denials.map(denial => denial.candidateHash) : []
+      ),
       projectionIntent: record.projectionIntent
         ? { operationId: record.projectionIntent.operationId }
         : null,
@@ -341,6 +354,136 @@ async function main() {
   const { service, tokenStore, getActiveEnvKey, getMeOwners } = await createService()
   let envKey = getActiveEnvKey()
   let environmentSwitchInfo = null
+
+  if (role === 'journal-seed') {
+    const { SessionPersistenceProducer } = require('../dist/sessionPersistenceJournal.js')
+    await tokenStore.setSessionToken(tokenFor('A'), envKey)
+    const denial = new SessionPersistenceProducer(
+      userData,
+      envKey,
+      null,
+      () => {},
+      () => {}
+    )
+    denial.prepare('keytar', tokenFor('A'))
+    const journalPath = path.join(
+      userData,
+      `session-persistence-journal-${crypto.createHash('sha256').update(envKey).digest('hex')}`
+    )
+    const bytes = fs.readFileSync(journalPath)
+    const pendingArrayEnd = bytes.lastIndexOf(Buffer.from(']'))
+    if (pendingArrayEnd <= 0) throw new Error('writer did not produce a complete denial array')
+    fs.truncateSync(journalPath, pendingArrayEnd + 1)
+    const corruptedBytes = fs.readFileSync(journalPath)
+    safeReport({
+      ok: true,
+      denialHash: crypto.createHash('sha256').update(tokenFor('A')).digest('hex'),
+      corruptedJournal: true,
+      corruptedJournalDigest: crypto.createHash('sha256').update(corruptedBytes).digest('hex'),
+      corruptedJournalBytes: corruptedBytes.length,
+    })
+    process.exit(0)
+  }
+
+  if (role === 'journal-recovery-crash') {
+    const { TokenStore } = require('../dist/tokenStore.js')
+    const original = TokenStore.prototype.applySessionAuthorityMarkerCas
+    TokenStore.prototype.applySessionAuthorityMarkerCas = function (...args) {
+      const applied = original.apply(this, args)
+      const cas = args[3]
+      if (applied && cas?.next?.intent?.intent === 'logout-pending') {
+        const observation = this.observeSessionAuthorityMarkerRaw(args[0], args[1], args[2])
+        const authorityDirectory = this.resolveSessionAuthorityStorageDirectory(args[0])
+        const authorityFile = path.join(
+          authorityDirectory,
+          `session-authority-${crypto.createHash('sha256').update(args[2]).digest('hex')}`
+        )
+        const authority = JSON.parse(fs.readFileSync(authorityFile, 'utf8'))
+        safeReport({
+          ok: true,
+          crashReached: 'after-lp-sidecar-cas',
+          frameMode: authority.frame.mode,
+          recoveryId: authority.frame.recoveryId,
+          markerIntent: observation.marker?.intent.intent ?? null,
+          markerRevisionPresent: Boolean(observation.marker?.revision),
+        })
+        const blocked = new Int32Array(new SharedArrayBuffer(4))
+        while (true) Atomics.wait(blocked, 0, 0, 60_000)
+      }
+      return applied
+    }
+    await service.passwordLogin('owner-b@example.test', 'synthetic-password-B')
+    throw new Error('logout marker CAS hook did not stop the producer')
+  }
+
+  if (role === 'journal-recover') {
+    const coldState = await service.initialize()
+    const startupGetMeOwners = [...getMeOwners]
+    let protectedHttpDispatches = 0
+    let protectedRpcDispatches = 0
+    const originalGfsList = service.gfsClient.listAccessible.bind(service.gfsClient)
+    service.gfsClient.listAccessible = (...args) => {
+      protectedHttpDispatches += 1
+      return originalGfsList(...args)
+    }
+    const originalRpcList = service.rpcClient.listServers.bind(service.rpcClient)
+    service.rpcClient.listServers = (...args) => {
+      protectedRpcDispatches += 1
+      return originalRpcList(...args)
+    }
+    try {
+      await service.listAccessibleGfsResources()
+    } catch {}
+    try {
+      await service.listAccessibleMcpServers(['synthetic-host'])
+    } catch {}
+    const coldAuthority = await authoritySummary(tokenStore, envKey)
+    const coldWasSignedOut = !coldState.authenticated && coldState.me === null
+    const coldDispatches = protectedHttpDispatches + protectedRpcDispatches
+
+    await service.passwordLogin('owner-b@example.test', 'synthetic-password-B')
+    let deniedCandidateRejected = false
+    try {
+      await service.passwordLogin('owner-a@example.test', 'synthetic-password-A')
+    } catch (error) {
+      deniedCandidateRejected = error?.name === 'SessionAuthorityRecordConflictError'
+    }
+    const finalState = await service.getSessionState()
+    const authority = await authoritySummary(tokenStore, envKey)
+    const quarantineFiles = fs
+      .readdirSync(userData)
+      .filter(name => name.startsWith('session-persistence-journal-corrupt-'))
+      .map(name => {
+        const contents = fs.readFileSync(path.join(userData, name))
+        return {
+          digest: crypto.createHash('sha256').update(contents).digest('hex'),
+          byteLength: contents.length,
+        }
+      })
+    safeReport({
+      ok:
+        coldWasSignedOut &&
+        coldDispatches === 0 &&
+        startupGetMeOwners.length === 0 &&
+        !getMeOwners.includes('A') &&
+        deniedCandidateRejected &&
+        finalState.me?.id === 'crash-owner-B',
+      coldWasSignedOut,
+      startupGetMeOwners,
+      protectedHttpDispatches,
+      protectedRpcDispatches,
+      coldJournalStatus: coldAuthority.journal.status,
+      deniedCandidateRejected,
+      authenticated: finalState.authenticated,
+      owner: finalState.me?.id ?? null,
+      getMeOwners,
+      activeEnvKey: envKey,
+      profileSelection: await profileSelectionSummary(tokenStore),
+      authority,
+      quarantineFiles,
+    })
+    process.exit(0)
+  }
 
   if (role === 'memory-seed') {
     const state = await service.passwordLogin('crash@example.test', 'synthetic-password-M')

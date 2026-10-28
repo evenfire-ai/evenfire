@@ -17,6 +17,7 @@ import {
   type SessionAuthorityLegacyJournalReceipt,
   type SessionAuthorityProfileSelection,
   SessionAuthorityProjectionIntegrityError,
+  type SessionAuthorityQuarantine,
   type SessionAuthorityRecord,
   SessionAuthorityRecordConflictError,
   SessionAuthorityRecordRepository,
@@ -26,7 +27,10 @@ import {
   sameLogoutMarkerPreimage,
 } from './sessionAuthorityRecord.js'
 import {
+  type SessionPersistenceJournalQuarantineReceipt,
+  captureSessionPersistenceJournalRecovery,
   observeSessionPersistenceLegacySnapshot,
+  resumeSessionPersistenceJournalQuarantine,
   sessionPersistenceLegacySnapshotMatches,
 } from './sessionPersistenceJournal.js'
 import type {
@@ -159,6 +163,224 @@ function logoutReceiptBindsMarker(
     marker.marker.revision === receipt.markerRevision &&
     marker.rawDigest === receipt.markerDigest
   )
+}
+
+function isSignedOutProfileSelection(
+  observation: ReturnType<SessionAuthorityRecordRepository['observeProfileSelection']>
+): boolean {
+  return observation.status === 'observed' && observation.selection?.state !== 'active'
+}
+
+type FreshAuthenticationJournalRecoveryInput = {
+  tokenStore: TokenStore
+  userDataDirectory: string
+  envKey: string
+  legacyEnvKeys?: readonly string[]
+  legacyNamespaceComplete?: boolean
+}
+
+async function resumeLegacyJournalQuarantine(
+  tokenStore: TokenStore,
+  envKey: string,
+  storageScope: SessionAuthorityStorageScope,
+  repository: SessionAuthorityRecordRepository,
+  observation: Extract<
+    ReturnType<SessionAuthorityRecordRepository['observe']>,
+    { status: 'observed' }
+  >,
+  assertStorageScopeCurrent: () => void,
+  observeProjectionMarker: () => PendingExternalLogoutRawObservation,
+  observeLegacyJournal: () => ReturnType<typeof observeSessionPersistenceLegacySnapshot>
+): Promise<SessionAuthorityRecordSnapshot | null> {
+  const quarantine = observation.record.quarantines.find(
+    (item): item is Extract<SessionAuthorityQuarantine, { kind: 'legacy-journal' }> =>
+      item.kind === 'legacy-journal' && item.id === observation.record.frame.recoveryId
+  )
+  if (!quarantine) return null
+  const assertDurableDenial = () => {
+    assertStorageScopeCurrent()
+    const current = repository.observe()
+    if (
+      current.status !== 'observed' ||
+      current.record.frame.mode !== 'logged-out' ||
+      current.record.frame.recoveryId !== quarantine.id ||
+      current.record.marker?.intent !== 'logout-pending' ||
+      current.record.projectionIntent !== null ||
+      JSON.stringify(
+        current.record.quarantines.find(
+          item => item.kind === 'legacy-journal' && item.id === quarantine.id
+        )
+      ) !== JSON.stringify(quarantine)
+    )
+      throw current.status === 'transient'
+        ? current.error
+        : new SessionAuthorityRecordConflictError()
+    const marker = observeProjectionMarker()
+    if (
+      !current.record.logoutReceipt ||
+      !logoutReceiptBindsMarker(current.record.logoutReceipt, marker)
+    )
+      throw new SessionAuthorityProjectionIntegrityError('marker')
+    const profileRepository = new SessionAuthorityRecordRepository(
+      storageScope,
+      PROFILE_SESSION_AUTHORITY_ENV_KEY,
+      tokenStore
+    )
+    const profile = profileRepository.observeProfileSelection()
+    if (!isSignedOutProfileSelection(profile))
+      throw profile.status === 'transient'
+        ? profile.error
+        : new SessionAuthorityRecordConflictError()
+  }
+
+  assertDurableDenial()
+  const directory = tokenStore.resolveSessionAuthorityStorageScope(storageScope)
+  resumeSessionPersistenceJournalQuarantine(directory, envKey, quarantine, assertDurableDenial)
+  const journal = observeLegacyJournal()
+  if (
+    journal.status !== 'observed' ||
+    journal.receipt.schemaVersion !== 0 ||
+    journal.receipt.byteLength !== 0 ||
+    journal.receipt.denials.length !== 0
+  )
+    throw journal.status === 'observed'
+      ? new SessionAuthorityProjectionIntegrityError('journal')
+      : journal.error
+  const latest = repository.observe()
+  if (latest.status !== 'observed')
+    throw latest.status === 'transient' ? latest.error : new SessionAuthorityRecordConflictError()
+  assertDurableDenial()
+  const completed = repository.completeSessionPersistenceJournalRecovery(
+    latest.snapshot,
+    quarantine.id,
+    journal.receipt
+  )
+  committed(completed)
+  const verified = repository.observe()
+  const verifiedMarker = observeProjectionMarker()
+  const verifiedJournal = observeLegacyJournal()
+  if (
+    verified.status !== 'observed' ||
+    verified.record.frame.recoveryId !== null ||
+    verified.record.frame.mode !== 'logged-out' ||
+    !verified.record.logoutReceipt ||
+    !logoutReceiptBindsMarker(verified.record.logoutReceipt, verifiedMarker) ||
+    verifiedJournal.status !== 'observed' ||
+    !sessionPersistenceLegacySnapshotMatches(
+      verified.record.legacyJournalReceipt!,
+      verifiedJournal.receipt
+    )
+  )
+    throw verified.status === 'transient'
+      ? verified.error
+      : new SessionAuthorityProjectionIntegrityError('authority')
+  return verified.snapshot
+}
+
+async function recoverCorruptJournalForFreshAuthentication(
+  input: {
+    tokenStore: TokenStore
+    userDataDirectory: string
+    envKey: string
+    legacyEnvKeys?: readonly string[]
+    legacyNamespaceComplete?: boolean
+  },
+  storageScope: SessionAuthorityStorageScope,
+  repository: SessionAuthorityRecordRepository,
+  profileRepository: SessionAuthorityRecordRepository,
+  observation: Extract<
+    ReturnType<SessionAuthorityRecordRepository['observe']>,
+    { status: 'observed' }
+  >,
+  quarantine: SessionPersistenceJournalQuarantineReceipt
+): Promise<boolean> {
+  if (
+    observation.record.frame.mode === 'persistent' ||
+    observation.record.frame.source !== null ||
+    !['uninitialized', 'memory-only', 'logged-out'].includes(observation.record.frame.mode) ||
+    observation.record.projectionIntent !== null ||
+    observation.record.projectionReceipt !== null ||
+    observation.record.frame.recoveryId !== null
+  )
+    throw new SessionAuthorityRecordConflictError()
+  const initialProfile = profileRepository.observeProfileSelection()
+  if (!isSignedOutProfileSelection(initialProfile))
+    throw initialProfile.status === 'transient'
+      ? initialProfile.error
+      : new SessionAuthorityRecordConflictError()
+
+  let marker = input.tokenStore.observeSessionAuthorityMarkerRaw(
+    storageScope,
+    input.userDataDirectory,
+    input.envKey
+  )
+  if (marker.marker?.intent.intent === 'acceptance-pending')
+    throw new SessionAuthorityProjectionIntegrityError('marker')
+  if (marker.marker?.intent.intent !== 'logout-pending' || marker.marker.revision === null) {
+    const nextMarker: PendingExternalLogoutMarker = {
+      intent: { intent: 'logout-pending' },
+      revision: randomUUID(),
+    }
+    if (
+      !input.tokenStore.applySessionAuthorityMarkerCas(
+        storageScope,
+        input.userDataDirectory,
+        input.envKey,
+        {
+          expected: marker.marker,
+          next: nextMarker,
+        }
+      )
+    )
+      throw new SessionAuthorityRecordConflictError()
+    marker = input.tokenStore.observeSessionAuthorityMarkerRaw(
+      storageScope,
+      input.userDataDirectory,
+      input.envKey
+    )
+    if (
+      marker.marker?.intent.intent !== 'logout-pending' ||
+      marker.marker.revision !== nextMarker.revision ||
+      marker.rawContents !==
+        JSON.stringify({
+          version: 1,
+          revision: nextMarker.revision,
+          intent: 'logout-pending',
+        })
+    )
+      throw new SessionAuthorityProjectionIntegrityError('marker')
+  }
+
+  const current = repository.observe()
+  if (
+    current.status !== 'observed' ||
+    current.record.revision !== observation.record.revision ||
+    current.record.frame.revision !== observation.record.frame.revision
+  )
+    throw current.status === 'transient' ? current.error : new SessionAuthorityRecordConflictError()
+  const profile = profileRepository.observeProfileSelection()
+  if (!isSignedOutProfileSelection(profile))
+    throw profile.status === 'transient' ? profile.error : new SessionAuthorityRecordConflictError()
+  committed(
+    repository.beginSessionPersistenceJournalRecovery(current.snapshot, {
+      quarantine,
+      operationId: randomUUID(),
+      markerRevision: marker.marker!.revision!,
+      markerDigest: marker.rawDigest,
+    })
+  )
+
+  await reconcileAcceptanceProjection(
+    input.tokenStore,
+    input.userDataDirectory,
+    input.envKey,
+    storageScope,
+    repository,
+    input.legacyEnvKeys,
+    undefined,
+    input.legacyNamespaceComplete ?? false
+  )
+  return true
 }
 
 /**
@@ -742,6 +964,24 @@ async function reconcileAcceptanceProjection(
   if (observation.status !== 'observed') throw new SessionAuthorityRecordConflictError()
 
   let record = observation.record
+  const resumedJournalRecovery = await resumeLegacyJournalQuarantine(
+    tokenStore,
+    envKey,
+    storageScope,
+    repository,
+    observation,
+    assertStorageScopeCurrent,
+    observeProjectionMarker,
+    observeLegacyJournal
+  )
+  if (resumedJournalRecovery !== null) {
+    observation = repository.observe()
+    if (observation.status !== 'observed')
+      throw observation.status === 'transient'
+        ? observation.error
+        : new SessionAuthorityRecordConflictError()
+    record = observation.record
+  }
   if (
     record.frame.mode === 'uninitialized' &&
     record.projectionIntent === null &&
@@ -1173,6 +1413,93 @@ export class SessionAuthorityAcceptanceTransaction {
     } catch (error) {
       normalizedInput.tokenStore.finishSessionAuthorityTransaction(lease)
       throw error
+    }
+  }
+
+  /**
+   * Repair a confirmed corrupt legacy denial journal only after a public authentication producer
+   * has succeeded, and before the coordinator snapshots this candidate's authority revision.
+   */
+  static async recoverCorruptLegacyJournalAfterFreshAuthentication(
+    input: FreshAuthenticationJournalRecoveryInput
+  ): Promise<boolean> {
+    const lease = input.tokenStore.beginSessionAuthorityTransaction()
+    try {
+      return await input.tokenStore.runWithSessionAuthorityTransaction(lease, async () => {
+        const storageScope = await input.tokenStore.createSessionAuthorityStorageScope()
+        const repository = new SessionAuthorityRecordRepository(
+          storageScope,
+          input.envKey,
+          input.tokenStore,
+          lease
+        )
+        let observation = repository.observe()
+        if (observation.status === 'recovery-fenced') {
+          repository.resumeRecovery()
+          observation = repository.observe()
+        }
+        if (observation.status === 'absent') {
+          committed(repository.initialize(observation.snapshot))
+          observation = repository.observe()
+        }
+        if (observation.status !== 'observed')
+          throw observation.status === 'transient'
+            ? observation.error
+            : observation.status === 'invalid'
+              ? observation.error
+              : new SessionAuthorityRecordConflictError()
+
+        const currentRecord = observation.record
+        const pendingJournalQuarantine = currentRecord.quarantines.some(
+          item => item.kind === 'legacy-journal' && item.id === currentRecord.frame.recoveryId
+        )
+        if (pendingJournalQuarantine) {
+          await reconcileAcceptanceProjection(
+            input.tokenStore,
+            input.userDataDirectory,
+            input.envKey,
+            storageScope,
+            repository,
+            input.legacyEnvKeys,
+            undefined,
+            input.legacyNamespaceComplete ?? false
+          )
+          observation = repository.observe()
+          if (observation.status !== 'observed' || observation.record.frame.recoveryId !== null)
+            throw observation.status === 'transient'
+              ? observation.error
+              : new SessionAuthorityRecordConflictError()
+          return false
+        }
+        if (currentRecord.frame.recoveryId !== null) throw new SessionAuthorityRecordConflictError()
+
+        const directory = input.tokenStore.resolveSessionAuthorityStorageScope(storageScope)
+        const capture = captureSessionPersistenceJournalRecovery(directory, input.envKey)
+        if (capture.status === 'clean') return false
+        if (capture.status !== 'corrupt') throw capture.error
+
+        const profileRepository = new SessionAuthorityRecordRepository(
+          storageScope,
+          PROFILE_SESSION_AUTHORITY_ENV_KEY,
+          input.tokenStore,
+          lease
+        )
+        const profileObservation = profileRepository.observeProfileSelection()
+        if (profileObservation.status !== 'observed')
+          throw profileObservation.status === 'transient'
+            ? profileObservation.error
+            : new SessionAuthorityRecordConflictError()
+        return recoverCorruptJournalForFreshAuthentication(
+          input,
+          storageScope,
+          repository,
+          profileRepository,
+          observation,
+          capture.quarantine
+        )
+      })
+    } finally {
+      input.tokenStore.finishSessionAuthorityTransaction(lease)
     }
   }
 
