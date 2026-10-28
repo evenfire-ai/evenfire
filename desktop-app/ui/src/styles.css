@@ -7800,6 +7800,10 @@ h3 {
   box-shadow: 0 0 0 1px rgba(var(--focus-rgb), 0.56);
 }
 
+.composer-input-shell textarea:focus-visible {
+  outline: none;
+}
+
 .composer-input-shell--drag-active textarea:not(.ant-input) {
   border-color: rgba(var(--accent-rgb), 0.58);
   box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.24);

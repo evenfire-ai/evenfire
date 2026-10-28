@@ -289,6 +289,15 @@ describe.each([
     expect(cssRule('\\.composer-textarea-viewport')).toMatch(/overflow\s*:\s*hidden/)
   })
 
+  it('uses the composer shell as the text area focus indicator', () => {
+    const textareaFocusRule = cssRule('\\.composer-input-shell textarea:focus-visible')
+    const shellFocusRule = cssRule('\\.composer-input-shell:focus-within')
+
+    expect(textareaFocusRule).toMatch(/outline\s*:\s*none/)
+    expect(shellFocusRule).toMatch(/border-color\s*:/)
+    expect(shellFocusRule).toMatch(/box-shadow\s*:/)
+  })
+
   it('focuses on a trusted request and preserves selection when already focused', () => {
     const otherInput = document.createElement('input')
     document.body.append(otherInput)
