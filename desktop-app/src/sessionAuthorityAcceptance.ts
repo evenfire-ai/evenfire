@@ -1049,6 +1049,8 @@ export class SessionAuthorityAcceptanceTransaction {
     | null = null
   private accepted = false
   private acceptanceOutcomeIndeterminate = false
+  /** A committed or uncertain profile CAS forbids rejected-candidate source cleanup. */
+  private profileSelectionMayHaveCommitted = false
   private closed = false
   private priorSource: SessionAuthorityCredentialSource | null = null
   private restoredToken: string | null = null
@@ -1550,10 +1552,10 @@ export class SessionAuthorityAcceptanceTransaction {
       return { accepted: acceptedRecord, identity }
     } catch (error) {
       if (!this.accepted) {
-        // A failed final CAS may have published the authority record while its durable mutation
-        // fence remains uncertain. Recovery is deny-first, so the old in-process owner must be
-        // revoked before any asynchronous rollback or reconciliation can yield to consumers.
-        if (this.acceptanceOutcomeIndeterminate) {
+        // The profile CAS can select this candidate before its local authority projection
+        // finishes. If either CAS committed or may have committed, revoke the prior in-process
+        // owner before asynchronous cleanup can yield to consumers.
+        if (this.acceptanceOutcomeIndeterminate || this.profileSelectionMayHaveCommitted) {
           try {
             effects.onAcceptanceIndeterminate()
           } catch (failure) {
@@ -1561,35 +1563,37 @@ export class SessionAuthorityAcceptanceTransaction {
           }
         }
         if (consumers !== undefined) effects.discardConsumers(consumers)
-        await this.reject().catch(reportRollbackFailure)
-        await this.authorizePriorConsumerRollback(effects.assertOwned)
-        let rollbackCallbackAttempted = false
-        try {
-          // The ownership assertion above may itself await. Therefore it is only a preflight:
-          // exact runtime and durable ownership are checked again in this synchronous section,
-          // and the rollback effect runs in the same turn as those final observations. No
-          // competing producer can commit LP between the final marker read and consumer restore.
-          // A transient preflight read is not itself proof that the prior owner changed; the
-          // synchronous exact-frame, journal, marker, and runtime-owner checks decide that.
-          this.input.tokenStore.runWithSessionAuthorityTransaction(this.lease, () => {
-            // Candidate consumers can be superseded independently from the prior accepted
-            // owner's scope. A team-hop candidate losing its staged chat generation must not
-            // erase the still-selected prior source; rollback is instead gated by the exact
-            // prior runtime owner and scope, plus the durable frame/journal/marker checks below.
-            const preparedOwnerStillCurrent =
-              effects.isProducerStillCurrent() && effects.isPriorConsumerOwnerCurrent()
-            const authorization =
-              this.authorizePriorConsumerRollbackSynchronously(preparedOwnerStillCurrent)
-            rollbackCallbackAttempted = true
-            effects.rollbackBeforeAcceptance(authorization)
-          })
-        } catch (failure) {
-          reportRollbackFailure(failure)
-          if (!rollbackCallbackAttempted) {
-            try {
-              effects.rollbackBeforeAcceptance({ canRestorePriorConsumers: false })
-            } catch (rollbackFailure) {
-              reportRollbackFailure(rollbackFailure)
+        if (!this.profileSelectionMayHaveCommitted) {
+          await this.reject().catch(reportRollbackFailure)
+          await this.authorizePriorConsumerRollback(effects.assertOwned)
+          let rollbackCallbackAttempted = false
+          try {
+            // The ownership assertion above may itself await. Therefore it is only a preflight:
+            // exact runtime and durable ownership are checked again in this synchronous section,
+            // and the rollback effect runs in the same turn as those final observations. No
+            // competing producer can commit LP between the final marker read and consumer restore.
+            // A transient preflight read is not itself proof that the prior owner changed; the
+            // synchronous exact-frame, journal, marker, and runtime-owner checks decide that.
+            this.input.tokenStore.runWithSessionAuthorityTransaction(this.lease, () => {
+              // Candidate consumers can be superseded independently from the prior accepted
+              // owner's scope. A team-hop candidate losing its staged chat generation must not
+              // erase the still-selected prior source; rollback is instead gated by the exact
+              // prior runtime owner and scope, plus the durable frame/journal/marker checks below.
+              const preparedOwnerStillCurrent =
+                effects.isProducerStillCurrent() && effects.isPriorConsumerOwnerCurrent()
+              const authorization =
+                this.authorizePriorConsumerRollbackSynchronously(preparedOwnerStillCurrent)
+              rollbackCallbackAttempted = true
+              effects.rollbackBeforeAcceptance(authorization)
+            })
+          } catch (failure) {
+            reportRollbackFailure(failure)
+            if (!rollbackCallbackAttempted) {
+              try {
+                effects.rollbackBeforeAcceptance({ canRestorePriorConsumers: false })
+              } catch (rollbackFailure) {
+                reportRollbackFailure(rollbackFailure)
+              }
             }
           }
         }
@@ -1750,10 +1754,12 @@ export class SessionAuthorityAcceptanceTransaction {
         selection
       )
       if (profileResult.status === 'indeterminate') {
+        this.profileSelectionMayHaveCommitted = true
         this.acceptanceOutcomeIndeterminate = true
         throw new SessionAuthorityRecordConflictError()
       }
       committed(profileResult)
+      this.profileSelectionMayHaveCommitted = true
       this.profileSnapshot = profileResult.snapshot
       const profileAccepted = {
         record: profileResult.record,
@@ -2004,7 +2010,7 @@ export class SessionAuthorityAcceptanceTransaction {
 
   async reject(): Promise<void> {
     this.assertCandidateMode()
-    if (this.accepted || this.closed) return
+    if (this.accepted || this.closed || this.profileSelectionMayHaveCommitted) return
     await this.run(async () => {
       await reconcileAcceptanceProjection(
         this.input.tokenStore,

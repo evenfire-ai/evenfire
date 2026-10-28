@@ -305,6 +305,18 @@ export type SessionAuthorityRecordObservation =
     }
   | { status: 'recovery-fenced'; recoveryId: string }
 
+type SessionAuthorityProfileSelectionObservation =
+  | {
+      status: 'observed'
+      selection: SessionAuthorityProfileSelection | null
+      record: SessionAuthorityRecord
+      snapshot: SessionAuthorityRecordSnapshot
+    }
+  | Extract<
+      SessionAuthorityRecordObservation,
+      { status: 'absent' | 'transient' | 'invalid' | 'recovery-fenced' }
+    >
+
 export type SessionAuthorityCasResult =
   | {
       status: 'committed'
@@ -1814,11 +1826,16 @@ export class SessionAuthorityRecordRepository {
           }
         ) &&
         candidate.phase === 'cleanup-pending' &&
-        record.frame.source?.sourceRef !== candidate.sourceRef
+        record.frame.source?.sourceRef !== candidate.sourceRef &&
+        this.isGloballyUnselectedSourceRef(candidate.sourceRef)
       )
     }
 
-    if (!authorization.source || record.frame.source?.sourceRef === authorization.source.sourceRef)
+    if (
+      !authorization.source ||
+      record.frame.source?.sourceRef === authorization.source.sourceRef ||
+      !this.isGloballyUnselectedSourceRef(authorization.source.sourceRef)
+    )
       return false
     if (authorization.cleanupDebtId) {
       const debt = record.cleanupDebts.find(item => item.id === authorization.cleanupDebtId)
@@ -1908,6 +1925,29 @@ export class SessionAuthorityRecordRepository {
     }
   }
 
+  /** A global selector observation is part of source-deletion authority, not cleanup planning. */
+  private isGloballyUnselectedSourceRef(sourceRef: string): boolean {
+    try {
+      const profileRepository = new SessionAuthorityRecordRepository(
+        this.storageScope,
+        PROFILE_SESSION_AUTHORITY_ENV_KEY,
+        this.tokenStore
+      )
+      // Cleanup is destructive authority. This single read must not initialize a missing
+      // selector and turn absence into proof that this source is unselected.
+      const profile = profileRepository.observeExistingProfileSelection()
+      return (
+        profile.status === 'observed' &&
+        !(
+          profile.selection?.state === 'active' && profile.selection.source?.sourceRef === sourceRef
+        )
+      )
+    } catch {
+      // An unreadable or invalid global selector cannot authorize destructive cleanup.
+      return false
+    }
+  }
+
   initialize(snapshot: SessionAuthorityRecordSnapshot): SessionAuthorityCasResult {
     const captured = this.requireSnapshot(snapshot)
     if (captured.bytes !== null || captured.record !== null) return { status: 'superseded' }
@@ -1916,17 +1956,10 @@ export class SessionAuthorityRecordRepository {
   }
 
   /** Read the profile-wide selection from its reserved V2 authority repository. */
-  observeProfileSelection():
-    | {
-        status: 'observed'
-        selection: SessionAuthorityProfileSelection | null
-        record: SessionAuthorityRecord
-        snapshot: SessionAuthorityRecordSnapshot
-      }
-    | Extract<
-        SessionAuthorityRecordObservation,
-        { status: 'transient' | 'invalid' | 'recovery-fenced' }
-      > {
+  observeProfileSelection(): Exclude<
+    SessionAuthorityProfileSelectionObservation,
+    { status: 'absent' }
+  > {
     if (this.envKey !== PROFILE_SESSION_AUTHORITY_ENV_KEY)
       throw new Error('Profile selection requires the reserved session authority repository')
     let observation = this.observe()
@@ -1946,6 +1979,27 @@ export class SessionAuthorityRecordRepository {
         rawDigest: null,
         pathKind: 'missing',
       }
+    const profile = this.profileSelectionObservation(observation)
+    if (profile.status === 'absent')
+      return {
+        status: 'invalid',
+        error: new Error('Profile session authority could not be initialized'),
+        rawDigest: null,
+        pathKind: 'missing',
+      }
+    return profile
+  }
+
+  /** Observe a profile selector without initializing it; absence is not cleanup permission. */
+  observeExistingProfileSelection(): SessionAuthorityProfileSelectionObservation {
+    if (this.envKey !== PROFILE_SESSION_AUTHORITY_ENV_KEY)
+      throw new Error('Profile selection requires the reserved session authority repository')
+    return this.profileSelectionObservation(this.observe())
+  }
+
+  private profileSelectionObservation(
+    observation: SessionAuthorityRecordObservation
+  ): SessionAuthorityProfileSelectionObservation {
     if (observation.status !== 'observed') return observation
     if (
       observation.record.frame.mode !== 'uninitialized' ||
@@ -3380,6 +3434,7 @@ export class SessionAuthorityRecordRepository {
     if (
       !debt ||
       sourceKey(current.frame.source) === sourceKey(debt.source) ||
+      !this.isGloballyUnselectedSourceRef(debt.source.sourceRef) ||
       (debt.source.format === 'v0' &&
         (debt.source.envKey !== this.envKey ||
           !this.tokenStore.isLegacySessionCredentialSourceBoundToScope(
@@ -3427,6 +3482,8 @@ export class SessionAuthorityRecordRepository {
     | { status: 'in-flight' } {
     const current = this.requireCurrentRecord(snapshot)
     const candidate = current.candidates.find(item => item.transactionId === transactionId)
+    if (candidate && !this.isGloballyUnselectedSourceRef(candidate.sourceRef))
+      return { status: 'superseded' }
     if (
       candidate &&
       activeCandidatePublicationMap(this.tokenStore).has(
@@ -3494,7 +3551,8 @@ export class SessionAuthorityRecordRepository {
       candidate.phase !== 'cleanup-pending' ||
       !source ||
       source.format !== 'v1' ||
-      sourceKey(current.frame.source) === sourceKey(source)
+      sourceKey(current.frame.source) === sourceKey(source) ||
+      !this.isGloballyUnselectedSourceRef(source.sourceRef)
     )
       throw new Error('Rejected source cleanup requires a durable unselected candidate fence')
     return issueCleanupAuthorization({

@@ -86,6 +86,77 @@ function repository(): SessionAuthorityRecordRepository {
   return new SessionAuthorityRecordRepository(authorityScope, envKey, authorityStore)
 }
 
+async function selectProfileSource(
+  source: SessionAuthorityCredentialSource,
+  authorityRevision: string,
+  transactionId: string
+): Promise<void> {
+  const profileRepository = new SessionAuthorityRecordRepository(
+    authorityScope,
+    PROFILE_SESSION_AUTHORITY_ENV_KEY,
+    authorityStore
+  )
+  const profile = profileRepository.observeProfileSelection()
+  if (profile.status !== 'observed') throw new Error('Expected profile authority observation')
+  committed(
+    profileRepository.compareAndSetProfileSelection(
+      profile.snapshot,
+      profile.selection?.revision ?? null,
+      {
+        revision: randomUUID(),
+        state: 'active',
+        mode: 'persistent',
+        sessionGeneration: (profile.selection?.sessionGeneration ?? 0) + 1,
+        envKey,
+        userId: source.accountId ?? 'account-fixture',
+        teamId: null,
+        source,
+        authorityRevision,
+        transactionId,
+        volatileSessionId: null,
+      }
+    )
+  )
+}
+
+async function selectAcceptedProfileSource(record: SessionAuthorityRecord): Promise<void> {
+  const source = record.frame.source
+  const transactionId = record.frame.transactionId
+  const receipt = record.projectionReceipt
+  if (!source || !transactionId || !receipt)
+    throw new Error('Expected an accepted source with a projection receipt')
+  await selectProfileSource(source, receipt.baseAuthorityRevision, transactionId)
+}
+
+async function signOutProfileSelection(): Promise<void> {
+  const profileRepository = new SessionAuthorityRecordRepository(
+    authorityScope,
+    PROFILE_SESSION_AUTHORITY_ENV_KEY,
+    authorityStore
+  )
+  const profile = profileRepository.observeProfileSelection()
+  if (profile.status !== 'observed') throw new Error('Expected profile authority observation')
+  committed(
+    profileRepository.compareAndSetProfileSelection(
+      profile.snapshot,
+      profile.selection?.revision ?? null,
+      {
+        revision: randomUUID(),
+        state: 'signed-out',
+        mode: 'signed-out',
+        sessionGeneration: (profile.selection?.sessionGeneration ?? 0) + 1,
+        envKey: null,
+        userId: null,
+        teamId: null,
+        source: null,
+        authorityRevision: null,
+        transactionId: null,
+        volatileSessionId: null,
+      }
+    )
+  )
+}
+
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
 // Repository contract tests exercise the authority CAS input shape. End-to-end logout tests
 // produce and verify the external marker through SessionAuthorityLogoutTransaction.
@@ -272,36 +343,7 @@ async function acceptPersistent(
     markerIntent: null,
   })
   committed(accepted)
-  const profileScope = await authorityStore.createSessionAuthorityStorageScope()
-  const profileRepository = new SessionAuthorityRecordRepository(
-    profileScope,
-    PROFILE_SESSION_AUTHORITY_ENV_KEY,
-    authorityStore
-  )
-  const profile = profileRepository.observeProfileSelection()
-  if (profile.status !== 'observed') throw new Error('Expected profile authority observation')
-  const source = accepted.record.frame.source
-  const transactionId = accepted.record.frame.transactionId
-  if (!source || !transactionId || !accepted.record.projectionReceipt)
-    throw new Error('Expected a projected persistent source')
-  const profileResult = profileRepository.compareAndSetProfileSelection(
-    profile.snapshot,
-    profile.selection?.revision ?? null,
-    {
-      revision: randomUUID(),
-      state: 'active',
-      mode: 'persistent',
-      sessionGeneration: (profile.selection?.sessionGeneration ?? 0) + 1,
-      envKey,
-      userId: source.accountId ?? 'account-fixture',
-      teamId: null,
-      source,
-      authorityRevision: accepted.record.projectionReceipt.baseAuthorityRevision,
-      transactionId,
-      volatileSessionId: null,
-    }
-  )
-  committed(profileResult)
+  await selectAcceptedProfileSource(accepted.record)
   return accepted
 }
 
@@ -529,6 +571,16 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(acceptedSecond)
+    const acceptedSecondSource = acceptedSecond.record.frame.source
+    const acceptedSecondTransactionId = acceptedSecond.record.frame.transactionId
+    const acceptedSecondReceipt = acceptedSecond.record.projectionReceipt
+    if (!acceptedSecondSource || !acceptedSecondTransactionId || !acceptedSecondReceipt)
+      throw new Error('Expected the second accepted profile source')
+    await selectProfileSource(
+      acceptedSecondSource,
+      acceptedSecondReceipt.baseAuthorityRevision,
+      acceptedSecondTransactionId
+    )
     const debt = acceptedSecond.record.cleanupDebts.find(
       item => item.source.sourceRef === firstSource.sourceRef
     )
@@ -561,6 +613,15 @@ describe('session authority record repository contract', () => {
   it('rejects a candidate-cleanup permit after its journal revision changes without deleting it', async () => {
     const repo = repository()
     initialize(repo)
+    const profileRepository = new SessionAuthorityRecordRepository(
+      authorityScope,
+      PROFILE_SESSION_AUTHORITY_ENV_KEY,
+      authorityStore
+    )
+    const profileBefore = profileRepository.observe()
+    expect(profileBefore.status).toBe('absent')
+    if (profileBefore.status !== 'absent') throw new Error('Expected absent profile authority')
+    committed(profileRepository.initialize(profileBefore.snapshot))
     const published = await preparePersistentCandidate(repo, 'rejected-candidate-source')
     const claimed = repo.claimRejectedCandidateCleanup(published.snapshot, published.transactionId)
     expect(claimed.status).toBe('claimed')
@@ -597,6 +658,139 @@ describe('session authority record repository contract', () => {
       )
     ).rejects.toThrow('cleanup permit')
     expect(authorityFixture.keychain.get(`session-v1:${candidate.sourceRef}`)).toBe(storedBefore)
+  })
+
+  it('does not treat a missing profile selector as candidate-cleanup authority', async () => {
+    const repo = repository()
+    initialize(repo)
+    const profileRepository = new SessionAuthorityRecordRepository(
+      authorityScope,
+      PROFILE_SESSION_AUTHORITY_ENV_KEY,
+      authorityStore
+    )
+    expect(profileRepository.observe().status).toBe('absent')
+
+    const published = await preparePersistentCandidate(repo, 'missing-selector-cleanup-source')
+    const storedBefore = authorityFixture.keychain.get(`session-v1:${published.source.sourceRef}`)
+    expect(repo.claimRejectedCandidateCleanup(published.snapshot, published.transactionId)).toEqual(
+      { status: 'superseded' }
+    )
+    expect(profileRepository.observe().status).toBe('absent')
+    expect(authorityFixture.keychain.get(`session-v1:${published.source.sourceRef}`)).toBe(
+      storedBefore
+    )
+  })
+
+  it('rechecks the profile selector before applying a previously issued cleanup permit', async () => {
+    const repo = repository()
+    initialize(repo)
+    const profileRepository = new SessionAuthorityRecordRepository(
+      authorityScope,
+      PROFILE_SESSION_AUTHORITY_ENV_KEY,
+      authorityStore
+    )
+    const profileBefore = profileRepository.observe()
+    expect(profileBefore.status).toBe('absent')
+    if (profileBefore.status !== 'absent') throw new Error('Expected absent profile authority')
+    committed(profileRepository.initialize(profileBefore.snapshot))
+
+    const published = await preparePersistentCandidate(repo, 'stale-cleanup-permit-source')
+    const claim = repo.claimRejectedCandidateCleanup(published.snapshot, published.transactionId)
+    expect(claim.status).toBe('claimed')
+    if (claim.status !== 'claimed') throw new Error('Expected a cleanup capability')
+    const candidate = claim.record.candidates.find(
+      item => item.transactionId === published.transactionId
+    )
+    if (!candidate) throw new Error('Expected the cleanup candidate')
+    const storedBefore = authorityFixture.keychain.get(`session-v1:${candidate.sourceRef}`)
+
+    const local = observed(repo)
+    await selectProfileSource(published.source, local.record.revision, published.transactionId)
+    await expect(
+      authorityStore.discardUnacceptedSessionTokenCandidate(
+        {
+          transactionId: candidate.transactionId,
+          candidateHash: candidate.candidateHash,
+          sourceRef: candidate.sourceRef,
+          sourceRevision: candidate.sourceRevision,
+          envKey,
+          accountId: candidate.accountId,
+          source: 'keytar',
+        },
+        claim.authorization,
+        authorityScope
+      )
+    ).rejects.toThrow('cleanup permit')
+    expect(authorityFixture.keychain.get(`session-v1:${candidate.sourceRef}`)).toBe(storedBefore)
+  })
+
+  it('holds native candidate deletion until the final selector recheck', async () => {
+    const repo = repository()
+    initialize(repo)
+    const profileRepository = new SessionAuthorityRecordRepository(
+      authorityScope,
+      PROFILE_SESSION_AUTHORITY_ENV_KEY,
+      authorityStore
+    )
+    const profileBefore = profileRepository.observe()
+    expect(profileBefore.status).toBe('absent')
+    if (profileBefore.status !== 'absent') throw new Error('Expected absent profile authority')
+    committed(profileRepository.initialize(profileBefore.snapshot))
+
+    const published = await preparePersistentCandidate(repo, 'barrier-stale-cleanup-source')
+    const claim = repo.claimRejectedCandidateCleanup(published.snapshot, published.transactionId)
+    expect(claim.status).toBe('claimed')
+    if (claim.status !== 'claimed') throw new Error('Expected a cleanup capability')
+    const candidate = claim.record.candidates.find(
+      item => item.transactionId === published.transactionId
+    )
+    if (!candidate) throw new Error('Expected the cleanup candidate')
+    const storedBefore = authorityFixture.keychain.get(`session-v1:${candidate.sourceRef}`)
+    const keytar = await import('keytar')
+    const account = `session-v1:${candidate.sourceRef}`
+    let signalEntered!: () => void
+    let releaseBarrier!: () => void
+    const entered = new Promise<void>(resolve => {
+      signalEntered = resolve
+    })
+    const release = new Promise<void>(resolve => {
+      releaseBarrier = resolve
+    })
+    let held = false
+    vi.spyOn(keytar, 'getPassword').mockImplementation(async (_service, requestedAccount) => {
+      if (requestedAccount === account && !held) {
+        held = true
+        signalEntered()
+        await release
+      }
+      return authorityFixture.keychain.get(requestedAccount) ?? null
+    })
+    vi.mocked(keytar.deletePassword).mockClear()
+
+    const deletion = authorityStore.discardUnacceptedSessionTokenCandidate(
+      {
+        transactionId: candidate.transactionId,
+        candidateHash: candidate.candidateHash,
+        sourceRef: candidate.sourceRef,
+        sourceRevision: candidate.sourceRevision,
+        envKey,
+        accountId: candidate.accountId,
+        source: 'keytar',
+      },
+      claim.authorization,
+      authorityScope
+    )
+    try {
+      await waitForSignal(entered, 'Cleanup did not reach the native read barrier')
+      const local = observed(repo)
+      await selectProfileSource(published.source, local.record.revision, published.transactionId)
+    } finally {
+      releaseBarrier()
+    }
+
+    await expect(deletion).rejects.toThrow('Candidate cleanup authority changed after inspection')
+    expect(vi.mocked(keytar.deletePassword)).not.toHaveBeenCalled()
+    expect(authorityFixture.keychain.get(account)).toBe(storedBefore)
   })
 
   it('stores only opaque candidate digests and binds persistent acceptance to the exact source', async () => {
@@ -1020,6 +1214,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(item => item.source.format === 'v0')
     if (!debt) throw new Error('Accepted source change lost exact V0 cleanup debt')
 
@@ -1061,6 +1256,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(item => item.source.format === 'v0')
     if (!debt) throw new Error('Accepted source change lost its V0 cleanup debt')
 
@@ -1127,6 +1323,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(item => item.source.format === 'v0')
     if (!debt) throw new Error('Accepted source change lost its exact V0 cleanup debt')
 
@@ -1177,6 +1374,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(item => item.source.format === 'v0')
     if (!debt) throw new Error('Accepted source change lost its V0 cleanup debt')
 
@@ -1239,6 +1437,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(item => item.source.format === 'v0')
     if (!debt) throw new Error('Accepted source change lost its legacy safeStorage debt')
 
@@ -1303,6 +1502,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(
       item => item.source.sourceRef === priorSource.sourceRef
     )
@@ -1347,6 +1547,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(
       item => item.source.sourceRef === priorSource.sourceRef
     )
@@ -1392,6 +1593,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(
       item => item.source.sourceRef === priorSource.sourceRef
     )
@@ -1472,6 +1674,7 @@ describe('session authority record repository contract', () => {
       markerIntent: null,
     })
     committed(accepted)
+    await selectAcceptedProfileSource(accepted.record)
     const debt = accepted.record.cleanupDebts.find(item => item.source.format === 'v0')
     if (!debt) throw new Error('Accepted source change lost exact V0 cleanup debt')
     const newerCiphertext = Buffer.from('newer writer ciphertext')
@@ -2192,6 +2395,16 @@ describe('session authority record repository contract', () => {
     expect(interrupted.status).toBe('committed')
     expect(failedDirectorySync).toBe(true)
     vi.restoreAllMocks()
+    const interruptedSource = interrupted.record.frame.source
+    const interruptedTransactionId = interrupted.record.frame.transactionId
+    const interruptedReceipt = interrupted.record.projectionReceipt
+    if (!interruptedSource || !interruptedTransactionId || !interruptedReceipt)
+      throw new Error('Expected an accepted profile source after capacity recovery')
+    await selectProfileSource(
+      interruptedSource,
+      interruptedReceipt.baseAuthorityRevision,
+      interruptedTransactionId
+    )
 
     const restartedStore = new TokenStore()
     const restartedScope = await restartedStore.createSessionAuthorityStorageScope()
@@ -2458,6 +2671,7 @@ describe('session authority record repository contract', () => {
       logoutReceipt()
     )
     committed(loggedOut)
+    await signOutProfileSelection()
     expect(loggedOut.record.frame.mode).toBe('logged-out')
     expect(loggedOut.record.candidates).toHaveLength(127)
     expect(loggedOut.record.cleanupDebts).toHaveLength(1)

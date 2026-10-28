@@ -1776,6 +1776,257 @@ describe('Stage 4 public login candidate acceptance', () => {
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(replacementToken)
   })
 
+  it.each(['keytar', 'safe-storage'] as const)(
+    'preserves a profile-selected %s candidate after post-CAS EMFILE failures',
+    async sourceKind => {
+      const h = await harness()
+      if (sourceKind === 'safe-storage') {
+        boundary.getPassword.mockRejectedValue(
+          Object.assign(new Error('fixture Keytar access denied'), { code: 'EACCES' })
+        )
+        vi.spyOn(h.tokenStore, 'inspectVersionedKeytarCapability').mockResolvedValue('unknown')
+      }
+      const passwordLogin = vi.spyOn(h.state.authClient, 'passwordLogin')
+      passwordLogin.mockResolvedValueOnce({ token: homeToken, me: homeUser })
+      await expect(
+        h.service.passwordLogin('owner-a@example.test', 'fixture-password')
+      ).resolves.toMatchObject({ authenticated: true, me: homeUser })
+      expect(h.state.sessionToken).toBe(homeToken)
+      expect(h.state.me).toEqual(homeUser)
+      const { PROFILE_SESSION_AUTHORITY_ENV_KEY, SessionAuthorityRecordRepository } =
+        await import('../sessionAuthorityRecord.js')
+      const scope = await h.tokenStore.createSessionAuthorityStorageScope()
+      const authorityDirectory = h.tokenStore.resolveSessionAuthorityStorageDirectory(scope)
+      const authorityPath = (envKey: string) =>
+        path.join(
+          authorityDirectory,
+          `session-authority-${createHash('sha256').update(envKey).digest('hex')}`
+        )
+      const profileFile = authorityPath(PROFILE_SESSION_AUTHORITY_ENV_KEY)
+      const candidateFile = authorityPath(h.envKey)
+      const compareAndSet = SessionAuthorityRecordRepository.prototype.compareAndSetProfileSelection
+      let profileCasCommitted = false
+      vi.spyOn(
+        SessionAuthorityRecordRepository.prototype,
+        'compareAndSetProfileSelection'
+      ).mockImplementation(function (
+        this: InstanceType<typeof SessionAuthorityRecordRepository>,
+        ...args: Parameters<typeof compareAndSet>
+      ) {
+        const result = compareAndSet.apply(this, args)
+        if (this.envKey === PROFILE_SESSION_AUTHORITY_ENV_KEY && result.status === 'committed')
+          profileCasCommitted = true
+        return result
+      })
+
+      const open = fsSync.openSync.bind(fsSync)
+      let candidatePromotionFailed = false
+      let profileObservationFailed = false
+      vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+        const resolved = path.resolve(String(file))
+        if (profileCasCommitted && !candidatePromotionFailed && resolved === candidateFile) {
+          candidatePromotionFailed = true
+          throw Object.assign(new Error('fixture candidate promotion EMFILE'), { code: 'EMFILE' })
+        }
+        if (profileCasCommitted && !profileObservationFailed && resolved === profileFile) {
+          profileObservationFailed = true
+          throw Object.assign(new Error('fixture profile observation EMFILE'), { code: 'EMFILE' })
+        }
+        return open(file, flags, mode)
+      })
+
+      passwordLogin.mockResolvedValueOnce({
+        token: replacementToken,
+        me: replacementUser,
+      })
+      const login = await h.service.passwordLogin('owner-b@example.test', 'fixture-password').then(
+        value => ({ value, error: null }),
+        error => ({ value: null, error })
+      )
+
+      expect(profileCasCommitted).toBe(true)
+      expect(candidatePromotionFailed).toBe(true)
+      expect(profileObservationFailed).toBe(true)
+      expect(login.error).not.toBeNull()
+      expect(h.state.sessionToken).toBeNull()
+      expect(h.state.me).toBeNull()
+      expect(() => h.chatBinding.requireChatStore()).toThrow('Not authenticated')
+
+      const profile = new SessionAuthorityRecordRepository(
+        scope,
+        PROFILE_SESSION_AUTHORITY_ENV_KEY,
+        h.tokenStore
+      ).observeProfileSelection()
+      expect(profile.status).toBe('observed')
+      if (profile.status !== 'observed' || profile.selection?.state !== 'active')
+        throw new Error('Expected the profile selector to retain the accepted session')
+      const source = profile.selection.source
+      if (!source || source.format !== 'v1' || source.kind !== sourceKind)
+        throw new Error(`Expected the selected V1 ${sourceKind} source`)
+      const localRepository = new SessionAuthorityRecordRepository(scope, h.envKey, h.tokenStore)
+      const local = localRepository.observe()
+      expect(local.status).toBe('observed')
+      if (local.status !== 'observed') throw new Error('Expected the local candidate receipt')
+      if (sourceKind === 'keytar') {
+        const account = `session-v1:${source.sourceRef}`
+        expect(boundary.keychain.has(keyOf('Evenfire', account))).toBe(true)
+        expect(
+          boundary.deletePassword.mock.calls.some(
+            ([, deletedAccount]) => deletedAccount === account
+          )
+        ).toBe(false)
+      } else {
+        const sourceFile = path.join(
+          h.tokenStore.resolveSessionAuthorityStorageScope(scope),
+          'sessions',
+          `session-v1-${source.sourceRef}.enc`
+        )
+        const sourceFileExists = await fs.access(sourceFile).then(
+          () => true,
+          () => false
+        )
+        expect(sourceFileExists).toBe(true)
+        const sourceBytes = await fs.readFile(sourceFile)
+        const { safeStorage } = await import('electron')
+        const envelope = JSON.parse(safeStorage.decryptString(sourceBytes)) as {
+          transactionId: string
+          sourceRef: string
+          sessionToken: string
+        }
+        expect(envelope).toMatchObject({
+          transactionId: source.transactionId,
+          sourceRef: source.sourceRef,
+          sessionToken: replacementToken,
+        })
+      }
+      expect(
+        localRepository.claimRejectedCandidateCleanup(
+          local.snapshot,
+          profile.selection.transactionId!
+        )
+      ).toMatchObject({ status: 'superseded' })
+
+      boundary.getPassword.mockImplementation(
+        async (service, account) => boundary.keychain.get(keyOf(service, account)) ?? null
+      )
+      const restarted = await restartHarness()
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: true,
+        me: replacementUser,
+      })
+      expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(replacementToken)
+      expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+      if (sourceKind === 'keytar') {
+        expect(boundary.keychain.has(keyOf('Evenfire', `session-v1:${source.sourceRef}`))).toBe(
+          true
+        )
+      } else {
+        await expect(
+          fs.access(
+            path.join(
+              h.tokenStore.resolveSessionAuthorityStorageScope(scope),
+              'sessions',
+              `session-v1-${source.sourceRef}.enc`
+            )
+          )
+        ).resolves.toBeUndefined()
+      }
+    }
+  )
+
+  it('keeps an uncertain profile CAS candidate out of rejected-source cleanup', async () => {
+    const h = await harness()
+    const passwordLogin = vi.spyOn(h.state.authClient, 'passwordLogin')
+    passwordLogin.mockResolvedValueOnce({ token: homeToken, me: homeUser })
+    await expect(
+      h.service.passwordLogin('owner-a@example.test', 'fixture-password')
+    ).resolves.toMatchObject({ authenticated: true, me: homeUser })
+
+    const { PROFILE_SESSION_AUTHORITY_ENV_KEY, SessionAuthorityRecordRepository } =
+      await import('../sessionAuthorityRecord.js')
+    const scope = await h.tokenStore.createSessionAuthorityStorageScope()
+    const authorityDirectory = h.tokenStore.resolveSessionAuthorityStorageDirectory(scope)
+    const profileFile = path.join(
+      authorityDirectory,
+      `session-authority-${createHash('sha256')
+        .update(PROFILE_SESSION_AUTHORITY_ENV_KEY)
+        .digest('hex')}`
+    )
+    const compareAndSet = SessionAuthorityRecordRepository.prototype.compareAndSetProfileSelection
+    let profileCasIndeterminate = false
+    vi.spyOn(
+      SessionAuthorityRecordRepository.prototype,
+      'compareAndSetProfileSelection'
+    ).mockImplementation(function (
+      this: InstanceType<typeof SessionAuthorityRecordRepository>,
+      ...args: Parameters<typeof compareAndSet>
+    ) {
+      const result = compareAndSet.apply(this, args)
+      if (this.envKey === PROFILE_SESSION_AUTHORITY_ENV_KEY && result.status === 'indeterminate')
+        profileCasIndeterminate = true
+      return result
+    })
+
+    const rename = fsSync.renameSync.bind(fsSync)
+    let profileAuthorityRenamed = false
+    vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
+      const result = rename(source, destination)
+      if (path.resolve(String(destination)) === profileFile) profileAuthorityRenamed = true
+      return result
+    })
+    const fsync = fsSync.fsyncSync.bind(fsSync)
+    let directorySyncFailures = 0
+    vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
+      if (profileAuthorityRenamed && fsSync.fstatSync(descriptor).isDirectory()) {
+        directorySyncFailures += 1
+        throw Object.assign(new Error('fixture profile-selector directory sync failure'), {
+          code: 'EIO',
+        })
+      }
+      return fsync(descriptor)
+    })
+
+    passwordLogin.mockResolvedValueOnce({ token: replacementToken, me: replacementUser })
+    const login = await h.service.passwordLogin('owner-b@example.test', 'fixture-password').then(
+      value => ({ value, error: null }),
+      error => ({ value: null, error })
+    )
+    vi.restoreAllMocks()
+
+    expect(profileAuthorityRenamed).toBe(true)
+    expect(directorySyncFailures).toBeGreaterThan(0)
+    expect(profileCasIndeterminate).toBe(true)
+    expect(login.error).not.toBeNull()
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.state.me).toBeNull()
+    expect(() => h.chatBinding.requireChatStore()).toThrow('Not authenticated')
+
+    const localRepository = new SessionAuthorityRecordRepository(scope, h.envKey, h.tokenStore)
+    const local = localRepository.observe()
+    expect(local.status).toBe('observed')
+    if (local.status !== 'observed') throw new Error('Expected the local candidate receipt')
+    const transactionId = local.record.latestCandidateTransactionId
+    const candidate = local.record.candidates.find(item => item.transactionId === transactionId)
+    if (!candidate || candidate.sourceKind !== 'keytar')
+      throw new Error('Expected the uncertain Keytar candidate')
+    expect(
+      localRepository.claimRejectedCandidateCleanup(local.snapshot, candidate.transactionId)
+    ).toMatchObject({ status: 'superseded' })
+    expect(boundary.keychain.has(keyOf('Evenfire', `session-v1:${candidate.sourceRef}`))).toBe(true)
+    expect(
+      boundary.deletePassword.mock.calls.some(
+        ([, account]) => account === `session-v1:${candidate.sourceRef}`
+      )
+    ).toBe(false)
+
+    const restarted = await restartHarness()
+    await expect(restarted.service.initialize()).rejects.toThrow(
+      'Profile session authority recovery is required'
+    )
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(replacementToken)
+  })
+
   it('re-durably commits an exact next login authority after one directory-sync failure', async () => {
     const h = await harness()
     vi.spyOn(h.state.authClient, 'passwordLogin').mockResolvedValueOnce({
