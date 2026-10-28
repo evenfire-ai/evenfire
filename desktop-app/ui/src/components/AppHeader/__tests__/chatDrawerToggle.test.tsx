@@ -115,6 +115,7 @@ describe('AppHeader chat-drawer toggle', () => {
       />
     )
     const toggle = screen.getByTestId('chat-drawer-toggle')
+    expect(toggle.classList.contains('chat-drawer-toggle')).toBe(true)
     expect(toggle.getAttribute('aria-label')).toBe('Open chat drawer')
     expect(toggle.getAttribute('aria-pressed')).toBe('false')
 

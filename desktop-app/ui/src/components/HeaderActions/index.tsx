@@ -987,6 +987,7 @@ export const HeaderActions = React.memo(function HeaderActions({
       {onToggleChatDrawer ? (
         drawerAvailable ? (
           <Button
+            className="chat-drawer-toggle"
             htmlType="button"
             shape="circle"
             size="small"
