@@ -144,6 +144,41 @@ describe('DesktopUpdateManager', () => {
     expect(getDesktopReleasePolicy).toHaveBeenCalledOnce()
   })
 
+  it('rejects a different release while a download is in flight', async () => {
+    let resolveDownload!: (files: string[]) => void
+    mockAutoUpdater.downloadUpdate.mockReturnValue(
+      new Promise<string[]>(resolve => {
+        resolveDownload = resolve
+      })
+    )
+
+    const inFlight = manager.downloadDesktopUpdate(UPDATE_VERSION)
+    await vi.waitFor(() => expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledOnce())
+
+    await expect(manager.downloadDesktopUpdate('0.13.0')).rejects.toThrow(
+      'A different Desktop update is already in progress.'
+    )
+
+    resolveDownload([])
+    await expect(inFlight).resolves.toEqual({ downloaded: true, version: UPDATE_VERSION })
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledOnce()
+  })
+
+  it('clears a rejected download so the same release can be retried', async () => {
+    mockAutoUpdater.downloadUpdate.mockRejectedValueOnce(new Error('download failed'))
+
+    await expect(manager.downloadDesktopUpdate(UPDATE_VERSION)).rejects.toThrow('download failed')
+    await expect(
+      fs.readFile(path.join(userDataPath, 'desktop-update-pending.json'), 'utf8')
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+
+    await expect(manager.downloadDesktopUpdate(UPDATE_VERSION)).resolves.toEqual({
+      downloaded: true,
+      version: UPDATE_VERSION,
+    })
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(2)
+  })
+
   it('restarts immediately after the explicitly requested startup update', async () => {
     await expect(manager.downloadDesktopUpdate(UPDATE_VERSION, true)).resolves.toEqual({
       downloaded: true,
@@ -171,5 +206,42 @@ describe('DesktopUpdateManager', () => {
     // electron-updater's cache path. The updater reuses the checked cache file.
     expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(2)
     expect(mockAutoUpdater.quitAndInstall).toHaveBeenCalledWith(false, true)
+  })
+
+  it('coalesces same-version installs and rejects a different version in flight', async () => {
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+
+    let resolveStatus!: (policy: ReturnType<typeof createReleasePolicy>) => void
+    getDesktopReleasePolicy.mockImplementationOnce(
+      () => new Promise(resolve => (resolveStatus = resolve))
+    )
+    const first = manager.installDownloadedUpdate(UPDATE_VERSION)
+    await vi.waitFor(() => expect(getDesktopReleasePolicy).toHaveBeenCalledTimes(2))
+
+    const duplicate = manager.installDownloadedUpdate(UPDATE_VERSION)
+    await expect(manager.installDownloadedUpdate('0.13.0')).rejects.toThrow(
+      'A different Desktop update is already being installed.'
+    )
+
+    resolveStatus(createReleasePolicy())
+    await expect(Promise.all([first, duplicate])).resolves.toEqual([
+      { installed: true },
+      { installed: true },
+    ])
+    expect(getDesktopReleasePolicy).toHaveBeenCalledTimes(3)
+    expect(mockAutoUpdater.quitAndInstall).toHaveBeenCalledOnce()
+  })
+
+  it('clears a rejected install so the same release can be retried', async () => {
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+    getDesktopReleasePolicy.mockRejectedValueOnce(new Error('backend unavailable'))
+
+    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow(
+      'backend unavailable'
+    )
+    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).resolves.toEqual({
+      installed: true,
+    })
+    expect(mockAutoUpdater.quitAndInstall).toHaveBeenCalledOnce()
   })
 })
