@@ -375,7 +375,7 @@ describe('useGfsBrowserController', () => {
     ).toBeUndefined()
   })
 
-  it('keeps loaded pages while revalidating their permission affordances', async () => {
+  it('keeps loaded pages and avoids per-row reads during a scope revalidation', async () => {
     const root = await resolveResource(
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
     )
@@ -434,7 +434,7 @@ describe('useGfsBrowserController', () => {
     await act(async () => screen.getByRole('button', { name: 'revalidate GFS scope' }).click())
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(3))
     expect(screen.getByTestId('items-count').textContent).toBe('31')
-    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(64))
+    expect(affordances).toHaveBeenCalledTimes(32)
     const cachedChildren = lastHarnessQueryClient?.getQueryData<{
       pages: Array<{ items: Array<{ resourceId: string }> }>
     }>(childrenKey)
@@ -451,14 +451,15 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('items-count').textContent).toBe('31')
     await act(async () => finishSecondRefresh(secondPage))
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(4))
-    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(64))
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
 
-    // Both retained pages and their live permission affordances are refreshed.
+    // Two retained pages are refetched, but the 31 cached row permission
+    // queries are not repeated on a periodic scope tick.
     expect(listAccessible).toHaveBeenCalledTimes(2)
-    expect(affordances).toHaveBeenCalledTimes(64)
+    expect(affordances).toHaveBeenCalledTimes(32)
     expect(screen.getByTestId('items-count').textContent).toBe('31')
     expect(shouldRevalidateGfsQuery(childrenKey)).toBe(true)
-    expect(shouldRevalidateGfsQuery(affordanceKey)).toBe(true)
+    expect(shouldRevalidateGfsQuery(affordanceKey)).toBe(false)
   })
 
   afterEach(() => {

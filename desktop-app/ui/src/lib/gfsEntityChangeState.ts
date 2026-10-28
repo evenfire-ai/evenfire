@@ -16,9 +16,9 @@ export function authoritativeGfsStatus(error: unknown): number | undefined {
   return parseHttpStatus(message) ?? undefined
 }
 
-/** Revalidate the home and permission views when an entity change arrives. */
+/** Keep long-lived per-resource write affordances out of periodic content refreshes. */
 export function shouldRevalidateGfsQuery(queryKey: readonly unknown[]): boolean {
-  return queryKey[0] === 'desktop-app' && queryKey[1] === 'gfs'
+  return queryKey[0] === 'desktop-app' && queryKey[1] === 'gfs' && queryKey[3] !== 'affordances'
 }
 
 /** Purge every open GFS preview after the authenticated session is rejected. */
