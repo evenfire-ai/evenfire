@@ -2,11 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
-import {
-  FOLDER_HOVER_EXPAND_DELAY_MS,
-  GFS_DRIVE_MAIN,
-  GFS_RESOURCE_DRAG_TYPE,
-} from '@constants/gfsBrowser'
+import { FOLDER_HOVER_EXPAND_DELAY_MS, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   type GfsBrowserChild,
@@ -112,11 +108,11 @@ function FileExplorerNode({
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
 
-  const childQueryKey = desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN)
+  const childQueryKey = desktopQueryKeys.gfsChildren(scope, node.resourceId, node.drive)
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
-      window.clerum.gfs.listChildren(node.resourceId, GFS_DRIVE_MAIN, pageParam),
+      window.clerum.gfs.listChildren(node.resourceId, node.drive, pageParam),
     // Gate on live access as the controller's own children query does: a revoked
     // session fetches nothing (the subtree also unmounts as accessibleResources
     // empties, but this keeps the guard robust to future refactors).
@@ -462,7 +458,7 @@ export function FileExplorerTree({
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
     scope: ctrl.sessionScope,
-    drive: GFS_DRIVE_MAIN,
+    drive: ctrl.drive,
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
@@ -553,17 +549,13 @@ export function FileExplorerTree({
   const cachedDestinationNames = useCallback(
     (destinationId: string): Set<string> => {
       const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsBrowserChild[] }> }>(
-        desktopQueryKeys.gfsChildren(
-          ctrl.sessionScope ?? 'anonymous',
-          destinationId,
-          GFS_DRIVE_MAIN
-        )
+        desktopQueryKeys.gfsChildren(ctrl.sessionScope ?? 'anonymous', destinationId, ctrl.drive)
       )
       return new Set(
         (cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? [])
       )
     },
-    [ctrl.sessionScope, queryClient]
+    [ctrl.drive, ctrl.sessionScope, queryClient]
   )
 
   const handleToggle = useCallback((resourceId: string) => {
@@ -623,7 +615,7 @@ export function FileExplorerTree({
       return {
         resourceId: node.resourceId,
         gfsUri: node.gfsUri,
-        drive: node.drive || GFS_DRIVE_MAIN,
+        drive: node.drive,
         kind: node.kind === 'directory' ? 'directory' : 'file',
         name: node.name,
         ...(Number.isSafeInteger(node.version) ? { version: node.version } : {}),
@@ -676,10 +668,10 @@ export function FileExplorerTree({
     const source = dragSession.activeSource()
     return source &&
       dragSession.matchesScope(ctrl.sessionScope ?? 'anonymous') &&
-      source.drive === GFS_DRIVE_MAIN
+      source.drive === ctrl.drive
       ? source
       : null
-  }, [ctrl.sessionScope, dragSession])
+  }, [ctrl.drive, ctrl.sessionScope, dragSession])
 
   const handleNodeDragOver = useCallback(
     (
@@ -961,6 +953,53 @@ export function FileExplorerTree({
 
   return (
     <div className="da-file-explorer">
+      {ctrl.accessState === 'active' ? (
+        <div role="tree" aria-label="File destinations">
+          {ctrl.home?.state !== 'retired' ? (
+            <Button
+              align="start"
+              block
+              className="da-file-explorer__label"
+              color="neutral"
+              type="button"
+              role="treeitem"
+              aria-label="My home"
+              size="sm"
+              variant="text"
+              disabled={ctrl.home?.state !== 'ready' || !ctrl.home.drive || !ctrl.home.resourceId}
+              onClick={() => {
+                if (ctrl.home?.drive && ctrl.home.resourceId) {
+                  onOpenFolder(
+                    `gfs://${ctrl.home.drive}/${ctrl.home.resourceId.replace(/-/g, '').toLowerCase()}`
+                  )
+                }
+              }}
+            >
+              My home
+            </Button>
+          ) : null}
+          {ctrl.homeError ? <p role="alert">{ctrl.homeError}</p> : null}
+          {ctrl.home?.state === 'pending' ? (
+            <p role="status">Your home folder is being prepared</p>
+          ) : null}
+          {ctrl.home?.state === 'conflict' ? (
+            <p role="alert">Your home folder needs attention from an administrator</p>
+          ) : null}
+          <Button
+            align="start"
+            block
+            className="da-file-explorer__label"
+            color="neutral"
+            role="treeitem"
+            size="sm"
+            type="button"
+            variant="text"
+            onClick={() => onOpenFolder(null)}
+          >
+            Shared with me
+          </Button>
+        </div>
+      ) : null}
       {/* The drop verdict is painted on the target row; this live region is
           its spoken form, so a screen reader learns whether the folder under
           the pointer accepts the move (RP-026). */}
@@ -1086,7 +1125,7 @@ export function FileExplorerTree({
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,
-              drive: target.node.drive || GFS_DRIVE_MAIN,
+              drive: target.node.drive,
               kind: target.node.kind === 'directory' ? 'directory' : 'file',
               name: target.node.name,
               ...(Number.isSafeInteger(target.node.version)
@@ -1118,6 +1157,7 @@ export function FileExplorerTree({
             return false
           }}
           sessionScope={ctrl.sessionScope}
+          drive={moveDialogTarget.node.drive}
           target={{
             resourceId: moveDialogTarget.node.resourceId,
             name: moveDialogTarget.node.name,

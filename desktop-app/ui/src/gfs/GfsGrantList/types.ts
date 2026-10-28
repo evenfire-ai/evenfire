@@ -25,6 +25,7 @@ export interface GfsMergedAccessRow {
 
 export interface GfsGrantListProps {
   items: GfsGrantListItem[]
+  protectedOwner?: { userId: string; homeResourceId: string }
   shares?: GfsShareListItem[]
   /**
    * Client-derived rows inherited from ancestor folders. Ignored unless
@@ -69,6 +70,7 @@ export interface GfsGrantListProps {
   /** Removal requested on a merged row that carries an inherited floor. */
   onRemoveInherited?: (row: GfsMergedAccessRow, label: string) => void | Promise<void>
   onRevokeShare?: (item: GfsShareListItem, label: string) => void | Promise<void>
+  onLowerShare?: (item: GfsShareListItem, label: string) => void | Promise<void>
   revoking?: boolean
   revokingShare?: boolean
   updatingRole?: boolean

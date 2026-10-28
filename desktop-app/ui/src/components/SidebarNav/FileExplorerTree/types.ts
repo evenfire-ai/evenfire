@@ -11,7 +11,7 @@ import type { Tone } from '@/uiTypes'
  */
 export interface FileExplorerTreeProps {
   /** Double-click / Enter on a folder → open (or focus) its files tab. */
-  onOpenFolder: (gfsUri: string) => void
+  onOpenFolder: (gfsUri: string | null) => void
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
   /** Transient success/error feedback for the download fallback. */

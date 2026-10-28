@@ -1,7 +1,6 @@
 export const GFS_BREADCRUMB_MAX_DEPTH = 64
 
 /** Drive the desktop Files page browses (single-drive user plane today). */
-export const GFS_DRIVE_MAIN = 'main'
 
 /** Internal EvenDrive drag payload type, shared by the Files page and the
  * sidebar file explorer. Carries the resourceId as an identity POINTER only:

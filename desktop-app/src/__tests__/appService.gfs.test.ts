@@ -32,7 +32,12 @@ function gfsService() {
       drive?: string,
       inherit?: boolean
     ) => Promise<void>
-    createGfsShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
+    createGfsShare: (
+      resourceId: string,
+      subjectKeys: string[],
+      drive?: string,
+      options?: { permissions: string[]; includeDescendants: boolean }
+    ) => Promise<void>
     listGfsShares: (resourceId: string, drive?: string) => Promise<unknown[]>
     revokeGfsShare: (shareId: string) => Promise<void>
     moveGfsResource: (
@@ -113,6 +118,25 @@ describe('AppService GFS delegation subject boundary', () => {
         includeDescendants: true,
       },
       'session-token'
+    )
+  })
+
+  it('passes the narrowed share permissions and original descendant scope to the GFS client', async () => {
+    const service = gfsService()
+    await service.createGfsShare(RESOURCE_ID, ['user:user-9'], 'main', {
+      permissions: ['read', 'share'],
+      includeDescendants: false,
+    })
+    expect(service.gfsClient.createShare).toHaveBeenCalledTimes(1)
+    expect(service.gfsClient.createShare).toHaveBeenCalledWith(
+      {
+        resourceId: RESOURCE_ID,
+        drive: 'main',
+        subjects: [{ type: 'user', id: 'user-9' }],
+        permissions: ['read', 'share'],
+        includeDescendants: false,
+      },
+      expect.any(String)
     )
   })
 
@@ -1070,7 +1094,7 @@ describe('AppService GFS proxy read transport', () => {
     // only because this boundary strips every copy it did not write.
     const service = new AppService() as unknown as {
       sessionToken: string | null
-      listGfsChildren: (resourceId: string) => Promise<unknown>
+      listGfsChildren: (resourceId: string, drive: string) => Promise<unknown>
     }
     service.sessionToken = 'session-token'
 
@@ -1086,7 +1110,7 @@ describe('AppService GFS proxy read transport', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     try {
-      const error = await service.listGfsChildren(RESOURCE_ID).then(
+      const error = await service.listGfsChildren(RESOURCE_ID, 'main').then(
         () => {
           throw new Error('expected the failing children listing to reject')
         },

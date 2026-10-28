@@ -13,7 +13,7 @@ export type SidebarNavProps = {
   onSelect: (item: NavItem) => void
   /** Open (or focus) a files tab at a folder's gfsUri — the file explorer's
    *  double-click / Enter action on a folder. */
-  onOpenFilesSection: (gfsUri: string) => void
+  onOpenFilesSection: (gfsUri: string | null) => void
   /** Open (or focus) a preview tab — the file explorer's single-click / Enter
    *  action on a previewable file. */
   onOpenPreviewSection: (preview: GfsPreviewResource) => void

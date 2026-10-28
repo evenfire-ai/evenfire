@@ -48,7 +48,6 @@ import { desktopQueryKeys } from './queryKeys'
  * which controls to SHOW.
  */
 
-const DRIVE = 'main'
 export const GFS_UNAVAILABLE_LOCATION_MESSAGE = 'This folder or file is no longer available.'
 
 type GfsAccessState = 'active' | 'revoked'
@@ -81,11 +80,12 @@ interface GfsAccessibleResource extends GfsBrowserChild {
 type GfsAccessibleWirePage = Awaited<ReturnType<typeof window.clerum.gfs.listAccessible>>
 
 function normalizeAccessibleResource(
-  item: GfsAccessibleWirePage['items'][number]
+  item: GfsAccessibleWirePage['items'][number],
+  requestedDrive: string
 ): GfsAccessibleResource {
   return {
     ...item,
-    drive: item.drive ?? 'main',
+    drive: item.drive ?? requestedDrive,
     parentResourceId: item.parentResourceId ?? null,
     sources: item.sources ?? [],
     permissions: item.permissions ?? [],
@@ -283,7 +283,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const foregroundOpenUriPendingRef = useRef<number | null>(null)
   const backgroundOpenUriGenerationRef = useRef(0)
   const backgroundOpenErrorRef = useRef(false)
-  const pendingDeniedResourceIdRef = useRef<string | null>(null)
+  const pendingDeniedResourceIdRef = useRef<{ resourceId: string; drive: string } | null>(null)
   const backgroundLocationRetryRef = useRef<(uri: string) => void>(() => undefined)
   const backgroundLocationRetryTimerRef = useRef<number | null>(null)
   const backgroundLocationRetryAttemptRef = useRef(0)
@@ -340,6 +340,23 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     staleTime: Infinity,
   })
   const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
+  const homeQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsHome(sessionScope ?? 'anonymous'),
+    queryFn: () => window.clerum.gfs.getHome(),
+    enabled: Boolean(sessionScope) && accessState === 'active',
+    refetchOnMount: 'always',
+    refetchInterval: query => (query.state.data?.state === 'pending' ? 15_000 : false),
+    refetchIntervalInBackground: true,
+  })
+  const home =
+    homeQuery.isError ||
+    accessState !== 'active' ||
+    homeQuery.dataUpdatedAt < authorityEpochRef.current
+      ? null
+      : (homeQuery.data ?? null)
+  const homeDrive = home?.drive ?? ''
+  // A selected resource can belong to a different drive than the home.
+  const DRIVE = current ? (current.gfsUri.slice('gfs://'.length).split('/')[0] ?? '') : homeDrive
   const setAccessState = useCallback(
     (next: GfsAccessState) => {
       queryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous'), next)
@@ -426,15 +443,19 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   )
 
   const accessibleQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', DRIVE),
+    queryKey: desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', homeDrive),
     queryFn: async ({ pageParam }): Promise<GfsAccessibleWirePage> => {
       const listAccessible = window.clerum?.gfs?.listAccessible
       if (typeof listAccessible !== 'function') {
         return { items: [], nextCursor: null }
       }
-      return listAccessible(DRIVE, pageParam)
+      return listAccessible(homeDrive, pageParam)
     },
-    enabled: Boolean(sessionScope) && canListAccessibleResources && accessState === 'active',
+    enabled:
+      Boolean(sessionScope && homeDrive) && canListAccessibleResources && accessState === 'active',
+    // The drive arrives asynchronously from the home endpoint. A cached query
+    // switched in at that point must re-prove authority before its data renders.
+    staleTime: 0,
     // Accessible resources are permission-derived state. Another session can
     // revoke a grant/share while this user is away from Files, so an
     // Infinity-cached list must not survive a Files remount without a server
@@ -459,6 +480,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // per-resource operations still fail closed through handleAuthorityFailure.
   const authorityPending =
     Boolean(sessionScope) &&
+    Boolean(homeDrive) &&
     canListAccessibleResources &&
     accessState === 'active' &&
     accessibleQuery.dataUpdatedAt < authorityEpochRef.current
@@ -500,7 +522,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       queryKey: desktopQueryKeys.gfsAffordances(sessionScope, resourceId, DRIVE),
       refetchType: 'active',
     })
-  }, [current?.resourceId, queryClient, sessionScope])
+  }, [current?.resourceId, DRIVE, queryClient, sessionScope])
 
   /**
    * Row-level affordances for the one resource whose ⋯ menu is open. Children
@@ -578,7 +600,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       exact: true,
       queryKey: desktopQueryKeys.gfsShares(sessionScope ?? 'anonymous', resourceId, DRIVE),
     })
-  }, [current?.resourceId, queryClient, sessionScope])
+  }, [current?.resourceId, DRIVE, queryClient, sessionScope])
   const refreshGrants = useCallback(async () => {
     const resourceId = current?.resourceId
     if (!resourceId) return
@@ -586,7 +608,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       exact: true,
       queryKey: desktopQueryKeys.gfsGrants(sessionScope ?? 'anonymous', resourceId, DRIVE),
     })
-  }, [current?.resourceId, queryClient, sessionScope])
+  }, [current?.resourceId, DRIVE, queryClient, sessionScope])
   // Re-derives inherited access after a confirmed parent-folder edit changed
   // the ancestor rows the walk collected.
   const refreshInheritedAccess = useCallback(async () => {
@@ -596,7 +618,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       exact: true,
       queryKey: desktopQueryKeys.gfsInheritedAccess(sessionScope ?? 'anonymous', resourceId, DRIVE),
     })
-  }, [current?.resourceId, queryClient, sessionScope])
+  }, [current?.resourceId, DRIVE, queryClient, sessionScope])
+  const refreshPermissionState = useCallback(async () => {
+    await queryClient.invalidateQueries({
+      queryKey: desktopQueryKeys.gfsRoot,
+      predicate: query =>
+        ['home', 'grants', 'shares', 'affordances', 'inherited-access'].includes(
+          String(query.queryKey[3])
+        ),
+    })
+  }, [queryClient])
   const refreshGfs = useCallback(async () => {
     await queryClient.invalidateQueries({
       queryKey: desktopQueryKeys.gfsRoot,
@@ -619,8 +650,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
   }, [queryClient])
   const clearInaccessibleGfsLocation = useCallback(() => {
-    const resourceId = currentCrumbRef.current?.resourceId
-    pendingDeniedResourceIdRef.current = resourceId ?? null
+    const denied = currentCrumbRef.current
+    pendingDeniedResourceIdRef.current = denied
+      ? {
+          resourceId: denied.resourceId,
+          drive: denied.gfsUri.slice('gfs://'.length).split('/')[0] ?? '',
+        }
+      : null
     // A resource-scoped denial is not loss of the authenticated session.
     // Keep accessible roots and other GFS scopes intact, and avoid the
     // foreground navigation setter so a background denial cannot advance it.
@@ -628,15 +664,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     setOpenError(GFS_UNAVAILABLE_LOCATION_MESSAGE)
   }, [])
   useEffect(() => {
-    const resourceId = pendingDeniedResourceIdRef.current
-    if (!resourceId || current?.resourceId === resourceId) return
+    const denied = pendingDeniedResourceIdRef.current
+    if (!denied || current?.resourceId === denied.resourceId) return
     pendingDeniedResourceIdRef.current = null
     if (!sessionScope) return
     // Remove the denied query after its observer has left the current folder;
     // removing an active infinite query can transiently expose an empty page.
     queryClient.removeQueries({
       exact: true,
-      queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, DRIVE),
+      queryKey: desktopQueryKeys.gfsChildren(sessionScope, denied.resourceId, denied.drive),
     })
   }, [current?.resourceId, queryClient, sessionScope])
   const revokeAccess = useCallback(() => {
@@ -686,12 +722,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   )
   const revokeGrantMutation = useMutation({
     mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
-    onSuccess: refreshGrants,
+    onSuccess: refreshPermissionState,
     onError: failClosedOnMutationError,
   })
   const revokeShareMutation = useMutation({
     mutationFn: (shareId: string) => window.clerum.gfs.revokeShare(shareId),
-    onSuccess: refreshShares,
+    onSuccess: refreshPermissionState,
     onError: failClosedOnMutationError,
   })
   const createFolderMutation = useMutation({
@@ -853,6 +889,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // normal way the loss is discovered under Infinity staleTime). Discovery is
   // the session/authority boundary; per-resource verdicts stay local.
   const queryAuthorizationError = [
+    homeQuery.error ? { message: toMessage(homeQuery.error), surface: 'operation' as const } : null,
     accessibleQuery.error
       ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
       : null,
@@ -903,10 +940,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         ? []
         : suppressNavigableShares(
             (accessibleQuery.data?.pages ?? []).flatMap(page =>
-              page.items.map(normalizeAccessibleResource)
+              page.items.map(item => normalizeAccessibleResource(item, homeDrive))
             )
           ),
-    [accessibleQuery.data, authorityPending]
+    [accessibleQuery.data, authorityPending, homeDrive]
   )
   const grants = useMemo<GfsGrantListItem[]>(
     () => (authorityPending ? [] : (grantsQuery.data ?? [])),
@@ -1228,7 +1265,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       if (movedCrumb) await openUri(movedCrumb.gfsUri)
     },
-    [crumbs, openAncestryDependentResourceIds, openUri, queryClient, refreshGfs, sessionScope]
+    [
+      crumbs,
+      DRIVE,
+      openAncestryDependentResourceIds,
+      openUri,
+      queryClient,
+      refreshGfs,
+      sessionScope,
+    ]
   )
 
   const moveResourceMutation = useMutation({
@@ -1261,21 +1306,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
    * currently-inactive query so fresh data lands as the crumbs update.
    */
   const revalidateChildren = useCallback(
-    (resourceId: string) => {
+    (resourceId: string, drive = DRIVE) => {
       if (!sessionScope) return
       void queryClient.invalidateQueries({
         exact: true,
-        queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, DRIVE),
+        queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, drive),
         refetchType: 'all',
       })
     },
-    [queryClient, sessionScope]
+    [DRIVE, queryClient, sessionScope]
   )
 
   const openChild = useCallback(
     (child: GfsBrowserChild) => {
       if (child.kind !== 'directory') return
-      revalidateChildren(child.resourceId)
+      revalidateChildren(child.resourceId, child.drive)
       setCrumbs(prev => [
         ...prev,
         {
@@ -1294,7 +1339,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const openResource = useCallback(
     (resource: GfsBrowserChild) => {
       setOpenError(null)
-      if (resource.kind === 'directory') revalidateChildren(resource.resourceId)
+      if (resource.kind === 'directory') revalidateChildren(resource.resourceId, resource.drive)
       setCrumbs([
         {
           resourceId: resource.resourceId,
@@ -1339,24 +1384,34 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // `true` on the wire (uriHandler), so user/team panel grants cover folder
   // contents; callers that need a contents-excluding grant pass `false`.
   const grant = useCallback(
-    (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
-      if (!current) return Promise.reject(new Error('No resource selected'))
-      return window.clerum.gfs.grant(current.resourceId, subjectKeys, bits, DRIVE, inherit)
+    async (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
+      if (!current) throw new Error('No resource selected')
+      await window.clerum.gfs.grant(current.resourceId, subjectKeys, bits, DRIVE, inherit)
+      await refreshPermissionState()
     },
-    [current]
+    [current, DRIVE, refreshPermissionState]
   )
 
   const createShare = useCallback(
-    (subjectKeys: string[]): Promise<void> => {
-      if (!current) return Promise.reject(new Error('No resource selected'))
-      return window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE)
+    async (
+      subjectKeys: string[],
+      options?: { permissions: string[]; includeDescendants: boolean }
+    ): Promise<void> => {
+      if (!current) throw new Error('No resource selected')
+      await window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE, options)
+      await refreshPermissionState()
     },
-    [current]
+    [current, DRIVE, refreshPermissionState]
   )
 
   return {
     crumbs,
     current,
+    drive: DRIVE,
+    home,
+    homeError: homeQuery.error ? toPresentedMessage(homeQuery.error) : null,
+    loadingHome: homeQuery.isPending || homeQuery.isFetching,
+    homeOwnerId: me?.id ?? null,
     /** Cache-scope key (env + user + team) so the move dialog's queries share
      *  the controller's cache and are dropped together on scope change. */
     sessionScope: sessionScope ?? 'anonymous',
@@ -1402,8 +1457,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // children query, and gating it on a discovery error hid the spinner while
     // a folder was genuinely loading, flashing "this folder is empty".
     loadingAccessible:
+      !homeQuery.isError &&
       !accessibleQuery.isError &&
-      ((authorityPending && canListAccessibleResources) ||
+      (homeQuery.isPending ||
+        (home?.state === 'pending' && !homeDrive) ||
+        (authorityPending && canListAccessibleResources) ||
         (canListAccessibleResources &&
           accessibleQuery.isFetching &&
           accessibleResources.length === 0)),
@@ -1412,7 +1470,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // the server refused, and only the query knows it; deriving it from render
     // time would restart the wait on every re-render.
     errorUpdatedAt: childrenErrorUpdatedAt,
-    accessibleError: accessibleNotice ? null : accessibleErrorMessage,
+    accessibleError: homeQuery.error
+      ? toPresentedMessage(homeQuery.error)
+      : accessibleNotice
+        ? null
+        : accessibleErrorMessage,
     accessibleNotice,
     discoveryFailure,
     retryDiscovery,
@@ -1438,6 +1500,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     restoreCrumbs,
     reset,
     refreshAffordances,
+    refreshPermissionState,
     grant,
     grants,
     // Raw error (not toMessage) so FilesPage can map server codes — e.g. a

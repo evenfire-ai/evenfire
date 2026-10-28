@@ -15,6 +15,7 @@ import {
   childView,
   grantsListPage,
   heldAffordances,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   listGrantsFailureMessage,
@@ -303,6 +304,77 @@ function ProductionHarness({ children }: { children: ReactNode }) {
 }
 
 describe('useGfsBrowserController', () => {
+  it('carries a non-main home drive through discovery, children, affordances, uploads and grants', async () => {
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write', 'manage_acl'],
+      canDelegate: true,
+      grantableBits: ['read', 'write', 'manage_acl'],
+      canCreateShare: false,
+    }))
+    const createFile = vi.fn(async () => ({}))
+    const grant = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () => homeView({ drive: 'private' })),
+          listAccessible,
+          listChildren,
+          affordances,
+          createFile,
+          grant,
+          resolve: vi.fn(async () => ({
+            resourceId: 'home',
+            parentResourceId: null,
+            gfsUri: 'gfs://private/home',
+            drive: 'private',
+            name: 'Home',
+            kind: 'directory',
+            version: 1,
+            bytes: 0,
+          })),
+        },
+      },
+    })
+    function DriveProbe() {
+      const ctrl = useGfsBrowserController()
+      return (
+        <>
+          <button onClick={() => swallow(ctrl.openUri('gfs://private/home'))}>open home</button>
+          <button onClick={() => swallow(ctrl.createFile('home', 'file.txt', 'ZmlsZQ=='))}>
+            upload
+          </button>
+          <button onClick={() => swallow(ctrl.grant(['user:other'], ['read'], true))}>share</button>
+        </>
+      )
+    }
+    render(<DriveProbe />, { wrapper: Harness })
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledWith('private', undefined))
+    await act(async () => screen.getByRole('button', { name: 'open home' }).click())
+    await waitFor(() => expect(listChildren).toHaveBeenCalledWith('home', 'private', undefined))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('home', 'private'))
+    await act(async () => screen.getByRole('button', { name: 'upload' }).click())
+    await waitFor(() =>
+      expect(createFile).toHaveBeenCalledWith('home', 'file.txt', 'ZmlsZQ==', 'private')
+    )
+    await act(async () => screen.getByRole('button', { name: 'share' }).click())
+    await waitFor(() =>
+      expect(grant).toHaveBeenCalledWith('home', ['user:other'], ['read'], 'private', true)
+    )
+    expect(
+      lastHarnessQueryClient?.getQueryData(
+        desktopQueryKeys.gfsChildren(':user-a:team-a', 'home', 'private')
+      )
+    ).toBeTruthy()
+    expect(
+      lastHarnessQueryClient?.getQueryData(
+        desktopQueryKeys.gfsChildren(':user-a:team-a', 'home', 'main')
+      )
+    ).toBeUndefined()
+  })
+
   it('keeps loaded pages and avoids per-row reads during a scope revalidation', async () => {
     const root = await resolveResource(
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
@@ -337,7 +409,13 @@ describe('useGfsBrowserController', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
-        gfs: { listAccessible, resolve: vi.fn(async () => root), listChildren, affordances },
+        gfs: {
+          getHome: vi.fn(async () => homeView()),
+          listAccessible,
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances,
+        },
       },
     })
 
@@ -396,6 +474,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [],
             nextCursor: null,
@@ -450,6 +529,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -504,6 +584,7 @@ describe('useGfsBrowserController', () => {
         configurable: true,
         value: {
           gfs: {
+            getHome: vi.fn(async () => homeView()),
             resolve,
             listChildren: vi.fn(async (resourceId: string) =>
               resourceId === 'folder-a' ? folderAChildren : { items: [], nextCursor: null }
@@ -563,6 +644,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
@@ -611,6 +693,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -653,6 +736,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -697,6 +781,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -742,6 +827,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -843,6 +929,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
           listChildren,
           affordances,
@@ -923,6 +1010,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
           listChildren,
           affordances,
@@ -994,6 +1082,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [
               {
@@ -1057,6 +1146,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [
               {
@@ -1197,6 +1287,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [marketingFolder, financeFolder],
             nextCursor: null,
@@ -1312,6 +1403,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren,
@@ -1361,6 +1453,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [fileResource], nextCursor: null })),
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -1414,6 +1507,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
             gfsUri: 'gfs://main/root',
@@ -1451,6 +1545,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => {
             throw new Error('404 Not Found: Not Found')
           }),
@@ -1496,6 +1591,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => {
             throw new Error(
               '500 Internal Server Error: render failed for /docs/404 Not Found.md - upstream'
@@ -1539,6 +1635,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -1596,6 +1693,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -1703,6 +1801,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => {
             throw new Error(
               "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
@@ -1770,6 +1869,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -1842,6 +1942,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -1908,6 +2009,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           listChildren,
           resolve: vi.fn(async () => ({
@@ -2037,6 +2139,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({
             items: [
               {
@@ -2121,6 +2224,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -2180,6 +2284,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [accessibleRoot], nextCursor: null })),
           resolve: vi.fn(async () => root),
           listChildren,
@@ -2239,6 +2344,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren,
@@ -2294,6 +2400,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
@@ -2341,6 +2448,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
@@ -2374,6 +2482,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -2487,6 +2596,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(async () => ({
             resourceId: 'folder-x',
@@ -2550,6 +2660,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -2652,6 +2763,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -2720,6 +2832,7 @@ function ManageProbe() {
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
       <div data-testid="grants-count">{ctrl.grants.length}</div>
       <div data-testid="shares-count">{ctrl.shares.length}</div>
+      <div data-testid="share-permissions">{ctrl.shares[0]?.permissions.join(',') ?? 'none'}</div>
       <div data-testid="inherited-error">{ctrl.inheritedAccessError ?? 'none'}</div>
       <div data-testid="inherited-coverage">{ctrl.inheritedCoverage ?? 'none'}</div>
       <div data-testid="access-state">{ctrl.accessState}</div>
@@ -2775,6 +2888,19 @@ function ManageProbe() {
       >
         create share
       </button>
+      <button
+        type="button"
+        onClick={() =>
+          swallow(
+            ctrl.createShare(['user:bob'], {
+              permissions: ['read', 'share'],
+              includeDescendants: false,
+            })
+          )
+        }
+      >
+        lower share
+      </button>
     </>
   )
 }
@@ -2807,6 +2933,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -2852,6 +2979,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -2905,6 +3033,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -2951,6 +3080,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3008,6 +3138,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3065,6 +3196,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3107,6 +3239,71 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     await waitFor(() => expect(listShares).toHaveBeenCalledTimes(2))
   })
 
+  it('forwards a lowered share and reloads its list through permission invalidation', async () => {
+    let permissions = ['read', 'write', 'share']
+    const listShares = vi.fn(async () => [
+      {
+        id: 'share-42',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'bob' },
+        permissions,
+        includeDescendants: false,
+      },
+    ])
+    const createShare = vi.fn(async () => {
+      permissions = ['read', 'share']
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () => homeView()),
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'share', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read', 'share'],
+            canCreateShare: true,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares,
+          createShare,
+        },
+      },
+    })
+    render(<ManageProbe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('share-permissions').textContent).toBe('read,write,share')
+    )
+    await act(async () => {
+      screen.getByRole('button', { name: 'lower share' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('share-permissions').textContent).toBe('read,share')
+    )
+    expect(createShare).toHaveBeenCalledTimes(1)
+    expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main', {
+      permissions: ['read', 'share'],
+      includeDescendants: false,
+    })
+    expect(listShares).toHaveBeenCalledTimes(2)
+  })
+
   it('shows a newly created share without remounting (create → refreshShares)', async () => {
     const created: unknown[] = []
     const listShares = vi.fn(async () =>
@@ -3130,6 +3327,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async () => ({
             resourceId: 'root',
@@ -3167,7 +3365,9 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       screen.getByRole('button', { name: 'create share' }).click()
     })
 
-    await waitFor(() => expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main'))
+    await waitFor(() =>
+      expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main', undefined)
+    )
     await waitFor(() => expect(screen.getByTestId('shares-count').textContent).toBe('1'))
   })
 
@@ -3183,6 +3383,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           // The navigation resolve succeeds; the derivation's own resolve of
           // the same file then fails outright.
@@ -3250,6 +3451,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve,
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -3301,6 +3503,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async (uri: string) => {
             const id = uri.split('/').pop()!
@@ -3421,6 +3624,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
           configurable: true,
           value: {
             gfs: {
+              getHome: vi.fn(async () => homeView()),
               listAccessible: vi.fn(async () => accessible),
               resolve: vi.fn(async (uri: string) => {
                 if (uri.endsWith(parentId.replace(/-/g, '')) || uri.endsWith(parentId))
@@ -3541,6 +3745,7 @@ describe('useGfsBrowserController — cross-surface move convergence (RP-005)', 
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async (uri: string) => {
             const id = uri.split('/').pop()!
@@ -3626,6 +3831,7 @@ describe('useGfsBrowserController — cross-surface move convergence (RP-005)', 
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
           resolve: vi.fn(async (uri: string) => {
             const id = uri.split('/').pop()!

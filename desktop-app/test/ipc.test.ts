@@ -683,6 +683,50 @@ describe('ipc host status stream handlers', () => {
     )
   })
 
+  it('forwards a read share with its exact descendant scope and rejects Editor permissions', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    const payload = {
+      resourceId: ' resource-1 ',
+      subjectKeys: [' user:user-1 '],
+      drive: ' main ',
+      options: { permissions: [' read ', ' share '], includeDescendants: false },
+    }
+    await Promise.resolve(handler?.(event, payload))
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['read', 'share'],
+      includeDescendants: false,
+    })
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          ...payload,
+          options: { permissions: ['read', 'write'], includeDescendants: false },
+        })
+      )
+    ).rejects.toThrow('Invalid read share options')
+  })
+
+  it.each([{ permissions: ['share'] }, { permissions: [] }])(
+    'forwards the exact read-role intersection $permissions',
+    async ({ permissions }) => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('gfs:createShare')
+      await Promise.resolve(
+        handler?.(event, {
+          resourceId: 'resource-1',
+          subjectKeys: ['user:user-1'],
+          drive: 'main',
+          options: { permissions, includeDescendants: false },
+        })
+      )
+      expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+        permissions,
+        includeDescendants: false,
+      })
+    }
+  )
+
   it('rejects an empty or non-array subjectKeys payload before calling AppService', async () => {
     const { event } = makeTrustedEvent()
     const handler = testState.handlers.get('gfs:grant')

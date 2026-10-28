@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { isEditorGfsPermissions } from '@clerum/gfs-interaction-policy'
 import { DropdownSelect, StatusBanner } from '@components/Common'
 import {
   IconAgents,
@@ -13,6 +14,7 @@ import type {
   GfsGrantListItem,
   GfsInheritedAccessItem,
   GfsShareListItem,
+  GfsSubjectProfile,
 } from '@/gfs/delegation.types'
 import { AccessRowMenu } from './AccessRowMenu'
 import type { GfsGrantListProps, GfsMergedAccessRow } from './types'
@@ -22,6 +24,13 @@ type AccessSubjectKind = 'agent' | 'context' | 'team' | 'user' | 'workflow'
 
 function subjectKey(subject: { type: string; id?: string }): string {
   return `${subject.type}:${subject.id ?? ''}`
+}
+
+function canChangeSubjectRole(
+  subject: { type: string; id?: string },
+  agents: GfsAgentSubjectOption[]
+): boolean {
+  return subject.type !== 'host' || agents.some(agent => agent.id === subject.id)
 }
 
 function subjectKind(
@@ -71,8 +80,10 @@ function isHiddenSubject(
     | GfsGrantListItem['subject']
     | GfsShareListItem['subject']
     | GfsInheritedAccessItem['subject'],
-  subjects: GfsDelegationSubjectOption[]
+  subjects: GfsDelegationSubjectOption[],
+  profile?: GfsSubjectProfile
 ): boolean {
+  if (profile) return false
   if ((subject.type === 'user' || subject.type === 'team') && subject.id) {
     return !subjects.some(
       candidate => candidate.type === subject.type && candidate.id === subject.id
@@ -87,8 +98,10 @@ function subjectLabel(
     | GfsShareListItem['subject']
     | GfsInheritedAccessItem['subject'],
   agents: GfsAgentSubjectOption[],
-  subjects: GfsDelegationSubjectOption[]
+  subjects: GfsDelegationSubjectOption[],
+  profile?: GfsSubjectProfile
 ): string {
+  if (profile) return profile.name ?? profile.email ?? subject.id ?? subject.type
   if (subject.type === 'host' && subject.id) {
     const agent = agents.find(candidate => candidate.id === subject.id)
     // Visible agent name (spec.displayName); fall back to the id-based `name`
@@ -118,6 +131,7 @@ const ROLE_OPTIONS = [
 
 export function GfsGrantList({
   items,
+  protectedOwner,
   shares = [],
   inheritedItems = [],
   mergeInherited = false,
@@ -133,6 +147,7 @@ export function GfsGrantList({
   onChangeInheritedRole,
   onRemoveInherited,
   onRevokeShare,
+  onLowerShare,
   revoking = false,
   revokingShare = false,
   updatingRole = false,
@@ -145,11 +160,14 @@ export function GfsGrantList({
     const merged = new Map<string, GfsMergedAccessRow>()
     if (!mergeInherited) return merged
     for (const inherited of inheritedItems) {
-      // A directory-less member has no name this surface can act on.
-      if (isHiddenSubject(inherited.subject, subjects)) continue
       const key = subjectKey(inherited.subject)
       const grant = items.find(item => subjectKey(item.subject) === key) ?? null
       const subjectShares = shares.filter(share => subjectKey(share.subject) === key)
+      const profile =
+        inherited.subjectProfile ??
+        grant?.subjectProfile ??
+        subjectShares.find(share => share.subjectProfile)?.subjectProfile
+      if (isHiddenSubject(inherited.subject, subjects, profile)) continue
       merged.set(key, {
         subject: inherited.subject,
         permissions: [
@@ -170,16 +188,26 @@ export function GfsGrantList({
   // Grants and shares are independent server surfaces with independent
   // failure modes (R4 spec §2): one list's error suppresses only its own rows
   // and never the other list's rows or revoke actions.
-  const visibleItems = error ? [] : items.filter(item => !isHiddenSubject(item.subject, subjects))
+  const visibleItems = error
+    ? []
+    : items.filter(item => !isHiddenSubject(item.subject, subjects, item.subjectProfile))
   const visibleShares = shareError
     ? []
-    : shares.filter(share => !isHiddenSubject(share.subject, subjects))
+    : shares.filter(share => !isHiddenSubject(share.subject, subjects, share.subjectProfile))
   // How many rows the filter removed: drives the muted explanation line and
   // the honest empty state (a filtered list never claims to be empty). An
   // errored surface's rows are error-suppressed, not filtered — never count
   // them, or a failure would be reported as a directory gap.
   const hiddenInheritedCount = mergeInherited
-    ? inheritedItems.filter(item => isHiddenSubject(item.subject, subjects)).length
+    ? inheritedItems.filter(item => {
+        const key = subjectKey(item.subject)
+        const profile =
+          item.subjectProfile ??
+          items.find(grant => subjectKey(grant.subject) === key)?.subjectProfile ??
+          shares.find(share => subjectKey(share.subject) === key && share.subjectProfile)
+            ?.subjectProfile
+        return isHiddenSubject(item.subject, subjects, profile)
+      }).length
     : 0
   const hiddenCount =
     (error ? 0 : items.length - visibleItems.length) +
@@ -236,8 +264,14 @@ export function GfsGrantList({
           {showGrantRows
             ? visibleItems.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
-                const label = subjectLabel(item.subject, agents, subjects)
+                const label = subjectLabel(item.subject, agents, subjects, item.subjectProfile)
                 const kind = subjectKind(item.subject)
+                const ownerProtected = Boolean(
+                  protectedOwner &&
+                  item.subject.type === 'user' &&
+                  item.subject.id === protectedOwner.userId &&
+                  item.resourceId === protectedOwner.homeResourceId
+                )
                 return (
                   <li
                     className="da-gfs-grant-list__row"
@@ -253,32 +287,61 @@ export function GfsGrantList({
                     </span>
                     <span className="da-gfs-grant-list__identity">
                       <span className="da-gfs-grant-list__label">{label}</span>
+                      {item.subjectProfile?.email ? (
+                        <span className="muted">{item.subjectProfile.email}</span>
+                      ) : null}
                     </span>
                     <span className="da-gfs-grant-list__meta">
-                      <DropdownSelect
-                        ariaLabel={`Access role for ${label}`}
-                        className="da-gfs-grant-list__role"
-                        disabled={updatingRole || !onChangeRole}
-                        onChange={value => void onChangeRole?.(item, label, value as GfsAccessRole)}
-                        options={ROLE_OPTIONS}
-                        placeholder="Role"
-                        portal
-                        value={roleForPermissions(item.permissions)}
-                      />
+                      {ownerProtected ? (
+                        <span className="da-gfs-grant-list__role-label">Owner</span>
+                      ) : !canChangeSubjectRole(item.subject, agents) ? (
+                        <span className="da-gfs-grant-list__role-label">
+                          {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
+                        </span>
+                      ) : (
+                        <DropdownSelect
+                          ariaLabel={`Access role for ${label}`}
+                          className="da-gfs-grant-list__role"
+                          disabled={updatingRole || !onChangeRole}
+                          onChange={value =>
+                            void onChangeRole?.(item, label, value as GfsAccessRole)
+                          }
+                          options={ROLE_OPTIONS}
+                          placeholder="Role"
+                          portal
+                          value={roleForPermissions(item.permissions)}
+                        />
+                      )}
                     </span>
-                    <AccessRowMenu
-                      disabled={revoking}
-                      label={label}
-                      onRemove={() => onRevoke(item, label)}
-                    />
+                    {!ownerProtected ? (
+                      <AccessRowMenu
+                        disabled={revoking}
+                        label={label}
+                        onRemove={() => onRevoke(item, label)}
+                      />
+                    ) : null}
                   </li>
                 )
               })
             : null}
           {showMergedRows
             ? [...mergedByKey.values()].map(row => {
-                const label = subjectLabel(row.subject, agents, subjects)
+                const profile =
+                  row.inherited?.subjectProfile ??
+                  row.grant?.subjectProfile ??
+                  row.shares.find(share => share.subjectProfile)?.subjectProfile
+                const label = subjectLabel(row.subject, agents, subjects, profile)
                 const kind = subjectKind(row.subject)
+                const ownerProtected = Boolean(
+                  protectedOwner &&
+                  row.subject.type === 'user' &&
+                  row.subject.id === protectedOwner.userId &&
+                  (row.grant?.resourceId === protectedOwner.homeResourceId ||
+                    row.inherited?.sources.some(
+                      source =>
+                        source.resourceId === protectedOwner.homeResourceId && source.grantId
+                    ))
+                )
                 return (
                   <li
                     className="da-gfs-grant-list__row"
@@ -295,28 +358,39 @@ export function GfsGrantList({
                     </span>
                     <span className="da-gfs-grant-list__identity">
                       <span className="da-gfs-grant-list__label">{label}</span>
+                      {profile?.email ? <span className="muted">{profile.email}</span> : null}
                     </span>
                     <span className="da-gfs-grant-list__meta">
                       {/* Normal toggleable row: any edit opens the
                           parent-folder confirmation in the page. */}
-                      <DropdownSelect
-                        ariaLabel={`Access role for ${label}`}
-                        className="da-gfs-grant-list__role"
-                        disabled={updatingRole || !onChangeInheritedRole}
-                        onChange={value =>
-                          void onChangeInheritedRole?.(row, label, value as GfsAccessRole)
-                        }
-                        options={ROLE_OPTIONS}
-                        placeholder="Role"
-                        portal
-                        value={roleForPermissions(row.permissions)}
-                      />
+                      {ownerProtected ? (
+                        <span className="da-gfs-grant-list__role-label">Owner</span>
+                      ) : !canChangeSubjectRole(row.subject, agents) ? (
+                        <span className="da-gfs-grant-list__role-label">
+                          {roleForPermissions(row.permissions) === 'editor' ? 'Editor' : 'Read'}
+                        </span>
+                      ) : (
+                        <DropdownSelect
+                          ariaLabel={`Access role for ${label}`}
+                          className="da-gfs-grant-list__role"
+                          disabled={updatingRole || !onChangeInheritedRole}
+                          onChange={value =>
+                            void onChangeInheritedRole?.(row, label, value as GfsAccessRole)
+                          }
+                          options={ROLE_OPTIONS}
+                          placeholder="Role"
+                          portal
+                          value={roleForPermissions(row.permissions)}
+                        />
+                      )}
                     </span>
-                    <AccessRowMenu
-                      disabled={revoking || !onRemoveInherited}
-                      label={label}
-                      onRemove={() => void onRemoveInherited?.(row, label)}
-                    />
+                    {!ownerProtected ? (
+                      <AccessRowMenu
+                        disabled={revoking || !onRemoveInherited}
+                        label={label}
+                        onRemove={() => void onRemoveInherited?.(row, label)}
+                      />
+                    ) : null}
                   </li>
                 )
               })
@@ -324,7 +398,7 @@ export function GfsGrantList({
           {showShareRows
             ? visibleShares.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
-                const label = subjectLabel(item.subject, agents, subjects)
+                const label = subjectLabel(item.subject, agents, subjects, item.subjectProfile)
                 const kind = subjectKind(item.subject)
                 return (
                   <li
@@ -341,11 +415,31 @@ export function GfsGrantList({
                     </span>
                     <span className="da-gfs-grant-list__identity">
                       <span className="da-gfs-grant-list__label">{label}</span>
+                      {item.subjectProfile?.email ? (
+                        <span className="muted">{item.subjectProfile.email}</span>
+                      ) : null}
                     </span>
                     <span className="da-gfs-grant-list__meta">
-                      <span className="da-gfs-grant-list__role-label">
-                        {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
-                      </span>
+                      {onRevokeShare &&
+                      isEditorGfsPermissions(item.permissions) &&
+                      canChangeSubjectRole(item.subject, agents) ? (
+                        <DropdownSelect
+                          ariaLabel={`Access role for ${label}`}
+                          className="da-gfs-grant-list__role"
+                          disabled={updatingRole || !onLowerShare}
+                          onChange={value => {
+                            if (value === 'read') void onLowerShare?.(item, label)
+                          }}
+                          options={ROLE_OPTIONS}
+                          placeholder="Role"
+                          portal
+                          value="editor"
+                        />
+                      ) : (
+                        <span className="da-gfs-grant-list__role-label">
+                          {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
+                        </span>
+                      )}
                     </span>
                     <AccessRowMenu
                       disabled={revokingShare || !onRevokeShare}

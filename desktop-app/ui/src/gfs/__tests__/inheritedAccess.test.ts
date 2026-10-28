@@ -57,6 +57,83 @@ describe('deriveGfsInheritedAccess', () => {
     vi.restoreAllMocks()
   })
 
+  it('retains home identity profiles for inherited grants and shares', async () => {
+    installClerumGfs(
+      async uri => {
+        if (uri.endsWith(FILE_ID.replace(/-/g, ''))) {
+          return resolveView(FILE_ID, 'report.md', FOLDER_ID, 'file')
+        }
+        if (uri.endsWith(FOLDER_ID.replace(/-/g, ''))) {
+          return resolveView(FOLDER_ID, 'team-docs', ROOT_ID)
+        }
+        return resolveView(ROOT_ID, '', null)
+      },
+      async resourceId =>
+        grantsListPage(
+          resourceId === FOLDER_ID
+            ? [
+                {
+                  id: 'profiled-user',
+                  drive: 'main',
+                  resourceId,
+                  subject: { type: 'user', id: 'outside-user' },
+                  subjectProfile: { name: 'Outside User', email: 'outside@example.test' },
+                  permissions: ['read'],
+                  inherit: true,
+                },
+                {
+                  id: 'unprofiled-user',
+                  drive: 'main',
+                  resourceId,
+                  subject: { type: 'user', id: 'other-user' },
+                  permissions: ['read'],
+                  inherit: true,
+                },
+              ]
+            : [
+                {
+                  id: 'ancestor-grant',
+                  drive: 'main',
+                  resourceId,
+                  subject: { type: 'user', id: 'outside-user' },
+                  permissions: ['read'],
+                  inherit: true,
+                },
+              ]
+        ),
+      async resourceId =>
+        sharesListPage(
+          resourceId === FOLDER_ID
+            ? [
+                {
+                  id: 'profiled-team',
+                  drive: 'main',
+                  resourceId,
+                  subject: { type: 'team', id: 'outside-team' },
+                  subjectProfile: { name: 'Outside Team' },
+                  permissions: ['read'],
+                  includeDescendants: true,
+                },
+              ]
+            : []
+        )
+    )
+
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
+
+    expect(result.coverage).toBe('complete')
+    expect(result.items.find(item => item.subject.id === 'outside-user')?.subjectProfile).toEqual({
+      name: 'Outside User',
+      email: 'outside@example.test',
+    })
+    expect(result.items.find(item => item.subject.id === 'outside-team')?.subjectProfile).toEqual({
+      name: 'Outside Team',
+    })
+    expect(
+      result.items.find(item => item.subject.id === 'other-user')?.subjectProfile
+    ).toBeUndefined()
+  })
+
   it('collects inheriting rows with their editable source folder, nearest first', async () => {
     installClerumGfs(
       async uri => {
@@ -107,7 +184,7 @@ describe('deriveGfsInheritedAccess', () => {
           : []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('complete')
     expect(result.items).toEqual([
@@ -183,7 +260,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => sharesListPage([])
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('read-boundary')
     expect(result.items).toEqual([
@@ -257,7 +334,7 @@ describe('deriveGfsInheritedAccess', () => {
           : sharesListPage([])
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('acl-limited')
     // The folder's SHARES survived its grants denial; the root was still
@@ -333,7 +410,7 @@ describe('deriveGfsInheritedAccess', () => {
           : []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('unavailable')
     expect(result.items).toEqual([
@@ -394,7 +471,7 @@ describe('deriveGfsInheritedAccess', () => {
         }
       )
 
-      await expect(deriveGfsInheritedAccess(FILE_ID)).rejects.toThrow('httpStatus=401')
+      await expect(deriveGfsInheritedAccess(FILE_ID, 'main')).rejects.toThrow('httpStatus=401')
     }
   )
 
@@ -429,7 +506,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('unavailable')
     expect(result.items).toHaveLength(1)
@@ -455,7 +532,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('unavailable')
     expect(result.items).toEqual([])
@@ -487,7 +564,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     // The cap is the honest terminal state: rows above it were never seen.
     expect(result.coverage).toBe('unavailable')
@@ -517,7 +594,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     // The vetted 500 is retryable; the body's 403 would have been a quiet
     // ACL boundary.
@@ -534,7 +611,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('read-boundary')
     expect(result.items).toEqual([])
@@ -570,7 +647,7 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('complete')
     expect(result.items).toHaveLength(1)
@@ -645,7 +722,7 @@ describe('deriveGfsInheritedAccess', () => {
           : []
     )
 
-    const result = await deriveGfsInheritedAccess(FILE_ID)
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('complete')
     expect(result.items).toHaveLength(1)

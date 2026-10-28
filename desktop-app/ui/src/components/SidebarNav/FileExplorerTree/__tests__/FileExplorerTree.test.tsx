@@ -12,6 +12,7 @@ import {
   accessibleResource,
   childView,
   downloadResult,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   resolvedFile,
@@ -46,6 +47,7 @@ vi.mock('@contexts/AuthContext', () => ({
 // the producer; `listChildrenPage`/`listAccessiblePage`/`downloadResult` return
 // what the renderer actually receives.
 type Producers = {
+  getHome?: () => Promise<Awaited<ReturnType<typeof homeView>>>
   listAccessible?: (drive?: string, cursor?: string) => Promise<unknown>
   listChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
   download?: (uri: string) => Promise<unknown>
@@ -56,6 +58,7 @@ function installClerum(producers: Producers) {
     configurable: true,
     value: {
       gfs: {
+        getHome: producers.getHome ?? vi.fn(async () => homeView()),
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
         listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
         download:
@@ -94,7 +97,74 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
+})
+
+describe('My home', () => {
+  it('opens the server-provided non-main home and keeps Shared with me available', async () => {
+    installClerum({ getHome: async () => homeView({ drive: 'private' }) })
+    const { onOpenFolder } = renderTree()
+    const home = await screen.findByRole('treeitem', { name: 'My home' })
+    await waitFor(() => expect(home.hasAttribute('disabled')).toBe(false))
+    fireEvent.click(home)
+    expect(onOpenFolder).toHaveBeenCalledWith('gfs://private/aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa')
+    fireEvent.click(screen.getByRole('treeitem', { name: 'Shared with me' }))
+    expect(onOpenFolder).toHaveBeenCalledWith(null)
+  })
+
+  it('shows pending and refetches until ready', async () => {
+    vi.useFakeTimers()
+    const getHome = vi
+      .fn()
+      .mockImplementationOnce(() =>
+        homeView({
+          state: 'pending',
+          drive: null,
+          path: null,
+          resourceId: null,
+          heldPermissions: [],
+        })
+      )
+      .mockImplementation(() => homeView())
+    installClerum({ getHome })
+    renderTree()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getByText('Your home folder is being prepared')).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: 'My home' }).hasAttribute('disabled')).toBe(true)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_010)
+    })
+    expect(getHome).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText('Your home folder is being prepared')).toBeNull()
+    expect(screen.getByRole('treeitem', { name: 'My home' }).hasAttribute('disabled')).toBe(false)
+  })
+
+  it('shows conflict and unavailable honestly, while retired hides only My home', async () => {
+    installClerum({ getHome: async () => homeView({ state: 'conflict', resourceId: null }) })
+    const first = renderTree()
+    expect(
+      await screen.findByText('Your home folder needs attention from an administrator')
+    ).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: 'Shared with me' })).toBeTruthy()
+    cleanup()
+    installClerum({
+      getHome: async () => {
+        throw new Error('home service unavailable')
+      },
+    })
+    renderTree()
+    expect(await screen.findAllByText('home service unavailable')).not.toHaveLength(0)
+    expect(screen.queryByText('No shared files yet.')).toBeNull()
+    cleanup()
+    installClerum({ getHome: async () => homeView({ state: 'retired' }) })
+    renderTree()
+    await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'My home' })).toBeNull())
+    expect(screen.getByRole('treeitem', { name: 'Shared with me' })).toBeTruthy()
+    expect(first.onOpenFolder).not.toHaveBeenCalled()
+  })
 })
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
@@ -753,6 +823,7 @@ function installDndClerum(producers: DndProducers) {
     configurable: true,
     value: {
       gfs: {
+        getHome: vi.fn(async () => homeView()),
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
         listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
         download:

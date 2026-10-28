@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, IconButton, StatusBanner } from '@components/Common'
 import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
-import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
@@ -57,11 +56,11 @@ function GfsMoveTreeFolder({
 }: GfsMoveTreeFolderProps) {
   const queryClient = useQueryClient()
   const isExpanded = expandedFolderIds.has(folder.resourceId)
-  const childQueryKey = desktopQueryKeys.gfsChildren(scope, folder.resourceId, GFS_DRIVE_MAIN)
+  const childQueryKey = desktopQueryKeys.gfsChildren(scope, folder.resourceId, folder.drive)
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
-      window.clerum.gfs.listChildren(folder.resourceId, GFS_DRIVE_MAIN, pageParam),
+      window.clerum.gfs.listChildren(folder.resourceId, folder.drive, pageParam),
     enabled: isExpanded,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
@@ -194,6 +193,7 @@ function GfsMoveTreeFolder({
 export function GfsMoveDialog({
   target,
   sessionScope,
+  drive,
   initialCrumbs,
   onMove,
   onClose,
@@ -234,11 +234,11 @@ export function GfsMoveDialog({
   const scope = sessionScope ?? 'anonymous'
 
   const accessibleQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsAccessible(scope, GFS_DRIVE_MAIN),
+    queryKey: desktopQueryKeys.gfsAccessible(scope, drive),
     queryFn: ({ pageParam }) => {
       const listAccessible = window.clerum?.gfs?.listAccessible
       return typeof listAccessible === 'function'
-        ? listAccessible(GFS_DRIVE_MAIN, pageParam)
+        ? listAccessible(drive, pageParam)
         : Promise.resolve({ items: [], nextCursor: null })
     },
     initialPageParam: undefined as string | undefined,
@@ -249,7 +249,7 @@ export function GfsMoveDialog({
       .flatMap(page => page.items)
       .map(item => ({
         ...item,
-        drive: item.drive ?? GFS_DRIVE_MAIN,
+        drive: item.drive ?? drive,
         parentResourceId: item.parentResourceId ?? null,
       }))
       .filter(item => item.kind === 'directory')
@@ -261,7 +261,7 @@ export function GfsMoveDialog({
       accessibleFolders.unshift({
         ...currentPathRoot,
         rid: currentPathRoot.resourceId,
-        drive: GFS_DRIVE_MAIN,
+        drive: drive,
         parentResourceId: null,
         path: null,
       })
@@ -271,7 +271,7 @@ export function GfsMoveDialog({
       folder => !folder.parentResourceId || !accessibleFolderIds.has(folder.parentResourceId)
     )
     return folderItems(roots, new Set([target.resourceId]))
-  }, [accessibleQuery.data, initialCrumbs, target.resourceId])
+  }, [accessibleQuery.data, drive, initialCrumbs, target.resourceId])
 
   const listError = errorMessage(accessibleQuery.error)
   const loadingRoots = accessibleQuery.isFetching && rootFolders.length === 0

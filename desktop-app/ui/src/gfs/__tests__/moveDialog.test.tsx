@@ -67,6 +67,7 @@ function renderDialog(
     <QueryClientProvider client={queryClient}>
       <GfsMoveDialog
         target={target}
+        drive="main"
         initialCrumbs={[]}
         onMove={vi.fn(async () => undefined)}
         onClose={vi.fn()}
