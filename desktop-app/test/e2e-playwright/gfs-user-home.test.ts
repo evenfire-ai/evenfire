@@ -169,17 +169,23 @@ async function enterFolder(page: Page, name: string): Promise<void> {
   ).toBeVisible()
 }
 
-function readPrompt(filePath: string): string {
+// Agents address the file by its gfs:// link, as a user shares it. The agent's
+// gfs_resolve accepts only a gfs:// URI (mcp-host/src/internalTools/gfs.ts:684-688)
+// and gfs_write needs the resource id plus its current version (:890-900); a path
+// let the model give up before attempting the write it was asked to make.
+function readPrompt(fileUri: string): string {
   return (
-    `Read the file at path "${filePath}" in GFS drive main and quote its contents verbatim. ` +
-    'Do not answer from memory — attempt the read with your Clerum GFS tools even if the file is not in your listing.'
+    `Read the GFS file "${fileUri}" and quote its contents verbatim. ` +
+    'Resolve that gfs:// URI with your Clerum GFS tools and read it; do not answer from memory, ' +
+    'and attempt the read even if the file is not in your listing.'
   )
 }
 
-function writePrompt(filePath: string, line: string): string {
+function writePrompt(fileUri: string, line: string): string {
   return (
-    `Replace the ENTIRE contents of the file "${filePath}" in GFS drive main with exactly this single line of text: "${line}". ` +
-    "Use only your native Clerum GFS tools; if your write tool needs the file's current version, discover it with your own GFS tools first. " +
+    `Replace the ENTIRE contents of the GFS file "${fileUri}" with exactly this single line of text: "${line}". ` +
+    'Resolve that gfs:// URI with your Clerum GFS tools to get its resource id and current version, ' +
+    'then call your GFS write tool once with them. If the write is refused, report the refusal. ' +
     'Do not create, copy, or delete anything.'
   )
 }
@@ -187,11 +193,11 @@ function writePrompt(filePath: string, line: string): string {
 async function agentReads(
   page: Page,
   agent: ManagedGfsAgent,
-  filePath: string,
+  fileUri: string,
   sentinel: string
 ): Promise<void> {
   await openExactAgent(page, getManagedAgentDisplayName(agent))
-  const turn = await sendAgentTurn(page, readPrompt(filePath), 'gfs-user-home')
+  const turn = await sendAgentTurn(page, readPrompt(fileUri), 'gfs-user-home')
   assertNoInfraFailureShape(turn.responseText)
   await expectReadWithSentinel(turn.stepper, sentinel)
 }
@@ -199,11 +205,11 @@ async function agentReads(
 async function agentIsRefusedRead(
   page: Page,
   agent: ManagedGfsAgent,
-  filePath: string,
+  fileUri: string,
   sentinel: string
 ): Promise<void> {
   await openExactAgent(page, getManagedAgentDisplayName(agent))
-  const turn = await sendAgentTurn(page, readPrompt(filePath), 'gfs-user-home')
+  const turn = await sendAgentTurn(page, readPrompt(fileUri), 'gfs-user-home')
   await expectNoDisclosureDenial(turn, [sentinel])
 }
 
@@ -340,7 +346,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         fx.childId(fx.childId(home.resourceId!, folder), file)
       })
       const folderId = fx.childId(home.resourceId!, folder)
-      const filePath = `${homePath}/${folder}/${file}`
+      const fileUri = `gfs://${home.drive}/${ridOf(fx.childId(folderId, file))}`
       await test.step('the owner row cannot be revoked; share Read with the own agent', async () => {
         await openHomeFolder(page, home)
         await new DesktopResourceView(page).openShare(folder)
@@ -379,15 +385,15 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await page.keyboard.press('Escape')
       })
       await test.step('agent reads (positive) and cannot write while Read', async () => {
-        await agentReads(page, agent, filePath, sentinel)
+        await agentReads(page, agent, fileUri, sentinel)
         const turn = await sendAgentTurn(
           page,
-          writePrompt(filePath, `J1 denied write ${fx.runTag}`),
+          writePrompt(fileUri, `J1 denied write ${fx.runTag}`),
           'gfs-user-home'
         )
         await expectWriteRefused(turn, `J1 denied write ${fx.runTag}`)
         // The content is unchanged: an authorized read still returns the original.
-        await agentReads(page, agent, filePath, sentinel)
+        await agentReads(page, agent, fileUri, sentinel)
       })
       await test.step('Editor lets the agent write', async () => {
         await openHomeFolder(page, home)
@@ -401,7 +407,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await openExactAgent(page, getManagedAgentDisplayName(agent))
         const turn = await sendAgentTurn(
           page,
-          writePrompt(filePath, `J1 written ${fx.runTag}`),
+          writePrompt(fileUri, `J1 written ${fx.runTag}`),
           'gfs-user-home'
         )
         assertNoInfraFailureShape(turn.responseText)
@@ -413,7 +419,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await new DesktopShareDialog(page).revoke(agent.name)
         expect(fx.accessFor(folderId, 'host', agent.subjectId)).toBeNull()
         await page.keyboard.press('Escape')
-        await agentIsRefusedRead(page, agent, filePath, `J1 written ${fx.runTag}`)
+        await agentIsRefusedRead(page, agent, fileUri, `J1 written ${fx.runTag}`)
         await openHomeFolder(page, home)
         await enterFolder(page, folder)
         await expect(page.getByRole('button', { name: `Open ${file}` })).toBeVisible()
@@ -636,13 +642,13 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await agentReads(
           bS.page,
           foreignAgent,
-          `/${controlFixture.name}/${controlFixture.fileName}`,
+          controlFixture.fileUri,
           `E2E GFS file fixture: ${controlFixture.name}`
         )
         await agentIsRefusedRead(
           bS.page,
           foreignAgent,
-          `/Users/${home.storageUsername}/${file}`,
+          `gfs://${home.drive}/${ridOf(fileId)}`,
           sentinel
         )
       })
@@ -947,6 +953,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
       await new DesktopResourceView(ownerS.page).uploadFile(file, Buffer.from(sentinel))
       const fileId = fx.childId(home.resourceId!, file)
       const filePath = `/Users/${home.storageUsername}/${file}`
+      const fileUri = `gfs://${home.drive}/${ridOf(fileId)}`
       await test.step('forward: Desktop grants the agent Editor and the agent writes', async () => {
         await new DesktopResourceView(ownerS.page).openShare(file)
         await new DesktopShareDialog(ownerS.page).grant(agent.name, 'Editor', {
@@ -956,7 +963,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await openExactAgent(ownerS.page, getManagedAgentDisplayName(agent))
         const turn = await sendAgentTurn(
           ownerS.page,
-          writePrompt(filePath, `${sentinel} v2`),
+          writePrompt(fileUri, `${sentinel} v2`),
           'gfs-user-home'
         )
         assertNoInfraFailureShape(turn.responseText)
@@ -974,15 +981,15 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         expect(fx.accessFor(fileId, 'host', agent.subjectId)?.permissions).toEqual(['read'])
       })
       await test.step('agent reads (positive) and cannot write after narrowing', async () => {
-        await agentReads(ownerS.page, agent, filePath, `${sentinel} v2`)
+        await agentReads(ownerS.page, agent, fileUri, `${sentinel} v2`)
         const turn = await sendAgentTurn(
           ownerS.page,
-          writePrompt(filePath, `${sentinel} v3`),
+          writePrompt(fileUri, `${sentinel} v3`),
           'gfs-user-home'
         )
         await expectWriteRefused(turn, `${sentinel} v3`)
         // The content is unchanged: an authorized read still returns v2.
-        await agentReads(ownerS.page, agent, filePath, `${sentinel} v2`)
+        await agentReads(ownerS.page, agent, fileUri, `${sentinel} v2`)
       })
       await test.step('operator revokes; Desktop shows it after refresh; agent refused', async () => {
         await operatorPanel.revoke(agentRow)
@@ -995,7 +1002,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
             .getByText(agent.name, { exact: true })
         ).toHaveCount(0)
         await ownerS.page.keyboard.press('Escape')
-        await agentIsRefusedRead(ownerS.page, agent, filePath, `${sentinel} v2`)
+        await agentIsRefusedRead(ownerS.page, agent, fileUri, `${sentinel} v2`)
       })
       await test.step('reverse: operator grants B Read; Desktop changes it to Editor and then revokes', async () => {
         await operatorPanel.grant(b.name, 'Read')
