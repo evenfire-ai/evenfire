@@ -584,54 +584,8 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
-          # Critical suites must stay inside the real-Postgres filter. A rename or
-          # move that drops one from `*realPostgres*` would otherwise still pass
-          # the aggregate counts above.
-          for suite in \
-            accessCatalogCoordinator.realPostgres.integration \
-            accessCatalogFamilies.realPostgres.integration \
-            accessCatalogPerformance.realPostgres.integration \
-            accessCatalogShadow.realPostgres.integration \
-            accessDatabaseCancellation.realPostgres.integration \
-            catalogDistinctPagination.realPostgres.integration \
-            catalogProducers.realPostgres.integration \
-            catalogRevisionComponents.realPostgres.integration \
-            db.codexSubscriptionConnection.realPostgres.integration \
-            externalSessionSingleTouch.realPostgres.integration \
-            finalAuthorityLifecycle.realPostgres.integration \
-            gfsRevisionLockOrder.realPostgres.integration \
-            invitationAcceptedOnboarding.realPostgres.integration \
-            legacyPasswordEpochBackfill.realPostgres.integration \
-            legacySessionExchangeRace.realPostgres.integration \
-            migrationExecutionPolicy.realPostgres.integration \
-            migrationPreviousImageCompatibility.realPostgres.integration \
-            pr1MigrationLocks.realPostgres.integration \
-            routes.externalTeamsFinalAuthority.realPostgres.integration \
-            routes.externalTeamsLegacyAdminRevocation.realPostgres.integration \
-            services.codexSubscriptionOAuth.realPostgres.integration \
-            services.codexSubscriptionCatalog.realPostgres.integration \
-            services.llmProviderAttemptAuthorization.realPostgres.integration \
-            services.llmProviderAttemptStore.realPostgres.integration \
-            services.llmProviderAttemptRedemption.realPostgres.integration \
-            userAccessRuntimeContract.realPostgres.integration \
-            userSessionDatabaseClock.realPostgres.integration \
-            pluginWorkloadSdkCodexDualLedger.realPostgres.integration \
-            pluginWorkloadSdkGrokDualLedger.realPostgres.integration \
-            services.grokSubscriptionConnection.realPostgres.integration \
-            services.grokProviderAttemptRedemption.realPostgres.integration \
-            services.grokProviderAttemptRedemption.refresh.realPostgres.integration \
-            services.codexSubscriptionLifecycle.realPostgres.integration \
-            db.llmProviderAttemptConnectionIntegrity.realPostgres.integration \
-            services.llmCatalogSync.realPostgres.integration
-          do
-            grep -Fq "$suite" "$normalized_log" || {
-              echo "real-Postgres control-api lane omitted critical suite ${suite}" >&2
-              exit 1
-            }
-          done
-          # Pinned suites (Codex/Grok subscription, provider attempts, and the
-          # external GFS rate-limit suites) must stay inside the real-Postgres
-          # filter and run. The check reads the JSON report, not the console:
+          # Pinned suites must stay inside the real-Postgres filter and run.
+          # The check reads the JSON report, not the console:
           # a file whose tests are all skipped is still printed by name.
           node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report" \
             db.codexSubscriptionConnection.realPostgres.integration.test.ts \
@@ -663,7 +617,28 @@ jobs:
             entityChangeFeed.realPostgres.integration.test.ts \
             routes.mcp-host.renewal.realPostgres.integration.test.ts \
             routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
-            db.realPostgresMigration.integration.test.ts
+            db.realPostgresMigration.integration.test.ts \
+            accessCatalogCoordinator.realPostgres.integration.test.ts \
+            accessCatalogFamilies.realPostgres.integration.test.ts \
+            accessCatalogPerformance.realPostgres.integration.test.ts \
+            accessCatalogShadow.realPostgres.integration.test.ts \
+            accessDatabaseCancellation.realPostgres.integration.test.ts \
+            catalogDistinctPagination.realPostgres.integration.test.ts \
+            catalogProducers.realPostgres.integration.test.ts \
+            catalogRevisionComponents.realPostgres.integration.test.ts \
+            externalSessionSingleTouch.realPostgres.integration.test.ts \
+            finalAuthorityLifecycle.realPostgres.integration.test.ts \
+            gfsRevisionLockOrder.realPostgres.integration.test.ts \
+            invitationAcceptedOnboarding.realPostgres.integration.test.ts \
+            legacyPasswordEpochBackfill.realPostgres.integration.test.ts \
+            legacySessionExchangeRace.realPostgres.integration.test.ts \
+            migrationExecutionPolicy.realPostgres.integration.test.ts \
+            migrationPreviousImageCompatibility.realPostgres.integration.test.ts \
+            pr1MigrationLocks.realPostgres.integration.test.ts \
+            routes.externalTeamsFinalAuthority.realPostgres.integration.test.ts \
+            routes.externalTeamsLegacyAdminRevocation.realPostgres.integration.test.ts \
+            userAccessRuntimeContract.realPostgres.integration.test.ts \
+            userSessionDatabaseClock.realPostgres.integration.test.ts
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
