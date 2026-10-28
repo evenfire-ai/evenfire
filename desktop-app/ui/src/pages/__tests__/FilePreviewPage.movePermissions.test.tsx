@@ -1204,6 +1204,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       }
       expect(transportError).toBeInstanceOf(Error)
       if (!transportError) throw new Error('Expected a status-free Move transport failure')
+      const capturedTransportError = transportError
 
       const destinationPage = await listAccessiblePage([
         accessibleResource('destination-1', 'Archive', 'directory', {
@@ -1231,16 +1232,16 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         expect(
           screen.queryByText('Couldn’t confirm the move. Refresh before trying again.')
         ).toBeNull()
-        await act(async () => rejectMove(transportError))
+        await act(async () => rejectMove(capturedTransportError))
         await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
 
         expect(
           await screen.findByText('Couldn’t confirm the move. Refresh before trying again.')
         ).toBeTruthy()
-        expect(screen.queryByText(transportError.message)).toBeNull()
+        expect(screen.queryByText(capturedTransportError.message)).toBeNull()
         expect(moveResource).toHaveBeenCalledTimes(1)
       } finally {
-        await act(async () => rejectMove(transportError))
+        await act(async () => rejectMove(capturedTransportError))
         queryClient.clear()
       }
     } finally {
