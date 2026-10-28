@@ -781,14 +781,24 @@ export function SettingsPage({
       {activeSettingsTab === 'information' ? (
         <Card aria-label="Connection endpoints">
           <Flex vertical gap="middle">
-            <Descriptions
-              column={1}
-              size="small"
-              items={[
+            <Table
+              bordered={false}
+              columns={[
+                {
+                  key: 'label',
+                  dataIndex: 'label',
+                  rowScope: 'row',
+                  render: (label: string) => (
+                    <Typography.Text type="secondary">{label}</Typography.Text>
+                  ),
+                },
+                { key: 'value', dataIndex: 'value' },
+              ]}
+              dataSource={[
                 {
                   key: 'desktop-version',
                   label: 'Desktop app version',
-                  children:
+                  value:
                     endpointDiagnostics.appInfo?.version ||
                     endpointDiagnostics.releaseStatus?.currentVersion ||
                     getVersionValue(null, { loading: endpointDiagnostics.loading }),
@@ -796,12 +806,12 @@ export function SettingsPage({
                 {
                   key: 'rest-url',
                   label: 'External REST API URL',
-                  children: activeRuntimeConfig?.externalRestApiBaseUrl || 'Not configured',
+                  value: activeRuntimeConfig?.externalRestApiBaseUrl || 'Not configured',
                 },
                 {
                   key: 'rest-version',
                   label: 'External REST API version',
-                  children: getVersionValue(
+                  value: getVersionValue(
                     endpointDiagnostics.releaseStatus?.externalRestApiVersion,
                     {
                       loading: endpointDiagnostics.loading,
@@ -811,42 +821,42 @@ export function SettingsPage({
                 {
                   key: 'rpc-url',
                   label: 'RPC proxy URL',
-                  children:
+                  value:
                     activeRuntimeConfig?.rpcProxyBaseUrl ||
                     'Will be discovered from External REST API',
                 },
                 {
                   key: 'rpc-version',
                   label: 'RPC proxy version',
-                  children: getVersionValue(endpointDiagnostics.releaseStatus?.rpcProxyVersion, {
+                  value: getVersionValue(endpointDiagnostics.releaseStatus?.rpcProxyVersion, {
                     loading: endpointDiagnostics.loading,
                   }),
                 },
                 {
                   key: 'release-id',
                   label: 'Release ID',
-                  children:
+                  value:
                     endpointDiagnostics.releaseStatus?.releaseId ||
                     getVersionValue(null, { loading: endpointDiagnostics.loading }),
                 },
                 {
                   key: 'target-version',
                   label: 'Desktop target version',
-                  children: endpointDiagnostics.releaseStatus
+                  value: endpointDiagnostics.releaseStatus
                     ? endpointDiagnostics.releaseStatus.latestVersion
                     : getVersionValue(null, { loading: endpointDiagnostics.loading }),
                 },
                 {
                   key: 'minimum-version',
                   label: 'Minimum desktop version',
-                  children: endpointDiagnostics.releaseStatus
+                  value: endpointDiagnostics.releaseStatus
                     ? endpointDiagnostics.releaseStatus.minimumVersion
                     : getVersionValue(null, { loading: endpointDiagnostics.loading }),
                 },
                 {
                   key: 'update-required',
                   label: 'Update required',
-                  children: endpointDiagnostics.releaseStatus
+                  value: endpointDiagnostics.releaseStatus
                     ? endpointDiagnostics.releaseStatus.updateRequired
                       ? 'Yes'
                       : 'No'
@@ -857,24 +867,33 @@ export function SettingsPage({
                 {
                   key: 'release-url',
                   label: 'Release URL',
-                  children: endpointDiagnostics.releaseStatus?.releaseUrl || 'Not reported',
+                  value: endpointDiagnostics.releaseStatus?.releaseUrl || 'Not reported',
                 },
                 {
                   key: 'rest-health',
                   label: 'External REST API health',
-                  children: getHealthLabel(endpointDiagnostics.dependencyHealth?.externalRestApi),
+                  value: getHealthLabel(endpointDiagnostics.dependencyHealth?.externalRestApi),
                 },
                 {
                   key: 'rpc-health',
                   label: 'RPC proxy health',
-                  children: getHealthLabel(endpointDiagnostics.dependencyHealth?.rpcProxy),
+                  value: getHealthLabel(endpointDiagnostics.dependencyHealth?.rpcProxy),
                 },
                 {
                   key: 'last-checked',
                   label: 'Last checked',
-                  children: endpointDiagnostics.checkedAt || 'Not checked',
+                  value: endpointDiagnostics.checkedAt || 'Not checked',
                 },
               ]}
+              pagination={false}
+              rowKey="key"
+              showHeader={false}
+              size="small"
+              styles={{
+                body: {
+                  cell: { background: 'transparent', border: 0, fontWeight: 400 },
+                },
+              }}
             />
             {endpointDiagnostics.releaseError ? (
               <Alert

@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { StyleProvider, createCache } from '@ant-design/cssinjs'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   DESKTOP_COMMANDS,
@@ -190,6 +190,39 @@ describe('SettingsPage', () => {
     })
 
     await user.click(screen.getByRole('tab', { name: 'Information' }))
+
+    const informationTable = screen.getByRole('table')
+    const informationRows = within(informationTable)
+      .getAllByRole('row')
+      .map(row => [
+        within(row).getByRole('rowheader').textContent,
+        within(row).getByRole('cell').textContent,
+      ])
+    expect(screen.queryByRole('columnheader')).toBeNull()
+    expect(informationRows).toHaveLength(13)
+    expect(informationRows.slice(0, 12)).toEqual([
+      ['Desktop app version', '0.1.249'],
+      ['External REST API URL', 'http://127.0.0.1:8091'],
+      ['External REST API version', '0.1.50'],
+      ['RPC proxy URL', 'http://127.0.0.1:8094'],
+      ['RPC proxy version', '0.1.36'],
+      ['Release ID', 'master-abc123'],
+      ['Desktop target version', '0.1.250'],
+      ['Minimum desktop version', '0.1.250'],
+      ['Update required', 'Yes'],
+      ['Release URL', 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250'],
+      ['External REST API health', 'OK'],
+      ['RPC proxy health', 'OK'],
+    ])
+    expect(informationRows[12]?.[0]).toBe('Last checked')
+    expect(informationRows[12]?.[1]).not.toBe('Not checked')
+    expect(
+      Array.from(
+        informationTable.querySelectorAll<HTMLElement>(
+          '.ant-table-tbody > tr > th, .ant-table-tbody > tr > td'
+        )
+      ).every(cell => cell.style.border === '0px')
+    ).toBe(true)
 
     expect(screen.queryByRole('button', { name: 'Endpoint' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Add custom endpoint' })).toBeNull()
