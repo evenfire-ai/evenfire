@@ -6724,15 +6724,60 @@ async function preparePasswordAdmissionMigrationFence(
 
   const result = await db.query(`
     SELECT to_regclass('public.password_identifier_state') AS identifier_state,
-           to_regclass('public.password_verification_work') AS work_owner
+           to_regclass('public.password_verification_work') AS work_owner,
+           to_regclass('public.users') AS users
   `)
   const tables = result.rows[0] as
-    | { identifier_state: string | null; work_owner: string | null }
+    | { identifier_state: string | null; work_owner: string | null; users: string | null }
     | undefined
-  if (!tables?.identifier_state) return false
+  if (!tables?.identifier_state) {
+    if (appliedVersions.size > 0 || tables?.users) {
+      throw new Error(
+        'password admission upgrade is blocked: pre-existing application schema or migration history has no identifier admission state to establish a legacy fence; ' +
+          'deploy the owner-aware release that applies migrations 0126_bug192_password_admission, 0127_password_evaluation_retention, and 0128_password_work_ownership, complete its Recreate rollout, and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission'
+      )
+    }
+    return false
+  }
   if (!tables.work_owner) {
     throw new Error(
-      'password admission migration requires the durable verifier owner before the legacy fence'
+      'password admission upgrade is blocked: existing identifier state has no durable verifier owner; ' +
+        'deploy the release that applies migration 0128_password_work_ownership, complete its Recreate rollout, and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission'
+    )
+  }
+
+  const requiredAdmissionMigrations = [
+    '0126_bug192_password_admission',
+    '0127_password_evaluation_retention',
+    '0128_password_work_ownership',
+  ]
+  const requiredAdmissionMigrationReceipts = requiredAdmissionMigrations.flatMap(version => {
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    return migration ? [version, ...(migration.legacyVersions ?? [])] : [version]
+  })
+  const receiptResult = await db.query(
+    `SELECT version FROM schema_migrations
+      WHERE version = ANY($1::text[])
+      /* password-admission-required-receipts */`,
+    [requiredAdmissionMigrationReceipts]
+  )
+  const recordedAdmissionMigrations = new Set(
+    receiptResult.rows.map(row => String((row as { version: string }).version))
+  )
+  const missingAdmissionMigrations = requiredAdmissionMigrations.filter(version => {
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    return (
+      !migration ||
+      (!recordedAdmissionMigrations.has(version) &&
+        !migration.legacyVersions?.some(legacyVersion =>
+          recordedAdmissionMigrations.has(legacyVersion)
+        ))
+    )
+  })
+  if (missingAdmissionMigrations.length > 0) {
+    throw new Error(
+      'password admission upgrade is blocked: existing admission tables lack required migration receipts ' +
+        `${missingAdmissionMigrations.join(', ')}; complete the owner-aware Recreate rollout and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission`
     )
   }
 

@@ -309,6 +309,339 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(await violations(relationQuery)).toBe(0)
   }, 60_000)
 
+  it('requires the owner stage and preserves history through a staged legacy admission upgrade', async () => {
+    const db = await import('../src/db.js')
+    const legacyDatabase = `control_api_legacy_admission_${randomBytes(6).toString('hex')}`
+    let legacyPool: Pool | undefined
+    let databaseCreated = false
+    await db.initDb({ connect: () => dbPool.connect() })
+    await adminPool.query(`CREATE DATABASE ${quoteIdent(legacyDatabase)}`)
+    databaseCreated = true
+    legacyPool = new Pool({ connectionString: databaseUrl(adminUrl ?? '', legacyDatabase) })
+
+    try {
+      const admissionMigrationIndex = db.CONTROL_API_MIGRATIONS.findIndex(
+        migration => migration.version === '0126_bug192_password_admission'
+      )
+      const ownerMigrationIndex = db.CONTROL_API_MIGRATIONS.findIndex(
+        migration => migration.version === '0128_password_work_ownership'
+      )
+      const ownerMigration = db.CONTROL_API_MIGRATIONS[ownerMigrationIndex]
+      const beforeAdmissionMigrations = db.CONTROL_API_MIGRATIONS.slice(0, admissionMigrationIndex)
+      const beforeOwnerMigrations = db.CONTROL_API_MIGRATIONS.slice(0, ownerMigrationIndex)
+      expect(admissionMigrationIndex).toBeGreaterThan(0)
+      expect(ownerMigrationIndex).toBeGreaterThan(0)
+      expect(ownerMigration?.version).toBe('0128_password_work_ownership')
+      expect(beforeOwnerMigrations.at(-2)?.version).toBe('0126_bug192_password_admission')
+      expect(beforeOwnerMigrations.at(-1)?.version).toBe('0127_password_evaluation_retention')
+      if (!ownerMigration) throw new Error('durable owner migration missing')
+
+      await legacyPool.query(
+        `CREATE TABLE schema_migrations (
+           version TEXT PRIMARY KEY,
+           applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`
+      )
+      await legacyPool.query('BEGIN')
+      await legacyPool.query('SET LOCAL synchronous_commit = on')
+      for (const migration of beforeAdmissionMigrations) {
+        await migration.apply(legacyPool)
+        await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ])
+      }
+      await legacyPool.query('COMMIT')
+
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).rejects.toThrow(
+        'password admission upgrade is blocked: pre-existing application schema or migration history has no identifier admission state'
+      )
+      const preAdmissionTables = await legacyPool.query(
+        `SELECT to_regclass('public.password_identifier_state') AS identifier_state,
+                to_regclass('public.password_verification_work') AS work_owner`
+      )
+      expect(preAdmissionTables.rows[0]).toEqual({ identifier_state: null, work_owner: null })
+      const preAdmissionVersions = await legacyPool.query(
+        'SELECT version FROM schema_migrations ORDER BY version'
+      )
+      expect(preAdmissionVersions.rows.map(row => row.version)).toEqual(
+        beforeAdmissionMigrations.map(migration => migration.version)
+      )
+
+      await legacyPool.query('DELETE FROM schema_migrations')
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).rejects.toThrow(
+        'password admission upgrade is blocked: pre-existing application schema or migration history has no identifier admission state'
+      )
+      const missingReceiptState = await legacyPool.query(
+        `SELECT to_regclass('public.users') AS users,
+                to_regclass('public.password_identifier_state') AS identifier_state,
+                count(*)::integer AS receipt_count
+           FROM schema_migrations`
+      )
+      expect(missingReceiptState.rows[0]).toEqual({
+        users: 'users',
+        identifier_state: null,
+        receipt_count: 0,
+      })
+      await legacyPool.query('BEGIN')
+      await legacyPool.query('SET LOCAL synchronous_commit = on')
+      for (const migration of beforeAdmissionMigrations) {
+        await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ])
+      }
+      await legacyPool.query('COMMIT')
+
+      // The already-approved owner-aware release stages the legacy admission schema and owner.
+      await legacyPool.query('BEGIN')
+      await legacyPool.query('SET LOCAL synchronous_commit = on')
+      for (const migration of beforeOwnerMigrations.slice(admissionMigrationIndex)) {
+        await migration.apply(legacyPool)
+        await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ])
+      }
+      await legacyPool.query('COMMIT')
+
+      const key = 'c'.repeat(64)
+      const attemptAt = Date.now() - 5_000
+      await legacyPool.query(
+        'INSERT INTO password_identifier_state(identifier_key, attempts) VALUES ($1, $2)',
+        [key, [String(attemptAt)]]
+      )
+      const stateBefore = await legacyPool.query(
+        'SELECT attempts, failures, locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
+        [key]
+      )
+
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).rejects.toThrow(
+        'password admission upgrade is blocked: existing identifier state has no durable verifier owner'
+      )
+
+      const appliedVersions = await legacyPool.query(
+        'SELECT version FROM schema_migrations ORDER BY version'
+      )
+      expect(appliedVersions.rows.map(row => row.version)).toEqual([
+        ...beforeOwnerMigrations.map(migration => migration.version),
+      ])
+      const ownerTable = await legacyPool.query(
+        "SELECT to_regclass('public.password_verification_work') AS relation"
+      )
+      expect(ownerTable.rows[0].relation).toBeNull()
+      const stateAfter = await legacyPool.query(
+        'SELECT attempts, failures, locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
+        [key]
+      )
+      expect(stateAfter.rows).toEqual(stateBefore.rows)
+      const outcomeColumns = await legacyPool.query(
+        `SELECT count(*)::integer AS count FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='password_identifier_state'
+            AND column_name IN ('successes', 'uncertain', 'provisional_operation')`
+      )
+      expect(outcomeColumns.rows[0].count).toBe(0)
+
+      // The staged owner-aware release has installed 0126/0127/0128. The next current-version
+      // startup can now fence, drain and apply the Spec 092 outcome schema.
+      await legacyPool.query('BEGIN')
+      await legacyPool.query('SET LOCAL synchronous_commit = on')
+      await ownerMigration.apply(legacyPool)
+      await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+        ownerMigration.version,
+      ])
+      await legacyPool.query('COMMIT')
+
+      // Existing objects without the owner migration receipt are not proof that the
+      // owner-aware release completed its schema transaction. Fail before fencing or
+      // applying outcome-accounting migrations until the receipt is restored.
+      await legacyPool.query('DELETE FROM schema_migrations WHERE version=$1', [
+        ownerMigration.version,
+      ])
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).rejects.toThrow(
+        'password admission upgrade is blocked: existing admission tables lack required migration receipts 0128_password_work_ownership'
+      )
+      const missingOwnerReceiptVersions = await legacyPool.query(
+        'SELECT version FROM schema_migrations ORDER BY version'
+      )
+      expect(missingOwnerReceiptVersions.rows.map(row => row.version)).not.toContain(
+        ownerMigration.version
+      )
+      expect(missingOwnerReceiptVersions.rows.map(row => row.version)).not.toContain(
+        '0130_password_login_success_admission'
+      )
+      const missingOwnerReceiptState = await legacyPool.query(
+        `SELECT attempts, failures, locked_until_ms
+           FROM password_identifier_state WHERE identifier_key=$1`,
+        [key]
+      )
+      expect(missingOwnerReceiptState.rows).toEqual(stateBefore.rows)
+      const missingOwnerReceiptSchema = await legacyPool.query(
+        `SELECT to_regclass('public.password_admission_rollout_state') AS rollout_state,
+                count(*) FILTER (WHERE column_name IN ('successes', 'uncertain'))::integer AS outcome_columns
+           FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='password_identifier_state'`
+      )
+      expect(missingOwnerReceiptSchema.rows[0]).toEqual({
+        rollout_state: null,
+        outcome_columns: 0,
+      })
+
+      await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+        ownerMigration.version,
+      ])
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).resolves.toBeUndefined()
+
+      const readiness = await legacyPool.query(
+        'SELECT password_admission_rollout_is_ready() AS ready'
+      )
+      expect(readiness.rows[0].ready).toBe(true)
+      const stagedVersions = await legacyPool.query(
+        `SELECT version FROM schema_migrations
+          WHERE version IN ('0128_password_work_ownership', '0129_workflow_schedules_concurrency_policy',
+                            '0130_password_login_success_admission')
+          ORDER BY version`
+      )
+      expect(stagedVersions.rows.map(row => row.version)).toEqual([
+        '0128_password_work_ownership',
+        '0129_workflow_schedules_concurrency_policy',
+        '0130_password_login_success_admission',
+      ])
+      const upgradedState = await legacyPool.query(
+        `SELECT attempts, failures, locked_until_ms, successes, uncertain,
+                legacy_hold_until_ms::text
+           FROM password_identifier_state WHERE identifier_key=$1`,
+        [key]
+      )
+      expect(upgradedState.rows[0].attempts).toEqual([String(attemptAt)])
+      expect(upgradedState.rows[0].failures).toEqual([])
+      expect(upgradedState.rows[0].successes).toEqual([])
+      expect(upgradedState.rows[0].uncertain).toEqual([])
+      expect(Number(upgradedState.rows[0].legacy_hold_until_ms)).toBeGreaterThan(Date.now())
+    } finally {
+      await endPoolAndWaitForClients(legacyPool)
+      if (databaseCreated) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname=$1 AND pid<>pg_backend_pid()`,
+          [legacyDatabase]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(legacyDatabase)}`)
+      }
+    }
+  }, 60_000)
+
+  it('blocks an owner schema with a missing migration receipt before changing admission state', async () => {
+    const db = await import('../src/db.js')
+    const database = `control_api_missing_owner_receipt_${randomBytes(6).toString('hex')}`
+    let isolatedPool: Pool | undefined
+    let databaseCreated = false
+    await db.initDb({ connect: () => dbPool.connect() })
+    await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
+    databaseCreated = true
+    isolatedPool = new Pool({ connectionString: databaseUrl(adminUrl ?? '', database) })
+
+    try {
+      const ownerMigrationIndex = db.CONTROL_API_MIGRATIONS.findIndex(
+        migration => migration.version === '0128_password_work_ownership'
+      )
+      const ownerMigration = db.CONTROL_API_MIGRATIONS[ownerMigrationIndex]
+      expect(ownerMigrationIndex).toBeGreaterThan(0)
+      expect(ownerMigration?.version).toBe('0128_password_work_ownership')
+      if (!ownerMigration) throw new Error('durable owner migration missing')
+
+      await isolatedPool.query(
+        `CREATE TABLE schema_migrations (
+           version TEXT PRIMARY KEY,
+           applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`
+      )
+      await isolatedPool.query('BEGIN')
+      await isolatedPool.query('SET LOCAL synchronous_commit = on')
+      for (const migration of db.CONTROL_API_MIGRATIONS.slice(0, ownerMigrationIndex + 1)) {
+        await migration.apply(isolatedPool)
+        await isolatedPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ])
+      }
+      await isolatedPool.query('COMMIT')
+
+      const key = 'd'.repeat(64)
+      const attempts = [String(Date.now() - 3_000)]
+      await isolatedPool.query(
+        'INSERT INTO password_identifier_state(identifier_key, attempts) VALUES ($1, $2)',
+        [key, attempts]
+      )
+      for (const missingReceipt of [
+        '0128_password_work_ownership',
+        '0127_password_evaluation_retention',
+        '0126_bug192_password_admission',
+      ]) {
+        await isolatedPool.query('DELETE FROM schema_migrations WHERE version=$1', [missingReceipt])
+        if (missingReceipt === '0126_bug192_password_admission') {
+          await isolatedPool.query('DELETE FROM schema_migrations WHERE version=$1', [
+            '0125_bug192_password_admission',
+          ])
+        }
+
+        await expect(db.initDb({ connect: () => isolatedPool!.connect() })).rejects.toThrow(
+          `password admission upgrade is blocked: existing admission tables lack required migration receipts ${missingReceipt}`
+        )
+
+        const state = await isolatedPool.query(
+          'SELECT attempts, failures, locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
+          [key]
+        )
+        expect(state.rows).toEqual([{ attempts, failures: [], locked_until_ms: '0' }])
+        const rolloutAndOutcomeSchema = await isolatedPool.query(
+          `SELECT to_regclass('public.password_admission_rollout_state') AS rollout_state,
+                  count(*) FILTER (WHERE column_name IN ('successes', 'uncertain'))::integer AS outcome_columns
+             FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='password_identifier_state'`
+        )
+        expect(rolloutAndOutcomeSchema.rows[0]).toEqual({ rollout_state: null, outcome_columns: 0 })
+        const pendingReceipts = await isolatedPool.query(
+          `SELECT version FROM schema_migrations
+            WHERE version = '0130_password_login_success_admission'
+            ORDER BY version`
+        )
+        expect(pendingReceipts.rows).toEqual([])
+
+        await isolatedPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          missingReceipt,
+        ])
+      }
+
+      await isolatedPool.query('DELETE FROM schema_migrations WHERE version=$1', [
+        '0126_bug192_password_admission',
+      ])
+      await isolatedPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+        '0125_bug192_password_admission',
+      ])
+      await expect(db.initDb({ connect: () => isolatedPool!.connect() })).resolves.toBeUndefined()
+      const readiness = await isolatedPool.query(
+        'SELECT password_admission_rollout_is_ready() AS ready'
+      )
+      expect(readiness.rows[0].ready).toBe(true)
+      const canonicalizedLegacyReceipt = await isolatedPool.query(
+        `SELECT version FROM schema_migrations
+          WHERE version IN ('0125_bug192_password_admission', '0126_bug192_password_admission')
+          ORDER BY version`
+      )
+      expect(canonicalizedLegacyReceipt.rows.map(row => row.version)).toEqual([
+        '0125_bug192_password_admission',
+        '0126_bug192_password_admission',
+      ])
+    } finally {
+      await endPoolAndWaitForClients(isolatedPool)
+      if (databaseCreated) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname=$1 AND pid<>pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    }
+  }, 60_000)
+
   it('fences and drains legacy verifiers before migration, then fails closed on rollback', async () => {
     const db = await import('../src/db.js')
     const admissionSchema = await import('../src/services/auth/passwordAdmissionSchema.js')
@@ -354,8 +687,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       }
     }
 
-    // Reconstruct the actual pre-0130 schema in this throwaway database after
-    // the ordinary migration test has initialized all preceding migrations.
+    // Reconstruct the supported 0128 owner-aware pre-0130 schema in this throwaway
+    // database after the ordinary migration test has initialized all migrations.
     await dbPool.query(`
       DROP TRIGGER IF EXISTS password_admission_protocol_fence ON password_identifier_state;
       DROP TRIGGER IF EXISTS password_admission_rollout_state_guard ON password_identifier_state;

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 // Mock pg exactly like the other db.*.test.ts specs so importing ../src/db.js
 // does not spin up a real Pool as a module side effect.
@@ -14,9 +15,8 @@ type QueryResult = { rows: unknown[]; rowCount: number }
 
 function recordingQuery(appliedVersions: string[]) {
   return vi.fn(async (sql: string): Promise<QueryResult> => {
-    if (sql.includes('password_admission_rollout_is_ready')) {
-      return { rows: [{ ready: true }], rowCount: 1 }
-    }
+    const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+    if (admissionFixtureResult) return admissionFixtureResult
     return sql.includes('SELECT version FROM schema_migrations')
       ? {
           rows: appliedVersions.map(version => ({ version })),

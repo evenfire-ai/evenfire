@@ -16,6 +16,44 @@ timeout. Do not reset the pace or identifier history to recover it.
 See [password admission availability and monitoring](../operations/password-admission.md)
 for the intentionally retained anonymous-login starvation tradeoff and its signals.
 
+## Supported migration starting points
+
+The Spec 092 migration is supported from an empty fresh database or from an existing admission
+schema that has the durable `password_verification_work` owner and migration receipts for
+`0126_bug192_password_admission` (including its registered historical alias),
+`0127_password_evaluation_retention`, and `0128_password_work_ownership`. Schema objects alone do
+not prove that the owner-aware migration transaction completed. If any required receipt is missing,
+the v2 preflight fails before setting the rollout fence or applying pending migrations. Reconcile
+the migration history through the approved owner-aware release path; do not manually invent or
+insert receipts. With a supported existing admission state, the migration runner commits its
+durable fence before changing the outcome-accounting schema. A fresh database has no prior
+admission history or migration receipts to fence; the migration runner applies the ordered schema
+before the API serves.
+
+An existing database with migration receipts but without password admission state (before
+`0126_bug192_password_admission`) is not treated as fresh. A pre-existing application schema with
+missing or empty migration receipts is also not treated as fresh. The v2 startup fails before
+migration because it cannot prove there is no old password verifier to fence. Use the owner-aware release
+that applies migrations `0126_bug192_password_admission`,
+`0127_password_evaluation_retention`, and `0128_password_work_ownership`; complete its `Recreate`
+rollout and verify old verifier processes cannot resume before deploying the v2 release.
+
+An existing database with `password_identifier_state` but without
+`password_verification_work` (migration `0126_bug192_password_admission` or
+`0127_password_evaluation_retention`) must not be upgraded directly by the
+`0130_password_login_success_admission` verifier. Its preflight stops before applying pending
+migrations because the missing owner
+does not prove that an older verifier has stopped. Use the already-approved staged adoption: run
+the ownership-aware release that applies migration `0128_password_work_ownership`, complete its
+`Recreate` rollout and verify that older verifier processes cannot resume, then run the
+`0130_password_login_success_admission` release. Do not skip the ownership-aware
+stage, remove the preflight, or manually create the owner table. If process termination is
+uncertain, leave password verification unavailable and escalate under the procedure below.
+
+If migration `0130_password_login_success_admission` is interrupted after committing the
+`draining` fence, retry the compatible migration path; the fence and admission history remain in
+place. Do not downgrade to an older verifier or clear migration state to restart the upgrade.
+
 ## Roll out the first ownership-aware version
 
 Use the existing Control API `Recreate` deployment strategy. Drain and stop every
@@ -94,7 +132,6 @@ or expire a running identifier operation directly.
    Do not debit or clear anything again. If the state instance, revision, token, phase, or
    owner tuple changes before reconciliation, stop; the observation is stale.
 4. For an exact `running` operation, choose a disposition only from trusted evidence:
-
    - `failure`: authoritative evidence proves the verification completed unsuccessfully;
      add one F and start the 15-minute cooldown if this is the fifth completed failure.
    - `success`: authoritative evidence proves a public credential success; add one S only
