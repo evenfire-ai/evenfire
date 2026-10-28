@@ -203,7 +203,11 @@ async function main(): Promise<void> {
 
     serving = new GfsServingHandler({
       verifyToken: (token) =>
-        verifyGfsToken(token, { key: verificationKey, audience: config.tokenAudience }),
+        verifyGfsToken(token, {
+          key: verificationKey,
+          audience: config.tokenAudience,
+          authProtocolCutoverEnabled: config.authProtocolCutoverEnabled,
+        }),
       resolveContext: (claims, requestId) => resolveAuthzContext(pool, claims, requestId),
       authorize: (ctx, resourceId, op) => permissions.authorize(ctx, resourceId, op),
       listAccessible: (ctx, opts) => accessible.list(ctx, opts),

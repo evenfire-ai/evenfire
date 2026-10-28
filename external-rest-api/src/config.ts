@@ -10,6 +10,7 @@ if (process.env.NODE_ENV === 'production' && DEV_MODE_ENABLED) {
 }
 
 type Config = {
+  authProtocolCutoverEnabled: boolean
   port: number
   jsonBodyLimit: string
   corsOrigin: string[] | '*'
@@ -163,6 +164,7 @@ function resolveSessionJwtPublicKey(): string {
 }
 
 export const config: Config = {
+  authProtocolCutoverEnabled: process.env.AUTH_PROTOCOL_CUTOVER_ENABLED === 'true',
   port: Number(process.env.EXTERNAL_REST_API_PORT || 8091),
   jsonBodyLimit: process.env.EXTERNAL_REST_API_JSON_BODY_LIMIT || '150mb',
   corsOrigin: parseCorsOrigin(

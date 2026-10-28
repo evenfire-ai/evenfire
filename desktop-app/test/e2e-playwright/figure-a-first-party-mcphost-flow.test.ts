@@ -142,7 +142,7 @@ async function passwordLogin(email: string): Promise<{
   const password = requireDesktopPassword()
   const loginRes = await apiRequest(
     'POST',
-    `${EXT_API}/api/v1/auth/password-login`,
+    `${EXT_API}/api/v1/auth/v2/password-login`,
     JSON.stringify({ email, password })
   )
   if (loginRes.status !== 200) {

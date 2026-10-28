@@ -89,6 +89,8 @@ export function gfsDefaultFactoryConfig(): GfsFactoryConfig {
     readerPgSecretKey: env('CONTEXT_MAPPER_GFS_READER_PG_SECRET_KEY', 'connection-string'),
     driveName: env('CONTEXT_MAPPER_GFS_DRIVE_NAME', 'main'),
     tokenAudience: env('CONTEXT_MAPPER_GFS_TOKEN_AUDIENCE', 'gfs-controller'),
+    authProtocolCutoverEnabled:
+      process.env.CONTEXT_MAPPER_GFSC_AUTH_PROTOCOL_CUTOVER_ENABLED === 'true',
     agentReadRlPerMinPerReplica: envAgentBudget(
       'CONTEXT_MAPPER_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA',
       DEFAULT_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA

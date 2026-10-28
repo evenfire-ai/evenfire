@@ -864,18 +864,34 @@ export function getActiveLegacyRestOnlyEnvKey(): string {
  * environment. Two profiles sharing REST but using different RPC origins
  * cannot safely claim the same legacy token or chat tree.
  */
-export function getActiveLegacyEnvKeys(): string[] {
+export type ActiveLegacyEnvKeyInventory = Readonly<{
+  keys: readonly string[]
+  /** False when a configured environment shares the pre-RPC namespace. */
+  complete: boolean
+}>
+
+export function getActiveLegacyEnvKeyInventory(): ActiveLegacyEnvKeyInventory {
   hydrateDesktopRuntimeConfig()
   const envKey = getActiveEnvKey()
   const legacyEnvKey = getActiveLegacyRestOnlyEnvKey()
-  if (legacyEnvKey === envKey) return []
+  // Include the actual active config even when it is supplied by environment overrides and has
+  // no matching stored option. A REST-only active environment can equal the legacy key while a
+  // stored profile with the same REST origin and a different RPC origin shares that old slot.
+  const matchingEnvironmentKeys = new Set<string>([envKey])
+  for (const option of buildRuntimeConfigOptions(storedProfiles, localhostRuntimeConfig, true)) {
+    if (resolveEnvKey(option.externalRestApiBaseUrl) !== legacyEnvKey) continue
+    matchingEnvironmentKeys.add(
+      resolveEnvKey(option.externalRestApiBaseUrl, option.rpcProxyBaseUrl)
+    )
+  }
+  if (matchingEnvironmentKeys.size > 1) return { keys: [], complete: false }
+  return legacyEnvKey === envKey
+    ? { keys: [], complete: true }
+    : { keys: [legacyEnvKey], complete: true }
+}
 
-  const matchingEnvironmentKeys = new Set(
-    buildRuntimeConfigOptions(storedProfiles, localhostRuntimeConfig, true)
-      .filter(option => resolveEnvKey(option.externalRestApiBaseUrl) === legacyEnvKey)
-      .map(option => resolveEnvKey(option.externalRestApiBaseUrl, option.rpcProxyBaseUrl))
-  )
-  return matchingEnvironmentKeys.size > 1 ? [] : [legacyEnvKey]
+export function getActiveLegacyEnvKeys(): string[] {
+  return [...getActiveLegacyEnvKeyInventory().keys]
 }
 
 export function getDesktopRuntimeConfigState(): DesktopRuntimeConfigState {

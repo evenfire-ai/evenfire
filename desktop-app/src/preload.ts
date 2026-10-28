@@ -166,6 +166,16 @@ const clerum = Object.freeze({
       ipcRenderer.on('auth:externalLogout', listener)
       return () => ipcRenderer.off('auth:externalLogout', listener)
     },
+    onSessionStateChanged: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('auth:sessionStateChanged', listener)
+      return () => ipcRenderer.off('auth:sessionStateChanged', listener)
+    },
+    onSessionExpired: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('auth:sessionExpired', listener)
+      return () => ipcRenderer.off('auth:sessionExpired', listener)
+    },
     logout: () => ipcRenderer.invoke('auth:logout'),
   },
   team: {

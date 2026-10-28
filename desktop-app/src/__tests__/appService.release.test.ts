@@ -11,6 +11,7 @@ vi.mock('electron', () => ({
   },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
@@ -27,6 +28,7 @@ describe('AppService.getDesktopReleaseStatus', () => {
 
     const service = new AppService() as unknown as {
       sessionToken: string
+      me: { id: string; teamId: string }
       authClient: {
         getDesktopReleasePolicy: ReturnType<typeof vi.fn>
       }
@@ -49,6 +51,7 @@ describe('AppService.getDesktopReleaseStatus', () => {
       }>
     }
     service.sessionToken = 'session-token'
+    service.me = { id: 'release-test-user', teamId: 'team-1' }
     service.authClient = {
       getDesktopReleasePolicy: vi.fn().mockResolvedValue({
         releaseId: 'master-abc123',

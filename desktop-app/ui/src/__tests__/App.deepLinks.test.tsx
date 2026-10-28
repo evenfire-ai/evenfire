@@ -2,7 +2,7 @@
 import { type ReactElement, type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
@@ -161,6 +161,7 @@ vi.mock('@components/CommandPalette', () => ({
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({
   Button: () => null,
+  StatusBanner: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   IconButton: () => null,
   ToastStack: () => null,
 }))
@@ -302,6 +303,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    temporarySessionExpiresAt: null,
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     availableTeamIds: ['team-a', 'team-b'],
     teamDirectoryHydrated: true,
@@ -414,6 +416,19 @@ describe('App deep-link orchestration', () => {
   const closeSandboxUi = () => main.bridge.close
   const openSandboxUi = () => main.bridge.open
 
+  it('discloses when the authenticated session is temporary', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      temporarySessionExpiresAt: Date.now() + 60_000,
+    })
+
+    renderApp(<App />)
+
+    expect(screen.getByRole('status').textContent).toContain(
+      'This session is temporary. You’ll need to sign in again after quitting Evenfire.'
+    )
+  })
+
   it('prompts to add an environment when a Profile Portal handoff has no saved match', () => {
     const linkProvidedName = 'Tenant from profile link '.repeat(5)
     currentController = makeController({
@@ -438,38 +453,6 @@ describe('App deep-link orchestration', () => {
     expect(dialogBody).not.toContain(linkProvidedName.slice(64))
     expect(dialogBody).toContain('https://api.example.test')
     expect(dialogBody).not.toContain('https://rpc.example.test')
-  })
-
-  it('wires environment switch confirmation actions to the controller', () => {
-    const cancelSwitch = vi.fn()
-    const confirmSwitch = vi.fn()
-    const linkProvidedName = 'Tenant from profile link '.repeat(5)
-    currentController = makeController({
-      initialExperienceLoading: false,
-      pendingDesktopEnvironmentSwitchConfirmation: {
-        activeEnvironmentName: 'Current environment',
-        activeExternalRestApiBaseUrl: 'https://current-api.example.test/api/v1',
-        targetEnvironmentName: linkProvidedName,
-        targetExternalRestApiBaseUrl: 'https://target-api.example.test/api/v1',
-      },
-      handleCancelDesktopEnvironmentSwitchConfirmation: cancelSwitch,
-      handleConfirmDesktopEnvironmentSwitchConfirmation: confirmSwitch,
-    } as Partial<AppController>)
-
-    renderApp(<App />)
-
-    expect(confirmDialogHarness.props?.title).toBe('Switch desktop environment?')
-    expect(confirmDialogHarness.props?.confirmLabel).toBe('Sign out and switch')
-    const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
-    expect(dialogBody).toContain('<strong>current-api.example.test</strong>')
-    expect(dialogBody).toContain('<strong>target-api.example.test</strong>')
-    expect(dialogBody).toContain('Profile link label (unverified):')
-    expect(dialogBody).toContain(`${linkProvidedName.slice(0, 63)}…`)
-    expect(dialogBody).not.toContain(linkProvidedName.slice(64))
-    act(() => confirmDialogHarness.props?.onCancel())
-    expect(cancelSwitch).toHaveBeenCalledOnce()
-    act(() => confirmDialogHarness.props?.onConfirm())
-    expect(confirmSwitch).toHaveBeenCalledOnce()
   })
 
   beforeEach(() => {

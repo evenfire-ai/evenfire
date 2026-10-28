@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createAuthRouter } from '../src/routes/auth.js'
 
@@ -9,8 +10,16 @@ const authServiceMock = vi.hoisted(() => ({
   loginWithPassword: vi.fn(),
   requestPasswordReset: vi.fn(),
 }))
+const googleMock = vi.hoisted(() => ({ verifyIdToken: vi.fn() }))
 
 vi.mock('../src/services/authService.js', () => authServiceMock)
+vi.mock('google-auth-library', () => ({
+  OAuth2Client: class {
+    verifyIdToken(...args: unknown[]) {
+      return googleMock.verifyIdToken(...args)
+    }
+  },
+}))
 
 function buildApp() {
   const app = express()
@@ -28,10 +37,36 @@ function buildApp() {
 }
 
 describe('routes/auth password-login', () => {
+  let previousCutover = config.authProtocolCutoverEnabled
+
   beforeEach(() => {
+    previousCutover = config.authProtocolCutoverEnabled
+    authServiceMock.loginWithGoogle.mockReset()
+    config.authProtocolCutoverEnabled = true
     authServiceMock.loginWithPassword.mockReset()
     authServiceMock.requestPasswordReset.mockReset()
+    googleMock.verifyIdToken.mockReset()
   })
+
+  afterEach(() => {
+    config.authProtocolCutoverEnabled = previousCutover
+  })
+
+  it.each(['/api/v1/auth/password-login', '/api/v1/auth/google'])(
+    'rejects the historical login route %s without issuing a session',
+    async path => {
+      const res = await request(buildApp()).post(path).send({
+        email: 'user@example.invalid',
+        password: 'fixture-correct-password',
+        idToken: 'synthetic-id-token',
+      })
+
+      expect(res.status).toBe(426)
+      expect(res.body).toEqual({ error: 'supported_client_upgrade_required' })
+      expect(authServiceMock.loginWithPassword).not.toHaveBeenCalled()
+      expect(authServiceMock.loginWithGoogle).not.toHaveBeenCalled()
+    }
+  )
 
   it('propagates invalid credentials as a 401 instead of a 500', async () => {
     authServiceMock.loginWithPassword.mockRejectedValueOnce(
@@ -39,7 +74,7 @@ describe('routes/auth password-login', () => {
     )
 
     const res = await request(buildApp())
-      .post('/api/v1/auth/password-login')
+      .post('/api/v1/auth/v2/password-login')
       .send({ email: 'user@example.invalid', password: 'wrong-password' })
 
     expect(res.status).toBe(401)
@@ -52,7 +87,7 @@ describe('routes/auth password-login', () => {
     )
 
     const res = await request(buildApp())
-      .post('/api/v1/auth/password-login')
+      .post('/api/v1/auth/v2/password-login')
       .send({ email: 'user@example.invalid', password: 'synthetic-password' })
 
     expect(res.status).toBe(500)
@@ -77,10 +112,10 @@ describe('routes/auth password-login', () => {
     })
 
     const res = await request(buildApp())
-      .post('/api/v1/auth/password-login')
+      .post('/api/v1/auth/v2/password-login')
       .set('origin', 'http://localhost:3001')
       .set('x-forwarded-proto', 'https')
-      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .send({ email: 'user@example.invalid', password: 'fixture-correct-password' })
       .expect(200)
 
     expect(res.body.token).toBeUndefined()
@@ -107,13 +142,40 @@ describe('routes/auth password-login', () => {
     })
 
     const res = await request(buildApp())
-      .post('/api/v1/auth/password-login')
-      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .post('/api/v1/auth/v2/password-login')
+      .send({ email: 'user@example.invalid', password: 'fixture-correct-password' })
       .expect(200)
 
     expect(res.body.token).toBe('desktop-session-jwt')
     expect(res.body.me.email).toBe('user@example.invalid')
     expect(String(res.headers['set-cookie'])).toContain('profile_session=desktop-session-jwt')
+    expect(authServiceMock.loginWithPassword).toHaveBeenCalledWith(
+      'user@example.invalid',
+      'fixture-correct-password',
+      2
+    )
+  })
+
+  it('routes protocol-v2 Google login through the v2 public producer', async () => {
+    googleMock.verifyIdToken.mockResolvedValue({
+      getPayload: () => ({ email: 'user@example.invalid' }),
+    })
+    authServiceMock.loginWithGoogle.mockResolvedValueOnce({
+      token: 'fixture-google-v2-session-jwt',
+      me: { email: 'user@example.invalid' },
+    })
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/v2/google')
+      .send({ idToken: 'google-id-token' })
+      .expect(200)
+
+    expect(googleMock.verifyIdToken).toHaveBeenCalledWith({
+      idToken: 'google-id-token',
+      audience: config.googleClientId,
+    })
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith({ idToken: 'google-id-token' }, 2)
+    expect(res.body.token).toBe('fixture-google-v2-session-jwt')
   })
 
   it('documents the password-reset limiter headers and client-IP contract', async () => {

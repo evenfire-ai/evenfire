@@ -15,9 +15,10 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
 
 ## The daily loop
 
-1. **Log in.** The sign-in screen offers email and password, posted to
-   `POST /api/v1/auth/password-login`. (The main process also exposes a
-   Google `idToken` login IPC, but no screen uses it today.) Once a session is
+1. **Log in.** Password login posts to `POST /api/v1/auth/v2/password-login`;
+   Google login posts an already-issued `idToken` to
+   `POST /api/v1/auth/v2/google` — the token has to already exist, since the
+   app does not drive a full OAuth browser redirect yet. Once a session is
    established, it is restored from the OS keychain via `keytar`, with a
    local file fallback when no keychain is available.
 2. **Pick a team.** Team listing and switching read the access catalog:

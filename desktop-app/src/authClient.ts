@@ -1,5 +1,10 @@
 import { config } from './config.js'
-import { ApiError, requestJson } from './httpClient.js'
+import {
+  ApiError,
+  assertSessionRequestAllowed,
+  reportSessionUnauthorized,
+  requestJson,
+} from './httpClient.js'
 import {
   DesktopEnvironmentDiscovery,
   DesktopReleasePolicy,
@@ -352,13 +357,13 @@ export class AuthClient {
   }
 
   async googleLogin(idToken: string): Promise<LoginResult> {
-    return requestJson<LoginResult>('POST', url('/api/v1/auth/google'), {
+    return requestJson<LoginResult>('POST', url('/api/v1/auth/v2/google'), {
       body: { idToken },
     })
   }
 
   async passwordLogin(email: string, password: string): Promise<LoginResult> {
-    return requestJson<LoginResult>('POST', url('/api/v1/auth/password-login'), {
+    return requestJson<LoginResult>('POST', url('/api/v1/auth/v2/password-login'), {
       body: { email, password },
     })
   }
@@ -507,6 +512,7 @@ export class AuthClient {
     onEvent: (event: WorkflowNotificationStreamEvent) => void,
     signal: AbortSignal
   ): Promise<void> {
+    const requestOwner = assertSessionRequestAllowed(sessionToken)
     const response = await fetch(url('/api/v1/notifications/stream'), {
       method: 'GET',
       headers: {
@@ -516,6 +522,7 @@ export class AuthClient {
       signal,
     })
     if (!response.ok) {
+      reportSessionUnauthorized(sessionToken, response.status, requestOwner)
       const body = await readErrorBody(response)
       throw new ApiError(
         `Notification stream failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,
@@ -568,6 +575,7 @@ export class AuthClient {
     onEvent: (event: EntityChangeStreamEvent) => void,
     signal: AbortSignal
   ): Promise<void> {
+    const requestOwner = assertSessionRequestAllowed(sessionToken)
     const streamUrl = new URL(url('/api/v1/entity-changes/stream'))
     // The user stream intentionally starts from a fixed coarse invalidation
     // checkpoint. Sending the local cursor would disclose feed position while
@@ -581,6 +589,7 @@ export class AuthClient {
       signal,
     })
     if (!response.ok) {
+      reportSessionUnauthorized(sessionToken, response.status, requestOwner)
       const body = await readErrorBody(response)
       throw new ApiError(
         `Entity change stream failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,
@@ -721,6 +730,7 @@ export class AuthClient {
     runId: string,
     artifactName: string
   ): Promise<Buffer> {
+    const requestOwner = assertSessionRequestAllowed(sessionToken)
     const response = await fetch(
       url(
         `/api/v1/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactName)}/download`
@@ -732,6 +742,7 @@ export class AuthClient {
       }
     )
     if (!response.ok) {
+      reportSessionUnauthorized(sessionToken, response.status, requestOwner)
       const body = await readErrorBody(response)
       throw new ApiError(
         `Download workflow artifact failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,

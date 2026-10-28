@@ -394,7 +394,7 @@ async function globalSetup(): Promise<void> {
   const authPreflight = process.env.E2E_AUTH_PREFLIGHT || 'password'
 
   let loginResp: Response
-  const loginPath = '/api/v1/auth/password-login'
+  const loginPath = '/api/v1/auth/v2/password-login'
   let loginBody: Record<string, string> = { email }
   try {
     if (authPreflight !== 'password') {

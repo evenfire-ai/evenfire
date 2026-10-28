@@ -14,6 +14,7 @@ function boundedIntegerEnv(name: string, fallback: number, min: number, max: num
 }
 
 type Config = {
+  authProtocolCutoverEnabled: boolean
   port: number
   jsonBodyLimit: string
   namespace: string
@@ -745,6 +746,7 @@ if (oauthProactiveRefreshBufferMs <= REACTIVE_REFRESH_BUFFER_MS) {
 }
 
 export const config: Config = {
+  authProtocolCutoverEnabled: process.env.AUTH_PROTOCOL_CUTOVER_ENABLED === 'true',
   port: Number(process.env.CONTROL_API_PORT || 8090),
   jsonBodyLimit: process.env.CONTROL_API_JSON_BODY_LIMIT || '150mb',
   namespace: process.env.CONTROL_API_NAMESPACE || 'mcp-server',

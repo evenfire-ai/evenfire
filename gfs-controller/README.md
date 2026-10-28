@@ -81,17 +81,18 @@ reads are `Authorization` and `x-request-id`. Mutation bodies are capped at
 Required values fail loud at startup in production; `GFS_DEV_MODE=true`
 relaxes them for local runs only.
 
-| Variable                    | Explanation                                                                                                                    | Default          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
-| `GFS_PORT`                  | HTTP listen port                                                                                                               | `8087`           |
-| `GFS_STORAGE_PATH`          | Drive PVC mount path (required; dev default `/tmp/gfs-data`)                                                                   | —                |
-| `GFS_STORAGE_ROLE`          | `writer` (RW, single replica) or `reader` (RO)                                                                                 | `writer`         |
-| `GFS_PG_CONNECTION_STRING`  | Permission-store DSN — the least-privilege `gfs_controller` role (required)                                                    | —                |
-| `GFS_JWT_PUBLIC_KEY`        | RS256 public key (PEM) verifying gfs access tokens; required to serve in production. In dev mode an empty key runs probes-only | —                |
-| `GFS_TOKEN_AUDIENCE`        | Expected `aud` on inbound tokens                                                                                               | `gfs-controller` |
-| `GFS_DRIVE_NAME`            | Drive this gfsc serves (a cluster singleton in the open-source release)                                                        | `main`           |
-| `GFS_DECISION_CACHE_TTL_MS` | Decision-cache TTL; bounds staleness even with no invalidation signal                                                          | `5000`           |
-| `GFS_DEV_MODE`              | Relax required vars for local runs and tests                                                                                   | `false`          |
+| Variable                        | Explanation                                                                                                                    | Default          |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
+| `GFS_PORT`                      | HTTP listen port                                                                                                               | `8087`           |
+| `GFS_STORAGE_PATH`              | Drive PVC mount path (required; dev default `/tmp/gfs-data`)                                                                   | —                |
+| `GFS_STORAGE_ROLE`              | `writer` (RW, single replica) or `reader` (RO)                                                                                 | `writer`         |
+| `GFS_PG_CONNECTION_STRING`      | Permission-store DSN — the least-privilege `gfs_controller` role (required)                                                    | —                |
+| `GFS_JWT_PUBLIC_KEY`            | RS256 public key (PEM) verifying gfs access tokens; required to serve in production. In dev mode an empty key runs probes-only | —                |
+| `GFS_TOKEN_AUDIENCE`            | Expected `aud` on inbound tokens                                                                                               | `gfs-controller` |
+| `AUTH_PROTOCOL_CUTOVER_ENABLED` | Require protocol-v2 user claims for the internal test-fleet cutover                                                            | `false`          |
+| `GFS_DRIVE_NAME`                | Drive this gfsc serves (a cluster singleton in the open-source release)                                                        | `main`           |
+| `GFS_DECISION_CACHE_TTL_MS`     | Decision-cache TTL; bounds staleness even with no invalidation signal                                                          | `5000`           |
+| `GFS_DEV_MODE`                  | Relax required vars for local runs and tests                                                                                   | `false`          |
 
 ## Readiness
 

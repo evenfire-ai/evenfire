@@ -1,15 +1,51 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 // ── import after mocks are set up ─────────────────────────────────────────────
 
 import { AppService } from '../appService.js'
+import { getActiveEnvKey } from '../config.js'
 import { ApiError } from '../httpClient.js'
+import { readPendingExternalLogoutIntent } from '../pendingExternalLogout.js'
+import { TokenStore } from '../tokenStore.js'
+
+let userDataDirectory = ''
+const reportLogoutFailure = vi.fn()
+
+vi.mock('electron', () => ({
+  app: { getPath: () => userDataDirectory, isReady: () => true },
+  safeStorage: { isEncryptionAvailable: () => false },
+}))
+
+beforeEach(async () => {
+  userDataDirectory = await mkdtemp(path.join(tmpdir(), 'evenfire-prewarm-storage-'))
+  reportLogoutFailure.mockClear()
+})
+
+afterEach(async () => {
+  try {
+    expect(reportLogoutFailure).not.toHaveBeenCalled()
+    const markers = (await readdir(userDataDirectory)).filter(name =>
+      name.startsWith('pending-external-logout-')
+    )
+    expect(markers.length).toBeLessThanOrEqual(1)
+    if (markers.length > 0)
+      expect(readPendingExternalLogoutIntent(userDataDirectory, getActiveEnvKey())).toEqual({
+        intent: 'logout-pending',
+      })
+  } finally {
+    await rm(userDataDirectory, { recursive: true, force: true })
+  }
+})
 
 // ── mock dependencies before AppService is imported ──────────────────────────
 
 vi.mock('../config.js', () => ({
   getActiveRuntimeConfigOptionId: () => 'test-profile',
-  getActiveEnvKey: () => 'test-env',
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveLegacyEnvKeys: () => [],
+  getActiveLegacyEnvKeyInventory: () => ({ keys: [], complete: true }),
   getDesktopRuntimeConfigState: () => ({ activeOptionId: 'test-profile' }),
   config: {
     rpcProxyBaseUrl: 'http://proxy',
@@ -51,18 +87,15 @@ vi.mock('../authClient.js', () => ({
   },
 }))
 
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
-  },
-}))
-
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function makeService(): AppService {
-  const svc = new AppService()
+  const tokenStore = new TokenStore({ isolatedUserDataPath: userDataDirectory })
+  const svc = new AppService({
+    tokenStore,
+    getUserDataDirectory: () => userDataDirectory,
+    reportDeferredLogoutFailure: reportLogoutFailure,
+  })
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
   ;(svc as unknown as { me: unknown }).me = { id: 1, teamId: 'team-1' }
   return svc
@@ -73,7 +106,7 @@ function makeService(): AppService {
 describe('AppService.prewarmHost', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],
@@ -97,10 +130,11 @@ describe('AppService.prewarmHost', () => {
     expect(mockGetOrIssue).toHaveBeenCalledWith(
       'session-token',
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
-      ['chatllm']
+      ['chatllm'],
+      expect.any(String)
     )
     expect(mockPrewarmHost).toHaveBeenCalledTimes(1)
-    expect(mockPrewarmHost).toHaveBeenCalledWith('rpc-token', 'chatllm')
+    expect(mockPrewarmHost).toHaveBeenCalledWith('fixture-rpc-token', 'chatllm')
   })
 
   it('cooldown: a re-open inside the window makes no HTTP call; after the window it fires again', async () => {
@@ -162,7 +196,7 @@ describe('AppService.prewarmHost', () => {
     const logged = warnSpy.mock.calls.map(args => args.map(String).join(' ')).join('\n')
     expect(logged).toContain('missing-host')
     expect(logged).toContain('404')
-    expect(logged).not.toContain('rpc-token')
+    expect(logged).not.toContain('fixture-rpc-token')
     expect(logged).not.toContain('session-token')
     warnSpy.mockRestore()
   })
@@ -194,7 +228,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.useFakeTimers()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],
@@ -227,8 +261,8 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     expect(mockPrewarmHost).toHaveBeenCalledTimes(3)
 
     // Every re-emit reuses the invocation's token and hostRef.
-    expect(mockPrewarmHost.mock.calls[1]).toEqual(['rpc-token', 'chatllm'])
-    expect(mockPrewarmHost.mock.calls[2]).toEqual(['rpc-token', 'chatllm'])
+    expect(mockPrewarmHost.mock.calls[1]).toEqual(['fixture-rpc-token', 'chatllm'])
+    expect(mockPrewarmHost.mock.calls[2]).toEqual(['fixture-rpc-token', 'chatllm'])
 
     // Acknowledged by 200 active — nothing further is ever scheduled.
     expect(vi.getTimerCount()).toBe(0)
@@ -240,7 +274,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     expect(infoLogged).toContain('host=chatllm')
     expect(infoLogged).toContain('attempt=1')
     expect(infoLogged).toContain('attempt=2')
-    expect(infoLogged).not.toContain('rpc-token')
+    expect(infoLogged).not.toContain('fixture-rpc-token')
     infoSpy.mockRestore()
     warnSpy.mockRestore()
   })
@@ -279,6 +313,9 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     expect(vi.getTimerCount()).toBe(1)
 
     await svc.logout()
+    expect(readPendingExternalLogoutIntent(userDataDirectory, getActiveEnvKey())).toEqual({
+      intent: 'logout-pending',
+    })
 
     expect(vi.getTimerCount()).toBe(0)
     await vi.advanceTimersByTimeAsync(30_000)
@@ -296,9 +333,9 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
   it('a late prewarm result cannot erase the next session cooldown', async () => {
     const grant = await mockGetOrIssue()
     mockGetOrIssue.mockClear()
-    let complete!: (value: typeof grant) => void
-    const pending = new Promise<typeof grant>(resolve => {
-      complete = resolve
+    let reject!: (error: Error) => void
+    const pending = new Promise<typeof grant>((_resolve, rejectPending) => {
+      reject = rejectPending
     })
     mockGetOrIssue.mockReturnValueOnce(pending)
     mockPrewarmHost.mockResolvedValue({ status: 'active' })
@@ -312,6 +349,9 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     for (let i = 0; i < 10 && mockGetOrIssue.mock.calls.length === 0; i++) await Promise.resolve()
     expect(mockGetOrIssue).toHaveBeenCalledTimes(1)
     await svc.logout()
+    expect(readPendingExternalLogoutIntent(userDataDirectory, getActiveEnvKey())).toEqual({
+      intent: 'logout-pending',
+    })
     ;(svc as unknown as { sessionToken: string }).sessionToken = 'next-session'
     ;(svc as unknown as { me: unknown }).me = { id: 2, teamId: 'team-2' }
 
@@ -319,7 +359,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
       requested: true,
       status: 'active',
     })
-    complete(grant)
+    reject(new Error('credential owner superseded'))
     await expect(oldAttempt).resolves.toEqual({ requested: false, skipped: 'auth-changed' })
     await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
       requested: false,
@@ -421,6 +461,9 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
     await svc.logout()
+    expect(readPendingExternalLogoutIntent(userDataDirectory, getActiveEnvKey())).toEqual({
+      intent: 'logout-pending',
+    })
     ;(svc as unknown as { sessionToken: string }).sessionToken = 'next-session'
     ;(svc as unknown as { me: unknown }).me = { id: 2, teamId: 'team-2' }
     await svc.prewarmHost('chatllm')
@@ -476,7 +519,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     const warnLogged = warnSpy.mock.calls.map(args => args.map(String).join(' ')).join('\n')
     expect(warnLogged).toContain('host=chatllm')
     expect(warnLogged).toContain('reactive message path')
-    expect(warnLogged).not.toContain('rpc-token')
+    expect(warnLogged).not.toContain('fixture-rpc-token')
 
     // Loop is over: no pending timers, no fourth POST ever.
     expect(vi.getTimerCount()).toBe(0)
@@ -503,7 +546,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     const warnLogged = warnSpy.mock.calls.map(args => args.map(String).join(' ')).join('\n')
     expect(warnLogged).toContain('re-emit failed host=chatllm')
     expect(warnLogged).toContain('503')
-    expect(warnLogged).not.toContain('rpc-token')
+    expect(warnLogged).not.toContain('fixture-rpc-token')
 
     expect(vi.getTimerCount()).toBe(0)
     await vi.advanceTimersByTimeAsync(30_000)
@@ -573,7 +616,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
 describe('AppService host status stream — ANTI-FLAP invariant', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mockRpcTokenManagerGetMetadata.mockReturnValue({
       expiresAtMs: null,
       scopes: [],

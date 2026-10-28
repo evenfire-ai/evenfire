@@ -65,6 +65,7 @@ function authValue(me: AuthContextValue['me']): AuthContextValue {
     statusTone: 'info',
     isAuthenticated: Boolean(me),
     me,
+    temporarySessionExpiresAt: null,
     email: me?.email ?? '',
     password: '',
     desktopSetupAuthorizationToken: '',

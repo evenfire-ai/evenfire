@@ -20,6 +20,7 @@ export type AuthClaims = {
   email: string
   teamId: string
   role: TeamRole
+  authProtocolVersion?: 2
   exp: number
 }
 

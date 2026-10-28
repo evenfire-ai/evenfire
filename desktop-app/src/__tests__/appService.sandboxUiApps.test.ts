@@ -27,6 +27,7 @@ vi.mock('electron', () => ({
   },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
@@ -50,7 +51,7 @@ vi.mock('../sandboxUiSessionRefresh.js', () => ({
 
 vi.mock('../config.js', () => ({
   getActiveRuntimeConfigOptionId: () => null,
-  getActiveEnvKey: () => 'test-env',
+  getActiveEnvKey: () => 'test_env-000000000000',
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -95,24 +96,17 @@ vi.mock('../authClient.js', () => ({
   },
 }))
 
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
-  },
-}))
-
 function makeService(): AppService {
   const svc = new AppService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
+  ;(svc as unknown as { me: unknown }).me = { id: 'test-user', teamId: 'team-1' }
   return svc
 }
 
 describe('AppService.listSandboxUiApps', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockGetOrIssue.mockResolvedValue({ token: 'fixture-rpc-token', expiresInSeconds: 300 })
     mockListSandboxUiApps.mockResolvedValue({ apps: [] })
   })
 
@@ -143,16 +137,17 @@ describe('AppService.listSandboxUiApps', () => {
     expect(mockGetOrIssue).toHaveBeenCalledWith(
       'session-token',
       ['sandbox:ui:view'],
-      ['sandbox-ui']
+      ['sandbox-ui'],
+      expect.any(String)
     )
-    expect(mockListSandboxUiApps).toHaveBeenCalledWith('rpc-token')
+    expect(mockListSandboxUiApps).toHaveBeenCalledWith('fixture-rpc-token')
     expect(result.apps.map(app => app.title)).toEqual(["Andy's Sales CRM", 'Support Desk'])
   })
 
   it('clears and reissues the RPC token when rpc-proxy reports a missing sandbox UI scope', async () => {
     mockGetOrIssue
-      .mockResolvedValueOnce({ token: 'stale-rpc-token' })
-      .mockResolvedValueOnce({ token: 'fresh-rpc-token' })
+      .mockResolvedValueOnce({ token: 'fixture-stale-rpc-token', expiresInSeconds: 300 })
+      .mockResolvedValueOnce({ token: 'fixture-fresh-rpc-token', expiresInSeconds: 300 })
     mockListSandboxUiApps
       .mockRejectedValueOnce(new ApiError('403 Forbidden: missing scope', 403, 'missing scope'))
       .mockResolvedValueOnce({ apps: [] })
@@ -164,16 +159,18 @@ describe('AppService.listSandboxUiApps', () => {
       1,
       'session-token',
       ['sandbox:ui:view'],
-      ['sandbox-ui']
+      ['sandbox-ui'],
+      expect.any(String)
     )
     expect(mockGetOrIssue).toHaveBeenNthCalledWith(
       2,
       'session-token',
       ['sandbox:ui:view'],
-      ['sandbox-ui']
+      ['sandbox-ui'],
+      expect.any(String)
     )
-    expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(1, 'stale-rpc-token')
-    expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(2, 'fresh-rpc-token')
+    expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(1, 'fixture-stale-rpc-token')
+    expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(2, 'fixture-fresh-rpc-token')
   })
 })
 

@@ -9,6 +9,7 @@ vi.mock('electron', () => ({
   },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
@@ -27,6 +28,7 @@ describe('AppService.startWorkflowNotificationStream', () => {
   it('forwards validated notification stream events to the renderer', async () => {
     const service = new AppService() as any
     service.sessionToken = 'session-token'
+    service.me = { id: 'notification-test-user', teamId: 'team-1' }
     service.authClient = {
       openWorkflowNotificationStream: vi.fn().mockImplementation(async (_token, onEvent) => {
         onEvent({ type: 'open' })
@@ -62,6 +64,7 @@ describe('AppService.startWorkflowNotificationStream', () => {
   it('does not report an announced stream rollover as degraded', async () => {
     const service = new AppService() as any
     service.sessionToken = 'session-token'
+    service.me = { id: 'notification-test-user', teamId: 'team-1' }
     service.authClient = {
       openWorkflowNotificationStream: vi.fn().mockImplementation(async (_token, onEvent) => {
         onEvent({ type: 'open' })
@@ -101,6 +104,7 @@ describe('AppService.startWorkflowNotificationStream', () => {
   it('prevents a renderer from stopping another renderer notification stream', () => {
     const service = new AppService() as any
     service.sessionToken = 'session-token'
+    service.me = { id: 'notification-test-user', teamId: 'team-1' }
     service.authClient = {
       openWorkflowNotificationStream: vi.fn(),
     }
@@ -114,6 +118,7 @@ describe('AppService.startWorkflowNotificationStream', () => {
   it('reports a stream as open only after the upstream connection opens', async () => {
     const service = new AppService() as any
     service.sessionToken = 'session-token'
+    service.me = { id: 'notification-test-user', teamId: 'team-1' }
     let emit: ((event: WorkflowNotificationStreamEvent) => void) | null = null
     let releaseStream!: () => void
     const streamClosed = new Promise<void>(resolve => {
@@ -162,6 +167,7 @@ describe('AppService.startWorkflowNotificationStream', () => {
   it('reports notification event counters for stream-delivered approval events', async () => {
     const service = new AppService() as any
     service.sessionToken = 'session-token'
+    service.me = { id: 'notification-test-user', teamId: 'team-1' }
     let emit: ((event: WorkflowNotificationStreamEvent) => void) | null = null
     let releaseStream!: () => void
     const streamClosed = new Promise<void>(resolve => {

@@ -29,6 +29,7 @@ describe('AppService team directory loading', () => {
       getInitialTeamsDirectory: () => Promise<unknown>
     }
     service.sessionToken = 'session-token'
+    service.me = { id: 'team-directory-test-user', teamId: 'team-1' }
     service.authClient = {
       getInitialTeamDirectory: vi.fn().mockResolvedValue(payload),
       switchTeam: vi.fn(),
@@ -51,6 +52,7 @@ describe('AppService team directory loading', () => {
       listWorkflows: () => Promise<unknown>
     }
     service.sessionToken = 'session-token'
+    service.me = { id: 'team-directory-test-user', teamId: 'team-1' }
     service.workflowTeamByKey.set('sandbox-recipes/stale', 'team-old')
     service.authClient = {
       listTeams: vi.fn().mockResolvedValue({ currentTeamId: null, items: [] }),
@@ -74,6 +76,7 @@ describe('AppService team directory loading', () => {
       listWorkflows: () => Promise<unknown>
     }
     service.sessionToken = 'session-token'
+    service.me = { id: 'team-directory-test-user', teamId: 'team-1' }
     service.workflowTeamByKey.set('sandbox-recipes/stale', 'team-old')
     service.authClient = {
       listTeams: vi.fn().mockRejectedValue(new Error('team directory unavailable')),
@@ -194,6 +197,7 @@ describe('AppService team directory loading', () => {
       getTeamsDirectory: () => Promise<unknown>
     }
     service.sessionToken = 'session-token'
+    service.me = { id: 'team-directory-test-user', teamId: 'team-1' }
     service.authClient = {
       getInitialTeamDirectory: vi.fn().mockResolvedValue(payload),
       switchTeam: vi.fn(),

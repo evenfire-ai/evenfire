@@ -33,7 +33,7 @@ export const partitionGcModule = {
 // RpcProxyClient.
 export const rpcTokenManagerModule = {
   RpcTokenManager: class {
-    getOrIssue = vi.fn(async () => ({ token: 'fake-rpc-token' }))
+    getOrIssue = vi.fn(async () => ({ token: 'fake-rpc-token', expiresInSeconds: 300 }))
     clear = vi.fn()
     getMetadata = vi.fn(() => ({ expiresAtMs: null, scopes: [], hostRefs: [] }))
   },
@@ -47,6 +47,12 @@ export const authClientModule = {
 }
 
 export const tokenStoreModule = {
+  SessionTokenStorageSupersededBeforeWriteError: class extends Error {
+    constructor() {
+      super('Session-token mutation was superseded before storage dispatch')
+      this.name = 'SessionTokenStorageSupersededBeforeWriteError'
+    }
+  },
   TokenStore: class {
     getSessionToken = vi.fn().mockResolvedValue(null)
     setSessionToken = vi.fn()

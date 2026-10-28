@@ -22,6 +22,10 @@ function modelService() {
     setHostModel: vi.fn(),
   }
   const service = new AppService() as any
+  // These unit tests stub token issuance and focus on model-selection behavior. Bind the
+  // synthetic token to a runtime owner so the real dispatch-ownership guard remains active.
+  service.sessionToken = 'session-token'
+  service.me = { id: 'host-models-test-user', teamId: 'team-1' }
   service.issueRpcTokenForHostRefs = issueRpcTokenForHostRefs
   service.rpcClient = rpcClient
   return { service, issueRpcTokenForHostRefs, rpcClient }

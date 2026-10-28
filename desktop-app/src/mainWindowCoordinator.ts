@@ -1,3 +1,82 @@
+import type { App } from 'electron'
+import { QuitAdmissionClosedError } from './appService.js'
+
+export function isQuitAdmissionClosedError(error: unknown): boolean {
+  return error instanceof QuitAdmissionClosedError
+}
+
+export function retryPendingExternalLogoutAfterQuitCancellation(
+  cancelQuitPreparation: () => void,
+  applyPendingLogout: () => Promise<boolean>,
+  onApplied: () => void,
+  onFailure: (error: unknown) => void,
+  onNotApplied: () => void = () => {},
+  onNotificationFailure: (error: unknown) => void = () => {}
+): void {
+  cancelQuitPreparation()
+  void applyPendingLogout().then(
+    applied => {
+      try {
+        if (applied) onApplied()
+        else onNotApplied()
+      } catch (error) {
+        try {
+          onNotificationFailure(error)
+        } catch {
+          // A renderer notification is best-effort and cannot change the logout result.
+        }
+      }
+    },
+    error => {
+      try {
+        onFailure(error)
+      } catch {
+        // The retry is detached from quit cancellation; a reporter must not reject it again.
+      }
+    }
+  )
+}
+
+type SessionStateWindow = {
+  isDestroyed: () => boolean
+  webContents: {
+    send: (channel: 'auth:sessionStateChanged') => void
+  }
+}
+
+export function createDeferredExternalLogoutStateRefreshHandler(options: {
+  getCachedUserId: () => string | null
+  getWindow: () => SessionStateWindow | null
+}): () => void {
+  return () => {
+    try {
+      const window = options.getWindow()
+      if (!options.getCachedUserId() && window && !window.isDestroyed()) {
+        window.webContents.send('auth:sessionStateChanged')
+      }
+    } catch {
+      // State refresh is best-effort; it never declares logout success.
+    }
+  }
+}
+
+export function createDeferredExternalLogoutFailureHandler(options: {
+  getCachedUserId: () => string | null
+  getWindow: () => SessionStateWindow | null
+  reportFailure: (error: unknown) => void
+}): (error: unknown) => void {
+  return error => {
+    try {
+      options.reportFailure(error)
+    } catch {
+      // This callback runs from a detached retry promise; reporting must not create
+      // a second unhandled rejection.
+    }
+
+    createDeferredExternalLogoutStateRefreshHandler(options)()
+  }
+}
+
 type MainWindowHandle = {
   isDestroyed: () => boolean
 }
@@ -52,4 +131,70 @@ export function createRetryableInitializer(initialize: () => Promise<unknown>) {
   }
 
   return { ensureInitialized }
+}
+
+export function registerQuitDrain(
+  app: Pick<App, 'on' | 'quit'>,
+  prepareForQuit: () => Promise<void>,
+  cancelQuitPreparation: () => void,
+  reportPreparationFailure: (error: unknown) => void = () => {}
+): void {
+  let quitDrainStarted = false
+  let quitDrainComplete = false
+
+  const reopenQuitAttempt = (): void => {
+    if (!quitDrainStarted || !quitDrainComplete) return
+    quitDrainStarted = false
+    quitDrainComplete = false
+    cancelQuitPreparation()
+  }
+
+  app.on('browser-window-created', (_event, window) => {
+    window.webContents.on('will-prevent-unload', event => {
+      if (!quitDrainComplete) return
+
+      // Electron's defaultPrevented flag records whether another listener
+      // allowed the page to unload. Window destruction is not reliable at this
+      // point, so use the event outcome to detect a still-active page veto.
+      setImmediate(() => {
+        if (!event.defaultPrevented) reopenQuitAttempt()
+      })
+    })
+  })
+
+  app.on('before-quit', event => {
+    if (quitDrainComplete) {
+      // Another before-quit listener can still veto the resumed app.quit().
+      setImmediate(() => {
+        if (event.defaultPrevented) reopenQuitAttempt()
+      })
+      return
+    }
+
+    event.preventDefault()
+    if (quitDrainStarted) return
+
+    quitDrainStarted = true
+    const resumeQuit = () => {
+      setImmediate(() => {
+        quitDrainComplete = true
+        app.quit()
+      })
+    }
+    void prepareForQuit().then(resumeQuit, error => {
+      try {
+        reportPreparationFailure(error)
+      } catch {
+        // Failure reporting must never prevent the best-effort quit path.
+      }
+      resumeQuit()
+    })
+  })
+
+  app.on('will-quit', event => {
+    if (!quitDrainComplete) return
+    setImmediate(() => {
+      if (event.defaultPrevented) reopenQuitAttempt()
+    })
+  })
 }

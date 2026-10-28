@@ -687,7 +687,28 @@ export type HostMessageResponse = {
 export type SessionState = {
   authenticated: boolean
   me: SessionMe | null
+  /** Present only for a current-process session that is never restored after restart. */
+  sessionMode?: 'temporary'
+  /** Absolute main-process deadline, in Unix milliseconds, for a temporary session. */
+  expiresAt?: number
 }
+
+/**
+ * Local logout reports only the durable authority outcome. `cleanup: 'pending'` means
+ * exact selected-source cleanup debt was committed and may retry after sign-out; it does
+ * not claim physical credential deletion or remote token revocation.
+ */
+export type DesktopLogoutOutcome =
+  | {
+      kind: 'committed'
+      sessionGeneration: number
+      cleanup: 'pending' | 'not-required'
+    }
+  | {
+      kind: 'not-committed'
+      sessionGeneration: number
+      reason: 'superseded' | 'failed' | 'deferred'
+    }
 
 export type PasswordLoginResult = SessionState
 

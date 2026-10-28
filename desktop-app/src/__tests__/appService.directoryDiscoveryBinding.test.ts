@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { testLoginResult } from '../../testSupport/authTestFixtures.js'
+import { testLoginResult, testSessionTokenWithExpiry } from '../../testSupport/authTestFixtures.js'
 
 const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
 const originalPreview = process.env.EVENFIRE_ONBOARDING_PREVIEW
@@ -13,6 +13,7 @@ afterEach(async () => {
   closeStore?.()
   vi.restoreAllMocks()
   vi.doUnmock('electron')
+  vi.doUnmock('keytar')
   vi.resetModules()
   if (originalConfigPath === undefined) delete process.env.CLERUM_DESKTOP_CONFIG_PATH
   else process.env.CLERUM_DESKTOP_CONFIG_PATH = originalConfigPath
@@ -21,13 +22,13 @@ afterEach(async () => {
   if (directory) await fs.rm(directory, { recursive: true, force: true })
 })
 
-async function selectSiblingAfterIndexFailure() {
+async function createAuthenticatedDirectoryProfile() {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-directory-discovery-'))
   delete process.env.CLERUM_DESKTOP_CONFIG_PATH
   delete process.env.EVENFIRE_ONBOARDING_PREVIEW
   vi.resetModules()
   vi.doMock('electron', () => ({
-    app: { getPath: () => directory, isPackaged: true, isReady: () => true, setName: vi.fn() },
+    app: { getPath: () => directory, isPackaged: false, isReady: () => true, setName: vi.fn() },
     safeStorage: { isEncryptionAvailable: () => false },
   }))
   const rest = 'https://shared-api.example.test/api'
@@ -70,14 +71,21 @@ async function selectSiblingAfterIndexFailure() {
   const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment')
   discovery.mockRejectedValueOnce(new Error('initial optional discovery unavailable'))
   discovery.mockResolvedValue({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
-  vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(testLoginResult())
+  const sessionToken = testSessionTokenWithExpiry()
+  const loginResult = testLoginResult(sessionToken)
+  vi.spyOn(AuthClient.prototype, 'passwordLogin').mockResolvedValue(loginResult)
   vi.spyOn(AuthClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
   const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+    const url = new URL(String(input))
+    if (url.pathname.endsWith('/api/v1/me'))
+      return new Response(JSON.stringify(loginResult.me), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
     // Native fetch rejects the relative /health URL when no transport is configured.
-    new URL(String(input))
     return new Response(JSON.stringify({ status: 'ok' }), { status: 200 })
   })
-  await service.googleLogin('synthetic-google-token')
+  await service.passwordLogin('user-a@example.test', 'synthetic-password')
   const key = config.getActiveEnvKey()
   const generation = service.getSessionGeneration()
   const chatGeneration = chat.getChatStoreBindingGeneration()
@@ -85,6 +93,43 @@ async function selectSiblingAfterIndexFailure() {
   expect(fetch).toHaveBeenCalledWith(`${rpc}/health`, expect.any(Object))
   discovery.mockRejectedValue(new Error('subsequent optional discovery unavailable'))
   const index = path.join(saved.storagePath, 'index.json')
+  return { service, config, store, chat, a, b, key, index, generation, chatGeneration }
+}
+
+it('rejects sibling profile selection while authenticated without touching profile storage', async () => {
+  const { service, config, store, chat, a, b, key, index, generation, chatGeneration } =
+    await createAuthenticatedDirectoryProfile()
+  const write = fs.writeFile.bind(fs)
+  const failure = vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args) => {
+    if (String(file) === index) throw new Error('fixture profile index write denied')
+    return write(file, ...args)
+  })
+  await expect(service.selectRuntimeConfig(b.id)).rejects.toThrow('desktop_setup_requires_signout')
+  expect(failure).not.toHaveBeenCalled()
+  failure.mockRestore()
+  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(a)
+  expect(config.getActiveEnvKey()).toBe(key)
+  expect(service.getSessionGeneration()).toBe(generation)
+  expect(service.getCachedUserId()).toBe('user-a')
+  expect(await store.getSessionToken(key)).toBeNull()
+  await expect(service.getSessionState()).resolves.toMatchObject({
+    authenticated: true,
+    me: { id: 'user-a' },
+    sessionMode: 'temporary',
+  })
+  expect(chat.getChatStoreBindingGeneration()).toBe(chatGeneration)
+})
+
+it('keeps failed signed-out selection unauthenticated and persists only a later successful selection', async () => {
+  const { service, config, store, a, b, key, index } = await createAuthenticatedDirectoryProfile()
+  const logout = await service.logout()
+  expect(logout.kind).toBe('committed')
+  expect(service.getCachedUserId()).toBeNull()
+  expect(await store.getSessionToken(key)).toBeNull()
+  await expect(service.getSessionState()).resolves.toMatchObject({
+    authenticated: false,
+    me: null,
+  })
   const write = fs.writeFile.bind(fs)
   const failure = vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args) => {
     if (String(file) === index) throw new Error('fixture profile index write denied')
@@ -92,33 +137,14 @@ async function selectSiblingAfterIndexFailure() {
   })
   await expect(service.selectRuntimeConfig(b.id)).rejects.toThrow('profile index write denied')
   failure.mockRestore()
-  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
-  expect(config.getActiveEnvKey()).toBe(key)
-  expect(service.getSessionGeneration()).toBeGreaterThan(generation)
-  expect(service.getCachedUserId()).toBe('user-a')
-  expect(await store.getSessionToken(key)).toBe('synthetic-session-a')
-  expect(chat.getChatStoreBindingGeneration()).toBe(chatGeneration)
-  return { service, config, store, b, key, rpc, fetch, index }
-}
-
-it('does not route a surviving session through another profile after an index write rejection', async () => {
-  const { service, config, fetch, b, rpc } = await selectSiblingAfterIndexFailure()
-  fetch.mockClear()
-  const health = await service.getDependenciesHealth()
-  expect(health.rpcProxy.ok).toBe(false)
-  expect(fetch).not.toHaveBeenCalledWith(`${rpc}/health`, expect.any(Object))
-  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
-  expect(config.config.rpcProxyBaseUrl).toBe('')
-})
-
-it('does not persist another directory profile discovery on logout after an index write rejection', async () => {
-  const { service, config, store, b, key, index } = await selectSiblingAfterIndexFailure()
-  await service.logout()
-  expect(service.getCachedUserId()).toBeNull()
+  await expect(service.getSessionState()).resolves.toMatchObject({ authenticated: false, me: null })
+  expect(service.sessionToken).toBeNull()
   expect(await store.getSessionToken(key)).toBeNull()
-  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
-  expect(config.config.rpcProxyBaseUrl).toBe('')
-  // A later successful native save persists B, never A's stale discovery.
+
+  // A later successful signed-out selection persists B; it does not revive A's old session.
   await service.selectRuntimeConfig(b.id)
   expect(JSON.parse(await fs.readFile(index, 'utf8')).activeProfileId).toBe(b.id)
+  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
+  expect(config.getDesktopRuntimeConfigState().activeOptionId).not.toBe(a)
+  await expect(service.getSessionState()).resolves.toMatchObject({ authenticated: false, me: null })
 })

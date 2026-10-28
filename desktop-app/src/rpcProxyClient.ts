@@ -1,5 +1,11 @@
 import { config } from './config.js'
-import { ApiError, requestJson, withTimeout } from './httpClient.js'
+import {
+  ApiError,
+  assertSessionRequestAllowed,
+  reportSessionUnauthorized,
+  requestJson,
+  withTimeout,
+} from './httpClient.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   ApprovalDecisionResult,
@@ -26,6 +32,17 @@ import {
 import { boundedErrorExcerpt, hostAccessDenialMessage } from './upstreamErrors.js'
 
 export type { SandboxUiApp } from './types.js'
+
+async function fetchWithSession(
+  token: string,
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  const requestOwner = assertSessionRequestAllowed(token)
+  const response = await fetch(input, init)
+  reportSessionUnauthorized(token, response.status, requestOwner)
+  return response
+}
 
 /**
  * The runtime rejected a model that is not in the operator allowlist (R2/R3).
@@ -608,7 +625,8 @@ export class RpcProxyClient {
    * Anything else (401/403/404/5xx) is an error for the caller to log.
    */
   async prewarmHost(rpcAccessToken: string, hostRef: string): Promise<{ status: string }> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcAccessToken,
       this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/wake`),
       {
         method: 'POST',
@@ -693,7 +711,8 @@ export class RpcProxyClient {
     recipeNs: string,
     recipeName: string
   ): Promise<{ setCookie: string }> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcAccessToken,
       this.url(
         `/api/v1/sandbox-ui/${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/session`
       ),
@@ -730,7 +749,8 @@ export class RpcProxyClient {
     oauthClientId: string,
     background = false
   ): Promise<{ authorizeUrl: string }> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcAccessToken,
       this.url(
         `/api/v1/sandbox-ui/${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/oauth/authorize-url`
       ),
@@ -781,7 +801,8 @@ export class RpcProxyClient {
     mcpServerName: string,
     contextId?: string
   ): Promise<{ authorizeUrl: string }> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcAccessToken,
       this.url(`/api/v1/mcp-oauth/${encodeURIComponent(mcpServerName)}/authorize-url`),
       {
         method: 'POST',
@@ -821,7 +842,7 @@ export class RpcProxyClient {
     // falsely time out during a long, semantically-silent tool run.
     onKeepalive?: () => void
   ): Promise<void> {
-    const response = await fetch(this.url(path), {
+    const response = await fetchWithSession(rpcAccessToken, this.url(path), {
       method: 'GET',
       headers: {
         accept: 'text/event-stream',
@@ -939,7 +960,8 @@ export class RpcProxyClient {
     taskId: string,
     toolCallId: string
   ): Promise<ApprovalDecisionResult> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcToken,
       this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/approve`),
       {
         method: 'POST',
@@ -971,7 +993,8 @@ export class RpcProxyClient {
     toolCallId: string,
     reason: string
   ): Promise<ApprovalDecisionResult> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcToken,
       this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/deny`),
       {
         method: 'POST',
@@ -995,7 +1018,8 @@ export class RpcProxyClient {
   }
 
   async cancelTask(rpcToken: string, hostRef: string, taskId: string): Promise<void> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcToken,
       this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/tasks/${encodeURIComponent(taskId)}/cancel`
       ),
@@ -1024,7 +1048,8 @@ export class RpcProxyClient {
   ): Promise<{
     artifacts: Array<{ name: string; format: string; sizeBytes: number; createdAt: string }>
   }> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcToken,
       this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/artifacts`),
       {
         headers: { authorization: `Bearer ${rpcToken}` },
@@ -1045,7 +1070,8 @@ export class RpcProxyClient {
   }
 
   async downloadArtifact(rpcToken: string, hostRef: string, filename: string): Promise<Buffer> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcToken,
       this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/artifacts/${encodeURIComponent(filename)}/download`
       ),
@@ -1072,7 +1098,7 @@ export class RpcProxyClient {
     if (query.agent) requestUrl.searchParams.set('agent', query.agent)
     if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
     if (query.cursor) requestUrl.searchParams.set('cursor', query.cursor)
-    const response = await fetch(requestUrl, {
+    const response = await fetchWithSession(rpcToken, requestUrl, {
       headers: { authorization: `Bearer ${rpcToken}` },
       signal: withTimeout(),
     })
@@ -1111,7 +1137,7 @@ export class RpcProxyClient {
     if (query.afterTurn !== undefined) {
       requestUrl.searchParams.set('afterTurn', String(query.afterTurn))
     }
-    const response = await fetch(requestUrl, {
+    const response = await fetchWithSession(rpcToken, requestUrl, {
       headers: { authorization: `Bearer ${rpcToken}` },
       signal: withTimeout(),
     })
@@ -1154,7 +1180,8 @@ export class RpcProxyClient {
     assertSafeRouteSegment('hostRef', hostRef)
     assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
     assertSafeRouteSegment('chatId', chatId)
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcToken,
       this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`
       ),
@@ -1199,7 +1226,7 @@ export class RpcProxyClient {
     const modelsPath = trimmedChatId
       ? `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/models?chatId=${encodeURIComponent(trimmedChatId)}`
       : `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/models`
-    const response = await fetch(this.url(modelsPath), {
+    const response = await fetchWithSession(rpcToken, this.url(modelsPath), {
       headers: { authorization: `Bearer ${rpcToken}` },
       signal: withTimeout(),
     })
@@ -1233,7 +1260,8 @@ export class RpcProxyClient {
     model: string,
     expectedRevision?: number
   ): Promise<SetHostModelResult> {
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcToken,
       this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/model`),
       {
         method: 'POST',
@@ -1303,7 +1331,8 @@ export class RpcProxyClient {
     assertSafeRouteSegment('hostRef', hostRef)
     assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
     assertSafeRouteSegment('chatId', chatId)
-    const response = await fetch(
+    const response = await fetchWithSession(
+      rpcToken,
       this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/name`
       ),
@@ -1352,14 +1381,18 @@ export class RpcProxyClient {
     rpcAccessToken: string,
     hostRef: string
   ): Promise<{ ok: true; hostRef: string; setCookie: string[] }> {
-    const res = await fetch(this.url(`/api/v1/desktop/${encodeURIComponent(hostRef)}/session`), {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${rpcAccessToken}`,
-        'content-type': 'application/json',
-      },
-      body: '{}',
-    })
+    const res = await fetchWithSession(
+      rpcAccessToken,
+      this.url(`/api/v1/desktop/${encodeURIComponent(hostRef)}/session`),
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${rpcAccessToken}`,
+          'content-type': 'application/json',
+        },
+        body: '{}',
+      }
+    )
     if (!res.ok) {
       const text = await readErrorBody(res)
       throw new ApiError(

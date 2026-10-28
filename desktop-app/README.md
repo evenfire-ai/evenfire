@@ -25,7 +25,7 @@ Electron desktop client with a React renderer. The app authenticates through `ex
 
 ## Implemented Flows
 
-- Google login with direct `idToken` submit (`POST /api/v1/auth/google`)
+- Google login with direct `idToken` submit (`POST /api/v1/auth/v2/google`)
 - Invitation-token inspection and password setup after confirmation in `profile-ui`
 - Session restore from OS keychain (or local fallback file if keychain is unavailable)
 - Team listing and team switching

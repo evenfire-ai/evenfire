@@ -376,6 +376,24 @@ export function registerIpcHandlers(service: AppService): void {
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
 
+  const assertSignedOutForEnvironmentSelection = async (
+    expectedSessionGeneration?: number
+  ): Promise<number> => {
+    const observedGeneration = service.getSessionGeneration()
+    if (
+      expectedSessionGeneration !== undefined &&
+      expectedSessionGeneration !== observedGeneration
+    ) {
+      throw new Error('stale_session_generation')
+    }
+    if ((await service.getSessionState()).authenticated) {
+      throw new Error('desktop_setup_requires_signout')
+    }
+    const currentGeneration = service.getSessionGeneration()
+    if (currentGeneration !== observedGeneration) throw new Error('stale_session_generation')
+    return currentGeneration
+  }
+
   // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
   // R1-M1): the renderer attaches a requestId to an invoke and fires
   // 'gfs:abort' on Stop; the in-flight request's AbortController ends the
@@ -420,7 +438,12 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:selectRuntimeConfig', async (event, payload: { optionId: string }) => {
     assertTrustedSender(event)
-    return service.selectRuntimeConfig(sanitizeString(payload?.optionId))
+    const expectedSessionGeneration = await assertSignedOutForEnvironmentSelection()
+    const selection = await service.selectRuntimeConfigForHandoff(
+      sanitizeString(payload?.optionId),
+      expectedSessionGeneration
+    )
+    return selection.runtimeConfigState
   })
   ipcMain.handle(
     'auth:selectRuntimeConfigForHandoff',
@@ -434,6 +457,7 @@ export function registerIpcHandlers(service: AppService): void {
       ) {
         throw new Error('Invalid session generation')
       }
+      await assertSignedOutForEnvironmentSelection(expectedSessionGeneration)
       return service.selectRuntimeConfigForHandoff(
         sanitizeString(payload?.optionId),
         expectedSessionGeneration
@@ -442,6 +466,7 @@ export function registerIpcHandlers(service: AppService): void {
   )
   ipcMain.handle('auth:clearRuntimeConfigSelection', async event => {
     assertTrustedSender(event)
+    await assertSignedOutForEnvironmentSelection()
     return service.clearRuntimeConfigSelection()
   })
   ipcMain.handle(
@@ -462,14 +487,15 @@ export function registerIpcHandlers(service: AppService): void {
         rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
         appName: sanitizeString(payload?.appName),
       }
-      if (rawExpectedSessionGeneration === undefined) {
-        return service.saveRuntimeConfig(runtimeConfig)
-      }
-      return service.saveRuntimeConfig(runtimeConfig, rawExpectedSessionGeneration)
+      const expectedSessionGeneration = await assertSignedOutForEnvironmentSelection(
+        rawExpectedSessionGeneration
+      )
+      return service.saveRuntimeConfig(runtimeConfig, expectedSessionGeneration)
     }
   )
   ipcMain.handle('auth:deleteRuntimeConfig', async (event, payload: { optionId: string }) => {
     assertTrustedSender(event)
+    await assertSignedOutForEnvironmentSelection()
     return service.deleteRuntimeConfig(sanitizeString(payload?.optionId))
   })
   ipcMain.handle('auth:googleLogin', async (event, payload: { idToken: string }) => {
@@ -550,8 +576,7 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    const sessionGeneration = await service.logout()
-    return { ok: true, sessionGeneration }
+    return service.logout()
   })
 
   ipcMain.handle('notifications:isSupported', async event => {
@@ -763,13 +788,20 @@ export function registerIpcHandlers(service: AppService): void {
         throw new Error('zip entry exceeds the allowed maximum')
       }
       const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      const requestContext = service.captureGfsRequestContext()
       const result = await runWithGfsAbortSignal(requestId, signal =>
         appendZipEntryStreaming(
           sanitizeString(payload.jobId),
           zipJobOwnerId(event),
           name,
           async sink => {
-            await service.downloadGfsUriInto(uri, maxBytes, signal, chunk => sink.write(chunk))
+            await service.downloadGfsUriInto(
+              uri,
+              maxBytes,
+              signal,
+              chunk => sink.write(chunk),
+              requestContext
+            )
           },
           {}
         )

@@ -4,6 +4,7 @@ metadata:
   name: external-rest-api-config
   namespace: profiles
 data:
+  AUTH_PROTOCOL_CUTOVER_ENABLED: 'false'
   EXTERNAL_REST_API_JSON_BODY_LIMIT: 150mb
   # Coarse edge backstop capacity for GFS traffic behind one trusted proxy.
   # Authoritative per-session/actor budgets remain in control-api.

@@ -4,7 +4,7 @@
 
 ## Features
 
-- Password login through `external-rest-api /api/v1/auth/password-login`
+- Password login through the supported `external-rest-api /api/v1/auth/v2/password-login` protocol
 - Authenticated profile home with the signed-in user and email
 - Authenticated settings surface at `/settings` (redirects to `/settings/profile`) for editing your profile, changing your password, and managing social channels (`/settings/social`, `/settings/social/[network]`)
 - Authenticated member invitation route at `/members/invite`, which posts to `external-rest-api /api/v1/members/invite`

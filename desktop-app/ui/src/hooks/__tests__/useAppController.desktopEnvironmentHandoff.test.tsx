@@ -5,6 +5,7 @@ import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
 } from '../../../../testSupport/appService.nativeCommitTestHarness'
+import { testSessionTokenWithExpiry } from '../../../../testSupport/authTestFixtures'
 import {
   type AppControllerDesktopEnvironmentHandoffProducer,
   installAppControllerClerum,
@@ -14,7 +15,7 @@ import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-describe('useAppController desktop environment handoff', () => {
+describe('useAppController login-screen environment selection', () => {
   let unmount: (() => void) | null = null
 
   afterEach(async () => {
@@ -25,16 +26,18 @@ describe('useAppController desktop environment handoff', () => {
     await cleanupNativeCommitTestHarness()
   })
 
-  async function openSwitchConfirmation() {
-    const native = await createNativeCommitTestHarness()
+  async function openAuthenticatedApp(options: { keytarAvailable?: boolean } = {}) {
+    const native = await createNativeCommitTestHarness({
+      keytarAvailable: options.keytarAvailable ?? true,
+    })
     const producer = native.service as unknown as AppControllerDesktopEnvironmentHandoffProducer & {
       authClient: unknown
-      googleLogin: (token: string) => Promise<unknown>
+      passwordLogin: (email: string, password: string) => Promise<unknown>
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
     producer.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({
-        token: 'synthetic-session-a',
+      passwordLogin: vi.fn().mockResolvedValue({
+        token: testSessionTokenWithExpiry(),
         me: {
           id: 'user-1',
           email: 'test@clerum.io',
@@ -45,9 +48,18 @@ describe('useAppController desktop environment handoff', () => {
           role: 'member',
         },
       }),
+      getMe: vi.fn().mockResolvedValue({
+        id: 'user-1',
+        email: 'test@clerum.io',
+        name: 'Test User',
+        picture: null,
+        teamId: 'team-a',
+        teamName: 'Team A',
+        role: 'member',
+      }),
     }
     producer.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {})
-    await producer.googleLogin('synthetic-google-token')
+    await producer.passwordLogin('test@clerum.io', 'synthetic-password')
 
     const { handle } = installAppControllerClerum({
       desktopEnvironmentHandoffProducer: producer,
@@ -58,93 +70,60 @@ describe('useAppController desktop environment handoff', () => {
     await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
     await waitFor(() => expect(handle.onDesktopEnvironmentSetup).toHaveBeenCalledOnce())
 
-    let handoff!: Promise<void>
-    await act(async () => {
-      handoff = handle.emitDesktopEnvironmentSetup({
+    return { app, handle, native }
+  }
+
+  it('rejects a linked environment while authenticated until the user logs out', async () => {
+    const { app, handle, native } = await openAuthenticatedApp()
+
+    await act(async () =>
+      handle.emitDesktopEnvironmentSetup({
         appName: 'Environment B',
         externalRestApiBaseUrl: native.restB,
       })
-    })
-    await waitFor(() =>
-      expect(app.result.current.pendingDesktopEnvironmentSwitchConfirmation).toMatchObject({
-        targetEnvironmentName: 'Environment B',
-        targetExternalRestApiBaseUrl: native.restB,
-      })
     )
-    return { app, handle, handoff, native, targetOptionId: native.optionB.id }
-  }
-
-  it('keeps the signed-in session and skips selection when the user cancels', async () => {
-    const { app, handle, handoff } = await openSwitchConfirmation()
-
-    await act(async () => app.result.current.handleCancelDesktopEnvironmentSwitchConfirmation())
-    await act(async () => handoff)
 
     expect(handle.logout).not.toHaveBeenCalled()
     expect(handle.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
     expect(app.result.current.isAuthenticated).toBe(true)
-    expect(app.result.current.pendingDesktopEnvironmentSwitchConfirmation).toBeNull()
-    expect(app.result.current.toasts.map(toast => toast.text)).toContain(
-      'Environment switch cancelled. Your current session remains active.'
+    expect(native.runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(
+      native.optionA.id
     )
+    expect(app.result.current.statusText).toContain('Log out before selecting another desktop')
   })
 
-  it('signs out before selecting the saved environment with the logout generation', async () => {
-    const { app, handle, handoff, targetOptionId } = await openSwitchConfirmation()
-
-    await act(async () => app.result.current.handleConfirmDesktopEnvironmentSwitchConfirmation())
-    await act(async () => handoff)
-
-    expect(handle.logout).toHaveBeenCalledOnce()
-    const logoutResult = await handle.logout.mock.results[0]?.value
-    expect(handle.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
-      targetOptionId,
-      logoutResult.sessionGeneration
-    )
-    expect(handle.logout.mock.invocationCallOrder[0]!).toBeLessThan(
-      handle.selectRuntimeConfigForHandoff.mock.invocationCallOrder[0]!
-    )
-    expect(app.result.current.isAuthenticated).toBe(false)
-    expect(app.result.current.runtimeConfigState?.activeOptionId).toBe(targetOptionId)
-  })
-
-  it('keeps the committed logout when renderer session reload fails', async () => {
-    const { app, handle, handoff, targetOptionId } = await openSwitchConfirmation()
-    handle.setSessionStateError(new Error('session read unavailable'))
-
-    await act(async () => app.result.current.handleConfirmDesktopEnvironmentSwitchConfirmation())
-    await act(async () => handoff)
-
-    expect(handle.logout).toHaveBeenCalledOnce()
-    const logoutResult = await handle.logout.mock.results[0]?.value
-    expect(handle.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
-      targetOptionId,
-      logoutResult.sessionGeneration
-    )
-    expect(app.result.current.isAuthenticated).toBe(false)
-    expect(app.result.current.runtimeConfigState?.activeOptionId).toBe(targetOptionId)
-    expect(app.result.current.statusText).toContain(
-      'Could not load the selected desktop environment'
-    )
-  })
-
-  it('keeps the signed-in session and reports the native logout failure', async () => {
-    const { app, handle, handoff, native } = await openSwitchConfirmation()
-    const tokenStore = native.service as unknown as {
-      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+  it('shows signed-out UI while GFS resource cleanup remains pending', async () => {
+    const { app, handle, native } = await openAuthenticatedApp()
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>(resolve => {
+      releaseCleanup = resolve
+    })
+    const producer = native.service as unknown as {
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
-    tokenStore.tokenStore.clearSessionToken.mockRejectedValueOnce(
-      new Error('secure storage unavailable')
-    )
+    vi.mocked(producer.suspendDesktopGfsUploadsForAuthBoundary).mockReturnValue(cleanup)
 
-    await act(async () => app.result.current.handleConfirmDesktopEnvironmentSwitchConfirmation())
-    await act(async () => handoff)
+    let logout!: Promise<void>
+    try {
+      await act(async () => {
+        logout = app.result.current.handleLogout()
+      })
 
-    expect(handle.logout).toHaveBeenCalledOnce()
-    expect(handle.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
-    expect(app.result.current.isAuthenticated).toBe(true)
-    expect(app.result.current.statusText).toContain(
-      "Logout failed: Error invoking remote method 'auth:logout': Error: secure storage unavailable"
-    )
+      await waitFor(() => expect(app.result.current.isAuthenticated).toBe(false))
+      expect(handle.logout).toHaveBeenCalledOnce()
+      await act(async () => {
+        await expect(handle.logout.mock.results[0]?.value).resolves.toMatchObject({
+          kind: 'committed',
+        })
+      })
+      expect(app.result.current.isAuthenticated).toBe(false)
+    } finally {
+      await act(async () => {
+        releaseCleanup()
+        await cleanup
+      })
+    }
+
+    await act(async () => logout)
   })
 })

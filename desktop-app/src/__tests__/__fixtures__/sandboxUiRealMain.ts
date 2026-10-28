@@ -106,6 +106,7 @@ export function startRealMain(options: RealMainOptions): RealMain {
   if (current) throw new Error('a main process is already running: await resetRealMain() first')
   const service = new AppService()
   ;(service as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
+  ;(service as unknown as { me: unknown }).me = { id: 'fake-user', teamId: 'team-1' }
   const parent = new FakeParentWindow()
   const sender = { id: 1 }
   const mainWebContents = new FakeMainWebContents()

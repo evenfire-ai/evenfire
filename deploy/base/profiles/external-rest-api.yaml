@@ -32,6 +32,11 @@ spec:
             - secretRef:
                 name: external-rest-api-secrets
           env:
+            - name: AUTH_PROTOCOL_CUTOVER_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  key: AUTH_PROTOCOL_CUTOVER_ENABLED
+                  name: external-rest-api-config
             - name: EXTERNAL_REST_API_PORT
               value: '8091'
             - name: EXTERNAL_REST_API_JSON_BODY_LIMIT
