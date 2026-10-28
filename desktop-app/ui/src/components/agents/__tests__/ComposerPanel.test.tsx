@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatComposerStateContextValue } from '@contexts/ChatComposerStateContext'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
@@ -225,6 +225,57 @@ describe.each([
   ['inline new-chat', true],
   ['docked conversation', false],
 ])('ComposerPanel %s', (_name, inline) => {
+  it('closes a submenu 400ms after hover moves to another action', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      render(<ComposerPanel inline={inline} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+
+      const submenu = () => document.querySelector('.composer-reference-submenu')
+      const pluginsItem = screen.getByRole('menuitem', { name: /Plugins/ })
+      const connectorsItem = screen.getByRole('menuitem', { name: /Connectors/ })
+      const uploadItem = screen.getByRole('menuitem', { name: 'Upload Files' })
+
+      fireEvent.mouseEnter(pluginsItem)
+      const pluginsSubmenu = submenu()
+      expect(pluginsSubmenu).toBeTruthy()
+      fireEvent.mouseLeave(pluginsItem)
+      fireEvent.mouseEnter(pluginsSubmenu as HTMLElement)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(submenu()).toBeTruthy()
+
+      fireEvent.mouseLeave(pluginsSubmenu as HTMLElement)
+      fireEvent.mouseEnter(uploadItem)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(399)
+      })
+      expect(submenu()).toBeTruthy()
+
+      fireEvent.mouseEnter(connectorsItem)
+      expect(screen.getByRole('menu', { name: 'connectors choices' })).toBeTruthy()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(screen.getByRole('menu', { name: 'connectors choices' })).toBeTruthy()
+
+      fireEvent.mouseLeave(connectorsItem)
+      fireEvent.mouseEnter(uploadItem)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(399)
+      })
+      expect(submenu()).toBeTruthy()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+      expect(submenu()).toBeNull()
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
   it('renders add-context labels through Ant Design menu slots', () => {
     render(<ComposerPanel inline={inline} />)
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))

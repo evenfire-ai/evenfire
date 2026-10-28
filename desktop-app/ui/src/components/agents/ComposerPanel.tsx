@@ -59,6 +59,7 @@ type ComposerPanelProps = {
 const COMPOSER_MAX_TEXT_HEIGHT = 240
 const COMPOSER_MIN_TEXT_HEIGHT = 56
 const COMPOSER_INLINE_MIN_TEXT_HEIGHT = 48
+const COMPOSER_SUBMENU_CLOSE_DELAY_MS = 400
 
 function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']): string {
   if (type === 'plugin') return 'Plugin'
@@ -213,6 +214,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerMenuRef = useRef<HTMLSpanElement | null>(null)
+  const composerSubmenuCloseTimerRef = useRef<number | null>(null)
   // The reference submenu is portaled out of the composer (the drawer's
   // overflow-clipping ancestors would otherwise crop it), so it needs an anchor
   // ref per primary item and its own ref for click-outside + positioning.
@@ -220,6 +222,23 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const pluginsItemRef = useRef<HTMLElement | null>(null)
   const connectorsItemRef = useRef<HTMLElement | null>(null)
   const agentFilesItemRef = useRef<HTMLElement | null>(null)
+  const clearComposerSubmenuCloseTimer = useCallback(() => {
+    const timer = composerSubmenuCloseTimerRef.current
+    if (timer === null) return
+    window.clearTimeout(timer)
+    composerSubmenuCloseTimerRef.current = null
+  }, [])
+  const scheduleComposerSubmenuClose = useCallback(() => {
+    if (composerSubmenuCloseTimerRef.current !== null) return
+    composerSubmenuCloseTimerRef.current = window.setTimeout(() => {
+      composerSubmenuCloseTimerRef.current = null
+      setComposerSubmenu(null)
+    }, COMPOSER_SUBMENU_CLOSE_DELAY_MS)
+  }, [])
+  const openComposerSubmenu = (submenu: NonNullable<typeof composerSubmenu>) => {
+    clearComposerSubmenuCloseTimer()
+    setComposerSubmenu(submenu)
+  }
   const composerSubmenuAnchorRef =
     composerSubmenu === 'connectors'
       ? connectorsItemRef
@@ -262,9 +281,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // submenu item is outside `composerMenuRef` and would close the menu before
   // the item's click fires.
   useClickOutside([composerMenuRef, composerSubmenuRef], composerMenuOpen, () => {
+    clearComposerSubmenuCloseTimer()
     setComposerMenuOpen(false)
     setComposerSubmenu(null)
   })
+
+  useEffect(() => clearComposerSubmenuCloseTimer, [clearComposerSubmenuCloseTimer])
 
   const resizeComposerInput = useCallback(() => {
     const textarea = composerInputRef.current
@@ -939,12 +961,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 aria-haspopup="menu"
                 aria-expanded={composerMenuOpen}
                 onClick={() => {
+                  clearComposerSubmenuCloseTimer()
                   setComposerMenuOpen(open => !open)
                   setComposerSubmenu(null)
                 }}
               />
               {composerMenuOpen ? (
-                <div className="composer-reference-menu-panel">
+                <div
+                  className="composer-reference-menu-panel"
+                  onMouseLeave={scheduleComposerSubmenuClose}
+                >
                   <Menu
                     items={
                       [
@@ -961,8 +987,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                             </span>
                           ),
                           extra: <RightOutlined aria-hidden="true" />,
-                          onClick: () => setComposerSubmenu('plugins'),
-                          onMouseEnter: () => setComposerSubmenu('plugins'),
+                          onClick: () => openComposerSubmenu('plugins'),
+                          onMouseEnter: () => openComposerSubmenu('plugins'),
+                          onMouseLeave: scheduleComposerSubmenuClose,
                         },
                         {
                           key: 'connectors',
@@ -977,8 +1004,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                             </span>
                           ),
                           extra: <RightOutlined aria-hidden="true" />,
-                          onClick: () => setComposerSubmenu('connectors'),
-                          onMouseEnter: () => setComposerSubmenu('connectors'),
+                          onClick: () => openComposerSubmenu('connectors'),
+                          onMouseEnter: () => openComposerSubmenu('connectors'),
+                          onMouseLeave: scheduleComposerSubmenuClose,
                         },
                         ...(SHOW_AGENT_FILES_UI
                           ? [
@@ -1003,8 +1031,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                                   <RightOutlined aria-hidden="true" />
                                 ) : undefined,
                                 onClick: agentFilesDisabled ? undefined : openAgentFilesModal,
-                                onMouseEnter: () =>
-                                  setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null),
+                                onMouseEnter: () => {
+                                  if (agentFilesDisabled) openComposerSubmenu('agent-files')
+                                  else scheduleComposerSubmenuClose()
+                                },
+                                onMouseLeave: agentFilesDisabled
+                                  ? scheduleComposerSubmenuClose
+                                  : undefined,
                               },
                             ]
                           : []),
@@ -1014,6 +1047,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                                 key: 'even-drive',
                                 icon: <PaperClipOutlined aria-hidden="true" />,
                                 label: 'EvenDrive',
+                                onMouseEnter: scheduleComposerSubmenuClose,
                                 onClick: openGlobalFilesModal,
                               },
                             ]
@@ -1022,6 +1056,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           key: 'upload',
                           icon: <UploadOutlined aria-hidden="true" />,
                           label: 'Upload Files',
+                          onMouseEnter: scheduleComposerSubmenuClose,
                           onClick: openUploadPicker,
                         },
                       ] satisfies NonNullable<MenuProps['items']>
@@ -1031,15 +1066,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       const target = event.target as HTMLElement
                       const menuItem = target.closest('[role="menuitem"]')
                       if (pluginsItemRef.current?.closest('[role="menuitem"]') === menuItem) {
-                        setComposerSubmenu('plugins')
+                        openComposerSubmenu('plugins')
                       } else if (
                         connectorsItemRef.current?.closest('[role="menuitem"]') === menuItem
                       ) {
-                        setComposerSubmenu('connectors')
+                        openComposerSubmenu('connectors')
                       } else if (
                         agentFilesItemRef.current?.closest('[role="menuitem"]') === menuItem
                       ) {
-                        setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                        if (agentFilesDisabled) openComposerSubmenu('agent-files')
+                        else scheduleComposerSubmenuClose()
+                      } else {
+                        scheduleComposerSubmenuClose()
                       }
                     }}
                     selectable={false}
@@ -1055,6 +1093,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     <div
                       className="composer-reference-submenu"
                       ref={composerSubmenuRef}
+                      onMouseEnter={clearComposerSubmenuCloseTimer}
+                      onMouseLeave={scheduleComposerSubmenuClose}
                       style={{
                         left: submenuFlyoutPosition?.left ?? 0,
                         top: submenuFlyoutPosition?.top ?? 0,
@@ -1124,6 +1164,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                                 : []
                         }
                         mode="vertical"
+                        onFocus={clearComposerSubmenuCloseTimer}
                         selectable={false}
                       />
                     </div>,
