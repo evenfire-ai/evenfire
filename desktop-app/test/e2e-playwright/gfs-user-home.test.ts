@@ -528,23 +528,56 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       })
       await test.step('owner lowers an Editor share B made to C to Read (D26, D9)', async () => {
         // Named precondition: no UI writes share rows (see seedShare).
-        fx.seedShare(home.drive!, outerId, b, c, ['read', 'write', 'share'])
+        const shareId = fx.seedShare(home.drive!, outerId, b, c, ['read', 'write', 'share'])
+        const cRows = () =>
+          fx.accessRows(outerId).filter(row => row.subjectType === 'user' && row.subjectId === c.id)
+        expect(cRows()).toEqual([
+          expect.objectContaining({ id: shareId, relation: 'share', inherit: true }),
+        ])
         const outerUri = `gfs://${home.drive}/${ridOf(outerId)}`
-        const cAccess = cS.page.getByLabel('Your access')
+        const innerRow = cS.page.getByRole('button', { name: `Open ${inner}` })
+        // C's effective bits on the folder, read through C's own authenticated
+        // Desktop session ("Your access" renders only inside the user's home).
+        const cHeld = () =>
+          cS.page.evaluate(
+            async ([resourceId, drive]) =>
+              (
+                await (
+                  window as unknown as {
+                    clerum: {
+                      gfs: {
+                        affordances: (id: string, d: string) => Promise<{ held: string[] }>
+                      }
+                    }
+                  }
+                ).clerum.gfs.affordances(resourceId, drive)
+              ).held,
+            [outerId, home.drive!] as const
+          )
+        await expect.poll(cHeld).toEqual(expect.arrayContaining(['read', 'write']))
+        // C reaches the folder through the share (positive).
         await openEvenDriveLink(cS.page, outerUri)
-        await expect(cAccess).toContainText('write')
+        await expect(innerRow).toBeVisible()
         await openHomeFolder(ownerS.page, home)
         await view.openShare(outer)
         await new DesktopShareDialog(ownerS.page).lowerShare(c.name)
-        expect(fx.accessFor(outerId, 'user', c.id)).toMatchObject({
-          relation: 'share',
-          permissions: ['read', 'share'],
-          inherit: true,
-        })
+        expect(cRows()).toEqual([
+          expect.objectContaining({
+            id: shareId,
+            relation: 'share',
+            permissions: ['read', 'share'],
+            inherit: true,
+          }),
+        ])
         await ownerS.page.keyboard.press('Escape')
+        // Lowering narrows the share without revoking it: C keeps read and
+        // loses write, and opens the folder again after leaving it.
+        await expect.poll(cHeld).not.toContain('write')
+        expect(await cHeld()).toContain('read')
+        await openHomeFolder(cS.page, await fx.waitForHomeState(c.id, 'ready'))
+        await expect(innerRow).toHaveCount(0)
         await openEvenDriveLink(cS.page, outerUri)
-        await expect(cAccess).toContainText('read')
-        await expect(cAccess).not.toContainText('write')
+        await expect(innerRow).toBeVisible()
       })
     } finally {
       for (const s of sessions.reverse()) await s.close()
