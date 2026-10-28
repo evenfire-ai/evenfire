@@ -2775,30 +2775,29 @@ export function FilesPage({
                     <h4>Add people, teams, agents, or workflows</h4>
                   </div>
                 </div>
-                {loadingAffordances ? (
-                  <p className="muted">Refreshing permissions…</p>
-                ) : affordancesError ? (
-                  <StatusBanner tone="error" text={affordancesError} />
-                ) : affordances ? (
-                  <>
-                    <GfsDelegationPanel
-                      affordances={affordances}
-                      subjectOptions={grantSubjectOptions}
-                      subjectOptionsLoading={
-                        teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
-                      }
-                      subjectOptionsError={mergeErrorMessages(
-                        teamDirectoryQuery.error,
-                        myAgentsQuery.error
-                      )}
-                      isDirectory={currentIsFolder}
-                      onGrant={handleGrant}
-                      onDetailViewChange={setShareDetailsOpen}
-                    />
-                  </>
-                ) : (
-                  <p className="muted">Loading permissions…</p>
-                )}
+                {affordancesError ? <StatusBanner tone="error" text={affordancesError} /> : null}
+                {affordances ? (
+                  <GfsDelegationPanel
+                    affordances={affordances}
+                    subjectOptions={grantSubjectOptions}
+                    subjectOptionsLoading={
+                      teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
+                    }
+                    subjectOptionsError={mergeErrorMessages(
+                      teamDirectoryQuery.error,
+                      myAgentsQuery.error
+                    )}
+                    permissionCheckPending={loadingAffordances}
+                    permissionCheckFailed={Boolean(affordancesError)}
+                    isDirectory={currentIsFolder}
+                    onGrant={handleGrant}
+                    onDetailViewChange={setShareDetailsOpen}
+                  />
+                ) : !affordancesError ? (
+                  <p className="muted" role="status">
+                    Loading permissions…
+                  </p>
+                ) : null}
               </section>
 
               {!shareDetailsOpen ? (

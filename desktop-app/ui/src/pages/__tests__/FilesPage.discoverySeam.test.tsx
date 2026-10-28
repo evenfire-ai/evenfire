@@ -7,15 +7,24 @@ import {
   focusManager,
   onlineManager,
 } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
+  affordancesFailureMessage,
+  affordancesResult,
+  childView,
   gfsRouteFailureMessage,
+  grantsListPage,
+  heldAffordances,
   listAccessiblePage,
   listChildrenPage,
+  resolveResource,
+  resolvedDirectory,
+  sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
+import { delegationAffordances } from '../../../../src/gfs/delegation'
 import { FilesPage } from '../FilesPage'
 
 /**
@@ -59,10 +68,14 @@ const testQueryClients: QueryClient[] = []
 const ACCESSIBLE_KEY = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main')
 const GFS_ACCESSIBLE = 'fixture-session-token'
 
-function installGfsBridge(gfs: Partial<typeof window.clerum.gfs>) {
+function installGfsBridge(
+  gfs: Partial<typeof window.clerum.gfs>,
+  extras: Record<string, unknown> = {}
+) {
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
+      ...extras,
       gfs: {
         resolve: vi.fn(),
         listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -78,9 +91,8 @@ function installGfsBridge(gfs: Partial<typeof window.clerum.gfs>) {
   })
 }
 
-function renderFilesPage() {
-  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
-  testQueryClients.push(queryClient)
+function renderFilesPage(queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })) {
+  if (!testQueryClients.includes(queryClient)) testQueryClients.push(queryClient)
   return {
     ...render(
       <AuthContext.Provider value={authValue}>
@@ -91,6 +103,16 @@ function renderFilesPage() {
     ),
     queryClient,
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
 }
 
 describe('FilesPage against the real GFS browser controller', () => {
@@ -739,5 +761,353 @@ describe('FilesPage against the real GFS browser controller', () => {
     await act(async () => resolveRefetch(emptyPage))
     expect(emptyState.isConnected).toBe(true)
     expect(browser.getAttribute('aria-busy')).toBe('false')
+  })
+
+  it('withholds a cached empty root until remount authority validation succeeds', async () => {
+    const emptyPage = await listAccessiblePage([])
+    const discovery = deferred<typeof emptyPage>()
+    const listAccessible = vi
+      .fn()
+      .mockResolvedValueOnce(emptyPage)
+      .mockImplementationOnce(() => discovery.promise)
+    installGfsBridge({ listAccessible })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const firstMount = renderFilesPage(queryClient)
+    const firstEmptyState = await screen.findByText('No shared files yet')
+    const dataUpdatedAt = queryClient.getQueryState(ACCESSIBLE_KEY)?.dataUpdatedAt ?? 0
+    firstMount.unmount()
+    expect(firstEmptyState.isConnected).toBe(false)
+
+    await waitFor(() => expect(Date.now()).toBeGreaterThan(dataUpdatedAt))
+    renderFilesPage(queryClient)
+
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    await waitFor(() => {
+      expect(listAccessible).toHaveBeenCalledTimes(2)
+      expect(queryClient.getQueryState(ACCESSIBLE_KEY)?.fetchStatus).toBe('fetching')
+    })
+    expect(queryClient.getQueryState(ACCESSIBLE_KEY)?.data).toMatchObject({
+      pages: [{ items: [] }],
+    })
+    expect(screen.queryByText('No shared files yet')).toBeNull()
+    expect(screen.getByRole('status', { name: 'Loading files' })).toBeTruthy()
+    expect(browser.getAttribute('aria-busy')).toBe('true')
+
+    await act(async () => discovery.resolve(emptyPage))
+
+    expect(await screen.findByText('No shared files yet')).toBeTruthy()
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+  })
+
+  it('keeps a cached empty child state connected while revisiting through its ancestor', async () => {
+    const rootPage = await listAccessiblePage([
+      accessibleResource('folder-a', 'Folder A', 'directory', {
+        sources: ['grant'],
+        permissions: ['read'],
+        coversDescendants: true,
+      }),
+    ])
+    const ancestorPage = await listChildrenPage([
+      childView('folder-b', 'Folder B', 'directory', { readable: true }),
+    ])
+    const emptyChildrenPage = await listChildrenPage([])
+    const folderBRefresh = deferred<typeof emptyChildrenPage>()
+    let holdNextFolderBRequest = false
+    let heldFolderBRequestStarted = false
+    const listChildren = vi.fn((resourceId: string) => {
+      if (resourceId === 'folder-a') return Promise.resolve(ancestorPage)
+      if (resourceId === 'folder-b' && holdNextFolderBRequest) {
+        holdNextFolderBRequest = false
+        heldFolderBRequestStarted = true
+        return folderBRefresh.promise
+      }
+      return Promise.resolve(emptyChildrenPage)
+    })
+    installGfsBridge({ listAccessible: vi.fn(async () => rootPage), listChildren })
+
+    const { queryClient } = renderFilesPage()
+    await screen.findByRole('button', { name: 'Open Folder A' })
+    fireEvent.click(screen.getByRole('button', { name: 'Folder A' }))
+    await screen.findByRole('button', { name: 'Open Folder B' })
+    fireEvent.click(screen.getByRole('button', { name: 'Folder B' }))
+    await screen.findByText('This folder is empty')
+
+    const folderBKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder-b', 'main')
+    await waitFor(() => {
+      expect(queryClient.getQueryState(folderBKey)?.status).toBe('success')
+      expect(queryClient.getQueryState(folderBKey)?.fetchStatus).toBe('idle')
+    })
+    expect(queryClient.getQueryData(folderBKey)).toMatchObject({ pages: [{ items: [] }] })
+
+    const breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
+    fireEvent.click(within(breadcrumbs).getByRole('button', { name: 'Folder A' }))
+    await screen.findByRole('button', { name: 'Open Folder B' })
+    await waitFor(() => {
+      expect(
+        queryClient.getQueryCache().find({ exact: true, queryKey: folderBKey })?.getObserversCount()
+      ).toBe(0)
+    })
+    expect(queryClient.getQueryData(folderBKey)).toMatchObject({ pages: [{ items: [] }] })
+
+    holdNextFolderBRequest = true
+    fireEvent.click(screen.getByRole('button', { name: 'Folder B' }))
+    await waitFor(() => {
+      expect(heldFolderBRequestStarted).toBe(true)
+      expect(queryClient.getQueryState(folderBKey)?.fetchStatus).toBe('fetching')
+      expect(queryClient.getQueryData(folderBKey)).toMatchObject({ pages: [{ items: [] }] })
+    })
+
+    const emptyState = screen.getByText('This folder is empty')
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    expect(emptyState.isConnected).toBe(true)
+    expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+
+    await act(async () => folderBRefresh.resolve(emptyChildrenPage))
+
+    expect(emptyState.isConnected).toBe(true)
+    expect(screen.getByText('This folder is empty')).toBe(emptyState)
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+  })
+
+  it('shows initial loading after removal and a real accessible-query observer rebind', async () => {
+    const emptyPage = await listAccessiblePage([])
+    const discovery = deferred<typeof emptyPage>()
+    const listAccessible = vi
+      .fn()
+      .mockResolvedValueOnce(emptyPage)
+      .mockImplementationOnce(() => discovery.promise)
+    installGfsBridge({ listAccessible })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const firstMount = renderFilesPage(queryClient)
+    const firstEmptyState = await screen.findByText('No shared files yet')
+    firstMount.unmount()
+
+    act(() => {
+      queryClient.removeQueries({ exact: true, queryKey: ACCESSIBLE_KEY })
+    })
+    expect(queryClient.getQueryState(ACCESSIBLE_KEY)).toBeUndefined()
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+
+    renderFilesPage(queryClient)
+
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    await waitFor(() => {
+      expect(listAccessible).toHaveBeenCalledTimes(2)
+      expect(queryClient.getQueryState(ACCESSIBLE_KEY)?.fetchStatus).toBe('fetching')
+      expect(queryClient.getQueryState(ACCESSIBLE_KEY)?.data).toBeUndefined()
+    })
+    expect(firstEmptyState.isConnected).toBe(false)
+    expect(screen.queryByText('No shared files yet')).toBeNull()
+    expect(screen.getByRole('status', { name: 'Loading files' })).toBeTruthy()
+    expect(browser.getAttribute('aria-busy')).toBe('true')
+
+    await act(async () => discovery.resolve(emptyPage))
+
+    expect(await screen.findByText('No shared files yet')).toBeTruthy()
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+  })
+
+  it('keeps the typed delegation form visible and blocks Share during exact permission refresh', async () => {
+    const rootPage = await listAccessiblePage([
+      accessibleResource('folder-a', 'Folder A', 'directory', {
+        sources: ['grant'],
+        permissions: ['read', 'manage_acl'],
+        coversDescendants: true,
+      }),
+    ])
+    const emptyChildrenPage = await listChildrenPage([])
+    const resolvedFolder = {
+      ...(await resolveResource(resolvedDirectory('folder-a', 'Folder A'))),
+      pathCache: null,
+    }
+    const currentGrantable = await affordancesResult(
+      heldAffordances(['read', 'write', 'manage_acl', 'share'])
+    )
+    const freshPositive = delegationAffordances(
+      new Set(currentGrantable.held),
+      currentGrantable.isOperator
+    )
+    const permissionRefresh = deferred<typeof freshPositive>()
+    let nextPermissionRefresh: Promise<typeof freshPositive> | null = null
+    const listAccessible = vi.fn(async () => rootPage)
+    const listChildren = vi.fn(async () => emptyChildrenPage)
+    const affordances = vi.fn(() => {
+      const nextRefresh = nextPermissionRefresh
+      nextPermissionRefresh = null
+      return nextRefresh ?? Promise.resolve(freshPositive)
+    })
+    const grant = vi.fn(async () => undefined)
+    installGfsBridge(
+      {
+        listAccessible,
+        listChildren,
+        affordances,
+        grant,
+        resolve: vi.fn(async () => resolvedFolder),
+        listGrants: vi.fn(async () => grantsListPage([])),
+        listShares: vi.fn(async () => sharesListPage([])),
+      },
+      {
+        agents: {
+          listMine: vi.fn(async () => [
+            {
+              name: 'chatllm',
+              contextRef: 'ctx-1',
+              mcpServers: [],
+              gfsSubject: { type: 'host' as const, id: '1st:mcp-host/chatllm' },
+            },
+          ]),
+        },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-a', items: [] })) },
+      }
+    )
+
+    const { queryClient } = renderFilesPage()
+    await screen.findByRole('button', { name: 'Share Folder A' })
+    fireEvent.click(screen.getByRole('button', { name: 'Share Folder A' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Share folder Folder A' })
+    const affordancesKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'folder-a', 'main')
+    await waitFor(() => {
+      expect(queryClient.getQueryState(affordancesKey)?.status).toBe('success')
+      expect(queryClient.getQueryState(affordancesKey)?.fetchStatus).toBe('idle')
+      expect(queryClient.getQueryState(affordancesKey)?.isInvalidated).toBe(false)
+    })
+    const subjectInput = await within(dialog).findByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
+    fireEvent.focus(subjectInput)
+    fireEvent.change(subjectInput, { target: { value: 'chatllm' } })
+    fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
+    const selectedSubject = within(dialog).getByText('chatllm')
+    expect(subjectInput.isConnected).toBe(true)
+
+    nextPermissionRefresh = permissionRefresh.promise
+    act(() => {
+      void queryClient.invalidateQueries({ exact: true, queryKey: affordancesKey })
+    })
+    await waitFor(() => {
+      expect(queryClient.getQueryState(affordancesKey)?.fetchStatus).toBe('fetching')
+    })
+
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    const emptyState = screen.getByText('This folder is empty')
+    expect(subjectInput.isConnected).toBe(true)
+    expect(selectedSubject.isConnected).toBe(true)
+    expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
+    const shareButton = within(dialog).getByRole('button', { name: 'Share' }) as HTMLButtonElement
+    expect(shareButton.disabled).toBe(true)
+    fireEvent.click(shareButton)
+    expect(grant).not.toHaveBeenCalled()
+    expect(emptyState.isConnected).toBe(true)
+    expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+
+    await act(async () => permissionRefresh.resolve(freshPositive))
+
+    await waitFor(() => {
+      expect(queryClient.getQueryState(affordancesKey)?.fetchStatus).toBe('idle')
+    })
+    expect(subjectInput.isConnected).toBe(true)
+    expect(selectedSubject.isConnected).toBe(true)
+    expect(within(dialog).queryByText('Checking permissions…')).toBeNull()
+    expect(shareButton.disabled).toBe(false)
+    fireEvent.click(shareButton)
+    await waitFor(() => {
+      expect(grant).toHaveBeenCalledOnce()
+      expect(grant).toHaveBeenCalledWith(
+        'folder-a',
+        ['host:1st:mcp-host/chatllm'],
+        ['read'],
+        'main',
+        true
+      )
+    })
+    expect(emptyState.isConnected).toBe(true)
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+
+    const selectAgent = async (input = subjectInput) => {
+      fireEvent.focus(input)
+      fireEvent.change(input, { target: { value: 'chatllm' } })
+      fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
+      return within(dialog).getByText('chatllm')
+    }
+
+    const selectedAgain = await selectAgent()
+    const roleSelect = within(dialog).getByRole('button', {
+      name: 'Access role for selected recipients',
+    })
+    fireEvent.click(roleSelect)
+    fireEvent.click(await within(dialog).findByRole('option', { name: 'Editor' }))
+    expect(roleSelect.textContent).toContain('Editor')
+    const inheritanceCheckbox = within(dialog).getByRole('checkbox', {
+      name: 'Include contents of this folder',
+    }) as HTMLInputElement
+    fireEvent.click(inheritanceCheckbox)
+    expect(inheritanceCheckbox.checked).toBe(false)
+    const grantFailureMessage = await gfsRouteFailureMessage(
+      client =>
+        client.grant(
+          {
+            resourceId: 'folder-a',
+            drive: 'main',
+            subjects: [{ type: 'host', id: '1st:mcp-host/chatllm' }],
+            permissions: ['read', 'write'],
+            inherit: false,
+          },
+          'fixture-session-token'
+        ),
+      503,
+      { code: 'internal', message: 'share attempt failed' }
+    )
+    grant.mockRejectedValueOnce(new Error(grantFailureMessage))
+    const shareButtonAgain = within(dialog).getByRole('button', {
+      name: 'Share',
+    }) as HTMLButtonElement
+    fireEvent.click(shareButtonAgain)
+    expect(await within(dialog).findByText(/share attempt failed/)).toBeTruthy()
+    expect(grant).toHaveBeenCalledTimes(2)
+    expect(grant).toHaveBeenLastCalledWith(
+      'folder-a',
+      ['host:1st:mcp-host/chatllm'],
+      ['read', 'write'],
+      'main',
+      false
+    )
+
+    const producerErrorMessage = await affordancesFailureMessage(
+      503,
+      { code: 'internal', message: 'gfs controller failed' },
+      'folder-a'
+    )
+    const failedRefresh = deferred<typeof freshPositive>()
+    nextPermissionRefresh = failedRefresh.promise
+    act(() => {
+      void queryClient.invalidateQueries({ exact: true, queryKey: affordancesKey })
+    })
+    await waitFor(() => {
+      expect(queryClient.getQueryState(affordancesKey)?.fetchStatus).toBe('fetching')
+    })
+    expect(subjectInput.isConnected).toBe(true)
+    expect(selectedAgain.isConnected).toBe(true)
+    expect(roleSelect.textContent).toContain('Editor')
+    expect(inheritanceCheckbox.checked).toBe(false)
+    expect(within(dialog).getByText(/share attempt failed/)).toBeTruthy()
+    expect(shareButtonAgain.disabled).toBe(true)
+    fireEvent.click(shareButtonAgain)
+    expect(grant).toHaveBeenCalledTimes(2)
+
+    await act(async () => failedRefresh.reject(new Error(producerErrorMessage)))
+    expect(await screen.findByText(/gfs controller failed/)).toBeTruthy()
+    expect(subjectInput.isConnected).toBe(true)
+    expect(selectedAgain.isConnected).toBe(true)
+    expect(roleSelect.textContent).toContain('Editor')
+    expect(inheritanceCheckbox.checked).toBe(false)
+    expect(within(dialog).getByText(/share attempt failed/)).toBeTruthy()
+    expect(shareButtonAgain.disabled).toBe(true)
+    fireEvent.click(shareButtonAgain)
+    expect(grant).toHaveBeenCalledTimes(2)
   })
 })

@@ -3576,7 +3576,7 @@ describe('FilesPage', () => {
     renderFilesPage()
     await openManageDialog('Product')
 
-    expect(screen.getByText('Refreshing permissions…')).toBeTruthy()
+    expect(screen.getByText('Checking permissions…')).toBeTruthy()
     expect(screen.queryByText('Read-only access')).toBeNull()
   })
 

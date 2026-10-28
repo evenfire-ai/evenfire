@@ -53,6 +53,8 @@ export function GfsDelegationPanel({
   subjectOptions,
   subjectOptionsLoading = false,
   subjectOptionsError = null,
+  permissionCheckPending = false,
+  permissionCheckFailed = false,
   isDirectory,
   onGrant,
   onDetailViewChange,
@@ -102,6 +104,14 @@ export function GfsDelegationPanel({
 
   // A Leader without manage_acl (canDelegate=false) sees no controls.
   if (!affordances.canDelegate) {
+    if (permissionCheckPending) {
+      return (
+        <p className="muted" role="status">
+          Checking permissions…
+        </p>
+      )
+    }
+    if (permissionCheckFailed) return null
     return (
       <div className="da-gfs-delegation__empty" role="note">
         <strong>Read-only access</strong>
@@ -139,6 +149,11 @@ export function GfsDelegationPanel({
         </p>
       ) : null}
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
+      {permissionCheckPending ? (
+        <p className="muted" role="status">
+          Checking permissions…
+        </p>
+      ) : null}
       {subjectKeys.length > 0 ? (
         <div className="da-gfs-delegation__scope-actions">
           {isDirectory ? (
@@ -167,7 +182,9 @@ export function GfsDelegationPanel({
             <Button
               type="button"
               loading={busy}
-              disabled={busy || bits.length === 0}
+              disabled={
+                busy || permissionCheckPending || permissionCheckFailed || bits.length === 0
+              }
               onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
             >
               Share
