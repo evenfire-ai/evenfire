@@ -325,6 +325,8 @@ type Config = {
   // rpcJwtPrivateKey (the open core uses one platform keypair; per-tenant keys
   // are the managed edition, P6).
   gfsTokenAudience: string
+  // Explicitly configured drive for automatic user-home provisioning.
+  gfsHomeDrive: string | null
   // TTL for gfs access tokens minted by POST /api/v1/gfs/token.
   gfsTokenTtlSeconds: number
   // In-cluster base URL of the gfsc read ClusterIP Service (gfs namespace).
@@ -1356,6 +1358,7 @@ export const config: Config = {
   wfcJwtAudience: process.env.CONTROL_API_WFC_JWT_AUDIENCE || 'workspace-files-controller',
   wfcTokenTtlSeconds: Number(process.env.CONTROL_API_WFC_TOKEN_TTL_SECONDS || 300),
   gfsTokenAudience: process.env.CONTROL_API_GFS_JWT_AUDIENCE || 'gfs-controller',
+  gfsHomeDrive: process.env.GFS_HOME_DRIVE?.trim() || null,
   gfsTokenTtlSeconds: Number(process.env.CONTROL_API_GFS_TOKEN_TTL_SECONDS || 3600),
   gfscBaseUrl: process.env.CONTROL_API_GFSC_BASE_URL || 'http://gfsc.gfs.svc.cluster.local:8087',
   gfscWriteBaseUrl:

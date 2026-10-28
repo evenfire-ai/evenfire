@@ -539,7 +539,7 @@ export async function auditMutation(
     targetKey: string
     op: string
     drive: string
-    resourceId: string
+    resourceId: string | null
     outcome: 'allowed' | 'denied'
     requestId?: string
     sourceIp?: string
@@ -548,13 +548,15 @@ export async function auditMutation(
     authoritySource?: 'user-session' | 'linked-admin'
   }
 ): Promise<string | null> {
-  const gfsUri = `gfs://${params.drive}/${params.resourceId}`
+  // A null resource (an event with no GFS resource yet) is stored as a NULL
+  // gfs_uri, never as a drive-root URI.
+  const gfsUri = params.resourceId === null ? null : `gfs://${params.drive}/${params.resourceId}`
   const rowHash = createHash('sha256')
     .update(
       [
         params.targetKey,
         params.op,
-        gfsUri,
+        gfsUri ?? '',
         params.outcome,
         params.actorOnBehalfOf === undefined ? params.actorKey : (params.actorOnBehalfOf ?? ''),
         params.desktopUserId ?? '',
