@@ -118,15 +118,15 @@ export async function retireUserHomeForInactiveUser(
       outcome: 'allowed',
     })
   }
+  await auditMutation(db, {
+    actorKey,
+    targetKey: `user:${userId}`,
+    op: 'user_home.retired',
+    drive,
+    resourceId,
+    outcome: 'allowed',
+  })
   if (home) {
-    await auditMutation(db, {
-      actorKey,
-      targetKey: `user:${userId}`,
-      op: 'user_home.retired',
-      drive,
-      resourceId,
-      outcome: 'allowed',
-    })
     const next = transitionUserHomeState(homeState(home), { type: 'retire' })
     await db.query(
       `UPDATE gfs_user_homes
@@ -201,13 +201,12 @@ export async function retireUserHomeForInactiveUser(
     shareRows.map(row => row.id),
   ])
 
-  if (!home) return
   log.info(
     {
       event: 'user_home.retired',
       userId,
       drive,
-      conflictCode: home.conflict_code,
+      conflictCode: home?.conflict_code ?? null,
       conflictDetail: detail,
       homeGrants: grantRows.filter(row => row.home_match).length,
       userGrants: grantRows.filter(row => row.user_match).length,

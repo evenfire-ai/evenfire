@@ -39,6 +39,7 @@ function mockAdminDeleteUserWithHomeCleanup() {
     if (sql.includes('SELECT agent_name FROM user_agents'))
       return { rows: [{ agent_name: 'my-agent' }], rowCount: 1 }
     if (sql.includes('FROM gfs_user_homes WHERE user_id')) return { rows: [], rowCount: 0 }
+    if (sql.includes('INSERT INTO gfs_audit')) return { rows: [{ id: 'audit-1' }], rowCount: 1 }
     if (sql.includes('FROM gfs_grants g'))
       return {
         rows: [
@@ -323,6 +324,21 @@ describe('services/directory team management unit tests', () => {
       expect.stringContaining('SELECT agent_name FROM user_agents'),
       ['u1']
     )
+    const audit = dbMocks.txQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO gfs_audit')
+    )
+    expect(audit?.[1]).toEqual([
+      'user:u1',
+      'operator:',
+      'user_home.retired',
+      null,
+      'allowed',
+      null,
+      null,
+      expect.stringMatching(/^[0-9a-f]{64}$/),
+      null,
+      null,
+    ])
     expect(dbMocks.txQuery).toHaveBeenCalledWith(
       expect.stringContaining('DELETE FROM gfs_grants'),
       [['grant-1']]
