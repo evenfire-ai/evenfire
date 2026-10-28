@@ -220,7 +220,8 @@ async function openEvenDriveLink(page: Page, uri: string): Promise<void> {
   await page.getByRole('menuitem', { name: 'Open EvenDrive link' }).click()
   const dialog = page.getByRole('dialog', { name: 'Open EvenDrive link' })
   await expect(dialog).toBeVisible()
-  await dialog.getByLabel('EvenDrive link').fill(uri)
+  // By role: a label substring also matches the "Close EvenDrive link dialog" button.
+  await dialog.getByRole('textbox', { name: 'EvenDrive link' }).fill(uri)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
 }
 
@@ -305,7 +306,9 @@ function auditRowsAfter(sequenceNo: number, desktopUserId: string): GfsAuditRow[
     .map(line => JSON.parse(line) as GfsAuditRow)
 }
 
-test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
+// Not serial: every journey creates and cleans its own users, homes and
+// fixtures (per-test runTag), so one failure must not hide the others.
+test.describe('GFS per-user homes — Desktop (#1168)', () => {
   test.beforeAll(() => {
     assertGfsInfraHealthy()
   })

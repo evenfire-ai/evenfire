@@ -193,7 +193,8 @@ export async function openDesktopLink(page: Page, uri: string): Promise<void> {
     .getByRole('menuitem', { name: 'Open EvenDrive link' })
     .click()
   const dialog = page.getByRole('dialog', { name: 'Open EvenDrive link' })
-  await dialog.getByLabel('EvenDrive link').fill(uri)
+  // By role: a label substring also matches the "Close EvenDrive link dialog" button.
+  await dialog.getByRole('textbox', { name: 'EvenDrive link' }).fill(uri)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
 }
 
