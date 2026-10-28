@@ -115,7 +115,7 @@ declare global {
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void
         onSessionStateChanged: (callback: () => void) => () => void
-        onSessionExpired: (callback: () => void) => () => void
+        onSessionExpired: (callback: (sessionGeneration: number) => void) => () => void
         logout: () => Promise<DesktopLogoutOutcome>
       }
       team: {

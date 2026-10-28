@@ -21,6 +21,7 @@ import type { SetStatusFn } from './types'
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
+  onSessionReloadFailed?: () => void
 }
 
 function isInvitationExpiredError(error: unknown) {
@@ -57,7 +58,11 @@ function getDesktopSetupErrorMessage(error: unknown) {
   return 'Desktop setup could not be completed.'
 }
 
-export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthControllerParams) {
+export function useAuthController({
+  setStatus,
+  onSessionNeedsLoad,
+  onSessionReloadFailed,
+}: UseAuthControllerParams) {
   const [booting, setBootingState] = useState(true)
   const bootingRef = useRef(true)
   const setBooting = useCallback((next: boolean) => {
@@ -133,7 +138,57 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     setMe(null)
     setPassword('')
     setTemporarySessionExpiresAt(null)
-  }, [setIsAuthenticated])
+    setBackendSwitchHint(null)
+    desktopQueryClient.clear()
+    onSessionReloadFailed?.()
+  }, [onSessionReloadFailed, setIsAuthenticated])
+
+  const handleSessionExpired = useCallback(
+    async (expiredGeneration: number) => {
+      if (!Number.isSafeInteger(expiredGeneration)) {
+        clearAuthAfterSessionReloadFailure()
+        setStatus('Your temporary session ended. Please sign in again.', 'info')
+        return
+      }
+
+      let currentGeneration: number | null
+      try {
+        currentGeneration = await window.clerum.auth.getSessionGeneration()
+      } catch {
+        currentGeneration = null
+      }
+      if (currentGeneration !== null && currentGeneration !== expiredGeneration) return
+
+      try {
+        await onSessionNeedsLoad({ preserveNav: true })
+      } catch (error) {
+        let latestGeneration: number | null
+        try {
+          latestGeneration = await window.clerum.auth.getSessionGeneration()
+        } catch {
+          latestGeneration = null
+        }
+        if (latestGeneration !== null && latestGeneration !== expiredGeneration) return
+        clearAuthAfterSessionReloadFailure()
+        setStatus(
+          `Your temporary session ended. Please sign in again. ${error instanceof Error ? error.message : String(error)}`,
+          'info'
+        )
+        return
+      }
+
+      let latestGeneration: number
+      try {
+        latestGeneration = await window.clerum.auth.getSessionGeneration()
+      } catch {
+        latestGeneration = expiredGeneration
+      }
+      if (latestGeneration !== expiredGeneration) return
+      setTemporarySessionExpiresAt(null)
+      setStatus('Your temporary session ended. Please sign in again.', 'info')
+    },
+    [clearAuthAfterSessionReloadFailure, onSessionNeedsLoad, setStatus]
+  )
 
   const refreshRuntimeConfigState = useCallback(async () => {
     const state = await window.clerum.auth.getRuntimeConfigState()
@@ -222,13 +277,22 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
   }, [onSessionNeedsLoad, setStatus])
 
   useEffect(() => {
-    return window.clerum.auth.onSessionExpired(() => {
-      void onSessionNeedsLoad({ preserveNav: true }).finally(() => {
-        setTemporarySessionExpiresAt(null)
-        setStatus('Your temporary session ended. Please sign in again.', 'info')
-      })
+    return window.clerum.auth.onSessionExpired(sessionGeneration => {
+      void handleSessionExpired(sessionGeneration)
+        .catch(async error => {
+          const currentGeneration = await window.clerum.auth
+            .getSessionGeneration()
+            .catch(() => null)
+          if (currentGeneration !== null && currentGeneration !== sessionGeneration) return
+          clearAuthAfterSessionReloadFailure()
+          setStatus(
+            `Your temporary session ended. Please sign in again. ${error instanceof Error ? error.message : String(error)}`,
+            'info'
+          )
+        })
+        .catch(() => undefined)
     })
-  }, [onSessionNeedsLoad, setStatus])
+  }, [clearAuthAfterSessionReloadFailure, handleSessionExpired, setStatus])
 
   const handlePasswordLogin = async () => {
     try {

@@ -126,4 +126,22 @@ describe('useAppController login-screen environment selection', () => {
 
     await act(async () => logout)
   })
+
+  it('clears protected controller and query state when expiry reload fails', async () => {
+    const { app, handle, native } = await openAuthenticatedApp()
+    const protectedQueryKey = ['protected-expiry-cache']
+    app.queryClient.setQueryData(protectedQueryKey, { value: 'fixture-protected-cache' })
+    const expiredGeneration = native.service.getSessionGeneration()
+    handle.setSessionStateError(new Error('fixture session-state IPC unavailable'))
+
+    await act(async () => {
+      handle.emitSessionExpired(expiredGeneration)
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(false))
+    expect(app.result.current.me).toBeNull()
+    expect(app.queryClient.getQueryData(protectedQueryKey)).toBeUndefined()
+    expect(app.result.current.statusText).toContain('Your temporary session ended')
+  })
 })

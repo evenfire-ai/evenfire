@@ -81,9 +81,9 @@ const appService = new AppService({
     const errorName = error instanceof Error && error.name ? error.name : typeof error
     console.error(`[Desktop] Could not apply deferred external logout (${errorName}).`)
   },
-  notifySessionExpired: () => {
+  notifySessionExpired: sessionGeneration => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('auth:sessionExpired')
+      mainWindow.webContents.send('auth:sessionExpired', sessionGeneration)
     }
   },
 })

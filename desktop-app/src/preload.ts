@@ -171,8 +171,9 @@ const clerum = Object.freeze({
       ipcRenderer.on('auth:sessionStateChanged', listener)
       return () => ipcRenderer.off('auth:sessionStateChanged', listener)
     },
-    onSessionExpired: (callback: () => void) => {
-      const listener = () => callback()
+    onSessionExpired: (callback: (sessionGeneration: number) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, sessionGeneration: number) =>
+        callback(sessionGeneration)
       ipcRenderer.on('auth:sessionExpired', listener)
       return () => ipcRenderer.off('auth:sessionExpired', listener)
     },

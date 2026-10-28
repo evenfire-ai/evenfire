@@ -176,6 +176,8 @@ export function useAppController() {
   // Use a ref so the stable onSessionNeedsLoad callback can call the real loadSession
   // without creating a circular dependency (loadSession is defined after auth+session).
   const loadSessionRef = useRef(async (_options?: { preserveNav?: boolean }) => {})
+  const clearSessionReloadFailureStateRef = useRef<() => void>(() => {})
+  const onSessionReloadFailed = useCallback(() => clearSessionReloadFailureStateRef.current(), [])
   const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
   const authenticatedSessionIdentityRef = useRef<string | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
@@ -187,6 +189,7 @@ export function useAppController() {
   const auth = useAuthController({
     setStatus: fullSetStatus,
     onSessionNeedsLoad,
+    onSessionReloadFailed,
   })
 
   // ─── First-run onboarding ───
@@ -588,6 +591,23 @@ export function useAppController() {
     queryClient.removeQueries({ queryKey: ['desktop-app', 'workflow-detail'] })
     queryClient.removeQueries({ queryKey: ['desktop-app', 'workflow-runs'] })
   }, [queryClient])
+
+  clearSessionReloadFailureStateRef.current = () => {
+    setPostPaintDataReady(false)
+    catalogRefreshPromiseRef.current = null
+    agentsData.reset()
+    contextsData.reset()
+    mcpServersData.reset()
+    connectorsData.reset()
+    teamsData.reset()
+    resetWorkflowsData()
+    queryClient.clear()
+    chat.resetChat()
+    notif.resetNotifications()
+    activeAuthenticatedSessionIdentityRef.current = null
+    authenticatedSessionIdentityRef.current = null
+    void chat.stopAllActivityStreams().catch(() => undefined)
+  }
 
   const refreshAuthenticatedData = useCallback(
     async (options: { initialLoad?: boolean; sessionIdentity?: string } = {}) => {

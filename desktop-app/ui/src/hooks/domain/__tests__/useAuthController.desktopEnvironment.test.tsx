@@ -6,13 +6,14 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { AppService } from '../../../../../src/appService'
-import type { DesktopRuntimeConfigState } from '../../../../../src/types'
+import type { DesktopRuntimeConfigState, SessionMe } from '../../../../../src/types'
 import { testSessionTokenWithExpiry } from '../../../../../testSupport/authTestFixtures'
 import { useAuthController } from '../useAuthController'
 import { wrapLikeElectronIpc } from './__fixtures__/ipcErrors'
 
 const mocks = vi.hoisted(() => ({
   clearQueryCache: vi.fn(),
+  clearProtectedSessionState: vi.fn(),
   completeDesktopSetup: vi.fn(),
   getRuntimeConfigState: vi.fn(),
   getSessionGeneration: vi.fn(),
@@ -56,13 +57,15 @@ let desktopEnvironmentSetupListener:
 let desktopSetupTokenListener:
   | ((payload: DesktopSetupTokenPayload) => void | Promise<void>)
   | null = null
-let sessionExpiredListener: (() => void) | null = null
+let sessionExpiredListener: ((sessionGeneration: number) => void) | null = null
 let sessionStateChangedListener: (() => void) | null = null
 let confirmDesktopEnvironmentSetupForTest: (() => Promise<void>) | null = null
 let selectRuntimeConfigForTest: ((id: string) => Promise<DesktopRuntimeConfigState | null>) | null =
   null
 let setBootingForTest: ((value: boolean) => void) | null = null
 let setAuthenticatedForTest: ((value: boolean) => void) | null = null
+let setMeForTest: ((value: SessionMe | null) => void) | null = null
+let setPasswordForTest: ((value: string) => void) | null = null
 let setTemporarySessionExpiryForTest: ((value: number | null) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
 let nativeAppService: AppService | null = null
@@ -75,9 +78,12 @@ function Probe() {
   const auth = useAuthController({
     setStatus: mocks.setStatus,
     onSessionNeedsLoad: mocks.loadSession,
+    onSessionReloadFailed: mocks.clearProtectedSessionState,
   })
   setBootingForTest = auth.setBooting
   setAuthenticatedForTest = auth.setIsAuthenticated
+  setMeForTest = auth.setMe
+  setPasswordForTest = auth.setPassword
   setTemporarySessionExpiryForTest = auth.setTemporarySessionExpiresAt
   confirmDesktopEnvironmentSetupForTest = auth.handleConfirmDesktopEnvironmentSetup
   selectRuntimeConfigForTest = auth.handleSelectRuntimeConfig
@@ -89,6 +95,8 @@ function Probe() {
         {auth.pendingDesktopEnvironmentSetup?.externalRestApiBaseUrl || 'none'}
       </div>
       <div data-testid="is-authenticated">{auth.isAuthenticated ? 'yes' : 'no'}</div>
+      <div data-testid="me">{auth.me?.id || 'none'}</div>
+      <div data-testid="password">{auth.password || 'none'}</div>
       <div data-testid="pending-rpc">
         {auth.pendingDesktopEnvironmentSetup?.rpcProxyBaseUrl || 'none'}
       </div>
@@ -138,6 +146,9 @@ beforeEach(async () => {
   selectRuntimeConfigForTest = null
   setBootingForTest = null
   setAuthenticatedForTest = null
+  setMeForTest = null
+  setPasswordForTest = null
+  setTemporarySessionExpiryForTest = null
   runtimeConfigModule = null
   nativeAppService = null
   delete process.env.EVENFIRE_ONBOARDING_PREVIEW
@@ -223,7 +234,7 @@ beforeEach(async () => {
     sessionStateChangedListener = listener
     return () => undefined
   })
-  mocks.onSessionExpired.mockImplementation((listener: () => void) => {
+  mocks.onSessionExpired.mockImplementation((listener: (sessionGeneration: number) => void) => {
     sessionExpiredListener = listener
     return () => undefined
   })
@@ -278,26 +289,95 @@ describe('Desktop environment handoff', () => {
     expect(mocks.loadSession).toHaveBeenLastCalledWith({ preserveNav: true })
   })
 
-  it('clears the temporary-session disclosure and reloads auth on main-process expiry', async () => {
+  it('clears authenticated state when the session-expiry reload rejects', async () => {
     render(<Probe />)
     await waitFor(() => expect(mocks.onSessionExpired).toHaveBeenCalledOnce())
     const expiresAt = Date.now() + 60_000
-    act(() => setTemporarySessionExpiryForTest?.(expiresAt))
+    const me = {
+      id: 'fixture-expired-user',
+      email: 'expired@example.test',
+      name: null,
+      picture: null,
+      teamId: 'fixture-team',
+      teamName: 'Fixture team',
+      role: null,
+    }
+    act(() => {
+      setAuthenticatedForTest?.(true)
+      setMeForTest?.(me)
+      setPasswordForTest?.('fixture-password')
+      setTemporarySessionExpiryForTest?.(expiresAt)
+    })
+    expect(screen.getByTestId('is-authenticated')).toHaveTextContent('yes')
+    expect(screen.getByTestId('me')).toHaveTextContent(me.id)
+    expect(screen.getByTestId('password')).toHaveTextContent('fixture-password')
     expect(screen.getByTestId('temporary-expiry')).toHaveTextContent(String(expiresAt))
+    const loadCount = mocks.loadSession.mock.calls.length
+    mocks.loadSession.mockRejectedValueOnce(new Error('fixture session-state IPC unavailable'))
 
     await act(async () => {
-      sessionExpiredListener?.()
+      sessionExpiredListener?.(await nativeAppService!.getSessionGeneration())
       await Promise.resolve()
     })
 
-    await waitFor(() =>
-      expect(mocks.setStatus).toHaveBeenCalledWith(
-        'Your temporary session ended. Please sign in again.',
-        'info'
-      )
-    )
-    expect(mocks.loadSession).toHaveBeenCalledWith({ preserveNav: true })
+    await waitFor(() => expect(screen.getByTestId('is-authenticated')).toHaveTextContent('no'))
+    expect(mocks.loadSession).toHaveBeenCalledTimes(loadCount + 1)
+    expect(mocks.loadSession).toHaveBeenLastCalledWith({ preserveNav: true })
+    expect(screen.getByTestId('me')).toHaveTextContent('none')
+    expect(screen.getByTestId('password')).toHaveTextContent('none')
     expect(screen.getByTestId('temporary-expiry')).toHaveTextContent('none')
+    expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
+    expect(mocks.clearProtectedSessionState).toHaveBeenCalledOnce()
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      expect.stringContaining('Your temporary session ended. Please sign in again.'),
+      'info'
+    )
+  })
+
+  it('does not clear a newer generation for a stale session-expiry event', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(mocks.onSessionExpired).toHaveBeenCalledOnce())
+    act(() => setAuthenticatedForTest?.(true))
+    const loadCount = mocks.loadSession.mock.calls.length
+    mocks.getSessionGeneration.mockResolvedValueOnce(22)
+
+    await act(async () => {
+      sessionExpiredListener?.(21)
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(mocks.getSessionGeneration).toHaveBeenCalledOnce())
+    expect(mocks.loadSession).toHaveBeenCalledTimes(loadCount)
+    expect(screen.getByTestId('is-authenticated')).toHaveTextContent('yes')
+    expect(mocks.clearQueryCache).not.toHaveBeenCalled()
+    expect(mocks.clearProtectedSessionState).not.toHaveBeenCalled()
+  })
+
+  it('keeps a newer generation when the session changes during a rejected expiry reload', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(mocks.onSessionExpired).toHaveBeenCalledOnce())
+    act(() => setAuthenticatedForTest?.(true))
+    const loadCount = mocks.loadSession.mock.calls.length
+    mocks.getSessionGeneration.mockResolvedValueOnce(31).mockResolvedValueOnce(32)
+    let rejectSessionLoad: ((reason?: unknown) => void) | null = null
+    mocks.loadSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSessionLoad = reject
+        })
+    )
+
+    act(() => sessionExpiredListener?.(31))
+    await waitFor(() => expect(mocks.loadSession).toHaveBeenCalledTimes(loadCount + 1))
+    await act(async () => {
+      rejectSessionLoad?.(new Error('fixture session-state IPC unavailable'))
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(mocks.getSessionGeneration).toHaveBeenCalledTimes(2))
+    expect(screen.getByTestId('is-authenticated')).toHaveTextContent('yes')
+    expect(mocks.clearQueryCache).not.toHaveBeenCalled()
+    expect(mocks.clearProtectedSessionState).not.toHaveBeenCalled()
   })
 
   it.each(['generation failure', 'authentication starts', 'invalid REST endpoint'])(

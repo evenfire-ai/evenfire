@@ -985,7 +985,7 @@ export interface AppServiceOptions {
   tokenStore?: TokenStore
   getUserDataDirectory?: () => string
   reportDeferredLogoutFailure?: (error: unknown) => void
-  notifySessionExpired?: () => void
+  notifySessionExpired?: (sessionGeneration: number) => void
 }
 
 type ActiveTeamContextHop = {
@@ -1031,7 +1031,7 @@ export class AppService {
   private readonly sessionAuthority: SessionAuthorityCoordinator
   private readonly getUserDataDirectory: () => string
   private readonly reportDeferredLogoutFailure: (error: unknown) => void
-  private readonly notifySessionExpired: () => void
+  private readonly notifySessionExpired: (sessionGeneration: number) => void
   private readonly pendingCredentialProducers = new Set<Promise<unknown>>()
   private quitPreparationStarted = false
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -6860,9 +6860,9 @@ export class AppService {
     this.memoryOnlySessionExpiryTimer = timer
   }
 
-  private notifyTemporarySessionEnded(): void {
+  private notifyTemporarySessionEnded(sessionGeneration = this.sessionGeneration): void {
     try {
-      this.notifySessionExpired()
+      this.notifySessionExpired(sessionGeneration)
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
     }

@@ -151,6 +151,7 @@ export interface AppControllerClerumHandle {
     appName?: string
   }) => Promise<void>
   emitSessionStateChanged: () => void
+  emitSessionExpired: (sessionGeneration: number) => void
   getDesktopReleaseStatus: Fn
   teamDirectory: Fn
   switchTeam: Fn
@@ -313,6 +314,13 @@ export function extendMockClerumForAppController(
       if (sessionStateChangedListener === callback) sessionStateChangedListener = null
     }
   })
+  let sessionExpiredListener: ((sessionGeneration: number) => void) | null = null
+  const onSessionExpired = vi.fn((callback: (sessionGeneration: number) => void) => {
+    sessionExpiredListener = callback
+    return () => {
+      if (sessionExpiredListener === callback) sessionExpiredListener = null
+    }
+  })
 
   Object.assign(bridge.rpc as object, {
     listServers: vi.fn(async () => ({ servers: [] })),
@@ -342,7 +350,7 @@ export function extendMockClerumForAppController(
       onDesktopEnvironmentSetup,
       onExternalLogout: vi.fn(() => () => undefined),
       onSessionStateChanged,
-      onSessionExpired: vi.fn(() => () => undefined),
+      onSessionExpired,
     },
     team: {
       list: vi.fn(async () => teamDirectoryPayload),
@@ -420,6 +428,9 @@ export function extendMockClerumForAppController(
     onDesktopEnvironmentSetup,
     emitSessionStateChanged() {
       sessionStateChangedListener?.()
+    },
+    emitSessionExpired(sessionGeneration) {
+      sessionExpiredListener?.(sessionGeneration)
     },
     async emitDesktopEnvironmentSetup(payload) {
       await desktopEnvironmentSetupListener?.(payload)
