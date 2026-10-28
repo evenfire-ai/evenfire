@@ -119,6 +119,30 @@ export class UserHomeFixtures {
     return teamId
   }
 
+  /**
+   * Adds `member` to the one team `owner` already belongs to, without creating
+   * a team. Removing `member` in cleanup removes the membership (FK cascade).
+   */
+  joinOnlyTeamOf(owner: HomeTestUser, member: HomeTestUser): string {
+    const teamIds = runControlPostgresSql(`
+      SELECT team_id::text FROM team_members
+       WHERE user_id = ${sqlLiteral(owner.id)}::uuid AND status = 'active';
+    `)
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+    if (teamIds.length !== 1 || !UUID_RE.test(teamIds[0])) {
+      throw new Error(
+        `[USER-HOME-E2E] ${owner.name} must belong to exactly one team, found ${teamIds.length}`
+      )
+    }
+    runControlPostgresSql(`
+      INSERT INTO team_members(team_id, user_id, role, status)
+      VALUES(${sqlLiteral(teamIds[0])}::uuid, ${sqlLiteral(member.id)}::uuid, 'member', 'active');
+    `)
+    return teamIds[0]
+  }
+
   /** Makes `agent` one of `user`'s own agents (direct user_agents association). */
   associateAgent(user: HomeTestUser, agent: ManagedGfsAgent): void {
     runControlPostgresSql(`

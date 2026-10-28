@@ -777,7 +777,9 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       await operatorPanel.login(adminLogin, adminPassword)
 
       // Named precondition, as in J1b–J6: share targets are team members (D4).
-      fx.createTeam('j5', [initial.user, guest])
+      // V joins the admin's own team: a second team would make Desktop hop team
+      // context in the background and refuse an upload that lands in a hop (#1218).
+      fx.joinOnlyTeamOf(initial.user, guest)
 
       const guestSession = await launchDesktopAs(testInfo, guest)
       sessions.push(guestSession)
@@ -1041,7 +1043,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     const owner = fx.createUser('guard-owner')
     const other = fx.createUser('guard-other')
     const file = `guard-file-${fx.runTag}.txt`
-    const folder = `guard-folder-${fx.runTag}`
     const sessions: DesktopSession[] = []
     const controls: Array<Awaited<ReturnType<typeof browser.newContext>>> = []
     try {
@@ -1074,7 +1075,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await nav.openMyHome()
         const view = new DesktopResourceView(ownerS.page)
         await view.uploadFile(file, Buffer.from(`Guard witness ${fx.runTag}`))
-        await view.createFolder(folder)
         const fileRow = ownerS.page.getByRole('button', { name: `Open ${file}` })
         await expect(fileRow).toBeVisible()
 
@@ -1102,11 +1102,12 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expect(controlPage).toHaveURL(/\/users-and-teams\/users(?:\?|$)/)
         await fx.waitForHomeState(owner.id, 'retired')
 
-        // This folder has not been opened before, so its navigation fetches a
-        // fresh authoritative location instead of refocusing an existing tab.
-        await ownerS.page.getByRole('button', { name: `Open ${folder}` }).click()
+        // Retirement ends the session's file access: Desktop re-reads, shows the
+        // refusal and drops the listing without any further click.
         await expect(
-          ownerS.page.getByText('File access is not authorized', { exact: true })
+          ownerS.page
+            .getByRole('region', { name: 'EvenDrive browser' })
+            .getByText('File access is not authorized', { exact: true })
         ).toBeVisible({
           timeout: 60_000,
         })
