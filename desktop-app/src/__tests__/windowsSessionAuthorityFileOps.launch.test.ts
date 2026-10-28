@@ -99,7 +99,7 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(options.env.COMSPEC).toBe('C:\\Windows\\System32\\cmd.exe')
     expect(options.env.SystemDrive).toBe('C:')
     expect(options.env.EVENFIRE_SESSION_AUTHORITY_FILE_OPS).toBeTruthy()
-    expect(options.timeout).toBe(10_000)
+    expect(options.timeout).toBe(30_000)
 
     const request = JSON.parse(
       Buffer.from(options.env.EVENFIRE_SESSION_AUTHORITY_FILE_OPS, 'base64').toString('utf8')

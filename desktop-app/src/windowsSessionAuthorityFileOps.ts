@@ -232,7 +232,9 @@ export function moveSessionAuthorityFileDurablySync(
     },
     input: SCRIPT,
     maxBuffer: 4096,
-    timeout: 10_000,
+    // Add-Type compiles the fixed native wrapper per invocation; timeout remains bounded and
+    // a started operation that exceeds it stays indeterminate.
+    timeout: 30_000,
     windowsHide: true,
   })
   if (result.error || result.signal || !result.stdout) throw diagnostic(result)
