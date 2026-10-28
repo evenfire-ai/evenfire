@@ -1002,6 +1002,7 @@ describe('AppService GFS upload security scope', () => {
       if (authority.status !== 'observed') throw new Error('Expected durable logout authority')
       expect(authority.record.frame.mode).toBe('logged-out')
       expect(authority.record.logoutReceipt).not.toBeNull()
+      await service.tokenStore.prepareForQuit()
     } finally {
       await rm(root, { recursive: true, force: true })
     }
