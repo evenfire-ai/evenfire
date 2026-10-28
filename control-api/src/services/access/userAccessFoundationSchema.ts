@@ -317,6 +317,64 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
+    CREATE OR REPLACE FUNCTION authorization_bump_workflow_run_audit_revision()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE
+      row_value RECORD;
+      revision RECORD;
+    BEGIN
+      FOR row_value IN
+        SELECT triggerer_actor_type, triggerer_user_id::TEXT,
+               triggerer_team_id::TEXT, usage_team_id
+          FROM (VALUES (
+            NEW.triggerer_actor_type, NEW.triggerer_user_id,
+            NEW.triggerer_team_id, NEW.usage_team_id
+          )) AS current_row(
+            triggerer_actor_type, triggerer_user_id,
+            triggerer_team_id, usage_team_id
+          )
+         WHERE TG_OP <> 'DELETE'
+        UNION ALL
+        SELECT triggerer_actor_type, triggerer_user_id::TEXT,
+               triggerer_team_id::TEXT, usage_team_id
+          FROM (VALUES (
+            OLD.triggerer_actor_type, OLD.triggerer_user_id,
+            OLD.triggerer_team_id, OLD.usage_team_id
+          )) AS prior_row(
+            triggerer_actor_type, triggerer_user_id,
+            triggerer_team_id, usage_team_id
+          )
+         WHERE TG_OP <> 'INSERT'
+      LOOP
+        FOR revision IN
+          SELECT subject_type, subject_id
+            FROM (VALUES
+              ('team', row_value.triggerer_team_id),
+              ('team', CASE
+                 WHEN row_value.usage_team_id = 'control-plane-admin-ui' THEN NULL
+                 ELSE row_value.usage_team_id
+               END),
+              ('user', CASE
+                 WHEN row_value.triggerer_actor_type = 'user'
+                   THEN row_value.triggerer_user_id
+               END)
+            ) AS revision_subjects(subject_type, subject_id)
+           WHERE subject_id IS NOT NULL AND subject_id <> ''
+           ORDER BY subject_type, subject_id
+        LOOP
+          PERFORM authorization_bump_subject_revision(
+            revision.subject_type, revision.subject_id
+          );
+        END LOOP;
+      END LOOP;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$;
+
     CREATE OR REPLACE FUNCTION authorization_bump_workflow_approval_revision()
     RETURNS TRIGGER
     LANGUAGE plpgsql
@@ -468,6 +526,15 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     CREATE OR REPLACE TRIGGER workflow_approval_requests_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON workflow_approval_requests
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_workflow_approval_revision();
+    CREATE OR REPLACE TRIGGER workflow_recipe_allowed_teams_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON workflow_recipe_allowed_teams
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_team_grant_revision();
+    CREATE OR REPLACE TRIGGER workflow_approval_medium_accounts_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON workflow_approval_medium_accounts
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_user_grant_revision();
+    CREATE OR REPLACE TRIGGER workflow_runs_audit_authorization_revision
+      AFTER INSERT OR UPDATE OR DELETE ON workflow_runs_audit
+      FOR EACH ROW EXECUTE FUNCTION authorization_bump_workflow_run_audit_revision();
     CREATE OR REPLACE TRIGGER notification_deliveries_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON notification_deliveries
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_notification_revision();
@@ -487,6 +554,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_workflow_run_revision() FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_bump_workflow_run_audit_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_workflow_approval_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_notification_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_component(UUID) FROM PUBLIC;
@@ -691,7 +759,9 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     DECLARE trigger_spec RECORD;
     BEGIN
       FOR trigger_spec IN
-        SELECT * FROM (VALUES
+        -- The audit writer is installed by 0134 after this 0131 bootstrap.
+        -- Keep its repair spec here, but skip it until that function exists.
+        SELECT specs.* FROM (VALUES
           ('team_members', 'team_members_authorization_revision',
             'authorization_bump_team_membership_revision'),
           ('user_contexts', 'user_contexts_authorization_revision',
@@ -706,12 +776,20 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
             'authorization_bump_team_grant_revision'),
           ('team_workflow_triggers', 'team_workflow_authorization_revision',
             'authorization_bump_team_grant_revision'),
+          ('workflow_recipe_allowed_teams', 'workflow_recipe_allowed_teams_authorization_revision',
+            'authorization_bump_team_grant_revision'),
+          ('workflow_approval_medium_accounts',
+            'workflow_approval_medium_accounts_authorization_revision',
+            'authorization_bump_user_grant_revision'),
+          ('workflow_runs_audit', 'workflow_runs_audit_authorization_revision',
+            'authorization_bump_workflow_run_audit_revision'),
           ('operational_resource_index', 'operational_resource_authorization_revision',
             'authorization_bump_operational_resource_revision'),
           ('operational_resource_relationships',
             'operational_relationship_authorization_revision',
             'authorization_bump_operational_relationship_revision')
         ) AS specs(table_name, trigger_name, function_name)
+        WHERE to_regprocedure(format('public.%I()', specs.function_name)) IS NOT NULL
       LOOP
         IF NOT EXISTS (
           SELECT 1 FROM pg_trigger WHERE tgname = trigger_spec.trigger_name

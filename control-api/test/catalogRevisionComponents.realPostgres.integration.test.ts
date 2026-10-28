@@ -87,6 +87,14 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     return Number(result.rows[0]?.revision ?? 1)
   }
 
+  async function teamRevision(teamId: string): Promise<number> {
+    const result = await databasePool.query<{ revision: string }>(
+      `SELECT revision::text FROM authorization_team_revisions WHERE team_id = $1`,
+      [teamId]
+    )
+    return Number(result.rows[0]?.revision ?? 1)
+  }
+
   async function resourceRevision(resourceId: string): Promise<number> {
     const result = await databasePool.query<{ revision: string }>(
       `SELECT revision::text
@@ -266,6 +274,105 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
       workflowRun.rows[0]!.run_id,
     ])
     expect(await userRevision(userIds[0])).toBeGreaterThan(revision)
+  })
+
+  it('bumps the team revision for allowed-team changes', async () => {
+    const recipeName = `p10-${randomUUID()}`
+    let revision = await teamRevision(teamIds[0])
+    await databasePool.query(
+      `INSERT INTO workflow_recipe_allowed_teams(recipe_namespace, recipe_name, team_id)
+       VALUES ('sandbox-recipes', $1, $2)`,
+      [recipeName, teamIds[0]]
+    )
+    expect(await teamRevision(teamIds[0])).toBeGreaterThan(revision)
+
+    revision = await teamRevision(teamIds[0])
+    await databasePool.query(
+      `DELETE FROM workflow_recipe_allowed_teams
+       WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1 AND team_id = $2`,
+      [recipeName, teamIds[0]]
+    )
+    expect(await teamRevision(teamIds[0])).toBeGreaterThan(revision)
+  })
+
+  it('bumps the user revision for approval medium-account changes', async () => {
+    let revision = await userRevision(userIds[1])
+    const account = await databasePool.query<{ id: string }>(
+      `INSERT INTO workflow_approval_medium_accounts(
+         user_id, medium, provider_user_id, verified_at
+       ) VALUES ($1, 'slack', $2, NOW())
+       RETURNING id::text`,
+      [userIds[1], `provider-${randomUUID()}`]
+    )
+    expect(await userRevision(userIds[1])).toBeGreaterThan(revision)
+
+    revision = await userRevision(userIds[1])
+    await databasePool.query(`DELETE FROM workflow_approval_medium_accounts WHERE id = $1`, [
+      account.rows[0]!.id,
+    ])
+    expect(await userRevision(userIds[1])).toBeGreaterThan(revision)
+  })
+
+  it('bumps ordered audit-run subjects and permits the Admin UI sentinel', async () => {
+    const runId = randomUUID()
+    let userBefore = await userRevision(userIds[0])
+    let teamBefore = await teamRevision(teamIds[1])
+    await databasePool.query(
+      `INSERT INTO workflow_runs_audit(
+         run_id, run_namespace, run_name, recipe_namespace, recipe_name,
+         triggerer_team_id, usage_team_id, triggerer_user_id, triggerer_actor_type,
+         trigger_source, idempotency_key, triggered_at, completed_at,
+         final_phase, step_count, snapshot_sha
+       ) VALUES (
+         $1, 'revision', $2, 'sandbox-recipes', $2,
+         $3, NULL, $4, 'user', 'onDemand', $5, NOW(), NOW(),
+         'Succeeded', 0, 'p15-audit-witness'
+       )`,
+      [runId, `audit-${randomUUID()}`, teamIds[1], userIds[0], `audit-${randomUUID()}`]
+    )
+    expect(await userRevision(userIds[0])).toBeGreaterThan(userBefore)
+    expect(await teamRevision(teamIds[1])).toBeGreaterThan(teamBefore)
+
+    userBefore = await userRevision(userIds[0])
+    teamBefore = await teamRevision(teamIds[1])
+    await databasePool.query(`DELETE FROM workflow_runs_audit WHERE run_id = $1`, [runId])
+    expect(await userRevision(userIds[0])).toBeGreaterThan(userBefore)
+    expect(await teamRevision(teamIds[1])).toBeGreaterThan(teamBefore)
+
+    const sentinelRunId = randomUUID()
+    userBefore = await userRevision(userIds[1])
+    teamBefore = await teamRevision(teamIds[0])
+    await databasePool.query(
+      `INSERT INTO workflow_runs_audit(
+         run_id, run_namespace, run_name, recipe_namespace, recipe_name,
+         triggerer_team_id, usage_team_id, triggerer_user_id, triggerer_actor_type,
+         trigger_source, idempotency_key, triggered_at, completed_at,
+         final_phase, step_count, snapshot_sha
+       ) VALUES (
+         $1, 'revision', $2, 'sandbox-recipes', $2,
+         NULL, 'control-plane-admin-ui', NULL, 'scheduled', 'schedule', $3,
+         NOW(), NOW(), 'Succeeded', 0, 'p15-sentinel-witness'
+       )`,
+      [sentinelRunId, `audit-${randomUUID()}`, `audit-${randomUUID()}`]
+    )
+    expect(await userRevision(userIds[1])).toBe(userBefore)
+    expect(await teamRevision(teamIds[0])).toBe(teamBefore)
+
+    await expect(
+      databasePool.query(
+        `INSERT INTO workflow_runs_audit(
+           run_id, run_namespace, run_name, recipe_namespace, recipe_name,
+           triggerer_team_id, usage_team_id, triggerer_user_id, triggerer_actor_type,
+           trigger_source, idempotency_key, triggered_at, completed_at,
+           final_phase, step_count, snapshot_sha
+         ) VALUES (
+           $1, 'revision', $2, 'sandbox-recipes', $2,
+           NULL, 'not-a-uuid', NULL, 'scheduled', 'schedule', $3,
+           NOW(), NOW(), 'Succeeded', 0, 'p15-invalid-witness'
+         )`,
+        [randomUUID(), `audit-${randomUUID()}`, `audit-${randomUUID()}`]
+      )
+    ).rejects.toMatchObject({ code: 'P0001' })
   })
 
   it('moves GFS resource and subject components for the complete writer class', async () => {

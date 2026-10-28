@@ -49,6 +49,7 @@ const accessFoundationDefinerSignatures = [
   'authorization_bump_user_row_revision()',
   'authorization_bump_team_row_revision()',
   'authorization_bump_workflow_run_revision()',
+  'authorization_bump_workflow_run_audit_revision()',
   'authorization_bump_workflow_approval_revision()',
   'authorization_bump_notification_revision()',
   'authorization_bump_gfs_resource_component(pg_catalog.uuid)',

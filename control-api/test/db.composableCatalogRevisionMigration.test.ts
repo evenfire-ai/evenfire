@@ -20,6 +20,7 @@ describe('0134 composable catalog revisions migration', () => {
     // real-PostgreSQL suite, not a production table.
     expect(sql).not.toContain('authorization_catalog_writer_components')
     expect(sql).toContain('authorization_bump_workflow_run_revision')
+    expect(sql).toContain('authorization_bump_workflow_run_audit_revision')
     expect(sql).toContain('authorization_bump_workflow_approval_revision')
     expect(sql).toContain('authorization_bump_notification_revision')
     expect(sql).toContain('authorization_bump_gfs_resource_revision')
@@ -48,6 +49,9 @@ describe('0134 composable catalog revisions migration', () => {
         'teams_authorization_revision',
         'workflow_runs_authorization_revision',
         'workflow_approval_requests_authorization_revision',
+        'workflow_recipe_allowed_teams_authorization_revision',
+        'workflow_approval_medium_accounts_authorization_revision',
+        'workflow_runs_audit_authorization_revision',
         'notification_deliveries_authorization_revision',
         'gfs_grants_authorization_revision',
         'gfs_shares_authorization_revision',
