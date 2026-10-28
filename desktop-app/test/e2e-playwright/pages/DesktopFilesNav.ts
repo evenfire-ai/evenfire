@@ -1,5 +1,6 @@
 // E2E_GUARDIAN_IPC_FLOW: Desktop Files transitions are brokered through Electron IPC.
 import { type Page, expect } from '@playwright/test'
+import { humanRecordedPause } from '../helpers/humanPause'
 import { openResourcesNavItem } from '../navigationHelpers'
 
 export class DesktopFilesNav {
@@ -8,6 +9,7 @@ export class DesktopFilesNav {
   async openFiles(): Promise<void> {
     await openResourcesNavItem(this.page, 'nav-files')
     await expect(this.page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async openMyHome(): Promise<void> {
@@ -16,6 +18,7 @@ export class DesktopFilesNav {
     await home.click()
     await expect(this.page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
     await expect(this.page.getByLabel('Your access')).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async expectHomeState(
@@ -45,5 +48,6 @@ export class DesktopFilesNav {
         .getByRole('navigation', { name: 'File location' })
         .getByRole('button', { name: 'Shared with me' })
     ).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 }

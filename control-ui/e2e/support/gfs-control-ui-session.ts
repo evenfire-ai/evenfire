@@ -1,4 +1,5 @@
 import { type Locator, type Page, expect } from '@playwright/test'
+import { humanRecordedPause } from '../../../desktop-app/test/e2e-playwright/helpers/humanPause'
 
 export const CONTROL_UI_BASE_URL =
   process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || 'http://localhost:3000'
@@ -76,6 +77,7 @@ export async function loginControlUi(page: Page): Promise<void> {
     await remindLater.click()
     await expect(accountAlert).toBeHidden({ timeout: 10_000 })
   }
+  await humanRecordedPause([600, 1200])
 }
 
 export async function openGlobalFileSystemFromSidebar(page: Page): Promise<void> {

@@ -3,6 +3,7 @@ import { type Page, expect } from '@playwright/test'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { humanRecordedPause } from '../helpers/humanPause'
 
 export class DesktopResourceView {
   constructor(private readonly page: Page) {}
@@ -15,6 +16,7 @@ export class DesktopResourceView {
     await dialog.getByRole('button', { name: 'Create folder' }).click()
     await expect(dialog).toBeHidden()
     await expect(this.page.getByRole('button', { name: `Open ${name}` })).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async uploadFile(name: string, bytes: Buffer): Promise<void> {
@@ -32,6 +34,7 @@ export class DesktopResourceView {
       timeout: 120_000,
     })
     fs.rmSync(dir, { recursive: true, force: true })
+    await humanRecordedPause([600, 1200])
   }
 
   async openShare(name: string): Promise<void> {
@@ -47,6 +50,7 @@ export class DesktopResourceView {
     await expect(
       this.page.getByRole('dialog', { name: new RegExp(`^Share (folder|file) `) })
     ).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async expectYourAccess(bits: string[]): Promise<void> {

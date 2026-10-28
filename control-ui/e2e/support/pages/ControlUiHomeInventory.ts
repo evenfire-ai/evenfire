@@ -1,4 +1,5 @@
 import { type Page, expect } from '@playwright/test'
+import { humanRecordedPause } from '../../../../desktop-app/test/e2e-playwright/helpers/humanPause'
 
 type HomeState = 'pending' | 'ready' | 'conflict' | 'retired'
 
@@ -18,6 +19,7 @@ export class ControlUiHomeInventory {
     expect((await response).ok()).toBe(true)
     await expect(this.page).toHaveURL(/\/global-file-system\/user-homes(?:\?|$)/)
     await expect(this.page.getByRole('table', { name: 'Home folders' })).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async filter(state: HomeState): Promise<void> {
@@ -30,6 +32,7 @@ export class ControlUiHomeInventory {
     await this.page.getByLabel('Home state').selectOption(state)
     expect((await response).ok()).toBe(true)
     await expect(this.page.getByLabel('Home state')).toHaveValue(state)
+    await humanRecordedPause([600, 1200])
   }
 
   async expectUserListed(userId: string, state: HomeState): Promise<void> {
@@ -62,5 +65,6 @@ export class ControlUiHomeInventory {
     await this.page.getByRole('link', { name: userId, exact: true }).click()
     expect((await response).ok()).toBe(true)
     await expect(this.page.getByRole('region', { name: 'Home folder' })).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 }

@@ -1,4 +1,5 @@
 import { type Page, type Response, expect } from '@playwright/test'
+import { humanRecordedPause } from '../../../../desktop-app/test/e2e-playwright/helpers/humanPause'
 
 type HomeState = 'pending' | 'ready' | 'conflict' | 'retired'
 
@@ -23,6 +24,7 @@ export class ControlUiUserHomeBlock {
     ])
     expect(response.ok()).toBe(true)
     await expect(this.page.getByRole('region', { name: 'Home folder' })).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async expectState(state: HomeState, path?: string): Promise<void> {
@@ -46,6 +48,7 @@ export class ControlUiUserHomeBlock {
     expect(result.ok()).toBe(true)
     expect(result.request().postDataJSON()).toEqual({ storageUsername: name })
     await expect(home.getByText(/^(pending|ready)$/, { exact: true })).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async restoreOwner(): Promise<void> {
@@ -58,6 +61,7 @@ export class ControlUiUserHomeBlock {
     await home.getByRole('button', { name: 'Restore owner access', exact: true }).click()
     expect((await response).ok()).toBe(true)
     await this.expectState('ready')
+    await humanRecordedPause([600, 1200])
   }
 
   async deleteUser(): Promise<void> {

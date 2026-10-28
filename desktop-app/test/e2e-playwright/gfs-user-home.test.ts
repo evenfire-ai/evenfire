@@ -55,6 +55,7 @@ import { type ManagedGfsAgent, getManagedAgentDisplayName } from './helpers/gfsA
 import type { GfsAuditRow } from './helpers/gfsDesktopOperatorParityFixtures'
 import { assertGfsInfraHealthy, discoverManagedGfsAgents } from './helpers/gfsFixtures'
 import { type HomeTestUser, UserHomeFixtures } from './helpers/gfsUserHomeFixtures'
+import { humanRecordedPause } from './helpers/humanPause'
 import { awaitPasswordPace } from './helpers/passwordPace'
 import { ControlUiAccessPanel } from './pages/ControlUiAccessPanel'
 import { DesktopFilesNav } from './pages/DesktopFilesNav'
@@ -149,6 +150,7 @@ async function loginVisible(page: Page, user: HomeTestUser): Promise<void> {
   await awaitPasswordPace()
   await page.getByRole('button', { name: /^Sign in$/ }).click()
   await expect(settingsMenu).toBeVisible({ timeout: 45_000 })
+  await humanRecordedPause([600, 1200])
 }
 
 async function openHomeFolder(page: Page, home: { storageUsername: string | null }): Promise<void> {
@@ -160,6 +162,7 @@ async function openHomeFolder(page: Page, home: { storageUsername: string | null
       .getByRole('navigation', { name: 'File location' })
       .getByText(home.storageUsername ?? '', { exact: true })
   ).toBeVisible()
+  await humanRecordedPause([600, 1200])
 }
 
 async function enterFolder(page: Page, name: string): Promise<void> {
@@ -167,6 +170,7 @@ async function enterFolder(page: Page, name: string): Promise<void> {
   await expect(
     page.getByRole('navigation', { name: 'File location' }).getByText(name, { exact: true })
   ).toBeVisible()
+  await humanRecordedPause([600, 1200])
 }
 
 // Agents address the file by its gfs:// link, as a user shares it. The agent's
@@ -223,6 +227,7 @@ async function openEvenDriveLink(page: Page, uri: string): Promise<void> {
   // By role: a label substring also matches the "Close EvenDrive link dialog" button.
   await dialog.getByRole('textbox', { name: 'EvenDrive link' }).fill(uri)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
+  await humanRecordedPause([600, 1200])
 }
 
 async function expectRefusedLinkAndClose(page: Page): Promise<void> {

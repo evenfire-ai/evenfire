@@ -13,6 +13,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DEV_ISOLATION_ENV, devIsolationPaths } from '../../../desktop-app/src/devIsolation'
+import {
+  HUMAN_E2E_RECORDED,
+  humanRecordedPause,
+} from '../../../desktop-app/test/e2e-playwright/helpers/humanPause'
 import { awaitPasswordPace } from '../../../desktop-app/test/e2e-playwright/helpers/passwordPace'
 import type { HomeFixtureUser } from './gfs-user-home-fixtures'
 
@@ -82,6 +86,15 @@ export async function launchHomeDesktop(
         CLERUM_DESKTOP_CONFIG_PATH: isolated.configPath,
         EVENFIRE_RENDERER_URL: '',
       },
+      // Recorded runs (/human-e2e-recorder) keep each Desktop window's video.
+      ...(HUMAN_E2E_RECORDED
+        ? {
+            recordVideo: {
+              dir: test.info().outputPath(`video-desktop-${user.name}`),
+              size: { width: 1280, height: 720 },
+            },
+          }
+        : {}),
     })
   } catch (error) {
     fs.rmSync(runDir, { recursive: true, force: true })
@@ -150,6 +163,7 @@ export async function openDesktopHome(page: Page, folderName: string): Promise<v
       }
     )
   }).toPass({ timeout: 150_000, intervals: [2_000, 5_000] })
+  await humanRecordedPause([600, 1200])
 }
 
 export async function uploadDesktopFile(page: Page, name: string, content: string): Promise<void> {
@@ -161,6 +175,7 @@ export async function uploadDesktopFile(page: Page, name: string, content: strin
     timeout: 120_000,
   })
   fs.rmSync(dir, { recursive: true, force: true })
+  await humanRecordedPause([600, 1200])
 }
 
 export async function shareDesktopFolder(
@@ -192,6 +207,7 @@ export async function shareDesktopFolder(
     dialog.getByRole('list', { name: 'Resource access' }).getByText(recipient, { exact: true })
   ).toBeVisible()
   await dialog.getByRole('button', { name: 'Close share dialog' }).click()
+  await humanRecordedPause([600, 1200])
 }
 
 export async function openDesktopLink(page: Page, uri: string): Promise<void> {
@@ -210,6 +226,7 @@ export async function openDesktopLink(page: Page, uri: string): Promise<void> {
   // By role: a label substring also matches the "Close EvenDrive link dialog" button.
   await dialog.getByRole('textbox', { name: 'EvenDrive link' }).fill(uri)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
+  await humanRecordedPause([600, 1200])
 }
 
 export async function readWithAgent(
@@ -281,4 +298,5 @@ export async function readWithAgent(
     )
     await expect(output).not.toContainText(sentinel)
   }
+  await humanRecordedPause([600, 1200])
 }

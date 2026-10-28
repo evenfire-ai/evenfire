@@ -159,7 +159,8 @@ export default defineConfig({
   use: {
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
-    video: 'retain-on-failure',
+    // HUMAN_E2E_RECORDED=1 (/human-e2e-recorder) keeps every browser video.
+    video: process.env.HUMAN_E2E_RECORDED === '1' ? 'on' : 'retain-on-failure',
   },
   projects: [
     {

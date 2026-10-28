@@ -1,5 +1,6 @@
 // E2E_GUARDIAN_IPC_FLOW: Share mutations are brokered through Electron IPC.
 import { type Page, expect } from '@playwright/test'
+import { humanRecordedPause } from '../helpers/humanPause'
 
 export class DesktopShareDialog {
   constructor(private readonly page: Page) {}
@@ -30,6 +31,7 @@ export class DesktopShareDialog {
     else if (await contents.count()) await contents.uncheck()
     await this.page.getByRole('dialog').getByRole('button', { name: 'Share', exact: true }).click()
     await expect(this.row(subjectLabel)).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async changeRole(subjectLabel: string, role: 'Read' | 'Editor'): Promise<void> {
@@ -48,6 +50,7 @@ export class DesktopShareDialog {
     await expect(
       row.getByRole('button', { name: `Access role for ${subjectLabel}` })
     ).toContainText(role)
+    await humanRecordedPause([600, 1200])
   }
 
   /** D26: an Editor-strength share row offers only "Read"; afterwards it is text. */
@@ -59,6 +62,7 @@ export class DesktopShareDialog {
     await this.page.getByRole('option', { name: 'Read', exact: true }).click()
     await expect(role).toHaveCount(0)
     await expect(row).toContainText('Read')
+    await humanRecordedPause([600, 1200])
   }
 
   async revoke(subjectLabel: string): Promise<void> {
@@ -78,6 +82,7 @@ export class DesktopShareDialog {
       await expect(confirmation).toBeHidden()
     }
     await expect(row).toHaveCount(0)
+    await humanRecordedPause([600, 1200])
   }
 
   async expectRow(

@@ -1,4 +1,5 @@
 import { type Page, type Response, expect } from '@playwright/test'
+import { humanRecordedPause } from '../../../../desktop-app/test/e2e-playwright/helpers/humanPause'
 import { openGlobalFileSystemFromSidebar } from '../gfs-control-ui-session'
 
 type AccessRole = 'Read' | 'Editor'
@@ -66,6 +67,7 @@ export class ControlUiGrantPanel {
       this.page.getByRole('dialog', { name: new RegExp(`^Share (folder|file) `) })
     ).toBeVisible()
     await expect(this.page.getByRole('heading', { name: `Share “${name}”` })).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async openFile(path: string): Promise<void> {
@@ -81,12 +83,14 @@ export class ControlUiGrantPanel {
       .click()
     expect((await response).ok()).toBe(true)
     await expect(this.page.getByRole('dialog', { name })).toBeVisible()
+    await humanRecordedPause([600, 1200])
   }
 
   async grant(subject: string, role: AccessRole): Promise<void> {
     const response = await this.submitGrant(subject, role)
     expect(response.ok()).toBe(true)
     await this.expectRow(subject, role)
+    await humanRecordedPause([600, 1200])
   }
 
   /** The server refuses the grant with `status`; the dialog shows `message`. */
@@ -104,12 +108,14 @@ export class ControlUiGrantPanel {
     await expect(this.page.getByRole('button', { name: `Access role for ${subject}` })).toHaveCount(
       0
     )
+    await humanRecordedPause([600, 1200])
   }
 
   async close(): Promise<void> {
     const dialog = this.page.getByRole('dialog', { name: /^Share (folder|file) / })
     await dialog.getByRole('button', { name: 'Close share dialog' }).click()
     await expect(dialog).toBeHidden()
+    await humanRecordedPause([600, 1200])
   }
 
   private async submitGrant(subject: string, role: AccessRole): Promise<Response> {
@@ -141,6 +147,7 @@ export class ControlUiGrantPanel {
     await this.page.getByRole('option', { name: role, exact: true }).click()
     expect((await response).ok()).toBe(true)
     await this.expectRow(subject, role)
+    await humanRecordedPause([600, 1200])
   }
 
   async revoke(subject: string): Promise<void> {
@@ -161,6 +168,7 @@ export class ControlUiGrantPanel {
     await expect(this.page.getByRole('button', { name: `Access role for ${subject}` })).toHaveCount(
       0
     )
+    await humanRecordedPause([600, 1200])
   }
 
   async expectRow(subject: string, role: AccessRole): Promise<void> {
