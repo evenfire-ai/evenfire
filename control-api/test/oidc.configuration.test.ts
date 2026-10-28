@@ -5,7 +5,7 @@ import {
   readOidcClientSecret,
 } from '../src/oidc/configuration.js'
 
-const SECRET = 'a-test-only-provider-secret-that-must-never-escape'
+const SECRET = 'a-test-only-oidc-provider-fixture-secret-that-must-never-escape'
 const GENERATION_KEY = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
 const OIDC_ENV = {
   CONTROL_API_OIDC_REGISTRATION_ID: 'company-login',
