@@ -57,6 +57,26 @@ type OidcServerMetadata = {
   authorization_response_iss_parameter_supported?: unknown
 }
 
+type TrustedOidcProviderEndpoints = Readonly<{
+  issuer: string
+  authorizationEndpoint: string
+  tokenEndpoint: string
+  jwksEndpoint: string
+}>
+
+type ValidatedOidcProviderProfile = TrustedOidcProviderEndpoints &
+  Readonly<{
+    responseType: 'code'
+    responseMode: 'query'
+    grantType: 'authorization_code'
+    scopes: readonly ['openid', 'profile', 'email']
+    clientAuthenticationMethod: OidcProviderConfiguration['clientAuthenticationMethod']
+    codeChallengeMethod: 'S256'
+    idTokenSigningAlgorithm: typeof OIDC_ID_TOKEN_ALGORITHM
+    minimumRsaModulusBits: typeof MIN_RSA_MODULUS_BITS
+    authorizationResponseIssuerParameterSupported: boolean
+  }>
+
 export type OidcProviderValidation = Readonly<{
   status: 'metadata-and-jwks-valid' | 'unavailable' | 'incompatible'
   registrationId: string
@@ -157,9 +177,13 @@ export class OidcProviderIncompatibleError extends Error {
   }
 }
 
+type OidcProviderOperationFailure =
+  | Readonly<{ kind: 'unavailable'; error: OidcProviderUnavailableError }>
+  | Readonly<{ kind: 'incompatible'; error: OidcProviderIncompatibleError }>
+
 type OidcOperationContext = {
   signal?: AbortSignal
-  transportFailure?: OidcProviderIncompatibleError | OidcProviderUnavailableError
+  transportFailure?: OidcProviderOperationFailure
 }
 
 export type OidcProtocolDependencies = Readonly<{
@@ -172,6 +196,7 @@ export type OidcProtocolDependencies = Readonly<{
 type TrustedConfiguration = Readonly<{
   client: Configuration
   transport: TrustedOidcTransport
+  profile: ValidatedOidcProviderProfile
   validatedAt: number
 }>
 
@@ -192,7 +217,7 @@ export class OidcProtocolEngine {
     return this.operationContext.run({ signal: options.signal }, async () => {
       try {
         const trusted = await this.getTrustedConfiguration()
-        await trusted.transport.fetchJwks()
+        await trusted.transport.fetchJwks(trusted.profile)
         return this.safeStatus('metadata-and-jwks-valid')
       } catch (error) {
         if (error instanceof OidcProviderIncompatibleError) {
@@ -223,7 +248,7 @@ export class OidcProtocolEngine {
         this.dependencies.db,
         this.dependencies.encryptionKeyHex,
         {
-          ...this.binding(),
+          ...this.binding(trusted.profile),
           state,
           pkceVerifier,
           nonce,
@@ -234,13 +259,13 @@ export class OidcProtocolEngine {
       const authorizationUrl = buildAuthorizationUrl(trusted.client, {
         client_id: this.provider.clientId,
         redirect_uri: this.provider.redirectUri,
-        response_type: 'code',
-        response_mode: 'query',
-        scope: 'openid profile email',
+        response_type: trusted.profile.responseType,
+        response_mode: trusted.profile.responseMode,
+        scope: trusted.profile.scopes.join(' '),
         state,
         nonce,
         code_challenge: codeChallenge,
-        code_challenge_method: 'S256',
+        code_challenge_method: trusted.profile.codeChallengeMethod,
       })
       return { authorizationUrl: authorizationUrl.href, expiresAt: attempt.expiresAt }
     })
@@ -278,8 +303,7 @@ export class OidcProtocolEngine {
     }
     this.assertCurrentGeneration()
     const trusted = await this.getTrustedConfiguration()
-    const server = trusted.client.serverMetadata() as OidcServerMetadata
-    const hasIssuerBinding = server.authorization_response_iss_parameter_supported === true
+    const hasIssuerBinding = trusted.profile.authorizationResponseIssuerParameterSupported
     if (hasIssuerBinding && input.issuer !== this.provider.issuer) {
       throw new OidcProviderIncompatibleError(
         'OIDC authorization response issuer binding is invalid'
@@ -295,7 +319,7 @@ export class OidcProtocolEngine {
       this.dependencies.db,
       this.dependencies.encryptionKeyHex,
       input.state,
-      this.binding()
+      this.binding(trusted.profile)
     )
     if (!claimed)
       throw new OidcProviderIncompatibleError(
@@ -332,13 +356,13 @@ export class OidcProtocolEngine {
       const transportFailure = this.operationContext.getStore()?.transportFailure
       if (
         error instanceof OidcProviderUnavailableError ||
-        transportFailure instanceof OidcProviderUnavailableError
+        transportFailure?.kind === 'unavailable'
       ) {
         throw new OidcProviderUnavailableError()
       }
       if (error instanceof OidcProviderIncompatibleError) throw error
-      if (transportFailure instanceof OidcProviderIncompatibleError) {
-        throw transportFailure
+      if (transportFailure?.kind === 'incompatible') {
+        throw transportFailure.error
       }
       throw new OidcProviderIncompatibleError('OIDC authorization response could not be verified')
     }
@@ -473,28 +497,28 @@ export class OidcProtocolEngine {
       ) {
         throw error
       }
-      throw transport.failure ?? new OidcProviderIncompatibleError()
+      throw transport.operationFailure?.error ?? new OidcProviderIncompatibleError()
     }
 
     const metadata = client.serverMetadata() as OidcServerMetadata
-    await transport.trustMetadata(metadata)
+    const profile = await transport.trustMetadata(metadata)
     if (previous) {
       const jwksCache = getJwksCache(previous.client)
       if (jwksCache) setJwksCache(client, jwksCache)
     }
     client.timeout = REQUEST_TIMEOUT_MS / 1000
     enableNonRepudiationChecks(client)
-    return { client, transport, validatedAt: this.now() }
+    return { client, transport, profile, validatedAt: this.now() }
   }
 
-  private binding(): OidcProtocolAttemptBinding {
+  private binding(profile: ValidatedOidcProviderProfile): OidcProtocolAttemptBinding {
     return {
       registrationId: this.provider.registrationId,
       configurationGeneration: this.provider.configurationGeneration,
       issuer: this.provider.issuer,
       clientId: this.provider.clientId,
       redirectUri: this.provider.redirectUri,
-      responseMode: 'query',
+      responseMode: profile.responseMode,
     }
   }
 
@@ -541,7 +565,7 @@ class TrustedOidcTransport {
   readonly fetch: CustomFetch
   private readonly allowedEndpoints = new Set<string>()
   private readonly discoveryUrl: string
-  private jwksEndpoint?: string
+  private profile?: ValidatedOidcProviderProfile
 
   constructor(
     private readonly provider: OidcProviderConfiguration,
@@ -552,29 +576,26 @@ class TrustedOidcTransport {
     this.fetch = (url, options) => this.request(url, options)
   }
 
-  get failure(): OidcProviderIncompatibleError | OidcProviderUnavailableError | undefined {
+  get operationFailure(): OidcProviderOperationFailure | undefined {
     return this.dependencies.getOperationContext()?.transportFailure
   }
 
-  private set failure(
-    value: OidcProviderIncompatibleError | OidcProviderUnavailableError | undefined
-  ) {
+  private recordOperationFailure(
+    error: OidcProviderIncompatibleError | OidcProviderUnavailableError
+  ): OidcProviderOperationFailure {
+    const failure: OidcProviderOperationFailure =
+      error instanceof OidcProviderUnavailableError
+        ? { kind: 'unavailable', error }
+        : { kind: 'incompatible', error }
     const context = this.dependencies.getOperationContext()
-    if (context) context.transportFailure = value
+    if (context) context.transportFailure = failure
+    return failure
   }
 
-  async trustMetadata(metadata: OidcServerMetadata): Promise<void> {
+  async trustMetadata(metadata: OidcServerMetadata): Promise<ValidatedOidcProviderProfile> {
     if (metadata.issuer !== this.provider.issuer) {
       throw new OidcProviderIncompatibleError(
         'OIDC discovery issuer does not exactly match configuration'
-      )
-    }
-    if (
-      metadata.authorization_response_iss_parameter_supported !== undefined &&
-      typeof metadata.authorization_response_iss_parameter_supported !== 'boolean'
-    ) {
-      throw new OidcProviderIncompatibleError(
-        'OIDC discovery response has an invalid issuer-binding capability'
       )
     }
     const authorizationEndpoint = requireString(
@@ -594,11 +615,12 @@ class TrustedOidcTransport {
         'OIDC endpoints do not share the configured issuer site'
       )
     }
-    for (const [url, field] of [
+    const endpointCandidates = [
       [authorizationEndpoint, 'authorization endpoint'],
       [tokenEndpoint, 'token endpoint'],
       [jwksUri, 'JWKS endpoint'],
-    ] as const) {
+    ] as const
+    for (const [url, field] of endpointCandidates) {
       validateMetadataEndpoint(url, field)
       const resolved = await resolveEndpointWithDeadline(
         url,
@@ -611,68 +633,34 @@ class TrustedOidcTransport {
         }
         throw new OidcProviderIncompatibleError('OIDC endpoint failed public-network validation')
       }
-      this.allowedEndpoints.add(new URL(url).href)
     }
-    this.jwksEndpoint = new URL(jwksUri).href
-
-    const responseTypes = metadataStringArray(
-      metadata.response_types_supported,
-      'response_types_supported'
-    )
-    if (!responseTypes?.includes('code')) {
-      throw new OidcProviderIncompatibleError(
-        'OIDC provider does not support authorization-code response'
-      )
+    const trustedEndpoints: TrustedOidcProviderEndpoints = Object.freeze({
+      issuer: this.provider.issuer,
+      authorizationEndpoint: new URL(authorizationEndpoint).href,
+      tokenEndpoint: new URL(tokenEndpoint).href,
+      jwksEndpoint: new URL(jwksUri).href,
+    })
+    const profile = validateOidcProviderProfile(metadata, this.provider, trustedEndpoints)
+    this.profile = profile
+    for (const endpoint of [
+      profile.authorizationEndpoint,
+      profile.tokenEndpoint,
+      profile.jwksEndpoint,
+    ]) {
+      this.allowedEndpoints.add(endpoint)
     }
-    const responseModes = metadataStringArray(
-      metadata.response_modes_supported,
-      'response_modes_supported'
-    )
-    const grantTypes = metadataStringArray(metadata.grant_types_supported, 'grant_types_supported')
-    const scopes = metadataStringArray(metadata.scopes_supported, 'scopes_supported')
-    const authenticationMethods = metadataStringArray(
-      metadata.token_endpoint_auth_methods_supported,
-      'token_endpoint_auth_methods_supported'
-    )
-    const codeChallengeMethods = metadataStringArray(
-      metadata.code_challenge_methods_supported,
-      'code_challenge_methods_supported'
-    )
-    if (grantTypes && !grantTypes.includes('authorization_code')) {
-      throw new OidcProviderIncompatibleError(
-        'OIDC provider does not support authorization-code grant'
-      )
-    }
-    if (scopes && !['openid', 'profile', 'email'].every(scope => scopes.includes(scope))) {
-      throw new OidcProviderIncompatibleError('OIDC provider does not support required scopes')
-    }
-    if (responseModes && !responseModes.includes('query')) {
-      throw new OidcProviderIncompatibleError(
-        'OIDC provider does not support the configured query response mode'
-      )
-    }
-    const supportedAuthenticationMethods = authenticationMethods ?? ['client_secret_basic']
-    if (!supportedAuthenticationMethods.includes(this.provider.clientAuthenticationMethod)) {
-      throw new OidcProviderIncompatibleError(
-        'OIDC provider does not support configured client authentication'
-      )
-    }
-    if (codeChallengeMethods && !codeChallengeMethods.includes('S256')) {
-      throw new OidcProviderIncompatibleError('OIDC provider does not support PKCE S256')
-    }
+    return profile
   }
 
-  async fetchJwks(): Promise<void> {
-    if (!this.jwksEndpoint)
+  async fetchJwks(profile: ValidatedOidcProviderProfile): Promise<void> {
+    if (profile !== this.profile)
       throw new OidcProviderIncompatibleError('OIDC JWKS endpoint is unavailable')
-    const response = await this.request(this.jwksEndpoint, {
+    await this.request(profile.jwksEndpoint, {
       body: undefined,
       method: 'GET',
       headers: { accept: 'application/json' },
       redirect: 'manual',
     })
-    const body = await response.text()
-    validateJwks(body)
   }
 
   private async request(url: string, options: Parameters<CustomFetch>[1]): Promise<Response> {
@@ -680,22 +668,23 @@ class TrustedOidcTransport {
     try {
       parsed = new URL(url)
     } catch {
-      this.failure = new OidcProviderIncompatibleError('OIDC metadata contains an invalid endpoint')
-      throw this.failure
+      throw this.recordOperationFailure(
+        new OidcProviderIncompatibleError('OIDC metadata contains an invalid endpoint')
+      ).error
     }
     const normalized = parsed.href
     if (options.redirect !== 'manual' || !this.allowedEndpoints.has(normalized)) {
-      this.failure = new OidcProviderIncompatibleError(
-        'OIDC endpoint is outside the validated provider boundary'
-      )
-      throw this.failure
+      throw this.recordOperationFailure(
+        new OidcProviderIncompatibleError(
+          'OIDC endpoint is outside the validated provider boundary'
+        )
+      ).error
     }
     const method = options.method.toUpperCase()
     if (method !== 'GET' && method !== 'POST') {
-      this.failure = new OidcProviderIncompatibleError(
-        'OIDC endpoint request method is unsupported'
-      )
-      throw this.failure
+      throw this.recordOperationFailure(
+        new OidcProviderIncompatibleError('OIDC endpoint request method is unsupported')
+      ).error
     }
     const body = requestBody(options.body)
     const headers = Object.fromEntries(
@@ -710,38 +699,33 @@ class TrustedOidcTransport {
       signal: combineSignals(options.signal, this.dependencies.getOperationContext()?.signal),
     })
     if (!result.ok) {
+      let error: OidcProviderIncompatibleError | OidcProviderUnavailableError
       if (result.error.kind === 'kernel_rejected') {
-        this.failure = new OidcProviderIncompatibleError(
-          'OIDC endpoint failed public-network validation'
-        )
+        error = new OidcProviderIncompatibleError('OIDC endpoint failed public-network validation')
       } else if (result.error.kind === 'transport_failed') {
-        this.failure = new OidcProviderUnavailableError()
+        error = new OidcProviderUnavailableError()
       } else {
-        this.failure = new OidcProviderIncompatibleError(
-          'OIDC endpoint response encoding is unsupported'
-        )
+        error = new OidcProviderIncompatibleError('OIDC endpoint response encoding is unsupported')
       }
-      throw this.failure
+      throw this.recordOperationFailure(error).error
     }
     if (result.response.status >= 300 && result.response.status < 400) {
-      this.failure = new OidcProviderIncompatibleError('OIDC endpoint redirects are not supported')
-      throw this.failure
+      throw this.recordOperationFailure(
+        new OidcProviderIncompatibleError('OIDC endpoint redirects are not supported')
+      ).error
     }
     if (result.response.status >= 500 || result.response.status === 429) {
-      this.failure = new OidcProviderUnavailableError()
-      throw this.failure
+      throw this.recordOperationFailure(new OidcProviderUnavailableError()).error
     }
     if (result.response.status < 200 || result.response.status >= 300) {
-      this.failure = new OidcProviderIncompatibleError(
-        'OIDC endpoint rejected the supported protocol request'
-      )
-      throw this.failure
+      throw this.recordOperationFailure(
+        new OidcProviderIncompatibleError('OIDC endpoint rejected the supported protocol request')
+      ).error
     }
     if (result.response.status !== 200) {
-      this.failure = new OidcProviderIncompatibleError(
-        'OIDC endpoint returned an unsupported success response'
-      )
-      throw this.failure
+      throw this.recordOperationFailure(
+        new OidcProviderIncompatibleError('OIDC endpoint returned an unsupported success response')
+      ).error
     }
     if (normalized === this.discoveryUrl) {
       try {
@@ -750,19 +734,19 @@ class TrustedOidcTransport {
           throw new Error('invalid metadata shape')
         }
       } catch {
-        this.failure = new OidcProviderIncompatibleError('OIDC discovery response is malformed')
-        throw this.failure
+        throw this.recordOperationFailure(
+          new OidcProviderIncompatibleError('OIDC discovery response is malformed')
+        ).error
       }
     }
-    if (this.isJwksEndpoint(normalized)) validateJwks(result.response.bodyText)
+    const profile = this.profile
+    if (profile && normalized === profile.jwksEndpoint) {
+      validateJwks(result.response.bodyText, profile)
+    }
     return new Response(result.response.bodyText, {
       status: result.response.status,
       headers: toWebHeaders(result.response.headers),
     })
-  }
-
-  private isJwksEndpoint(url: string): boolean {
-    return url === this.jwksEndpoint
   }
 }
 
@@ -845,6 +829,79 @@ function metadataStringArray(value: unknown, field: string): string[] | undefine
   return value as string[]
 }
 
+function validateOidcProviderProfile(
+  metadata: OidcServerMetadata,
+  provider: OidcProviderConfiguration,
+  trustedEndpoints: TrustedOidcProviderEndpoints
+): ValidatedOidcProviderProfile {
+  if (
+    metadata.authorization_response_iss_parameter_supported !== undefined &&
+    typeof metadata.authorization_response_iss_parameter_supported !== 'boolean'
+  ) {
+    throw new OidcProviderIncompatibleError(
+      'OIDC discovery response has an invalid issuer-binding capability'
+    )
+  }
+  const responseTypes = metadataStringArray(
+    metadata.response_types_supported,
+    'response_types_supported'
+  )
+  if (!responseTypes?.includes('code')) {
+    throw new OidcProviderIncompatibleError(
+      'OIDC provider does not support authorization-code response'
+    )
+  }
+  const responseModes = metadataStringArray(
+    metadata.response_modes_supported,
+    'response_modes_supported'
+  )
+  const grantTypes = metadataStringArray(metadata.grant_types_supported, 'grant_types_supported')
+  const scopes = metadataStringArray(metadata.scopes_supported, 'scopes_supported')
+  const authenticationMethods = metadataStringArray(
+    metadata.token_endpoint_auth_methods_supported,
+    'token_endpoint_auth_methods_supported'
+  )
+  const codeChallengeMethods = metadataStringArray(
+    metadata.code_challenge_methods_supported,
+    'code_challenge_methods_supported'
+  )
+  if (grantTypes && !grantTypes.includes('authorization_code')) {
+    throw new OidcProviderIncompatibleError(
+      'OIDC provider does not support authorization-code grant'
+    )
+  }
+  if (scopes && !['openid', 'profile', 'email'].every(scope => scopes.includes(scope))) {
+    throw new OidcProviderIncompatibleError('OIDC provider does not support required scopes')
+  }
+  if (responseModes && !responseModes.includes('query')) {
+    throw new OidcProviderIncompatibleError(
+      'OIDC provider does not support the configured query response mode'
+    )
+  }
+  const supportedAuthenticationMethods = authenticationMethods ?? ['client_secret_basic']
+  if (!supportedAuthenticationMethods.includes(provider.clientAuthenticationMethod)) {
+    throw new OidcProviderIncompatibleError(
+      'OIDC provider does not support configured client authentication'
+    )
+  }
+  if (codeChallengeMethods && !codeChallengeMethods.includes('S256')) {
+    throw new OidcProviderIncompatibleError('OIDC provider does not support PKCE S256')
+  }
+  return Object.freeze({
+    ...trustedEndpoints,
+    responseType: 'code',
+    responseMode: 'query',
+    grantType: 'authorization_code',
+    scopes: ['openid', 'profile', 'email'] as const,
+    clientAuthenticationMethod: provider.clientAuthenticationMethod,
+    codeChallengeMethod: 'S256',
+    idTokenSigningAlgorithm: OIDC_ID_TOKEN_ALGORITHM,
+    minimumRsaModulusBits: MIN_RSA_MODULUS_BITS,
+    authorizationResponseIssuerParameterSupported:
+      metadata.authorization_response_iss_parameter_supported === true,
+  })
+}
+
 function isTransientDnsFailure(error: { message: string }): boolean {
   return /\b(?:EAI_AGAIN|ETIMEDOUT|ESERVFAIL|SERVFAIL)\b/i.test(error.message)
 }
@@ -868,7 +925,7 @@ function toWebHeaders(headers: Record<string, string | string[] | undefined>): H
   return result
 }
 
-function validateJwks(body: string): void {
+function validateJwks(body: string, profile: ValidatedOidcProviderProfile): void {
   let value: unknown
   try {
     value = JSON.parse(body)
@@ -889,13 +946,13 @@ function validateJwks(body: string): void {
       !isRecord(key) ||
       key.kty !== 'RSA' ||
       typeof key.n !== 'string' ||
-      !hasMinimumRsaModulus(key.n) ||
+      !hasMinimumRsaModulus(key.n, profile.minimumRsaModulusBits) ||
       typeof key.e !== 'string' ||
       typeof key.kid !== 'string' ||
       key.kid.length === 0 ||
       key.kid.length > 256 ||
       (key.use !== undefined && key.use !== 'sig') ||
-      (key.alg !== undefined && key.alg !== OIDC_ID_TOKEN_ALGORITHM) ||
+      (key.alg !== undefined && key.alg !== profile.idTokenSigningAlgorithm) ||
       Object.keys(key).some(name => privateParameters.has(name))
     ) {
       throw new OidcProviderIncompatibleError('OIDC JWKS response contains an invalid public key')
@@ -907,7 +964,7 @@ function validateJwks(body: string): void {
   }
 }
 
-function hasMinimumRsaModulus(value: string): boolean {
+function hasMinimumRsaModulus(value: string, minimumBits: number): boolean {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) return false
   const modulus = Buffer.from(value, 'base64url')
   if (modulus.length === 0 || modulus.toString('base64url') !== value) return false
@@ -921,7 +978,7 @@ function hasMinimumRsaModulus(value: string): boolean {
   const significantLength = modulus.length - firstSignificantByte
   const leadingByte = modulus[firstSignificantByte] ?? 0
   const leadingBits = 32 - Math.clz32(leadingByte)
-  return (significantLength - 1) * 8 + leadingBits >= MIN_RSA_MODULUS_BITS
+  return (significantLength - 1) * 8 + leadingBits >= minimumBits
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -187,6 +187,7 @@ function fixture(
     tokenAuthMethodsSupported?: unknown
     codeChallengeMethodsSupported?: unknown
     issuerBindingCapability?: unknown
+    omitOptionalCapabilities?: boolean
     initialKeyBits?: number
     tokenStatus?: number
     tokenTimeout?: boolean
@@ -213,13 +214,21 @@ function fixture(
     token_endpoint: `${issuer}/token`,
     jwks_uri: `${issuer}/keys`,
     response_types_supported: options.responseTypesSupported ?? ['code'],
-    response_modes_supported: options.responseModesSupported ?? ['query', 'fragment', 'form_post'],
-    grant_types_supported: options.grantTypesSupported ?? ['authorization_code'],
-    scopes_supported: options.scopesSupported ?? ['openid', 'profile', 'email'],
-    token_endpoint_auth_methods_supported: options.tokenAuthMethodsSupported ?? [
-      'client_secret_basic',
-    ],
-    code_challenge_methods_supported: options.codeChallengeMethodsSupported ?? ['S256'],
+    ...(!options.omitOptionalCapabilities
+      ? {
+          response_modes_supported: options.responseModesSupported ?? [
+            'query',
+            'fragment',
+            'form_post',
+          ],
+          grant_types_supported: options.grantTypesSupported ?? ['authorization_code'],
+          scopes_supported: options.scopesSupported ?? ['openid', 'profile', 'email'],
+          token_endpoint_auth_methods_supported: options.tokenAuthMethodsSupported ?? [
+            'client_secret_basic',
+          ],
+          code_challenge_methods_supported: options.codeChallengeMethodsSupported ?? ['S256'],
+        }
+      : {}),
     authorization_response_iss_parameter_supported: options.issuerBindingCapability ?? true,
   }
   let tokenStatus = options.tokenStatus
@@ -644,6 +653,23 @@ describe('generic OIDC protocol foundation', () => {
     ['issuer binding capability', { issuerBindingCapability: 'true' }],
   ])('rejects malformed %s capability metadata', async (_label, options) => {
     expect((await fixture(options).engine.validateProvider()).status).toBe('incompatible')
+  })
+
+  it('accepts absent optional capability lists without widening the configured flow', async () => {
+    const f = fixture({ omitOptionalCapabilities: true })
+    expect((await f.engine.validateProvider()).status).toBe('metadata-and-jwks-valid')
+
+    const { params } = await begin(f)
+    expect(params.get('response_type')).toBe('code')
+    expect(params.get('response_mode')).toBe('query')
+    expect(params.get('scope')).toBe('openid profile email')
+    expect(params.get('code_challenge_method')).toBe('S256')
+    const proof = await f.engine.completeIdentityProofAttempt({
+      state: params.get('state')!,
+      code: 'fixture-code',
+      issuer: GENERIC_ISSUER,
+    })
+    expect(isVerifiedOidcIdentityProof(proof)).toBe(true)
   })
 
   it('reports transient token-endpoint DNS failures as unavailable', async () => {
