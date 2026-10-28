@@ -15,34 +15,13 @@ describe('0134 composable catalog revisions migration', () => {
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
     await migration!.apply({ query })
     const sql = query.mock.calls.map(call => String(call[0])).join('\n')
-    const normalizedSql = sql.replace(/\s+/g, ' ')
 
-    for (const table of [
-      'users',
-      'teams',
-      'team_members',
-      'user_contexts',
-      'team_contexts',
-      'user_agents',
-      'team_agents',
-      'user_workflow_triggers',
-      'team_workflow_triggers',
-      'workflow_runs',
-      'workflow_approval_requests',
-      'notification_deliveries',
-      'gfs_resources',
-      'gfs_grants',
-      'gfs_shares',
-      'operational_resource_index',
-      'operational_resource_relationships',
-      'operational_catalog_source_state',
-    ]) {
-      expect(normalizedSql).toContain(`('${table}',`)
-    }
+    // The writer-class map is test data in the catalogRevisionComponents
+    // real-PostgreSQL suite, not a production table.
+    expect(sql).not.toContain('authorization_catalog_writer_components')
     expect(sql).toContain('authorization_bump_workflow_run_revision')
     expect(sql).toContain('authorization_bump_workflow_approval_revision')
     expect(sql).toContain('authorization_bump_notification_revision')
-    expect(sql).toContain('authorization_bump_gfs_subject_revision')
     expect(sql).toContain('authorization_bump_gfs_resource_revision')
     expect(sql).not.toContain('authorization_catalog_revision')
     expect(sql).not.toMatch(/\bDROP\s+(?:TRIGGER|TABLE|FUNCTION)\b/i)

@@ -51,7 +51,6 @@ const accessFoundationDefinerSignatures = [
   'authorization_bump_workflow_run_revision()',
   'authorization_bump_workflow_approval_revision()',
   'authorization_bump_notification_revision()',
-  'authorization_bump_gfs_subject_revision()',
   'authorization_bump_gfs_resource_component(pg_catalog.uuid)',
   'authorization_bump_gfs_authority_revision()',
   'authorization_bump_gfs_resource_subjects(pg_catalog.uuid)',
@@ -832,6 +831,49 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
     expectPrivileges([...privileges.password_admission_rollout_state], [])
     expectPrivileges([...privileges.password_verification_work], ['SELECT', 'INSERT', 'DELETE'])
+    // P-14: the GFS subject bump function had no trigger and no caller.
+    const obsoleteGfsSubjectRevision = await dbPool.query<{ function_name: string | null }>(
+      `SELECT to_regprocedure('public.authorization_bump_gfs_subject_revision()')::text
+         AS function_name`
+    )
+    expect(obsoleteGfsSubjectRevision.rows).toEqual([{ function_name: null }])
+    // Revision rows are written only by SECURITY DEFINER bump functions.
+    for (const relation of [
+      'authorization_user_revisions',
+      'authorization_team_revisions',
+      'authorization_resource_revisions',
+    ]) {
+      expectPrivileges([...privileges[relation]], ['SELECT'])
+    }
+    const runtimeClient = await dbPool.connect()
+    try {
+      await runtimeClient.query('BEGIN')
+      await runtimeClient.query('SET LOCAL ROLE control_api_runtime')
+      const team = await runtimeClient.query<{ id: string }>(
+        `INSERT INTO teams(name) VALUES ('Synthetic revision grant team') RETURNING id`
+      )
+      const teamId = team.rows[0].id
+      // Liveness witness: the runtime's own team write advances the revision
+      // through the trigger.
+      const bumped = await runtimeClient.query<{ revision: string }>(
+        'SELECT revision::text FROM authorization_team_revisions WHERE team_id = $1',
+        [teamId]
+      )
+      expect(bumped.rows).toHaveLength(1)
+      for (const statement of [
+        'INSERT INTO authorization_team_revisions(team_id) VALUES ($1)',
+        'UPDATE authorization_team_revisions SET revision = revision + 1 WHERE team_id = $1',
+      ]) {
+        await runtimeClient.query('SAVEPOINT direct_revision_write')
+        await expect(runtimeClient.query(statement, [teamId])).rejects.toMatchObject({
+          code: '42501',
+        })
+        await runtimeClient.query('ROLLBACK TO SAVEPOINT direct_revision_write')
+      }
+    } finally {
+      await runtimeClient.query('ROLLBACK')
+      runtimeClient.release()
+    }
 
     try {
       await dbPool.query('GRANT UPDATE ON password_verification_work TO control_api_runtime')

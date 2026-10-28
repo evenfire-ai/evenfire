@@ -18,6 +18,29 @@ const runtimeRoles = [
   'workflow_recipes_runtime',
 ] as const
 
+// Catalog writer tables and the revision component each one advances. This
+// was a production table with no reader (P-13); it is now test data.
+const CATALOG_WRITER_COMPONENTS = Object.freeze([
+  ['users', 'user'],
+  ['teams', 'team'],
+  ['team_members', 'user+team'],
+  ['user_contexts', 'user'],
+  ['team_contexts', 'team'],
+  ['user_agents', 'user'],
+  ['team_agents', 'team'],
+  ['user_workflow_triggers', 'user'],
+  ['team_workflow_triggers', 'team'],
+  ['workflow_runs', 'user+team'],
+  ['workflow_approval_requests', 'user+team'],
+  ['notification_deliveries', 'user+team'],
+  ['gfs_resources', 'resource+gfs-subjects'],
+  ['gfs_grants', 'resource+user+team'],
+  ['gfs_shares', 'resource+user+team'],
+  ['operational_resource_index', 'resource+source-state'],
+  ['operational_resource_relationships', 'resource+source-state'],
+  ['operational_catalog_source_state', 'source-state'],
+] as const)
+
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
   value.pathname = `/${database}`
@@ -140,20 +163,11 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
   it('maps the complete writer class without a singleton revision trigger', async () => {
     await applyComposableCatalogRevisionSchema(databasePool)
     await applyComposableCatalogRevisionSchema(databasePool)
-    const mappings = await databasePool.query<{
-      writer_table: string
-      component_class: string
-    }>(
-      `SELECT writer_table, component_class
-         FROM authorization_catalog_writer_components
-        ORDER BY catalog_utf8_bytes(writer_table)`
+    expect(CATALOG_WRITER_COMPONENTS).toHaveLength(18)
+    const registry = await databasePool.query<{ relation: string | null }>(
+      `SELECT to_regclass('public.authorization_catalog_writer_components')::text AS relation`
     )
-    expect(mappings.rows).toHaveLength(18)
-    expect(mappings.rows.filter(row => row.writer_table.startsWith('gfs_'))).toEqual([
-      { writer_table: 'gfs_grants', component_class: 'resource+user+team' },
-      { writer_table: 'gfs_resources', component_class: 'resource+gfs-subjects' },
-      { writer_table: 'gfs_shares', component_class: 'resource+user+team' },
-    ])
+    expect(registry.rows).toEqual([{ relation: null }])
 
     const globalTriggers = await databasePool.query<{ count: string }>(
       `SELECT count(*)::text AS count
@@ -169,11 +183,10 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     )
     const directlyVersioned = new Set(['operational_catalog_source_state'])
     const triggered = new Set(triggerTables.rows.map(row => row.table_name))
-    for (const mapping of mappings.rows) {
-      expect(
-        triggered.has(mapping.writer_table) || directlyVersioned.has(mapping.writer_table),
-        mapping.writer_table
-      ).toBe(true)
+    for (const [writerTable] of CATALOG_WRITER_COMPONENTS) {
+      expect(triggered.has(writerTable) || directlyVersioned.has(writerTable), writerTable).toBe(
+        true
+      )
     }
   })
 

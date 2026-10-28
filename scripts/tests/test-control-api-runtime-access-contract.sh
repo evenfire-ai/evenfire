@@ -10,7 +10,7 @@ duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (
 invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/) { count++ } END { print count + 0 }' "$PROFILE_FILE")"
 
 # The composed profile includes operational catalog readers and password-admission relations.
-if [[ "$relation_count" != "115" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
+if [[ "$relation_count" != "114" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
   ! grep -qx $'authorization_catalog_environment\tread' "$PROFILE_FILE" || \
   ! grep -qx $'dynamic_clients\tlegacy_dml' "$PROFILE_FILE" || \
   ! grep -qx $'entity_change_feed\tnone' "$PROFILE_FILE" || \

@@ -154,11 +154,6 @@ export async function applyUserAccessFoundationSchema(db: DbClient): Promise<voi
         AND source_provider_uid <> '' AND source_resource_version <> ''
       )
     );
-    CREATE INDEX IF NOT EXISTS operational_relationship_source_idx
-      ON operational_resource_relationships (
-        environment_id, source_type, source_id, relationship_type,
-        target_type, target_id, relationship_instance_id
-      );
     CREATE INDEX IF NOT EXISTS operational_relationship_target_idx
       ON operational_resource_relationships (
         environment_id, target_type, target_id, source_type,
@@ -226,37 +221,6 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
       environment_id TEXT NOT NULL CHECK (environment_id <> '')
     );
-
-    CREATE TABLE IF NOT EXISTS authorization_catalog_writer_components (
-      writer_table TEXT PRIMARY KEY,
-      component_class TEXT NOT NULL,
-      rationale TEXT NOT NULL,
-      CHECK (writer_table <> '' AND component_class <> '' AND rationale <> '')
-    );
-
-    INSERT INTO authorization_catalog_writer_components(writer_table, component_class, rationale)
-    VALUES
-      ('users', 'user', 'user identity and lifecycle'),
-      ('teams', 'team', 'team identity'),
-      ('team_members', 'user+team', 'membership and live role'),
-      ('user_contexts', 'user', 'direct context access'),
-      ('team_contexts', 'team', 'team context access'),
-      ('user_agents', 'user', 'direct agent access'),
-      ('team_agents', 'team', 'team agent access'),
-      ('user_workflow_triggers', 'user', 'direct workflow access'),
-      ('team_workflow_triggers', 'team', 'team workflow access'),
-      ('workflow_runs', 'user+team', 'visible workflow-run ownership'),
-      ('workflow_approval_requests', 'user+team', 'approval target authority'),
-      ('notification_deliveries', 'user+team', 'notification audience'),
-      ('gfs_resources', 'resource+gfs-subjects', 'resource and current subject visibility'),
-      ('gfs_grants', 'resource+user+team', 'GFS resource and direct-subject authority'),
-      ('gfs_shares', 'resource+user+team', 'GFS resource and shared-subject authority'),
-      ('operational_resource_index', 'resource+source-state', 'promoted source resources'),
-      ('operational_resource_relationships', 'resource+source-state', 'promoted source edges'),
-      ('operational_catalog_source_state', 'source-state', 'atomic source generation promotion')
-    ON CONFLICT (writer_table) DO UPDATE
-      SET component_class = EXCLUDED.component_class,
-          rationale = EXCLUDED.rationale;
 
     CREATE OR REPLACE FUNCTION authorization_bump_subject_revision(
       target_subject_type TEXT,
@@ -391,23 +355,6 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
-    CREATE OR REPLACE FUNCTION authorization_bump_gfs_subject_revision()
-    RETURNS TRIGGER
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog, public, pg_temp
-    AS $$
-    BEGIN
-      IF TG_OP <> 'DELETE' THEN
-        PERFORM authorization_bump_subject_revision(NEW.subject_type, NEW.subject_id);
-      END IF;
-      IF TG_OP <> 'INSERT' THEN
-        PERFORM authorization_bump_subject_revision(OLD.subject_type, OLD.subject_id);
-      END IF;
-      RETURN COALESCE(NEW, OLD);
-    END;
-    $$;
-
     CREATE OR REPLACE FUNCTION authorization_bump_gfs_resource_component(
       target_resource_id UUID
     )
@@ -534,9 +481,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       AFTER INSERT OR UPDATE OR DELETE ON gfs_resources
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_resource_revision();
 
-    REVOKE ALL ON TABLE authorization_catalog_writer_components FROM PUBLIC;
     REVOKE ALL ON TABLE authorization_catalog_environment FROM PUBLIC;
-    GRANT SELECT ON TABLE authorization_catalog_writer_components TO control_api_runtime;
     GRANT SELECT ON TABLE authorization_catalog_environment TO control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_subject_revision(TEXT, TEXT) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
@@ -544,7 +489,6 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     REVOKE ALL ON FUNCTION authorization_bump_workflow_run_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_workflow_approval_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_notification_revision() FROM PUBLIC;
-    REVOKE ALL ON FUNCTION authorization_bump_gfs_subject_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_component(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_authority_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_gfs_resource_subjects(UUID) FROM PUBLIC;
@@ -843,7 +787,8 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
       operational_relationships_staging
       TO control_api_runtime;
 
-    GRANT SELECT, INSERT, UPDATE ON TABLE
+    -- Revision rows are written only by the SECURITY DEFINER bump functions.
+    GRANT SELECT ON TABLE
       authorization_user_revisions,
       authorization_team_revisions,
       authorization_resource_revisions

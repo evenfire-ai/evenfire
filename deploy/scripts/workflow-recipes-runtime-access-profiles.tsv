@@ -2,7 +2,6 @@
 administrative_events	none
 agent_run_events	none
 authorization_catalog_environment	none
-authorization_catalog_writer_components	none
 authorization_resource_revisions	none
 authorization_team_revisions	none
 authorization_user_revisions	none

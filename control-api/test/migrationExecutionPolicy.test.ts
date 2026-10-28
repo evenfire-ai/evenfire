@@ -19,7 +19,6 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'external_v1_session_revocations_expiry_idx',
   'authorization_resource_revisions_updated_idx',
   'operational_resource_source_idx',
-  'operational_relationship_source_idx',
   'operational_relationship_target_idx',
   'operational_relationship_catalog_target_idx',
   'operational_relationship_generation_idx',
@@ -133,7 +132,8 @@ describe('D34 migration execution policy', () => {
     // every index on a pre-existing table is built online, and only online.
     expect(inTransactionNames).toEqual([...FRESH_TABLE_INDEXES].sort())
     expect(plannedNames).toHaveLength(25)
-    expect(new Set([...plannedNames, ...inTransactionNames])).toHaveLength(39)
+    // 25 online plus 13 fresh-table indexes (P-12 removed the duplicate source index).
+    expect(new Set([...plannedNames, ...inTransactionNames])).toHaveLength(38)
 
     // The planned definitions equal the in-transaction definitions S1d removed
     // (canonical form at 579ed2986), so an index built by either path is equivalent.

@@ -107,7 +107,6 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'external_v1_session_revocations_expiry_idx',
   'authorization_resource_revisions_updated_idx',
   'operational_resource_source_idx',
-  'operational_relationship_source_idx',
   'operational_relationship_target_idx',
   'operational_relationship_catalog_target_idx',
   'operational_relationship_generation_idx',
@@ -309,10 +308,10 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   it('classifies, creates, and reruns all PR1 indexes without replay', async () => {
     const firstVersions = await versions(databasePool)
     expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
-    expect(FRESH_TABLE_INDEXES).toHaveLength(14)
+    expect(FRESH_TABLE_INDEXES).toHaveLength(13)
 
     const allNames = [...PR1_ONLINE_INDEX_PLAN.map(index => index.name), ...FRESH_TABLE_INDEXES]
-    expect(new Set(allNames)).toHaveLength(39)
+    expect(new Set(allNames)).toHaveLength(38)
     const indexes = await databasePool.query<{ relname: string; indisvalid: boolean }>(
       `SELECT relation.relname, index.indisvalid
          FROM pg_class relation
@@ -320,7 +319,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         WHERE relation.relname = ANY($1::text[])`,
       [allNames]
     )
-    expect(indexes.rows).toHaveLength(39)
+    expect(indexes.rows).toHaveLength(38)
     expect(indexes.rows.every(row => row.indisvalid)).toBe(true)
 
     await initDb({ connect: () => databasePool.connect() })
