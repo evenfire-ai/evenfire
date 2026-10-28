@@ -73,7 +73,7 @@ type EndpointDiagnostics = {
   loading: boolean
 }
 
-const NOTIFICATION_TITLE_THEME = {
+const SETTINGS_TITLE_THEME = {
   components: {
     Typography: {
       titleMarginTop: 0,
@@ -628,11 +628,9 @@ export function SettingsPage({
               title={
                 <Flex align="center" gap="small">
                   <BellOutlined aria-hidden="true" />
-                  <ConfigProvider theme={NOTIFICATION_TITLE_THEME}>
-                    <Typography.Title id="settings-in-app-heading" level={3}>
-                      In App Notifications
-                    </Typography.Title>
-                  </ConfigProvider>
+                  <Typography.Title id="settings-in-app-heading" level={3}>
+                    In App Notifications
+                  </Typography.Title>
                 </Flex>
               }
             >
@@ -660,11 +658,9 @@ export function SettingsPage({
               title={
                 <Flex align="center" gap="small">
                   <DesktopOutlined aria-hidden="true" />
-                  <ConfigProvider theme={NOTIFICATION_TITLE_THEME}>
-                    <Typography.Title id="settings-desktop-heading" level={3}>
-                      Desktop notifications
-                    </Typography.Title>
-                  </ConfigProvider>
+                  <Typography.Title id="settings-desktop-heading" level={3}>
+                    Desktop notifications
+                  </Typography.Title>
                 </Flex>
               }
             >
@@ -689,11 +685,9 @@ export function SettingsPage({
             title={
               <Flex align="center" gap="small">
                 <BellOutlined aria-hidden="true" />
-                <ConfigProvider theme={NOTIFICATION_TITLE_THEME}>
-                  <Typography.Title id="settings-channel-fallback-heading" level={3}>
-                    Channel fallback
-                  </Typography.Title>
-                </ConfigProvider>
+                <Typography.Title id="settings-channel-fallback-heading" level={3}>
+                  Channel fallback
+                </Typography.Title>
               </Flex>
             }
           >
@@ -764,11 +758,9 @@ export function SettingsPage({
             title={
               <Flex align="center" gap="small">
                 <SoundOutlined aria-hidden="true" />
-                <ConfigProvider theme={NOTIFICATION_TITLE_THEME}>
-                  <Typography.Title id="settings-notification-sound-heading" level={3}>
-                    Notification sound
-                  </Typography.Title>
-                </ConfigProvider>
+                <Typography.Title id="settings-notification-sound-heading" level={3}>
+                  Notification sound
+                </Typography.Title>
               </Flex>
             }
           >
@@ -951,46 +943,49 @@ export function SettingsPage({
       ) : null}
     </Flex>
   )
+  const settingsContentWithTitleTheme = (
+    <ConfigProvider theme={SETTINGS_TITLE_THEME}>{settingsContent}</ConfigProvider>
+  )
 
   const settingsTabItems = [
     {
       key: 'account',
       label: 'Account',
-      children: activeSettingsTab === 'account' ? settingsContent : null,
+      children: activeSettingsTab === 'account' ? settingsContentWithTitleTheme : null,
     },
     {
       key: 'appearance',
       label: 'Appearance',
-      children: activeSettingsTab === 'appearance' ? settingsContent : null,
+      children: activeSettingsTab === 'appearance' ? settingsContentWithTitleTheme : null,
     },
     {
       key: 'notifications',
       label: 'Notifications',
-      children: activeSettingsTab === 'notifications' ? settingsContent : null,
+      children: activeSettingsTab === 'notifications' ? settingsContentWithTitleTheme : null,
     },
     {
       key: 'plugins',
       label: 'Plugin permissions',
-      children: activeSettingsTab === 'plugins' ? settingsContent : null,
+      children: activeSettingsTab === 'plugins' ? settingsContentWithTitleTheme : null,
     },
     ...(hasSocialChannelsAccess
       ? [
           {
             key: 'social',
             label: 'Social channels',
-            children: activeSettingsTab === 'social' ? settingsContent : null,
+            children: activeSettingsTab === 'social' ? settingsContentWithTitleTheme : null,
           },
         ]
       : []),
     {
       key: 'shortcuts',
       label: 'Shortcuts',
-      children: activeSettingsTab === 'shortcuts' ? settingsContent : null,
+      children: activeSettingsTab === 'shortcuts' ? settingsContentWithTitleTheme : null,
     },
     {
       key: 'information',
       label: 'Information',
-      children: activeSettingsTab === 'information' ? settingsContent : null,
+      children: activeSettingsTab === 'information' ? settingsContentWithTitleTheme : null,
     },
   ]
 

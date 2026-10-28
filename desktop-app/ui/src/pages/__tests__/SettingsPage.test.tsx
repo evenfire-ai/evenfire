@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { StyleProvider, createCache } from '@ant-design/cssinjs'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
@@ -123,6 +124,12 @@ describe('SettingsPage', () => {
       value: {
         socialChannels: {
           getSummary: vi.fn(async () => ({ targets: [], accounts: [] })),
+        },
+        pluginSdk: {
+          listGrants: vi.fn(async () => []),
+          activity: vi.fn(async () => []),
+          revoke: vi.fn(async () => undefined),
+          clearActivity: vi.fn(async () => undefined),
         },
         auth: {
           getDesktopAppInfo: vi.fn(async () => ({
@@ -394,49 +401,80 @@ describe('SettingsPage', () => {
     expect(section?.classList.contains('ant-flex-gap-small')).toBe(true)
   })
 
-  it('keeps notification title spacing scoped to the notifications tab', () => {
-    const styleContainer = document.createElement('div')
-    document.body.append(styleContainer)
-    const view = render(
-      <StyleProvider cache={createCache()} container={styleContainer}>
-        <AuthContext.Provider value={makeAuthValue()}>
-          <SettingsPage {...defaultSettingsProps} />
-        </AuthContext.Provider>
-      </StyleProvider>
-    )
+  it('applies aligned title spacing to every titled settings tab', async () => {
+    const titledTabs = [
+      { tab: 'Account', headings: ['Account'], iconAligned: true },
+      { tab: 'Appearance', headings: ['Theme'], iconAligned: true },
+      {
+        tab: 'Notifications',
+        headings: [
+          'In App Notifications',
+          'Desktop notifications',
+          'Channel fallback',
+          'Notification sound',
+        ],
+        iconAligned: true,
+      },
+      { tab: 'Plugin permissions', headings: ['Plugin permissions'], iconAligned: false },
+      { tab: 'Shortcuts', headings: ['Keyboard shortcuts'], iconAligned: true },
+      { tab: 'Social channels', headings: ['Social channels'], iconAligned: true },
+    ]
+    vi.mocked(window.clerum.socialChannels.getSummary).mockResolvedValue({
+      targets: [
+        {
+          id: 'social-target-1',
+          medium: 'telegram',
+          agentName: 'Agent',
+          channelName: 'Channel',
+          botLabel: 'Bot',
+          botUsername: null,
+          status: 'ready',
+        },
+      ],
+      accounts: [],
+    })
 
-    try {
-      expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy()
-      const typographyStyles = Array.from(styleContainer.querySelectorAll('style'))
-        .map(style => style.textContent)
-        .join('\n')
-      expect(typographyStyles).not.toContain('--ant-typography-title-margin-top:0px')
-      expect(typographyStyles).not.toContain('--ant-typography-title-margin-bottom:0px')
-    } finally {
-      view.unmount()
-      styleContainer.remove()
+    for (const { tab, headings, iconAligned } of titledTabs) {
+      const user = userEvent.setup()
+      const styleContainer = document.createElement('div')
+      document.body.append(styleContainer)
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const view = render(
+        <StyleProvider cache={createCache()} container={styleContainer}>
+          <QueryClientProvider client={queryClient}>
+            <AuthContext.Provider value={makeAuthValue()}>
+              <SettingsPage {...defaultSettingsProps} />
+            </AuthContext.Provider>
+          </QueryClientProvider>
+        </StyleProvider>
+      )
+
+      try {
+        if (tab !== 'Account') {
+          const tabElement =
+            tab === 'Social channels'
+              ? await screen.findByRole('tab', { name: tab })
+              : screen.getByRole('tab', { name: tab })
+          await user.click(tabElement)
+        }
+
+        for (const name of headings) {
+          const heading = screen.getByRole('heading', { name })
+          if (iconAligned) {
+            expect(heading.parentElement?.classList.contains('ant-flex-align-center')).toBe(true)
+          }
+        }
+
+        const typographyStyles = Array.from(styleContainer.querySelectorAll('style'))
+          .map(style => style.textContent)
+          .join('\n')
+        expect(typographyStyles).toContain('--ant-typography-title-margin-top:0px')
+        expect(typographyStyles).toContain('--ant-typography-title-margin-bottom:0px')
+      } finally {
+        view.unmount()
+        queryClient.clear()
+        styleContainer.remove()
+      }
     }
-  })
-
-  it('aligns notification section heading text with its icon', async () => {
-    const user = userEvent.setup()
-    renderSettingsPage()
-
-    await user.click(screen.getByRole('tab', { name: 'Notifications' }))
-
-    for (const name of [
-      'In App Notifications',
-      'Desktop notifications',
-      'Channel fallback',
-      'Notification sound',
-    ]) {
-      const heading = screen.getByRole('heading', { name })
-      expect(heading.parentElement?.classList.contains('ant-flex-align-center')).toBe(true)
-    }
-    const typographyStyles = Array.from(document.head.querySelectorAll('style'))
-      .map(style => style.textContent)
-      .join('\n')
-    expect(typographyStyles).toContain('--ant-typography-title-margin-top:0px')
-    expect(typographyStyles).toContain('--ant-typography-title-margin-bottom:0px')
   })
 })
