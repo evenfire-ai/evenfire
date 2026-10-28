@@ -1693,6 +1693,260 @@ describe('App deep-link orchestration', () => {
     queryClient.clear()
   })
 
+  it('releases the exact app-link owner after workspace capture throws', async () => {
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    let failNextCapture = false
+    vi.mocked(useAppController).mockImplementation(() => {
+      const controller = actualControllerModule.useAppController()
+      const captureWorkspaceNavigation = controller.captureWorkspaceNavigation
+      controller.captureWorkspaceNavigation = (...args) => {
+        if (failNextCapture) {
+          failNextCapture = false
+          throw new Error('workspace snapshot failed')
+        }
+        return captureWorkspaceNavigation(...args)
+      }
+      realController = controller
+      return controller
+    })
+    const appBridge = window.clerum
+    installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/team-a',
+          title: 'Team A app',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    failNextCapture = true
+
+    const firstTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-a',
+        path: '/capture-failure',
+        teamId: 'team-a',
+      })
+    )
+    if (!firstTarget) throw new Error('the production parser rejected the capture-failure link')
+    const first = queue.enqueue(firstTarget)
+    act(() => emitDeepLink?.(first))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain(
+      'workspace snapshot failed'
+    )
+    expect(openSandboxUi()).not.toHaveBeenCalled()
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+
+    await act(async () => {
+      confirmDialogHarness.props?.onCancel()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
+
+    const secondTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-a',
+        path: '/after-capture-failure',
+        teamId: 'team-a',
+      })
+    )
+    if (!secondTarget) throw new Error('the production parser rejected the recovery link')
+    const second = queue.enqueue(secondTarget)
+    act(() => emitDeepLink?.(second))
+    await confirmPendingAppLink()
+    await waitForAppOpen()
+    await waitForMounted()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(second.id))
+    expect(main.live()).toMatchObject({
+      appRef: 'ns/team-a',
+      routePath: '/after-capture-failure',
+    })
+    expect(acknowledgeDeepLink.mock.calls.map(([id]) => id)).toEqual([first.id, second.id])
+    queryClient.clear()
+  })
+
+  it('settles a link after rollback restore throws and lets a later link proceed', async () => {
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    let failNextWorkspaceRestore = false
+    vi.mocked(useAppController).mockImplementation(() => {
+      const controller = actualControllerModule.useAppController()
+      const restoreWorkspaceNavigation = controller.restoreWorkspaceNavigation
+      controller.restoreWorkspaceNavigation = (...args) => {
+        if (failNextWorkspaceRestore) {
+          failNextWorkspaceRestore = false
+          throw new Error('workspace restore failed')
+        }
+        return restoreWorkspaceNavigation(...args)
+      }
+      realController = controller
+      return controller
+    })
+    const appBridge = window.clerum
+    const { handle } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+    let activeTeamId = 'team-a'
+    let failNextTeamBListing = false
+    handle.teamDirectory.mockImplementation(async () => ({
+      items: [],
+      currentTeamId: activeTeamId,
+    }))
+    const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
+      | (() => Promise<Record<string, unknown>>)
+      | undefined
+    if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
+    handle.refreshCatalog.mockImplementation(async () => ({
+      ...(await refreshCatalogProducer()),
+      teamId: activeTeamId,
+    }))
+    const switchTeamProducer = handle.switchTeam.getMockImplementation() as
+      | ((teamId: string) => Promise<unknown>)
+      | undefined
+    if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
+    handle.switchTeam.mockImplementation(async teamId => {
+      activeTeamId = teamId
+      return switchTeamProducer(teamId)
+    })
+    listApps.mockImplementation(async () => {
+      if (activeTeamId === 'team-b' && failNextTeamBListing) {
+        failNextTeamBListing = false
+        throw new Error('target app listing failed')
+      }
+      return {
+        apps: [
+          {
+            appRef: `ns/${activeTeamId}`,
+            title: `App ${activeTeamId}`,
+            defaultPath: '/',
+            ready: true,
+            phase: 'active',
+          },
+        ],
+      }
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+
+    const switchesBeforeLink = handle.switchTeam.mock.calls.length
+    failNextTeamBListing = true
+    failNextWorkspaceRestore = true
+    const firstTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-b',
+        path: '/restore-failure',
+        teamId: 'team-b',
+      })
+    )
+    if (!firstTarget) throw new Error('the production parser rejected the rollback-failure link')
+    const first = queue.enqueue(firstTarget)
+    act(() => emitDeepLink?.(first))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-a'))
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain(
+      'workspace restore failed'
+    )
+    expect(
+      handle.switchTeam.mock.calls.slice(switchesBeforeLink).map(([teamId]) => teamId)
+    ).toEqual(['team-b', 'team-a'])
+    expect(failNextWorkspaceRestore).toBe(false)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+    expect(main.live()).toBeNull()
+
+    // An explicit UI navigation supersedes the retryable failed link. Once
+    // its rejected restore has settled, that link may be acknowledged safely.
+    act(() => getController().handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(getController().navItem).toBe(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
+
+    const secondTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'team-a',
+        path: '/after-restore-failure',
+        teamId: 'team-a',
+      })
+    )
+    if (!secondTarget) throw new Error('the production parser rejected the recovery link')
+    const second = queue.enqueue(secondTarget)
+    act(() => emitDeepLink?.(second))
+    await confirmPendingAppLink()
+    await waitForAppOpen()
+    await waitForMounted()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(second.id))
+    expect(main.live()).toMatchObject({
+      appRef: 'ns/team-a',
+      routePath: '/after-restore-failure',
+    })
+    expect(getController().getCurrentTeamId()).toBe('team-a')
+    expect(acknowledgeDeepLink.mock.calls.map(([id]) => id)).toEqual([first.id, second.id])
+    queryClient.clear()
+  })
+
   it('continues after a superseded in-flight link is evicted from the bounded queue', async () => {
     let liveTeamId = 'team-a'
     let releaseFirstSwitch!: () => void

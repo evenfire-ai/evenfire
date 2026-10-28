@@ -2148,6 +2148,13 @@ export function App() {
       try {
         outcome = await restoreSandboxUiDeepLinkTeam(launchContext)
       } catch {
+        const dismissed = pendingSandboxUiDeepLinksRef.current.some(
+          item => item.link.id === pending.link.id && item.failedMessageDismissed
+        )
+        if (dismissed) {
+          await acknowledgeSandboxUiDeepLink(pending.link.id)
+          return
+        }
         // A rejected restore operation is settled but not safe to retry in the
         // background. Surface it as retryable and release this exact owner so
         // the queue cannot remain blocked indefinitely.
@@ -2719,12 +2726,44 @@ export function App() {
         }
         await acknowledgeSandboxUiDeepLink(pending.link.id)
       }
-    })()
+    })().catch(error => {
+      // Capture and restoration can throw outside the scheduler's inner
+      // operation handler. The promise is settled here, so release only this
+      // exact processing owner and leave an actionable retry state.
+      if (
+        processingGeneration !== sandboxUiDeepLinkGenerationRef.current ||
+        processingSandboxUiDeepLinkIdRef.current !== pending.link.id
+      ) {
+        clearSandboxUiDeepLinkProcessing(pending.link.id)
+        return
+      }
+      const currentPending = pendingSandboxUiDeepLinksRef.current.find(
+        item => item.link.id === pending.link.id
+      )
+      if (!currentPending) {
+        clearSandboxUiDeepLinkLocalOwnership(pending.link.id)
+        return
+      }
+      if (currentPending.failedMessageDismissed) {
+        void acknowledgeSandboxUiDeepLink(pending.link.id)
+        return
+      }
+      if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+        void cancelSupersededSandboxUiDeepLink(pending.link.id)
+        return
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      markSandboxUiDeepLinkRetryableFailure(
+        pending.link.id,
+        `App link processing stopped safely: ${message}. Confirm the active team, then retry.`
+      )
+    })
   }, [
     acknowledgeSandboxUiDeepLink,
     awaitLaunchOutcome,
     bootSplashLoading,
     clearSandboxUiDeepLinkProcessing,
+    clearSandboxUiDeepLinkLocalOwnership,
     cancelSupersededSandboxUiDeepLink,
     deferSandboxUiDeepLinkAndRestoreOrigin,
     finishSandboxUiDeepLinkLaunch,
