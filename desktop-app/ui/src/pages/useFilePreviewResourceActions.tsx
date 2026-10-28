@@ -25,6 +25,8 @@ import {
 } from '@/gfs/delegation'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
+import { commitGfsMove, toastMoveOutcome } from '@/gfs/moveCommit'
+import type { MoveToast } from '@/gfs/moveCommit'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { AgentWithMcpServers, TeamDirectoryResult } from '../../../src/types'
 
@@ -38,7 +40,7 @@ type FilePreviewResourceActionsProps = {
   onAuthorityFailure: (message: string) => boolean
   onDeleted: () => void
   onRenameCommitted?: (gfsUri: string) => void
-  pushToast?: (message: string, tone: 'success' | 'error') => void
+  pushToast?: MoveToast
 }
 
 function errorMessage(error: unknown): string {
@@ -709,19 +711,71 @@ export function useFilePreviewResourceActions({
         setMovePermissionStatus(null)
         return
       }
-      mutationDispatched = true
-      await window.clerum.gfs.moveResource(
-        resource.resourceId,
-        destinationId,
-        resource.drive,
-        resource.version
+      const outcome = await commitGfsMove(
+        {
+          resolveSource: async sourceUri => {
+            const resolved = await window.clerum.gfs.resolve(sourceUri)
+            return {
+              resourceId: resolved.resourceId,
+              gfsUri: sourceUri,
+              kind: resolved.kind === 'directory' ? 'directory' : 'file',
+              name: resolved.name,
+              version: resolved.version,
+              parentResourceId: resolved.parentResourceId,
+            }
+          },
+          moveResource: (resourceId, targetId, ifMatch) => {
+            mutationDispatched = true
+            return window.clerum.gfs.moveResource(resourceId, targetId, moveContext.drive, ifMatch)
+          },
+          isSessionAuthorityFailure: error => onAuthorityFailure(errorMessage(error)),
+          isCurrent: () =>
+            previewMountedRef.current &&
+            isActiveMove() &&
+            hasCurrentMoveContext() &&
+            (!isDialogCurrent || isDialogCurrent()),
+        },
+        {
+          source: {
+            resourceId: moveContext.resourceId,
+            gfsUri: moveContext.gfsUri,
+            kind: 'file',
+            name: resource.name,
+          },
+          destination: { resourceId: destinationId, name: destinationName },
+          allowNumberedRename: false,
+          expectedSourceSnapshot: {
+            resourceId: moveContext.resourceId,
+            version: moveContext.version,
+            parentResourceId: moveContext.parentResourceId,
+          },
+        }
       )
-      if (moveContextRef.current.sessionScope === moveContext.sessionScope) {
-        await invalidateResourceForSession(moveContext.sessionScope)
+
+      if (outcome.status === 'committed') {
+        if (moveContextRef.current.sessionScope === moveContext.sessionScope) {
+          await invalidateResourceForSession(moveContext.sessionScope)
+        }
+        if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
+        if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) setMoveOpen(false)
+        toastMoveOutcome(pushToast, outcome, resource.name, destinationName, 'file')
+        return
       }
+
+      if (outcome.status === 'session-lost') {
+        if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
+          setMoveOpen(false)
+          setMovePermissionStatus(null)
+        }
+        return
+      }
+      if (outcome.status === 'gesture-lost') return
       if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
-      if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) setMoveOpen(false)
-      pushToast?.(`Moved ${resource.name} to ${destinationName}`, 'success')
+
+      if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
+        throw new Error(outcome.message)
+      }
+      toastMoveOutcome(pushToast, outcome, resource.name, destinationName, 'file')
     } catch (error) {
       if (!mutationDispatched) {
         if (!isActiveMove()) return

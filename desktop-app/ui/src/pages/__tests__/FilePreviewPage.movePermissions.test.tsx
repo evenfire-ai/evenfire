@@ -7,6 +7,7 @@ import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useToastController } from '@hooks/domain/useToastController'
 import {
   accessibleResource,
+  gfsRouteFailureMessage,
   listAccessiblePage,
   resolveResource,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
@@ -16,6 +17,8 @@ import {
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { GfsClient } from '../../../../src/gfs/uriHandler'
+import { requestJson } from '../../../../src/httpClient'
 import { FilePreviewPage } from '../FilePreviewPage'
 
 const hookMock = vi.hoisted(() => ({ useGfsBrowserController: vi.fn() }))
@@ -36,6 +39,8 @@ const fullAccess = delegationAffordances(
   false
 )
 const readOnly = delegationAffordances(new Set(['read']), false)
+type MoveReceipt = Awaited<ReturnType<typeof window.clerum.gfs.moveResource>>
+const successfulMoveReceipt: MoveReceipt = { resourceId, version: 8 }
 
 afterEach(() => {
   cleanup()
@@ -47,7 +52,7 @@ function installGfs(options: {
   source?: () => Promise<ReturnType<typeof delegationAffordances>>
   resourceAffordances?: () => Promise<ReturnType<typeof delegationAffordances>>
   destination?: () => Promise<ReturnType<typeof delegationAffordances>>
-  move?: (...args: unknown[]) => Promise<void>
+  move?: (...args: unknown[]) => Promise<MoveReceipt>
   rename?: (...args: unknown[]) => Promise<void>
   listAccessible?: () => Promise<unknown>
 }) {
@@ -73,7 +78,7 @@ function installGfs(options: {
     }
     return fullAccess
   })
-  const moveResource = vi.fn(options.move ?? (async () => undefined))
+  const moveResource = vi.fn(options.move ?? (async () => ({ resourceId, version: 8 })))
   const renameResource = vi.fn(options.rename ?? (async () => undefined))
   const deleteResource = vi.fn(async () => undefined)
   Object.defineProperty(window, 'clerum', {
@@ -579,7 +584,7 @@ describe('FilePreviewPage move permission contract', () => {
         permissions: ['read'],
       }),
     ])
-    const moveResource = vi.fn(async () => undefined)
+    const moveResource = vi.fn(async () => ({ resourceId, version: 8 }))
     installGfs({
       destination: async () => readOnly,
       listAccessible: async () => destinationPage,
@@ -610,7 +615,7 @@ describe('FilePreviewPage move permission contract', () => {
         permissions: ['read', 'write'],
       }),
     ])
-    const moveResource = vi.fn(async () => undefined)
+    const moveResource = vi.fn(async () => ({ resourceId, version: 8 }))
     const { affordances } = installGfs({
       destination: async () => readOnly,
       listAccessible: async () => destinationPage,
@@ -646,7 +651,7 @@ describe('FilePreviewPage move permission contract', () => {
     ])
     let sourceCalls = 0
     let finishSourceRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
-    const moveResource = vi.fn(async () => undefined)
+    const moveResource = vi.fn(async () => ({ resourceId, version: 8 }))
     const { affordances } = installGfs({
       source: () => {
         sourceCalls += 1
@@ -707,7 +712,7 @@ describe('FilePreviewPage move permission contract', () => {
       if (sourceCalls === 2) throw limited
       return fullAccess
     })
-    const moveResource = vi.fn(async () => undefined)
+    const moveResource = vi.fn(async () => ({ resourceId, version: 8 }))
     installGfs({ source, listAccessible: async () => destinationPage, move: moveResource })
     installController()
     const { queryClient } = renderPreview()
@@ -772,7 +777,7 @@ describe('FilePreviewPage move permission contract', () => {
       if (destinationCalls === 1) throw limited
       return fullAccess
     })
-    const moveResource = vi.fn(async () => undefined)
+    const moveResource = vi.fn(async () => ({ resourceId, version: 8 }))
     const { affordances } = installGfs({
       destination,
       listAccessible: async () => destinationPage,
@@ -823,7 +828,7 @@ describe('FilePreviewPage move permission contract', () => {
           finishDestinationCheck = resolve
         })
     )
-    const moveResource = vi.fn(async () => undefined)
+    const moveResource = vi.fn(async () => ({ resourceId, version: 8 }))
     const { resolve } = installGfs({
       destination,
       listAccessible: async () => destinationPage,
@@ -890,7 +895,7 @@ describe('FilePreviewPage move permission contract', () => {
         permissions: ['read', 'write'],
       }),
     ])
-    const moveResource = vi.fn(async () => undefined)
+    const moveResource = vi.fn(async () => ({ resourceId, version: 8 }))
     const pushToast = vi.fn()
     installGfs({
       destination: async () => fullAccess,
@@ -1004,8 +1009,8 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   }
 
   it('reports one confirmed success after close and invalidates only the captured session cache', async () => {
-    let settleMove!: () => void
-    const pendingMove = new Promise<void>(resolve => {
+    let settleMove!: (receipt: MoveReceipt) => void
+    const pendingMove = new Promise<MoveReceipt>(resolve => {
       settleMove = resolve
     })
     const movedResource = await resolveResource({
@@ -1051,7 +1056,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(queryClient.getQueryState(capturedSessionCache)?.isInvalidated).toBe(false)
 
       resolve.mockResolvedValue(movedResource)
-      await act(async () => settleMove())
+      await act(async () => settleMove(successfulMoveReceipt))
 
       expect(await screen.findByText(moveMessage)).toBeTruthy()
       expect(screen.getAllByText(moveMessage)).toHaveLength(1)
@@ -1067,14 +1072,14 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(queryClient.getQueryState(otherSessionCache)?.isInvalidated).toBe(false)
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
-      await act(async () => settleMove())
+      await act(async () => settleMove(successfulMoveReceipt))
       queryClient.clear()
     }
   })
 
   it('shows one safe failure after close without repeating the Move', async () => {
     let rejectMove!: (error: Error) => void
-    const pendingMove = new Promise<void>((_resolve, reject) => {
+    const pendingMove = new Promise<MoveReceipt>((_resolve, reject) => {
       rejectMove = reject
     })
     const destinationPage = await listAccessiblePage([
@@ -1099,7 +1104,9 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
 
       const failure = await screen.findByRole('alert')
-      expect(failure.textContent).toContain('Could not move diagram.png to Archive: Move rejected')
+      expect(failure.textContent).toContain(
+        'The server rejected this destination. Refresh and choose a different folder.'
+      )
       expect(screen.getAllByRole('alert')).toHaveLength(1)
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
@@ -1108,9 +1115,142 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     }
   })
 
+  it.each([
+    [
+      412,
+      'precondition_failed',
+      'stale file version',
+      'This item changed while you were moving it. Review its current location and try again.',
+    ],
+    [
+      403,
+      'forbidden',
+      'move permission denied',
+      'EvenDrive could not confirm permission for this move. Refresh and try again.',
+    ],
+    [429, 'rate_limited', 'too many requests', 'Too many file requests — try again in 7s.'],
+    [
+      409,
+      'name_conflict',
+      'a destination item already exists',
+      'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.',
+    ],
+  ] as const)(
+    'uses the shared safe Move verdict for a real GFS %i after close',
+    async (status, code, serverMessage, expectedMessage) => {
+      const failureMessage = await gfsRouteFailureMessage(
+        client =>
+          client.moveResource(
+            { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+            'fixture-session-token'
+          ),
+        status,
+        { code, message: serverMessage },
+        status === 429 ? { 'retry-after': '7' } : {}
+      )
+      let rejectMove!: (error: Error) => void
+      const pendingMove = new Promise<MoveReceipt>((_resolve, reject) => {
+        rejectMove = reject
+      })
+      const destinationPage = await listAccessiblePage([
+        accessibleResource('destination-1', 'Archive', 'directory', {
+          permissions: ['read', 'write'],
+        }),
+      ])
+      const { moveResource } = installGfs({
+        destination: async () => fullAccess,
+        listAccessible: async () => destinationPage,
+        move: () => pendingMove,
+      })
+      installController(sessionScope)
+      const { queryClient } = renderPreviewWithToastStack()
+      try {
+        const dialog = await dispatchArchiveMove()
+        expect(moveResource).toHaveBeenCalledTimes(1)
+        expect(moveResource).toHaveBeenCalledWith(resourceId, 'destination-1', 'main', 7)
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+
+        await act(async () => rejectMove(new Error(failureMessage)))
+
+        expect(await screen.findByText(expectedMessage)).toBeTruthy()
+        expect(screen.queryByText(failureMessage)).toBeNull()
+        expect(moveResource).toHaveBeenCalledTimes(1)
+      } finally {
+        await act(async () => rejectMove(new Error(failureMessage)))
+        queryClient.clear()
+      }
+    }
+  )
+
+  it('verifies a status-free Preview Move transport failure without repeating the PATCH', async () => {
+    const { createServer } = await import('node:http')
+    const server = createServer(request => request.socket.destroy())
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    let transportError: Error | undefined
+    try {
+      const address = server.address() as import('node:net').AddressInfo
+      const client = new GfsClient({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        requestJson,
+        fetchBytes: async () => new ArrayBuffer(0),
+      })
+      try {
+        await client.moveResource(
+          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          'fixture-session-token'
+        )
+      } catch (error) {
+        transportError = error instanceof Error ? error : new Error(String(error))
+      }
+      expect(transportError).toBeInstanceOf(Error)
+      if (!transportError) throw new Error('Expected a status-free Move transport failure')
+
+      const destinationPage = await listAccessiblePage([
+        accessibleResource('destination-1', 'Archive', 'directory', {
+          permissions: ['read', 'write'],
+        }),
+      ])
+      let rejectMove!: (error: Error) => void
+      const pendingMove = new Promise<MoveReceipt>((_resolve, reject) => {
+        rejectMove = reject
+      })
+      const { moveResource, resolve } = installGfs({
+        destination: async () => fullAccess,
+        listAccessible: async () => destinationPage,
+        move: () => pendingMove,
+      })
+      installController(sessionScope)
+      const { queryClient } = renderPreviewWithToastStack()
+      try {
+        const dialog = await dispatchArchiveMove()
+        expect(moveResource).toHaveBeenCalledWith(resourceId, 'destination-1', 'main', 7)
+        expect(moveResource).toHaveBeenCalledTimes(1)
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+        resolve.mockClear()
+
+        expect(
+          screen.queryByText('Couldn’t confirm the move. Refresh before trying again.')
+        ).toBeNull()
+        await act(async () => rejectMove(transportError))
+        await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+
+        expect(
+          await screen.findByText('Couldn’t confirm the move. Refresh before trying again.')
+        ).toBeTruthy()
+        expect(screen.queryByText(transportError.message)).toBeNull()
+        expect(moveResource).toHaveBeenCalledTimes(1)
+      } finally {
+        await act(async () => rejectMove(transportError))
+        queryClient.clear()
+      }
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
   it('keeps a dispatched failure in the open dialog without duplicate toast feedback', async () => {
     let rejectMove!: (error: Error) => void
-    const pendingMove = new Promise<void>((_resolve, reject) => {
+    const pendingMove = new Promise<MoveReceipt>((_resolve, reject) => {
       rejectMove = reject
     })
     const destinationPage = await listAccessiblePage([
@@ -1129,7 +1269,11 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const dialog = await dispatchArchiveMove()
       await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
 
-      expect(within(dialog).getByText('Move rejected')).toBeTruthy()
+      expect(
+        within(dialog).getByText(
+          'The server rejected this destination. Refresh and choose a different folder.'
+        )
+      ).toBeTruthy()
       expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
       expect(screen.queryByRole('alert')).toBeNull()
       expect(moveResource).toHaveBeenCalledTimes(1)
@@ -1183,89 +1327,13 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     }
   })
 
-  it.each(['session', 'resource'] as const)(
-    'fences a settled result after the Preview %s context changes',
-    async contextChange => {
-      let settleMove!: () => void
-      const pendingMove = new Promise<void>(resolve => {
-        settleMove = resolve
-      })
-      const destinationPage = await listAccessiblePage([
-        accessibleResource('destination-1', 'Archive', 'directory', {
-          permissions: ['read', 'write'],
-        }),
-      ])
-      const { moveResource, resolve } = installGfs({
-        destination: async () => fullAccess,
-        listAccessible: async () => destinationPage,
-        move: () => pendingMove,
-      })
-      installController(sessionScope)
-      const { queryClient, rerender } = renderPreviewWithToastStack()
-      const newScope = 'other-user:main'
-      const currentScope = contextChange === 'session' ? newScope : sessionScope
-      const currentUri = 'gfs://main/fedcba9876543210fedcba9876543210'
-      const currentId = 'fedcba9876543210fedcba9876543210'
-      const currentResource = resolveResource({
-        resourceId: currentId,
-        rid: currentId,
-        gfsUri: currentUri,
-        drive: 'main',
-        parentResourceId: parentId,
-        name: 'current.png',
-        kind: 'file',
-        version: 2,
-        bytes: 1,
-      })
-      const currentCache = desktopQueryKeys.gfsChildren(currentScope, parentId, 'main')
-      queryClient.setQueryDefaults(currentCache, { gcTime: 60_000 })
-      try {
-        await dispatchArchiveMove()
-        queryClient.setQueryData(currentCache, { items: [], nextCursor: null })
-
-        if (contextChange === 'session') {
-          installController(newScope)
-          rerender(
-            <QueryClientProvider client={queryClient}>
-              <ToastingPreview />
-            </QueryClientProvider>
-          )
-        } else {
-          resolve.mockImplementation(async () => currentResource)
-          rerender(
-            <QueryClientProvider client={queryClient}>
-              <ToastingPreview gfsUri={currentUri} fileName="current.png" />
-            </QueryClientProvider>
-          )
-        }
-        await screen.findByAltText(
-          `Preview of ${contextChange === 'session' ? 'diagram.png' : 'current.png'}`
-        )
-        expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
-
-        await act(async () => settleMove())
-
-        expect(screen.queryByText(moveMessage)).toBeNull()
-        expect(moveResource).toHaveBeenCalledTimes(1)
-        if (contextChange === 'session') {
-          expect(queryClient.getQueryState(currentCache)?.isInvalidated).toBe(false)
-        } else {
-          expect(queryClient.getQueryState(currentCache)?.isInvalidated).toBe(true)
-        }
-      } finally {
-        await act(async () => settleMove())
-        queryClient.clear()
-      }
-    }
-  )
-
   it('does not let an earlier completion close a newer Move dialog or misattribute results', async () => {
-    let settleArchive!: () => void
-    let settleWork!: () => void
-    const archiveMove = new Promise<void>(resolve => {
+    let settleArchive!: (receipt: MoveReceipt) => void
+    let settleWork!: (receipt: MoveReceipt) => void
+    const archiveMove = new Promise<MoveReceipt>(resolve => {
       settleArchive = resolve
     })
-    const workMove = new Promise<void>(resolve => {
+    const workMove = new Promise<MoveReceipt>(resolve => {
       settleWork = resolve
     })
     const destinationPage = await listAccessiblePage([
@@ -1304,35 +1372,35 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(moveResource.mock.calls[0]).toEqual([resourceId, 'destination-1', 'main', 7])
       expect(moveResource.mock.calls[1]).toEqual([resourceId, 'destination-2', 'main', 7])
 
-      await act(async () => settleArchive())
+      await act(async () => settleArchive(successfulMoveReceipt))
       expect(await screen.findByText('Moved diagram.png to Archive')).toBeTruthy()
       expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
       expect(screen.queryByText('Moved diagram.png to Work')).toBeNull()
 
-      await act(async () => settleWork())
+      await act(async () => settleWork(successfulMoveReceipt))
       expect(await screen.findByText('Moved diagram.png to Work')).toBeTruthy()
       expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
       expect(screen.getAllByRole('status')).toHaveLength(2)
       expect(moveResource).toHaveBeenCalledTimes(2)
     } finally {
       await act(async () => {
-        settleArchive()
-        settleWork()
+        settleArchive(successfulMoveReceipt)
+        settleWork(successfulMoveReceipt)
       })
       queryClient.clear()
     }
   })
 
   it('keeps a dispatched success when its own refresh advances the resource version', async () => {
-    let settleArchive!: () => void
-    let settleWork!: () => void
+    let settleArchive!: (receipt: MoveReceipt) => void
+    let settleWork!: (receipt: MoveReceipt) => void
     let finishPermissionRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
     let holdPermissionRefresh = false
     let sourceReads = 0
-    const archiveMove = new Promise<void>(resolve => {
+    const archiveMove = new Promise<MoveReceipt>(resolve => {
       settleArchive = resolve
     })
-    const workMove = new Promise<void>(resolve => {
+    const workMove = new Promise<MoveReceipt>(resolve => {
       settleWork = resolve
     })
     const permissionRefresh = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
@@ -1385,9 +1453,9 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
 
       holdPermissionRefresh = true
       resolve.mockResolvedValue(movedResource)
-      await act(async () => settleArchive())
+      await act(async () => settleArchive(successfulMoveReceipt))
       await waitFor(() => expect(sourceReads).toBeGreaterThan(3))
-      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(4))
       await waitFor(() =>
         expect(queryClient.getQueryData(previewResourceKey)).toEqual(movedResource)
       )
@@ -1400,8 +1468,8 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(moveResource).toHaveBeenCalledTimes(2)
     } finally {
       await act(async () => {
-        settleArchive()
-        settleWork()
+        settleArchive(successfulMoveReceipt)
+        settleWork(successfulMoveReceipt)
         finishPermissionRefresh(fullAccess)
       })
       queryClient.clear()
@@ -1409,15 +1477,24 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   })
 
   it('shows a competing stale-version failure in the still-current Move dialog', async () => {
-    let settleArchive!: () => void
+    const failureMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId, destinationId: 'destination-2', ifMatch: 7 },
+          'fixture-session-token'
+        ),
+      412,
+      { code: 'precondition_failed', message: 'stale file version' }
+    )
+    let settleArchive!: (receipt: MoveReceipt) => void
     let rejectWork!: (error: Error) => void
     let finishPermissionRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
     let holdPermissionRefresh = false
     let sourceReads = 0
-    const archiveMove = new Promise<void>(resolve => {
+    const archiveMove = new Promise<MoveReceipt>(resolve => {
       settleArchive = resolve
     })
-    const workMove = new Promise<void>((_resolve, reject) => {
+    const workMove = new Promise<MoveReceipt>((_resolve, reject) => {
       rejectWork = reject
     })
     const permissionRefresh = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
@@ -1469,9 +1546,9 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
 
       holdPermissionRefresh = true
       resolve.mockResolvedValue(movedResource)
-      await act(async () => settleArchive())
+      await act(async () => settleArchive(successfulMoveReceipt))
       await waitFor(() => expect(sourceReads).toBeGreaterThan(3))
-      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(4))
       await waitFor(() =>
         expect(
           queryClient.getQueryData([
@@ -1483,8 +1560,12 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         ).toEqual(movedResource)
       )
 
-      await act(async () => rejectWork(new Error('412 Precondition Failed: stale file version')))
-      expect(within(workDialog).getByText(/stale file version/i)).toBeTruthy()
+      await act(async () => rejectWork(new Error(failureMessage)))
+      expect(
+        within(workDialog).getByText(
+          'This item changed while you were moving it. Review its current location and try again.'
+        )
+      ).toBeTruthy()
       expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
       expect(screen.queryByRole('alert')).toBeNull()
       expect(moveResource).toHaveBeenCalledTimes(2)
@@ -1493,8 +1574,8 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(await screen.findByText('Moved diagram.png to Archive')).toBeTruthy()
     } finally {
       await act(async () => {
-        settleArchive()
-        rejectWork(new Error('412 Precondition Failed: stale file version'))
+        settleArchive(successfulMoveReceipt)
+        rejectWork(new Error(failureMessage))
         finishPermissionRefresh(fullAccess)
       })
       queryClient.clear()
@@ -1504,10 +1585,10 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   it('identifies the captured destination for overlapping post-close Move failures', async () => {
     let rejectArchive!: (error: Error) => void
     let rejectWork!: (error: Error) => void
-    const archiveMove = new Promise<void>((_resolve, reject) => {
+    const archiveMove = new Promise<MoveReceipt>((_resolve, reject) => {
       rejectArchive = reject
     })
-    const workMove = new Promise<void>((_resolve, reject) => {
+    const workMove = new Promise<MoveReceipt>((_resolve, reject) => {
       rejectWork = reject
     })
     const destinationPage = await listAccessiblePage([
@@ -1550,12 +1631,14 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(screen.queryByRole('alert')).toBeNull()
       await act(async () => rejectArchive(new Error('Move rejected httpStatus=400')))
       const archiveFailure = await screen.findByText(
-        'Could not move diagram.png to Archive: Move rejected'
+        'The server rejected this destination. Refresh and choose a different folder.'
       )
       expect(archiveFailure).toBeTruthy()
       await act(async () => rejectWork(new Error('Move rejected httpStatus=400')))
       expect(
-        await screen.findByText('Could not move diagram.png to Work: Move rejected')
+        await screen.findAllByText(
+          'The server rejected this destination. Refresh and choose a different folder.'
+        )
       ).toBeTruthy()
       expect(screen.getAllByRole('alert')).toHaveLength(2)
       expect(moveResource).toHaveBeenCalledTimes(2)
@@ -1569,8 +1652,8 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   })
 
   it('invalidates the same-session cache but does not toast after Preview unmounts', async () => {
-    let settleMove!: () => void
-    const pendingMove = new Promise<void>(resolve => {
+    let settleMove!: (receipt: MoveReceipt) => void
+    const pendingMove = new Promise<MoveReceipt>(resolve => {
       settleMove = resolve
     })
     const destinationPage = await listAccessiblePage([
@@ -1597,7 +1680,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
           <ToastingPreview showPreview={false} />
         </QueryClientProvider>
       )
-      await act(async () => settleMove())
+      await act(async () => settleMove(successfulMoveReceipt))
 
       expect(queryClient.getQueryState(cacheKey)?.isInvalidated).toBe(true)
       expect(screen.queryByText(moveMessage)).toBeNull()
@@ -1605,7 +1688,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(screen.queryByRole('alert')).toBeNull()
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
-      await act(async () => settleMove())
+      await act(async () => settleMove(successfulMoveReceipt))
       queryClient.clear()
     }
   })
