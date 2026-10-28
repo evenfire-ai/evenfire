@@ -9,6 +9,7 @@ import {
   clearSandboxUiDeepLinkProcessingOwner,
   confirmPendingSandboxUiDeepLink,
   deferPendingSandboxUiDeepLink,
+  dismissPendingSandboxUiDeepLinkFailure,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
   findPendingSandboxUiDeepLinkAwaitingConfirmation,
@@ -391,8 +392,12 @@ describe('pending sandbox UI deep-link state', () => {
     expect(pending[0]?.failedMessage).toBe('native mount failed')
     expect(pending[0]?.nextRetryAt).toBeUndefined()
 
+    pending = dismissPendingSandboxUiDeepLinkFailure(pending, 1)
+    expect(pending[0]?.failedMessageDismissed).toBe(true)
+
     pending = resetPendingSandboxUiDeepLinkFailure(pending, 1)
     expect(pending[0]?.failedMessage).toBeUndefined()
+    expect(pending[0]?.failedMessageDismissed).toBe(false)
     expect(pending[0]?.retryCount).toBe(0)
   })
 

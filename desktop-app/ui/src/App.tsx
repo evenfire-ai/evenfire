@@ -75,6 +75,7 @@ import {
   clearSandboxUiDeepLinkProcessingOwner,
   confirmPendingSandboxUiDeepLink,
   deferPendingSandboxUiDeepLink,
+  dismissPendingSandboxUiDeepLinkFailure,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
   findPendingSandboxUiDeepLinkAwaitingConfirmation,
@@ -2156,6 +2157,13 @@ export function App() {
         )
         return
       }
+      const dismissed = pendingSandboxUiDeepLinksRef.current.some(
+        item => item.link.id === pending.link.id && item.failedMessageDismissed
+      )
+      if (dismissed) {
+        await acknowledgeSandboxUiDeepLink(pending.link.id)
+        return
+      }
       if (outcome === 'retryable') markSandboxUiDeepLinkRetryableFailure(pending.link.id)
       else if (
         outcome === 'superseded' &&
@@ -2172,6 +2180,7 @@ export function App() {
       cancelSupersededSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
       deferSandboxUiDeepLink,
+      acknowledgeSandboxUiDeepLink,
       markSandboxUiDeepLinkRetryableFailure,
       restoreSandboxUiDeepLinkTeam,
       vm.isNavigationIntentCurrent,
@@ -3101,7 +3110,7 @@ export function App() {
       vm.authenticatedPrincipalIdentity
     ) ?? null
   const failedSandboxUiDeepLink = vm.authenticatedPrincipalIdentity
-    ? pendingSandboxUiDeepLinks.find(item => item.failedMessage)
+    ? pendingSandboxUiDeepLinks.find(item => item.failedMessage && !item.failedMessageDismissed)
     : null
 
   const handleConfirmSandboxUiDeepLink = React.useCallback(
@@ -3144,7 +3153,7 @@ export function App() {
   const handleRetryFailedSandboxUiDeepLink = React.useCallback(
     (linkId: number) => {
       const pending = pendingSandboxUiDeepLinksRef.current.find(
-        item => item.link.id === linkId && item.failedMessage
+        item => item.link.id === linkId && item.failedMessage && !item.failedMessageDismissed
       )
       if (!pending) return
       const navigationIntentSequence = sandboxUiDeepLinkIntentByIdRef.current.get(linkId)
@@ -3172,12 +3181,18 @@ export function App() {
   const handleDismissFailedSandboxUiDeepLink = React.useCallback(
     (linkId: number) => {
       const pending = pendingSandboxUiDeepLinksRef.current.find(
-        item => item.link.id === linkId && item.failedMessage
+        item => item.link.id === linkId && item.failedMessage && !item.failedMessageDismissed
       )
       if (!pending) return
+      if (processingSandboxUiDeepLinkIdRef.current === linkId) {
+        setPendingSandboxUiDeepLinkState(
+          dismissPendingSandboxUiDeepLinkFailure(pendingSandboxUiDeepLinksRef.current, linkId)
+        )
+        return
+      }
       void acknowledgeSandboxUiDeepLink(linkId)
     },
-    [acknowledgeSandboxUiDeepLink]
+    [acknowledgeSandboxUiDeepLink, setPendingSandboxUiDeepLinkState]
   )
 
   const sandboxUiDeepLinkDialog = pendingSandboxUiConfirmation ? (

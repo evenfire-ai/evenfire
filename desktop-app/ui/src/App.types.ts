@@ -14,6 +14,7 @@ export type PendingSandboxUiDeepLink = {
   retryCount?: number
   nextRetryAt?: number
   failedMessage?: string
+  failedMessageDismissed?: boolean
 }
 
 /**

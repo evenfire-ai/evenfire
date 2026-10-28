@@ -144,9 +144,19 @@ export function failPendingSandboxUiDeepLink(
       ? {
           ...item,
           failedMessage: message,
+          failedMessageDismissed: false,
           nextRetryAt: undefined,
         }
       : item
+  )
+}
+
+export function dismissPendingSandboxUiDeepLinkFailure(
+  current: PendingSandboxUiDeepLink[],
+  linkId: number
+): PendingSandboxUiDeepLink[] {
+  return current.map(item =>
+    item.link.id === linkId && item.failedMessage ? { ...item, failedMessageDismissed: true } : item
   )
 }
 
@@ -159,6 +169,7 @@ export function resetPendingSandboxUiDeepLinkFailure(
       ? {
           ...item,
           failedMessage: undefined,
+          failedMessageDismissed: false,
           nextRetryAt: undefined,
           retryCount: 0,
         }
