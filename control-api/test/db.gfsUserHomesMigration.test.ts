@@ -6,7 +6,7 @@ vi.mock('pg', () => ({
   }),
 }))
 
-const VERSION = '0130_gfs_user_homes'
+const VERSION = '0131_gfs_user_homes'
 
 function recordingQuery(appliedVersions: string[]) {
   return vi.fn(async (sql: string) =>
@@ -16,15 +16,16 @@ function recordingQuery(appliedVersions: string[]) {
   )
 }
 
-describe('0130_gfs_user_homes migration', () => {
-  it('registers exactly once immediately after 0129', async () => {
+describe('0131_gfs_user_homes migration', () => {
+  it('registers exactly once immediately after 0130 and keeps its earlier name', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
     const index = versions.indexOf(VERSION)
 
     expect(index).toBeGreaterThan(0)
-    expect(versions[index - 1]).toBe('0129_workflow_schedules_concurrency_policy')
+    expect(versions[index - 1]).toBe('0130_password_login_success_admission')
     expect(versions.filter(version => version === VERSION)).toHaveLength(1)
+    expect(CONTROL_API_MIGRATIONS[index].legacyVersions).toEqual(['0130_gfs_user_homes'])
   })
 
   it('applies and records the migration on upgrade but does not rerun it once recorded', async () => {
