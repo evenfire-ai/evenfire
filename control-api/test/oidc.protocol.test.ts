@@ -808,23 +808,19 @@ describe('generic OIDC protocol foundation', () => {
     ).rejects.toBeInstanceOf(OidcProviderIncompatibleError)
     expect([...undersized.db.rows.values()][0]?.status).toBe('failed')
 
+    const publicKey = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const validSigningKey = jwk(publicKey.publicKey, 'key-1')
+    const validBaseline = fixture({ jwksBody: JSON.stringify({ keys: [validSigningKey] }) })
+    expect((await validBaseline.engine.validateProvider()).status).toBe('metadata-and-jwks-valid')
+
     const privateJwk = fixture({
-      jwksBody: JSON.stringify({
-        keys: [{ kty: 'RSA', kid: 'key-1', n: 'n', e: 'AQAB', d: 'private' }],
-      }),
+      jwksBody: JSON.stringify({ keys: [{ ...validSigningKey, d: 'AQAB' }] }),
     })
     expect((await privateJwk.engine.validateProvider()).status).toBe('incompatible')
 
     const oversized = fixture({
       jwksBody: JSON.stringify({
-        keys: Array.from({ length: 65 }, (_, i) => ({
-          kty: 'RSA',
-          kid: `key-${i}`,
-          n: 'n',
-          e: 'AQAB',
-          use: 'sig',
-          alg: 'RS256',
-        })),
+        keys: Array.from({ length: 65 }, (_, i) => ({ ...validSigningKey, kid: `key-${i}` })),
       }),
     })
     expect((await oversized.engine.validateProvider()).status).toBe('incompatible')
