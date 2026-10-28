@@ -413,9 +413,16 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     ).toBe(429)
   })
   it('trusted password recovery clears failure cooldown while preserving success history', async () => {
+    const successfulResponses: Array<{ status: number }> = []
+    for (let i = 0; i < 2; i++) {
+      await openPace()
+      successfulResponses.push(await login('member@example.invalid', password, `192.0.2.${35 + i}`))
+    }
+    expect(successfulResponses.map(response => response.status)).toEqual([200, 200])
+
     for (let i = 0; i < 5; i++) {
       await openPace()
-      await login('member@example.invalid', 'wrong', `192.0.2.${40 + i}`)
+      expect((await login('member@example.invalid', 'wrong', `192.0.2.${40 + i}`)).status).toBe(401)
     }
     const before = compare.mock.calls.length
     await openPace()
@@ -428,8 +435,15 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
         'SELECT attempts,successes FROM password_identifier_state WHERE identifier_key = $1',
         [passwordIdentifierKey('member@example.invalid')]
       )
-    ).rows[0].attempts
-    expect(stateBeforeRecovery).toHaveLength(0)
+    ).rows[0]
+    expect(stateBeforeRecovery.attempts).toEqual([])
+    expect(stateBeforeRecovery.successes).toHaveLength(2)
+    const now = Date.now()
+    expect(
+      stateBeforeRecovery.successes.every(
+        (timestamp: string) => now - Number(timestamp) < 15 * 60 * 1_000
+      )
+    ).toBe(true)
     const teamId = (
       await holder.pool.query(
         "INSERT INTO teams(name) VALUES ('Synthetic recovery team') RETURNING id"
@@ -446,19 +460,13 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
         'SELECT attempts,successes,failures,locked_until_ms FROM password_identifier_state WHERE identifier_key = $1',
         [passwordIdentifierKey('member@example.invalid')]
       )
-    ).rows[0].attempts
-    expect(stateAfterRecovery).toEqual(stateBeforeRecovery)
-    const afterReset = (
-      await holder.pool.query(
-        'SELECT successes,failures,locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
-        [passwordIdentifierKey('member@example.invalid')]
-      )
     ).rows[0]
-    expect(afterReset).toMatchObject({
-      successes: [],
+    expect(stateAfterRecovery.attempts).toEqual(stateBeforeRecovery.attempts)
+    expect(stateAfterRecovery).toMatchObject({
       failures: [],
       locked_until_ms: '0',
     })
+    expect(stateAfterRecovery.successes).toEqual(stateBeforeRecovery.successes)
     const comparisons = compare.mock.calls.length
     await openPace()
     const admitted = await login(
@@ -468,6 +476,14 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     )
     expect(admitted.status).toBe(200)
     expect(compare.mock.calls.length).toBe(comparisons + 1)
+    const successesAfterNewCredential = (
+      await holder.pool.query(
+        'SELECT successes FROM password_identifier_state WHERE identifier_key=$1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0].successes
+    expect(successesAfterNewCredential).toHaveLength(3)
+    expect(successesAfterNewCredential.slice(0, 2)).toEqual(stateBeforeRecovery.successes)
   })
   it('admits forty successes and quota-masks the next login through dummy verification', async () => {
     for (let i = 0; i < 40; i++) {
