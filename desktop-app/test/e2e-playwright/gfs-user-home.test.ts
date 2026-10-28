@@ -39,6 +39,7 @@ import {
   seedGfsFileFixture,
   seedGfsGrant,
 } from '../../../tests/e2e/gfsResourceFixtures'
+import { DEV_ISOLATION_ENV, devIsolationPaths } from '../../src/devIsolation'
 import { expect, test } from './fixtures'
 import {
   RESPONSE_TIMEOUT_MS,
@@ -54,6 +55,7 @@ import { type ManagedGfsAgent, getManagedAgentDisplayName } from './helpers/gfsA
 import type { GfsAuditRow } from './helpers/gfsDesktopOperatorParityFixtures'
 import { assertGfsInfraHealthy, discoverManagedGfsAgents } from './helpers/gfsFixtures'
 import { type HomeTestUser, UserHomeFixtures } from './helpers/gfsUserHomeFixtures'
+import { awaitPasswordPace } from './helpers/passwordPace'
 import { ControlUiAccessPanel } from './pages/ControlUiAccessPanel'
 import { DesktopFilesNav } from './pages/DesktopFilesNav'
 import { DesktopResourceView } from './pages/DesktopResourceView'
@@ -81,38 +83,58 @@ interface DesktopSession {
   close(): Promise<void>
 }
 
-/** Isolated Electron profile + visible login form (operator-parity pattern). */
+/** A dev-isolated Electron session with a visible login. */
 async function launchDesktopAs(testInfo: TestInfo, user: HomeTestUser): Promise<DesktopSession> {
-  const tag = `${user.name}-${testInfo.retry}`
-  const userDataDir = testInfo.outputPath(`user-data-${tag}`)
-  const videoDir = testInfo.outputPath(`video-${tag}`)
-  fs.mkdirSync(userDataDir, { recursive: true })
+  const appPath = fs.realpathSync(path.dirname(MAIN_ENTRY))
+  const restUrl = requiredEnv('EXTERNAL_REST_API_BASE_URL')
+  const rpcUrl = requiredEnv('RPC_PROXY_BASE_URL')
+  fs.mkdirSync(testInfo.outputDir, { recursive: true })
+  const runDir = fs.realpathSync(fs.mkdtempSync(testInfo.outputPath('home-desktop-')))
+  const isolated = devIsolationPaths(runDir)
+  const videoDir = testInfo.outputPath(`video-${path.basename(runDir)}`)
+  fs.mkdirSync(isolated.userDataDir, { mode: 0o700 })
   fs.mkdirSync(videoDir, { recursive: true })
-  const app = await electron.launch({
-    args: [`--user-data-dir=${userDataDir}`, MAIN_ENTRY],
-    env: {
-      ...process.env,
-      EVENFIRE_RENDERER_URL: '',
-      ELECTRON_RENDERER_URL: '',
-      EXTERNAL_REST_API_BASE_URL: requiredEnv('EXTERNAL_REST_API_BASE_URL'),
-      RPC_PROXY_BASE_URL: requiredEnv('RPC_PROXY_BASE_URL'),
-      CLERUM_DESKTOP_CONFIG_PATH: path.join(userDataDir, 'runtime-config.json'),
-    },
-    recordVideo: { dir: videoDir, size: { width: 1280, height: 720 } },
-  })
-  const page = await app.firstWindow()
-  await page.waitForLoadState('domcontentloaded')
-  await loginVisible(page, user)
-  return {
-    app,
-    page,
-    close: async () => {
-      await app.close()
-      const resolved = path.resolve(userDataDir)
-      if (resolved.startsWith(`${path.resolve(testInfo.outputDir)}${path.sep}`)) {
-        fs.rmSync(resolved, { recursive: true, force: true })
-      }
-    },
+  let app: ElectronApplication
+  try {
+    app = await electron.launch({
+      args: [`--user-data-dir=${isolated.userDataDir}`, path.join(appPath, 'main.js')],
+      env: {
+        ...process.env,
+        EVENFIRE_DEV_ISOLATION: '1',
+        [DEV_ISOLATION_ENV.runDir]: runDir,
+        [DEV_ISOLATION_ENV.restUrl]: restUrl,
+        [DEV_ISOLATION_ENV.rpcUrl]: rpcUrl,
+        [DEV_ISOLATION_ENV.target]: path.basename(runDir),
+        [DEV_ISOLATION_ENV.appPath]: appPath,
+        [DEV_ISOLATION_ENV.pr]: process.env.E2E_DESKTOP_PR_NUMBER || '',
+        EVENFIRE_RENDERER_URL: '',
+        ELECTRON_RENDERER_URL: '',
+        EXTERNAL_REST_API_BASE_URL: restUrl,
+        RPC_PROXY_BASE_URL: rpcUrl,
+        CLERUM_DESKTOP_CONFIG_PATH: isolated.configPath,
+      },
+      recordVideo: { dir: videoDir, size: { width: 1280, height: 720 } },
+    })
+  } catch (error) {
+    fs.rmSync(runDir, { recursive: true, force: true })
+    throw error
+  }
+  try {
+    const page = await app.firstWindow()
+    await page.waitForLoadState('domcontentloaded')
+    await loginVisible(page, user)
+    return {
+      app,
+      page,
+      close: async () => {
+        await app.close()
+        fs.rmSync(runDir, { recursive: true, force: true })
+      },
+    }
+  } catch (error) {
+    await app.close()
+    fs.rmSync(runDir, { recursive: true, force: true })
+    throw error
   }
 }
 
@@ -121,16 +143,10 @@ async function loginVisible(page: Page, user: HomeTestUser): Promise<void> {
   const passwordInput = page.locator('#password-input')
   const settingsMenu = page.getByTestId('nav-settings-menu')
   await expect(page.locator('.boot-overlay')).toBeHidden({ timeout: 30_000 })
-  await expect(emailInput.or(settingsMenu)).toBeVisible({ timeout: 30_000 })
-  if (!(await emailInput.isVisible().catch(() => false))) {
-    // A keychain-restored shell from another journey: leave it through the
-    // real logout UI, never by mutating storage.
-    if ((await settingsMenu.getAttribute('aria-expanded')) !== 'true') await settingsMenu.click()
-    await page.getByTestId('logout-btn').click()
-    await expect(emailInput).toBeVisible({ timeout: 30_000 })
-  }
+  await expect(emailInput).toBeVisible({ timeout: 30_000 })
   await emailInput.fill(user.email)
   await passwordInput.fill(user.password)
+  await awaitPasswordPace()
   await page.getByRole('button', { name: /^Sign in$/ }).click()
   await expect(settingsMenu).toBeVisible({ timeout: 45_000 })
 }
@@ -200,6 +216,17 @@ async function openEvenDriveLink(page: Page, uri: string): Promise<void> {
   await expect(dialog).toBeVisible()
   await dialog.getByLabel('EvenDrive link').fill(uri)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
+}
+
+async function expectRefusedLinkAndClose(page: Page): Promise<void> {
+  const dialog = page.getByRole('dialog', { name: 'Open EvenDrive link' })
+  await expect(
+    dialog.getByText('403 Forbidden: forbidden: not authorized to read this resource', {
+      exact: true,
+    })
+  ).toBeVisible()
+  await dialog.getByRole('button', { name: 'Close EvenDrive link dialog' }).click()
+  await expect(dialog).toBeHidden()
 }
 
 /** Read the seeded initial admin and its active link without creating either. */
@@ -447,9 +474,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
           bS.page,
           `gfs://${home.drive}/${ridOf(fx.childId(home.resourceId!, sibling))}`
         )
-        await expect(
-          bS.page.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
+        await expectRefusedLinkAndClose(bS.page)
       })
       await test.step('B shares the outer folder with C (Read); C opens the file', async () => {
         await new DesktopFilesNav(bS.page).openFiles()
@@ -473,10 +498,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         expect(fx.accessFor(outerId, 'user', b.id)).toBeNull()
         await ownerS.page.keyboard.press('Escape')
         await openEvenDriveLink(bS.page, `gfs://${home.drive}/${ridOf(outerId)}`)
-        await expect(
-          bS.page.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
-        await bS.page.keyboard.press('Escape')
+        await expectRefusedLinkAndClose(bS.page)
         await openHomeFolder(bS.page, await fx.waitForHomeState(b.id, 'ready'))
         expect(fx.accessFor(outerId, 'user', c.id)).not.toBeNull()
       })
@@ -489,9 +511,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         expect(fx.accessFor(outerId, 'user', c.id)).toBeNull()
         await ownerS.page.keyboard.press('Escape')
         await openEvenDriveLink(cS.page, `gfs://${home.drive}/${ridOf(outerId)}`)
-        await expect(
-          cS.page.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
+        await expectRefusedLinkAndClose(cS.page)
         await openHomeFolder(ownerS.page, home)
         await enterFolder(ownerS.page, outer)
         await enterFolder(ownerS.page, inner)
@@ -506,15 +526,18 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
   test('J2 a conflicting home path is shown honestly, shared files still open', async ({}, testInfo) => {
     test.setTimeout(10 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
-    const sharer = fx.createUser('j2-sharer')
     const expectedName = `e2e-home-j2-user-${fx.runTag}`
-    fx.createForeignDirectoryAtHomePath(expectedName)
-    const user = fx.createUser('j2-user')
-    expect(user.name).toBe(expectedName)
-    fx.createTeam('j2', [sharer, user])
-    const shared = seedGfsFileFixture(`e2e-home-j2-shared-${fx.runTag}`)
+    let shared: ReturnType<typeof seedGfsFileFixture> | null = null
     let session: DesktopSession | null = null
+    let foreignDirectoryId: string | null = null
+    let setupComplete = false
     try {
+      const sharer = fx.createUser('j2-sharer')
+      foreignDirectoryId = fx.createForeignDirectoryAtHomePath(expectedName)
+      const user = fx.createUser('j2-user')
+      expect(user.name).toBe(expectedName)
+      fx.createTeam('j2', [sharer, user])
+      shared = seedGfsFileFixture(`e2e-gfs-j2-shared-${fx.runTag}`)
       seedGfsGrant({
         resourceId: shared.resourceId,
         subjectType: 'user',
@@ -531,10 +554,42 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
       await nav.expectHomeState('conflict')
       await nav.openSharedWithMe()
       await expect(session.page.getByRole('button', { name: `Open ${shared.name}` })).toBeVisible()
+      setupComplete = true
     } finally {
-      await session?.close()
-      cleanupGfsFixture(shared.name)
-      fx.cleanup()
+      try {
+        await session?.close()
+      } finally {
+        try {
+          if (shared) cleanupGfsFixture(shared.name)
+        } finally {
+          try {
+            fx.cleanup()
+          } finally {
+            if (!setupComplete && foreignDirectoryId) {
+              // Match the Control UI fixture's ownership check: never delete a bound home.
+              const deleted = firstDataLine(
+                runControlPostgresSql(`
+                  DELETE FROM gfs_resources
+                   WHERE resource_id = ${sqlLiteral(foreignDirectoryId)}::uuid
+                     AND drive = ${sqlLiteral(GFS_E2E_DRIVE)}
+                     AND name = ${sqlLiteral(expectedName)}
+                     AND path_cache = ${sqlLiteral(`/Users/${expectedName}`)}
+                     AND NOT EXISTS (
+                       SELECT 1 FROM gfs_user_homes
+                        WHERE resource_id = ${sqlLiteral(foreignDirectoryId)}::uuid
+                     )
+                  RETURNING resource_id::text;
+                `)
+              )
+              if (deleted !== foreignDirectoryId) {
+                throw new Error(
+                  '[USER-HOME-E2E] foreign directory cleanup refused; inspect ownership'
+                )
+              }
+            }
+          }
+        }
+      }
     }
   })
 
@@ -542,16 +597,18 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
     test.setTimeout(3 * RESPONSE_TIMEOUT_MS + 10 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const [ownAgent, foreignAgent] = discoverManagedGfsAgents()
-    const owner = fx.createUser('j3-owner')
-    const b = fx.createUser('j3-b')
-    fx.createTeam('j3', [owner, b])
-    fx.associateAgent(owner, ownAgent)
-    fx.associateAgent(b, foreignAgent)
     const file = `j3-file-${fx.runTag}.txt`
     const sentinel = `J3 private ${fx.runTag}`
-    const control = seedGfsFileFixture(`e2e-home-j3-control-${fx.runTag}`)
+    let control: ReturnType<typeof seedGfsFileFixture> | null = null
     const sessions: DesktopSession[] = []
     try {
+      const owner = fx.createUser('j3-owner')
+      const b = fx.createUser('j3-b')
+      fx.createTeam('j3', [owner, b])
+      fx.associateAgent(owner, ownAgent)
+      fx.associateAgent(b, foreignAgent)
+      control = seedGfsFileFixture(`e2e-gfs-j3-control-${fx.runTag}`)
+      const controlFixture = control
       seedGfsGrant({
         resourceId: control.resourceId,
         subjectType: 'host',
@@ -571,10 +628,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         const bS = await launchDesktopAs(testInfo, b)
         sessions.push(bS)
         await openEvenDriveLink(bS.page, `gfs://${home.drive}/${ridOf(fileId)}`)
-        await expect(
-          bS.page.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
-        await bS.page.keyboard.press('Escape')
+        await expectRefusedLinkAndClose(bS.page)
         await openHomeFolder(bS.page, await fx.waitForHomeState(b.id, 'ready'))
       })
       await test.step('an agent not associated with the owner reads its control file but not the owner file', async () => {
@@ -582,8 +636,8 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await agentReads(
           bS.page,
           foreignAgent,
-          `/${control.name}`,
-          `E2E GFS file fixture: ${control.name}`
+          `/${controlFixture.name}/${controlFixture.fileName}`,
+          `E2E GFS file fixture: ${controlFixture.name}`
         )
         await agentIsRefusedRead(
           bS.page,
@@ -613,9 +667,15 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         expect(fx.accessFor(fileId, 'user', b.id)?.permissions).toContain('manage_acl')
       })
     } finally {
-      for (const s of sessions.reverse()) await s.close()
-      cleanupGfsFixture(control.name)
-      fx.cleanup()
+      try {
+        for (const s of sessions.reverse()) await s.close()
+      } finally {
+        try {
+          if (control) cleanupGfsFixture(control.name)
+        } finally {
+          fx.cleanup()
+        }
+      }
     }
   })
 
@@ -789,9 +849,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         // Link opening resolves metadata before bytes; the byte-proxy refusal is
         // covered by control-api/test/routes.externalGfsAuthority.test.ts.
         await openEvenDriveLink(adminPage, `gfs://${guestHome.drive}/${ridOf(guestFileId)}`)
-        await expect(
-          adminPage.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
+        await expectRefusedLinkAndClose(adminPage)
         await expect
           .poll(() =>
             auditRowsAfter(floor, initial.user.id).some(
@@ -950,9 +1008,12 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         expect(fx.accessFor(fileId, 'user', b.id)?.permissions).toEqual(OWNER_BITS)
         await dialog.revoke(b.name)
         expect(fx.accessFor(fileId, 'user', b.id)).toBeNull()
-        // The operator reopens the resource (openResource waits for the grant
+        // The operator reopens the resource (the helper waits for the grant
         // list response, the liveness witness) and sees the Desktop revoke.
-        await operatorPanel.openResource(filePath)
+        const sharePanel = page.getByRole('dialog', { name: `Share file ${file}` })
+        await sharePanel.getByRole('button', { name: 'Close share dialog' }).click()
+        await expect(sharePanel).toBeHidden()
+        await operatorPanel.openResourceInCurrentFolder(file)
         await expect(operatorPanel.roleControl({ label: b.name })).toHaveCount(0)
       })
     } finally {
@@ -962,12 +1023,17 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
     }
   })
 
-  test('Guards: refused link, logout and retirement never show stale Files content', async ({}, testInfo) => {
+  test('Guards: refused link, logout and retirement never show stale Files content', async ({
+    browser,
+  }, testInfo) => {
     test.setTimeout(10 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const owner = fx.createUser('guard-owner')
     const other = fx.createUser('guard-other')
+    const file = `guard-file-${fx.runTag}.txt`
+    const folder = `guard-folder-${fx.runTag}`
     const sessions: DesktopSession[] = []
+    const controls: Array<Awaited<ReturnType<typeof browser.newContext>>> = []
     try {
       const ownerS = await launchDesktopAs(testInfo, owner)
       sessions.push(ownerS)
@@ -979,8 +1045,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
           `gfs://${otherHome.drive}/${ridOf(otherHome.resourceId!)}`
         )
         const dialog = ownerS.page.getByRole('dialog', { name: 'Open EvenDrive link' })
-        await expect(dialog.getByRole('alert')).toBeVisible()
-        await ownerS.page.keyboard.press('Escape')
+        await expectRefusedLinkAndClose(ownerS.page)
         await openEvenDriveLink(ownerS.page, `gfs://${home.drive}/${ridOf(home.resourceId!)}`)
         await expect(dialog).toBeHidden()
         await expect(ownerS.page.getByLabel('Your access')).toBeVisible()
@@ -992,24 +1057,53 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await expect(ownerS.page.locator('#email-input')).toBeVisible({ timeout: 30_000 })
         await expect(ownerS.page.getByRole('region', { name: 'EvenDrive browser' })).toHaveCount(0)
       })
-      await test.step('retirement (named precondition) ends the session with 401 and AuthPage (D19)', async () => {
+      await test.step('retirement refuses a fresh Files read and clears the stale listing (D19)', async () => {
         await loginVisible(ownerS.page, owner)
         const nav = new DesktopFilesNav(ownerS.page)
         await nav.openFiles()
         await nav.openMyHome()
-        // Precondition: retire the per-test user (never the seeded identity).
-        // The product's operator retirement journey is J8 in the Control UI suite.
-        runControlPostgresSql(
-          `UPDATE users SET lifecycle_state = 'retired', retired_at = now() WHERE id = ${sqlLiteral(owner.id)}::uuid;`
+        const view = new DesktopResourceView(ownerS.page)
+        await view.uploadFile(file, Buffer.from(`Guard witness ${fx.runTag}`))
+        await view.createFolder(folder)
+        const fileRow = ownerS.page.getByRole('button', { name: `Open ${file}` })
+        await expect(fileRow).toBeVisible()
+
+        // Use the same governed operator retirement journey as Control UI J8.
+        const control = await browser.newContext({ baseURL: requiredEnv('CONTROL_UI_BASE_URL') })
+        controls.push(control)
+        const controlPage = await control.newPage()
+        await new ControlUiAccessPanel(controlPage).login(
+          requiredEnv('ADMIN_USER'),
+          requiredEnv('ADMIN_PASS')
         )
-        // The 401 comes from the main-process transport (externalSessionAuth);
-        // the renderer-visible contract is the signed-out state with no stale listing.
-        // The same "My home" action succeeded just above (positive witness).
-        await ownerS.page.getByRole('treeitem', { name: 'My home' }).click()
-        await expect(ownerS.page.locator('#email-input')).toBeVisible({ timeout: 60_000 })
-        await expect(ownerS.page.getByRole('region', { name: 'EvenDrive browser' })).toHaveCount(0)
+        // E2E_GUARDIAN_NAVIGATION: user-detail-entry — the operator opens this fixture user
+        await controlPage.goto(`/users-and-teams/users/${owner.id}`)
+        await controlPage.getByRole('button', { name: 'Delete account…', exact: true }).click()
+        const confirmation = controlPage.getByRole('alertdialog', {
+          name: 'Delete member account permanently?',
+        })
+        const retirement = controlPage.waitForResponse(
+          response =>
+            response.request().method() === 'DELETE' &&
+            new URL(response.url()).pathname.endsWith(`/admin/users/${owner.id}`)
+        )
+        await confirmation.getByRole('button', { name: 'Delete account', exact: true }).click()
+        expect((await retirement).ok()).toBe(true)
+        await expect(controlPage).toHaveURL(/\/users-and-teams\/users(?:\?|$)/)
+        await fx.waitForHomeState(owner.id, 'retired')
+
+        // This folder has not been opened before, so its navigation fetches a
+        // fresh authoritative location instead of refocusing an existing tab.
+        await ownerS.page.getByRole('button', { name: `Open ${folder}` }).click()
+        await expect(
+          ownerS.page.getByText('File access is not authorized', { exact: true })
+        ).toBeVisible({
+          timeout: 60_000,
+        })
+        await expect(fileRow).toHaveCount(0)
       })
     } finally {
+      for (const control of controls) await control.close()
       for (const s of sessions.reverse()) await s.close()
       fx.cleanup()
     }

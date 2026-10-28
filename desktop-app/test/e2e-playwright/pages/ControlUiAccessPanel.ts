@@ -55,12 +55,17 @@ export class ControlUiAccessPanel {
       expect((await children).ok()).toBe(true)
       await expect(this.page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(folder)
     }
-    const name = parts[parts.length - 1]
+    await this.openResourceInCurrentFolder(parts[parts.length - 1]!)
+  }
+
+  /** Reopen a resource without leaving the current folder. */
+  async openResourceInCurrentFolder(name: string): Promise<void> {
+    const resources = this.page.getByRole('list', { name: 'Current folder resources' })
     await resources.getByRole('button', { name: `Actions for ${name}`, exact: true }).click()
     await this.page
       .getByRole('menu', { name: `Actions for ${name}` })
       .getByRole('menuitem', { name: 'Share', exact: true })
-      .click()
+      .hover()
     const grantList = this.page.waitForResponse(
       response =>
         response.request().method() === 'GET' &&

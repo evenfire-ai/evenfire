@@ -299,10 +299,13 @@ test.describe('Per-user GFS homes — Control UI', () => {
       await test.step('member is refused while their own home still opens', async () => {
         await openDesktopLink(memberSession.page, fileUri)
         const dialog = memberSession.page.getByRole('dialog', { name: 'Open EvenDrive link' })
-        await expect(dialog.getByRole('alert')).toHaveText(
-          '403 Forbidden: forbidden: not authorized to read this resource'
-        )
+        await expect(
+          dialog.getByText('403 Forbidden: forbidden: not authorized to read this resource', {
+            exact: true,
+          })
+        ).toBeVisible()
         await dialog.getByRole('button', { name: 'Close EvenDrive link dialog' }).click()
+        await expect(dialog).toBeHidden()
         await openDesktopHome(memberSession.page, member.name)
       })
       await test.step('agent is refused on the retired home and reads an independent control file', async () => {

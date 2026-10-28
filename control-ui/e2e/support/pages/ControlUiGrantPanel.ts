@@ -54,7 +54,7 @@ export class ControlUiGrantPanel {
         name: 'Share',
         exact: true,
       })
-      .click()
+      .hover()
     await this.page
       .getByRole('menu', { name: `Share options for ${name}` })
       .getByRole('menuitem', {

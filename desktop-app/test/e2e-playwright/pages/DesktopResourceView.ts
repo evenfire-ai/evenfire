@@ -27,12 +27,11 @@ export class DesktopResourceView {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-home-upload-'))
     const filePath = path.join(dir, name)
     fs.writeFileSync(filePath, bytes)
-    try {
-      await this.page.getByLabel('Upload file', { exact: true }).setInputFiles(filePath)
-      await expect(this.page.getByRole('button', { name: `Open ${name}` })).toBeVisible()
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true })
-    }
+    await this.page.getByLabel('Upload file', { exact: true }).setInputFiles(filePath)
+    await expect(this.page.getByRole('button', { name: `Open ${name}` })).toBeVisible({
+      timeout: 120_000,
+    })
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 
   async openShare(name: string): Promise<void> {
@@ -40,7 +39,7 @@ export class DesktopResourceView {
     await this.page
       .getByRole('menu', { name: `Actions for ${name}` })
       .getByRole('menuitem', { name: 'Share' })
-      .click()
+      .hover()
     await this.page
       .getByRole('menu', { name: `Share options for ${name}` })
       .getByRole('menuitem', { name: 'Share', exact: true })

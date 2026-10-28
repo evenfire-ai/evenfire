@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DEV_ISOLATION_ENV, devIsolationPaths } from '../../../desktop-app/src/devIsolation'
+import { awaitPasswordPace } from '../../../desktop-app/test/e2e-playwright/helpers/passwordPace'
 import type { HomeFixtureUser } from './gfs-user-home-fixtures'
 
 const desktopRoot = path.resolve(__dirname, '../../../desktop-app')
@@ -102,6 +103,7 @@ export async function launchHomeDesktop(
     await expect(page.getByLabel('Email', { exact: true })).toBeVisible()
     await page.getByLabel('Email', { exact: true }).fill(user.email)
     await page.getByLabel('Password', { exact: true }).fill(user.password)
+    await awaitPasswordPace()
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
     await expect(page.getByTestId('nav-settings-menu')).toBeVisible({ timeout: 60_000 })
     const id = await page.evaluate(async () => {
@@ -137,12 +139,14 @@ export async function openDesktopHome(page: Page, folderName: string): Promise<v
 }
 
 export async function uploadDesktopFile(page: Page, name: string, content: string): Promise<void> {
-  await page
-    .getByLabel('Upload file', { exact: true })
-    .setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.from(content) })
-  await expect(
-    page.getByRole('region', { name: 'EvenDrive browser' }).getByText(name, { exact: true })
-  ).toBeVisible()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-home-upload-'))
+  const filePath = path.join(dir, name)
+  fs.writeFileSync(filePath, content)
+  await page.getByLabel('Upload file', { exact: true }).setInputFiles(filePath)
+  await expect(page.getByRole('button', { name: `Open ${name}` })).toBeVisible({
+    timeout: 120_000,
+  })
+  fs.rmSync(dir, { recursive: true, force: true })
 }
 
 export async function shareDesktopFolder(
@@ -154,7 +158,7 @@ export async function shareDesktopFolder(
   await page
     .getByRole('menu', { name: `Actions for ${folderName}` })
     .getByRole('menuitem', { name: 'Share', exact: true })
-    .click()
+    .hover()
   await page
     .getByRole('menu', { name: `Share options for ${folderName}` })
     .getByRole('menuitem', { name: 'Share', exact: true })

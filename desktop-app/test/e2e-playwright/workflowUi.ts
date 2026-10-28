@@ -22,7 +22,10 @@ import type {
   WorkflowRecipeListResult,
   WorkflowRunsResult,
 } from '../../src/types'
+import { awaitPasswordPace, deferPasswordPace } from './helpers/passwordPace'
 import { openResourcesNavItem } from './navigationHelpers'
+
+export { awaitPasswordPace } from './helpers/passwordPace'
 
 // Desktop workflow/approval E2E must default to the same seeded identity as
 // chatllm and the cluster seed scripts. Unauthorized specs are the only
@@ -395,21 +398,8 @@ export function seedDesktopPasswordLogin(
   }
 }
 
-// control-api admits one password verification per PASSWORD_ADMISSION_POLICY.paceMs
-// (7.5 s) for the whole server, and charges the identity's 5-per-15-minutes budget
-// before the pace check, so a paced 429 still spends an attempt. Space every password
-// attempt from this worker (API and Desktop sign-in) by the pace. The worker loads after
-// global setup's preflight login, so module load is a safe bound for that attempt.
-const PASSWORD_PACE_MS = 8_000
 // One paced retry at most; a longer Retry-After means the identity budget is spent.
 const MAX_PACE_RETRY_SECONDS = 15
-let lastPasswordAttemptAt = Date.now()
-
-export async function awaitPasswordPace(): Promise<void> {
-  const waitMs = lastPasswordAttemptAt + PASSWORD_PACE_MS - Date.now()
-  if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs))
-  lastPasswordAttemptAt = Date.now()
-}
 
 async function pacedPasswordLogin(
   email: string,
@@ -436,7 +426,7 @@ async function pacedPasswordLogin(
       `password-login for ${email} is rate limited beyond the pace (identity budget spent?): HTTP 429 ${first.body}`
     )
   }
-  lastPasswordAttemptAt = Date.now() + retryAfterSeconds * 1000 - PASSWORD_PACE_MS
+  deferPasswordPace(retryAfterSeconds)
   return attempt()
 }
 
