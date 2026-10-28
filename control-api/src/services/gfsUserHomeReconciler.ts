@@ -110,8 +110,8 @@ export class GfsUserHomeReconciler {
       if (!locked || this.stopping) return
 
       if (this.startupRepairPending) {
-        this.startupRepairPending = false
         await this.repairStartup(client)
+        this.startupRepairPending = false
         if (this.stopping || sessionFailed) return
       }
 
