@@ -1,5 +1,6 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process'
 import path from 'node:path'
+import { createWindowsSessionAuthorityPowerShellEnvironment } from './windowsSessionAuthorityPowerShellEnvironment.js'
 
 export type WindowsSessionAuthorityAclEvidence = {
   userSid: string
@@ -752,8 +753,15 @@ function assertWindowsPlatform(): void {
 function runWindowsAclOperation(request: Request): WindowsSessionAuthorityAclEvidence {
   assertWindowsPlatform()
   const systemRoot = process.env.SystemRoot
-  if (!systemRoot) throw new Error('Windows session authority ACL verifier is unavailable')
-  const powershell = path.join(
+  const temporaryDirectory = process.env.TEMP ?? process.env.TMP
+  if (
+    !systemRoot ||
+    !temporaryDirectory ||
+    !path.win32.isAbsolute(systemRoot) ||
+    !path.win32.isAbsolute(temporaryDirectory)
+  )
+    throw new Error('Windows session authority ACL verifier is unavailable')
+  const powershell = path.win32.join(
     systemRoot,
     'System32',
     'WindowsPowerShell',
@@ -763,7 +771,10 @@ function runWindowsAclOperation(request: Request): WindowsSessionAuthorityAclEvi
   const payload = Buffer.from(JSON.stringify(request), 'utf8').toString('base64')
   const result = spawnSync(powershell, [...POWERSHELL_ARGS], {
     encoding: 'utf8',
-    env: { ...process.env, [POWERSHELL_REQUEST]: payload },
+    env: {
+      ...createWindowsSessionAuthorityPowerShellEnvironment(systemRoot, temporaryDirectory),
+      [POWERSHELL_REQUEST]: payload,
+    },
     input: SCRIPT,
     maxBuffer: 1024 * 1024,
     timeout: 15_000,

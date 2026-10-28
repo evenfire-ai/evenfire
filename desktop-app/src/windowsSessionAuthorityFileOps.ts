@@ -1,5 +1,6 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process'
 import path from 'node:path'
+import { createWindowsSessionAuthorityPowerShellEnvironment } from './windowsSessionAuthorityPowerShellEnvironment.js'
 
 const REQUEST_ENV = 'EVENFIRE_SESSION_AUTHORITY_FILE_OPS'
 const LAUNCHER = '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
@@ -205,7 +206,14 @@ export function moveSessionAuthorityFileDurablySync(
   validateMovePaths(source, destination)
   const systemRoot = process.env.SystemRoot
   if (!systemRoot) throw new SessionAuthorityFileMutationError('ENOENT', 'rejected')
-  const executable = path.join(
+  const temporaryDirectory = process.env.TEMP ?? process.env.TMP
+  if (
+    !temporaryDirectory ||
+    !path.win32.isAbsolute(systemRoot) ||
+    !path.win32.isAbsolute(temporaryDirectory)
+  )
+    throw new SessionAuthorityFileMutationError('EINVAL', 'rejected')
+  const executable = path.win32.join(
     systemRoot,
     'System32',
     'WindowsPowerShell',
@@ -218,7 +226,10 @@ export function moveSessionAuthorityFileDurablySync(
   ).toString('base64')
   const result = spawnSync(executable, [...ARGS], {
     encoding: 'utf8',
-    env: { ...process.env, [REQUEST_ENV]: request },
+    env: {
+      ...createWindowsSessionAuthorityPowerShellEnvironment(systemRoot, temporaryDirectory),
+      [REQUEST_ENV]: request,
+    },
     input: SCRIPT,
     maxBuffer: 4096,
     timeout: 10_000,
