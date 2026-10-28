@@ -1694,6 +1694,7 @@ describe('App deep-link orchestration', () => {
     if (schedule.supersedeWithNavigation) {
       await waitFor(() => expect(getController().navItem).toBe(DESKTOP_ROUTES.files))
       await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
+      await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(second.id))
       expect(main.live()).toBeNull()
       expect(embedState().owner).toBeNull()
       expect(activeWorkspaceTab(getController().workspaceTabs)?.kind).toBe('files')
@@ -1721,7 +1722,7 @@ describe('App deep-link orchestration', () => {
     const acknowledgedIds = acknowledgeDeepLink.mock.calls.map(([id]) => id)
     expect(new Set(acknowledgedIds).size).toBe(acknowledgedIds.length)
     expect(acknowledgedIds.filter(id => id === first.id)).toHaveLength(1)
-    expect(acknowledgedIds.filter(id => id === second.id).length).toBeLessThanOrEqual(1)
+    expect(acknowledgedIds.filter(id => id === second.id)).toHaveLength(1)
     queryClient.clear()
   }
 
