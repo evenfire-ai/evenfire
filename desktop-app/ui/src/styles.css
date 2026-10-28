@@ -2688,6 +2688,14 @@ h3 {
   text-align: left;
 }
 
+/* Ant Design buttons center their contents by default. Keep the section titles
+   and their nested entries on the same left text edge as the Chat title. The
+   collapsed sidebar's more specific rule still centers its icon-only buttons. */
+.left-nav .nav-link-main,
+.left-nav .nav-available-app {
+  justify-content: flex-start;
+}
+
 .nav-link-session-toggle {
   display: inline-flex;
   align-items: center;
