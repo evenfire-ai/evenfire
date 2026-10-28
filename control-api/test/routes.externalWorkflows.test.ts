@@ -576,7 +576,7 @@ describe('routes/external/workflows', () => {
         } as never,
         RECIPE_NS
       )
-      const callerKey = `external-rest-api:user:${USER_SESSION_CLAIMS.userId}:direct`
+      const callerKey = `external-rest-api:user:${USER_SESSION_CLAIMS.userId}:team:${USER_SESSION_CLAIMS.teamId}`
       const idempotencyKey = 'external-key-stale-approval'
       const payload = {
         message: `Approve ${RECIPE_NS}/test-recipe workflow trigger.`,

@@ -25,7 +25,7 @@ function run(overrides: Record<string, unknown> = {}) {
   } as never
 }
 
-describe('workflow run live team authorization', () => {
+describe('workflow run user authorization', () => {
   it('keeps a directly attributed user run readable without a team lookup', async () => {
     const db = { query: vi.fn() }
 
@@ -33,8 +33,8 @@ describe('workflow run live team authorization', () => {
     expect(db.query).not.toHaveBeenCalled()
   })
 
-  it('does not treat a direct recipe grant as authority for a stale team-attributed run', async () => {
-    const db = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) }
+  it('lets the author read their own historical team-attributed run without a live team grant', async () => {
+    const db = { query: vi.fn() }
 
     await expect(
       canCallerReadWorkflowRun(
@@ -42,9 +42,8 @@ describe('workflow run live team authorization', () => {
         run({ team_id: 'team-1', usage_team_id: 'team-1' }),
         db as never
       )
-    ).resolves.toBe(false)
-    expect(String(db.query.mock.calls[0][0])).toContain("tm.status = 'active'")
-    expect(String(db.query.mock.calls[0][0])).toContain('team_workflow_triggers')
+    ).resolves.toBe(true)
+    expect(db.query).not.toHaveBeenCalled()
   })
 
   it('allows the same team-attributed run only with a current membership and recipe grant', async () => {
