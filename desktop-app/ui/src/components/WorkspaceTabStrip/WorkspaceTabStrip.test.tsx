@@ -54,6 +54,29 @@ const twoChatTabs = newChatTab(
 ).tabs
 
 describe('WorkspaceTabStrip', () => {
+  it('uses the Settings line-tab highlight while retaining editable close controls', () => {
+    render(
+      <WorkspaceTabStrip
+        tabs={twoChatTabs}
+        activeTabId="one"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+      />
+    )
+
+    const selectedTab = screen.getByRole('tab', { name: 'First chat' })
+    const tabItem = selectedTab.parentElement
+    const indicator = document.querySelector<HTMLElement>('.ant-tabs-ink-bar')
+
+    expect(selectedTab.getAttribute('aria-selected')).toBe('true')
+    expect(tabItem?.style.backgroundColor).toBe('transparent')
+    expect(tabItem?.style.border).toBe('0px')
+    expect(tabItem?.style.borderRadius).toBe('0px')
+    expect(indicator?.style.visibility).toBe('visible')
+    expect(screen.getByRole('button', { name: 'Close First chat' })).toBeTruthy()
+  })
+
   it('renders the tab order and exposes non-destructive view actions', () => {
     const onSelect = vi.fn()
     const onClose = vi.fn()

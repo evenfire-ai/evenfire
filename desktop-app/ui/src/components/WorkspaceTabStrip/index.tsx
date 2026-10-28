@@ -208,7 +208,13 @@ export function WorkspaceTabStrip({
         }}
         ref={tabsRef}
         size="small"
-        styles={{ body: { display: 'none' } }}
+        // Keep Ant Design's editable-card interactions while presenting the same flat line
+        // treatment as Settings, whose tabs do not need per-tab close controls.
+        styles={{
+          body: { display: 'none' },
+          indicator: { visibility: 'visible' },
+          item: { background: 'transparent', border: 0, borderRadius: 0 },
+        }}
         type="editable-card"
       />
     </div>
