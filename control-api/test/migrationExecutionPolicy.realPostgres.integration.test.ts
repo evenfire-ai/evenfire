@@ -669,6 +669,16 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     try {
       await runPinnedMigrationProducer(LATEST_DEV_RUNNER, isolatedUrl)
 
+      // A real pre-PR1 Admin UI row must remain writable after the upgrade.
+      const legacyAdminRun = await isolatedPool.query<{ run_id: string }>(
+        `INSERT INTO workflow_runs(recipe_namespace, recipe_name, phase, actor_type, actor_id,
+           trigger_source, usage_team_id)
+         VALUES ('sandbox-recipes', 'legacy-admin-revision', 'Pending', 'admin', $1,
+           'onDemand', 'control-plane-admin-ui') RETURNING run_id::text`,
+        [randomUUID()]
+      )
+      expect(legacyAdminRun.rowCount).toBe(1)
+
       const latestDevReceipts = await versions(isolatedPool)
       expect(latestDevReceipts).toHaveLength(LATEST_DEV_RECEIPT_COUNT)
       expect(DEV_POST_0106_THROUGH_0129).toContain('0129_workflow_schedules_concurrency_policy')
@@ -687,6 +697,21 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         initDb({ connect: () => isolatedPool.connect() })
       )
       const upgradedReceipts = await versions(isolatedPool)
+      expect(
+        (
+          await isolatedPool.query(
+            "UPDATE workflow_runs SET phase = 'Running' WHERE run_id = $1 RETURNING run_id",
+            [legacyAdminRun.rows[0]!.run_id]
+          )
+        ).rowCount
+      ).toBe(1)
+      expect(
+        (
+          await isolatedPool.query('DELETE FROM workflow_runs WHERE run_id = $1 RETURNING run_id', [
+            legacyAdminRun.rows[0]!.run_id,
+          ])
+        ).rowCount
+      ).toBe(1)
       expect(upgradedReceipts).toHaveLength(
         LATEST_DEV_RECEIPT_COUNT + PR1_MIGRATION_VERSIONS.length + 1
       )

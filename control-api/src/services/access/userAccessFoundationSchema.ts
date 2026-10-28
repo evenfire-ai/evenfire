@@ -294,24 +294,34 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
     AS $$
-    DECLARE row_value RECORD;
+    DECLARE revision RECORD;
     BEGIN
-      FOR row_value IN
-        SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
-          FROM (VALUES (NEW.actor_type, NEW.actor_id, NEW.team_id, NEW.usage_team_id))
-               AS current_row(actor_type, actor_id, team_id, usage_team_id)
-         WHERE TG_OP <> 'DELETE'
-        UNION ALL
-        SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
-          FROM (VALUES (OLD.actor_type, OLD.actor_id, OLD.team_id, OLD.usage_team_id))
-               AS prior_row(actor_type, actor_id, team_id, usage_team_id)
-         WHERE TG_OP <> 'INSERT'
+      -- Order all affected subjects together, including prior attribution.
+      FOR revision IN
+        SELECT subject_type, subject_id
+          FROM (
+            SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
+              FROM (VALUES (NEW.actor_type, NEW.actor_id, NEW.team_id, NEW.usage_team_id))
+                   AS current_row(actor_type, actor_id, team_id, usage_team_id)
+             WHERE TG_OP <> 'DELETE'
+            UNION ALL
+            SELECT actor_type, actor_id::TEXT, team_id::TEXT, usage_team_id
+              FROM (VALUES (OLD.actor_type, OLD.actor_id, OLD.team_id, OLD.usage_team_id))
+                   AS prior_row(actor_type, actor_id, team_id, usage_team_id)
+             WHERE TG_OP <> 'INSERT'
+          ) AS row_value
+          CROSS JOIN LATERAL (VALUES
+            ('team', row_value.team_id),
+            ('team', CASE
+              WHEN row_value.usage_team_id = 'control-plane-admin-ui' THEN NULL
+              ELSE row_value.usage_team_id
+            END),
+            ('user', CASE WHEN row_value.actor_type = 'user' THEN row_value.actor_id END)
+          ) AS subjects(subject_type, subject_id)
+         WHERE subject_id IS NOT NULL AND subject_id <> ''
+         ORDER BY subject_type, subject_id
       LOOP
-        IF row_value.actor_type = 'user' THEN
-          PERFORM authorization_bump_subject_revision('user', row_value.actor_id);
-        END IF;
-        PERFORM authorization_bump_subject_revision('team', row_value.team_id);
-        PERFORM authorization_bump_subject_revision('team', row_value.usage_team_id);
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
       END LOOP;
       RETURN COALESCE(NEW, OLD);
     END;
@@ -452,8 +462,8 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
-        PERFORM authorization_bump_subject_revision(NEW.subject_type, NEW.subject_id);
         PERFORM authorization_bump_gfs_resource_component(NEW.resource_id);
+        PERFORM authorization_bump_subject_revision(NEW.subject_type, NEW.subject_id);
       END IF;
       IF TG_OP = 'DELETE' OR (
         TG_OP = 'UPDATE' AND (
@@ -462,8 +472,8 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
           OR OLD.resource_id IS DISTINCT FROM NEW.resource_id
         )
       ) THEN
-        PERFORM authorization_bump_subject_revision(OLD.subject_type, OLD.subject_id);
         PERFORM authorization_bump_gfs_resource_component(OLD.resource_id);
+        PERFORM authorization_bump_subject_revision(OLD.subject_type, OLD.subject_id);
       END IF;
       RETURN COALESCE(NEW, OLD);
     END;
@@ -648,18 +658,31 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
     AS $$
+    DECLARE revision RECORD;
     BEGIN
-      IF TG_OP <> 'DELETE' THEN
-        PERFORM authorization_bump_user_revision(NEW.user_id);
-        PERFORM authorization_bump_team_revision(NEW.team_id);
-      END IF;
-      IF TG_OP <> 'INSERT' AND (
-        TG_OP = 'DELETE' OR OLD.user_id IS DISTINCT FROM NEW.user_id
-        OR OLD.team_id IS DISTINCT FROM NEW.team_id
-      ) THEN
-        PERFORM authorization_bump_user_revision(OLD.user_id);
-        PERFORM authorization_bump_team_revision(OLD.team_id);
-      END IF;
+      FOR revision IN
+        SELECT subject_type, subject_id
+          FROM (
+            SELECT NEW.team_id AS team_id, NEW.user_id AS user_id
+             WHERE TG_OP <> 'DELETE'
+            UNION ALL
+            SELECT OLD.team_id, OLD.user_id
+             WHERE TG_OP <> 'INSERT' AND (
+               TG_OP = 'DELETE' OR OLD.user_id IS DISTINCT FROM NEW.user_id
+               OR OLD.team_id IS DISTINCT FROM NEW.team_id
+             )
+          ) AS row_value
+          CROSS JOIN LATERAL (VALUES
+            ('team', row_value.team_id), ('user', row_value.user_id)
+          ) AS subjects(subject_type, subject_id)
+         ORDER BY subject_type, subject_id
+      LOOP
+        IF revision.subject_type = 'team' THEN
+          PERFORM authorization_bump_team_revision(revision.subject_id);
+        ELSE
+          PERFORM authorization_bump_user_revision(revision.subject_id);
+        END IF;
+      END LOOP;
       RETURN COALESCE(NEW, OLD);
     END;
     $$;
