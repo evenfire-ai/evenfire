@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
+import { planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsInheritedAccessDialog } from '@components/GfsInheritedAccessDialog'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
@@ -39,11 +40,14 @@ import type {
   GfsExistingAccessItem,
   GfsFileAccessRow,
   GfsGrantPanelProps,
+  GfsGrantShareEntry,
+  GfsInheritedAccessCoverage,
   GfsInheritedAccessItem,
   GfsInheritedAccessSource,
 } from './GfsGrantPanel.types'
 import { buildGfsBulkSubjectOptions, toGfsBulkSubjectInputs } from './gfsGrantSubjectOptions'
-import { loadGfsInheritedAccess, planInheritedRoleChange } from './gfsInheritedAccess'
+import { loadGfsInheritedAccess } from './gfsInheritedAccess'
+import { isEditorPermissions } from './gfsInheritedAccessMerge'
 
 /**
  * P4-S07 — Operator delegation panel for the Global File System. The operator
@@ -107,6 +111,88 @@ const ROLE_OPTIONS: SelectionDropdownOption[] = [
   { value: 'editor', label: 'Editor' },
 ]
 
+/**
+ * Folders whose SHARING entries still grant Editor after a role change
+ * (R1-M5): the change rewrites the folder's GRANT row, so a share row
+ * survives it and the member keeps Editor through it. RP-032 revokes the
+ * sharing entries that CONFLICT with the requested role, so what survives is
+ * exactly the share-only ancestors this panel cannot rewrite. The
+ * confirmation discloses these BEFORE the operator approves; the post-change
+ * toast repeats the disclosure.
+ */
+function collectResidualEditorFolderNames(sources: readonly GfsInheritedAccessSource[]): string[] {
+  return [
+    ...new Set(
+      sources
+        .filter(source => source.shareEntries.some(entry => isEditorPermissions(entry.permissions)))
+        .map(source => source.name)
+    ),
+  ]
+}
+
+/**
+ * The sharing entries that CONFLICT with the requested role (RP-032): a
+ * Read-only downgrade must not leave effective Editor access through a link,
+ * so every sharing entry on a rewritten resource that still grants Editor
+ * bits is revoked with the role write. A sharing entry that already matches
+ * the target role is not a conflict and survives the change.
+ */
+function conflictingShareEntries(
+  entries: readonly GfsGrantShareEntry[],
+  nextRole: AccessRole
+): GfsGrantShareEntry[] {
+  if (nextRole !== 'read') return []
+  return entries.filter(entry => isEditorPermissions(entry.permissions))
+}
+
+/** Honest outcome copy for the sharing entries a role change revoked. */
+function revokedSharesCopy(folderNames: string[]): string {
+  if (folderNames.length === 1) {
+    return `The sharing entry on ${folderNames[0]} was revoked.`
+  }
+  return `The sharing entries on ${joinFolderNames(folderNames)} were revoked.`
+}
+
+/**
+ * The item's OWN surviving Editor access.
+ *
+ * A share-only direct row has no grant to rewrite, and a role change never
+ * converts one into a grant (R1-M5) — so an Editor sharing entry on the item
+ * itself SURVIVES the downgrade and the member keeps Editor access through
+ * it. The operator must be told: in the confirmation BEFORE the write (the
+ * consent) and in the outcome after it (the feedback).
+ *
+ * A direct GRANT is different: the change rewrites it, and RP-032 revokes the
+ * conflicting sharing entries together with it, so nothing of it survives.
+ */
+function collectResidualDirectShareNames(
+  direct: GfsExistingAccessItem | null,
+  itemName: string
+): string[] {
+  if (!direct || direct.grantId !== null) return []
+  return direct.shareEntries.some(entry => isEditorPermissions(entry.permissions)) ? [itemName] : []
+}
+
+/**
+ * A role promise is only as good as the coverage it was made under: when the
+ * inherited walk did not complete, an ancestor the operator cannot see may
+ * still grant a stronger role. The success copy then states what was NOT
+ * verified instead of promising an effective role the client never proved.
+ *
+ * The Control UI's role copy ends with a period, so the qualifier brings only
+ * its own leading space.
+ */
+function inheritedCoverageCaveat(coverage: GfsInheritedAccessCoverage, loading: boolean): string {
+  if (!loading && coverage === 'complete') return ''
+  if (coverage === 'read-boundary') {
+    return ' Access through parent folders you cannot see was not verified.'
+  }
+  if (coverage === 'acl-limited') {
+    return ' Access through some parent folders was not verified because their sharing details are not visible to you.'
+  }
+  return ' Inherited access could not be verified, so access through parent folders you cannot see may still be stronger.'
+}
+
 export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -128,13 +214,24 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const existingAccessRequest = useRef(0)
   const existingAccessController = useRef<AbortController | null>(null)
   // Inherited access is derived separately: it comes from ancestor folders,
-  // not from this resource's direct grant/share rows. Only FILE dialogs use
-  // the derivation — folder dialogs keep their direct-only behavior.
+  // not from this resource's direct grant/share rows. Files and folders use
+  // the same retaining walk, with explicit incomplete-coverage feedback.
   const [inheritedAccess, setInheritedAccess] = useState<GfsInheritedAccessItem[]>([])
   const [inheritedAccessLoading, setInheritedAccessLoading] = useState(true)
-  // True only when the whole derivation failed (R1-M3): the access section
-  // then shows a quiet notice instead of trusting an empty derived list.
-  const [inheritedAccessFailed, setInheritedAccessFailed] = useState(false)
+  const [inheritedAccessCoverage, setInheritedAccessCoverage] =
+    useState<GfsInheritedAccessCoverage>('complete')
+  const inheritedAccessFailed = inheritedAccessCoverage !== 'complete'
+  const inheritedAccessNotice =
+    inheritedAccessCoverage === 'read-boundary'
+      ? 'There may be access from parent folders you cannot see.'
+      : inheritedAccessCoverage === 'acl-limited'
+        ? 'Sharing details on some parent folders are not visible to you.'
+        : 'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+  // Native tooltip explaining the read-boundary notice in plain language.
+  const inheritedAccessNoticeTitle =
+    inheritedAccessCoverage === 'read-boundary'
+      ? 'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
+      : undefined
   const inheritedAccessRequest = useRef(0)
   const inheritedAccessController = useRef<AbortController | null>(null)
   // Pending parent-folder confirmation (role change or removal) for a member
@@ -147,12 +244,18 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         mode: 'change-role'
         nextRole: AccessRole
         affected: Array<{ source: GfsInheritedAccessSource; permissions: string[] }>
+        /** Editor share-only sources excluded from writes (residual access). */
+        residualSources: GfsInheritedAccessSource[]
+        /** Grant-backed folders skipped because their own scope flag was
+         * unknown — never written with a defaulted scope (R1-M5). */
+        skippedFolderNames: string[]
+        /** Folders whose sharing entries still grant Editor after the change. */
+        residualEditorFolderNames: string[]
       }
     | { row: GfsFileAccessRow; mode: 'remove' }
     | null
   >(null)
   const canIncludeDescendants = resource.kind === 'directory'
-  const resourceIsFile = resource.kind === 'file'
 
   const loadExistingAccess = useCallback(async () => {
     existingAccessController.current?.abort()
@@ -176,7 +279,15 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         const key = subjectKey(subject)
         let entry = bySubject.get(key)
         if (!entry) {
-          entry = { subject, permissions: [], inherit: false, grantId: null, shareIds: [] }
+          entry = {
+            subject,
+            permissions: [],
+            inherit: false,
+            grantInherit: false,
+            grantId: null,
+            shareIds: [],
+            shareEntries: [],
+          }
           bySubject.set(key, entry)
         }
         return entry
@@ -185,12 +296,22 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         const entry = entryFor(grant.subject)
         entry.grantId = grant.id
         entry.inherit = entry.inherit || grant.inherit
+        // R1-M5: the GRANT row's own scope flag, never OR'd with share
+        // coverage — a role write preserves exactly this.
+        entry.grantInherit = grant.inherit
         entry.permissions = [...new Set([...entry.permissions, ...grant.permissions])]
       }
       for (const share of shareResult.items) {
         const entry = entryFor(share.subject)
         entry.shareIds.push(share.id)
         entry.inherit = entry.inherit || share.includeDescendants
+        // R1-M5: each share row's own bits/scope survive the merge so role
+        // edits can disclose residual access truthfully.
+        entry.shareEntries.push({
+          rowId: share.id,
+          permissions: [...share.permissions],
+          includeDescendants: share.includeDescendants,
+        })
         entry.permissions = [...new Set([...entry.permissions, ...share.permissions])]
       }
       setExistingAccess([...bySubject.values()])
@@ -219,35 +340,35 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const loadInheritedAccess = useCallback(async () => {
     inheritedAccessController.current?.abort()
     const requestId = ++inheritedAccessRequest.current
-    setInheritedAccessFailed(false)
-    if (!resourceIsFile || !resource.path) {
-      inheritedAccessController.current = null
-      setInheritedAccess([])
-      setInheritedAccessLoading(false)
-      return
-    }
+    setInheritedAccessCoverage('complete')
+    // Inherited access is derived for FILES AND FOLDERS: a folder dialog must
+    // show the identities its ancestors grant, not an empty list. The walk
+    // resolves the canonical path itself when the target carries none.
     const controller = new AbortController()
     inheritedAccessController.current = controller
     setInheritedAccessLoading(true)
     try {
-      const items = await loadGfsInheritedAccess(resource.path, DRIVE, controller.signal)
+      const result = await loadGfsInheritedAccess(
+        { path: resource.path, gfsUri: resource.gfsUri },
+        DRIVE,
+        controller.signal
+      )
       if (requestId !== inheritedAccessRequest.current) return
-      setInheritedAccess(items)
+      setInheritedAccess(result.items)
+      setInheritedAccessCoverage(result.coverage)
     } catch {
       if (requestId !== inheritedAccessRequest.current) return
       setInheritedAccess([])
-      // A TOTAL derivation failure (the walk itself blew up) is surfaced as a
-      // quiet notice; per-ancestor best-effort skipping stays silent by
-      // design. An empty derived list alone would silently read as "no one
-      // else has access" (R1-M3).
-      setInheritedAccessFailed(true)
+      // Session expiry and cancellation still reject through the existing
+      // API/request boundary; never keep protected rows from a failed session.
+      setInheritedAccessCoverage('unavailable')
     } finally {
       if (requestId === inheritedAccessRequest.current) {
         inheritedAccessController.current = null
         setInheritedAccessLoading(false)
       }
     }
-  }, [resource.path, resourceIsFile])
+  }, [resource.gfsUri, resource.path, resource.resourceId])
 
   useEffect(() => {
     void loadInheritedAccess()
@@ -443,15 +564,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     [subjectLabel]
   )
 
-  const sortedExistingAccess = useMemo(
-    () => [...existingAccess].sort(bySubjectLabel),
-    [bySubjectLabel, existingAccess]
-  )
-
-  // File dialogs dedupe to exactly one row per member across direct grants
-  // and inherited ancestor grants; the effective role is the strongest.
-  const sortedFileAccessRows = useMemo<GfsFileAccessRow[]>(() => {
-    if (!resourceIsFile) return []
+  // Every dialog — file AND folder — dedupes to exactly one row per member
+  // across direct grants/shares and inherited ancestor rows; the effective
+  // role is the strongest. Folders previously rendered direct-only, which hid
+  // the identities their ancestors grant.
+  const sortedAccessRows = useMemo<GfsFileAccessRow[]>(() => {
     const bySubjectRow = new Map<string, GfsFileAccessRow>()
     for (const direct of existingAccess) {
       bySubjectRow.set(subjectKey(direct.subject), {
@@ -479,7 +596,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       }
     }
     return [...bySubjectRow.values()].sort(bySubjectLabel)
-  }, [bySubjectLabel, existingAccess, inheritedAccess, resourceIsFile])
+  }, [bySubjectLabel, existingAccess, inheritedAccess])
 
   async function revokeAccess(item: GfsExistingAccessItem) {
     const label = subjectLabel(item)
@@ -513,7 +630,49 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     }
   }
 
-  async function updateAccessRole(item: GfsExistingAccessItem, nextRole: AccessRole) {
+  /**
+   * RP-032 — revoke the sharing entries that CONFLICT with the requested role
+   * on a resource whose grant this change rewrote. The server has no
+   * share-update surface, so the client deletes them; a Read-only downgrade
+   * must not leave effective Editor access through a link. Returns the
+   * revoked row ids; a failure is thrown to the caller so the outcome stays
+   * honest instead of silently claiming the member lost the access.
+   */
+  async function revokeConflictingShares(
+    entries: readonly GfsGrantShareEntry[],
+    nextRole: AccessRole
+  ): Promise<string[]> {
+    const revoked: string[] = []
+    for (const entry of conflictingShareEntries(entries, nextRole)) {
+      try {
+        await deleteGfsShare(entry.rowId)
+      } catch (caught) {
+        // The row is already gone: the sharing entry grants nothing, so the
+        // outcome is the one a successful delete would have produced. Calling
+        // it a failure would claim residual Editor access that cannot exist.
+        if (!isAlreadyMissing(caught)) throw caught
+      }
+      revoked.push(entry.rowId)
+    }
+    return revoked
+  }
+
+  async function updateAccessRole(
+    item: GfsExistingAccessItem,
+    nextRole: AccessRole,
+    inheritedSources: GfsInheritedAccessSource[] = [],
+    skippedFolderNames: string[] = []
+  ) {
+    // R1-M5: role editing never creates a grant. A share-only direct row has
+    // no grant to rewrite and there is no share-update surface — refuse with
+    // honest feedback instead of converting the share into a grant.
+    if (item.grantId === null) {
+      showToast(
+        `${subjectLabel(item)}'s access comes from a sharing entry that can only be removed, not changed here.`,
+        { tone: 'error' }
+      )
+      return
+    }
     const permissions = rolePermissions(nextRole, hostOnlySubject(item.subject))
     setBusy(true)
     setError('')
@@ -523,17 +682,57 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         resourceId: resource.resourceId,
         subject: item.subject,
         permissions,
-        inherit: item.inherit,
+        // R1-M5: the grant row's OWN scope flag — share coverage is never
+        // OR'd into a role write.
+        inherit: item.grantInherit,
       })
-      // The upserted grant supersedes any legacy URI share for this subject;
-      // the server has no share-update surface, so consolidation happens here.
-      for (const shareId of item.shareIds) await deleteGfsShare(shareId)
-      showToast(
-        `${subjectLabel(item)} is now ${nextRole === 'editor' ? 'an Editor' : 'Read-only'}.`,
-        {
-          tone: 'success',
+      // RP-032: the rewritten grant is the member's access on this item, so a
+      // sharing entry that still grants Editor goes with it — otherwise a
+      // Read downgrade leaves effective Editor access through the link.
+      let revokedNames: string[] = []
+      try {
+        const revoked = await revokeConflictingShares(item.shareEntries, nextRole)
+        revokedNames = revoked.length > 0 ? [resource.name] : []
+      } catch (caught) {
+        if (!isAlreadyMissing(caught)) {
+          setError(caught instanceof Error ? caught.message : 'Failed to revoke a sharing entry')
         }
-      )
+        showToast(
+          `Changed grant access to ${nextRole === 'editor' ? 'Editor' : 'Read-only'} on ${resource.name}. A sharing entry could not be revoked, so Editor access may remain.`,
+          { tone: 'error' }
+        )
+        await loadExistingAccess()
+        return
+      }
+      // What survives the change: the share-only ancestors this panel cannot
+      // rewrite still grant Editor through their own sharing entries.
+      const residualNames =
+        nextRole === 'read' ? collectResidualEditorFolderNames(inheritedSources) : []
+      const details: string[] = []
+      if (skippedFolderNames.length > 0) {
+        details.push(
+          `Sharing details on ${joinFolderNames(skippedFolderNames)} could not be verified; existing access was kept.`
+        )
+      }
+      if (revokedNames.length > 0) {
+        details.push(revokedSharesCopy(revokedNames))
+      }
+      if (residualNames.length > 0) {
+        details.push(
+          `Sharing entries on ${joinFolderNames(residualNames)} still grant Editor access.`
+        )
+      }
+      if (details.length > 0) {
+        showToast(
+          `Changed grant access to ${nextRole === 'editor' ? 'Editor' : 'Read-only'} on ${resource.name}. ${details.join(' ')}`,
+          { tone: skippedFolderNames.length > 0 ? 'error' : 'info' }
+        )
+      } else {
+        showToast(
+          `${subjectLabel(item)} is now ${nextRole === 'editor' ? 'an Editor' : 'Read-only'}.${inheritedCoverageCaveat(inheritedAccessCoverage, inheritedAccessLoading)}`,
+          { tone: 'success' }
+        )
+      }
       await loadExistingAccess()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to update access')
@@ -557,20 +756,90 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
    * the access rows it can already read and lets the server accept or reject
    * each mutation. Per-folder affordance preflight is deferred to the backend
    * contract tracked separately from this PR.
+   *
+   * R1-M5: the shared split planner separates grant-backed sources (rewritten
+   * with their OWN scope flag) from share-only sources (never converted into
+   * grants, never deleted — residual access survives and is disclosed).
    */
   async function prepareParentRoleChange(row: GfsFileAccessRow, nextRole: AccessRole) {
     const inherited = row.inherited
     if (!inherited) return
     if (nextRole === roleForPermissions(row.permissions)) return
-    const affected = planInheritedRoleChange(inherited, nextRole === 'editor')
-    if (affected.length === 0) {
-      if (row.direct) await updateAccessRole(row.direct, nextRole)
+    const plan = planGfsInheritedRoleChange(inherited, nextRole === 'editor')
+    // Unknown own-scope folders are never written (no `?? true` default);
+    // they surface through the partial summary at confirm time.
+    const writable = plan.grantSources.filter(
+      (source): source is GfsInheritedAccessSource & { grantInherit: boolean } =>
+        typeof source.grantInherit === 'boolean'
+    )
+    const skippedFolderNames = plan.grantSources
+      .filter(source => typeof source.grantInherit !== 'boolean')
+      .map(source => source.name)
+    if (writable.length === 0) {
+      if (row.direct && row.direct.grantId !== null) {
+        // Only this item's own grant can be rewritten, but the member also
+        // inherits Editor through share rows this panel cannot edit. The
+        // operator approves the change in the SAME confirmation every other
+        // role change uses, so the access those shares keep is disclosed
+        // BEFORE the write instead of only in the post-change feedback
+        // (RP-011). With nothing left granting Editor, the direct write
+        // needs no confirmation.
+        const residualEditorFolderNames =
+          nextRole === 'read' ? collectResidualEditorFolderNames(plan.shareOnlySources) : []
+        if (residualEditorFolderNames.length > 0) {
+          setParentUpdate({
+            row,
+            mode: 'change-role',
+            nextRole,
+            affected: [],
+            residualSources: plan.shareOnlySources,
+            skippedFolderNames,
+            residualEditorFolderNames,
+          })
+          return
+        }
+        await updateAccessRole(row.direct, nextRole, plan.shareOnlySources, skippedFolderNames)
+        return
+      }
+      // Unknown scope and non-editable shares are different reasons to keep access.
+      if (skippedFolderNames.length > 0) {
+        showToast(
+          `Sharing details on ${joinFolderNames(skippedFolderNames)} could not be verified; existing access was kept.`,
+          { tone: 'error' }
+        )
+        return
+      }
+      // Nothing writable anywhere: explain why nothing changed.
+      showToast(
+        `${subjectLabel(row)} still has ${roleForPermissions(row.permissions) === 'editor' ? 'Editor' : 'Read-only'} access from sharing entries that can't be edited here.`,
+        { tone: 'info' }
+      )
       return
     }
 
     const permissions = rolePermissions(nextRole, hostOnlySubject(row.subject))
-    const updates = affected.map(source => ({ source, permissions }))
-    setParentUpdate({ row, mode: 'change-role', nextRole, affected: updates })
+    const updates = writable.map(source => ({ source, permissions }))
+    setParentUpdate({
+      row,
+      mode: 'change-role',
+      nextRole,
+      affected: updates,
+      residualSources: plan.shareOnlySources,
+      skippedFolderNames,
+      // The surviving Editor shares are disclosed IN the confirmation, before
+      // the operator approves a role that will not remove them. The folders
+      // this change rewrites lose their conflicting sharing entries
+      // (RP-032), so what remains is the share-only ancestors this panel
+      // cannot rewrite — plus a share-only Editor entry on the item ITSELF,
+      // which no rewrite touches and therefore survives.
+      residualEditorFolderNames:
+        nextRole === 'read'
+          ? [
+              ...collectResidualEditorFolderNames(plan.shareOnlySources),
+              ...collectResidualDirectShareNames(row.direct, resource.name),
+            ]
+          : [],
+    })
   }
 
   /**
@@ -653,6 +922,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       }
       const affected = request.affected
       const affectedNames = affected.map(update => update.source.name)
+      const revokedFolderNames = new Set<string>()
       let updated = 0
       for (const { source, permissions } of affected) {
         try {
@@ -661,23 +931,40 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             resourceId: source.resourceId,
             subject: row.subject,
             permissions,
-            inherit: true,
+            // R1-M5: the folder grant's OWN scope flag (prepare guaranteed a
+            // known boolean) — share coverage is never OR'd in.
+            inherit: source.grantInherit === true,
           })
-          for (const shareId of source.shareIds) await deleteGfsShare(shareId)
           updated += 1
         } catch (caught) {
-          if (isAlreadyMissing(caught)) {
-            updated += 1
-            continue
+          if (!isAlreadyMissing(caught)) {
+            await failPartially(
+              caught,
+              `Updated ${updated} of ${affected.length} folders — ${source.name} still grants access.`
+            )
+            return
+          }
+          // The grant row is already gone, but the folder's sharing entries
+          // still grant access: they are revoked below.
+          updated += 1
+        }
+        // RP-032: the rewritten grant is the member's access on this folder,
+        // so a sharing entry that still grants Editor goes with it.
+        try {
+          const revoked = await revokeConflictingShares(source.shareEntries, request.nextRole)
+          if (revoked.length > 0) revokedFolderNames.add(source.name)
+        } catch (caught) {
+          if (!isAlreadyMissing(caught)) {
+            setError(caught instanceof Error ? caught.message : 'Failed to revoke a sharing entry')
           }
           await failPartially(
             caught,
-            `Updated ${updated} of ${affected.length} folders — ${source.name} still grants access.`
+            `Updated ${updated} of ${affected.length} folders — a sharing entry on ${source.name} could not be revoked, so Editor access may remain.`
           )
           return
         }
       }
-      if (row.direct) {
+      if (row.direct && row.direct.grantId !== null) {
         try {
           const permissions = rolePermissions(request.nextRole, hostOnlySubject(row.subject))
           await putGfsGrant({
@@ -685,9 +972,10 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             resourceId: resource.resourceId,
             subject: row.subject,
             permissions,
-            inherit: row.direct.inherit,
+            // The direct GRANT's own scope flag; a share-only direct row
+            // never gains a grant (R1-M5).
+            inherit: row.direct.grantInherit,
           })
-          for (const shareId of row.direct.shareIds) await deleteGfsShare(shareId)
         } catch (caught) {
           await failPartially(
             caught,
@@ -695,13 +983,61 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           )
           return
         }
+        // RP-032: the same revocation applies to this item's own sharing
+        // entries — a Read downgrade must not leave effective Editor access
+        // through a link on the item itself.
+        try {
+          const revoked = await revokeConflictingShares(row.direct.shareEntries, request.nextRole)
+          if (revoked.length > 0) revokedFolderNames.add(resource.name)
+        } catch (caught) {
+          if (!isAlreadyMissing(caught)) {
+            setError(caught instanceof Error ? caught.message : 'Failed to revoke a sharing entry')
+          }
+          await failPartially(
+            caught,
+            `Updated ${affected.length} of ${affected.length} folders — a sharing entry on ${resource.name} could not be revoked, so Editor access may remain.`
+          )
+          return
+        }
       }
-      showToast(
-        affectedNames.length > 0
-          ? `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}.`
-          : `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${resource.name}.`,
-        { tone: 'success' }
-      )
+      // Residual honesty (RP-032): the conflicting sharing entries are revoked
+      // with the change, so what can still grant Editor is the share-only
+      // ancestor this panel cannot rewrite — and a share-only Editor entry on
+      // the item itself, which this change never touches.
+      const residualNames =
+        request.nextRole === 'read'
+          ? [
+              ...collectResidualEditorFolderNames(request.residualSources),
+              ...collectResidualDirectShareNames(row.direct, resource.name),
+            ]
+          : []
+      const details: string[] = []
+      if (request.skippedFolderNames.length > 0) {
+        details.push(
+          `Updated ${updated} of ${affected.length + request.skippedFolderNames.length} folders. Sharing details on ${joinFolderNames(request.skippedFolderNames)} could not be verified; existing access was kept.`
+        )
+      }
+      if (revokedFolderNames.size > 0) {
+        details.push(revokedSharesCopy([...revokedFolderNames]))
+      }
+      if (residualNames.length > 0) {
+        details.push(
+          `Sharing entries on ${joinFolderNames(residualNames)} still grant Editor access.`
+        )
+      }
+      if (details.length > 0) {
+        showToast(
+          `Changed grant access to ${request.nextRole === 'editor' ? 'Editor' : 'Read-only'} on ${affectedNames.length > 0 ? joinFolderNames(affectedNames) : resource.name}. ${details.join(' ')}`,
+          { tone: request.skippedFolderNames.length > 0 ? 'error' : 'info' }
+        )
+      } else {
+        showToast(
+          affectedNames.length > 0
+            ? `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}.${inheritedCoverageCaveat(inheritedAccessCoverage, inheritedAccessLoading)}`
+            : `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${resource.name}.${inheritedCoverageCaveat(inheritedAccessCoverage, inheritedAccessLoading)}`,
+          { tone: 'success' }
+        )
+      }
       await reload()
     } finally {
       setBusy(false)
@@ -788,9 +1124,12 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             <h4>People with access</h4>
           </div>
           {inheritedAccessFailed ? (
-            <p role="status" className="cu-gfs-existing-access__notice">
-              Inherited access could not be loaded. Members with access from a parent folder may be
-              missing.
+            <p
+              role="status"
+              className="cu-gfs-existing-access__notice"
+              title={inheritedAccessNoticeTitle}
+            >
+              {inheritedAccessNotice}
             </p>
           ) : null}
           {existingAccessLoading || inheritedAccessLoading ? (
@@ -812,126 +1151,77 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             <p className="cu-gfs-existing-access__empty">No one has access yet.</p>
           ) : (
             <RecordList className="cu-gfs-existing-access__list" aria-label="Resource access">
-              {resourceIsFile
-                ? sortedFileAccessRows.map(row => {
-                    const label = subjectLabel(row)
-                    const kind = subjectKind(row)
-                    const inherited = row.inherited !== null
-                    return (
-                      <RecordListRow
-                        className="cu-gfs-existing-access__item"
-                        data-testid={`gfs-access-row-${subjectKey(row.subject)}`}
-                        data-access-id={row.direct?.grantId ?? row.direct?.shareIds[0]}
-                        data-inherited={inherited ? 'true' : undefined}
-                        key={`file:${subjectKey(row.subject)}`}
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
-                          data-subject-kind={kind}
-                        >
-                          <AccessSubjectIcon kind={kind} />
-                        </span>
-                        <span className="cu-gfs-existing-access__identity">
-                          <span className="cu-gfs-existing-access__subject">{label}</span>
-                        </span>
-                        <span className="cu-gfs-existing-access__meta">
-                          <SelectionDropdown
-                            ariaLabel={`Access role for ${label}`}
-                            className="cu-gfs-existing-access__role"
-                            disabled={actionPending}
-                            multiple={false}
-                            onChange={next => {
-                              if (!inherited) {
-                                void updateAccessRole(
-                                  row.direct as GfsExistingAccessItem,
-                                  (next[0] ?? 'read') as AccessRole
-                                )
-                                return
-                              }
-                              const nextRole = (next[0] ?? 'read') as AccessRole
-                              void prepareParentRoleChange(row, nextRole)
-                            }}
-                            menuClassName="cu-gfs-existing-access__role-menu"
-                            options={ROLE_OPTIONS}
-                            placeholder="Role"
-                            portal
-                            searchable={false}
-                            showSelectedChips={false}
-                            value={[roleForPermissions(row.permissions)]}
-                          />
-                        </span>
-                        <RowActionMenu
-                          actions={[
-                            {
-                              key: 'remove',
-                              label: 'Remove access',
-                              danger: true,
-                              disabled: actionPending,
-                              onSelect: () =>
-                                inherited
-                                  ? setParentUpdate({ row, mode: 'remove' })
-                                  : void revokeAccess(row.direct as GfsExistingAccessItem),
-                            },
-                          ]}
-                          ariaLabel={`Actions for ${label}`}
-                        />
-                      </RecordListRow>
-                    )
-                  })
-                : sortedExistingAccess.map(item => {
-                    const label = subjectLabel(item)
-                    const kind = subjectKind(item)
-                    return (
-                      <RecordListRow
-                        className="cu-gfs-existing-access__item"
-                        data-testid={`gfs-access-row-${subjectKey(item.subject)}`}
-                        data-access-id={item.grantId ?? item.shareIds[0]}
-                        key={`direct:${subjectKey(item.subject)}`}
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
-                          data-subject-kind={kind}
-                        >
-                          <AccessSubjectIcon kind={kind} />
-                        </span>
-                        <span className="cu-gfs-existing-access__identity">
-                          <span className="cu-gfs-existing-access__subject">{label}</span>
-                        </span>
-                        <span className="cu-gfs-existing-access__meta">
-                          <SelectionDropdown
-                            ariaLabel={`Access role for ${label}`}
-                            className="cu-gfs-existing-access__role"
-                            disabled={actionPending}
-                            multiple={false}
-                            onChange={next =>
-                              void updateAccessRole(item, (next[0] ?? 'read') as AccessRole)
-                            }
-                            menuClassName="cu-gfs-existing-access__role-menu"
-                            options={ROLE_OPTIONS}
-                            placeholder="Role"
-                            portal
-                            searchable={false}
-                            showSelectedChips={false}
-                            value={[roleForPermissions(item.permissions)]}
-                          />
-                        </span>
-                        <RowActionMenu
-                          actions={[
-                            {
-                              key: 'remove',
-                              label: 'Remove access',
-                              danger: true,
-                              disabled: actionPending,
-                              onSelect: () => void revokeAccess(item),
-                            },
-                          ]}
-                          ariaLabel={`Actions for ${label}`}
-                        />
-                      </RecordListRow>
-                    )
-                  })}
+              {sortedAccessRows.map(row => {
+                const label = subjectLabel(row)
+                const kind = subjectKind(row)
+                const inherited = row.inherited !== null
+                // R1-M5: a share-only direct row has no grant to rewrite and
+                // no share-edit surface — the role control stays disabled
+                // instead of offering a change that would create a grant.
+                const shareOnlyDirect =
+                  !inherited && row.direct !== null && row.direct.grantId === null
+                return (
+                  <RecordListRow
+                    className="cu-gfs-existing-access__item"
+                    data-testid={`gfs-access-row-${subjectKey(row.subject)}`}
+                    data-access-id={row.direct?.grantId ?? row.direct?.shareIds[0]}
+                    data-inherited={inherited ? 'true' : undefined}
+                    key={`access:${subjectKey(row.subject)}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
+                      data-subject-kind={kind}
+                    >
+                      <AccessSubjectIcon kind={kind} />
+                    </span>
+                    <span className="cu-gfs-existing-access__identity">
+                      <span className="cu-gfs-existing-access__subject">{label}</span>
+                    </span>
+                    <span className="cu-gfs-existing-access__meta">
+                      <SelectionDropdown
+                        ariaLabel={`Access role for ${label}`}
+                        className="cu-gfs-existing-access__role"
+                        disabled={actionPending || shareOnlyDirect}
+                        multiple={false}
+                        onChange={next => {
+                          if (!inherited) {
+                            void updateAccessRole(
+                              row.direct as GfsExistingAccessItem,
+                              (next[0] ?? 'read') as AccessRole
+                            )
+                            return
+                          }
+                          const nextRole = (next[0] ?? 'read') as AccessRole
+                          void prepareParentRoleChange(row, nextRole)
+                        }}
+                        menuClassName="cu-gfs-existing-access__role-menu"
+                        options={ROLE_OPTIONS}
+                        placeholder="Role"
+                        portal
+                        searchable={false}
+                        showSelectedChips={false}
+                        value={[roleForPermissions(row.permissions)]}
+                      />
+                    </span>
+                    <RowActionMenu
+                      actions={[
+                        {
+                          key: 'remove',
+                          label: 'Remove access',
+                          danger: true,
+                          disabled: actionPending,
+                          onSelect: () =>
+                            inherited
+                              ? setParentUpdate({ row, mode: 'remove' })
+                              : void revokeAccess(row.direct as GfsExistingAccessItem),
+                        },
+                      ]}
+                      ariaLabel={`Actions for ${label}`}
+                    />
+                  </RecordListRow>
+                )
+              })}
             </RecordList>
           )}
         </section>
@@ -958,6 +1248,14 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                       })),
                 fileCurrentRole: roleForPermissions(parentUpdate.row.permissions),
                 nextRole: parentUpdate.mode === 'change-role' ? parentUpdate.nextRole : undefined,
+                // The surviving Editor shares are disclosed BEFORE the
+                // operator approves: the effective role this dialog shows is
+                // not the whole truth, and only the post-change toast used to
+                // say so.
+                ...(parentUpdate.mode === 'change-role' &&
+                parentUpdate.residualEditorFolderNames.length > 0
+                  ? { residualEditorFolderNames: parentUpdate.residualEditorFolderNames }
+                  : {}),
               }
             : null
         }

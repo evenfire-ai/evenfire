@@ -13,7 +13,7 @@ export function createMcpHostRoutes(
   directRunAttributionBindingService: DirectRunAttributionBindingService
 ): Router {
   const router = Router()
-  router.use(createMcpHostRenewalRoutes())
+  router.use(createMcpHostRenewalRoutes(gateway))
   router.use(createUserApprovalRequestsRoutes(gateway, directRunAttributionBindingService))
   router.use(createMcpHostWorkflowRoutes(gateway))
   router.use(createMcpHostPluginWorkloadSdkRoutes())

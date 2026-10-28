@@ -143,6 +143,7 @@ export class MockGateway {
   private secretWriteFault: MockGatewaySecretWriteFault | null = null
   private resourceCreateFault: MockGatewayResourceCreateFault | null = null
   private resourceUpdateFault: MockGatewayResourceUpdateFault | null = null
+  private readonly getResourceFailures = new Map<ResourceType, unknown[]>()
 
   // Stub for the LLM allowlist ConfigMap materializer. Defaults to a no-op so
   // CRUD success paths are undisturbed; a test can inject a throwing impl to
@@ -250,7 +251,34 @@ export class MockGateway {
     return rows.filter(row => row.metadata.namespace === namespace)
   }
 
+  /**
+   * Test helper: the next `getResource` on `plural` rejects with `err` (e.g. a
+   * K8s-shaped `{ statusCode: 503 }`). Each call queues one failure; later reads
+   * go back to the store.
+   */
+  failGetResource(plural: ResourceType, err: unknown): void {
+    const queue = this.getResourceFailures.get(plural) ?? []
+    queue.push(err)
+    this.getResourceFailures.set(plural, queue)
+  }
+
+  /**
+   * Test helper: put a stored resource in the "being deleted" state the
+   * apiserver reports while finalizers run (`metadata.deletionTimestamp` set,
+   * object still readable). `createResource` drops that field, so this is the
+   * only way to model it.
+   */
+  markDeleting(plural: ResourceType, name: string, namespace?: string): void {
+    const row = this.store[plural].get(this.key(name, namespace))
+    if (!row) throw new Error(`markDeleting: ${plural}/${name} not found`)
+    ;(row.metadata as Record<string, unknown>).deletionTimestamp = new Date().toISOString()
+  }
+
   async getResource(plural: ResourceType, name: string, namespace?: string): Promise<unknown> {
+    const queuedFailure = this.getResourceFailures.get(plural)
+    if (queuedFailure && queuedFailure.length > 0) {
+      throw queuedFailure.shift()
+    }
     const row = this.store[plural].get(this.key(name, namespace))
     if (!row) {
       throw new K8sNotFoundError(`${plural}/${name} not found`)
