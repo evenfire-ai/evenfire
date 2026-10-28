@@ -72,6 +72,7 @@ export function GfsResourceMenu({
   onOpenChange,
   onPreview,
   onDownload,
+  onDownloadZip,
   onRename,
   onMove,
   onReplace,
@@ -308,6 +309,7 @@ export function GfsResourceMenu({
     ].filter(isMenuAction),
     [
       menuAction('download', 'Download', <IconDownload />, onDownload),
+      menuAction('download-zip', 'Download as zip', <IconDownload />, onDownloadZip),
       menuAction(
         'replace',
         'Replace file',

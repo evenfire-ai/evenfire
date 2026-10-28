@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { config } from '../src/config.js'
 import {
-  consumeMcpHostRefreshJwt,
   getMcpHostExpiredRefreshRateLimitKey,
   getMcpHostRefreshRateLimitKey,
   issueMcpHostControlJwt,
@@ -92,10 +91,6 @@ describe('[SEC-2] reverse audience confusion — mcp-host validators reject a br
 
   it('verifyExpiredMcpHostRefreshJwt rejects an aud=oauth-broker token', async () => {
     expect(await verifyExpiredMcpHostRefreshJwt(brokerToken())).toBeNull()
-  })
-
-  it('consumeMcpHostRefreshJwt rejects an aud=oauth-broker token (and does not consume a jti)', async () => {
-    expect(await consumeMcpHostRefreshJwt(brokerToken())).toBeNull()
   })
 
   it('getMcpHostRefreshRateLimitKey returns null for an aud=oauth-broker token', () => {

@@ -2,12 +2,14 @@
 import { StrictMode, useEffect, useReducer } from 'react'
 import { flushSync } from 'react-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import type { EmbedEvent, Launch } from '@lib/embedOwnership.types'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import { toActiveSandboxUiApps } from '@lib/sandboxUiAppSelection'
 import type { SandboxUiAppListing } from '@lib/sandboxUiAppSelection.types'
 import {
@@ -452,7 +454,15 @@ describe('App wires gestures and main events to the embed ownership machine', ()
   }
 
   async function renderApp() {
-    render(<App />)
+    // App mounts GfsDragSessionProvider, which reads Query state: the render
+    // needs a real QueryClient (fresh per render, production cache defaults)
+    // instead of the app-level singleton provider it gets in production.
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(<App />, {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      ),
+    })
     await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
     await flushMacrotask()
   }
@@ -546,6 +556,9 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await flushMacrotask()
 
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
+    // The deactivation continuation persists the final route as main and both
+    // ownership lanes settle.
+    await act(() => main.settle())
     expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox')
 
     fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
@@ -1120,6 +1133,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
 
     expect(controller.navItem).toBe(DESKTOP_ROUTES.preview)
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
+    await act(() => main.settle())
     expect(machine().getSnapshot().views.size).toBe(0)
   })
 
@@ -1141,10 +1155,16 @@ describe('App wires gestures and main events to the embed ownership machine', ()
   })
 
   it('keeps its machine alive through StrictMode effect replay', async () => {
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
     render(
       <StrictMode>
         <App />
-      </StrictMode>
+      </StrictMode>,
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+        ),
+      }
     )
     await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
     await flushMacrotask()

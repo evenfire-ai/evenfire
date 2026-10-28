@@ -35,6 +35,16 @@ export const desktopQueryKeys = {
     ['desktop-app', 'gfs', sessionScope, 'shares', drive, resourceId] as const,
   gfsInheritedAccess: (sessionScope: string, resourceId: string, drive: string) =>
     ['desktop-app', 'gfs', sessionScope, 'inherited-access', drive, resourceId] as const,
+  // Open GFS locations, SHARED across every controller mount (the sidebar
+  // tree, FilesPage, FilePreviewPage) via the query cache: each mount
+  // publishes the resource it has open together with the ancestry it
+  // observed, so a move committed by ONE surface can tell that it changes
+  // what ANOTHER surface's open Share/Manage dialog inherits. Kept OUTSIDE
+  // the `gfsRoot` prefix on purpose: the fail-closed purge removes
+  // everything under `gfsRoot`, and the registry must survive that purge
+  // (the mounts republish it as their access state settles).
+  gfsOpenLocations: (sessionScope: string) =>
+    ['desktop-app', 'gfs-open-locations', sessionScope] as const,
   // Proactive connectors panel (spec 11 U2). Invalidated on connect/disconnect
   // completion (U3/U4) so the tri-state re-reads the authoritative grant store.
   connectors: ['desktop-app', 'connectors'] as const,

@@ -11,13 +11,22 @@ import {
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
+  affordancesResult,
   childView,
+  grantsListPage,
+  heldAffordances,
+  listAccessiblePage,
   listChildrenPage,
+  listGrantsFailureMessage,
+  listSharesFailureMessage,
   resolveDeniedMessage,
   resolveResource,
   resolvedDirectory,
+  resolvedFile,
+  sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { shouldRevalidateGfsQuery } from '@/lib/gfsEntityChangeState'
+import { readGfsOpenLocations } from '@/lib/gfsOpenLocations'
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 
@@ -2082,7 +2091,7 @@ describe('useGfsBrowserController', () => {
       screen.getByRole('button', { name: 'move current' }).click()
     })
     await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith(docsId, 'destination-1', 'main', 3)
+      expect(moveResource).toHaveBeenCalledWith(docsId, 'destination-1', 'main', 3, undefined)
     )
     // Navigation reconciles to the new location and consumes the new version.
     await waitFor(() =>
@@ -2712,6 +2721,10 @@ function ManageProbe() {
       <div data-testid="grants-count">{ctrl.grants.length}</div>
       <div data-testid="shares-count">{ctrl.shares.length}</div>
       <div data-testid="inherited-error">{ctrl.inheritedAccessError ?? 'none'}</div>
+      <div data-testid="inherited-coverage">{ctrl.inheritedCoverage ?? 'none'}</div>
+      <div data-testid="access-state">{ctrl.accessState}</div>
+      <div data-testid="crumbs">{ctrl.crumbs.map(crumb => crumb.name).join(' / ')}</div>
+      <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
       <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open root
       </button>
@@ -2735,6 +2748,23 @@ function ManageProbe() {
       </button>
       <button type="button" onClick={() => swallow(ctrl.refreshShares())}>
         refresh shares
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          swallow(
+            ctrl.convergeCommittedMove(
+              {
+                resourceId: ctrl.crumbs[0]?.resourceId ?? '',
+                destinationId: 'destination-1',
+                oldParentId: null,
+              },
+              { version: 2 }
+            )
+          )
+        }
+      >
+        move oldest ancestor
       </button>
       <button type="button" onClick={() => swallow(ctrl.revokeShare('share-42'))}>
         revoke share
@@ -3144,7 +3174,10 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
   // R1-M3 — a total inherited-derivation failure (the file itself cannot be
   // re-resolved for the walk) must surface as controller error state instead
   // of silently collapsing to an empty list.
-  it('exposes inheritedAccessError when the derivation fails entirely', async () => {
+  // R1-H3: a classified mid-walk failure no longer throws — the coverage
+  // state ('unavailable') tells the dialog which notice to show, and only a
+  // raw session 401 still surfaces through inheritedAccessError.
+  it('exposes inheritedCoverage unavailable when a mid-walk resolve fails', async () => {
     let resolveCalls = 0
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -3189,7 +3222,460 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     })
 
     await waitFor(() =>
-      expect(screen.getByTestId('inherited-error').textContent).toBe('Error: 500 resolve_failed')
+      expect(screen.getByTestId('inherited-coverage').textContent).toBe('unavailable')
     )
+    expect(screen.getByTestId('inherited-error').textContent).toBe('none')
+  })
+
+  // An 'unavailable' coverage is a FAILED walk, not an observation. Caching it
+  // under the app's Infinity staleTime would keep the failure on screen as if
+  // it were authoritative; reopening Share must retry the walk.
+  it('retries an unavailable inherited derivation when Share is reopened', async () => {
+    const resolve = vi.fn(async (uri: string) => {
+      // The navigation resolve succeeds; every later resolve (the derivation's
+      // own walk) fails transiently.
+      if (uri.endsWith('/root')) {
+        return {
+          resourceId: 'file-1',
+          parentResourceId: 'folder-1',
+          gfsUri: 'gfs://main/file-1',
+          name: 'report.txt',
+          kind: 'file',
+          version: 1,
+        }
+      }
+      throw new Error('Error: 500 resolve_failed')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares: vi.fn(async () => []),
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('file-1'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('inherited-coverage').textContent).toBe('unavailable')
+    )
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'close manage' }).click()
+    })
+    const before = resolve.mock.calls.length
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+
+    // The failed walk is retried on reopen instead of being served from cache.
+    await waitFor(() => expect(resolve.mock.calls.length).toBeGreaterThan(before))
+  })
+
+  // A move changes the ANCESTRY of the open resource, and the open
+  // Share/Manage dialog shows rows derived from that ancestry. The dialog must
+  // re-read them: keeping the pre-move observation would present inherited
+  // access that no longer exists.
+  it('re-reads the open inherited access when a move affects its ancestry', async () => {
+    const listGrants = vi.fn(async () => [])
+    const listShares = vi.fn(async () => [])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => {
+            const id = uri.split('/').pop()!
+            if (id === 'folder1') {
+              return {
+                resourceId: 'folder-1',
+                parentResourceId: null,
+                gfsUri: 'gfs://main/folder1',
+                name: 'Team docs',
+                kind: 'directory',
+                version: 1,
+              }
+            }
+            return {
+              resourceId: 'file-1',
+              parentResourceId: 'folder-1',
+              gfsUri: 'gfs://main/file1',
+              name: 'report.txt',
+              kind: 'file',
+              version: 1,
+            }
+          }),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants,
+          listShares,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('file-1'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listGrants).toHaveBeenCalled())
+
+    const client = lastHarnessQueryClient!
+    const scope = ':user-a:team-a'
+    const inheritedKey = desktopQueryKeys.gfsInheritedAccess(scope, 'file-1', 'main')
+    const inheritedQuery = client.getQueryCache().find({ queryKey: inheritedKey })!
+    const before = inheritedQuery.state.dataUpdatedAt
+    expect(before).toBeGreaterThan(0)
+
+    // The oldest crumb is an ancestor of the open resource: moving it changes
+    // what the open resource inherits.
+    await act(async () => {
+      screen.getByRole('button', { name: 'move oldest ancestor' }).click()
+    })
+
+    await waitFor(() => expect(inheritedQuery.state.dataUpdatedAt).not.toBe(before))
+  })
+
+  // Every response and rejection crosses the real client/HTTP fixture seam.
+  // The observable contract is session state and protected metadata, not a
+  // briefly presented error string before the authority boundary clears it.
+  for (const route of ['resolve', 'grants', 'shares'] as const) {
+    for (const [status, code] of [
+      [401, 'unauthorized'],
+      [403, 'desktop_user_retired'],
+      [403, 'gfs_operator_link_invalid'],
+      [403, 'manage_acl_required'],
+    ] as const) {
+      it(`handles inherited ${route} ${code} through the correct authority boundary`, async () => {
+        const targetId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        const parentId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        const target = await resolveResource(
+          resolvedFile(targetId, 'report.txt', {
+            parentResourceId: parentId,
+          })
+        )
+        const parent = await resolveResource(resolvedDirectory(parentId, 'team-docs'))
+        const body = { code, message: code }
+        const failure =
+          route === 'resolve'
+            ? await resolveDeniedMessage(target.gfsUri, body, status)
+            : route === 'grants'
+              ? await listGrantsFailureMessage(status, body)
+              : await listSharesFailureMessage(status, body)
+        expect(failure).toContain(`httpStatus=${status}`)
+        expect(failure).toContain(code)
+        const directGrants = await grantsListPage([
+          {
+            id: 'direct-grant',
+            drive: 'main',
+            resourceId: targetId,
+            subject: { type: 'user', id: 'bob' },
+            permissions: ['read'],
+            inherit: false,
+          },
+        ])
+        const directShares = await sharesListPage([
+          {
+            id: 'direct-share',
+            drive: 'main',
+            resourceId: targetId,
+            subject: { type: 'user', id: 'carol' },
+            permissions: ['read'],
+            includeDescendants: false,
+          },
+        ])
+        const emptyGrants = await grantsListPage([])
+        const emptyShares = await sharesListPage([])
+        const accessible = await listAccessiblePage([])
+        const children = await listChildrenPage([])
+        const affordances = await affordancesResult(heldAffordances(['read', 'manage_acl']))
+        let manageReadStarted = false
+        Object.defineProperty(window, 'clerum', {
+          configurable: true,
+          value: {
+            gfs: {
+              listAccessible: vi.fn(async () => accessible),
+              resolve: vi.fn(async (uri: string) => {
+                if (uri.endsWith(parentId.replace(/-/g, '')) || uri.endsWith(parentId))
+                  return parent
+                if (manageReadStarted && route === 'resolve') throw new Error(failure)
+                return target
+              }),
+              listChildren: vi.fn(async () => children),
+              affordances: vi.fn(async () => affordances),
+              listGrants: vi.fn(async (resourceId: string) => {
+                if (resourceId === targetId) return directGrants
+                if (route === 'grants') throw new Error(failure)
+                return emptyGrants
+              }),
+              listShares: vi.fn(async (resourceId: string) => {
+                if (resourceId === targetId) return directShares
+                if (route === 'shares') throw new Error(failure)
+                return emptyShares
+              }),
+            },
+          },
+        })
+        render(<ManageProbe />, { wrapper: Harness })
+        await act(async () => screen.getByRole('button', { name: 'open root' }).click())
+        await waitFor(() => expect(screen.getByTestId('current').textContent).toBe(targetId))
+        const client = lastHarnessQueryClient!
+        const scope = ':user-a:team-a'
+        const grantsKey = desktopQueryKeys.gfsGrants(scope, targetId, 'main')
+        const sharesKey = desktopQueryKeys.gfsShares(scope, targetId, 'main')
+        await act(async () => {
+          client.setQueryData(grantsKey, directGrants)
+          client.setQueryData(sharesKey, directShares)
+        })
+        expect(client.getQueryData(grantsKey)).toEqual(directGrants)
+        expect(client.getQueryData(sharesKey)).toEqual(directShares)
+        manageReadStarted = true
+        await act(async () => screen.getByRole('button', { name: 'open manage' }).click())
+        if (code === 'manage_acl_required') {
+          await waitFor(() =>
+            expect(screen.getByTestId('inherited-coverage').textContent).toBe(
+              route === 'resolve' ? 'read-boundary' : 'acl-limited'
+            )
+          )
+          expect(screen.getByTestId('access-state').textContent).toBe('active')
+          expect(screen.getByTestId('current').textContent).toBe(targetId)
+          expect(screen.getByTestId('grants-count').textContent).toBe('1')
+          expect(screen.getByTestId('shares-count').textContent).toBe('1')
+        } else {
+          await waitFor(() =>
+            expect(screen.getByTestId('access-state').textContent).toBe('revoked')
+          )
+          expect(screen.getByTestId('current').textContent).toBe('none')
+          expect(screen.getByTestId('crumbs').textContent).toBe('')
+          expect(screen.getByTestId('held-permissions').textContent).toBe('none')
+          expect(screen.getByTestId('grants-count').textContent).toBe('0')
+          expect(screen.getByTestId('shares-count').textContent).toBe('0')
+          expect(client.getQueryData(grantsKey)).toBeUndefined()
+          expect(client.getQueryData(sharesKey)).toBeUndefined()
+        }
+      })
+    }
+  }
+})
+
+// A move committed by ONE surface must reach the Share/Manage dialog ANOTHER
+// surface has open. The Files page opened a deep descendant by URI — its
+// ancestry lives in ITS controller, and the children caches that could
+// connect it to the moved ancestor were never loaded — while the sidebar, a
+// SEPARATE controller with its own crumbs, moves that ancestor.
+function TwoSurfaceProbe() {
+  const [manageOpen, setManageOpen] = useState(false)
+  const files = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  const sidebar = useGfsBrowserController()
+  return (
+    <>
+      <div data-testid="files-current">{files.current?.resourceId ?? 'none'}</div>
+      <div data-testid="files-crumbs">
+        {files.crumbs.map(crumb => crumb.resourceId).join(' / ')}
+      </div>
+      <button type="button" onClick={() => swallow(files.openUri('gfs://main/leaf1'))}>
+        open leaf
+      </button>
+      <button type="button" onClick={() => setManageOpen(true)}>
+        open manage
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          swallow(
+            sidebar.convergeCommittedMove(
+              {
+                resourceId: 'ancestor-1',
+                destinationId: 'destination-1',
+                oldParentId: null,
+              },
+              { version: 2 }
+            )
+          )
+        }
+      >
+        move ancestor
+      </button>
+    </>
+  )
+}
+
+describe('useGfsBrowserController — cross-surface move convergence (RP-005)', () => {
+  afterEach(() => {
+    cleanup()
+    lastHarnessQueryClient = null
+    vi.restoreAllMocks()
+  })
+
+  it("re-reads another surface's open inherited access when a move affects its ancestry", async () => {
+    const listGrants = vi.fn(async () => [])
+    const listShares = vi.fn(async () => [])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => {
+            const id = uri.split('/').pop()!
+            if (id === 'leaf1') {
+              return {
+                resourceId: 'leaf-1',
+                parentResourceId: 'parent-1',
+                gfsUri: 'gfs://main/leaf1',
+                name: 'leaf.txt',
+                kind: 'file',
+                version: 1,
+              }
+            }
+            if (id === 'parent1') {
+              return {
+                resourceId: 'parent-1',
+                parentResourceId: 'ancestor-1',
+                gfsUri: 'gfs://main/parent1',
+                name: 'Parent',
+                kind: 'directory',
+                version: 1,
+              }
+            }
+            return {
+              resourceId: 'ancestor-1',
+              parentResourceId: null,
+              gfsUri: 'gfs://main/ancestor1',
+              name: 'Ancestor',
+              kind: 'directory',
+              version: 1,
+            }
+          }),
+          // No children listing is ever loaded, so the shared cache holds no
+          // child→parent link that could connect the open leaf to its
+          // ancestor: the ancestry exists only in the Files controller.
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants,
+          listShares,
+        },
+      },
+    })
+
+    render(<TwoSurfaceProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open leaf' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('files-current').textContent).toBe('leaf-1'))
+    expect(screen.getByTestId('files-crumbs').textContent).toBe('ancestor-1 / parent-1 / leaf-1')
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listGrants).toHaveBeenCalled())
+
+    const client = lastHarnessQueryClient!
+    const scope = ':user-a:team-a'
+    const inheritedKey = desktopQueryKeys.gfsInheritedAccess(scope, 'leaf-1', 'main')
+    const inheritedQuery = client.getQueryCache().find({ queryKey: inheritedKey })!
+    const before = inheritedQuery.state.dataUpdatedAt
+    expect(before).toBeGreaterThan(0)
+
+    // The OTHER surface moves the open leaf's ancestor.
+    await act(async () => {
+      screen.getByRole('button', { name: 'move ancestor' }).click()
+    })
+
+    await waitFor(() => expect(inheritedQuery.state.dataUpdatedAt).not.toBe(before))
+  })
+
+  it('publishes the open location in the registry order the relocation helper assumes', async () => {
+    // The controller's CRUMBS are root-first (ancestor-1 / parent-1 / leaf-1),
+    // but the shared open-location registry documents — and the relocation
+    // helper slice()s — a NEAREST-FIRST chain. Publishing the crumbs without
+    // reversing them made a relocation of an intermediate ancestor keep the
+    // stale ancestors ABOVE it and drop the still-real ones BELOW it.
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => {
+            const id = uri.split('/').pop()!
+            if (id === 'leaf1') {
+              return {
+                resourceId: 'leaf-1',
+                parentResourceId: 'parent-1',
+                gfsUri: 'gfs://main/leaf1',
+                name: 'leaf.txt',
+                kind: 'file',
+                version: 1,
+              }
+            }
+            if (id === 'parent1') {
+              return {
+                resourceId: 'parent-1',
+                parentResourceId: 'ancestor-1',
+                gfsUri: 'gfs://main/parent1',
+                name: 'Parent',
+                kind: 'directory',
+                version: 1,
+              }
+            }
+            return {
+              resourceId: 'ancestor-1',
+              parentResourceId: null,
+              gfsUri: 'gfs://main/ancestor1',
+              name: 'Ancestor',
+              kind: 'directory',
+              version: 1,
+            }
+          }),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+        },
+      },
+    })
+
+    render(<TwoSurfaceProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open leaf' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('files-current').textContent).toBe('leaf-1'))
+    expect(screen.getByTestId('files-crumbs').textContent).toBe('ancestor-1 / parent-1 / leaf-1')
+
+    const client = lastHarnessQueryClient!
+    // Nearest first: parent-1 before ancestor-1. The sidebar mount has
+    // nothing open, so the files mount is the registry's only entry.
+    expect(readGfsOpenLocations(client, ':user-a:team-a')).toEqual([
+      { resourceId: 'leaf-1', ancestorResourceIds: ['parent-1', 'ancestor-1'] },
+    ])
   })
 })

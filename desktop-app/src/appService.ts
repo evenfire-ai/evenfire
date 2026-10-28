@@ -22,7 +22,7 @@ import {
   canonicalizeDesktopRestEndpoint,
   sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
-import { fetchBoundedBytes } from './gfs/boundedDownload.js'
+import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
   DesktopGfsUploadJob,
@@ -887,6 +887,7 @@ export class AppService {
     },
     requestJson,
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
+    fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
   private readonly tokenStore: TokenStore
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -2729,17 +2730,43 @@ export class AppService {
    * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
    * reads the full body.
    */
-  async downloadGfsUri(uri: string, maxBytes?: number) {
+  async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
     return this.gfsClient.download(
       uri,
       this.requireSessionToken(),
-      maxBytes !== undefined ? { maxBytes } : undefined
+      maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
+    )
+  }
+
+  /**
+   * Resolve then STREAM a gfs:// resource's bytes into `onChunk` (R1-H2).
+   *
+   * The folder-zip walk uses this instead of `downloadGfsUri`: the payload is
+   * written straight into the ZIP temp file chunk by chunk, so neither the
+   * main process nor the renderer ever holds a whole file in memory. The
+   * ceiling is enforced producer-side, mid-stream.
+   */
+  async downloadGfsUriInto(
+    uri: string,
+    maxBytes: number,
+    signal: AbortSignal | undefined,
+    onChunk: (chunk: Uint8Array) => Promise<void>
+  ) {
+    return this.gfsClient.downloadInto(
+      uri,
+      this.requireSessionToken(),
+      signal ? { maxBytes, signal } : { maxBytes },
+      onChunk
     )
   }
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
-  async listGfsChildren(resourceId: string, drive?: string, cursor?: string) {
-    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), { drive, cursor })
+  async listGfsChildren(resourceId: string, drive?: string, cursor?: string, signal?: AbortSignal) {
+    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), {
+      drive,
+      cursor,
+      signal,
+    })
   }
 
   /** List explicit gfs resources the current user can read through grants or shares. */
@@ -3436,15 +3463,17 @@ export class AppService {
    * Move a resource into a destination folder (PATCH newParentId). Move
    * authority is parent-relative (write+delete on the old parent, write on the
    * destination) and is enforced server-side; ifMatch pins the resource version.
+   * An optional newName performs a combined rename+move in the same PATCH.
    */
   async moveGfsResource(
     resourceId: string,
     destinationId: string,
     drive?: string,
-    ifMatch?: number
+    ifMatch?: number,
+    newName?: string
   ) {
     return this.gfsClient.moveResource(
-      { resourceId, drive, destinationId, ifMatch },
+      { resourceId, drive, destinationId, ifMatch, ...(newName !== undefined ? { newName } : {}) },
       this.requireSessionToken()
     )
   }
