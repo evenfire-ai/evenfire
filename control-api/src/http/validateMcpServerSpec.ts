@@ -49,6 +49,12 @@ interface EgressBinding {
 
 export type DnsResolver = (hostname: string) => Promise<string[]>
 
+export type OAuthEndpointResolutionClassification = 'trust_rejected' | 'transient_dns'
+
+function isTransientDnsFailure(message: string): boolean {
+  return /\b(?:EAI_AGAIN|ETIMEDOUT|ESERVFAIL|SERVFAIL)\b/i.test(message)
+}
+
 const FORBIDDEN_ENV = new Set([
   'LD_PRELOAD',
   'LD_LIBRARY_PATH',
@@ -479,12 +485,20 @@ async function validateAndResolveOAuthEndpoint(
   rawUrl: string,
   field: string,
   options: { resolveDns?: DnsResolver } = {}
-): Promise<{ errors: ValidationError[]; addresses: string[] }> {
+): Promise<{
+  errors: ValidationError[]
+  addresses: string[]
+  classification: OAuthEndpointResolutionClassification
+}> {
   let url: URL
   try {
     url = new URL(rawUrl)
   } catch {
-    return { errors: [{ field, message: 'must be a valid absolute URL' }], addresses: [] }
+    return {
+      errors: [{ field, message: 'must be a valid absolute URL' }],
+      addresses: [],
+      classification: 'trust_rejected',
+    }
   }
 
   const errors: ValidationError[] = []
@@ -498,11 +512,12 @@ async function validateAndResolveOAuthEndpoint(
     // resolved. An internal/literal/malformed host is rejected without a DNS
     // lookup (never resolve to probe internal names).
     errors.push({ field, message: 'host must be a public DNS hostname' })
-    return { errors, addresses: [] }
+    return { errors, addresses: [], classification: 'trust_rejected' }
   }
 
   const resolveDns = options.resolveDns ?? defaultDnsResolver
   let addresses: string[] = []
+  let classification: OAuthEndpointResolutionClassification = 'trust_rejected'
   try {
     addresses = Array.from(new Set(await resolveDns(host)))
     if (addresses.length === 0) {
@@ -519,15 +534,20 @@ async function validateAndResolveOAuthEndpoint(
       }
     }
   } catch (error) {
+    const resolutionMessage = `host "${host}" could not be resolved: ${
+      error instanceof Error ? error.message : String(error)
+    }`
+    classification =
+      errors.length === 0 && isTransientDnsFailure(resolutionMessage)
+        ? 'transient_dns'
+        : 'trust_rejected'
     errors.push({
       field,
-      message: `host "${host}" could not be resolved: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      message: resolutionMessage,
     })
   }
 
-  return { errors, addresses }
+  return { errors, addresses, classification }
 }
 
 /**
@@ -559,9 +579,20 @@ export async function resolveValidatedOAuthEndpoint(
   rawUrl: string,
   field: string,
   options: { resolveDns?: DnsResolver } = {}
-): Promise<{ ok: true; addresses: string[] } | { ok: false; errors: ValidationError[] }> {
-  const { errors, addresses } = await validateAndResolveOAuthEndpoint(rawUrl, field, options)
-  if (errors.length > 0) return { ok: false, errors }
+): Promise<
+  | { ok: true; addresses: string[] }
+  | {
+      ok: false
+      errors: ValidationError[]
+      classification: OAuthEndpointResolutionClassification
+    }
+> {
+  const { errors, addresses, classification } = await validateAndResolveOAuthEndpoint(
+    rawUrl,
+    field,
+    options
+  )
+  if (errors.length > 0) return { ok: false, errors, classification }
   return { ok: true, addresses }
 }
 

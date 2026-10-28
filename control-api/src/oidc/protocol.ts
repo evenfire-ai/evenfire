@@ -627,7 +627,7 @@ class TrustedOidcTransport {
         this.dependencies.getOperationContext()?.signal
       )
       if (!resolved.ok) {
-        if (resolved.errors.some(isTransientDnsFailure)) {
+        if (resolved.classification === 'transient_dns') {
           throw new OidcProviderUnavailableError()
         }
         throw new OidcProviderIncompatibleError('OIDC endpoint failed public-network validation')
@@ -899,10 +899,6 @@ function validateOidcProviderProfile(
     authorizationResponseIssuerParameterSupported:
       metadata.authorization_response_iss_parameter_supported === true,
   })
-}
-
-function isTransientDnsFailure(error: { message: string }): boolean {
-  return /\b(?:EAI_AGAIN|ETIMEDOUT|ESERVFAIL|SERVFAIL)\b/i.test(error.message)
 }
 
 function requestBody(value: FetchBody): string | undefined {

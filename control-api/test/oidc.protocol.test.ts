@@ -323,6 +323,7 @@ function fixture(
     if (options.temporaryTokenEndpointDnsFailure && url === metadata.token_endpoint) {
       return {
         ok: false,
+        classification: 'transient_dns',
         errors: [
           {
             field: 'OIDC token endpoint',
