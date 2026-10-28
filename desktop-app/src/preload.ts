@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsShareOptions } from './gfs/uriHandler.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DesktopRuntimeConfigHandoffSelection,
@@ -298,11 +299,13 @@ const clerum = Object.freeze({
     listShares: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
     revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
-    // A desktop share grants READ access only (the minimal shared capability) —
-    // unlike `grant`, it takes no permission bits by design. The server still
-    // enforces the caller holds read + share (no-escalation).
-    createShare: (resourceId: string, subjectKeys: string[], drive?: string) =>
-      ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive }),
+    // Share options permit only Read-strength permissions; main validates them.
+    createShare: (
+      resourceId: string,
+      subjectKeys: string[],
+      drive?: string,
+      options?: GfsShareOptions
+    ) => ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive, options }),
   },
   agents: {
     listMine: () => ipcRenderer.invoke('agents:listMine'),

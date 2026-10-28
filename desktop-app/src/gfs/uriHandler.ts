@@ -197,6 +197,11 @@ export interface GfsGrantInput {
   inherit?: boolean
 }
 
+export interface GfsShareOptions {
+  permissions: string[]
+  includeDescendants: boolean
+}
+
 export interface GfsShareInput {
   resourceId: string
   drive?: string

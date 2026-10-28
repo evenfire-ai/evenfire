@@ -57,6 +57,47 @@ function shareItem(overrides: Partial<GfsShareListItem>): GfsShareListItem {
 }
 
 describe('GfsGrantList', () => {
+  it('keeps foreign agent grants removable without offering their role control', () => {
+    const onRevoke = vi.fn()
+    const onChangeRole = vi.fn()
+    const foreign = grantItem({
+      id: 'foreign',
+      subject: { type: 'host', id: '1st:mcp-host/foreign' },
+      permissions: ['read', 'write'],
+    })
+    render(
+      <GfsGrantList
+        agents={agents}
+        items={[foreign, grantItem({ id: 'own' })]}
+        onChangeRole={onChangeRole}
+        onRevoke={onRevoke}
+        subjects={subjects}
+      />
+    )
+
+    const foreignRow = screen.getByTestId('gfs-access-row-grant-foreign')
+    expect(within(foreignRow).getByText('Editor')).toBeTruthy()
+    expect(
+      within(foreignRow).queryByRole('button', {
+        name: 'Access role for 1st:mcp-host/foreign',
+      })
+    ).toBeNull()
+    fireEvent.click(
+      within(foreignRow).getByRole('button', { name: 'Actions for 1st:mcp-host/foreign' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    expect(onRevoke).toHaveBeenCalledWith(foreign, '1st:mcp-host/foreign')
+
+    const ownRow = screen.getByTestId('gfs-access-row-grant-own')
+    fireEvent.click(within(ownRow).getByRole('button', { name: 'Access role for Chat LLM' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+    expect(onChangeRole).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'own' }),
+      'Chat LLM',
+      'editor'
+    )
+  })
+
   it('renders resolved subject labels, grouped roles, and revoke controls', () => {
     render(
       <GfsGrantList
@@ -439,6 +480,51 @@ describe('GfsGrantList', () => {
         { resourceId: 'folder-1', name: 'team-docs' }
       ).sources,
       ...overrides,
+    })
+
+    it('keeps foreign inherited agents removable while own inherited agents remain editable', () => {
+      const onChangeInheritedRole = vi.fn()
+      const onRemoveInherited = vi.fn()
+      render(
+        <GfsGrantList
+          agents={agents}
+          inheritedItems={[
+            inheritedItem({ subject: { type: 'host', id: '1st:mcp-host/foreign' } }),
+            inheritedItem({ subject: { type: 'host', id: '1st:mcp-host/chatllm' } }),
+          ]}
+          items={[]}
+          mergeInherited
+          onChangeInheritedRole={onChangeInheritedRole}
+          onRemoveInherited={onRemoveInherited}
+          onRevoke={vi.fn()}
+          subjects={subjects}
+        />
+      )
+
+      const foreignRow = screen.getByTestId('gfs-access-row-inherited-host:1st:mcp-host/foreign')
+      expect(within(foreignRow).getByText('Editor')).toBeTruthy()
+      expect(
+        within(foreignRow).queryByRole('button', {
+          name: 'Access role for 1st:mcp-host/foreign',
+        })
+      ).toBeNull()
+      fireEvent.click(
+        within(foreignRow).getByRole('button', { name: 'Actions for 1st:mcp-host/foreign' })
+      )
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      expect(onRemoveInherited).toHaveBeenCalledWith(
+        expect.objectContaining({ subject: { type: 'host', id: '1st:mcp-host/foreign' } }),
+        '1st:mcp-host/foreign'
+      )
+
+      const ownRow = screen.getByTestId('gfs-access-row-inherited-host:1st:mcp-host/chatllm')
+      fireEvent.click(within(ownRow).getByRole('button', { name: 'Access role for Chat LLM' }))
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+      expect(onChangeInheritedRole).toHaveBeenCalledWith(
+        expect.objectContaining({ subject: { type: 'host', id: '1st:mcp-host/chatllm' } }),
+        'Chat LLM',
+        'read'
+      )
     })
 
     it('renders inherited members as normal toggleable rows with their strongest role', () => {

@@ -70,8 +70,13 @@ import {
   GfsDelegationPanel,
   type GfsDelegationSubjectOption,
   type GfsGrantListItem,
+  permissionsForRole,
 } from '@/gfs/delegation'
-import type { GfsInheritedAccessSource, GfsInheritedCoverageState } from '@/gfs/delegation.types'
+import type {
+  GfsInheritedAccessSource,
+  GfsInheritedCoverageState,
+  GfsShareListItem,
+} from '@/gfs/delegation.types'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
 import type { GfsDragSource, GfsDropVerdict } from '@/gfs/dragSession'
@@ -807,6 +812,25 @@ export function FilesPage({
     } catch (revokeError) {
       if (failClosedOnAuthorizationError(revokeError)) return
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+    }
+  }
+
+  const handleLowerShare = async (item: GfsShareListItem) => {
+    const subjectKey = item.subject.id
+      ? `${item.subject.type}:${item.subject.id}`
+      : item.subject.type
+    const permissions = permissionsForRole('read', false, item.permissions)
+    setUpdatingAccessRole(true)
+    try {
+      await ctrl.createShare([subjectKey], {
+        permissions,
+        includeDescendants: item.includeDescendants,
+      })
+    } catch (roleError) {
+      if (failClosedOnAuthorizationError(roleError)) return
+      pushToast?.(describeGfsGrantError(roleError).message, 'error')
+    } finally {
+      setUpdatingAccessRole(false)
     }
   }
 
@@ -2852,6 +2876,7 @@ export function FilesPage({
                     onRemoveInherited={handleInheritedRemove}
                     onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
                     onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
+                    onLowerShare={handleLowerShare}
                     revoking={ctrl.revoking}
                     revokingShare={ctrl.revokingShare}
                     shareError={sharesError}

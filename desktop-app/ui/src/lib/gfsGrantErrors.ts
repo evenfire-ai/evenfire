@@ -26,6 +26,7 @@ const GFS_GRANT_ERROR_MESSAGES: Record<string, string> = {
   agent_manager_forbidden: "Agents can't be given manage or share access.",
   managed_agent_permission_forbidden: 'Managed agents can only be granted read and write.',
   foreign_agent_forbidden: 'You can only grant access to your own agents.',
+  permissions_invalid: 'The permission change failed.',
   subjects_invalid: 'Some selected subjects are invalid and were rejected.',
   escalation_rejected: 'You can only grant permissions you already hold here.',
   manage_acl_required: 'Only people with manage access can view who has access here.',

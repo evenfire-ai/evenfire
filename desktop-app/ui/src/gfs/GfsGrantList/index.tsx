@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { isEditorGfsPermissions } from '@clerum/gfs-interaction-policy'
 import { DropdownSelect, StatusBanner } from '@components/Common'
 import {
   IconAgents,
@@ -23,6 +24,13 @@ type AccessSubjectKind = 'agent' | 'context' | 'team' | 'user' | 'workflow'
 
 function subjectKey(subject: { type: string; id?: string }): string {
   return `${subject.type}:${subject.id ?? ''}`
+}
+
+function canChangeSubjectRole(
+  subject: { type: string; id?: string },
+  agents: GfsAgentSubjectOption[]
+): boolean {
+  return subject.type !== 'host' || agents.some(agent => agent.id === subject.id)
 }
 
 function subjectKind(
@@ -139,6 +147,7 @@ export function GfsGrantList({
   onChangeInheritedRole,
   onRemoveInherited,
   onRevokeShare,
+  onLowerShare,
   revoking = false,
   revokingShare = false,
   updatingRole = false,
@@ -285,6 +294,10 @@ export function GfsGrantList({
                     <span className="da-gfs-grant-list__meta">
                       {ownerProtected ? (
                         <span className="da-gfs-grant-list__role-label">Owner</span>
+                      ) : !canChangeSubjectRole(item.subject, agents) ? (
+                        <span className="da-gfs-grant-list__role-label">
+                          {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
+                        </span>
                       ) : (
                         <DropdownSelect
                           ariaLabel={`Access role for ${label}`}
@@ -352,6 +365,10 @@ export function GfsGrantList({
                           parent-folder confirmation in the page. */}
                       {ownerProtected ? (
                         <span className="da-gfs-grant-list__role-label">Owner</span>
+                      ) : !canChangeSubjectRole(row.subject, agents) ? (
+                        <span className="da-gfs-grant-list__role-label">
+                          {roleForPermissions(row.permissions) === 'editor' ? 'Editor' : 'Read'}
+                        </span>
                       ) : (
                         <DropdownSelect
                           ariaLabel={`Access role for ${label}`}
@@ -403,9 +420,26 @@ export function GfsGrantList({
                       ) : null}
                     </span>
                     <span className="da-gfs-grant-list__meta">
-                      <span className="da-gfs-grant-list__role-label">
-                        {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
-                      </span>
+                      {onRevokeShare &&
+                      isEditorGfsPermissions(item.permissions) &&
+                      canChangeSubjectRole(item.subject, agents) ? (
+                        <DropdownSelect
+                          ariaLabel={`Access role for ${label}`}
+                          className="da-gfs-grant-list__role"
+                          disabled={updatingRole || !onLowerShare}
+                          onChange={value => {
+                            if (value === 'read') void onLowerShare?.(item, label)
+                          }}
+                          options={ROLE_OPTIONS}
+                          placeholder="Role"
+                          portal
+                          value="editor"
+                        />
+                      ) : (
+                        <span className="da-gfs-grant-list__role-label">
+                          {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
+                        </span>
+                      )}
                     </span>
                     <AccessRowMenu
                       disabled={revokingShare || !onRevokeShare}

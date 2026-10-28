@@ -70,6 +70,7 @@ export interface GfsGrantListProps {
   /** Removal requested on a merged row that carries an inherited floor. */
   onRemoveInherited?: (row: GfsMergedAccessRow, label: string) => void | Promise<void>
   onRevokeShare?: (item: GfsShareListItem, label: string) => void | Promise<void>
+  onLowerShare?: (item: GfsShareListItem, label: string) => void | Promise<void>
   revoking?: boolean
   revokingShare?: boolean
   updatingRole?: boolean

@@ -20,6 +20,7 @@ import {
 } from './chatStoreBinding.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import type { GfsShareOptions } from './gfs/uriHandler.js'
 import {
   abortZipJob,
   appendZipEntry,
@@ -1075,13 +1076,36 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle(
     'gfs:createShare',
-    async (event, payload: { resourceId: string; subjectKeys: string[]; drive?: string }) => {
+    async (
+      event,
+      payload: {
+        resourceId: string
+        subjectKeys: string[]
+        drive?: string
+        options?: GfsShareOptions
+      }
+    ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      let options: GfsShareOptions | undefined
+      if (payload?.options !== undefined) {
+        if (
+          !Array.isArray(payload.options?.permissions) ||
+          typeof payload.options?.includeDescendants !== 'boolean'
+        ) {
+          throw new Error('Invalid read share options')
+        }
+        const permissions = payload.options.permissions.map(sanitizeString)
+        if (permissions.some(permission => permission !== 'read' && permission !== 'share')) {
+          throw new Error('Invalid read share options')
+        }
+        options = { permissions, includeDescendants: payload.options.includeDescendants }
+      }
       return service.createGfsShare(
         sanitizeString(payload?.resourceId),
         sanitizeSubjectKeys(payload?.subjectKeys),
-        drive
+        drive,
+        options
       )
     }
   )

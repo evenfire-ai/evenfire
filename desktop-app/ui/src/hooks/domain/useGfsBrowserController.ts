@@ -1393,9 +1393,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   )
 
   const createShare = useCallback(
-    async (subjectKeys: string[]): Promise<void> => {
+    async (
+      subjectKeys: string[],
+      options?: { permissions: string[]; includeDescendants: boolean }
+    ): Promise<void> => {
       if (!current) throw new Error('No resource selected')
-      await window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE)
+      await window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE, options)
       await refreshPermissionState()
     },
     [current, DRIVE, refreshPermissionState]

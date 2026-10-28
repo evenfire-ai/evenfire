@@ -1,4 +1,5 @@
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsShareOptions } from './gfs/uriHandler.js'
 import type {
   PluginAuditEntryView,
   PluginConsentRequest,
@@ -452,7 +453,12 @@ declare global {
           }>
         >
         revokeShare: (shareId: string) => Promise<void>
-        createShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
+        createShare: (
+          resourceId: string,
+          subjectKeys: string[],
+          drive?: string,
+          options?: GfsShareOptions
+        ) => Promise<void>
       }
       agents: {
         listMine: () => Promise<AgentWithMcpServers[]>

@@ -2832,6 +2832,7 @@ function ManageProbe() {
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
       <div data-testid="grants-count">{ctrl.grants.length}</div>
       <div data-testid="shares-count">{ctrl.shares.length}</div>
+      <div data-testid="share-permissions">{ctrl.shares[0]?.permissions.join(',') ?? 'none'}</div>
       <div data-testid="inherited-error">{ctrl.inheritedAccessError ?? 'none'}</div>
       <div data-testid="inherited-coverage">{ctrl.inheritedCoverage ?? 'none'}</div>
       <div data-testid="access-state">{ctrl.accessState}</div>
@@ -2886,6 +2887,19 @@ function ManageProbe() {
         onClick={() => swallow(ctrl.createShare(['user:bob']).then(() => ctrl.refreshShares()))}
       >
         create share
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          swallow(
+            ctrl.createShare(['user:bob'], {
+              permissions: ['read', 'share'],
+              includeDescendants: false,
+            })
+          )
+        }
+      >
+        lower share
       </button>
     </>
   )
@@ -3225,6 +3239,71 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     await waitFor(() => expect(listShares).toHaveBeenCalledTimes(2))
   })
 
+  it('forwards a lowered share and reloads its list through permission invalidation', async () => {
+    let permissions = ['read', 'write', 'share']
+    const listShares = vi.fn(async () => [
+      {
+        id: 'share-42',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'bob' },
+        permissions,
+        includeDescendants: false,
+      },
+    ])
+    const createShare = vi.fn(async () => {
+      permissions = ['read', 'share']
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () => homeView()),
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'share', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read', 'share'],
+            canCreateShare: true,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares,
+          createShare,
+        },
+      },
+    })
+    render(<ManageProbe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('share-permissions').textContent).toBe('read,write,share')
+    )
+    await act(async () => {
+      screen.getByRole('button', { name: 'lower share' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('share-permissions').textContent).toBe('read,share')
+    )
+    expect(createShare).toHaveBeenCalledTimes(1)
+    expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main', {
+      permissions: ['read', 'share'],
+      includeDescendants: false,
+    })
+    expect(listShares).toHaveBeenCalledTimes(2)
+  })
+
   it('shows a newly created share without remounting (create → refreshShares)', async () => {
     const created: unknown[] = []
     const listShares = vi.fn(async () =>
@@ -3286,7 +3365,9 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       screen.getByRole('button', { name: 'create share' }).click()
     })
 
-    await waitFor(() => expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main'))
+    await waitFor(() =>
+      expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main', undefined)
+    )
     await waitFor(() => expect(screen.getByTestId('shares-count').textContent).toBe('1'))
   })
 

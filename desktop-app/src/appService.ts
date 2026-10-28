@@ -32,7 +32,12 @@ import {
   type DesktopUploadSession,
   formatGfsUploadLimit,
 } from './gfs/upload.js'
-import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import {
+  GfsClient,
+  type GfsResourceView,
+  type GfsShareOptions,
+  parseSubjectKey,
+} from './gfs/uriHandler.js'
 import { ApiError, requestJson } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
@@ -2819,18 +2824,22 @@ export class AppService {
   }
 
   /**
-   * Create a read share for a subject. A "share" grants read access (the minimal
-   * shared capability); the no-escalation engine still requires the caller hold
-   * read + share. includeDescendants so a folder share covers its subtree.
+   * Create a read share or lower an existing share. Existing callers retain
+   * the original read-only, descendant-covering defaults.
    */
-  async createGfsShare(resourceId: string, subjectKeys: string[], drive?: string) {
+  async createGfsShare(
+    resourceId: string,
+    subjectKeys: string[],
+    drive?: string,
+    options?: GfsShareOptions
+  ) {
     await this.gfsClient.createShare(
       {
         resourceId,
         drive,
         subjects: subjectKeys.map(parseSubjectKey),
-        permissions: ['read'],
-        includeDescendants: true,
+        permissions: options?.permissions ?? ['read'],
+        includeDescendants: options?.includeDescendants ?? true,
       },
       this.requireSessionToken()
     )

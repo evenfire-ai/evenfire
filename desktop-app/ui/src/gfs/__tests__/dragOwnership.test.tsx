@@ -34,6 +34,7 @@ vi.mock('@contexts/AuthContext', () => ({ useAuthContext: () => mocks.auth }))
 
 function baseController() {
   return {
+    drive: 'main',
     current: null,
     crumbs: [],
     sessionScope: 'env-1:user-1:team-1',
