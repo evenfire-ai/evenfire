@@ -6420,23 +6420,23 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyPasswordSuccessAdmissionSchema,
   },
   {
-    version: '0130_user_access_foundation',
+    version: '0131_user_access_foundation',
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0131_invitation_delivery_commands',
+    version: '0132_invitation_delivery_commands',
     apply: applyInvitationDeliveryCommandFoundation,
   },
   {
-    version: '0132_catalog_utf8_ordering',
+    version: '0133_catalog_utf8_ordering',
     apply: applyCatalogUtf8OrderingSchema,
   },
   {
-    version: '0133_composable_catalog_revisions',
+    version: '0134_composable_catalog_revisions',
     apply: applyComposableCatalogRevisionSchema,
   },
   {
-    version: '0134_legacy_password_security_epoch_backfill',
+    version: '0135_legacy_password_security_epoch_backfill',
     apply: backfillLegacyPasswordSecurityEpochs,
   },
 ]

@@ -4,11 +4,11 @@ vi.mock('../src/config.js', () => ({
   config: { databaseUrl: 'postgresql://test' },
 }))
 
-describe('0133 composable catalog revisions migration', () => {
+describe('0134 composable catalog revisions migration', () => {
   it('installs scoped transactional writers for every catalog writer table', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0133_composable_catalog_revisions'
+      candidate => candidate.version === '0134_composable_catalog_revisions'
     )
     expect(migration).toBeDefined()
 
@@ -51,7 +51,7 @@ describe('0133 composable catalog revisions migration', () => {
   it('replaces row-level revision triggers without dropping them', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0133_composable_catalog_revisions'
+      candidate => candidate.version === '0134_composable_catalog_revisions'
     )
     expect(migration).toBeDefined()
 

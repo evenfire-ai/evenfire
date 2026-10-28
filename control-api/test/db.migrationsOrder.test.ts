@@ -65,19 +65,21 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0128_password_work_ownership',
     ]
     const incomingDev = '0129_workflow_schedules_concurrency_policy'
+    const lastDev = '0130_password_login_success_admission'
     const task106 = [
-      '0130_user_access_foundation',
-      '0131_invitation_delivery_commands',
-      '0132_catalog_utf8_ordering',
-      '0133_composable_catalog_revisions',
-      '0134_legacy_password_security_epoch_backfill',
+      '0131_user_access_foundation',
+      '0132_invitation_delivery_commands',
+      '0133_catalog_utf8_ordering',
+      '0134_composable_catalog_revisions',
+      '0135_legacy_password_security_epoch_backfill',
     ]
 
     expect(
       versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
     ).toEqual(parentDev)
     expect(versions[versions.indexOf(parentDev.at(-1)!) + 1]).toBe(incomingDev)
-    expect(versions.indexOf(incomingDev)).toBeLessThan(versions.indexOf(task106[0]!))
+    expect(versions[versions.indexOf(incomingDev) + 1]).toBe(lastDev)
+    expect(versions[versions.indexOf(lastDev) + 1]).toBe(task106[0])
     expect(
       versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 5)
     ).toEqual(task106)

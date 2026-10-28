@@ -68,7 +68,7 @@ describe('db.initDb', () => {
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
     // 0130_password_login_success_admission (as in dev), then five PR1 versions
-    // plus the 0132 function transaction.
+    // plus the 0133 function transaction.
     expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(8)
     expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(8)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
@@ -94,7 +94,7 @@ describe('db.initDb', () => {
       expect(index, version).toBeGreaterThan(devBatchBegin)
       expect(index, version).toBeLessThan(devBatchCommit)
     }
-    expect(receiptIndex('0130_user_access_foundation')).toBeGreaterThan(devBatchCommit)
+    expect(receiptIndex('0131_user_access_foundation')).toBeGreaterThan(devBatchCommit)
   })
 
   it('applies the triggered_at audit index migration on top of an already-migrated baseline', async () => {

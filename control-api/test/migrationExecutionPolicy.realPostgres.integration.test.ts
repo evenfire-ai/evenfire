@@ -411,7 +411,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     for (const candidate of cases) {
       await databasePool.query(`CREATE INDEX ${candidate.name} ON ${table} ${candidate.actual}`)
       const entry: OnlineIndexDefinition = {
-        migrationVersion: '0130_user_access_foundation',
+        migrationVersion: '0131_user_access_foundation',
         name: candidate.name,
         table,
         createSql: `CREATE INDEX CONCURRENTLY ${candidate.name} ON ${table} ${candidate.expected}`,
@@ -425,7 +425,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     await databasePool.query(`CREATE INDEX ${uniqueName} ON ${table} (userid)`)
     await expect(
       ensureOnlineIndex(databasePool, {
-        migrationVersion: '0130_user_access_foundation',
+        migrationVersion: '0131_user_access_foundation',
         name: uniqueName,
         table,
         unique: true,
@@ -437,7 +437,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   it('repairs an equivalent interrupted index and enforces the online bound', async () => {
     const name = `d34_interrupted_${randomBytes(4).toString('hex')}`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0130_user_access_foundation',
+      migrationVersion: '0131_user_access_foundation',
       name,
       table: 'd34_interrupted_index',
       unique: true,
@@ -486,7 +486,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const functionName = `d34_slow_index_value_${suffix}`
     const name = `d34_slow_index_${suffix}_idx`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0130_user_access_foundation',
+      migrationVersion: '0131_user_access_foundation',
       name,
       table,
       createSql: `CREATE INDEX CONCURRENTLY ${name} ON ${table} (${functionName}(value))`,
@@ -598,10 +598,10 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('bounds ordinary DDL lock acquisition and never runs the later version', async () => {
     const locker = await databasePool.connect()
-    await removeMigrationReceiptForReplay(databasePool, '0133_composable_catalog_revisions')
+    await removeMigrationReceiptForReplay(databasePool, '0134_composable_catalog_revisions')
     await removeMigrationReceiptForReplay(
       databasePool,
-      '0134_legacy_password_security_epoch_backfill'
+      '0135_legacy_password_security_epoch_backfill'
     )
     await locker.query('BEGIN')
     await locker.query('LOCK TABLE users IN ACCESS EXCLUSIVE MODE')
@@ -617,8 +617,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
     expect(Date.now() - started).toBeLessThan(15_000)
     const failedVersions = await versions(databasePool)
-    expect(failedVersions).not.toContain('0133_composable_catalog_revisions')
-    expect(failedVersions).not.toContain('0134_legacy_password_security_epoch_backfill')
+    expect(failedVersions).not.toContain('0134_composable_catalog_revisions')
+    expect(failedVersions).not.toContain('0135_legacy_password_security_epoch_backfill')
     await initDb({ connect: () => databasePool.connect() })
   }, 20_000)
 
@@ -631,7 +631,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ...PR1_MIGRATION_VERSIONS.map(version => ({
         version,
         apply: async (db: DbClient) => {
-          if (version === '0133_composable_catalog_revisions') {
+          if (version === '0134_composable_catalog_revisions') {
             await db.query('SELECT pg_sleep(20)')
           }
         },
@@ -655,7 +655,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         `SELECT version FROM ${recordTable} ORDER BY version`
       )
       expect(recorded.rows).toEqual([])
-      expect(appliedVersions).not.toContain('0134_legacy_password_security_epoch_backfill')
+      expect(appliedVersions).not.toContain('0135_legacy_password_security_epoch_backfill')
     } finally {
       client.release(true)
     }
@@ -705,13 +705,13 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         'latest DEV migration body replay'
       ).toBe(0)
       expect(upgrade.applyCounts.get(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)).toBe(1)
-      const foundationIndex = upgrade.applyOrder.indexOf('0130_user_access_foundation')
+      const foundationIndex = upgrade.applyOrder.indexOf('0131_user_access_foundation')
       const passwordAdmissionIndex = upgrade.applyOrder.indexOf(
         DEV_PASSWORD_SUCCESS_ADMISSION_VERSION
       )
       expect(passwordAdmissionIndex).toBeGreaterThanOrEqual(0)
       expect(passwordAdmissionIndex).toBeLessThan(foundationIndex)
-      expect(upgrade.applyOrder[foundationIndex + 1]).toBe('0131_invitation_delivery_commands')
+      expect(upgrade.applyOrder[foundationIndex + 1]).toBe('0132_invitation_delivery_commands')
       await assertDbReady(isolatedPool)
 
       // Rollback: the DEV image's migrator runs against the upgraded database.
@@ -795,7 +795,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         'new latest DEV migration applies exactly once from the observed DEV state'
       ).toBe(1)
       expect(firstRun.applyCounts.get(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)).toBe(1)
-      const foundationIndex = firstRun.applyOrder.indexOf('0130_user_access_foundation')
+      const foundationIndex = firstRun.applyOrder.indexOf('0131_user_access_foundation')
       const scheduleIndex = firstRun.applyOrder.indexOf(
         '0129_workflow_schedules_concurrency_policy'
       )
@@ -805,7 +805,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       expect(scheduleIndex).toBeGreaterThanOrEqual(0)
       expect(scheduleIndex).toBeLessThan(passwordAdmissionIndex)
       expect(passwordAdmissionIndex).toBeLessThan(foundationIndex)
-      expect(firstRun.applyOrder[foundationIndex + 1]).toBe('0131_invitation_delivery_commands')
+      expect(firstRun.applyOrder[foundationIndex + 1]).toBe('0132_invitation_delivery_commands')
       await assertDbReady(isolatedPool)
 
       const afterUpgrade = await versions(isolatedPool)

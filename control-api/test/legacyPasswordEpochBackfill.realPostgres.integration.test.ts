@@ -25,7 +25,7 @@ function quoteIdentifier(value: string): string {
 async function removeLegacyEpochMigrationReceipts(databasePool: Pool): Promise<void> {
   const removed = await databasePool.query(
     `DELETE FROM schema_migrations
-      WHERE version = '0134_legacy_password_security_epoch_backfill'`
+      WHERE version = '0135_legacy_password_security_epoch_backfill'`
   )
   if (removed.rowCount !== 1) throw new Error('legacy epoch backfill receipt was not recorded')
 }
@@ -133,7 +133,7 @@ describeRealPostgres('legacy password epoch backfill on real PostgreSQL', () => 
     const recorded = await databasePool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count
          FROM schema_migrations
-        WHERE version = '0134_legacy_password_security_epoch_backfill'`
+        WHERE version = '0135_legacy_password_security_epoch_backfill'`
     )
     expect(recorded.rows[0]?.count).toBe('1')
   })

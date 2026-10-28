@@ -29,16 +29,16 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_invitation_idx',
 ])
 
-const USER_ACCESS_FOUNDATION_VERSION = '0130_user_access_foundation'
+const USER_ACCESS_FOUNDATION_VERSION = '0131_user_access_foundation'
 
 describe('D34 migration execution policy', () => {
   it('classifies the five PR1 migrations that follow the dev batch', () => {
     expect(PR1_MIGRATION_VERSIONS).toEqual([
-      '0130_user_access_foundation',
-      '0131_invitation_delivery_commands',
-      '0132_catalog_utf8_ordering',
-      '0133_composable_catalog_revisions',
-      '0134_legacy_password_security_epoch_backfill',
+      '0131_user_access_foundation',
+      '0132_invitation_delivery_commands',
+      '0133_catalog_utf8_ordering',
+      '0134_composable_catalog_revisions',
+      '0135_legacy_password_security_epoch_backfill',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -76,10 +76,10 @@ describe('D34 migration execution policy', () => {
     expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
     expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0130'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0131'))
     ).toHaveLength(18)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0132'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0133'))
     ).toHaveLength(7)
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
@@ -91,10 +91,11 @@ describe('D34 migration execution policy', () => {
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
     // S1d changed the PR1 bodies before any shared environment applied them:
-    // statement-level catalog triggers are no longer installed by 0130, 0133/0134
-    // replace row triggers in place, and planned indexes left the transactions.
-    // S1e folded 0134, 0135 and 0144 into 0130/0133 and dropped the
-    // authorization_catalog_revision table and function.
+    // statement-level catalog triggers are no longer installed by the foundation
+    // migration, the composable-revision migration replaces row triggers in place,
+    // and planned indexes left the transactions. S1e folded three later PR1
+    // migrations into those two and dropped the authorization_catalog_revision
+    // table and function. PR1 now occupies slots 0131-0135, after dev's 0130.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
@@ -313,7 +314,7 @@ describe('D34 PR1 migration runner', () => {
 
     expect(applied).toEqual([...PR1_MIGRATION_VERSIONS])
     // One transaction per version, plus the catalog_utf8_bytes function that
-    // 0132 creates and commits before building its online indexes.
+    // 0133 creates and commits before building its online indexes.
     const transactions = PR1_MIGRATION_VERSIONS.length + 1
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)

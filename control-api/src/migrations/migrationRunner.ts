@@ -3,11 +3,11 @@ import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
-  '0130_user_access_foundation',
-  '0131_invitation_delivery_commands',
-  '0132_catalog_utf8_ordering',
-  '0133_composable_catalog_revisions',
-  '0134_legacy_password_security_epoch_backfill',
+  '0131_user_access_foundation',
+  '0132_invitation_delivery_commands',
+  '0133_catalog_utf8_ordering',
+  '0134_composable_catalog_revisions',
+  '0135_legacy_password_security_epoch_backfill',
 ] as const)
 
 // Every migration up to and including dev's last migration runs in initDb's
