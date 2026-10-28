@@ -2,6 +2,11 @@ import type { Request, Response, Router } from 'express'
 import { config } from '../../config.js'
 import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../../db.js'
 import { isValidUserHomeName, userHomeRetryNameCandidates } from '../../gfs/userHomeNaming.js'
+import {
+  USER_HOME_OWNER_PERMISSIONS,
+  lockUserHome,
+  restoreUserHomeOwnerGrant,
+} from '../../gfs/userHomeOwnerRestore.js'
 import { reserveUserHomeName } from '../../gfs/userHomeReservation.js'
 import {
   type UserHomeConflictCode,
@@ -12,7 +17,7 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
-import { PERMISSIONS, UUID_RE, auditMutation, requestIdOf } from './grants.js'
+import { UUID_RE, auditMutation, requestIdOf } from './grants.js'
 import { resolveUserHomeConflictDetail } from './userHomeConflictDetails.js'
 
 const HOME_STATES = ['pending', 'ready', 'conflict', 'retired'] as const
@@ -325,78 +330,27 @@ export async function restoreUserHomeOwnerInTransaction(
   requestId?: string,
   sourceIp?: string
 ): Promise<RestoreResult> {
-  await db.query("SELECT pg_advisory_xact_lock(hashtext('gfs:user-home:' || $1::text))", [userId])
-  const result = await db.query(
-    `SELECT state, drive, storage_username, resource_id, conflict_code, conflict_detail
-       FROM gfs_user_homes WHERE user_id = $1 FOR UPDATE`,
-    [userId]
+  await lockUserHome(db, userId)
+  // One implementation serves this route and the operator grant PUT (D34):
+  // validation, invariant check, audit and the state change live there.
+  const outcome = await restoreUserHomeOwnerGrant(
+    db,
+    userId,
+    { actorKey: 'operator:', actorOnBehalfOf: adminId, requestId, sourceIp },
+    async binding => {
+      await db.query(
+        `INSERT INTO gfs_grants
+           (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
+         VALUES ($1, $2, 'user', $3, $4::text[], true, 'platform:user-home')
+         ON CONFLICT (drive, resource_id, subject_type, subject_id)
+         DO UPDATE SET permissions = EXCLUDED.permissions, inherit = true,
+                       granted_by = 'platform:user-home', updated_at = now()`,
+        [binding.drive, binding.resourceId, binding.userId, [...USER_HOME_OWNER_PERMISSIONS]]
+      )
+    }
   )
-  const home = result.rows[0] as HomeRow | undefined
-  if (!home) return { kind: 'not_found' }
-  if (home.state !== 'conflict' || home.conflict_code !== 'ownership_conflict') {
-    return { kind: 'not_restorable' }
-  }
-  if (!home.drive || !home.resource_id || !home.storage_username) {
-    throw new Error('home_owner_binding_invalid')
-  }
-  const resource = await db.query(
-    `SELECT resource_id FROM gfs_resources
-      WHERE resource_id = $1 AND drive = $2 AND kind = 'directory' AND deleted_at IS NULL
-      FOR SHARE`,
-    [home.resource_id, home.drive]
-  )
-  if (resource.rows.length !== 1) throw new Error('home_owner_binding_invalid')
-
-  const grant = await db.query(
-    `INSERT INTO gfs_grants
-       (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
-     VALUES ($1, $2, 'user', $3, $4::text[], true, 'platform:user-home')
-     ON CONFLICT (drive, resource_id, subject_type, subject_id)
-     DO UPDATE SET permissions = EXCLUDED.permissions, inherit = true,
-                   granted_by = 'platform:user-home', updated_at = now()
-     RETURNING permissions, inherit`,
-    [home.drive, home.resource_id, userId, [...PERMISSIONS]]
-  )
-  const restored = grant.rows[0] as { permissions?: unknown; inherit?: unknown } | undefined
-  const restoredPermissions = restored?.permissions
-  if (
-    !restored ||
-    restored.inherit !== true ||
-    !Array.isArray(restoredPermissions) ||
-    !PERMISSIONS.every(permission => restoredPermissions.includes(permission))
-  ) {
-    throw new Error('home_owner_grant_invariant_failed')
-  }
-
-  const audit = {
-    actorKey: 'operator:',
-    actorOnBehalfOf: adminId,
-    targetKey: `user:${userId}`,
-    drive: home.drive,
-    resourceId: home.resource_id,
-    outcome: 'allowed' as const,
-    requestId,
-    sourceIp,
-  }
-  await auditMutation(db, { ...audit, op: 'user_home.conflict_cleared.ownership_conflict' })
-  // The structured record is emitted before the registry clears the detail;
-  // the audit insert and state change are committed or rolled back together.
-  rootLogger.info(
-    {
-      event: 'user_home.conflict_cleared',
-      userId,
-      conflictCode: home.conflict_code,
-      conflictDetail: home.conflict_detail,
-      transactionState: 'pending_commit',
-    },
-    'user home conflict clearing'
-  )
-  await db.query(
-    `UPDATE gfs_user_homes SET state = 'ready', conflict_code = NULL, conflict_detail = NULL,
-            last_error = NULL, updated_at = now() WHERE user_id = $1`,
-    [userId]
-  )
-  await auditMutation(db, { ...audit, op: 'user_home.restore_owner' })
+  if (outcome === 'not_found') return { kind: 'not_found' }
+  if (outcome === 'not_restorable') return { kind: 'not_restorable' }
   const updatedHome = await loadHome(db, userId)
   if (!updatedHome) throw new Error('home_disappeared_during_restore')
   return { kind: 'restored', home: updatedHome }
