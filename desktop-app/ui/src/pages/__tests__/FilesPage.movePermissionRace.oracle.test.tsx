@@ -11,6 +11,7 @@ import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
   childView,
+  gfsRouteFailureMessage,
   listAccessiblePage,
   listChildrenPage,
   resolveResource,
@@ -460,6 +461,118 @@ describe('FilesPage Move permission generation fencing', () => {
       'The server rejected this destination. Refresh and choose a different folder.',
       'error'
     )
+  })
+
+  it('reports a dispatched name conflict when closing cancels the numbered retry', async () => {
+    const conflictMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          {
+            resourceId: 'file-src',
+            destinationId: 'destination-1',
+            ifMatch: 3,
+          },
+          'fixture-session-token'
+        ),
+      409,
+      { code: 'name_conflict', message: 'an item with this name already exists' }
+    )
+    const rows = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        path: '/Archive',
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const children = await listChildrenPage([
+      childView('file-src', 'notes.txt', 'file', {
+        parentResourceId: 'source-parent',
+        path: '/Team/notes.txt',
+        version: 3,
+      }),
+    ])
+    const sourceParent = await resolveResource(
+      resolvedDirectory('source-parent', 'Team', { gfsUri: 'gfs://main/source-parent' })
+    )
+    const resolvedSource = await resolveResource(
+      resolvedFile('file-src', 'notes.txt', {
+        parentResourceId: 'source-parent',
+        path: '/Team/notes.txt',
+        version: 3,
+      })
+    )
+    const resolvedArchive = await resolveResource(
+      resolvedDirectory('destination-1', 'Archive', {
+        parentResourceId: 'source-parent',
+        path: '/Team/Archive',
+        version: 4,
+      })
+    )
+    let rejectMove!: (error: Error) => void
+    const moveGate = new Promise<{ resourceId: string; version: number }>((_resolve, reject) => {
+      rejectMove = reject
+    })
+    const affordances = appServiceAffordanceProducer(async resourceId =>
+      heldPermissionResponse(
+        resourceId === 'source-parent'
+          ? ['read', 'write', 'delete']
+          : resourceId === 'destination-1' || resourceId === 'file-src'
+            ? ['read', 'write']
+            : ['read']
+      )
+    )
+    const moveResource = vi.fn(() => moveGate)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => rows),
+          listChildren: vi.fn(async (resourceId: string) =>
+            resourceId === 'source-parent' ? children : listChildrenPage([])
+          ),
+          affordances,
+          resolve: vi.fn(async (uri: string) =>
+            uri.endsWith('/source-parent')
+              ? sourceParent
+              : uri.endsWith('/filesrc') || uri.endsWith('/file-src')
+                ? resolvedSource
+                : resolvedArchive
+          ),
+          moveResource,
+        },
+      },
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(
+      <AuthContext.Provider value={authFor('team-a')}>
+        <QueryClientProvider client={queryClient}>
+          <ToastingFilesPage pendingGfsUri="gfs://main/source-parent" />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+    )
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+    expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
+
+    await act(async () => rejectMove(new Error(conflictMessage)))
+
+    expect(
+      await screen.findByText(
+        'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+      )
+    ).toBeTruthy()
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
   })
 
   it('does not move a selected file after its team scope changes during confirmation', async () => {

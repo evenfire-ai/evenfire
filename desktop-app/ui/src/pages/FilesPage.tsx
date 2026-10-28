@@ -2072,15 +2072,32 @@ export function FilesPage({
     allowNumberedRename: boolean,
     isCurrent?: () => boolean,
     expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot,
-    reportOutcomes = true
+    reportOutcomes = true,
+    dispatchObserver?: {
+      onDispatch: () => void
+      onRejected: (error: unknown) => void
+    }
   ): Promise<MoveCommitOutcome> => {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
     try {
       return await runGfsMoveCommit(
         {
-          moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
-            ctrl.moveResource(resourceId, destinationId, ifMatch, newName, oldParentId),
+          moveResource: async (resourceId, destinationId, ifMatch, newName, oldParentId) => {
+            dispatchObserver?.onDispatch()
+            try {
+              return await ctrl.moveResource(
+                resourceId,
+                destinationId,
+                ifMatch,
+                newName,
+                oldParentId
+              )
+            } catch (error) {
+              dispatchObserver?.onRejected(error)
+              throw error
+            }
+          },
           handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
           convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
           ...(reportOutcomes && pushToast ? { pushToast } : {}),
@@ -2539,14 +2556,39 @@ export function FilesPage({
         version: target.version,
         parentResourceId: sourceParentId,
       }
+      const dispatchedMove = {
+        count: 0,
+        lastRejectedStatus: null as number | null,
+      }
       const outcome = await runMoveCommit(
         moveSource,
         { resourceId: destinationId, name: destinationName },
         allowNumberedRename,
         () => pageActiveRef.current && ownsDialog() && contextStillMatches(),
         expectedSourceSnapshot,
-        false
+        false,
+        {
+          onDispatch: () => {
+            dispatchedMove.count += 1
+            dispatchedMove.lastRejectedStatus = null
+          },
+          onRejected: error => {
+            dispatchedMove.lastRejectedStatus = parseHttpStatus(
+              error instanceof Error ? error.message : String(error)
+            )
+          },
+        }
       )
+      const visibleOutcome: MoveCommitOutcome =
+        outcome.status === 'gesture-lost' &&
+        dispatchedMove.count > 0 &&
+        dispatchedMove.lastRejectedStatus === 409
+          ? {
+              status: 'conflict-stopped',
+              message:
+                'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.',
+            }
+          : outcome
       if (!pageActiveRef.current) return
       if (!sessionStillMatches()) {
         closeOwnedDialog()
@@ -2556,19 +2598,19 @@ export function FilesPage({
         // After dispatch, the operation owns its outcome independently of the
         // current folder and dialog. A same-session route change cannot erase
         // completion feedback; the generation check keeps newer dialogs safe.
-        toastMoveOutcome(pushToast, outcome, target.name, destinationName, target.kind)
+        toastMoveOutcome(pushToast, visibleOutcome, target.name, destinationName, target.kind)
         closeOwnedDialog()
         return
       }
-      if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
-        if (outcome.status === 'session-lost') closeOwnedDialog()
+      if (visibleOutcome.status === 'session-lost' || visibleOutcome.status === 'gesture-lost') {
+        if (visibleOutcome.status === 'session-lost') closeOwnedDialog()
         else setMovePermissionStatus(null)
         return
       }
-      if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
-        throw new Error(outcome.message)
+      if (visibleOutcome.status !== 'committed' && visibleOutcome.status !== 'no-op') {
+        throw new Error(visibleOutcome.message)
       }
-      toastMoveOutcome(pushToast, outcome, target.name, destinationName, target.kind)
+      toastMoveOutcome(pushToast, visibleOutcome, target.name, destinationName, target.kind)
     } catch (moveError) {
       if (!pageActiveRef.current) return
       if (!ownsDialogGeneration()) return
