@@ -95,10 +95,14 @@ describe('D34 migration execution policy', () => {
     // and planned indexes left the transactions. S1e folded three later PR1
     // migrations into those two and dropped the authorization_catalog_revision
     // table and function. PR1 now occupies slots 0131-0135, after dev's 0130.
+    // The 2026-10-28 review (still unapplied anywhere) dropped unused objects,
+    // made revision tables read-only for the runtime, ordered revision writers,
+    // kept the Admin UI attribution sentinel, added three revision triggers and
+    // a pre-lock for archive batches.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'eeb09ac027c7a893ea99a53141f097bba1d76fd4694342f56c20515a3a8b2020',
+        '89307fd494ed2c7936a04d888f962684ac97fad8a57fa1e731e04013d3349e43',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',
