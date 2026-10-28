@@ -692,12 +692,12 @@ export type GfsUserHomeConflictAccess = {
 export type GfsUserHomeConflictDetail =
   | {
       code: 'path_conflict'
-      resource: { resourceId: string; path: string; kind: string; createdAt: string } | null
+      resource: { resourceId: string; path: string | null; kind: string; createdAt: string } | null
       access: GfsUserHomeConflictAccess[]
     }
   | {
       code: 'ancestor_grant_conflict'
-      entries: Array<GfsUserHomeConflictAccess & { resourceId: string; path: string }>
+      entries: Array<GfsUserHomeConflictAccess & { resourceId: string; path: string | null }>
     }
   | {
       code: 'ownership_conflict'

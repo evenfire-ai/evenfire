@@ -233,6 +233,61 @@ describe('Home folder block', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
   })
 
+  it('shows an unavailable path when the server has no cached path', async () => {
+    vi.mocked(getGfsUserHome)
+      .mockResolvedValueOnce({
+        home: {
+          ...baseHome,
+          state: 'conflict',
+          conflictCode: 'path_conflict',
+          conflictDetail: {
+            code: 'path_conflict',
+            resource: {
+              resourceId: 'conflict-1',
+              path: null,
+              kind: 'directory',
+              createdAt: '2026-10-27T00:00:00.000Z',
+            },
+            access: [],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        home: {
+          ...baseHome,
+          state: 'conflict',
+          conflictCode: 'ancestor_grant_conflict',
+          conflictDetail: {
+            code: 'ancestor_grant_conflict',
+            entries: [
+              {
+                relation: 'grant',
+                resourceId: 'ancestor-1',
+                path: null,
+                subjectType: 'team',
+                subjectId: 'team-1',
+                subjectLabel: 'Platform',
+                permissions: ['read'],
+                inherit: true,
+              },
+            ],
+          },
+        },
+      })
+    const first = render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    const pathDetails = await screen.findByRole('region', { name: 'Path conflict details' })
+    expect(within(pathDetails).getByText('conflict-1')).toBeVisible()
+    expect(within(pathDetails).getByText('Not available')).toBeVisible()
+    first.unmount()
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    const ancestorDetails = await screen.findByRole('region', {
+      name: 'Ancestor access conflict details',
+    })
+    expect(
+      within(ancestorDetails).getByText('Path: Not available; resource ID: ancestor-1')
+    ).toBeVisible()
+  })
+
   it('explains the missing permissions and inheritance in a narrowed owner grant', async () => {
     vi.mocked(getGfsUserHome).mockResolvedValue({
       home: {

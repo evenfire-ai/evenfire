@@ -59,7 +59,7 @@ function ConflictDetails({
         {detail.resource ? (
           <dl>
             <dt>Conflicting path</dt>
-            <dd>{detail.resource.path}</dd>
+            <dd>{detail.resource.path ?? 'Not available'}</dd>
             <dt>Resource ID</dt>
             <dd>{detail.resource.resourceId}</dd>
             <dt>Kind</dt>
@@ -95,7 +95,7 @@ function ConflictDetails({
                 key={`${entry.resourceId}:${entry.relation}:${entry.subjectType}:${entry.subjectId}:${index}`}
               >
                 <p>
-                  Path: {entry.path}; resource ID: {entry.resourceId}
+                  Path: {entry.path ?? 'Not available'}; resource ID: {entry.resourceId}
                 </p>
                 <p>
                   <ConflictAccess access={entry} />
