@@ -1,5 +1,4 @@
 import type { NextFunction, Request, Response } from 'express'
-import { ControlApiHostVersionMismatchError } from './services/controlApiVersionError.js'
 import { UpstreamBodyReadError } from './services/upstreamBody.js'
 import { isUpstreamTimeoutError } from './services/wakeAndHold.js'
 
@@ -30,15 +29,6 @@ export function apiErrorHandler(
 ): void {
   if (isUpstreamTimeoutError(err)) {
     res.status(504).json({ error: 'Gateway Timeout' })
-    return
-  }
-
-  // control-api answered 404 for a Host-access operation this edge requires:
-  // the peer predates the route. That is a deployment version mismatch, not a
-  // refusal of Host access, so it must never collapse into a 403 denial or an
-  // opaque 500. The public body names the mismatch; the operation stays local.
-  if (err instanceof ControlApiHostVersionMismatchError) {
-    res.status(503).json({ error: 'control_api_version_mismatch' })
     return
   }
 

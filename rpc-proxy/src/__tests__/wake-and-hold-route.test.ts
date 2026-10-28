@@ -134,9 +134,6 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
 
     expect(response.body).toEqual({ success: true, taskId: 't-1' })
     expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
-    expect(serviceMock.resolveHostConnectionForUser.mock.calls[0]?.[3]).toMatchObject({
-      messageResolution: true,
-    })
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledWith('chatllm', 'token')
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)

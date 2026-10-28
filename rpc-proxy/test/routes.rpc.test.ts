@@ -247,7 +247,6 @@ describe('routes/rpc', () => {
       'agent2',
       'token',
       {
-        messageResolution: true,
         teamId: 'team-1',
       }
     )
@@ -284,7 +283,6 @@ describe('routes/rpc', () => {
       'agent2',
       'rpc-token',
       {
-        messageResolution: true,
         teamId: 'team-1',
         directRunBinding: {
           runId: expect.any(String),

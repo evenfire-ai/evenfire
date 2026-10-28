@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import type { K8sGateway } from '../src/k8s.js'
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
@@ -393,63 +394,32 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — happy path', () =
   })
 })
 
-describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () => {
-  beforeEach(() => {
-    rateLimiterMock.checkAndIncrement.mockReset()
-    svc.getUserAgents.mockReset()
-  })
-
-  it('authorizes more than 30 reads without a limiter call', async () => {
+describe('removed Host sub-paths are not served', () => {
+  it('answers 404 for message-resolution and artifact-read, and 200 for the parent path', async () => {
     const userId = 'user-a'
-    const hostRef = 'chatllm'
-    let charges = 0
-    rateLimiterMock.checkAndIncrement.mockImplementation(async (_key: string, maximum: number) => {
-      charges += 1
-      return {
-        allowed: charges <= maximum,
-        remaining: Math.max(0, maximum - charges),
-        resetMs: Date.now() + 60_000,
-        windowStartMs: Date.now(),
-        count: charges,
-        backendAvailable: true,
-      }
-    })
+    const hostRef = 'host-a'
+    svc.getUserAgents.mockReset()
     svc.getUserAgents.mockResolvedValue({ userId, agentNames: [hostRef] })
-    const { app, gatewayStub } = buildApp([
-      { metadata: { name: hostRef }, spec: { enabled: true } },
-    ])
-    for (let attempt = 0; attempt < 35; attempt += 1) {
-      const response = await request(app)
-        .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`)
-        .expect(200)
-      expect(response.body).toMatchObject({ userId, hostRef })
-    }
-    expect(svc.getUserAgents).toHaveBeenCalledTimes(35)
-    expect(gatewayStub.listResource).toHaveBeenCalledTimes(35)
-    expect(rateLimiterMock.checkAndIncrement).not.toHaveBeenCalled()
-  })
+    const { app } = buildApp([{ metadata: { name: hostRef }, spec: { enabled: true } }])
 
-  it('rejects mismatched subject and signed Host before authorization', async () => {
-    authState.claims = { sub: 'user-a', hostRefs: ['host-a'] }
-    const { app, gatewayStub } = buildApp([])
-    await request(app).get('/rpc/access/users/user-b/mcp-hosts/host-a/artifact-read').expect(403)
-    await request(app).get('/rpc/access/users/user-a/mcp-hosts/other/artifact-read').expect(403)
+    await request(app)
+      .post(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/message-resolution`)
+      .send({ content: 'hi' })
+      .expect(404)
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`)
+      .expect(404)
     expect(svc.getUserAgents).not.toHaveBeenCalled()
-    expect(gatewayStub.listResource).not.toHaveBeenCalled()
-    expect(rateLimiterMock.checkAndIncrement).not.toHaveBeenCalled()
-  })
 
-  it('denies a deleted or disabled Host after checking the live grant', async () => {
-    svc.getUserAgents.mockResolvedValue({ userId: 'user-a', agentNames: ['host-a'] })
-    const deleted = buildApp([])
-    const disabled = buildApp([{ metadata: { name: 'host-a' }, spec: { enabled: false } }])
-    for (const { app } of [deleted, disabled]) {
-      await request(app).get('/rpc/access/users/user-a/mcp-hosts/host-a/artifact-read').expect(403)
-    }
-    expect(svc.getUserAgents).toHaveBeenCalledTimes(2)
-    expect(deleted.gatewayStub.listResource).toHaveBeenCalledOnce()
-    expect(disabled.gatewayStub.listResource).toHaveBeenCalledOnce()
-    expect(rateLimiterMock.checkAndIncrement).not.toHaveBeenCalled()
+    const parent = await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}`)
+      .expect(200)
+    expect(parent.body).toEqual({
+      userId,
+      hostRef,
+      url: `http://${hostRef}.${config.hostsNamespace}.svc.cluster.local:8080`,
+    })
+    expect(svc.getUserAgents).toHaveBeenCalledOnce()
   })
 })
 
@@ -632,7 +602,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — error propagation
     await request(app).get(`/rpc/access/users/u/mcp-hosts/product`).expect(500)
   })
 
-  it('returns an operational 5xx, never 404, when the Host listing dependency answers 404', async () => {
+  it('forwards a Kubernetes 404 from the Host listing with its status', async () => {
     svc.getUserAgents.mockResolvedValue({ userId: 'u', agentNames: ['product'] })
     const k8sNotFound = Object.assign(new Error('namespaces "mcp-host" not found'), {
       code: 404,
@@ -664,11 +634,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — error propagation
     app.use(clerumErrorHandler)
 
     const dependencyFailure = await request(app).get(`/rpc/access/users/u/mcp-hosts/product`)
-    // A Kubernetes 404 is a dependency failure on this RPC path: forwarding it
-    // as 404 would make rpc-proxy report a peer version mismatch.
-    expect(dependencyFailure.status).not.toBe(404)
-    expect(dependencyFailure.status).toBe(500)
-    expect(dependencyFailure.body).toMatchObject({ error: 'Internal Server Error' })
+    expect(dependencyFailure.status).toBe(404)
 
     // Positive control in the same test: once the dependency answers, the same
     // route and handler resolve the Host normally.

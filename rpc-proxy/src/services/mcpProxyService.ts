@@ -3,7 +3,6 @@ import { ResolvedServerConnection } from '../types.js'
 import {
   type DirectRunBindingRequest,
   type UserAllowedServers,
-  fetchArtifactReadHostConnectionFromControlApi,
   fetchHostConnectionFromControlApi,
   fetchUserAllowedServersFromControlApi,
 } from './controlApiRestService.js'
@@ -84,12 +83,10 @@ export async function resolveHostConnectionForUser(
     teamId?: string | null
     requestId?: string
     directRunBinding?: DirectRunBindingRequest
-    messageResolution?: boolean
   }
 ): Promise<ResolvedServerConnection | HostAccessDenial> {
   const host = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
     directRunBinding: edgeContext?.directRunBinding,
-    messageResolution: edgeContext?.messageResolution,
   })
   if (isHostAccessDenied(host)) return host
 
@@ -108,32 +105,4 @@ export async function resolveHostConnectionForUser(
     ...host,
     headers,
   }
-}
-
-/** Resolve the Host through the Control API's dedicated artifact-read operation. */
-export async function resolveArtifactReadHostConnectionForUser(
-  userId: string,
-  hostRef: string,
-  rpcAccessToken: string,
-  edgeContext?: {
-    accessScope?: 'team' | 'user'
-    teamId?: string | null
-    requestId?: string
-  }
-): Promise<ResolvedServerConnection | HostAccessDenial> {
-  const host = await fetchArtifactReadHostConnectionFromControlApi(userId, hostRef, rpcAccessToken)
-  if (isHostAccessDenied(host)) return host
-
-  const headers: Record<string, string> = {
-    ...host.headers,
-    'x-clerum-edge-caller': 'rpc-proxy',
-    'x-clerum-edge-host-ref': hostRef,
-    'x-clerum-edge-user-id': userId,
-  }
-  if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
-  headers['x-clerum-edge-access-scope'] =
-    edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')
-  if (edgeContext?.requestId) headers['x-clerum-edge-request-id'] = edgeContext.requestId
-
-  return { ...host, headers }
 }

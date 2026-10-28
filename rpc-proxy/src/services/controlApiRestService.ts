@@ -1,10 +1,6 @@
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
-  type ControlApiHostOperation,
-  ControlApiHostVersionMismatchError,
-} from './controlApiVersionError.js'
-import {
   type HostAccessDenial,
   type HostAccessDenialCode,
   hostAccessDenialCodeForReason,
@@ -225,73 +221,29 @@ export async function fetchHostConnectionFromControlApi(
   rpcAccessToken: string,
   options: {
     directRunBinding?: DirectRunBindingRequest
-    messageResolution?: boolean
     fetchImpl?: typeof fetch
-  } = {}
-): Promise<ResolvedServerConnection | HostAccessDenial> {
-  return fetchHostConnectionForPath(userId, hostRef, rpcAccessToken, options)
-}
-
-/**
- * Resolves a Host connection through Control API's dedicated artifact-read
- * operation, which authenticates the RPC token and live-authorizes the Host.
- */
-export async function fetchArtifactReadHostConnectionFromControlApi(
-  userId: string,
-  hostRef: string,
-  rpcAccessToken: string,
-  options: { fetchImpl?: typeof fetch } = {}
-): Promise<ResolvedServerConnection | HostAccessDenial> {
-  return fetchHostConnectionForPath(userId, hostRef, rpcAccessToken, {
-    ...options,
-    artifactRead: true,
-  })
-}
-
-async function fetchHostConnectionForPath(
-  userId: string,
-  hostRef: string,
-  rpcAccessToken: string,
-  options: {
-    directRunBinding?: DirectRunBindingRequest
-    fetchImpl?: typeof fetch
-    artifactRead?: boolean
-    messageResolution?: boolean
   } = {}
 ): Promise<ResolvedServerConnection | HostAccessDenial> {
   const directRunBinding = options.directRunBinding
-  const hostAccessPath = `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`
-  const messageResolution = options.messageResolution === true
-  const operation: ControlApiHostOperation = options.artifactRead
-    ? 'host-artifact-read'
-    : messageResolution
-      ? 'host-message-resolution'
-      : 'host-access'
   const response = await (options.fetchImpl ?? fetch)(
-    options.artifactRead
-      ? `${hostAccessPath}/artifact-read`
-      : messageResolution
-        ? `${hostAccessPath}/message-resolution`
-        : hostAccessPath,
+    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
     {
-      method: messageResolution || directRunBinding ? 'POST' : 'GET',
+      method: directRunBinding ? 'POST' : 'GET',
       headers: {
         ...controlApiHeaders(rpcAccessToken),
-        ...(messageResolution || directRunBinding ? { 'content-type': 'application/json' } : {}),
+        ...(directRunBinding ? { 'content-type': 'application/json' } : {}),
       },
-      ...(messageResolution || directRunBinding
-        ? { body: JSON.stringify(directRunBinding ?? {}) }
-        : {}),
+      ...(directRunBinding ? { body: JSON.stringify(directRunBinding) } : {}),
       signal: upstreamAbortSignal(),
     }
   )
 
-  if (response.status === 404) {
-    await drainBody(response)
-    throw new ControlApiHostVersionMismatchError(operation)
-  }
   if (!directRunBinding && response.status === 403) {
     return hostAccessDenied(await readHostAccessDenialCode(response))
+  }
+  if (!directRunBinding && response.status === 404) {
+    await drainBody(response)
+    return hostAccessDenied('host_access_denied')
   }
   if (response.status === 403) {
     throw new ControlApiHostAccessRejectedError(403, await readHostAccessDenialCode(response))

@@ -14,7 +14,6 @@ const serviceMock = vi.hoisted(() => ({
   listAllowedServersForUser: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
-  resolveArtifactReadHostConnectionForUser: vi.fn(),
   validateRpcRequest: vi.fn(),
   forwardRpcToServer: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
@@ -117,7 +116,6 @@ beforeEach(() => {
   // Default: auth passes, host resolves
   authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS })
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
-  serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
 })
 
 afterEach(() => {
@@ -425,7 +423,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
       .set('authorization', 'Bearer token')
       .expect(200)
 
-    expect(serviceMock.resolveArtifactReadHostConnectionForUser).toHaveBeenCalledTimes(36)
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(36)
     expect(globalThis.fetch).toHaveBeenCalledTimes(36)
   })
 
@@ -434,7 +432,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
     authTokenMock.verifyRpcToken.mockImplementation(token =>
       token === 'other-user-token' ? { ...VALID_CLAIMS, sub: 'other-user' } : { ...VALID_CLAIMS }
     )
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockImplementation(
+    serviceMock.resolveHostConnectionForUser.mockImplementation(
       async (_userId: string, hostRef: string) => ({ ...HOST_CONNECTION, name: hostRef })
     )
     const app = makeApp()
@@ -510,7 +508,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue({
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
       denied: true,
       code: 'host_access_denied',
     })
@@ -524,7 +522,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
 
   it('does not forward an artifact read when Host resolution fails', async () => {
     globalThis.fetch = vi.fn()
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockRejectedValue(
+    serviceMock.resolveHostConnectionForUser.mockRejectedValue(
       new Error('Host resolution unavailable')
     )
     const app = makeApp()
@@ -974,7 +972,7 @@ describe('GET /rpc/hosts/:hostRef/artifacts/:filename/download', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue({
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
       denied: true,
       code: 'host_access_denied',
     })

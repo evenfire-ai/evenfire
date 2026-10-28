@@ -8,7 +8,6 @@ import { config } from '../config.js'
 import { createMcpOauthRouter } from '../routes/mcpOauth.js'
 import { createSandboxUiSessionRouter } from '../routes/sandboxUi.js'
 import {
-  fetchArtifactReadHostConnectionFromControlApi,
   fetchHostConnectionFromControlApi,
   fetchUserAllowedServersFromControlApi,
   fetchUserConnectorsFromControlApi,
@@ -204,8 +203,6 @@ async function emittedRequests(): Promise<Array<{ method: string; path: string }
     },
     fetchImpl,
   })
-  await fetchHostConnectionFromControlApi(USER, HOST, 'jwt', { messageResolution: true, fetchImpl })
-  await fetchArtifactReadHostConnectionFromControlApi(USER, HOST, 'jwt', { fetchImpl })
   await requestHostWakeFromControlApi(HOST, 'jwt')
   await lookupSandboxUiRegistry('sandbox-recipes', 'r1', USER, 'team-1')
   await listSandboxUiApps(USER, 'team-1')
@@ -253,11 +250,6 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
       { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-connectors` },
       { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}` },
       { method: 'POST', path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}` },
-      {
-        method: 'POST',
-        path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/message-resolution`,
-      },
-      { method: 'GET', path: `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/artifact-read` },
       { method: 'POST', path: `/api/v1/rpc/hosts/${HOST}/wake` },
       { method: 'GET', path: '/api/v1/internal/sandbox-ui/registry/sandbox-recipes/r1' },
       { method: 'GET', path: '/api/v1/internal/sandbox-ui/apps' },
@@ -281,24 +273,29 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
   it('keeps the default deny for paths and methods rpc-proxy does not emit', () => {
     const locations = gatewayLocations(gatewayNginxConf())
     // Witness that the matcher can deny: these would pass a matcher that
-    // admits everything.
-    expect(gatewayAdmits(locations, 'GET', `/api/v1/rpc/access/users/${USER}/contexts`)).toBe(false)
-    expect(
-      gatewayAdmits(
-        locations,
-        'POST',
-        `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/artifact-read`
-      )
-    ).toBe(false)
-    expect(
-      gatewayAdmits(
-        locations,
-        'GET',
-        `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/message-resolution`
-      )
-    ).toBe(false)
-    expect(
-      gatewayAdmits(locations, 'GET', `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}/other`)
-    ).toBe(false)
+    // admits everything. The parent Host path stays admitted (GET and POST)
+    // in the emitter test above. Both methods of the removed sub-paths are
+    // denied, so restoring either location block turns this red. Reintroducing
+    // a messageResolution emission would request /message-resolution, which
+    // selects no location and fails the emitter test.
+    const admits = (method: string, path: string): boolean => {
+      try {
+        return gatewayAdmits(locations, method, path)
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('no gateway location selects ')) {
+          return false
+        }
+        throw error
+      }
+    }
+    expect(admits('GET', `/api/v1/rpc/access/users/${USER}/contexts`)).toBe(false)
+    const removed = `/api/v1/rpc/access/users/${USER}/mcp-hosts/${HOST}`
+    for (const method of ['GET', 'POST']) {
+      expect(admits(method, `${removed}/artifact-read`)).toBe(false)
+      expect(admits(method, `${removed}/message-resolution`)).toBe(false)
+    }
+    expect(gatewayAdmits(locations, 'GET', removed)).toBe(true)
+    expect(gatewayAdmits(locations, 'POST', removed)).toBe(true)
+    expect(admits('GET', `${removed}/other`)).toBe(false)
   })
 })

@@ -6,7 +6,6 @@ import {
   requireRpcAuth,
   requireScope,
 } from '../middleware/auth.js'
-import { ControlApiHostVersionMismatchError } from '../services/controlApiVersionError.js'
 import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
@@ -242,10 +241,6 @@ export function createRpcHostActivityStreamRouter(): Router {
           cleanup('client-disconnect')
         })
       } catch (error) {
-        if (!res.headersSent && error instanceof ControlApiHostVersionMismatchError) {
-          next(error)
-          return
-        }
         if (!res.headersSent) {
           res.status(500).json({ error: 'Internal Server Error' })
           return

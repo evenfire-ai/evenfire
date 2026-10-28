@@ -31,7 +31,6 @@ const serviceMock = vi.hoisted(() => ({
   listAllowedServersForUser: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
-  resolveArtifactReadHostConnectionForUser: vi.fn(),
   validateRpcRequest: vi.fn(),
   forwardRpcToServer: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
@@ -119,7 +118,6 @@ async function startUpstream(handler: Handler): Promise<void> {
     headers: {},
   }
   serviceMock.resolveHostConnectionForUser.mockResolvedValue(connection)
-  serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue(connection)
 }
 
 /** Ends the TCP connection without a response: undici reports it as `fetch failed`. */
@@ -723,10 +721,7 @@ describe.each(HELD_ROUTES)('R3-L7 $label pins the hold deadline before host reso
       // the wake retry is never answered
     })
     const { port } = server!.address() as AddressInfo
-    const resolveHost =
-      route.label === 'list artifacts' || route.label === 'artifact download'
-        ? serviceMock.resolveArtifactReadHostConnectionForUser
-        : serviceMock.resolveHostConnectionForUser
+    const resolveHost = serviceMock.resolveHostConnectionForUser
     resolveHost.mockImplementation(async () => {
       await new Promise(resolve => setTimeout(resolve, HOST_RESOLUTION_LATENCY_MS))
       return { name: 'chatllm', url: `http://127.0.0.1:${port}`, headers: {} }

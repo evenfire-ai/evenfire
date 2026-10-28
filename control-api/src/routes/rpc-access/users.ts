@@ -1,10 +1,9 @@
 import express, { Router } from 'express'
-import type { NextFunction, Request, Response } from 'express'
+import type { Request, Response } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
 import {
-  requireRpcTokenHostMatch,
   requireRpcTokenUserMatch,
   requireValidRpcAccessToken,
   requireValidRpcAccessTokenAny,
@@ -15,7 +14,6 @@ import {
   resolveInvocableMcpServersForContexts,
 } from '../../services/access/mcpInvocable.js'
 import {
-  type AuthorizedRpcHostAccess,
   type RpcHostAccessDenialReason,
   type RpcHostAccessDirectory,
   authorizeRpcHostAccess,
@@ -26,7 +24,6 @@ import {
   DirectRunBindingConflictError,
 } from '../../services/tracing/directRunAttributionBindingService.js'
 import { parseDirectRunBindingRequest } from '../../services/tracing/directRunBindingRequest.js'
-import type { ParsedDirectRunBindingRequest } from '../../services/tracing/directRunBindingRequest.js'
 
 type RpcAccessUsersRouterOptions = {
   bindingService: Pick<DirectRunAttributionBindingService, 'bind'>
@@ -50,9 +47,6 @@ const HOST_ACCESS_SCOPES = [
 ] as const
 
 type RpcAuthedRequest = Request & { rpcAuth?: RpcAccessClaims }
-type HostMessageResolutionRequest = RpcAuthedRequest & {
-  messageResolutionBinding?: ParsedDirectRunBindingRequest | null
-}
 
 /**
  * Response header that tells rpc-proxy why control-api denied Host access. The
@@ -73,47 +67,6 @@ function denyHostAccess(
   )
   res.setHeader(HOST_ACCESS_DENIAL_REASON_HEADER, reason)
   res.status(403).json({ error: 'Forbidden' })
-}
-
-function validateMessageResolutionBody(
-  req: HostMessageResolutionRequest,
-  res: Response,
-  next: NextFunction
-): void {
-  const body = req.body
-  const ordinary =
-    body !== null &&
-    typeof body === 'object' &&
-    !Array.isArray(body) &&
-    Object.keys(body).length === 0
-  const binding = ordinary ? null : parseDirectRunBindingRequest(body)
-  if (!ordinary && !binding) {
-    res.status(400).json({ error: 'invalid_direct_run_binding' })
-    return
-  }
-  req.messageResolutionBinding = binding
-  next()
-}
-
-async function resolveAuthorizedHostConnection(
-  req: RpcAuthedRequest,
-  res: Response,
-  gateway: K8sGateway,
-  directory: RpcHostAccessDirectory | undefined
-): Promise<AuthorizedRpcHostAccess | null> {
-  const userId = String(req.params.userId || '').trim()
-  const hostRef = String(req.params.hostRef || '').trim()
-  const claims = req.rpcAuth
-  if (!claims) {
-    denyHostAccess(req, res, 'claims_missing')
-    return null
-  }
-  const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
-  if (!authorization.authorized) {
-    denyHostAccess(req, res, authorization.reason)
-    return null
-  }
-  return authorization.connection
 }
 
 async function bindDirectRunWithinBudget(
@@ -137,77 +90,6 @@ async function bindDirectRunWithinBudget(
   } finally {
     if (timeout) clearTimeout(timeout)
   }
-}
-
-/**
- * The single Host-message resolution path shared by the legacy strict POST and
- * the /message-resolution route. Signed selectors are checked before live
- * Host authorization on both paths.
- */
-async function respondWithAuthorizedHostConnection(
-  req: RpcAuthedRequest,
-  res: Response,
-  gateway: K8sGateway,
-  directory: RpcHostAccessDirectory | undefined,
-  bindingService: Pick<DirectRunAttributionBindingService, 'bind'>,
-  bindingBudgetMs: number,
-  binding: ParsedDirectRunBindingRequest | null
-): Promise<void> {
-  const userId = String(req.params.userId || '').trim()
-  const hostRef = String(req.params.hostRef || '').trim()
-  const claims = req.rpcAuth
-  if (!claims) {
-    denyHostAccess(req, res, 'claims_missing')
-    return
-  }
-  // Same order as /message-resolution's claim-match middleware: a signed
-  // selector that disagrees with the URL is a request-shape error.
-  if (!userId || claims.sub !== userId) {
-    denyHostAccess(req, res, 'subject_mismatch')
-    return
-  }
-  if (!hostRef || !claims.hostRefs.includes(hostRef)) {
-    denyHostAccess(req, res, 'host_claim_missing')
-    return
-  }
-  const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
-  if (!authorization.authorized) {
-    denyHostAccess(req, res, authorization.reason)
-    return
-  }
-  if (!binding) {
-    res.status(200).json(authorization.connection)
-    return
-  }
-  const bindingStatus = await bindDirectRunWithinBudget(
-    bindingService,
-    {
-      ...binding,
-      hostRef,
-      identityIssuer: config.rpcJwtIssuer,
-      actorHumanSub: claims.sub,
-      userId: claims.sub,
-      teamId: claims.teamId,
-    },
-    bindingBudgetMs
-  )
-  if (bindingStatus === 'recorded') {
-    res.status(200).json({ ...authorization.connection, bindingStatus: 'recorded' })
-    return
-  }
-  if (bindingStatus === 'conflict') {
-    res.status(409).json({ error: 'direct_run_binding_conflict' })
-    return
-  }
-  req.log?.warn(
-    {
-      event: 'governed_trace_operational_error',
-      scope: 'agent_run',
-      reason: 'attribution_binding_unavailable',
-    },
-    'direct run attribution binding unavailable after host authorization'
-  )
-  res.status(200).json({ ...authorization.connection, bindingStatus: 'unavailable' })
 }
 
 export function createRpcAccessUsersRouter(
@@ -312,23 +194,25 @@ export function createRpcAccessUsersRouter(
     requireValidRpcAccessTokenAny([...HOST_ACCESS_SCOPES]),
     async (req: RpcAuthedRequest, res, next) => {
       try {
-        const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
-        if (connection) res.status(200).json(connection)
-      } catch (error) {
-        next(error)
-      }
-    }
-  )
-
-  router.get(
-    `${hostAccessPath}/artifact-read`,
-    requireValidRpcAccessTokenAny(['host:task:read']),
-    requireRpcTokenUserMatch(),
-    requireRpcTokenHostMatch(),
-    async (req: RpcAuthedRequest, res, next) => {
-      try {
-        const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
-        if (connection) res.status(200).json(connection)
+        const userId = String(req.params.userId || '').trim()
+        const hostRef = String(req.params.hostRef || '').trim()
+        const claims = req.rpcAuth
+        if (!claims) {
+          denyHostAccess(req, res, 'claims_missing')
+          return
+        }
+        const authorization = await authorizeRpcHostAccess(
+          gateway,
+          claims,
+          userId,
+          hostRef,
+          directory
+        )
+        if (!authorization.authorized) {
+          denyHostAccess(req, res, authorization.reason)
+          return
+        }
+        res.status(200).json(authorization.connection)
       } catch (error) {
         next(error)
       }
@@ -341,6 +225,8 @@ export function createRpcAccessUsersRouter(
     express.json({ limit: '2kb', strict: true }),
     async (req: RpcAuthedRequest, res, next) => {
       try {
+        const userId = String(req.params.userId || '').trim()
+        const hostRef = String(req.params.hostRef || '').trim()
         const claims = req.rpcAuth
         const binding = parseDirectRunBindingRequest(req.body)
         if (!claims) {
@@ -352,41 +238,53 @@ export function createRpcAccessUsersRouter(
           return
         }
 
-        await respondWithAuthorizedHostConnection(
-          req,
-          res,
+        const authorization = await authorizeRpcHostAccess(
           gateway,
-          directory,
-          bindingService,
-          bindingBudgetMs,
-          binding
+          claims,
+          userId,
+          hostRef,
+          directory
         )
-      } catch (error) {
-        next(error)
-      }
-    }
-  )
+        if (!authorization.authorized) {
+          denyHostAccess(req, res, authorization.reason)
+          return
+        }
 
-  // The empty object represents an ordinary send; the existing exact binding
-  // body is accepted for direct-run-bound sends.
-  router.post(
-    `${hostAccessPath}/message-resolution`,
-    requireValidRpcAccessToken('host:message:invoke'),
-    express.json({ limit: '2kb', strict: true }),
-    validateMessageResolutionBody,
-    requireRpcTokenUserMatch('userId', (req, res, reason) => denyHostAccess(req, res, reason)),
-    requireRpcTokenHostMatch('hostRef', (req, res, reason) => denyHostAccess(req, res, reason)),
-    async (req: HostMessageResolutionRequest, res, next) => {
-      try {
-        await respondWithAuthorizedHostConnection(
-          req,
-          res,
-          gateway,
-          directory,
+        const bindingStatus = await bindDirectRunWithinBudget(
           bindingService,
-          bindingBudgetMs,
-          req.messageResolutionBinding ?? null
+          {
+            ...binding,
+            hostRef,
+            identityIssuer: config.rpcJwtIssuer,
+            actorHumanSub: claims.sub,
+            userId: claims.sub,
+            teamId: claims.teamId,
+          },
+          bindingBudgetMs
         )
+        if (bindingStatus === 'recorded') {
+          res.status(200).json({
+            ...authorization.connection,
+            bindingStatus: 'recorded',
+          })
+          return
+        }
+        if (bindingStatus === 'conflict') {
+          res.status(409).json({ error: 'direct_run_binding_conflict' })
+          return
+        }
+        req.log?.warn(
+          {
+            event: 'governed_trace_operational_error',
+            scope: 'agent_run',
+            reason: 'attribution_binding_unavailable',
+          },
+          'direct run attribution binding unavailable after host authorization'
+        )
+        res.status(200).json({
+          ...authorization.connection,
+          bindingStatus: 'unavailable',
+        })
       } catch (error) {
         next(error)
       }

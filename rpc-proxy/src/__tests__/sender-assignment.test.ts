@@ -145,7 +145,7 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
       'user-uuid-abc',
       'chatllm',
       'token',
-      { teamId: null, messageResolution: true }
+      { teamId: null }
     )
     const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
     expect(forwardedBody.metadata).toEqual({ accessScope: 'user' })

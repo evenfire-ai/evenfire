@@ -6,7 +6,6 @@ import {
   requireRpcAuth,
   requireScope,
 } from '../middleware/auth.js'
-import { ControlApiHostVersionMismatchError } from '../services/controlApiVersionError.js'
 import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
 import {
   UpstreamHostError,
@@ -223,10 +222,6 @@ export function createRpcHostStatusStreamRouter(): Router {
           cleanup('client-disconnect')
         })
       } catch (error) {
-        if (!res.headersSent && error instanceof ControlApiHostVersionMismatchError) {
-          next(error)
-          return
-        }
         console.warn(
           `[RPC_PROXY] host status stream setup failed host=${String(req.params.hostRef || '').trim()} error=${
             error instanceof Error ? error.message : String(error)

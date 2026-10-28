@@ -3,7 +3,6 @@ import express from 'express'
 import request from 'supertest'
 import { createApp } from '../app.js'
 import { apiErrorHandler } from '../errorHandler.js'
-import { ControlApiHostVersionMismatchError } from '../services/controlApiVersionError.js'
 
 function appThrowing(error: unknown) {
   const app = express()
@@ -42,14 +41,6 @@ describe('apiErrorHandler', () => {
     const res = await request(appThrowing(new Error('kaput'))).get('/boom')
     expect(res.status).toBe(500)
     expect(res.body).toEqual({ error: 'Internal Server Error', message: 'kaput' })
-  })
-
-  it('names a control-api Host operation version mismatch as a 503, never a denial', async () => {
-    const res = await request(
-      appThrowing(new ControlApiHostVersionMismatchError('host-message-resolution'))
-    ).get('/boom')
-    expect(res.status).toBe(503)
-    expect(res.body).toEqual({ error: 'control_api_version_mismatch' })
   })
 
   it('is the terminal handler of the real app (tests and production share it)', () => {
