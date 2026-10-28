@@ -490,7 +490,11 @@ export function App() {
 
   React.useEffect(() => {
     const status = vm.desktopReleaseStatus
-    if (!status) return
+    if (!status) {
+      desktopUpdateRequestRef.current += 1
+      setDesktopUpdateFlow(null)
+      return
+    }
     if (status.updateRequired) {
       setDesktopUpdateFlow({
         mode: 'startup',

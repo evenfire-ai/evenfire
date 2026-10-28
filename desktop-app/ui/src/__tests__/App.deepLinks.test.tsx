@@ -19,6 +19,8 @@ import {
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
+import { buildDesktopReleasePolicy } from '../../../../external-rest-api/src/desktopReleasePolicy.js'
+import { releaseManifest } from '../../../../external-rest-api/src/releaseManifest.js'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
@@ -402,6 +404,38 @@ function renderApp(ui: ReactElement) {
   })
 }
 
+async function createOutdatedDesktopReleaseStatus() {
+  const electron = await import('../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')
+  const fakeApp = electron.electronModule.app as unknown as Record<string, unknown>
+  const previousIsPackaged = fakeApp.isPackaged
+  const previousGetVersion = fakeApp.getVersion
+  fakeApp.isPackaged = true
+  fakeApp.getVersion = () => '0.10.0'
+
+  try {
+    const { AppService } = await import('../../../src/appService')
+    const policy = buildDesktopReleasePolicy(
+      {
+        ...releaseManifest,
+        desktopVersion: '0.12.0',
+        compatibleDesktopVersions: ['0.12.0'],
+      },
+      'https://github.com/evenfire-ai/evenfire/releases'
+    )
+    const service = new AppService() as unknown as {
+      authClient: { getDesktopReleasePolicy: ReturnType<typeof vi.fn> }
+      getDesktopReleaseStatus: () => Promise<NonNullable<AppController['desktopReleaseStatus']>>
+    }
+    service.authClient = { getDesktopReleasePolicy: vi.fn().mockResolvedValue(policy) }
+    return await service.getDesktopReleaseStatus()
+  } finally {
+    if (previousIsPackaged === undefined) delete fakeApp.isPackaged
+    else fakeApp.isPackaged = previousIsPackaged
+    if (previousGetVersion === undefined) delete fakeApp.getVersion
+    else fakeApp.getVersion = previousGetVersion
+  }
+}
+
 describe('App deep-link orchestration', () => {
   let currentController: AppController
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
@@ -470,6 +504,24 @@ describe('App deep-link orchestration', () => {
     expect(cancelSwitch).toHaveBeenCalledOnce()
     act(() => confirmDialogHarness.props?.onConfirm())
     expect(confirmSwitch).toHaveBeenCalledOnce()
+  })
+
+  it('clears a stale update notice when the selected backend status is reset', async () => {
+    const desktopReleaseStatus = await createOutdatedDesktopReleaseStatus()
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus,
+    })
+    const view = renderApp(<App />)
+
+    expect(view.getByRole('region', { name: 'Desktop update available' })).toBeTruthy()
+
+    act(() => {
+      currentController.desktopReleaseStatus = null
+      forceControllerRender()
+    })
+
+    expect(view.queryByRole('region', { name: 'Desktop update available' })).toBeNull()
   })
 
   beforeEach(() => {
