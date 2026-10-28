@@ -7,9 +7,9 @@ Password login retains the BUG-192 capacity controls and the five-failure guessi
 - Five attempts per trusted source per minute.
 - Up to 40 committed public password-authentication completions per normalized identifier in a
   rolling 15-minute window.
-- A shared budget of five completed failures plus conservative uncertain-work debits per
-  normalized identifier. Five completed failures start a 15-minute cooldown from the fifth
-  verification's database completion time.
+- A shared risk budget of five confirmed failures plus conservative uncertain-work debits per
+  normalized identifier. Only the fifth confirmed failed verification starts the ordinary
+  completion-anchored 15-minute cooldown.
 - Success and authenticated password reverification preserve prior failures and any active
   cooldown. Trusted credential/lifecycle transitions remain the only approved reset boundary.
 - One cost-12 password verification permit every 7.5 seconds, concurrency one,
@@ -19,7 +19,15 @@ Each eligible request reserves one durable provisional operation before credenti
 bcrypt. A 41st public request inside the success window follows the same identifier lookup and
 generation-fencing path, then uses the precomputed cost-12 dummy hash without comparing the real
 credential. It returns the same generic 401 as an unknown identifier and charges one shared
-failure-risk unit. After five such failed or uncertain outcomes, the ordinary cooldown applies.
+failure-risk unit. Confirmed failures and uncertain outcomes consume the same five-unit risk
+budget. Risk exhaustion caused by uncertainty alone does not create the ordinary cooldown; absent
+an active cooldown, admission becomes eligible again when an old risk entry expires.
+
+For example, four confirmed failures at minutes 0, 5, 10 and 12 plus one uncertain outcome at
+minute 14 exhaust the shared risk budget without starting a cooldown. Admission can become eligible
+again when the minute-0 failure reaches the 15-minute rolling-window boundary. A fifth confirmed
+failure at minute 14 instead starts a cooldown through minute 29, anchored to that verification's
+completion time.
 The cap is an admission target, not a guarantee of 40 delivered HTTP responses:
 source limits, failure cooldown, global pace, the shared work owner, session creation and downstream
 availability still apply. Response loss after a committed success does not refund the success.
