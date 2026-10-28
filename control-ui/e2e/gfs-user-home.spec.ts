@@ -36,12 +36,16 @@ import {
   readHomeGrant,
   removeForeignHomeDirectory,
   resourceIdAtPath,
+  userAccessOnUsersFolder,
 } from './support/gfs-user-home-fixtures'
 import { ControlUiGrantPanel } from './support/pages/ControlUiGrantPanel'
 import { ControlUiHomeInventory } from './support/pages/ControlUiHomeInventory'
 import { ControlUiUserHomeBlock } from './support/pages/ControlUiUserHomeBlock'
 
 const OWNER_BITS = ['read', 'write', 'delete', 'share', 'manage_acl']
+// `ANCESTOR_HOME_EXPOSURE_MESSAGE` in components/GfsGrantPanel.tsx.
+const ANCESTOR_HOME_EXPOSURE_MESSAGE =
+  'Only operators can have access on the drive root or /Users. Choose a sub-folder for this access.'
 
 async function waitForHome(
   user: HomeFixtureUser,
@@ -70,14 +74,38 @@ async function expectOwnerGrant(resourceId: string, userId: string): Promise<voi
   expect(readHomeGrant(resourceId, 'user', userId)?.permissions).toHaveLength(5)
 }
 
-async function expectVisibleReady(page: Page, path: string): Promise<void> {
+/**
+ * D47: after Retry the block polls the pending home by itself (every 5 s for
+ * 60 s) and shows `ready` without Refresh. The reconciler ticks every 60 s
+ * (`gfsUserHomeReconciler.ts` PERIOD_MS), so the database can turn ready only
+ * after that window; then "Still pending" with Refresh is the designed state,
+ * accepted only when the database really turned ready late.
+ */
+async function expectReadyAfterRetry(
+  page: Page,
+  path: string,
+  readyAfterMs: number
+): Promise<void> {
   const home = page.getByRole('region', { name: 'Home folder' })
-  await expect(async () => {
-    const refresh = home.getByRole('button', { name: 'Refresh', exact: true })
-    if (await refresh.isVisible()) await refresh.click()
-    await expect(home.getByText('ready', { exact: true })).toBeVisible({ timeout: 1_000 })
-    await expect(home.getByText(path, { exact: true })).toBeVisible()
-  }).toPass({ timeout: 180_000, intervals: [2_000, 5_000] })
+  await expect(home.getByText(/^(ready|Still pending)$/)).toBeVisible({ timeout: 90_000 })
+  const stillPending = home.getByText('Still pending', { exact: true })
+  if ((await stillPending.count()) > 0) {
+    expect(readyAfterMs, 'polling stopped although the home was ready in time').toBeGreaterThan(
+      50_000
+    )
+    test.info().annotations.push({
+      type: 'D47',
+      description: `polling window expired; database ready after ${readyAfterMs} ms`,
+    })
+    await home.getByRole('button', { name: 'Refresh', exact: true }).click()
+  } else {
+    test.info().annotations.push({
+      type: 'D47',
+      description: `ready by polling; database ready after ${readyAfterMs} ms`,
+    })
+  }
+  await expect(home.getByText('ready', { exact: true })).toBeVisible()
+  await expect(home.getByText(path, { exact: true })).toBeVisible()
 }
 
 async function cleanupUsers(
@@ -128,14 +156,20 @@ test.describe('Per-user GFS homes — Control UI', () => {
         await expect(details.getByText('directory', { exact: true })).toBeVisible()
       })
       const newName = `${user.name}-retry`
-      await test.step('operator changes the name and retries until the home is ready', async () => {
+      await test.step('operator changes the name and retries; the block turns ready by itself', async () => {
         const block = new ControlUiUserHomeBlock(page)
+        const region = page.getByRole('region', { name: 'Home folder' })
+        // React does not own this attribute, so a remount of the block drops it.
+        await region.evaluate(element => element.setAttribute('data-e2e-block', 'before-retry'))
         await block.retryWithName(newName)
+        const retriedAt = Date.now()
         const home = await waitForHome(user, 'ready')
+        const readyAfterMs = Date.now() - retriedAt
         expect(home.storageUsername).toBe(newName)
         expect(home.path).toBe(`/Users/${newName}`)
         if (!home.resourceId) throw new Error('Ready home has no resource ID')
-        await expectVisibleReady(page, `/Users/${newName}`)
+        await expectReadyAfterRetry(page, `/Users/${newName}`, readyAfterMs)
+        await expect(region).toHaveAttribute('data-e2e-block', 'before-retry')
         await expect(page.getByTestId('home-resource-id')).toHaveText(home.resourceId)
         await expectOwnerGrant(home.resourceId, user.id)
         await expect(
@@ -190,6 +224,37 @@ test.describe('Per-user GFS homes — Control UI', () => {
       })
     } finally {
       await cleanupUsers(page, [user])
+    }
+  })
+
+  test('/Users cannot be shared with a member; the member home can (D45)', async ({ page }) => {
+    const owner = newHomeFixtureUser()
+    const member = newHomeFixtureUser()
+    const users = [owner, member]
+    try {
+      createHomeFixtureUser(owner)
+      createHomeFixtureUser(member)
+      const home = await waitForHome(owner, 'ready')
+      if (!home.resourceId || !home.path)
+        throw new Error('Ready home is missing its resource or path')
+      await loginControlUi(page)
+      const panel = new ControlUiGrantPanel(page)
+      await test.step('sharing /Users with the member is refused with the operator-only message', async () => {
+        await panel.openResource('/Users')
+        await panel.grantRefused(member.name, 'Read', 409, ANCESTOR_HOME_EXPOSURE_MESSAGE)
+        expect(userAccessOnUsersFolder(member.id)).toBe(0)
+        await panel.close()
+      })
+      await test.step('the same member gets Read on the owner home (positive)', async () => {
+        await panel.openResource(home.path!)
+        await panel.grant(member.name, 'Read')
+        await expect
+          .poll(() => readHomeGrant(home.resourceId!, 'user', member.id))
+          .toMatchObject({ permissions: expect.arrayContaining(['read']), inherit: true })
+        expect(userAccessOnUsersFolder(member.id)).toBe(0)
+      })
+    } finally {
+      await cleanupUsers(page, users)
     }
   })
 

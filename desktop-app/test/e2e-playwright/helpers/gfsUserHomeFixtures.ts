@@ -143,6 +143,34 @@ export class UserHomeFixtures {
     return teamIds[0]
   }
 
+  /**
+   * Named precondition: a direct share row `sharer` made to `recipient`. No UI
+   * creates share rows (Desktop and Control UI write grants; shares arrive
+   * through the share APIs), so a journey that acts on an existing share seeds
+   * one. Removing `recipient` in cleanup removes it with the user's shares.
+   */
+  seedShare(
+    drive: string,
+    resourceId: string,
+    sharer: HomeTestUser,
+    recipient: HomeTestUser,
+    permissions: string[]
+  ): string {
+    if (!permissions.every(bit => /^[a-z_]+$/.test(bit))) throw new Error('invalid share bits')
+    const id = firstDataLine(
+      runControlPostgresSql(`
+        INSERT INTO gfs_shares(drive, resource_id, subject_type, subject_id, permissions,
+                               include_descendants, created_by)
+        VALUES(${sqlLiteral(drive)}, ${sqlLiteral(resourceId)}::uuid, 'user',
+               ${sqlLiteral(recipient.id)}, ARRAY[${permissions.map(sqlLiteral).join(', ')}]::text[],
+               true, ${sqlLiteral(`user:${sharer.id}`)})
+        RETURNING id::text;
+      `)
+    )
+    if (!UUID_RE.test(id)) throw new Error('[USER-HOME-E2E] seeded share was not created')
+    return id
+  }
+
   /** Makes `agent` one of `user`'s own agents (direct user_agents association). */
   associateAgent(user: HomeTestUser, agent: ManagedGfsAgent): void {
     runControlPostgresSql(`

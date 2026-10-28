@@ -526,6 +526,26 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await enterFolder(ownerS.page, inner)
         await expect(ownerS.page.getByRole('button', { name: `Open ${file}` })).toBeVisible()
       })
+      await test.step('owner lowers an Editor share B made to C to Read (D26, D9)', async () => {
+        // Named precondition: no UI writes share rows (see seedShare).
+        fx.seedShare(home.drive!, outerId, b, c, ['read', 'write', 'share'])
+        const outerUri = `gfs://${home.drive}/${ridOf(outerId)}`
+        const cAccess = cS.page.getByLabel('Your access')
+        await openEvenDriveLink(cS.page, outerUri)
+        await expect(cAccess).toContainText('write')
+        await openHomeFolder(ownerS.page, home)
+        await view.openShare(outer)
+        await new DesktopShareDialog(ownerS.page).lowerShare(c.name)
+        expect(fx.accessFor(outerId, 'user', c.id)).toMatchObject({
+          relation: 'share',
+          permissions: ['read', 'share'],
+          inherit: true,
+        })
+        await ownerS.page.keyboard.press('Escape')
+        await openEvenDriveLink(cS.page, outerUri)
+        await expect(cAccess).toContainText('read')
+        await expect(cAccess).not.toContainText('write')
+      })
     } finally {
       for (const s of sessions.reverse()) await s.close()
       fx.cleanup()
@@ -691,8 +711,10 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
   test('J4 inherited entries display correctly and a role change persists with its scope', async ({}, testInfo) => {
     test.setTimeout(15 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
+    const [agent] = discoverManagedGfsAgents()
     const owner = fx.createUser('j4-owner')
     const b = fx.createUser('j4-b')
+    fx.associateAgent(owner, agent)
     fx.createTeam('j4', [owner, b])
     const sub = `j4-sub-${fx.runTag}`
     const sessions: DesktopSession[] = []
@@ -703,6 +725,18 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       const view = new DesktopResourceView(ownerS.page)
       await openHomeFolder(ownerS.page, home)
       await view.createFolder(sub)
+      const subId = fx.childId(home.resourceId!, sub)
+      await test.step('owner shares the descendant with the own agent (Read)', async () => {
+        await view.openShare(sub)
+        await new DesktopShareDialog(ownerS.page).grant(agent.name, 'Read', {
+          includeContents: true,
+        })
+        expect(fx.accessFor(subId, 'host', agent.subjectId)).toMatchObject({
+          relation: 'grant',
+          permissions: ['read'],
+        })
+        await ownerS.page.keyboard.press('Escape')
+      })
       await test.step('grant B Read with inheritance on the home folder', async () => {
         await openHomeFolder(ownerS.page, home)
         await ownerS.page
@@ -733,15 +767,45 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         )
         await ownerS.page.keyboard.press('Escape')
       })
+      const bS = await launchDesktopAs(testInfo, b)
+      sessions.push(bS)
       await test.step('B can now create inside the descendant (positive)', async () => {
-        const bS = await launchDesktopAs(testInfo, b)
-        sessions.push(bS)
         await new DesktopFilesNav(bS.page).openFiles()
         await new DesktopFilesNav(bS.page).openSharedWithMe()
         await enterFolder(bS.page, home.storageUsername!)
         await enterFolder(bS.page, sub)
         await new DesktopResourceView(bS.page).createFolder(`j4-by-b-${fx.runTag}`)
-        fx.childId(fx.childId(home.resourceId!, sub), `j4-by-b-${fx.runTag}`)
+        fx.childId(subId, `j4-by-b-${fx.runTag}`)
+      })
+      await test.step('B (Editor) sees the owner row protected and the owner agent without a role control', async () => {
+        await new DesktopFilesNav(bS.page).openFiles()
+        await new DesktopFilesNav(bS.page).openSharedWithMe()
+        await enterFolder(bS.page, home.storageUsername!)
+        await new DesktopResourceView(bS.page).openShare(sub)
+        const access = bS.page.getByRole('list', { name: 'Resource access' })
+        // Witness: B's own row has a role control, so missing controls below are real.
+        await expect(access.getByRole('button', { name: `Access role for ${b.name}` })).toHaveCount(
+          1
+        )
+        // D5/D38: the inherited owner row has no role or remove control for B either.
+        const ownerRow = access
+          .getByRole('listitem')
+          .filter({ has: bS.page.getByText('Owner', { exact: true }) })
+        await expect(ownerRow).toHaveCount(1)
+        await expect(
+          ownerRow.getByRole('button', { name: /^(Actions|Access role) for / })
+        ).toHaveCount(0)
+        // D25: the owner's agent is not B's agent: its role is text, Remove stays.
+        const agentGrant = fx.accessFor(subId, 'host', agent.subjectId)
+        if (!agentGrant) throw new Error('The owner agent grant is missing')
+        const agentRow = bS.page.getByTestId(`gfs-access-row-grant-${agentGrant.id}`)
+        await expect(agentRow).toContainText('Read')
+        await expect(agentRow.getByRole('button', { name: /^Access role for / })).toHaveCount(0)
+        await agentRow.getByRole('button', { name: /^Actions for / }).click()
+        await bS.page.getByRole('menuitem', { name: 'Remove access' }).click()
+        await expect(agentRow).toHaveCount(0)
+        expect(fx.accessFor(subId, 'host', agent.subjectId)).toBeNull()
+        await bS.page.keyboard.press('Escape')
       })
     } finally {
       for (const s of sessions.reverse()) await s.close()

@@ -1,4 +1,4 @@
-import { type Page, expect } from '@playwright/test'
+import { type Page, type Response, expect } from '@playwright/test'
 import { openGlobalFileSystemFromSidebar } from '../gfs-control-ui-session'
 
 type AccessRole = 'Read' | 'Editor'
@@ -84,6 +84,35 @@ export class ControlUiGrantPanel {
   }
 
   async grant(subject: string, role: AccessRole): Promise<void> {
+    const response = await this.submitGrant(subject, role)
+    expect(response.ok()).toBe(true)
+    await this.expectRow(subject, role)
+  }
+
+  /** The server refuses the grant with `status`; the dialog shows `message`. */
+  async grantRefused(
+    subject: string,
+    role: AccessRole,
+    status: number,
+    message: string
+  ): Promise<void> {
+    const response = await this.submitGrant(subject, role)
+    expect(response.status()).toBe(status)
+    await expect(
+      this.page.getByRole('dialog').getByRole('alert').filter({ hasText: message })
+    ).toBeVisible()
+    await expect(this.page.getByRole('button', { name: `Access role for ${subject}` })).toHaveCount(
+      0
+    )
+  }
+
+  async close(): Promise<void> {
+    const dialog = this.page.getByRole('dialog', { name: /^Share (folder|file) / })
+    await dialog.getByRole('button', { name: 'Close share dialog' }).click()
+    await expect(dialog).toBeHidden()
+  }
+
+  private async submitGrant(subject: string, role: AccessRole): Promise<Response> {
     const picker = this.page.getByRole('combobox', {
       name: 'Add people, teams, agents, or workflows',
     })
@@ -101,8 +130,7 @@ export class ControlUiGrantPanel {
       result => result.request().method() === 'PUT' && result.url().includes('/gfs/grants')
     )
     await this.page.getByRole('dialog').getByRole('button', { name: 'Share', exact: true }).click()
-    expect((await response).ok()).toBe(true)
-    await this.expectRow(subject, role)
+    return response
   }
 
   async changeRole(subject: string, role: AccessRole): Promise<void> {
@@ -116,7 +144,12 @@ export class ControlUiGrantPanel {
   }
 
   async revoke(subject: string): Promise<void> {
-    await this.page.getByRole('button', { name: `Actions for ${subject}`, exact: true }).click()
+    // Scoped to the access list: a home folder named after its user has the
+    // same "Actions for <name>" menu in the resource list.
+    await this.page
+      .getByRole('region', { name: 'People with access' })
+      .getByRole('button', { name: `Actions for ${subject}`, exact: true })
+      .click()
     await this.page.getByRole('menuitem', { name: 'Remove access', exact: true }).click()
     const confirmation = this.page.getByRole('alertdialog')
     await expect(confirmation).toContainText(subject)

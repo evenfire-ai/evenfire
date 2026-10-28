@@ -5,6 +5,7 @@ import {
   type Page,
   _electron as electron,
   expect,
+  test,
 } from '@playwright/test'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
@@ -87,6 +88,13 @@ export async function launchHomeDesktop(
     throw error
   }
   app.on('close', () => fs.rmSync(runDir, { recursive: true, force: true }))
+  // Main-process and renderer output beside the test's artifacts: a refused
+  // login is only a transient toast, so a failure needs this to be diagnosed.
+  const outputLog = test.info().outputPath(`desktop-${user.name}.log`)
+  fs.mkdirSync(path.dirname(outputLog), { recursive: true })
+  for (const stream of [app.process().stdout, app.process().stderr]) {
+    stream?.on('data', chunk => fs.appendFileSync(outputLog, chunk))
+  }
   try {
     const runtime = await app.evaluate(({ app: electronApp }) => ({
       executable: process.execPath,
@@ -99,7 +107,13 @@ export async function launchHomeDesktop(
     expect(fs.realpathSync(runtime.userData)).toBe(fs.realpathSync(isolated.userDataDir))
     expect(runtime.isPackaged).toBe(false)
     const page = await app.firstWindow()
+    page.on('console', message =>
+      fs.appendFileSync(outputLog, `[renderer ${message.type()}] ${message.text()}\n`)
+    )
     expect(page.url()).toBe(pathToFileURL(path.join(desktopRoot, 'ui-dist/index.html')).href)
+    // Fill and submit only after the boot splash leaves, as the Desktop lane's
+    // loginVisible does.
+    await expect(page.locator('.boot-overlay')).toBeHidden({ timeout: 30_000 })
     await expect(page.getByLabel('Email', { exact: true })).toBeVisible()
     await page.getByLabel('Email', { exact: true }).fill(user.email)
     await page.getByLabel('Password', { exact: true }).fill(user.password)

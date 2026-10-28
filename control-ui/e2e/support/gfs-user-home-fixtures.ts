@@ -218,6 +218,29 @@ export function readHomeGrant(
   return row ? (JSON.parse(row) as { permissions: string[]; inherit: boolean }) : null
 }
 
+/** Grants plus shares a user holds directly on `/Users` of drive main (D45). */
+export function userAccessOnUsersFolder(userId: string): number {
+  if (!UUID_RE.test(userId)) throw new Error('Invalid fixture user ID')
+  const row = firstDataLine(
+    runControlPostgresSql(`
+    WITH target AS (
+      SELECT resource_id FROM gfs_resources
+       WHERE drive='main' AND path_cache='/Users' AND deleted_at IS NULL
+    )
+    SELECT (SELECT count(*) FROM target)::text || '|' ||
+           ((SELECT count(*) FROM gfs_grants WHERE resource_id IN (SELECT resource_id FROM target)
+              AND subject_type='user' AND subject_id=${sqlLiteral(userId)}) +
+            (SELECT count(*) FROM gfs_shares WHERE resource_id IN (SELECT resource_id FROM target)
+              AND subject_type='user' AND subject_id=${sqlLiteral(userId)}))::text;
+  `)
+  )
+  const [folders, access] = row.split('|')
+  if (folders !== '1' || !/^\d+$/.test(access ?? '')) {
+    throw new Error(`Expected one live /Users folder, read ${row}`)
+  }
+  return Number(access)
+}
+
 export function resourceIdAtPath(path: string): string {
   if (!/^\/Users\/e2e-gfs-home-[a-f0-9]{16}\/e2e-gfs-[a-z0-9-]+\.txt$/.test(path))
     throw new Error('Unsafe fixture file path')

@@ -50,6 +50,17 @@ export class DesktopShareDialog {
     ).toContainText(role)
   }
 
+  /** D26: an Editor-strength share row offers only "Read"; afterwards it is text. */
+  async lowerShare(subjectLabel: string): Promise<void> {
+    const row = this.row(subjectLabel)
+    const role = row.getByRole('button', { name: `Access role for ${subjectLabel}` })
+    await expect(role).toContainText('Editor')
+    await role.click()
+    await this.page.getByRole('option', { name: 'Read', exact: true }).click()
+    await expect(role).toHaveCount(0)
+    await expect(row).toContainText('Read')
+  }
+
   async revoke(subjectLabel: string): Promise<void> {
     const row = this.row(subjectLabel)
     const inherited = (await row.getAttribute('data-inherited')) === 'true'
