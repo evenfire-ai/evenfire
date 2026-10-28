@@ -48,9 +48,20 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         subject_id TEXT NOT NULL,
         gate INTEGER NOT NULL
       );
+      CREATE TABLE archive_delete_revision_observations (
+        position BIGSERIAL, application_name TEXT, revision_table TEXT,
+        subject_id TEXT, revision BIGINT
+      );
       CREATE FUNCTION archive_order_barrier() RETURNS TRIGGER LANGUAGE plpgsql AS $$
       DECLARE barrier RECORD;
       BEGIN
+        IF current_setting('application_name') LIKE 'archive-delete-%'
+          OR current_setting('application_name') LIKE 'delete-principal-%' THEN
+          INSERT INTO archive_delete_revision_observations
+            (application_name, revision_table, subject_id, revision)
+          VALUES (current_setting('application_name'), TG_TABLE_NAME,
+            COALESCE(to_jsonb(NEW)->>'user_id', to_jsonb(NEW)->>'team_id'), NEW.revision);
+        END IF;
         FOR barrier IN
           SELECT gate FROM archive_order_barriers
            WHERE application_name = current_setting('application_name')
@@ -334,6 +345,153 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       ).rows
     ).toEqual([{ phase: 'Running' }])
   })
+
+  it.each(['user', 'team'] as const)(
+    'commits an archive batch beside %s deletion with parent-before-revision locks',
+    async kind => {
+      const user = randomUUID()
+      const team = randomUUID()
+      const run = randomUUID()
+      await databasePool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+        user,
+        `${user}@example.test`,
+      ])
+      await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Archive delete')", [team])
+      await databasePool.query(
+        `INSERT INTO workflow_runs(run_id, recipe_namespace, recipe_name, phase, actor_type,
+           actor_id, team_id, trigger_source, completed_at, ttl_seconds_after_finished)
+         VALUES ($1, 'revision', 'archive-delete', 'Succeeded', 'user', $2, $3,
+           'onDemand', NOW() - interval '3 hours', 0)`,
+        [run, user, team]
+      )
+      await databasePool.query(
+        "INSERT INTO workflow_run_steps(run_id, step_id, phase) VALUES ($1, 'delete-step', 'Succeeded')",
+        [run]
+      )
+      const ids = { users: [user], teams: [team] }
+      const before = await revisions(ids)
+      const archiveGate = await databasePool.connect()
+      const archive = await databasePool.connect()
+      const deletion = await databasePool.connect()
+      const archivePid = await pid(archive)
+      const deletionPid = await pid(deletion)
+      const gatePid = await pid(archiveGate)
+      const subject = kind === 'user' ? user : team
+      const revisionTable = `authorization_${kind}_revisions`
+      let archiveOutcome: Promise<Outcome> | undefined
+      let deletionOutcome: Promise<Outcome> | undefined
+      const connect = vi.spyOn(pool, 'connect').mockResolvedValue(archive)
+      try {
+        await configure(archive, `archive-delete-${kind}`)
+        await configure(deletion, `delete-principal-${kind}`)
+        await archiveGate.query('SELECT pg_advisory_lock($1, 10)', [barrierClass])
+        await databasePool.query('INSERT INTO archive_order_barriers VALUES ($1, $2, $3, 10)', [
+          `archive-delete-${kind}`,
+          revisionTable,
+          subject,
+        ])
+        archiveOutcome = observe(archiveTerminalRuns(gateway, { batchSize: 1, maxBatches: 1 }))
+        // The real prelock has bumped the subject and holds its revision row.
+        await waitForBlock(archivePid, [gatePid])
+        deletionOutcome = observe(
+          deletion.query(`DELETE FROM ${kind === 'user' ? 'users' : 'teams'} WHERE id = $1`, [
+            subject,
+          ])
+        )
+        await waitForBlock(deletionPid, [archivePid])
+        await archiveGate.query('SELECT pg_advisory_unlock_all()')
+        const outcomes = await Promise.all([archiveOutcome, deletionOutcome])
+        console.info('ARCHIVE_DELETE_OUTCOMES', { kind, outcomes })
+        expect(outcomes.map(result => result.status)).toEqual(['fulfilled', 'fulfilled'])
+        expect(outcomes[0]).toEqual({ status: 'fulfilled', value: 1 })
+        expect(outcomes[1]).toMatchObject({ status: 'fulfilled', value: { rowCount: 1 } })
+        expect(
+          (
+            await databasePool.query(
+              `SELECT id FROM ${kind === 'user' ? 'users' : 'teams'} WHERE id = $1`,
+              [subject]
+            )
+          ).rows
+        ).toHaveLength(0)
+        expect(
+          (await databasePool.query('SELECT run_id FROM workflow_runs WHERE run_id = $1', [run]))
+            .rows
+        ).toHaveLength(0)
+        expect(
+          (
+            await databasePool.query('SELECT run_id FROM workflow_run_steps WHERE run_id = $1', [
+              run,
+            ])
+          ).rows
+        ).toHaveLength(0)
+        expect(
+          (
+            await databasePool.query(
+              'SELECT run_id, triggerer_user_id, triggerer_team_id FROM workflow_runs_audit WHERE run_id = $1',
+              [run]
+            )
+          ).rows
+        ).toEqual([
+          {
+            run_id: run,
+            triggerer_user_id: kind === 'user' ? null : user,
+            triggerer_team_id: kind === 'team' ? null : team,
+          },
+        ])
+        expect(
+          (
+            await databasePool.query(
+              'SELECT step_id FROM workflow_run_step_audit WHERE run_id = $1',
+              [run]
+            )
+          ).rows
+        ).toEqual([{ step_id: 'delete-step' }])
+        const after = await revisions(ids)
+        const deleted = kind === 'user' ? 'user' : 'team'
+        const surviving = kind === 'user' ? 'team' : 'user'
+        expect(after[deleted]).toEqual([])
+        // Archive: prelock + audit INSERT + live DELETE. Principal deletion
+        // nulls audit attribution, bumping its surviving subject twice.
+        expect(after[surviving]).toEqual([
+          {
+            id: before[surviving][0].id,
+            revision: before[surviving][0].revision + 5,
+          },
+        ])
+        for (const revisionKind of ['user', 'team'] as const) {
+          const recorded = await databasePool.query(
+            `SELECT revision::int FROM archive_delete_revision_observations
+             WHERE application_name = $1 AND revision_table = $2 AND subject_id = $3
+             ORDER BY position`,
+            [
+              `archive-delete-${kind}`,
+              `authorization_${revisionKind}_revisions`,
+              revisionKind === 'user' ? user : team,
+            ]
+          )
+          expect(recorded.rows).toEqual(
+            [1, 2, 3].map(delta => ({ revision: before[revisionKind][0].revision + delta }))
+          )
+        }
+        console.info(
+          'ARCHIVE_DELETE_WITNESSES',
+          JSON.stringify({ kind, before, after, archived: run, deleted: subject })
+        )
+      } finally {
+        await archiveGate.query('SELECT pg_advisory_unlock_all()')
+        await Promise.all([archiveOutcome, deletionOutcome])
+        connect.mockRestore()
+        if (!archiveOutcome) archive.release()
+        archiveGate.release()
+        deletion.release()
+        await databasePool.query('TRUNCATE archive_order_barriers')
+        await databasePool.query('DELETE FROM workflow_runs WHERE run_id = $1', [run])
+        await databasePool.query('DELETE FROM workflow_runs_audit WHERE run_id = $1', [run])
+        await databasePool.query('DELETE FROM users WHERE id = $1', [user])
+        await databasePool.query('DELETE FROM teams WHERE id = $1', [team])
+      }
+    }
+  )
 
   it('creates missing revisions once per subject in team-then-user order', async () => {
     const ids = await fixture()

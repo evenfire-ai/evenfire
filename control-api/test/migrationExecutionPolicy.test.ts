@@ -98,11 +98,11 @@ describe('D34 migration execution policy', () => {
     // The 2026-10-28 review (still unapplied anywhere) dropped unused objects,
     // made revision tables read-only for the runtime, ordered revision writers,
     // kept the Admin UI attribution sentinel, added three revision triggers and
-    // a pre-lock for archive batches.
+    // a pre-lock for archive batches, now locking parents before revisions.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        '89307fd494ed2c7936a04d888f962684ac97fad8a57fa1e731e04013d3349e43',
+        'f345f81dcb274246b0fb86fe345447addd9182d71f3fba140d087a33877a1df9',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',

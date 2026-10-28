@@ -262,6 +262,31 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     AS $$
     DECLARE revision RECORD;
     BEGIN
+      -- Parent locks must precede revisions and the audit INSERT's FK checks,
+      -- matching principal deletion's parent-before-cascade order.
+      PERFORM team.id
+        FROM teams AS team
+       WHERE team.id::TEXT IN (
+         SELECT run.team_id::TEXT FROM workflow_runs AS run
+          WHERE run.run_id = ANY(target_run_ids)
+         UNION
+         -- Keep malformed usage IDs for the existing subject validator below.
+         SELECT lower(run.usage_team_id) FROM workflow_runs AS run
+          WHERE run.run_id = ANY(target_run_ids)
+            AND run.usage_team_id <> 'control-plane-admin-ui'
+       )
+       ORDER BY team.id
+       FOR KEY SHARE;
+
+      PERFORM principal.id
+        FROM users AS principal
+       WHERE principal.id IN (
+         SELECT run.actor_id FROM workflow_runs AS run
+          WHERE run.run_id = ANY(target_run_ids) AND run.actor_type = 'user'
+       )
+       ORDER BY principal.id
+       FOR KEY SHARE;
+
       -- A batch must hold every team before any user, across both archive
       -- INSERT and live DELETE triggers. Bumping also creates missing rows.
       FOR revision IN
