@@ -154,18 +154,14 @@ attempting to revoke or narrow the owner grant receives 403
 
 ## Ancestor access and delegated permissions
 
-Nobody, operators included, can create an inheritable grant or a
-descendant-including share for a user, team, agent, or context on the drive
-root or `/Users`: the request returns 409 `ancestor_home_exposure`, and Control
-UI explains it in the grant panel. GFS authorization applies such entries to
-every descendant (`gfs-controller/src/authz/resolve.ts:91` and
-`gfs-controller/src/authz/resolve.ts:112`), so one entry there would reach every
-home. Operators keep their intrinsic access everywhere, can grant explicit
-non-inheritable access on any folder including the root, `/Users`, and any
-home, and can use inheritance on any other folder. Operator-subject entries
-are not affected. An entry that existed before this release blocks
-provisioning as `ancestor_grant_conflict` until an operator removes it or makes
-it non-inheritable.
+Only operator-subject grants and shares may be created on the drive root or
+`/Users`, whether or not they include descendants. Attempts to grant or share
+access there to a user, team, agent, or context return 409
+`ancestor_home_exposure`, and Control UI explains it in the grant panel.
+Operators retain intrinsic access everywhere and can grant or share access on
+sub-folders, including individual homes. Existing inheritable non-operator
+entries on the root or `/Users` block provisioning as
+`ancestor_grant_conflict` until an operator removes them.
 
 Permissions do not cascade when their grantor loses access. If A gives B
 `manage_acl`, B grants C access, and A revokes B, C's entry remains until an

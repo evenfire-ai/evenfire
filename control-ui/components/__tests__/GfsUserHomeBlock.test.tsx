@@ -35,6 +35,46 @@ afterEach(() => {
 })
 
 describe('Home folder block', () => {
+  it('silently polls an initially pending home without replacing the card content', async () => {
+    const pending = { ...baseHome, state: 'pending' as const }
+    let finishPoll!: (value: { home: GfsUserHomeDetail }) => void
+    const poll = new Promise<{ home: GfsUserHomeDetail }>(resolve => {
+      finishPoll = resolve
+    })
+    vi.mocked(getGfsUserHome)
+      .mockResolvedValueOnce({ home: pending })
+      .mockReturnValueOnce(poll)
+      .mockResolvedValueOnce({ home: baseHome })
+    vi.useFakeTimers()
+    await act(async () => {
+      render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    })
+
+    const card = screen.getByRole('region', { name: 'Home folder' })
+    const content = screen.getByTestId('home-resource-id')
+    const busy = card.getAttribute('aria-busy')
+    card.scrollTop = 100
+    expect(screen.getByText('pending', { exact: true })).toBeVisible()
+
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    expect(getGfsUserHome).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('home-resource-id')).toBe(content)
+    expect(card.getAttribute('aria-busy')).toBe(busy)
+    expect(card.scrollTop).toBe(100)
+    expect(screen.queryByText('Loading home folder…')).not.toBeInTheDocument()
+    expect(screen.queryByText('Checking home folder status…')).not.toBeInTheDocument()
+    expect(within(card).queryByRole('status')).not.toBeInTheDocument()
+
+    await act(async () => finishPoll({ home: { ...pending } }))
+    expect(screen.getByTestId('home-resource-id')).toBe(content)
+    expect(card.scrollTop).toBe(100)
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    expect(screen.getByText('ready', { exact: true })).toBeVisible()
+    expect(screen.getByTestId('home-resource-id')).toBe(content)
+    expect(card.getAttribute('aria-busy')).toBe(busy)
+    expect(card.scrollTop).toBe(100)
+  })
+
   it.each(['ready', 'pending', 'retired'] as const)(
     'renders the %s state with the server path and drive',
     async state => {

@@ -108,10 +108,9 @@ export async function assertNoAncestorHomeExposure(
   db: GrantsDb,
   drive: string,
   resourceId: string,
-  inheritable: boolean,
   subjects: readonly GfsSubject[]
 ): Promise<void> {
-  if (!inheritable || subjects.every(subject => subject.type === 'operator')) return
+  if (subjects.every(subject => subject.type === 'operator')) return
   const result = await db.query(
     `SELECT EXISTS (
        SELECT 1 FROM gfs_resources r
@@ -888,13 +887,7 @@ export async function writeGfsGrantBatchInTransaction(
       params.subjects,
       { isShare: false }
     )
-    await assertNoAncestorHomeExposure(
-      db,
-      params.drive,
-      params.resourceId,
-      params.inherit,
-      params.subjects
-    )
+    await assertNoAncestorHomeExposure(db, params.drive, params.resourceId, params.subjects)
     if (!params.caller.isOperator && ownerSubject) {
       const existing = await db.query(
         `SELECT permissions, inherit FROM gfs_grants WHERE drive = $1 AND resource_id = $2::uuid

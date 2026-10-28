@@ -371,7 +371,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         )
         await expect(
           bS.page.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toBeVisible()
+        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
       })
       await test.step('B shares the outer folder with C (Read); C opens the file', async () => {
         await new DesktopFilesNav(bS.page).openFiles()
@@ -397,7 +397,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await openEvenDriveLink(bS.page, `gfs://${home.drive}/${ridOf(outerId)}`)
         await expect(
           bS.page.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toBeVisible()
+        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
         await bS.page.keyboard.press('Escape')
         await openHomeFolder(bS.page, await fx.waitForHomeState(b.id, 'ready'))
         expect(fx.accessFor(outerId, 'user', c.id)).not.toBeNull()
@@ -413,7 +413,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await openEvenDriveLink(cS.page, `gfs://${home.drive}/${ridOf(outerId)}`)
         await expect(
           cS.page.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toBeVisible()
+        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
         await openHomeFolder(ownerS.page, home)
         await enterFolder(ownerS.page, outer)
         await enterFolder(ownerS.page, inner)
@@ -495,7 +495,7 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await openEvenDriveLink(bS.page, `gfs://${home.drive}/${ridOf(fileId)}`)
         await expect(
           bS.page.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
-        ).toBeVisible()
+        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
         await bS.page.keyboard.press('Escape')
         await openHomeFolder(bS.page, await fx.waitForHomeState(b.id, 'ready'))
       })

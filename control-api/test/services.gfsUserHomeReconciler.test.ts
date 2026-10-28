@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Pool } from 'pg'
+import { repairUserHomeOwnerGrant } from '../src/gfs/userHomeProvisioner.js'
 import { GfsUserHomeReconciler } from '../src/services/gfsUserHomeReconciler.js'
 
 const mocks = vi.hoisted(() => ({
@@ -35,6 +36,41 @@ beforeEach(() => {
 })
 
 describe('user-home startup repair', () => {
+  it('retries a failed row on the next tick and stops scanning after success', async () => {
+    const userId = '11111111-1111-4111-8111-111111111111'
+    let startupQueries = 0
+    vi.mocked(repairUserHomeOwnerGrant)
+      .mockRejectedValueOnce(new Error('injected repair failure'))
+      .mockResolvedValueOnce(undefined)
+    mocks.query.mockImplementation(async (sql: string, values?: string[]) => {
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] }
+      if (sql.includes('pg_advisory_unlock')) return { rows: [] }
+      if (sql.includes('LEFT JOIN LATERAL')) {
+        startupQueries += 1
+        if (sql.includes('FROM gfs_grants') && values?.[0] !== userId) {
+          return { rows: [{ user_id: userId, needs_repair: true }] }
+        }
+        return { rows: [] }
+      }
+      if (sql.includes('WITH candidates AS MATERIALIZED')) return { rows: [] }
+      if (sql.includes("state = 'pending'")) return { rows: [] }
+      throw new Error(`Unexpected query: ${sql}`)
+    })
+    const worker = new GfsUserHomeReconciler('main', { options: {} } as Pool)
+
+    await worker.tick()
+    expect(repairUserHomeOwnerGrant).toHaveBeenCalledTimes(1)
+    expect(mocks.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'user_home_startup_repair_failed', userId }),
+      'User-home startup repair failed'
+    )
+    await worker.tick()
+    expect(repairUserHomeOwnerGrant).toHaveBeenCalledTimes(2)
+    const completedQueries = startupQueries
+    await worker.tick()
+    expect(startupQueries).toBe(completedQueries)
+  })
+
   it.each([1, 2])('retries %i failed startup passes and stops after success', async failures => {
     let failuresRemaining = failures
     let startupQueries = 0

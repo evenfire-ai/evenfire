@@ -386,6 +386,53 @@ describe('GfsGrantList', () => {
     expect(screen.getByRole('button', { name: 'Access role for Test Two' })).toBeTruthy()
   })
 
+  it.each(['direct', 'inherited', 'merged-direct'] as const)(
+    'shows an anonymous %s owner while hiding other directory-less subjects',
+    source => {
+      const owner = { type: 'user' as const, id: 'private-owner-id' }
+      const other = { type: 'user' as const, id: 'private-other-id' }
+      const inherited = (subject: typeof owner, homeOwner = false) => ({
+        ...mergeInheritedAccessItem(
+          null,
+          { subject, permissions: ['read'], grantId: 'ancestor-grant', shareIds: [] },
+          { resourceId: 'home', name: 'Home' }
+        ),
+        ...(homeOwner ? { homeOwner: true as const } : {}),
+      })
+      render(
+        <GfsGrantList
+          agents={[]}
+          subjects={[]}
+          items={[
+            ...(source !== 'inherited'
+              ? [grantItem({ id: 'owner', subject: owner, homeOwner: true })]
+              : []),
+            grantItem({ id: 'other', subject: other }),
+          ]}
+          inheritedItems={
+            source === 'direct' ? [] : [inherited(owner, source === 'inherited'), inherited(other)]
+          }
+          mergeInherited={source !== 'direct'}
+          onChangeRole={vi.fn()}
+          onChangeInheritedRole={vi.fn()}
+          onRemoveInherited={vi.fn()}
+          onRevoke={vi.fn()}
+        />
+      )
+
+      const row = screen.getByTestId(
+        source === 'direct'
+          ? 'gfs-access-row-grant-owner'
+          : 'gfs-access-row-inherited-user:private-owner-id'
+      )
+      expect(within(row).getByText('Owner')).toBeTruthy()
+      expect(row.textContent).toBe('Owner')
+      expect(within(row).queryByRole('button')).toBeNull()
+      expect(screen.queryByTestId('gfs-access-row-grant-other')).toBeNull()
+      expect(screen.queryByTestId('gfs-access-row-inherited-user:private-other-id')).toBeNull()
+    }
+  )
+
   it.each(['inherited', 'direct'] as const)(
     'protects an owner grant from a %s contribution in a merged row',
     ownerSource => {

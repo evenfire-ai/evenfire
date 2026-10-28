@@ -67,7 +67,7 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
     databaseCreated = true
     const url = new URL(adminUrl)
     url.pathname = `/${database}`
-    fixturePool = new Pool({ connectionString: url.toString() })
+    fixturePool = new Pool({ connectionString: url.toString(), statement_timeout: 10_000 })
     await initDb({ connect: () => fixturePool.connect() })
     runtime.pool = new Pool({
       connectionString: url.toString(),

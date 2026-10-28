@@ -720,7 +720,7 @@ describe('GfsGrantPanel bulk access', () => {
     expect(screen.queryByRole('button', { name: 'Access role for selected recipients' })).toBeNull()
   })
 
-  it('explains that inherited access cannot be set on the drive root or /Users', async () => {
+  it('explains that only operators can access the drive root or /Users', async () => {
     mockPutGfsGrant.mockRejectedValueOnce(
       Object.assign(new Error('409 ancestor_home_exposure'), {
         code: 'ancestor_home_exposure',
@@ -735,9 +735,8 @@ describe('GfsGrantPanel bulk access', () => {
     await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(1))
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(
-      'Access that includes contents cannot be set on the drive root or /Users'
+      'Only operators can have access on the drive root or /Users. Choose a sub-folder for this access.'
     )
-    expect(alert).toHaveTextContent('Include contents of this folder')
     expect(alert).not.toHaveTextContent('ancestor_home_exposure')
     expect(screen.getByRole('button', { name: 'Remove Ada Lovelace' })).toBeTruthy()
   })

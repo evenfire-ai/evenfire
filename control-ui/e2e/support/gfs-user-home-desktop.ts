@@ -12,10 +12,23 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DEV_ISOLATION_ENV, devIsolationPaths } from '../../../desktop-app/src/devIsolation'
-import { openResourcesNavItem } from '../../../desktop-app/test/e2e-playwright/navigationHelpers'
 import type { HomeFixtureUser } from './gfs-user-home-fixtures'
 
 const desktopRoot = path.resolve(__dirname, '../../../desktop-app')
+
+async function openResourcesNavItem(page: Page, itemTestId: string): Promise<void> {
+  const item = page.getByTestId(itemTestId)
+  if (!(await item.isVisible().catch(() => false))) {
+    const settingsMenu = page.getByTestId('nav-settings-menu')
+    await expect(settingsMenu).toBeVisible({ timeout: 15_000 })
+    if ((await settingsMenu.getAttribute('aria-expanded')) !== 'true') {
+      await settingsMenu.click()
+    }
+    await expect(settingsMenu).toHaveAttribute('aria-expanded', 'true', { timeout: 15_000 })
+  }
+  await expect(item).toBeVisible({ timeout: 15_000 })
+  await item.click()
+}
 
 function requiredLoopbackEndpoint(name: string): string {
   const value = process.env[name]

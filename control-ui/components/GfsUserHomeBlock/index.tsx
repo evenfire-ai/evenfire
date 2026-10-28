@@ -197,6 +197,7 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
         setHome(loaded)
         setConflictDetail(loaded.conflictDetail)
         setFolderName(loaded.storageUsername ?? '')
+        setPolling(loaded.state === 'pending')
       })
       .catch(caught => {
         if (!controller.signal.aborted) setError(errorMessage(caught))
@@ -222,8 +223,14 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
         void getGfsUserHome(userId, controller.signal)
           .then(({ home: loaded }) => {
             if (controller.signal.aborted) return
-            setHome(loaded)
-            setConflictDetail(loaded.conflictDetail)
+            setHome(previous =>
+              JSON.stringify(previous) === JSON.stringify(loaded) ? previous : loaded
+            )
+            setConflictDetail(previous =>
+              JSON.stringify(previous) === JSON.stringify(loaded.conflictDetail)
+                ? previous
+                : loaded.conflictDetail
+            )
             if (loaded.state === 'pending') {
               schedule()
             } else {
@@ -376,9 +383,7 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
             {home.state === 'pending' ? (
               <div>
                 {stillPending ? <p role="status">Still pending</p> : null}
-                {polling ? (
-                  <p role="status">Checking home folder status…</p>
-                ) : (
+                {!polling ? (
                   <button
                     className="cu-btn cu-btn--ghost"
                     type="button"
@@ -387,7 +392,7 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
                   >
                     Refresh
                   </button>
-                )}
+                ) : null}
               </div>
             ) : null}
           </>

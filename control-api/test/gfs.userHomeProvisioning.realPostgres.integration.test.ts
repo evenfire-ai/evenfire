@@ -19,7 +19,10 @@ import { ensureInvitationUser } from '../src/services/directory/invitationStore.
 import { googleLoginData } from '../src/services/directory/login.js'
 import { createAdminUser } from '../src/services/directory/users.js'
 import { GfsUserHomeReconciler } from '../src/services/gfsUserHomeReconciler.js'
-import { createPostgresDisconnectBlackhole } from './helpers/realPostgresCancellation.js'
+import {
+  createPostgresCommitReplyBlackhole,
+  createPostgresDisconnectBlackhole,
+} from './helpers/realPostgresCancellation.js'
 import { createPostgresFatalCommitReplyInjector } from './helpers/realPostgresFatalCommit.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import {
@@ -94,6 +97,58 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
     ])
     return row!
   }
+
+  it('settles a tick and releases the reconciler lock after a silent lost COMMIT reply', async () => {
+    const user = await createUser(database.pool, 'Lost Commit Owner')
+    const url = new URL(adminUrl!)
+    url.pathname = `/${database.database}`
+    const blackhole = await createPostgresCommitReplyBlackhole(url.toString())
+    const proxyPool = new Pool({
+      connectionString: blackhole.connectionString,
+      max: 2,
+      statement_timeout: 10_000,
+    })
+    let transactions = 0
+    const transaction: typeof withTransaction = async (work, txPool, options) => {
+      transactions += 1
+      return withTransaction(work, txPool, options)
+    }
+    const results: string[] = []
+    const worker = new GfsUserHomeReconciler(drive, database.pool, async userId => {
+      const result = await provisionUserHome(userId, {
+        drive,
+        dbPool: proxyPool,
+        transaction,
+        transactionTimeoutMs: 2_000,
+      })
+      results.push(result)
+      return result
+    })
+    try {
+      const tick = worker.tick()
+      await blackhole.commitForwarded
+      await tick
+
+      expect(blackhole.discardedReplyBytes).toBeGreaterThan(0)
+      expect(transactions).toBe(2)
+      expect(results).toEqual(['ready'])
+      await assertReady(user)
+
+      const observer = await database.pool.connect()
+      try {
+        const lock = await observer.query(
+          "SELECT pg_try_advisory_lock(hashtext('gfs-user-home-reconciler-v1')) AS acquired"
+        )
+        expect(lock.rows[0].acquired).toBe(true)
+        await observer.query("SELECT pg_advisory_unlock(hashtext('gfs-user-home-reconciler-v1'))")
+      } finally {
+        observer.release()
+      }
+    } finally {
+      await blackhole.close()
+      await endPoolAndWaitForClients(proxyPool)
+    }
+  }, 15_000)
 
   it('provisions exactly one home after each of the five user creation paths', async () => {
     const suffix = randomUUID()
@@ -729,7 +784,13 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
         )
         expect(
           lines.filter(line => line.event === 'user_home.retired' && line.userId === user)
-        ).toEqual([expect.objectContaining({ conflictCode: code, conflictDetail: detail })])
+        ).toEqual([
+          expect.objectContaining({
+            conflictCode: code,
+            conflictDetail: detail,
+            transactionState: 'pending_commit',
+          }),
+        ])
       } finally {
         rootLogger.level = oldLevel
         logger[streamSymbol] = oldStream
@@ -768,6 +829,7 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
     const runtimePool = new Pool({
       connectionString: url.toString(),
       options: '-c role=control_api_runtime',
+      statement_timeout: 10_000,
     })
     try {
       const identity = await runtimePool.query('SELECT current_user')
@@ -898,7 +960,10 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
     const url = new URL(adminUrl!)
     url.pathname = `/${database.database}`
     const injector = await createPostgresFatalCommitReplyInjector(url.toString())
-    const carrierPool = new Pool({ connectionString: injector.connectionString })
+    const carrierPool = new Pool({
+      connectionString: injector.connectionString,
+      statement_timeout: 10_000,
+    })
     let first = true
     let unknown = 0
     const statements: string[] = []

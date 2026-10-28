@@ -62,7 +62,7 @@ import { isEditorPermissions } from './gfsInheritedAccessMerge'
 const OPERATOR_VALUE = 'operator'
 const DRIVE = 'main'
 const ANCESTOR_HOME_EXPOSURE_MESSAGE =
-  'Access that includes contents cannot be set on the drive root or /Users, because it would reach every user home. Turn off "Include contents of this folder" or choose a sub-folder.'
+  'Only operators can have access on the drive root or /Users. Choose a sub-folder for this access.'
 
 function isAncestorHomeExposure(error: unknown): boolean {
   return (error as GfsGrantError | null)?.code === 'ancestor_home_exposure'

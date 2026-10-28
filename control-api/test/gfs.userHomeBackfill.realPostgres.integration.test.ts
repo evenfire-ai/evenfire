@@ -280,6 +280,7 @@ describeRealPostgres('automatic user-home backfill on PostgreSQL', () => {
       connectionString: url.toString(),
       max: 1,
       connectionTimeoutMillis: 250,
+      statement_timeout: 10_000,
     })
     try {
       const worker = new GfsUserHomeReconciler(drive, constrainedPool)

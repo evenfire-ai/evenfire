@@ -20,6 +20,8 @@ import {
 
 const log = rootLogger.child({ service: 'gfs_user_home_provisioner' })
 const OWNER_PERMISSIONS = ['read', 'write', 'delete', 'share', 'manage_acl']
+// Allow twice the maximum core-pool statement timeout for the whole transaction.
+const PROVISION_TRANSACTION_TIMEOUT_MS = 60_000
 
 type HomeRow = {
   drive: string | null
@@ -35,6 +37,7 @@ type ProvisionOptions = {
   drive?: string | null
   dbPool?: Pool
   transaction?: TransactionRunner
+  transactionTimeoutMs?: number
 }
 
 export type ProvisionUserHomeResult = 'ready' | 'conflict' | 'retired' | 'pending' | 'unchanged'
@@ -204,6 +207,7 @@ export async function retireUserHomeForInactiveUser(
   log.info(
     {
       event: 'user_home.retired',
+      transactionState: 'pending_commit',
       userId,
       drive,
       conflictCode: home?.conflict_code ?? null,
@@ -612,6 +616,9 @@ export async function provisionUserHome(
     let outcomeUnknown = false
     try {
       return await transaction(db => installHome(db, userId, drive), dbPool, {
+        signal: AbortSignal.timeout(
+          options.transactionTimeoutMs ?? PROVISION_TRANSACTION_TIMEOUT_MS
+        ),
         onCommitOutcomeUnknown: () => {
           outcomeUnknown = true
         },

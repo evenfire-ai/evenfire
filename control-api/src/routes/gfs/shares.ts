@@ -159,13 +159,7 @@ export async function writeGfsShareBatchInTransaction(
       params.subjects,
       { isShare: true }
     )
-    await assertNoAncestorHomeExposure(
-      db,
-      params.drive,
-      params.resourceId,
-      params.includeDescendants,
-      params.subjects
-    )
+    await assertNoAncestorHomeExposure(db, params.drive, params.resourceId, params.subjects)
   } catch (error) {
     if (!(error instanceof GfsGrantError)) throw error
     outcome = 'denied'

@@ -618,7 +618,7 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
   })
 
   it.each(['user', 'operator'] as const)(
-    'blocks ancestor inheritance for non-operator subjects under %s authority',
+    'blocks ancestor grants and shares for non-operator subjects under %s authority',
     async authority => {
       const manager = await createUser(database.pool, 'Manager')
       const target = await createUser(database.pool, 'Target')
@@ -639,56 +639,52 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
       const authorize = (call: request.Test) =>
         authority === 'operator' ? call.set('x-operator', 'yes') : call.set('x-user', manager)
       for (const ancestor of [root, users]) {
+        // A legacy direct grant lets the user-authority case reach the new guard.
         await grant(ancestor, 'user', manager, ALL, false)
         for (const subject of subjects) {
           const grantBody = { drive, resourceId: ancestor, subject, permissions: ['read'] }
-          await authorize(request(app).put('/grants'))
-            .send({ ...grantBody, inherit: false })
-            .expect(200)
-          await authorize(request(app).put('/grants'))
-            .send({ ...grantBody, inherit: true })
-            .expect(409)
-            .expect(({ body }) => expect(body.error).toBe('ancestor_home_exposure'))
-          const shareBody = { drive, resourceId: ancestor, subject, permissions: ['read'] }
-          if (subject.type !== 'host') {
-            await authorize(request(app).post('/shares'))
-              .send({ ...shareBody, includeDescendants: false })
-              .expect(200)
-          }
-          const shareResponse = authorize(request(app).post('/shares')).send({
-            ...shareBody,
-            includeDescendants: true,
-          })
-          if (subject.type === 'host') {
-            await shareResponse
-              .expect(403)
-              .expect(({ body }) => expect(body.error).toBe('share_to_agent_forbidden'))
-          } else {
-            await shareResponse
+          for (const inherit of [false, true]) {
+            await authorize(request(app).put('/grants'))
+              .send({ ...grantBody, inherit })
               .expect(409)
               .expect(({ body }) => expect(body.error).toBe('ancestor_home_exposure'))
+            const shareResponse = authorize(request(app).post('/shares')).send({
+              ...grantBody,
+              includeDescendants: inherit,
+            })
+            if (subject.type === 'host') {
+              await shareResponse
+                .expect(403)
+                .expect(({ body }) => expect(body.error).toBe('share_to_agent_forbidden'))
+            } else {
+              await shareResponse
+                .expect(409)
+                .expect(({ body }) => expect(body.error).toBe('ancestor_home_exposure'))
+            }
           }
         }
         if (authority === 'operator') {
           const subject = { type: 'operator' }
-          await authorize(request(app).put('/grants'))
-            .send({
-              drive,
-              resourceId: ancestor,
-              subject,
-              permissions: ['read'],
-              inherit: true,
-            })
-            .expect(200)
-          await authorize(request(app).post('/shares'))
-            .send({
-              drive,
-              resourceId: ancestor,
-              subject,
-              permissions: ['read'],
-              includeDescendants: true,
-            })
-            .expect(200)
+          for (const inherit of [false, true]) {
+            await authorize(request(app).put('/grants'))
+              .send({
+                drive,
+                resourceId: ancestor,
+                subject,
+                permissions: ['read'],
+                inherit,
+              })
+              .expect(200)
+            await authorize(request(app).post('/shares'))
+              .send({
+                drive,
+                resourceId: ancestor,
+                subject,
+                permissions: ['read'],
+                includeDescendants: inherit,
+              })
+              .expect(200)
+          }
         }
       }
       await authorize(request(app).put('/grants'))
@@ -738,39 +734,22 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
       .send({ ...body, includeDescendants: true })
       .expect(403)
       .expect(({ body: result }) => expect(result.error).toBe('not_sharer'))
-    await request(app)
-      .put('/grants')
-      .set('x-operator', 'yes')
-      .send({
-        drive,
-        resourceId: root,
-        subject: { type: 'user', id: user },
-        permissions: ALL,
-        inherit: false,
-      })
-      .expect(200)
-    await request(app)
-      .put('/grants')
-      .set('x-user', user)
-      .send({ ...body, inherit: false })
-      .expect(200)
-    await request(app)
-      .put('/grants')
-      .set('x-user', user)
-      .send({ ...body, inherit: true })
-      .expect(409)
-      .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
-    await request(app)
-      .post('/shares')
-      .set('x-user', user)
-      .send({ ...body, includeDescendants: false })
-      .expect(200)
-    await request(app)
-      .post('/shares')
-      .set('x-user', user)
-      .send({ ...body, includeDescendants: true })
-      .expect(409)
-      .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+    // Model a pre-existing direct grant so the caller reaches the ancestor guard.
+    await grant(root, 'user', user, ALL, false)
+    for (const inherit of [false, true]) {
+      await request(app)
+        .put('/grants')
+        .set('x-user', user)
+        .send({ ...body, inherit })
+        .expect(409)
+        .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+      await request(app)
+        .post('/shares')
+        .set('x-user', user)
+        .send({ ...body, includeDescendants: inherit })
+        .expect(409)
+        .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+    }
   })
 
   it('shows profiles only to the home owner and records the owner lowering another manager share', async () => {
@@ -838,14 +817,21 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
         true
       )
     }
-    await grant(root, 'user', owner, ALL, false)
-    await grant(root, 'user', outsider, ['read'], false)
+    const outsideFolder = (
+      await database.pool.query<{ resource_id: string }>(
+        `INSERT INTO gfs_resources (drive,parent_resource_id,name,kind,path_cache)
+         VALUES ($1,$2,'outside','directory','/outside') RETURNING resource_id::text`,
+        [drive, root]
+      )
+    ).rows[0]!.resource_id
+    await grant(outsideFolder, 'user', owner, ALL, false)
+    await grant(outsideFolder, 'user', outsider, ['read'], false)
     await request(app)
       .post('/shares')
       .set('x-user', owner)
       .send({
         drive,
-        resourceId: root,
+        resourceId: outsideFolder,
         subject: { type: 'user', id: outsider },
         permissions: ['read'],
         includeDescendants: false,
@@ -855,7 +841,7 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
       const outsideHome = await request(app)
         .get(path)
         .set('x-user', owner)
-        .query({ drive, resourceId: root })
+        .query({ drive, resourceId: outsideFolder })
         .expect(200)
       expect(outsideHome.body.items.length).toBeGreaterThan(0)
       expect(

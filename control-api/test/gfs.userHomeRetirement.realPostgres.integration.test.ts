@@ -413,6 +413,7 @@ describeRealPostgres('user-home retirement on PostgreSQL', () => {
       )
       expect(recorded).toHaveLength(1)
       expect(recorded[0]).toMatchObject({
+        transactionState: 'pending_commit',
         homeGrants: expect.any(Number),
         userGrants: expect.any(Number),
         agentGrants: expect.any(Number),
@@ -504,6 +505,7 @@ describeRealPostgres('user-home retirement on PostgreSQL', () => {
       )
       expect(recorded).toHaveLength(1)
       expect(recorded[0]).toMatchObject({
+        transactionState: 'pending_commit',
         conflictCode: null,
         conflictDetail: null,
         homeGrants: 0,
@@ -782,7 +784,7 @@ describeRealPostgres('user-home retirement on PostgreSQL', () => {
     ).toEqual([{ bytes: '7' }])
   }, 15_000)
 
-  it('runs startup repair once after a failed row and retries that row only on a new start', async () => {
+  it('retries a failed startup repair row on the same reconciler next tick', async () => {
     const blocked = await fixture()
     const healthyRepair = await fixture()
     await database.pool.query(
@@ -814,8 +816,6 @@ describeRealPostgres('user-home retirement on PostgreSQL', () => {
       await database.pool.query('DROP FUNCTION fail_one_home_repair()')
     }
     await worker.tick()
-    expect(await homeState(database.pool, blocked.owner)).toMatchObject({ state: 'ready' })
-    await new GfsUserHomeReconciler(blocked.drive, database.pool).tick()
     expect(await homeState(database.pool, blocked.owner)).toMatchObject({
       state: 'conflict',
       conflict_code: 'ownership_conflict',

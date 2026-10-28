@@ -168,7 +168,12 @@ export function GfsGrantList({
         inherited.subjectProfile ??
         grant?.subjectProfile ??
         subjectShares.find(share => share.subjectProfile)?.subjectProfile
-      if (isHiddenSubject(inherited.subject, subjects, profile)) continue
+      if (
+        !inherited.homeOwner &&
+        !grant?.homeOwner &&
+        isHiddenSubject(inherited.subject, subjects, profile)
+      )
+        continue
       merged.set(key, {
         subject: inherited.subject,
         permissions: [
@@ -191,7 +196,9 @@ export function GfsGrantList({
   // and never the other list's rows or revoke actions.
   const visibleItems = error
     ? []
-    : items.filter(item => !isHiddenSubject(item.subject, subjects, item.subjectProfile))
+    : items.filter(
+        item => item.homeOwner || !isHiddenSubject(item.subject, subjects, item.subjectProfile)
+      )
   const visibleShares = shareError
     ? []
     : shares.filter(share => !isHiddenSubject(share.subject, subjects, share.subjectProfile))
@@ -202,12 +209,15 @@ export function GfsGrantList({
   const hiddenInheritedCount = mergeInherited
     ? inheritedItems.filter(item => {
         const key = subjectKey(item.subject)
+        const grant = items.find(candidate => subjectKey(candidate.subject) === key)
         const profile =
           item.subjectProfile ??
-          items.find(grant => subjectKey(grant.subject) === key)?.subjectProfile ??
+          grant?.subjectProfile ??
           shares.find(share => subjectKey(share.subject) === key && share.subjectProfile)
             ?.subjectProfile
-        return isHiddenSubject(item.subject, subjects, profile)
+        return (
+          !item.homeOwner && !grant?.homeOwner && isHiddenSubject(item.subject, subjects, profile)
+        )
       }).length
     : 0
   const hiddenCount =
@@ -281,12 +291,14 @@ export function GfsGrantList({
                     >
                       <AccessSubjectIcon kind={kind} />
                     </span>
-                    <span className="da-gfs-grant-list__identity">
-                      <span className="da-gfs-grant-list__label">{label}</span>
-                      {item.subjectProfile?.email ? (
-                        <span className="muted">{item.subjectProfile.email}</span>
-                      ) : null}
-                    </span>
+                    {ownerProtected && !item.subjectProfile ? null : (
+                      <span className="da-gfs-grant-list__identity">
+                        <span className="da-gfs-grant-list__label">{label}</span>
+                        {item.subjectProfile?.email ? (
+                          <span className="muted">{item.subjectProfile.email}</span>
+                        ) : null}
+                      </span>
+                    )}
                     <span className="da-gfs-grant-list__meta">
                       {ownerProtected ? (
                         <span className="da-gfs-grant-list__role-label">Owner</span>
@@ -344,10 +356,12 @@ export function GfsGrantList({
                     >
                       <AccessSubjectIcon kind={kind} />
                     </span>
-                    <span className="da-gfs-grant-list__identity">
-                      <span className="da-gfs-grant-list__label">{label}</span>
-                      {profile?.email ? <span className="muted">{profile.email}</span> : null}
-                    </span>
+                    {ownerProtected && !profile ? null : (
+                      <span className="da-gfs-grant-list__identity">
+                        <span className="da-gfs-grant-list__label">{label}</span>
+                        {profile?.email ? <span className="muted">{profile.email}</span> : null}
+                      </span>
+                    )}
                     <span className="da-gfs-grant-list__meta">
                       {/* Normal toggleable row: any edit opens the
                           parent-folder confirmation in the page. */}

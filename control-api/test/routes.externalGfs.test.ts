@@ -1443,7 +1443,7 @@ describe('indexed upload relay canonical drive', () => {
 
 describe('ancestor home exposure through both GFS authority planes', () => {
   it.each(['user', 'operator'] as const)(
-    'rejects inheritable grant and share writes for %s while explicit writes succeed',
+    'rejects grants and shares on protected ancestors for %s regardless of inheritance',
     async authority => {
       auth()
       dbReturning([
@@ -1476,14 +1476,14 @@ describe('ancestor home exposure through both GFS authority planes', () => {
           .post(sharePath)
           .set('x-user-session-token', 'sess')
           .send({ ...body, includeDescendants })
-      await grantWrite(false).expect(200)
-      await grantWrite(true)
-        .expect(409)
-        .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
-      await shareWrite(false).expect(200)
-      await shareWrite(true)
-        .expect(409)
-        .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+      for (const inherit of [false, true]) {
+        await grantWrite(inherit)
+          .expect(409)
+          .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+        await shareWrite(inherit)
+          .expect(409)
+          .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+      }
     }
   )
 })
@@ -1510,23 +1510,20 @@ describe('ancestor grants for user agents', () => {
     })
     const app = await buildApp()
     const body = { resourceId: R, permissions: ['read'] }
-    await request(app)
-      .put('/external/gfs/grants')
-      .set('x-user-session-token', 'sess')
-      .send({ ...body, subject: { type: 'host', id: H1 }, inherit: false })
-      .expect(200)
-    await request(app)
-      .put('/external/gfs/grants')
-      .set('x-user-session-token', 'sess')
-      .send({ ...body, subject: { type: 'host', id: H1 }, inherit: true })
-      .expect(409)
-      .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
-    await request(app)
-      .put('/external/gfs/grants')
-      .set('x-user-session-token', 'sess')
-      .send({ ...body, subject: { type: 'host', id: '1st:mcp-host/foreign-agent' }, inherit: true })
-      .expect(403)
-      .expect(({ body: result }) => expect(result.error).toBe('foreign_agent_forbidden'))
+    for (const inherit of [false, true]) {
+      await request(app)
+        .put('/external/gfs/grants')
+        .set('x-user-session-token', 'sess')
+        .send({ ...body, subject: { type: 'host', id: H1 }, inherit })
+        .expect(409)
+        .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+      await request(app)
+        .put('/external/gfs/grants')
+        .set('x-user-session-token', 'sess')
+        .send({ ...body, subject: { type: 'host', id: '1st:mcp-host/foreign-agent' }, inherit })
+        .expect(403)
+        .expect(({ body: result }) => expect(result.error).toBe('foreign_agent_forbidden'))
+    }
   })
 })
 

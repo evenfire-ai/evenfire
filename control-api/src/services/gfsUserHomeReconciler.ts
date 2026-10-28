@@ -110,8 +110,7 @@ export class GfsUserHomeReconciler {
       if (!locked || this.stopping) return
 
       if (this.startupRepairPending) {
-        await this.repairStartup(client)
-        this.startupRepairPending = false
+        this.startupRepairPending = !(await this.repairStartup(client))
         if (this.stopping || sessionFailed) return
       }
 
@@ -183,7 +182,8 @@ export class GfsUserHomeReconciler {
     }
   }
 
-  private async repairStartup(client: Client): Promise<void> {
+  private async repairStartup(client: Client): Promise<boolean> {
+    let failed = false
     for (const [sql, repair] of [
       [
         STARTUP_RETIRED_SQL,
@@ -199,11 +199,12 @@ export class GfsUserHomeReconciler {
         const page = await client.query<{ user_id: string; needs_repair: boolean }>(sql, [cursor])
         if (page.rows.length === 0) break
         for (const row of page.rows) {
-          if (this.stopping) return
+          if (this.stopping) return false
           if (!row.needs_repair) continue
           try {
             await repair(row.user_id)
           } catch (error) {
+            failed = true
             log.error(
               {
                 event: 'user_home_startup_repair_failed',
@@ -217,6 +218,7 @@ export class GfsUserHomeReconciler {
         cursor = page.rows[page.rows.length - 1]!.user_id
       }
     }
+    return !failed && !this.stopping
   }
 }
 

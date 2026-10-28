@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { AppService } from '../src/appService.js'
 import { fetchBoundedBytes, streamBoundedBytes } from '../src/gfs/boundedDownload.js'
 import { gfsUploadTransport, requestGfsJson } from '../src/gfs/transport.js'
 import { GfsClient } from '../src/gfs/uriHandler.js'
@@ -7,6 +8,38 @@ import { GfsClient } from '../src/gfs/uriHandler.js'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Desktop Files user authority', () => {
+  it('uses user authority for GFS requests composed by AppService', async () => {
+    const calls: Array<{ url: string; headers: Headers }> = []
+    const home = {
+      state: 'ready',
+      drive: 'main',
+      path: '/Users/example',
+      resourceId: 'home',
+      heldPermissions: ['read'],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL, init: RequestInit = {}) => {
+        calls.push({ url: String(url), headers: new Headers(init.headers) })
+        const data = String(url).endsWith('/home')
+          ? home
+          : { ok: true, data: { items: [], nextCursor: null } }
+        return new Response(JSON.stringify(data), { status: 200 })
+      })
+    )
+    const service = new AppService()
+    ;(service as unknown as { sessionToken: string }).sessionToken = randomUUID()
+
+    expect(await service.getGfsHome()).toEqual(home)
+    expect(await service.listGfsChildren('home', 'main')).toEqual({ items: [], nextCursor: null })
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.url).toContain('/api/v1/me/gfs/home')
+    expect(calls[1]!.url).toContain('/api/v1/me/gfs/resources/home/children')
+    for (const call of calls) {
+      expect(call.headers.get('X-Evenfire-Gfs-Authority')).toBe('user')
+    }
+  })
+
   it('sends user authority on metadata, upload parts, downloads and streams', async () => {
     const calls: RequestInit[] = []
     vi.stubGlobal(
