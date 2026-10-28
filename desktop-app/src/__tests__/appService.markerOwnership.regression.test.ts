@@ -218,15 +218,17 @@ describe('R21-M1 partial publication with unavailable repair', () => {
       if (published) throw new Error('fixture-native repair locked')
       return get(...args)
     })
-    const open = fsSync.openSync.bind(fsSync)
+    const observeMarker = h.tokenStore.observeSessionAuthorityMarkerRaw.bind(h.tokenStore)
     let rejectedReads = 0
-    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
-      if (published && String(file) === h.markerPath) {
-        rejectedReads += 1
-        throw Object.assign(new Error('fixture-transient owned marker read'), { code: 'EMFILE' })
+    vi.spyOn(h.tokenStore, 'observeSessionAuthorityMarkerRaw').mockImplementation(
+      (scope, userDataDirectory, envKey) => {
+        if (published) {
+          rejectedReads += 1
+          throw Object.assign(new Error('fixture-transient owned marker read'), { code: 'EMFILE' })
+        }
+        return observeMarker(scope, userDataDirectory, envKey)
       }
-      return open(file, flags, mode)
-    })
+    )
     const error = await h.service.switchTeam('fixture-other').then(
       () => null,
       error => error
@@ -246,7 +248,8 @@ describe('R21-M1 partial publication with unavailable repair', () => {
     const result = await restarted.service.initialize()
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
     expect(result).toEqual({ authenticated: true, me: homeMe })
-    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.state.me).toBeNull()
     expect(error).toBeInstanceOf(Error)
   })
 })
