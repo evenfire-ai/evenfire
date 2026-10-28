@@ -25,7 +25,6 @@ export interface GfsMergedAccessRow {
 
 export interface GfsGrantListProps {
   items: GfsGrantListItem[]
-  protectedOwner?: { userId: string; homeResourceId: string }
   shares?: GfsShareListItem[]
   /**
    * Client-derived rows inherited from ancestor folders. Ignored unless

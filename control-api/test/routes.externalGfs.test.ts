@@ -2672,6 +2672,97 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
     })
   })
 
+  it('marks only the home owner grant for the owner, a manager, and an operator', async () => {
+    const ownerGrant = {
+      id: 'aaaa1111-0000-4000-8000-000000000001',
+      drive: 'main',
+      resource_id: R,
+      subject_type: 'user',
+      subject_id: U1,
+      permissions: ['read', 'manage_acl'],
+      inherit: true,
+      home_owner: true,
+    }
+    const managerGrant = {
+      ...ownerGrant,
+      id: 'aaaa1111-0000-4000-8000-000000000002',
+      subject_id: U2,
+      home_owner: false,
+    }
+    const hostGrant = {
+      ...ownerGrant,
+      id: 'aaaa1111-0000-4000-8000-000000000003',
+      subject_type: 'host',
+      subject_id: H1,
+      home_owner: false,
+    }
+    dbReturning([ownerGrant, managerGrant], {
+      grantListRows: [ownerGrant, managerGrant, hostGrant],
+    })
+    const app = await buildApp()
+    const adminApp = await buildAdminGrantsApp('operator')
+    const expected = [
+      {
+        id: ownerGrant.id,
+        drive: 'main',
+        resourceId: R,
+        subject: { type: 'user', id: U1 },
+        permissions: ownerGrant.permissions,
+        inherit: true,
+        homeOwner: true,
+      },
+      {
+        id: managerGrant.id,
+        drive: 'main',
+        resourceId: R,
+        subject: { type: 'user', id: U2 },
+        permissions: managerGrant.permissions,
+        inherit: true,
+      },
+      {
+        id: hostGrant.id,
+        drive: 'main',
+        resourceId: R,
+        subject: { type: 'host', id: H1 },
+        permissions: hostGrant.permissions,
+        inherit: true,
+      },
+    ]
+    for (const callerId of [U1, U2]) {
+      mockVerifyExternalSessionToken.mockReturnValue({ ...SESSION, userId: callerId })
+      const response = await request(app)
+        .get('/external/gfs/grants')
+        .query({ drive: 'main', resourceId: R })
+        .set('x-user-session-token', 'sess')
+      expect(response.status).toBe(200)
+      expect(response.body.items).toEqual(expected)
+    }
+    const operator = await request(adminApp)
+      .get('/gfs/grants')
+      .query({ drive: 'main', resourceId: R })
+    expect(operator.status).toBe(200)
+    expect(operator.body.items).toEqual(expected)
+
+    const folderGrant = { ...ownerGrant, resource_id: R2, home_owner: false }
+    dbReturning([folderGrant], { grantListRows: [folderGrant] })
+    mockVerifyExternalSessionToken.mockReturnValue(SESSION)
+    const folder = await request(app)
+      .get('/external/gfs/grants')
+      .query({ drive: 'main', resourceId: R2 })
+      .set('x-user-session-token', 'sess')
+    expect(folder.status).toBe(200)
+    expect(folder.body.items).toEqual([
+      {
+        id: folderGrant.id,
+        drive: 'main',
+        resourceId: R2,
+        subject: { type: 'user', id: U1 },
+        permissions: folderGrant.permissions,
+        inherit: true,
+      },
+    ])
+  })
+
   it('denies the grants list to a caller without manage_acl', async () => {
     auth()
     authority(['read', 'write'])

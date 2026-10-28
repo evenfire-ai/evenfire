@@ -223,6 +223,7 @@ export interface GfsGrantListItem {
   resourceId: string
   subject: { type: string; id?: string }
   subjectProfile?: { name: string | null; email?: string }
+  homeOwner?: true
   permissions: string[]
   inherit: boolean
 }

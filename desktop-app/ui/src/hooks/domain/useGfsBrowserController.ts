@@ -1411,7 +1411,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     home,
     homeError: homeQuery.error ? toPresentedMessage(homeQuery.error) : null,
     loadingHome: homeQuery.isPending || homeQuery.isFetching,
-    homeOwnerId: me?.id ?? null,
     /** Cache-scope key (env + user + team) so the move dialog's queries share
      *  the controller's cache and are dropped together on scope change. */
     sessionScope: sessionScope ?? 'anonymous',

@@ -25,7 +25,6 @@ function baseController() {
   return {
     drive: 'main',
     home: null,
-    homeOwnerId: null,
     current: null,
     crumbs: [],
     sessionScope: 'env-1:user-1:team-1',

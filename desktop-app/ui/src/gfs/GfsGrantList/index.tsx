@@ -131,7 +131,6 @@ const ROLE_OPTIONS = [
 
 export function GfsGrantList({
   items,
-  protectedOwner,
   shares = [],
   inheritedItems = [],
   mergeInherited = false,
@@ -266,12 +265,7 @@ export function GfsGrantList({
                 if (mergedByKey.has(subjectKey(item.subject))) return null
                 const label = subjectLabel(item.subject, agents, subjects, item.subjectProfile)
                 const kind = subjectKind(item.subject)
-                const ownerProtected = Boolean(
-                  protectedOwner &&
-                  item.subject.type === 'user' &&
-                  item.subject.id === protectedOwner.userId &&
-                  item.resourceId === protectedOwner.homeResourceId
-                )
+                const ownerProtected = item.homeOwner === true
                 return (
                   <li
                     className="da-gfs-grant-list__row"
@@ -332,16 +326,8 @@ export function GfsGrantList({
                   row.shares.find(share => share.subjectProfile)?.subjectProfile
                 const label = subjectLabel(row.subject, agents, subjects, profile)
                 const kind = subjectKind(row.subject)
-                const ownerProtected = Boolean(
-                  protectedOwner &&
-                  row.subject.type === 'user' &&
-                  row.subject.id === protectedOwner.userId &&
-                  (row.grant?.resourceId === protectedOwner.homeResourceId ||
-                    row.inherited?.sources.some(
-                      source =>
-                        source.resourceId === protectedOwner.homeResourceId && source.grantId
-                    ))
-                )
+                const ownerProtected =
+                  row.grant?.homeOwner === true || row.inherited?.homeOwner === true
                 return (
                   <li
                     className="da-gfs-grant-list__row"

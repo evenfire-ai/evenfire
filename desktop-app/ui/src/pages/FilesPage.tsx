@@ -2855,11 +2855,6 @@ export function FilesPage({
                   </div>
                   <GfsGrantList
                     agents={agentSubjects}
-                    protectedOwner={
-                      ctrl.homeOwnerId && ctrl.home?.resourceId
-                        ? { userId: ctrl.homeOwnerId, homeResourceId: ctrl.home.resourceId }
-                        : undefined
-                    }
                     derivationNotice={inheritedAccessNotice}
                     derivationNoticeHint={inheritedAccessNoticeHint}
                     error={grantsError}

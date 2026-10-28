@@ -1049,6 +1049,7 @@ export interface GfsGrantListItem {
   subject: { type: string; id?: string }
   permissions: string[]
   inherit: boolean
+  homeOwner?: true
   subjectProfile?: { name: string | null; email: string } | { name: string }
 }
 
@@ -1110,8 +1111,14 @@ export async function queryGrantItems(
   resourceId: string
 ): Promise<GfsGrantListItem[]> {
   const result = await pool.query(
-    `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
-       FROM gfs_grants
+    `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit,
+            EXISTS (
+              SELECT 1 FROM gfs_user_homes h
+               WHERE h.resource_id = g.resource_id
+                 AND g.subject_type = 'user'
+                 AND h.user_id::text = g.subject_id
+            ) AS home_owner
+       FROM gfs_grants g
       WHERE drive = $1 AND resource_id = $2::uuid
       ORDER BY created_at ASC, id ASC`,
     [drive, resourceId]
@@ -1128,6 +1135,7 @@ export async function queryGrantItems(
       },
       permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
       inherit: Boolean(row.inherit),
+      ...(row.home_owner === true ? { homeOwner: true as const } : {}),
     }
   })
 }
