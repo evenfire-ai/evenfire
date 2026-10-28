@@ -3448,114 +3448,174 @@ describe('FilesPage', () => {
     }
   )
 
-  it.each([
-    { existing: ['write', 'share'], expected: ['share'] },
-    { existing: ['write'], expected: [] },
-  ])(
-    'posts the exact Read intersection without adding a missing read bit ($existing)',
-    async ({ existing, expected }) => {
-      Object.defineProperty(window, 'clerum', {
-        configurable: true,
-        value: {
-          agents: { listMine: vi.fn(async () => []) },
-          team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
-        },
-      })
-      const requestJson = vi.fn(
-        async (
-          _method: unknown,
-          _url: unknown,
-          request: {
-            body: { permissions: string[] }
-          }
-        ) => {
-          // The server rejects an empty permissions array.
-          if (request.body.permissions.length === 0) throw new Error('permissions_invalid')
-          return {}
+  it('posts the nonempty Read intersection without adding a missing read bit', async () => {
+    const existing = ['write', 'share']
+    const expected = ['share']
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const requestJson = vi.fn(
+      async (
+        _method: unknown,
+        _url: unknown,
+        request: {
+          body: { permissions: string[] }
         }
-      ) as GfsTransport['requestJson']
-      const client = new GfsClient({
-        baseUrl: 'https://api.example',
-        requestJson,
-        fetchBytes: vi.fn() as GfsTransport['fetchBytes'],
-      })
-      const refreshShares = vi.fn(async () => undefined)
-      const createShare = vi.fn(
-        async (
-          subjects: string[],
-          options: {
-            permissions: string[]
-            includeDescendants: boolean
-          }
-        ) => {
-          await client.createShare(
-            {
-              resourceId: 'folder-1',
-              drive: 'main',
-              subjects: subjects.map(parseSubjectKey),
-              ...options,
-            },
-            randomUUID()
-          )
-          await refreshShares()
-        }
-      )
-      const pushToast = vi.fn()
-      hookMock.useGfsBrowserController.mockReturnValue({
-        ...baseController(),
-        current: {
-          resourceId: 'folder-1',
-          gfsUri: 'gfs://main/folder',
-          name: 'Team folder',
-          kind: 'directory',
-        },
-        affordances: {
-          held: ['read', 'write', 'share', 'manage_acl'],
-          canDelegate: true,
-          grantableBits: ['read', 'write', 'share', 'manage_acl'],
-          canCreateShare: true,
-        },
-        shares: [
-          {
-            id: 'editor-share',
-            drive: 'main',
-            resourceId: 'folder-1',
-            subject: { type: 'user', id: 'user-editor' },
-            subjectProfile: { name: 'Editor User', email: 'editor@example.test' },
-            permissions: existing,
-            includeDescendants: false,
-          },
-        ],
-        createShare,
-      })
-
-      renderFilesPage(pushToast)
-      await openManageDialog('Team folder')
-      fireEvent.click(screen.getByRole('button', { name: 'Access role for Editor User' }))
-      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
-      await waitFor(() => expect(requestJson).toHaveBeenCalledTimes(1))
-      expect(requestJson).toHaveBeenCalledWith(
-        'POST',
-        'https://api.example/api/v1/me/gfs/shares',
-        expect.objectContaining({
-          body: {
-            drive: 'main',
-            resourceId: 'folder-1',
-            subjects: [{ type: 'user', id: 'user-editor' }],
-            permissions: expected,
-            includeDescendants: false,
-          },
-        })
-      )
-      if (expected.length === 0) {
-        await waitFor(() =>
-          expect(pushToast).toHaveBeenCalledWith('The permission change failed.', 'error')
-        )
-      } else {
-        await waitFor(() => expect(refreshShares).toHaveBeenCalledTimes(1))
+      ) => {
+        // The server rejects an empty permissions array.
+        if (request.body.permissions.length === 0) throw new Error('permissions_invalid')
+        return {}
       }
-    }
-  )
+    ) as GfsTransport['requestJson']
+    const client = new GfsClient({
+      baseUrl: 'https://api.example',
+      requestJson,
+      fetchBytes: vi.fn() as GfsTransport['fetchBytes'],
+    })
+    const refreshShares = vi.fn(async () => undefined)
+    const createShare = vi.fn(
+      async (
+        subjects: string[],
+        options: {
+          permissions: string[]
+          includeDescendants: boolean
+        }
+      ) => {
+        await client.createShare(
+          {
+            resourceId: 'folder-1',
+            drive: 'main',
+            subjects: subjects.map(parseSubjectKey),
+            ...options,
+          },
+          randomUUID()
+        )
+        await refreshShares()
+      }
+    )
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'write', 'share', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'write', 'share', 'manage_acl'],
+        canCreateShare: true,
+      },
+      shares: [
+        {
+          id: 'editor-share',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'user', id: 'user-editor' },
+          subjectProfile: { name: 'Editor User', email: 'editor@example.test' },
+          permissions: existing,
+          includeDescendants: false,
+        },
+      ],
+      createShare,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Team folder')
+    fireEvent.click(screen.getByRole('button', { name: 'Access role for Editor User' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    await waitFor(() => expect(requestJson).toHaveBeenCalledTimes(1))
+    expect(requestJson).toHaveBeenCalledWith(
+      'POST',
+      'https://api.example/api/v1/me/gfs/shares',
+      expect.objectContaining({
+        body: {
+          drive: 'main',
+          resourceId: 'folder-1',
+          subjects: [{ type: 'user', id: 'user-editor' }],
+          permissions: expected,
+          includeDescendants: false,
+        },
+      })
+    )
+    await waitFor(() => expect(refreshShares).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps a write-only share removable while another share can be lowered', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const revokeShare = vi.fn(async () => undefined)
+    const createShare = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'write', 'share', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'write', 'share', 'manage_acl'],
+        canCreateShare: true,
+      },
+      shares: [
+        {
+          id: 'write-only',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'user', id: 'user-write' },
+          subjectProfile: { name: 'Write User', email: 'write@example.test' },
+          permissions: ['write'],
+          includeDescendants: false,
+        },
+        {
+          id: 'lowerable',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'user', id: 'user-lower' },
+          subjectProfile: { name: 'Lower User', email: 'lower@example.test' },
+          permissions: ['write', 'share'],
+          includeDescendants: true,
+        },
+      ],
+      revokeShare,
+      createShare,
+    })
+
+    renderFilesPage()
+    await openManageDialog('Team folder')
+    const writeOnly = screen.getByTestId('gfs-access-row-share-write-only')
+    expect(
+      within(writeOnly).queryByRole('button', { name: 'Access role for Write User' })
+    ).toBeNull()
+    expect(within(writeOnly).getByText('Editor')).toBeTruthy()
+    fireEvent.click(within(writeOnly).getByRole('button', { name: 'Actions for Write User' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('write-only'))
+
+    const lowerable = screen.getByTestId('gfs-access-row-share-lowerable')
+    fireEvent.click(within(lowerable).getByRole('button', { name: 'Access role for Lower User' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    await waitFor(() =>
+      expect(createShare).toHaveBeenCalledWith(['user:user-lower'], {
+        permissions: ['share'],
+        includeDescendants: true,
+      })
+    )
+  })
 
   it('shows the existing readable error when lowering a share is rejected', async () => {
     Object.defineProperty(window, 'clerum', {

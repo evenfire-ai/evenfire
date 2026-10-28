@@ -8,6 +8,7 @@ import {
   IconUser,
   IconWorkflows,
 } from '@components/SidebarNav/icons'
+import { permissionsForRole } from '@/gfs/delegation'
 import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
@@ -409,6 +410,7 @@ export function GfsGrantList({
                     <span className="da-gfs-grant-list__meta">
                       {onRevokeShare &&
                       isEditorGfsPermissions(item.permissions) &&
+                      permissionsForRole('read', false, item.permissions).length > 0 &&
                       canChangeSubjectRole(item.subject, agents) ? (
                         <DropdownSelect
                           ariaLabel={`Access role for ${label}`}
