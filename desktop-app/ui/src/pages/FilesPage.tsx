@@ -2117,7 +2117,11 @@ export function FilesPage({
       key: 'name',
       title: 'Name',
       render: (_value, resource) => (
-        <Flex vertical gap="small">
+        <Flex
+          vertical
+          align={renameTarget?.resourceId === resource.resourceId ? undefined : 'flex-start'}
+          gap="small"
+        >
           {renameTarget?.resourceId === resource.resourceId ? (
             <GfsInlineRename
               onCancel={() => setRenameTarget(null)}
@@ -2150,7 +2154,7 @@ export function FilesPage({
       title: 'Actions',
       align: 'right',
       render: (_value, resource) => (
-        <Flex align="center" gap="small" wrap>
+        <Flex align="center" gap="small" justify="flex-end" wrap>
           {rowCanManage(resource) ? (
             <AntButton
               htmlType="button"

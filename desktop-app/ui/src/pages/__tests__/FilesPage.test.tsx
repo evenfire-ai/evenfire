@@ -346,6 +346,48 @@ describe('FilesPage', () => {
     ])
   })
 
+  it('left aligns resource names and right aligns row actions', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'report.txt',
+          kind: 'file',
+          path: '/report.txt',
+          version: 1,
+          bytes: 12,
+          permissions: ['read', 'write', 'manage_acl'],
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    const row = screen
+      .getByRole('button', { name: 'Open report.txt' })
+      .closest<HTMLElement>('[data-testid^="gfs-resource-row-"]')
+    expect(row).not.toBeNull()
+
+    const cells = row!.querySelectorAll<HTMLElement>('.ant-table-cell')
+    const nameLayout = cells.item(1)?.querySelector<HTMLElement>('.ant-flex')
+    const actionsLayout = cells.item(3)?.querySelector<HTMLElement>('.ant-flex')
+    if (!nameLayout || !actionsLayout) throw new Error('Resource row layouts are missing')
+    expect(window.getComputedStyle(nameLayout).alignItems).toBe('flex-start')
+    expect(window.getComputedStyle(actionsLayout).justifyContent).toBe('flex-end')
+
+    fireEvent.click(within(row!).getByRole('button', { name: 'Rename report.txt' }))
+    const renameForm = screen.getByRole('form', { name: 'Rename resource' })
+    const currentNameCell = renameForm.closest<HTMLElement>('.ant-table-cell')
+    const currentNameLayout = currentNameCell?.querySelector<HTMLElement>('.ant-flex')
+    if (!currentNameLayout) throw new Error('Renaming resource layout is missing')
+    expect(window.getComputedStyle(currentNameLayout).alignItems).toBe('stretch')
+  })
+
   it('shows permission-backed share and rename actions for folder and file children', () => {
     const folder = {
       resourceId: 'folder-child',
