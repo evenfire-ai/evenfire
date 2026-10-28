@@ -1644,6 +1644,8 @@ describe('App deep-link orchestration', () => {
     expect(main.live()).toBeNull()
 
     const listCallsBeforeSecond = listApps.mock.calls.length
+    const catalogReadsBeforeSecond = handle.refreshCatalog.mock.calls.length
+    const teamDirectoryReadsBeforeSecond = handle.teamDirectory.mock.calls.length
     const opensBeforeSecond = openSandboxUi().mock.calls.length
     const switchesBeforeSecond = handle.switchTeam.mock.calls.length
     const dismiss = confirmDialogHarness.props?.onCancel
@@ -1667,6 +1669,58 @@ describe('App deep-link orchestration', () => {
     const second = queue.enqueue(secondTarget)
     act(() => emitDeepLink?.(second))
     await confirmPendingAppLink()
+
+    await act(async () => {
+      await Promise.resolve()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    })
+    expect(getController().getCurrentTeamId()).toBe('team-b')
+    expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSecond)
+    expect(handle.refreshCatalog.mock.calls.length).toBe(catalogReadsBeforeSecond)
+    expect(handle.teamDirectory.mock.calls.length).toBe(teamDirectoryReadsBeforeSecond)
+    expect(listApps.mock.calls.length).toBe(listCallsBeforeSecond)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second.id)
+    expect(main.live()).toBeNull()
+
+    // Independent review diagnostic: cancellation of a different pending
+    // queue item must never release the unsettled first transaction.
+    const foreignTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'ready-team-b-app',
+        path: '/foreign-dismissed-link',
+        teamId: 'team-b',
+      })
+    )
+    if (!foreignTarget) throw new Error('producer rejected the foreign cancellation link')
+    const foreign = queue.enqueue(foreignTarget)
+    act(() => emitDeepLink?.(foreign))
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => {
+      confirmDialogHarness.props?.onCancel()
+      await Promise.resolve()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(foreign.id))
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === foreign.id)).toHaveLength(1)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second.id)
+    expect(queue.list().map(item => item.id)).toEqual([first.id, second.id])
+    await act(async () => {
+      await Promise.resolve()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    })
+    expect(getController().getCurrentTeamId()).toBe('team-b')
+    expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSecond)
+    expect(handle.refreshCatalog.mock.calls.length).toBe(catalogReadsBeforeSecond)
+    expect(handle.teamDirectory.mock.calls.length).toBe(teamDirectoryReadsBeforeSecond)
+    expect(listApps.mock.calls.length).toBe(listCallsBeforeSecond)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond)
+    expect(main.live()).toBeNull()
+    expect(embedState().owner).toBeNull()
+
     if (schedule.supersedeWithNavigation) {
       act(() => getController().handleNavSelect(DESKTOP_ROUTES.files))
     }
@@ -1723,6 +1777,9 @@ describe('App deep-link orchestration', () => {
     expect(new Set(acknowledgedIds).size).toBe(acknowledgedIds.length)
     expect(acknowledgedIds.filter(id => id === first.id)).toHaveLength(1)
     expect(acknowledgedIds.filter(id => id === second.id)).toHaveLength(1)
+    expect(acknowledgedIds.filter(id => id === foreign.id)).toHaveLength(1)
+    expect(acknowledgedIds).toEqual([foreign.id, first.id, second.id])
+    expect(queue.list()).toEqual([])
     queryClient.clear()
   }
 
