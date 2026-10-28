@@ -67,7 +67,6 @@ describe('Retained home of a deleted user', () => {
       attempts: 1,
       lastAttemptAt: null,
       updatedAt: '2026-10-27T00:00:00.000Z',
-      driveMismatch: false,
       conflictDetail: null,
     }
     vi.mocked(api.getAdminUserContext).mockRejectedValueOnce(
@@ -102,5 +101,6 @@ describe('Retained home of a deleted user', () => {
     render(<UserDetailsPage />)
     expect(await screen.findByRole('heading', { name: 'Member' })).toBeVisible()
     expect(screen.getByRole('button', { name: 'Edit' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Delete account…' })).toBeVisible()
   })
 })

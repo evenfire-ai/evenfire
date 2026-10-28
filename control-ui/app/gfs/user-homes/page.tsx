@@ -77,10 +77,6 @@ export default function GfsUserHomesPage() {
                       <dd>{inventory.counts[item]}</dd>
                     </div>
                   ))}
-                  <div>
-                    <dt>Drive mismatch</dt>
-                    <dd>{inventory.counts.driveMismatch}</dd>
-                  </div>
                 </dl>
               </section>
             ) : null}
@@ -110,24 +106,23 @@ export default function GfsUserHomesPage() {
                       { key: 'state', label: 'State' },
                       { key: 'path', label: 'Path' },
                       { key: 'drive', label: 'Drive' },
-                      { key: 'mismatch', label: 'Drive mismatch' },
                     ]}
                   />
                 </thead>
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td colSpan={6}>Loading home folders…</td>
+                      <td colSpan={5}>Loading home folders…</td>
                     </tr>
                   ) : null}
                   {!loading && error ? (
                     <tr>
-                      <td colSpan={6}>Home folders could not be loaded.</td>
+                      <td colSpan={5}>Home folders could not be loaded.</td>
                     </tr>
                   ) : null}
                   {!loading && !error && inventory?.items.length === 0 ? (
                     <tr>
-                      <td colSpan={6}>No home folders match this state.</td>
+                      <td colSpan={5}>No home folders match this state.</td>
                     </tr>
                   ) : null}
                   {!loading && !error
@@ -152,7 +147,6 @@ export default function GfsUserHomesPage() {
                           <td>{home.state}</td>
                           <td>{home.path ?? 'Not available'}</td>
                           <td>{home.drive ?? 'Not assigned'}</td>
-                          <td>{home.driveMismatch ? 'Yes' : 'No'}</td>
                         </TableRow>
                       ))
                     : null}

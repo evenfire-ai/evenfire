@@ -15,6 +15,8 @@ import type { ApiRequestError } from '@lib/api.types'
 const POLL_INTERVAL_MS = 5_000
 const POLL_WINDOW_MS = 60_000
 const OWNER_PERMISSIONS = ['read', 'write', 'delete', 'share', 'manage_acl']
+const BOUND_HOME_RECOVERY =
+  'In the Control UI GFS browser on drive main, move or rename any item at the reserved path, then move the home back to that path and press Retry.'
 
 const CONFLICT_CAUSES: Record<GfsUserHomeConflict, string> = {
   path_conflict: 'An item was found at the reserved home path.',
@@ -129,6 +131,48 @@ function ConflictDetails({
   )
 }
 
+function PathConflictRecovery({
+  home,
+  detail,
+}: {
+  home: GfsUserHome
+  detail: GfsUserHomeConflictDetail | null
+}) {
+  const reservedPath = home.storageUsername === null ? null : `/Users/${home.storageUsername}`
+  if (home.resourceId !== null) {
+    return (
+      <section aria-label="Path conflict recovery">
+        <span className="cu-chip">Home moved</span>
+        <dl>
+          <dt>Current home path</dt>
+          <dd>{home.path ?? 'Not available'}</dd>
+          <dt>Reserved home path</dt>
+          <dd>{reservedPath ?? 'Not available'}</dd>
+        </dl>
+        <p>{BOUND_HOME_RECOVERY}</p>
+      </section>
+    )
+  }
+
+  const resource = detail?.code === 'path_conflict' ? detail.resource : undefined
+  const pathLabel = reservedPath ?? 'the reserved home path'
+  const conflictDescription =
+    resource === null
+      ? `The item that occupied ${pathLabel} no longer exists.`
+      : resource?.path && resource.path === reservedPath
+        ? `Another item occupies ${pathLabel}.`
+        : `An item was found at ${pathLabel}.`
+  return (
+    <section aria-label="Path conflict recovery">
+      <p>{conflictDescription}</p>
+      <p>
+        In the Control UI GFS browser on drive main, if an item is still at the reserved path,
+        rename or move it, then press Retry. Or enter a different folder name and press Retry.
+      </p>
+    </section>
+  )
+}
+
 export function GfsUserHomeBlock({ userId }: { userId: string }) {
   const [home, setHome] = useState<GfsUserHome | null>(null)
   const [conflictDetail, setConflictDetail] = useState<GfsUserHomeConflictDetail | null>(null)
@@ -223,14 +267,22 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
     setBusy(true)
     setError('')
     try {
-      const name = home?.storageUsername === null && folderName === '' ? undefined : folderName
+      const name =
+        boundPathConflict || (home?.storageUsername === null && folderName === '')
+          ? undefined
+          : folderName
       const { home: updated } = await retryGfsUserHome(userId, name)
       setHome(updated)
       setConflictDetail(null)
       setStillPending(false)
       setPolling(updated.state === 'pending')
     } catch (caught) {
-      setError(errorMessage(caught))
+      const requestError = caught as ApiRequestError
+      if (requestError?.status === 409 && requestError.code === 'home_not_retryable') {
+        setError(`This home could not be retried. If the home is bound: ${BOUND_HOME_RECOVERY}`)
+      } else {
+        setError(errorMessage(caught))
+      }
     } finally {
       setBusy(false)
     }
@@ -256,6 +308,8 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
     home?.state === 'conflict' &&
     (home.conflictCode === 'path_conflict' || home.conflictCode === 'ancestor_grant_conflict')
   const ownerConflict = home?.state === 'conflict' && home.conflictCode === 'ownership_conflict'
+  const boundPathConflict =
+    home?.state === 'conflict' && home.conflictCode === 'path_conflict' && home.resourceId !== null
 
   return (
     <section aria-labelledby="user-home-title" className="cu-card">
@@ -275,10 +329,16 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
               <dt>Resource ID</dt>
               <dd data-testid="home-resource-id">{home.resourceId ?? 'Not available'}</dd>
             </dl>
-            {home.driveMismatch ? <p role="status">This home is on a different drive.</p> : null}
             {home.state === 'conflict' && home.conflictCode ? (
               <>
-                <p role="alert">{CONFLICT_CAUSES[home.conflictCode]}</p>
+                <p role="alert">
+                  {boundPathConflict
+                    ? 'The home is not at its reserved path.'
+                    : CONFLICT_CAUSES[home.conflictCode]}
+                </p>
+                {home.conflictCode === 'path_conflict' ? (
+                  <PathConflictRecovery home={home} detail={conflictDetail} />
+                ) : null}
                 <ConflictDetails detail={conflictDetail} code={home.conflictCode} />
               </>
             ) : null}
@@ -290,6 +350,7 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
                   id="user-home-folder-name"
                   value={folderName}
                   onChange={event => setFolderName(event.currentTarget.value)}
+                  readOnly={boundPathConflict}
                   disabled={busy}
                 />
                 <button

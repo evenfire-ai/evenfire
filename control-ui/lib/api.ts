@@ -677,7 +677,6 @@ export type GfsUserHome = {
   attempts: number
   lastAttemptAt: string | null
   updatedAt: string
-  driveMismatch: boolean
 }
 
 export type GfsUserHomeConflictAccess = {
@@ -711,7 +710,7 @@ export type GfsUserHomeDetail = GfsUserHome & {
 export type GfsUserHomeInventory = {
   items: GfsUserHome[]
   nextCursor: string | null
-  counts: Record<GfsUserHomeState, number> & { driveMismatch: number }
+  counts: Record<GfsUserHomeState, number>
 }
 
 export function getGfsUserHomes(

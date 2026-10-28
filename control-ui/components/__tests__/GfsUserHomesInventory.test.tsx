@@ -29,19 +29,18 @@ const retired: GfsUserHome = {
   attempts: 1,
   lastAttemptAt: null,
   updatedAt: '2026-10-27T00:00:00.000Z',
-  driveMismatch: true,
 }
 const inventory: GfsUserHomeInventory = {
   items: [retired],
   nextCursor: 'next-page',
-  counts: { pending: 3, ready: 5, conflict: 2, retired: 1, driveMismatch: 1 },
+  counts: { pending: 3, ready: 5, conflict: 2, retired: 1 },
 }
 
 beforeEach(() => vi.clearAllMocks())
 afterEach(cleanup)
 
 describe('Home folder inventory', () => {
-  it('shows whole-table counts, the drive mismatch and the retained path for a deleted user', async () => {
+  it('shows whole-table counts and the retained path for a deleted user', async () => {
     vi.mocked(getGfsUserHomes).mockResolvedValue(inventory)
     render(<GfsUserHomesPage />)
     const table = await screen.findByRole('table', { name: 'Home folders' })
@@ -50,9 +49,8 @@ describe('Home folder inventory', () => {
     const row = link.closest('tr')!
     expect(within(row).getByText('/Users/former-member')).toBeVisible()
     expect(within(row).getByText('Deleted user')).toBeVisible()
-    expect(within(row).getByText('Yes')).toBeVisible()
+    expect(within(row).getByText('main')).toBeVisible()
     const counts = screen.getByRole('region', { name: 'Home folder counts' })
-    expect(within(counts).getByText('Drive mismatch')).toBeVisible()
     expect(within(counts).getByText('5')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()

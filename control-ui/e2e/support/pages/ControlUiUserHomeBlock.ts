@@ -33,14 +33,18 @@ export class ControlUiUserHomeBlock {
 
   async retryWithName(name: string): Promise<void> {
     const home = this.page.getByRole('region', { name: 'Home folder' })
-    await home.getByLabel('Folder name').fill(name)
+    const folderName = home.getByLabel('Folder name')
+    await expect(folderName).toBeEditable()
+    await folderName.fill(name)
     const response = this.page.waitForResponse(
       result =>
         result.request().method() === 'POST' &&
         /\/gfs\/user-homes\/[^/]+\/retry$/.test(new URL(result.url()).pathname)
     )
     await home.getByRole('button', { name: 'Retry', exact: true }).click()
-    expect((await response).ok()).toBe(true)
+    const result = await response
+    expect(result.ok()).toBe(true)
+    expect(result.request().postDataJSON()).toEqual({ storageUsername: name })
     await expect(home.getByText(/^(pending|ready)$/, { exact: true })).toBeVisible()
   }
 

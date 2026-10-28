@@ -58,6 +58,27 @@ describe('GFS user-home operator API', () => {
     })
   })
 
+  it('sends no name on Retry and preserves a 409 before a successful retry', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'home_not_retryable' }), { status: 409 })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ home: { state: 'pending' } }), { status: 202 })
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(retryGfsUserHome('user')).rejects.toMatchObject({
+      status: 409,
+      code: 'home_not_retryable',
+    })
+    await expect(retryGfsUserHome('user')).resolves.toEqual({ home: { state: 'pending' } })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST', body: '{}' })
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST', body: '{}' })
+  })
+
   it('preserves resolved conflict details on a detail response', async () => {
     const detail = {
       code: 'ownership_conflict',

@@ -25,7 +25,6 @@ const baseHome: GfsUserHomeDetail = {
   attempts: 1,
   lastAttemptAt: null,
   updatedAt: '2026-10-27T00:00:00.000Z',
-  driveMismatch: false,
   conflictDetail: null,
 }
 
@@ -40,50 +39,147 @@ describe('Home folder block', () => {
     'renders the %s state with the server path and drive',
     async state => {
       vi.mocked(getGfsUserHome).mockResolvedValue({
-        home: { ...baseHome, state, drive: 'archive', path: '/Users/member', driveMismatch: true },
+        home: { ...baseHome, state },
       })
       render(<GfsUserHomeBlock userId={baseHome.userId} />)
       const region = await screen.findByRole('region', { name: 'Home folder' })
       expect(await within(region).findByText(state, { exact: true })).toBeVisible()
       expect(within(region).getByText('/Users/member')).toBeVisible()
-      expect(within(region).getByText('archive')).toBeVisible()
-      expect(within(region).getByText('This home is on a different drive.')).toBeVisible()
-      expect(within(region).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
-      expect(
-        within(region).queryByRole('button', { name: 'Restore owner access' })
-      ).not.toBeInTheDocument()
+      expect(within(region).getByText('main')).toBeVisible()
     }
   )
 
-  it.each([
-    ['path_conflict', 'An item was found at the reserved home path.'],
-    [
-      'ancestor_grant_conflict',
-      'An inherited grant or share on the drive root or Users folder exposed home folders.',
-    ],
-  ] as const)('offers Retry with the reserved name for %s', async (conflictCode, message) => {
+  it('explains both recovery choices for an unbound path conflict and retries a new name', async () => {
     const conflict: GfsUserHomeDetail = {
       ...baseHome,
       state: 'conflict',
-      conflictCode,
-      conflictDetail:
-        conflictCode === 'path_conflict'
-          ? { code: 'path_conflict', resource: null, access: [] }
-          : { code: 'ancestor_grant_conflict', entries: [] },
+      path: null,
+      resourceId: null,
+      conflictCode: 'path_conflict',
+      conflictDetail: {
+        code: 'path_conflict',
+        resource: {
+          resourceId: 'foreign-id',
+          path: '/Users/member',
+          kind: 'directory',
+          createdAt: '2026-10-27T00:00:00Z',
+        },
+        access: [],
+      },
     }
     vi.mocked(getGfsUserHome).mockResolvedValue({ home: conflict })
     vi.mocked(retryGfsUserHome).mockResolvedValue({
       home: { ...conflict, state: 'pending', conflictCode: null },
     })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
-    expect(await screen.findByRole('alert')).toHaveTextContent(message)
-    if (conflictCode === 'path_conflict') {
-      expect(screen.getByText('The conflicting item no longer exists.')).toBeVisible()
-    }
+    const guidance = await screen.findByRole('region', { name: 'Path conflict recovery' })
+    expect(within(guidance).getByText('Another item occupies /Users/member.')).toBeVisible()
+    expect(within(guidance).getByText(/GFS browser.*drive main.*rename or move/i)).toBeVisible()
+    expect(within(guidance).getByText(/enter a different folder name.*Retry/i)).toBeVisible()
     const name = screen.getByLabelText('Folder name')
     expect(name).toHaveValue('member')
-    expect(screen.queryByRole('button', { name: 'Restore owner access' })).not.toBeInTheDocument()
     fireEvent.change(name, { target: { value: 'member-new' } })
+    expect(name).toHaveValue('member-new')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, 'member-new')
+  })
+
+  it('explains a moved bound home and retries without a new name', async () => {
+    const conflict: GfsUserHomeDetail = {
+      ...baseHome,
+      state: 'conflict',
+      path: '/Moved/member',
+      conflictCode: 'path_conflict',
+      conflictDetail: { code: 'path_conflict', resource: null, access: [] },
+    }
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: conflict })
+    vi.mocked(retryGfsUserHome).mockResolvedValue({
+      home: { ...conflict, state: 'pending', conflictCode: null },
+    })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+
+    const guidance = await screen.findByRole('region', { name: 'Path conflict recovery' })
+    expect(within(guidance).getByText('Home moved')).toBeVisible()
+    expect(within(guidance).getByText('/Moved/member')).toBeVisible()
+    expect(within(guidance).getByText('/Users/member')).toBeVisible()
+    expect(within(guidance).getByText(/GFS browser.*drive main.*move or rename/i)).toBeVisible()
+    expect(within(guidance).getByText(/move the home back.*Retry/i)).toBeVisible()
+    const name = screen.getByLabelText('Folder name')
+    expect(name).toHaveValue('member')
+    expect(name).toHaveAttribute('readonly')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, undefined)
+  })
+
+  it('shows Not available for a moved home without a current path', async () => {
+    vi.mocked(getGfsUserHome).mockResolvedValue({
+      home: {
+        ...baseHome,
+        state: 'conflict',
+        path: null,
+        conflictCode: 'path_conflict',
+        conflictDetail: { code: 'path_conflict', resource: null, access: [] },
+      },
+    })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    const guidance = await screen.findByRole('region', { name: 'Path conflict recovery' })
+    expect(within(guidance).getByText('Not available')).toBeVisible()
+    expect(within(guidance).getByText('/Users/member')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled()
+  })
+
+  it('shows bound-home recovery guidance for a 409 retry and accepts a later retry', async () => {
+    const conflict: GfsUserHomeDetail = {
+      ...baseHome,
+      state: 'conflict',
+      path: '/Moved/member',
+      conflictCode: 'path_conflict',
+      conflictDetail: { code: 'path_conflict', resource: null, access: [] },
+    }
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: conflict })
+    vi.mocked(retryGfsUserHome)
+      .mockRejectedValueOnce(
+        Object.assign(new Error('409 Conflict - home_not_retryable'), {
+          code: 'home_not_retryable',
+          status: 409,
+        })
+      )
+      .mockResolvedValueOnce({ home: { ...conflict, state: 'pending', conflictCode: null } })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.click(retry)
+    const error = await screen.findByText(/This home could not be retried/)
+    expect(error).toHaveTextContent(/GFS browser.*drive main.*move or rename/i)
+    expect(error).toHaveTextContent(/move the home back.*Retry/i)
+    expect(error).not.toHaveTextContent('home_not_retryable')
+    expect(screen.getByLabelText('Folder name')).toHaveAttribute('readonly')
+    expect(screen.getByText('Home moved')).toBeVisible()
+    expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, undefined)
+    fireEvent.click(retry)
+    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    expect(retryGfsUserHome).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the existing editable Retry behavior for ancestor access conflicts', async () => {
+    const conflict: GfsUserHomeDetail = {
+      ...baseHome,
+      state: 'conflict',
+      conflictCode: 'ancestor_grant_conflict',
+      conflictDetail: { code: 'ancestor_grant_conflict', entries: [] },
+    }
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: conflict })
+    vi.mocked(retryGfsUserHome).mockResolvedValue({
+      home: { ...conflict, state: 'pending', conflictCode: null },
+    })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'An inherited grant or share on the drive root or Users folder exposed home folders.'
+    )
+    const name = screen.getByLabelText('Folder name')
+    fireEvent.change(name, { target: { value: 'member-new' } })
+    expect(name).toHaveValue('member-new')
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(await screen.findByText('pending', { exact: true })).toBeVisible()
     expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, 'member-new')
@@ -93,6 +189,8 @@ describe('Home folder block', () => {
     const conflict: GfsUserHomeDetail = {
       ...baseHome,
       state: 'conflict',
+      path: null,
+      resourceId: null,
       conflictCode: 'path_conflict',
       conflictDetail: { code: 'path_conflict', resource: null, access: [] },
     }
@@ -104,6 +202,10 @@ describe('Home folder block', () => {
       .mockResolvedValueOnce({ home: { ...conflict, state: 'pending', conflictCode: null } })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const name = await screen.findByLabelText('Folder name')
+    const guidance = screen.getByRole('region', { name: 'Path conflict recovery' })
+    expect(
+      within(guidance).getByText('The item that occupied /Users/member no longer exists.')
+    ).toBeVisible()
     fireEvent.change(name, { target: { value: '..' } })
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(await screen.findByText(/Enter a valid folder name/)).toBeVisible()
@@ -317,12 +419,24 @@ describe('Home folder block', () => {
     vi.mocked(getGfsUserHome).mockResolvedValue({
       home: { ...baseHome, state: 'conflict', conflictCode: 'path_conflict', conflictDetail: null },
     })
-    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    const first = render(<GfsUserHomeBlock userId={baseHome.userId} />)
     expect(
       await screen.findByText('Conflict details are unavailable. Refresh the page to check again.')
     ).toBeVisible()
     expect(screen.queryByRole('region', { name: 'Path conflict details' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
+    first.unmount()
+    vi.mocked(getGfsUserHome).mockResolvedValueOnce({
+      home: {
+        ...baseHome,
+        state: 'conflict',
+        conflictCode: 'path_conflict',
+        conflictDetail: { code: 'path_conflict', resource: null, access: [] },
+      },
+    })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    const details = await screen.findByRole('region', { name: 'Path conflict details' })
+    expect(within(details).getByText('The conflicting item no longer exists.')).toBeVisible()
   })
 
   it('stops polling after 60 seconds, then Refresh reveals a ready home', async () => {
