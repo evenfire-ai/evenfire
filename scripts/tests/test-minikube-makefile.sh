@@ -258,6 +258,8 @@ assert_contains minikube-start 'open -a "Docker Desktop"'
 assert_not_contains minikube-start "docker info"
 assert_contains minikube-deploy-all "with-t2-mutation-lock.sh"
 assert_contains minikube-deploy-all-body "minikube-sync-auth-key"
+assert_contains minikube-deploy-all-body "scripts/minikube/sync-external-rest-api-cors-origin.sh"
+assert_contains minikube-sync-external-rest-api-cors-origin "scripts/minikube/sync-external-rest-api-cors-origin.sh"
 assert_contains minikube-build-images "with-t2-mutation-lock.sh"
 assert_contains minikube-build-images-body "require-t2-mutation-lock.sh"
 assert_contains minikube-build-custom-coordinator-fixture "with-t2-mutation-lock.sh"
