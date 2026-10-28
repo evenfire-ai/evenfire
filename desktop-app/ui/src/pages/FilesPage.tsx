@@ -433,8 +433,7 @@ export function FilesPage({
     affordances,
     affordancesError,
     loadingAffordances,
-    loadingAccessible,
-    loading,
+    loadingCurrentView,
     accessibleError,
     accessibleNotice,
     error,
@@ -1979,21 +1978,10 @@ export function FilesPage({
       return (left.name || left.drive).localeCompare(right.name || right.drive)
     })
   }, [accessibleResources, currentIsFile, currentIsFolder, items])
-  // authorityPending keeps the loading state up: cached rows must not render
-  // (and must not be mistaken for an empty folder) until discovery re-proves
-  // the session (R4 spec §1).
-  //
-  // A settled discovery error is not a pending load, though — the same
-  // principle the controller already applies to `loadingAccessible`. The flag
-  // itself stays true, because a 429 or a 404 does not re-prove the session and
-  // the controller must go on withholding every cached surface; what changes is
-  // only that the page stops calling that a load in progress. Without this a
-  // 404 from an older server leaves "Loading files…" spinning forever
-  // underneath the notice that says discovery is unavailable, and a link opened
-  // while discovery is down never reveals the file it resolved.
-  const visibleLoading =
-    (ctrl.authorityPending && !ctrl.discoveryFailure) ||
-    (currentIsFolder ? loading : !current ? loadingAccessible : false)
+  // The controller owns current-view loading semantics, including the
+  // page-wide authority gate and the distinction between initial and
+  // background query activity.
+  const visibleLoading = loadingCurrentView
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
   const unavailableLocation = !current && openError === GFS_UNAVAILABLE_LOCATION_MESSAGE
   // Scoped to the root view on purpose: `accessibleError` only reaches

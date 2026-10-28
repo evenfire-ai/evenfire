@@ -340,6 +340,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     staleTime: Infinity,
   })
   const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
+  const accessibleQueryEnabled =
+    Boolean(sessionScope) && canListAccessibleResources && accessState === 'active'
   const setAccessState = useCallback(
     (next: GfsAccessState) => {
       queryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous'), next)
@@ -434,7 +436,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       return listAccessible(DRIVE, pageParam)
     },
-    enabled: Boolean(sessionScope) && canListAccessibleResources && accessState === 'active',
+    enabled: accessibleQueryEnabled,
     // Accessible resources are permission-derived state. Another session can
     // revoke a grant/share while this user is away from Files, so an
     // Infinity-cached list must not survive a Files remount without a server
@@ -462,6 +464,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     canListAccessibleResources &&
     accessState === 'active' &&
     accessibleQuery.dataUpdatedAt < authorityEpochRef.current
+  const accessibleInitialRequestPending =
+    accessibleQueryEnabled && !accessibleQuery.isError && accessibleQuery.data === undefined
+  const childrenQueryEnabled =
+    Boolean(sessionScope) && Boolean(current) && currentIsDirectory && accessState === 'active'
 
   const childrenQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsChildren(
@@ -471,8 +477,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     ),
     queryFn: ({ pageParam }) =>
       window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
-    enabled:
-      Boolean(sessionScope) && Boolean(current) && currentIsDirectory && accessState === 'active',
+    enabled: childrenQueryEnabled,
     // Folder contents change out-of-band: agents with host grants, other
     // sessions, and operator writes never pass through this client. Revisit
     // and window focus must revalidate — an Infinity-fresh cached listing
@@ -946,6 +951,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           : null,
     }
   }, [accessibleErrorMessage, accessibleErrorUpdatedAt])
+  const authorityWait = authorityPending && !discoveryFailure
+  const childrenInitialRequestPending =
+    childrenQueryEnabled && !childrenQuery.isError && childrenQuery.data === undefined
+  const loadingAccessible =
+    canListAccessibleResources &&
+    !accessibleQuery.isError &&
+    (authorityWait || accessibleInitialRequestPending)
+  const loading = childrenInitialRequestPending || (authorityWait && items.length === 0)
+  const loadingCurrentView =
+    authorityWait || (currentIsDirectory ? loading : !current ? loadingAccessible : false)
   // The folder plane's own rate-limit deadline. `listAccessible` and
   // `listChildren` are refused by ONE server budget, so a 429 on either means
   // the next focus-driven refetch of either spends a request the server just
@@ -1386,27 +1401,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     rowAffordancesError: rowAffordancesQuery.error
       ? toPresentedMessage(rowAffordancesQuery.error)
       : null,
-    // Only the `authorityPending` term stands down on a settled discovery
-    // error, never the children term: a folder that is genuinely fetching must
-    // keep the spinner, or the view flashes "this folder is empty" mid-load.
-    // Without the gate a 429 on discovery — which leaves `authorityPending`
-    // true by design, because a rate limit does not re-prove the session —
-    // pinned every consumer of this field on "Loading files…" with nothing
-    // in flight to end it.
-    loading:
-      ((authorityPending && !discoveryFailure) || childrenQuery.isFetching) && items.length === 0,
-    // A settled discovery error is not a pending load. Without this the
-    // spinner outlived the failure for every consumer that derives its
-    // loading state from here alone (ComposerGlobalFilesModal). The term
-    // belongs on this field only: `loading` above reports the INDEPENDENT
-    // children query, and gating it on a discovery error hid the spinner while
-    // a folder was genuinely loading, flashing "this folder is empty".
-    loadingAccessible:
-      !accessibleQuery.isError &&
-      ((authorityPending && canListAccessibleResources) ||
-        (canListAccessibleResources &&
-          accessibleQuery.isFetching &&
-          accessibleResources.length === 0)),
+    // These query-facing flags mean an enabled query has no settled result,
+    // not that an empty cached result happens to be fetching again. Keep the
+    // children initial request independent from discovery failure handling.
+    loading,
+    loadingAccessible,
+    // FilesPage has a stricter page-wide authority gate than other controller
+    // consumers; keep that precedence in one derived view decision.
+    loadingCurrentView,
     error: childrenErrorMessage,
     // The clock the children failure is dated by. A countdown needs the moment
     // the server refused, and only the query knows it; deriving it from render
