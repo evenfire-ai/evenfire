@@ -3131,7 +3131,7 @@ export function App() {
                                       }
                                       onNewChat={handleNewWorkspaceChatTab}
                                       onExpandFullScreen={expandChatDrawerToFullScreen}
-                                      onToggle={toggleChatDrawer}
+                                      onCollapse={closeChatDrawer}
                                       containerRef={chatDrawerRef}
                                       ready={drawerReady}
                                       onResizeHandleMouseDown={

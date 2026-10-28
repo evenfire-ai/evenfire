@@ -4,6 +4,8 @@ import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
 import { createWorkspaceTabsState, newChatTab, openChatTab } from '@lib/workspaceTabs'
 import { ChatSwitcher } from '.'
@@ -31,8 +33,20 @@ const tabs = newChatTab(
   'blank',
   'alpha'
 ).tabs
+const stylesheet = readFileSync(path.join(process.cwd(), 'ui/src/styles.css'), 'utf8')
 
 describe('ChatSwitcher', () => {
+  it('applies the drawer header width constraint to the chat selector', () => {
+    render(<ChatSwitcher tabs={tabs} activeTabId="one" onSelect={vi.fn()} onNewChat={vi.fn()} />)
+
+    const selector = screen.getByRole('combobox', { name: 'Open chats' }).closest('.ant-select')
+    expect(selector?.classList.contains('chat-switcher')).toBe(true)
+    const css = stylesheet.match(/\.chat-drawer__header-main \.chat-switcher\s*\{([^}]*)\}/)?.[1]
+    expect(css).toMatch(/display:\s*flex/)
+    expect(css).toMatch(/min-width:\s*0/)
+    expect(css).toMatch(/width:\s*100%/)
+  })
+
   it('shows the active chat in the trigger and lists open chats on demand', async () => {
     const onSelect = vi.fn()
     const user = userEvent.setup()

@@ -53,6 +53,7 @@ export function ChatSwitcher({
   return (
     <Select
       aria-label="Open chats"
+      className="chat-switcher"
       labelInValue={false}
       labelRender={({ label, value }) => renderTabLabel(String(value), label)}
       optionRender={option => renderTabLabel(String(option.value), option.label)}

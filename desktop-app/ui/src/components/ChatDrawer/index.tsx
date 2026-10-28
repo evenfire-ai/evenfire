@@ -18,7 +18,7 @@ export function ChatDrawer({
   header,
   onNewChat,
   onExpandFullScreen,
-  onToggle,
+  onCollapse,
   containerRef,
   ready,
   onResizeHandleMouseDown,
@@ -84,7 +84,7 @@ export function ChatDrawer({
               size="small"
               type="text"
               title="Collapse chat drawer"
-              onClick={onToggle}
+              onClick={onCollapse}
             />
           </Flex>
         }

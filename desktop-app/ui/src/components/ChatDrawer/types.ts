@@ -12,8 +12,8 @@ export type ChatDrawerProps = {
    */
   header: ReactNode
   onNewChat: () => void
-  /** Toggles the drawer. In this header it only ever collapses it — the reopen control lives on the embed title bar. */
-  onToggle: () => void
+  /** Collapses the drawer; its title-bar toggle owns reopening it. */
+  onCollapse: () => void
   /** Ejects the visible conversation into the full-screen chat route. */
   onExpandFullScreen: () => void
   /** Scroll container the embedded <ChatPage> anchors to. */

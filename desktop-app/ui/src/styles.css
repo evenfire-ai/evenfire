@@ -13712,10 +13712,12 @@ pre {
 /* Open-chats selector in the drawer header — a thin dropdown over chatViewTabs.
    The narrow drawer column can't host a horizontal tab strip, so the switcher
    lists chats vertically with their status badge. */
-.chat-switcher {
+.chat-drawer__header-main .chat-switcher {
+  display: flex;
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
+  width: 100%;
 }
 
 .chat-switcher__trigger {

@@ -28,7 +28,7 @@ afterEach(() => {
 
 function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = {}) {
   const onNewChat = props.onNewChat ?? vi.fn()
-  const onToggle = props.onToggle ?? vi.fn()
+  const onCollapse = props.onCollapse ?? vi.fn()
   const onExpandFullScreen = props.onExpandFullScreen ?? vi.fn()
   const onResizeHandleMouseDown = props.onResizeHandleMouseDown ?? vi.fn()
   const onResizeHandleKeyDown = props.onResizeHandleKeyDown ?? vi.fn()
@@ -38,7 +38,7 @@ function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = 
       header={props.header ?? <span className="chat-drawer__title">Drawer chat</span>}
       onNewChat={onNewChat}
       onExpandFullScreen={onExpandFullScreen}
-      onToggle={onToggle}
+      onCollapse={onCollapse}
       containerRef={containerRef}
       ready={props.ready ?? true}
       onResizeHandleMouseDown={onResizeHandleMouseDown}
@@ -53,7 +53,7 @@ function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = 
     ...utils,
     onNewChat,
     onExpandFullScreen,
-    onToggle,
+    onCollapse,
     onResizeHandleMouseDown,
     onResizeHandleKeyDown,
   }
@@ -70,13 +70,13 @@ describe('ChatDrawer', () => {
   })
 
   it('wires the new-chat, full-screen, and collapse actions', () => {
-    const { onNewChat, onExpandFullScreen, onToggle } = renderDrawer()
+    const { onNewChat, onExpandFullScreen, onCollapse } = renderDrawer()
     fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
     fireEvent.click(screen.getByRole('button', { name: 'Open chat in full screen' }))
     fireEvent.click(screen.getByRole('button', { name: 'Collapse chat drawer' }))
     expect(onNewChat).toHaveBeenCalledTimes(1)
     expect(onExpandFullScreen).toHaveBeenCalledTimes(1)
-    expect(onToggle).toHaveBeenCalledTimes(1)
+    expect(onCollapse).toHaveBeenCalledTimes(1)
   })
 
   it('renders the header actions with Ant Design buttons and icons', () => {

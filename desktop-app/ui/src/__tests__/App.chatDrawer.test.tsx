@@ -2116,6 +2116,18 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
   })
 
+  it('closes the drawer from its collapse button', () => {
+    renderApp(<App />)
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse chat drawer' }))
+
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Collapse chat drawer' })).toBeNull()
+  })
+
   // R4: selecting a chat tab with the drawer open collapses the drawer before the
   // chat shows, and clears the open intent so returning to a non-chat tab does not
   // silently re-open it.
