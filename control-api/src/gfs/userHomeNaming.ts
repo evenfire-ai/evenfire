@@ -35,8 +35,19 @@ export function userHomeNameCandidates(user: {
   const base = (displayName.length >= 2 ? displayName : emailName.length >= 2 ? emailName : '')
     .slice(0, 48)
     .replace(/[.-]+$/g, '')
+  return orderedNameCandidates(userId, base, base)
+}
+
+/** Retry keeps a valid operator choice first and uses the same collision policy. */
+export function userHomeRetryNameCandidates(userId: string, name: string): string[] {
+  const id = userId.toLowerCase()
+  const base = name.slice(0, 48).replace(/[.-]+$/g, '')
+  return orderedNameCandidates(id, base, name)
+}
+
+function orderedNameCandidates(userId: string, base: string, first: string): string[] {
   const candidates = base
-    ? [base, `${base}-${userId.replace(/-/g, '').slice(0, 8)}`, userId]
+    ? [first, `${base}-${userId.replace(/-/g, '').slice(0, 8)}`, userId]
     : [userId]
   return [...new Set(candidates.filter(candidate => isValidUserHomeName(candidate, userId)))]
 }

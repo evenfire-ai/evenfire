@@ -3,6 +3,7 @@ import {
   isValidUserHomeName,
   normalizeUserHomeName,
   userHomeNameCandidates,
+  userHomeRetryNameCandidates,
 } from '../src/gfs/userHomeNaming.js'
 
 const userId = '12345678-1234-4567-89ab-123456789abc'
@@ -58,5 +59,16 @@ describe('user home naming policy', () => {
       if (candidates[0] !== userId)
         expect(Buffer.byteLength(candidates[0]!, 'utf8')).toBeLessThanOrEqual(48)
     }
+  })
+
+  it('keeps a valid retry name first and applies the normal suffix and UUID collision order', () => {
+    expect(userHomeRetryNameCandidates(userId, 'x')).toEqual(['x', 'x-12345678', userId])
+    const longName = 'a'.repeat(64)
+    expect(userHomeRetryNameCandidates(userId, longName)).toEqual([
+      longName,
+      `${'a'.repeat(48)}-12345678`,
+      userId,
+    ])
+    expect(userHomeRetryNameCandidates(userId, userId)[0]).toBe(userId)
   })
 })

@@ -1,6 +1,13 @@
 import type { Request, Response, Router } from 'express'
 import { config } from '../../config.js'
-import { type DbClient, pool, withTransaction } from '../../db.js'
+import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../../db.js'
+import { isValidUserHomeName, userHomeRetryNameCandidates } from '../../gfs/userHomeNaming.js'
+import { reserveUserHomeName } from '../../gfs/userHomeReservation.js'
+import {
+  type UserHomeConflictCode,
+  parseUserHomeConflictDetail,
+  transitionUserHomeState,
+} from '../../gfs/userHomeState.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
@@ -21,7 +28,7 @@ type HomeRow = {
   storage_username: string | null
   resource_id: string | null
   path_cache: string | null
-  conflict_code: string | null
+  conflict_code: UserHomeConflictCode | null
   conflict_detail: unknown
   attempts: number
   last_attempt_at: Date | null
@@ -142,6 +149,168 @@ async function handleDetail(req: Request, res: Response): Promise<void> {
         })
       : null
   res.status(200).json({ home: { ...homeView(home), conflictDetail } })
+}
+
+type RetryResult =
+  | { kind: 'retried'; home: HomeRow }
+  | { kind: 'not_found' | 'not_retryable' | 'owner_requires_restore' | 'invalid_name' }
+
+type RetryHome = Pick<
+  HomeRow,
+  'state' | 'drive' | 'storage_username' | 'resource_id' | 'conflict_code' | 'conflict_detail'
+>
+
+async function retryUserHomeInTransaction(
+  db: DbTransactionClient,
+  userId: string,
+  storageUsername: unknown,
+  adminId: string,
+  requestId?: string,
+  sourceIp?: string
+): Promise<RetryResult> {
+  await db.query("SELECT pg_advisory_xact_lock(hashtext('gfs:user-home:' || $1)::bigint)", [userId])
+
+  // Read without a row lock so a needed structure lock precedes the home row lock.
+  const snapshot = await db.query(
+    `SELECT state, drive, storage_username, resource_id, conflict_code, conflict_detail
+       FROM gfs_user_homes WHERE user_id = $1`,
+    [userId]
+  )
+  const observed = snapshot.rows[0] as RetryHome | undefined
+  let lockedDrive: string | null = null
+  if (
+    observed?.state === 'conflict' &&
+    (observed.conflict_code === 'path_conflict' ||
+      observed.conflict_code === 'ancestor_grant_conflict') &&
+    !observed.resource_id &&
+    typeof storageUsername === 'string' &&
+    storageUsername !== observed.storage_username &&
+    isValidUserHomeName(storageUsername, userId)
+  ) {
+    if (!observed.drive) throw new Error('home_conflict_drive_invalid')
+    lockedDrive = observed.drive
+    await db.query("SELECT pg_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint)", [
+      lockedDrive,
+    ])
+  }
+
+  const result = await db.query(
+    `SELECT state, drive, storage_username, resource_id, conflict_code, conflict_detail
+       FROM gfs_user_homes WHERE user_id = $1 FOR UPDATE`,
+    [userId]
+  )
+  const home = result.rows[0] as RetryHome | undefined
+  if (!home) return { kind: 'not_found' }
+  if (home.state === 'conflict' && home.conflict_code === 'ownership_conflict') {
+    return { kind: 'owner_requires_restore' }
+  }
+  if (
+    home.state !== 'conflict' ||
+    (home.conflict_code !== 'path_conflict' && home.conflict_code !== 'ancestor_grant_conflict')
+  ) {
+    return { kind: 'not_retryable' }
+  }
+  if (storageUsername !== undefined && typeof storageUsername !== 'string') {
+    return { kind: 'invalid_name' }
+  }
+  if (
+    home.resource_id &&
+    storageUsername !== undefined &&
+    storageUsername !== home.storage_username
+  ) {
+    return { kind: 'not_retryable' }
+  }
+  if (!home.drive) throw new Error('home_conflict_drive_invalid')
+  if (storageUsername !== undefined && storageUsername !== home.storage_username) {
+    if (!isValidUserHomeName(storageUsername, userId)) return { kind: 'invalid_name' }
+    if (lockedDrive !== home.drive) throw new Error('home_retry_structure_lock_changed')
+    await reserveUserHomeName(
+      db,
+      userId,
+      home.drive,
+      userHomeRetryNameCandidates(userId, storageUsername)
+    )
+  }
+
+  const detail = parseUserHomeConflictDetail(home.conflict_detail)
+  const conflictResource =
+    home.conflict_code === 'path_conflict' ? detail.resourceIds[0] : undefined
+  if (home.conflict_code === 'path_conflict' && !home.resource_id && !conflictResource) {
+    throw new Error('Path conflict lacks its resource identity')
+  }
+  const next = transitionUserHomeState(
+    {
+      state: home.state,
+      drive: home.drive,
+      conflictCode: home.conflict_code,
+      conflictDetail: detail,
+    },
+    { type: 'retry' }
+  )
+  await auditMutation(db, {
+    actorKey: 'operator:',
+    actorOnBehalfOf: adminId,
+    targetKey: `user:${userId}`,
+    op: `user_home.conflict_cleared.${home.conflict_code}`,
+    drive: home.drive,
+    resourceId: home.resource_id ?? conflictResource ?? null,
+    outcome: 'allowed',
+    requestId,
+    sourceIp,
+  })
+  rootLogger.info(
+    {
+      event: 'user_home.conflict_cleared',
+      userId,
+      conflictCode: home.conflict_code,
+      conflictDetail: detail,
+      transactionState: 'pending_commit',
+    },
+    'user home conflict clearing'
+  )
+  await db.query(
+    `UPDATE gfs_user_homes SET state = $2, conflict_code = NULL, conflict_detail = NULL,
+            attempts = 0, last_error = NULL, updated_at = now() WHERE user_id = $1`,
+    [userId, next.state]
+  )
+  const updatedHome = await loadHome(db, userId)
+  if (!updatedHome) throw new Error('home_disappeared_during_retry')
+  return { kind: 'retried', home: updatedHome }
+}
+
+async function handleRetry(req: Request, res: Response): Promise<void> {
+  const userId = String(req.params.userId).toLowerCase()
+  if (!UUID_RE.test(userId)) {
+    res.status(400).json({ error: 'invalid_user_id' })
+    return
+  }
+  const adminId = (req as Request & { adminAuth: { sub: string } }).adminAuth.sub
+  const result = await withTransaction(db =>
+    retryUserHomeInTransaction(
+      db,
+      userId,
+      req.body?.storageUsername,
+      adminId,
+      requestIdOf(req),
+      req.ip
+    )
+  )
+  switch (result.kind) {
+    case 'not_found':
+      res.status(404).json({ error: 'home_not_found' })
+      return
+    case 'not_retryable':
+      res.status(409).json({ error: 'home_not_retryable' })
+      return
+    case 'owner_requires_restore':
+      res.status(409).json({ error: 'home_owner_grant_requires_operator_restore' })
+      return
+    case 'invalid_name':
+      res.status(422).json({ error: 'invalid_name' })
+      return
+    case 'retried':
+      res.status(202).json({ home: homeView(result.home) })
+  }
 }
 
 type RestoreResult =
@@ -271,6 +440,12 @@ export function registerGfsUserHomeRoutes(router: Router): void {
     requireAuthForControlUI,
     readLimit,
     asyncHandler(handleDetail)
+  )
+  router.post(
+    '/gfs/user-homes/:userId/retry',
+    requireAuthForControlUI,
+    writeLimit,
+    asyncHandler(handleRetry)
   )
   router.post(
     '/gfs/user-homes/:userId/restore-owner',

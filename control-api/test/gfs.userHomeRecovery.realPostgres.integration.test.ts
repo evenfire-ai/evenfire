@@ -14,8 +14,12 @@ vi.mock('../src/db.js', async importOriginal => {
     pool: {
       query: (...args: Parameters<import('pg').Pool['query']>) => runtime.pool!.query(...args),
     },
-    withTransaction: (work: Parameters<typeof actual.withTransaction>[0]) =>
-      actual.withTransaction(work, runtime.pool!),
+    withTransaction: ((work, dbPool, options) =>
+      actual.withTransaction(
+        work,
+        dbPool ?? runtime.pool!,
+        options
+      )) as typeof actual.withTransaction,
   }
 })
 vi.mock('../src/middleware/controlUIAuth.js', () => ({
@@ -151,6 +155,31 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
     return request(app)
       .post(`/gfs/user-homes/${fixture.userId}/restore-owner`)
       .set('x-test-operator', 'yes')
+  }
+
+  function retry(userId: string, storageUsername?: string) {
+    const call = request(app).post(`/gfs/user-homes/${userId}/retry`).set('x-test-operator', 'yes')
+    return storageUsername === undefined ? call : call.send({ storageUsername })
+  }
+
+  async function addUnboundConflict(
+    fixture: Fixture,
+    name: string,
+    code: 'path_conflict' | 'ancestor_grant_conflict' = 'path_conflict'
+  ): Promise<string> {
+    const userId = randomUUID()
+    await fixturePool.query('INSERT INTO users (id, email, name) VALUES ($1, $2, $3)', [
+      userId,
+      `${userId}@example.test`,
+      'Retry Owner',
+    ])
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET drive = $2, storage_username = $3, state = 'conflict',
+              conflict_code = $4, conflict_detail = $5::jsonb
+        WHERE user_id = $1`,
+      [userId, fixture.drive, name, code, JSON.stringify({ resourceIds: [fixture.resourceId] })]
+    )
+    return userId
   }
 
   it.each(['missing', 'narrowed', 'no-inherit'] as const)(
@@ -444,5 +473,280 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
       .set('x-test-operator', 'yes')
     expect(missing.status).toBe(404)
     expect(missing.body).toEqual({ error: 'home_not_found' })
+  })
+
+  it('shows an occupied bound path and retries its unchanged reservation with an audit before the next tick', async () => {
+    const fixture = await seedHome('narrowed')
+    const occupantId = randomUUID()
+    await fixturePool.query(
+      `INSERT INTO gfs_resources (resource_id, drive, parent_resource_id, name, kind, path_cache)
+       VALUES ($1, $2, $3, 'reserved', 'directory', '/Users/reserved')`,
+      [occupantId, fixture.drive, fixture.usersId]
+    )
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET storage_username = 'reserved', conflict_code = 'path_conflict',
+              conflict_detail = $2::jsonb, attempts = 3, last_error = 'previous_error'
+        WHERE user_id = $1`,
+      [fixture.userId, JSON.stringify({ resourceIds: [occupantId, fixture.resourceId] })]
+    )
+    await fixturePool.query(`CREATE FUNCTION s4_test_retry_audit_order() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.subject = 'user:${fixture.userId}' AND NEW.op = 'user_home.conflict_cleared.path_conflict'
+           AND NOT EXISTS (SELECT 1 FROM gfs_user_homes WHERE user_id = '${fixture.userId}'::uuid
+                           AND state = 'conflict' AND conflict_code = 'path_conflict'
+                           AND conflict_detail IS NOT NULL) THEN
+          RAISE EXCEPTION 'conflict cleared before audit';
+        END IF;
+        RETURN NEW;
+      END $$`)
+    await fixturePool.query(
+      'CREATE TRIGGER s4_test_retry_audit_order BEFORE INSERT ON gfs_audit FOR EACH ROW EXECUTE FUNCTION s4_test_retry_audit_order()'
+    )
+    const detail = await request(app)
+      .get(`/gfs/user-homes/${fixture.userId}`)
+      .set('x-test-operator', 'yes')
+    expect(detail.status).toBe(200)
+    expect(detail.body.home).toMatchObject({
+      resourceId: fixture.resourceId,
+      path: '/Users/owner',
+      conflictDetail: {
+        code: 'path_conflict',
+        resource: { resourceId: occupantId, path: '/Users/reserved' },
+        access: [],
+      },
+    })
+    const before = await fixturePool.query('SELECT * FROM gfs_user_homes WHERE user_id = $1', [
+      fixture.userId,
+    ])
+    const beforeAudit = await fixturePool.query('SELECT * FROM gfs_audit WHERE subject = $1', [
+      `user:${fixture.userId}`,
+    ])
+    const denied = await retry(fixture.userId, 'different')
+    expect(denied.status).toBe(409)
+    expect(denied.body).toEqual({ error: 'home_not_retryable' })
+    expect(
+      (await fixturePool.query('SELECT * FROM gfs_user_homes WHERE user_id = $1', [fixture.userId]))
+        .rows
+    ).toEqual(before.rows)
+    expect(
+      (
+        await fixturePool.query('SELECT * FROM gfs_audit WHERE subject = $1', [
+          `user:${fixture.userId}`,
+        ])
+      ).rows
+    ).toEqual(beforeAudit.rows)
+
+    const accepted = await retry(fixture.userId, 'reserved')
+    expect(accepted.status).toBe(202)
+    expect(accepted.body.home).toMatchObject({
+      state: 'pending',
+      attempts: 0,
+      lastError: null,
+      conflictCode: null,
+      storageUsername: 'reserved',
+      resourceId: fixture.resourceId,
+    })
+    const audit = await fixturePool.query(
+      'SELECT op, actor_on_behalf_of, gfs_uri FROM gfs_audit WHERE subject = $1 ORDER BY sequence_no',
+      [`user:${fixture.userId}`]
+    )
+    expect(audit.rows).toEqual([
+      {
+        op: 'user_home.conflict_cleared.path_conflict',
+        actor_on_behalf_of: 'operator-test',
+        gfs_uri: `gfs://${fixture.drive}/${fixture.resourceId}`,
+      },
+    ])
+    const contender = await addUnboundConflict(fixture, 'contender-old')
+    const contenderRetry = await retry(contender, 'reserved')
+    expect(contenderRetry.status).toBe(202)
+    expect(contenderRetry.body.home.storageUsername).toBe(
+      `reserved-${contender.replace(/-/g, '').slice(0, 8)}`
+    )
+    const { provisionUserHome } = await import('../src/gfs/userHomeProvisioner.js')
+    expect(
+      await provisionUserHome(fixture.userId, { drive: fixture.drive, dbPool: fixturePool })
+    ).toBe('conflict')
+    const afterTick = await fixturePool.query(
+      'SELECT state, conflict_code, storage_username, resource_id FROM gfs_user_homes WHERE user_id = $1',
+      [fixture.userId]
+    )
+    expect(afterTick.rows[0]).toEqual({
+      state: 'conflict',
+      conflict_code: 'path_conflict',
+      storage_username: 'reserved',
+      resource_id: fixture.resourceId,
+    })
+  })
+
+  it('preserves a bound ancestor-conflict name and accepts a retry without a name', async () => {
+    const fixture = await seedHome('narrowed')
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET conflict_code = 'ancestor_grant_conflict', conflict_detail = $2::jsonb
+        WHERE user_id = $1`,
+      [fixture.userId, JSON.stringify({ resourceIds: [fixture.usersId] })]
+    )
+    const before = await fixturePool.query('SELECT * FROM gfs_user_homes WHERE user_id = $1', [
+      fixture.userId,
+    ])
+    const denied = await retry(fixture.userId, 'different')
+    expect(denied.status).toBe(409)
+    expect(denied.body).toEqual({ error: 'home_not_retryable' })
+    expect(
+      (await fixturePool.query('SELECT * FROM gfs_user_homes WHERE user_id = $1', [fixture.userId]))
+        .rows
+    ).toEqual(before.rows)
+    expect(
+      (
+        await fixturePool.query('SELECT op FROM gfs_audit WHERE subject = $1', [
+          `user:${fixture.userId}`,
+        ])
+      ).rowCount
+    ).toBe(0)
+    const accepted = await retry(fixture.userId)
+    expect(accepted.status).toBe(202)
+    expect(accepted.body.home).toMatchObject({
+      state: 'pending',
+      storageUsername: 'owner',
+      attempts: 0,
+    })
+    const audit = await fixturePool.query('SELECT op, gfs_uri FROM gfs_audit WHERE subject = $1', [
+      `user:${fixture.userId}`,
+    ])
+    expect(audit.rows).toEqual([
+      {
+        op: 'user_home.conflict_cleared.ancestor_grant_conflict',
+        gfs_uri: `gfs://${fixture.drive}/${fixture.resourceId}`,
+      },
+    ])
+  })
+
+  it('leaves an invalid unbound name unchanged, then retries an ancestor conflict and provisions it', async () => {
+    const fixture = await seedHome()
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET resource_id = NULL, conflict_code = 'ancestor_grant_conflict',
+              conflict_detail = $2::jsonb WHERE user_id = $1`,
+      [fixture.userId, JSON.stringify({ resourceIds: [fixture.usersId] })]
+    )
+    const before = await fixturePool.query('SELECT * FROM gfs_user_homes WHERE user_id = $1', [
+      fixture.userId,
+    ])
+    const denied = await retry(fixture.userId, 'users')
+    expect(denied.status).toBe(422)
+    expect(denied.body).toEqual({ error: 'invalid_name' })
+    expect(
+      (await fixturePool.query('SELECT * FROM gfs_user_homes WHERE user_id = $1', [fixture.userId]))
+        .rows
+    ).toEqual(before.rows)
+    expect(
+      (
+        await fixturePool.query('SELECT op FROM gfs_audit WHERE subject = $1', [
+          `user:${fixture.userId}`,
+        ])
+      ).rowCount
+    ).toBe(0)
+    const accepted = await retry(fixture.userId, 'recovered')
+    expect(accepted.status).toBe(202)
+    expect(accepted.body.home).toMatchObject({ state: 'pending', storageUsername: 'recovered' })
+    const audit = await fixturePool.query('SELECT op, gfs_uri FROM gfs_audit WHERE subject = $1', [
+      `user:${fixture.userId}`,
+    ])
+    expect(audit.rows).toEqual([
+      { op: 'user_home.conflict_cleared.ancestor_grant_conflict', gfs_uri: null },
+    ])
+    const { provisionUserHome } = await import('../src/gfs/userHomeProvisioner.js')
+    expect(
+      await provisionUserHome(fixture.userId, { drive: fixture.drive, dbPool: fixturePool })
+    ).toBe('ready')
+    const home = await fixturePool.query(
+      'SELECT state, storage_username, resource_id FROM gfs_user_homes WHERE user_id = $1',
+      [fixture.userId]
+    )
+    expect(home.rows[0]).toMatchObject({
+      state: 'ready',
+      storage_username: 'recovered',
+      resource_id: expect.any(String),
+    })
+    expect(home.rows[0].resource_id).not.toBe(fixture.resourceId)
+  })
+
+  it('serializes competing reservations and releases old names only for unbound homes', async () => {
+    const fixture = await seedHome()
+    await fixturePool.query(
+      `UPDATE gfs_user_homes SET resource_id = NULL, conflict_code = 'path_conflict',
+              conflict_detail = $2::jsonb WHERE user_id = $1`,
+      [fixture.userId, JSON.stringify({ resourceIds: [fixture.resourceId] })]
+    )
+    const second = await addUnboundConflict(fixture, 'second-old')
+    const responses = await Promise.all([retry(fixture.userId, 'chosen'), retry(second, 'chosen')])
+    expect(responses.map(response => response.status)).toEqual([202, 202])
+    const reservations = await fixturePool.query<{ user_id: string; storage_username: string }>(
+      'SELECT user_id::text, storage_username FROM gfs_user_homes WHERE user_id = ANY($1::uuid[])',
+      [[fixture.userId, second]]
+    )
+    const winner = reservations.rows.find(row => row.storage_username === 'chosen')
+    const loser = reservations.rows.find(row => row.storage_username !== 'chosen')
+    expect(winner).toBeDefined()
+    expect(loser?.storage_username).toBe(`chosen-${loser?.user_id.replace(/-/g, '').slice(0, 8)}`)
+    const third = await addUnboundConflict(fixture, 'third-old')
+    const released = await retry(third, 'owner')
+    expect(released.status).toBe(202)
+    expect(released.body.home).toMatchObject({ state: 'pending', storageUsername: 'owner' })
+    const audit = await fixturePool.query('SELECT op, gfs_uri FROM gfs_audit WHERE subject = $1', [
+      `user:${third}`,
+    ])
+    expect(audit.rows).toEqual([
+      {
+        op: 'user_home.conflict_cleared.path_conflict',
+        gfs_uri: `gfs://${fixture.drive}/${fixture.resourceId}`,
+      },
+    ])
+  })
+
+  it('rolls back unique-name savepoints and uses the owner UUID after two collisions', async () => {
+    const fixture = await seedHome()
+    const target = await addUnboundConflict(fixture, 'old-name')
+    await addUnboundConflict(fixture, 'chosen')
+    await addUnboundConflict(fixture, `chosen-${target.replace(/-/g, '').slice(0, 8)}`)
+    const response = await retry(target, 'chosen')
+    expect(response.status).toBe(202)
+    expect(response.body.home).toMatchObject({ state: 'pending', storageUsername: target })
+    const audit = await fixturePool.query('SELECT op FROM gfs_audit WHERE subject = $1', [
+      `user:${target}`,
+    ])
+    expect(audit.rows).toEqual([{ op: 'user_home.conflict_cleared.path_conflict' }])
+  })
+
+  it('rolls back a reservation when its audit fails while another retry succeeds', async () => {
+    const fixture = await seedHome()
+    const failing = await addUnboundConflict(fixture, 'failing-old')
+    const working = await addUnboundConflict(fixture, 'working-old')
+    await fixturePool.query(`CREATE FUNCTION s4_test_retry_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.subject = 'user:${failing}' THEN RAISE EXCEPTION 'test audit failure'; END IF;
+        RETURN NEW;
+      END $$`)
+    await fixturePool.query(
+      'CREATE TRIGGER s4_test_retry_audit_failure BEFORE INSERT ON gfs_audit FOR EACH ROW EXECUTE FUNCTION s4_test_retry_audit_failure()'
+    )
+    const before = await fixturePool.query('SELECT * FROM gfs_user_homes WHERE user_id = $1', [
+      failing,
+    ])
+    const success = await retry(working, 'working-new')
+    expect(success.status).toBe(202)
+    expect(success.body.home).toMatchObject({ state: 'pending', storageUsername: 'working-new' })
+    const failure = await retry(failing, 'failing-new')
+    expect(failure.status).toBe(500)
+    expect(
+      (await fixturePool.query('SELECT * FROM gfs_user_homes WHERE user_id = $1', [failing])).rows
+    ).toEqual(before.rows)
+    expect(
+      (await fixturePool.query('SELECT op FROM gfs_audit WHERE subject = $1', [`user:${failing}`]))
+        .rowCount
+    ).toBe(0)
+    const successAudit = await fixturePool.query('SELECT op FROM gfs_audit WHERE subject = $1', [
+      `user:${working}`,
+    ])
+    expect(successAudit.rows).toEqual([{ op: 'user_home.conflict_cleared.path_conflict' }])
   })
 })

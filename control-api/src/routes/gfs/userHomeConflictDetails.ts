@@ -1,7 +1,10 @@
 import type { DbClient } from '../../db.js'
+import {
+  type UserHomeConflictDetail,
+  parseUserHomeConflictDetail,
+} from '../../gfs/userHomeState.js'
 import { UUID_RE } from './grants.js'
 
-type StoredConflictDetail = { resourceIds: string[]; grantIds?: string[]; shareIds?: string[] }
 type AccessRow = {
   relation: 'grant' | 'share'
   resource_id: string
@@ -12,33 +15,10 @@ type AccessRow = {
   inherit: boolean
 }
 
-function parseConflictDetail(value: unknown): StoredConflictDetail {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('home_conflict_detail_invalid')
-  }
-  const detail = value as Record<string, unknown>
-  if (Object.keys(detail).some(key => !['resourceIds', 'grantIds', 'shareIds'].includes(key))) {
-    throw new Error('home_conflict_detail_invalid')
-  }
-  const ids = (field: string, required: boolean): string[] | undefined => {
-    const values = detail[field]
-    if (values === undefined && !required) return undefined
-    if (!Array.isArray(values) || values.some(id => typeof id !== 'string' || !UUID_RE.test(id))) {
-      throw new Error('home_conflict_detail_invalid')
-    }
-    return values as string[]
-  }
-  return {
-    resourceIds: ids('resourceIds', true)!,
-    grantIds: ids('grantIds', false),
-    shareIds: ids('shareIds', false),
-  }
-}
-
 async function currentAccess(
   db: DbClient,
   drive: string,
-  detail: StoredConflictDetail,
+  detail: UserHomeConflictDetail,
   ancestorsOnly: boolean
 ) {
   const result = await db.query(
@@ -123,7 +103,7 @@ export async function resolveUserHomeConflictDetail(
   ) {
     throw new Error('home_conflict_code_invalid')
   }
-  const detail = parseConflictDetail(home.detail)
+  const detail = parseUserHomeConflictDetail(home.detail)
   if (!home.drive) throw new Error('home_conflict_drive_invalid')
 
   if (code === 'ownership_conflict') {
@@ -136,7 +116,13 @@ export async function resolveUserHomeConflictDetail(
     return { code, ownerGrant: result.rows[0] ?? null }
   }
   if (code === 'path_conflict') {
-    if (detail.resourceIds.length !== 1) throw new Error('home_conflict_detail_invalid')
+    if (
+      detail.resourceIds.length < 1 ||
+      detail.resourceIds.length > 2 ||
+      (detail.resourceIds.length === 2 && detail.resourceIds[1] !== home.resourceId)
+    ) {
+      throw new Error('home_conflict_detail_invalid')
+    }
     const result = await db.query(
       `SELECT resource_id, path_cache, kind, created_at FROM gfs_resources
         WHERE resource_id = $1 AND drive = $2 AND deleted_at IS NULL`,
@@ -146,7 +132,12 @@ export async function resolveUserHomeConflictDetail(
       | { resource_id: string; path_cache: string | null; kind: string; created_at: Date }
       | undefined
     if (!resource) return { code, resource: null, access: [] }
-    const access = await currentAccess(db, home.drive, detail, false)
+    const access = await currentAccess(
+      db,
+      home.drive,
+      { ...detail, resourceIds: [detail.resourceIds[0]!] },
+      false
+    )
     return {
       code,
       resource: {

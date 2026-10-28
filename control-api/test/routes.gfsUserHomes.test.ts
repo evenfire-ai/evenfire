@@ -163,6 +163,21 @@ describe('operator user-home routes', () => {
       .set('x-test-operator', 'yes')
     expect(page.status).toBe(200)
     expect(page.body.items).toHaveLength(100)
+    expect(Object.keys(page.body.items[0]).sort()).toEqual([
+      'attempts',
+      'conflictCode',
+      'drive',
+      'email',
+      'lastAttemptAt',
+      'lastError',
+      'name',
+      'path',
+      'resourceId',
+      'state',
+      'storageUsername',
+      'updatedAt',
+      'userId',
+    ])
     expect(page.body.nextCursor).toBe(rows[99].user_id)
     expect(page.body.counts).toEqual({ pending: 0, ready: 2, conflict: 101, retired: 0 })
     const invalid = await request(application)
