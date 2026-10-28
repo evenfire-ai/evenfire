@@ -57,6 +57,128 @@ function shareItem(overrides: Partial<GfsShareListItem>): GfsShareListItem {
 }
 
 describe('GfsGrantList', () => {
+  it('keeps context grants removable without offering a role control', () => {
+    const onRevoke = vi.fn()
+    const onChangeRole = vi.fn()
+    const context = grantItem({
+      id: 'context',
+      subject: { type: 'context', id: 'context-a' },
+      permissions: ['read', 'write'],
+    })
+    const user = grantItem({ id: 'user', subject: { type: 'user', id: 'user-2' } })
+    render(
+      <GfsGrantList
+        agents={agents}
+        items={[context, user]}
+        onChangeRole={onChangeRole}
+        onRevoke={onRevoke}
+        subjects={subjects}
+      />
+    )
+
+    const contextRow = screen.getByTestId('gfs-access-row-grant-context')
+    expect(
+      within(contextRow).queryByRole('button', { name: 'Access role for context-a' })
+    ).toBeNull()
+    expect(within(contextRow).getByText('Editor')).toBeTruthy()
+    fireEvent.click(within(contextRow).getByRole('button', { name: 'Actions for context-a' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    expect(onRevoke).toHaveBeenCalledWith(context, 'context-a')
+
+    const userRow = screen.getByTestId('gfs-access-row-grant-user')
+    fireEvent.click(within(userRow).getByRole('button', { name: 'Access role for Test Two' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+    expect(onChangeRole).toHaveBeenCalledWith(user, 'Test Two', 'editor')
+  })
+
+  it('keeps context shares removable without offering a lowering control', () => {
+    const onRevokeShare = vi.fn()
+    const onLowerShare = vi.fn()
+    const context = shareItem({
+      id: 'context',
+      subject: { type: 'context', id: 'context-a' },
+      permissions: ['read', 'write'],
+    })
+    const user = shareItem({
+      id: 'user',
+      subject: { type: 'user', id: 'user-2' },
+      permissions: ['read', 'write'],
+    })
+    render(
+      <GfsGrantList
+        agents={agents}
+        items={[]}
+        onLowerShare={onLowerShare}
+        onRevoke={vi.fn()}
+        onRevokeShare={onRevokeShare}
+        shares={[context, user]}
+        subjects={subjects}
+      />
+    )
+
+    const contextRow = screen.getByTestId('gfs-access-row-share-context')
+    expect(
+      within(contextRow).queryByRole('button', { name: 'Access role for context-a' })
+    ).toBeNull()
+    expect(within(contextRow).getByText('Editor')).toBeTruthy()
+    fireEvent.click(within(contextRow).getByRole('button', { name: 'Actions for context-a' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    expect(onRevokeShare).toHaveBeenCalledWith(context, 'context-a')
+
+    const userRow = screen.getByTestId('gfs-access-row-share-user')
+    fireEvent.click(within(userRow).getByRole('button', { name: 'Access role for Test Two' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    expect(onLowerShare).toHaveBeenCalledWith(user, 'Test Two')
+  })
+
+  it('keeps inherited context access removable without offering a role control', () => {
+    const onRemoveInherited = vi.fn()
+    const onChangeInheritedRole = vi.fn()
+    const folder = { resourceId: 'parent', name: 'Parent' }
+    const inherited = (subject: { type: string; id: string }) =>
+      mergeInheritedAccessItem(
+        null,
+        { subject, permissions: ['read', 'write'], grantId: subject.id, shareIds: [] },
+        folder
+      )
+    render(
+      <GfsGrantList
+        agents={agents}
+        inheritedItems={[
+          inherited({ type: 'context', id: 'context-a' }),
+          inherited({ type: 'user', id: 'user-2' }),
+        ]}
+        items={[]}
+        mergeInherited
+        onChangeInheritedRole={onChangeInheritedRole}
+        onRemoveInherited={onRemoveInherited}
+        onRevoke={vi.fn()}
+        subjects={subjects}
+      />
+    )
+
+    const contextRow = screen.getByTestId('gfs-access-row-inherited-context:context-a')
+    expect(
+      within(contextRow).queryByRole('button', { name: 'Access role for context-a' })
+    ).toBeNull()
+    expect(within(contextRow).getByText('Editor')).toBeTruthy()
+    fireEvent.click(within(contextRow).getByRole('button', { name: 'Actions for context-a' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    expect(onRemoveInherited).toHaveBeenCalledWith(
+      expect.objectContaining({ subject: { type: 'context', id: 'context-a' } }),
+      'context-a'
+    )
+
+    const userRow = screen.getByTestId(userInheritedRowTestId)
+    fireEvent.click(within(userRow).getByRole('button', { name: 'Access role for Test Two' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    expect(onChangeInheritedRole).toHaveBeenCalledWith(
+      expect.objectContaining({ subject: { type: 'user', id: 'user-2' } }),
+      'Test Two',
+      'read'
+    )
+  })
+
   it('keeps foreign agent grants removable without offering their role control', () => {
     const onRevoke = vi.fn()
     const onChangeRole = vi.fn()

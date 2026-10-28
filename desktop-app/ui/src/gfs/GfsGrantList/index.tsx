@@ -30,6 +30,7 @@ function canChangeSubjectRole(
   subject: { type: string; id?: string },
   agents: GfsAgentSubjectOption[]
 ): boolean {
+  if (subject.type === 'context') return false
   return subject.type !== 'host' || agents.some(agent => agent.id === subject.id)
 }
 
