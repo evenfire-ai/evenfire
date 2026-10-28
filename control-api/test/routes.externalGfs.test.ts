@@ -1441,6 +1441,95 @@ describe('indexed upload relay canonical drive', () => {
   })
 })
 
+describe('ancestor home exposure through both GFS authority planes', () => {
+  it.each(['user', 'operator'] as const)(
+    'rejects inheritable grant and share writes for %s while explicit writes succeed',
+    async authority => {
+      auth()
+      dbReturning([
+        {
+          subject_type: 'user',
+          subject_id: U1,
+          resource_id: R,
+          permissions: ['manage_acl', 'share', 'read'],
+          inherit: false,
+        },
+      ])
+      const originalQuery = mockQuery.getMockImplementation()!
+      mockQuery.mockImplementation(async (sql: string, values?: unknown[]) => {
+        if (sql.includes('AS protected')) return { rows: [{ protected: true }] }
+        return originalQuery(sql, values)
+      })
+      const userPlane = authority === 'user'
+      const grantApp = userPlane ? await buildApp() : await buildAdminGrantsApp(CONTROL_ADMIN_ID)
+      const shareApp = userPlane ? grantApp : await buildOperatorShareApp()
+      const grantPath = userPlane ? '/external/gfs/grants' : '/gfs/grants'
+      const sharePath = userPlane ? '/external/gfs/shares' : '/gfs/shares'
+      const body = { resourceId: R, subject: { type: 'user', id: U2 }, permissions: ['read'] }
+      const grantWrite = (inherit: boolean) =>
+        request(grantApp)
+          .put(grantPath)
+          .set('x-user-session-token', 'sess')
+          .send({ ...body, inherit })
+      const shareWrite = (includeDescendants: boolean) =>
+        request(shareApp)
+          .post(sharePath)
+          .set('x-user-session-token', 'sess')
+          .send({ ...body, includeDescendants })
+      await grantWrite(false).expect(200)
+      await grantWrite(true)
+        .expect(409)
+        .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+      await shareWrite(false).expect(200)
+      await shareWrite(true)
+        .expect(409)
+        .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+    }
+  )
+})
+
+describe('ancestor grants for user agents', () => {
+  it('rejects a foreign agent first and applies ancestor exposure to an owned agent', async () => {
+    auth()
+    dbReturning(
+      [
+        {
+          subject_type: 'user',
+          subject_id: U1,
+          resource_id: R,
+          permissions: ['manage_acl', 'read'],
+          inherit: false,
+        },
+      ],
+      { callerAgentNames: ['agent-a'] }
+    )
+    const originalQuery = mockQuery.getMockImplementation()!
+    mockQuery.mockImplementation(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('AS protected')) return { rows: [{ protected: true }] }
+      return originalQuery(sql, values)
+    })
+    const app = await buildApp()
+    const body = { resourceId: R, permissions: ['read'] }
+    await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({ ...body, subject: { type: 'host', id: H1 }, inherit: false })
+      .expect(200)
+    await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({ ...body, subject: { type: 'host', id: H1 }, inherit: true })
+      .expect(409)
+      .expect(({ body: result }) => expect(result.error).toBe('ancestor_home_exposure'))
+    await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({ ...body, subject: { type: 'host', id: '1st:mcp-host/foreign-agent' }, inherit: true })
+      .expect(403)
+      .expect(({ body: result }) => expect(result.error).toBe('foreign_agent_forbidden'))
+  })
+})
+
 describe('PUT /external/gfs/grants (user delegation via existing engine)', () => {
   it('honors a user-session grant and preserves false when inherit is omitted', async () => {
     auth()

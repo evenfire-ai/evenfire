@@ -1,8 +1,13 @@
 import type { Pool } from 'pg'
 import { config } from '../config.js'
-import { type DbTransactionClient, pool, withTransaction } from '../db.js'
+import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
-import { auditMutation } from '../routes/gfs/grants.js'
+import {
+  acquireStructureLock,
+  auditMutation,
+  recordOwnerGrantConflict,
+} from '../routes/gfs/grants.js'
+import { makeHostSubjectId } from './hostSubject.js'
 import { userHomeNameCandidates } from './userHomeNaming.js'
 import {
   type UserHomeConflictCode,
@@ -48,7 +53,7 @@ async function lockUser(db: DbTransactionClient, userId: string): Promise<void> 
   await db.query("SELECT pg_advisory_xact_lock(hashtext('gfs:user-home:' || $1)::bigint)", [userId])
 }
 
-async function lockHome(db: DbTransactionClient, userId: string): Promise<HomeRow | undefined> {
+async function lockHome(db: DbClient, userId: string): Promise<HomeRow | undefined> {
   const result = await db.query(
     'SELECT drive, storage_username, resource_id, state, conflict_code, conflict_detail FROM gfs_user_homes WHERE user_id = $1::uuid FOR UPDATE',
     [userId]
@@ -65,28 +70,46 @@ function homeState(home: HomeRow): UserHomeState {
   }
 }
 
-/** S3 replaces this boundary with the in-transaction retirement cleanup. */
+/** The caller already holds the users row lock, when that row exists. */
 export async function retireUserHomeForInactiveUser(
-  db: DbTransactionClient,
+  db: DbClient,
   userId: string,
-  configuredDrive: string
+  configuredDrive: string | null,
+  actorKey = 'platform:user-home'
 ): Promise<void> {
+  // A hard delete by an older image cascades user_agents; startup repair cannot
+  // identify those agents' grants outside the home (the D31 rollback gap).
+  const agents = await db.query('SELECT agent_name FROM user_agents WHERE user_id = $1::uuid', [
+    userId,
+  ])
+  const agentNames = (agents.rows as { agent_name: string }[]).map(row => row.agent_name)
+
+  const binding = await db.query(
+    'SELECT drive, resource_id FROM gfs_user_homes WHERE user_id = $1::uuid',
+    [userId]
+  )
+  const unlocked = binding.rows[0] as
+    | { drive: string | null; resource_id: string | null }
+    | undefined
+  if (unlocked?.resource_id) {
+    if (!unlocked.drive) throw new Error('Bound user home has no drive')
+    await acquireStructureLock(db, unlocked.drive)
+  }
   const home = await lockHome(db, userId)
-  if (!home || home.state === 'retired') return
-  const next = transitionUserHomeState(homeState(home), { type: 'retire' })
+  if (home?.state === 'retired') return
   const detail =
-    home.conflict_detail === null ? null : parseUserHomeConflictDetail(home.conflict_detail)
-  if (home.state === 'conflict' && !detail) throw new Error('User-home conflict lacks detail')
-  const drive = home.drive ?? configuredDrive
+    home?.conflict_detail == null ? null : parseUserHomeConflictDetail(home.conflict_detail)
+  if (home?.state === 'conflict' && !detail) throw new Error('User-home conflict lacks detail')
+  const drive = home?.drive ?? configuredDrive
   const conflictResource =
-    home.conflict_code === 'path_conflict' ? detail?.resourceIds[0] : undefined
-  if (home.conflict_code === 'path_conflict' && !home.resource_id && !conflictResource) {
+    home?.conflict_code === 'path_conflict' ? detail?.resourceIds[0] : undefined
+  if (home?.conflict_code === 'path_conflict' && !home.resource_id && !conflictResource) {
     throw new Error('Path conflict lacks its resource identity')
   }
-  const resourceId = home.resource_id ?? conflictResource ?? null
-  if (home.conflict_code) {
+  const resourceId = home?.resource_id ?? conflictResource ?? null
+  if (home?.conflict_code) {
     await auditMutation(db, {
-      actorKey: 'platform:user-home',
+      actorKey,
       targetKey: `user:${userId}`,
       op: `user_home.conflict_cleared.${home.conflict_code}`,
       drive,
@@ -94,14 +117,90 @@ export async function retireUserHomeForInactiveUser(
       outcome: 'allowed',
     })
   }
-  await auditMutation(db, {
-    actorKey: 'platform:user-home',
-    targetKey: `user:${userId}`,
-    op: 'user_home.retired',
-    drive,
-    resourceId,
-    outcome: 'allowed',
-  })
+  if (home) {
+    await auditMutation(db, {
+      actorKey,
+      targetKey: `user:${userId}`,
+      op: 'user_home.retired',
+      drive,
+      resourceId,
+      outcome: 'allowed',
+    })
+    const next = transitionUserHomeState(homeState(home), { type: 'retire' })
+    await db.query(
+      `UPDATE gfs_user_homes
+          SET state = $2, conflict_code = NULL, conflict_detail = NULL,
+              attempts = attempts + 1, last_attempt_at = now(), last_error = NULL, updated_at = now()
+        WHERE user_id = $1::uuid`,
+      [userId, next.state]
+    )
+  }
+
+  const capturedAgentIds = agentNames
+    .map(name => makeHostSubjectId('1st', config.hostsNamespace, name))
+    .filter((id): id is string => id !== null)
+
+  const tree = `WITH RECURSIVE home_tree AS (
+    SELECT resource_id FROM gfs_resources WHERE resource_id = $2::uuid
+    UNION ALL
+    SELECT r.resource_id FROM gfs_resources r JOIN home_tree t ON r.parent_resource_id = t.resource_id
+  )`
+  const grants = await db.query(
+    `${tree}
+     SELECT g.id::text, g.subject_id,
+            (g.subject_type IN ('user','team','host','context') AND g.resource_id IN (SELECT resource_id FROM home_tree)) AS home_match,
+            (g.subject_type = 'user' AND g.subject_id = $1) AS user_match,
+            (g.subject_type = 'host' AND g.subject_id = ANY($3::text[])) AS agent_candidate
+       FROM gfs_grants g
+      WHERE (g.subject_type IN ('user','team','host','context') AND g.resource_id IN (SELECT resource_id FROM home_tree))
+         OR (g.subject_type = 'user' AND g.subject_id = $1)
+         OR (g.subject_type = 'host' AND g.subject_id = ANY($3::text[]))
+      ORDER BY g.id FOR UPDATE`,
+    [userId, home?.resource_id ?? null, capturedAgentIds]
+  )
+  const shares = await db.query(
+    `${tree}
+     SELECT s.id::text,
+            (s.subject_type IN ('user','team','host','context') AND s.resource_id IN (SELECT resource_id FROM home_tree)) AS home_match,
+            (s.subject_type = 'user' AND s.subject_id = $1) AS user_match
+       FROM gfs_shares s
+      WHERE (s.subject_type IN ('user','team','host','context') AND s.resource_id IN (SELECT resource_id FROM home_tree))
+         OR (s.subject_type = 'user' AND s.subject_id = $1)
+      ORDER BY s.id FOR UPDATE`,
+    [userId, home?.resource_id ?? null]
+  )
+  // Lock every captured agent's grants in the global id order before deciding
+  // whether the agent is still shared. Concurrent retirements on different
+  // drives then recheck after the preceding retirement has committed.
+  const unsharedAgents = await db.query(
+    `SELECT candidate.agent_name FROM unnest($1::text[]) AS candidate(agent_name)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM user_agents other JOIN users u ON u.id = other.user_id
+         WHERE other.agent_name = candidate.agent_name AND other.user_id <> $2::uuid
+           AND u.lifecycle_state = 'active'
+      )
+        AND NOT EXISTS (SELECT 1 FROM team_agents ta WHERE ta.agent_name = candidate.agent_name)`,
+    [agentNames, userId]
+  )
+  const unsharedIds = new Set(
+    (unsharedAgents.rows as { agent_name: string }[])
+      .map(row => makeHostSubjectId('1st', config.hostsNamespace, row.agent_name))
+      .filter((id): id is string => id !== null)
+  )
+  type Match = { id: string; home_match: boolean; user_match: boolean }
+  type GrantMatch = Match & { subject_id: string; agent_candidate: boolean }
+  const grantRows = (grants.rows as GrantMatch[])
+    .map(row => ({ ...row, agent_match: row.agent_candidate && unsharedIds.has(row.subject_id) }))
+    .filter(row => row.home_match || row.user_match || row.agent_match)
+  const shareRows = shares.rows as Match[]
+  await db.query('DELETE FROM gfs_grants WHERE id = ANY($1::uuid[])', [
+    grantRows.map(row => row.id),
+  ])
+  await db.query('DELETE FROM gfs_shares WHERE id = ANY($1::uuid[])', [
+    shareRows.map(row => row.id),
+  ])
+
+  if (!home) return
   log.info(
     {
       event: 'user_home.retired',
@@ -109,15 +208,13 @@ export async function retireUserHomeForInactiveUser(
       drive,
       conflictCode: home.conflict_code,
       conflictDetail: detail,
+      homeGrants: grantRows.filter(row => row.home_match).length,
+      userGrants: grantRows.filter(row => row.user_match).length,
+      agentGrants: grantRows.filter(row => row.agent_match).length,
+      homeShares: shareRows.filter(row => row.home_match).length,
+      userShares: shareRows.filter(row => row.user_match).length,
     },
     'User-home retirement recorded'
-  )
-  await db.query(
-    `UPDATE gfs_user_homes
-        SET state = $2, conflict_code = NULL, conflict_detail = NULL,
-            attempts = attempts + 1, last_attempt_at = now(), last_error = NULL, updated_at = now()
-      WHERE user_id = $1::uuid`,
-    [userId, next.state]
   )
 }
 
@@ -132,6 +229,48 @@ async function markPendingAttempt(
       WHERE user_id = $1::uuid AND state = 'pending'`,
     [userId, error]
   )
+}
+
+/** Recheck under the home lock; never restore an owner grant automatically. */
+export async function repairUserHomeOwnerGrant(
+  userId: string,
+  drive: string,
+  dbPool: Pool
+): Promise<void> {
+  await withTransaction(async db => {
+    await db.query("SET LOCAL statement_timeout = '10s'")
+    await lockUser(db, userId)
+    const users = await db.query(
+      'SELECT lifecycle_state FROM users WHERE id = $1::uuid FOR SHARE',
+      [userId]
+    )
+    const user = users.rows[0] as { lifecycle_state: string } | undefined
+    if (!user || user.lifecycle_state !== 'active') {
+      await retireUserHomeForInactiveUser(db, userId, drive)
+      return
+    }
+    const home = await lockHome(db, userId)
+    if (!home || home.state !== 'ready' || !home.resource_id || !home.drive) return
+    const result = await db.query(
+      `SELECT permissions, inherit FROM gfs_grants
+        WHERE drive = $1 AND resource_id = $2::uuid AND subject_type = 'user' AND subject_id = $3`,
+      [home.drive, home.resource_id, userId]
+    )
+    const grant = result.rows[0] as { permissions: string[]; inherit: boolean } | undefined
+    if (
+      !grant ||
+      !grant.inherit ||
+      !OWNER_PERMISSIONS.every(permission => grant.permissions.includes(permission))
+    ) {
+      await recordOwnerGrantConflict(
+        db,
+        { user_id: userId, state: home.state },
+        home.drive,
+        home.resource_id,
+        { isOperator: true, subjects: new Set(), actorKey: 'platform:user-home' }
+      )
+    }
+  }, dbPool)
 }
 
 /** A rolled-back attempt must still move to the back of the pending queue. */
@@ -305,7 +444,7 @@ async function installHome(
     return 'pending'
   }
 
-  await db.query("SELECT pg_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint)", [drive])
+  await acquireStructureLock(db, drive)
   const home = await lockHome(db, userId)
   if (!home || home.state !== 'pending' || (home.drive !== null && home.drive !== drive))
     return 'unchanged'

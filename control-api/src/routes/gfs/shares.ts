@@ -10,15 +10,19 @@ import {
   type GfsSubject,
   type GfsSubjectType,
   UUID_RE,
+  acquireStructureLock,
+  addHomeSubjectProfiles,
   appendGfsPermissionEvent,
   appendGfsPermissionEvents,
   assertMayGrant,
   assertMayGrantBatch,
   assertMutationSubjectTransport,
+  assertNoAncestorHomeExposure,
   auditMutation,
   callerAuditFields,
   driveOf,
   heldPermissions,
+  lockHomeForResource,
   normalizeMutationSubjects,
   parsePermissions,
   permissionReadFilter,
@@ -79,7 +83,7 @@ export async function handleShareRead(req: Request, res: Response): Promise<void
 async function queryShareItems(
   drive: string,
   resourceId: string
-): Promise<Record<string, unknown>[]> {
+): Promise<Array<Record<string, unknown> & { subject: { type: string; id?: string } }>> {
   const result = await pool.query(
     `SELECT id, drive, resource_id, subject_type, subject_id, permissions, include_descendants
        FROM gfs_shares
@@ -115,7 +119,10 @@ export async function handleShareListForCaller(req: Request, res: Response): Pro
         throw new GfsGrantError(403, 'manage_acl_required')
       }
     }
-    res.status(200).json({ items: await queryShareItems(drive, resourceId) })
+    const items = await queryShareItems(drive, resourceId)
+    res
+      .status(200)
+      .json({ items: await addHomeSubjectProfiles(pool, caller, drive, resourceId, items) })
   } catch (error) {
     if (error instanceof GfsGrantError) {
       sendGfsGrantError(res, error)
@@ -137,6 +144,8 @@ export async function writeGfsShareBatchInTransaction(
     includeDescendants: boolean
   }
 ): Promise<{ error: GfsGrantError | null }> {
+  await acquireStructureLock(db, params.drive)
+  await lockHomeForResource(db, params.resourceId)
   const auditIds: Array<string | null> = []
   let outcome: 'allowed' | 'denied' = 'allowed'
   let policyError: GfsGrantError | null = null
@@ -149,6 +158,13 @@ export async function writeGfsShareBatchInTransaction(
       params.permissions,
       params.subjects,
       { isShare: true }
+    )
+    await assertNoAncestorHomeExposure(
+      db,
+      params.drive,
+      params.resourceId,
+      params.includeDescendants,
+      params.subjects
     )
   } catch (error) {
     if (!(error instanceof GfsGrantError)) throw error

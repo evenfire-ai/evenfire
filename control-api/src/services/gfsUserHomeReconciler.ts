@@ -1,13 +1,41 @@
 import { Client, type Pool } from 'pg'
 import { config } from '../config.js'
 import { pool } from '../db.js'
-import { provisionUserHome, recordFailedUserHomeAttempt } from '../gfs/userHomeProvisioner.js'
+import {
+  provisionUserHome,
+  recordFailedUserHomeAttempt,
+  repairUserHomeOwnerGrant,
+} from '../gfs/userHomeProvisioner.js'
 import { rootLogger } from '../observability/logger.js'
 
 const log = rootLogger.child({ service: 'gfs_user_home_reconciler' })
 const FIRST_CURSOR = '00000000-0000-0000-0000-000000000000'
 const LOCK_KEY = "hashtext('gfs-user-home-reconciler-v1')"
 const PERIOD_MS = 60_000
+
+// Materialize each page and retain lateral index lookups so a startup pass
+// stays bounded as the home registry grows; D18 requires index-backed scans.
+export const STARTUP_RETIRED_SQL = `WITH batch AS MATERIALIZED (
+  SELECT h.user_id FROM gfs_user_homes h
+   WHERE h.state IN ('ready', 'conflict') AND h.user_id > $1::uuid
+   ORDER BY h.user_id LIMIT 50
+)
+SELECT b.user_id::text, (u.id IS NULL OR u.lifecycle_state <> 'active') AS needs_repair
+  FROM batch b LEFT JOIN LATERAL (
+    SELECT id, lifecycle_state FROM users WHERE id = b.user_id OFFSET 0
+  ) u ON true ORDER BY b.user_id`
+
+export const STARTUP_OWNER_SQL = `WITH batch AS MATERIALIZED (
+  SELECT h.user_id, h.drive, h.resource_id FROM gfs_user_homes h
+   WHERE h.state = 'ready' AND h.user_id > $1::uuid ORDER BY h.user_id LIMIT 50
+)
+SELECT b.user_id::text,
+  (g.id IS NULL OR NOT g.inherit OR NOT g.permissions @> ARRAY['read','write','delete','share','manage_acl']::text[]) AS needs_repair
+  FROM batch b LEFT JOIN LATERAL (
+    SELECT id, inherit, permissions FROM gfs_grants
+     WHERE drive = b.drive AND resource_id = b.resource_id
+       AND subject_type = 'user' AND subject_id = b.user_id::text OFFSET 0
+  ) g ON true ORDER BY b.user_id`
 
 function errorClass(error: unknown): string {
   if (error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name)) return error.name
@@ -19,6 +47,7 @@ export class GfsUserHomeReconciler {
   private timer: ReturnType<typeof setInterval> | undefined
   private running: Promise<void> | undefined
   private stopping = false
+  private startupRepairPending = true
 
   constructor(
     private readonly drive: string,
@@ -79,6 +108,12 @@ export class GfsUserHomeReconciler {
       const lockResult = await client.query(`SELECT pg_try_advisory_lock(${LOCK_KEY}) AS acquired`)
       locked = lockResult.rows[0]?.acquired === true
       if (!locked || this.stopping) return
+
+      if (this.startupRepairPending) {
+        this.startupRepairPending = false
+        await this.repairStartup(client)
+        if (this.stopping || sessionFailed) return
+      }
 
       // Return the scanned candidates, including insert races, so the cursor
       // advances even when the enrollment trigger won ON CONFLICT.
@@ -145,6 +180,42 @@ export class GfsUserHomeReconciler {
         }
       }
       if (client) await client.end().catch(() => {})
+    }
+  }
+
+  private async repairStartup(client: Client): Promise<void> {
+    for (const [sql, repair] of [
+      [
+        STARTUP_RETIRED_SQL,
+        (userId: string) => provisionUserHome(userId, { drive: this.drive, dbPool: this.dbPool }),
+      ],
+      [
+        STARTUP_OWNER_SQL,
+        (userId: string) => repairUserHomeOwnerGrant(userId, this.drive, this.dbPool),
+      ],
+    ] as const) {
+      let cursor = FIRST_CURSOR
+      while (!this.stopping) {
+        const page = await client.query<{ user_id: string; needs_repair: boolean }>(sql, [cursor])
+        if (page.rows.length === 0) break
+        for (const row of page.rows) {
+          if (this.stopping) return
+          if (!row.needs_repair) continue
+          try {
+            await repair(row.user_id)
+          } catch (error) {
+            log.error(
+              {
+                event: 'user_home_startup_repair_failed',
+                userId: row.user_id,
+                errorClass: errorClass(error),
+              },
+              'User-home startup repair failed'
+            )
+          }
+        }
+        cursor = page.rows[page.rows.length - 1]!.user_id
+      }
     }
   }
 }
