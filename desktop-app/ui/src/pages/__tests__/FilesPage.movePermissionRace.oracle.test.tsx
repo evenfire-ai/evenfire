@@ -4,6 +4,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { ToastStack } from '@components/Common/ToastStack'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { useToastController } from '@hooks/domain/useToastController'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -19,6 +22,20 @@ import {
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { FilesPage } from '../FilesPage'
+
+function ToastingFilesPage({ pendingGfsUri }: { pendingGfsUri: string }) {
+  const toast = useToastController()
+  return (
+    <>
+      <FilesPage
+        pendingGfsUri={pendingGfsUri}
+        onPendingGfsUriHandled={vi.fn()}
+        pushToast={toast.pushToast}
+      />
+      <ToastStack items={toast.toasts} onDismiss={toast.dismissToast} />
+    </>
+  )
+}
 
 const member = (teamId: string, userId: string) => ({
   id: userId,
@@ -87,6 +104,180 @@ afterEach(() => {
 })
 
 describe('FilesPage Move permission generation fencing', () => {
+  it.each([
+    { dialog: 'closed' as const, outcome: 'success' as const },
+    { dialog: 'closed' as const, outcome: 'failure' as const },
+    { dialog: 'open' as const, outcome: 'success' as const },
+    { dialog: 'open' as const, outcome: 'failure' as const },
+  ])(
+    'shows the $outcome Move outcome after navigating with the dialog $dialog',
+    async ({ dialog: dialogState, outcome: outcomeKind }) => {
+      const rows = await listAccessiblePage([
+        accessibleResource('destination-1', 'Archive', 'directory', {
+          path: '/Archive',
+          permissions: ['read', 'write'],
+        }),
+      ])
+      const children = await listChildrenPage([
+        childView('folder-src', 'Projects', 'directory', {
+          parentResourceId: 'source-parent',
+          path: '/Team/Projects',
+          version: 7,
+        }),
+      ])
+      const sourceParent = await resolveResource(
+        resolvedDirectory('source-parent', 'Team', { gfsUri: 'gfs://main/source-parent' })
+      )
+      const resolvedSource = await resolveResource(
+        resolvedDirectory('folder-src', 'Projects', {
+          parentResourceId: 'source-parent',
+          path: '/Team/Projects',
+          version: 7,
+        })
+      )
+      const resolvedArchive = await resolveResource(
+        resolvedDirectory('destination-1', 'Archive', {
+          parentResourceId: 'source-parent',
+          path: '/Team/Archive',
+          version: 4,
+        })
+      )
+      let finishMove!: (value: { resourceId: string; version: number }) => void
+      let rejectMove!: (error: Error) => void
+      const moveGate = new Promise<{ resourceId: string; version: number }>((resolve, reject) => {
+        finishMove = resolve
+        rejectMove = reject
+      })
+      const produceAffordances = appServiceAffordanceProducer(async resourceId =>
+        heldPermissionResponse(
+          resourceId === 'source-parent'
+            ? ['read', 'write', 'delete']
+            : resourceId === 'destination-1'
+              ? ['read', 'write', 'delete']
+              : ['read']
+        )
+      )
+      const affordances = vi.fn((resourceId: string, drive?: string) =>
+        produceAffordances(resourceId, drive)
+      )
+      const moveResource = vi.fn(() => moveGate)
+      const listChildren = vi.fn(async (resourceId: string) =>
+        resourceId === 'source-parent' ? children : listChildrenPage([])
+      )
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => rows),
+            listChildren,
+            affordances,
+            resolve: vi.fn(async (uri: string) =>
+              uri.endsWith('/source-parent')
+                ? sourceParent
+                : uri.endsWith('/foldersrc') || uri.endsWith('/folder-src')
+                  ? resolvedSource
+                  : resolvedArchive
+            ),
+            moveResource,
+          },
+        },
+      })
+
+      const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+      const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
+      const renderPage = (pendingGfsUri: string) => (
+        <AuthContext.Provider value={authFor('team-a')}>
+          <QueryClientProvider client={queryClient}>
+            <ToastingFilesPage pendingGfsUri={pendingGfsUri} />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+      const view = render(renderPage('gfs://main/source-parent'))
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Options for Projects' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects' })
+      fireEvent.click(within(dialog).getAllByRole('button', { name: 'Archive' }).at(-1)!)
+      const moveButton = within(dialog).getByRole('button', { name: 'Move here (Archive)' })
+      expect((moveButton as HTMLButtonElement).disabled).toBe(false)
+      fireEvent.click(moveButton)
+      await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main'))
+      await waitFor(() => expect(affordances).toHaveBeenCalledWith('destination-1', 'main'))
+      await waitFor(() =>
+        expect(moveResource).toHaveBeenCalledWith(
+          'folder-src',
+          'destination-1',
+          'main',
+          7,
+          undefined
+        )
+      )
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(screen.queryByText('Moved Projects to Archive')).toBeNull()
+      expect(
+        screen.queryByText(
+          'Moving a folder changes who can access its contents — access now follows the new location.'
+        )
+      ).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+
+      if (dialogState === 'closed') {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+        expect(screen.queryByRole('dialog', { name: 'Move folder Projects' })).toBeNull()
+      }
+      view.rerender(renderPage('gfs://main/destination-1'))
+      if (dialogState === 'open') {
+        expect(screen.getByRole('dialog', { name: 'Move folder Projects' })).toBeTruthy()
+      }
+      await waitFor(() =>
+        expect(listChildren.mock.calls.some(([resourceId]) => resourceId === 'destination-1')).toBe(
+          true
+        )
+      )
+
+      if (outcomeKind === 'success') {
+        await act(async () => {
+          finishMove({ resourceId: 'folder-src', version: 8 })
+        })
+        expect(await screen.findByText('Moved Projects to Archive')).toBeTruthy()
+        expect(screen.getAllByText('Moved Projects to Archive')).toHaveLength(1)
+        expect(
+          screen.getAllByText(
+            'Moving a folder changes who can access its contents — access now follows the new location.'
+          )
+        ).toHaveLength(1)
+        const invalidatedKeys = invalidateQueries.mock.calls.map(([filters]) => filters.queryKey)
+        const sourceChildrenKey = invalidatedKeys.find(
+          key => key?.[3] === 'children' && key[5] === 'source-parent'
+        )
+        const destinationChildrenKey = invalidatedKeys.find(
+          key => key?.[3] === 'children' && key[5] === 'destination-1'
+        )
+        const accessibleKey = invalidatedKeys.find(key => key?.[3] === 'accessible')
+        expect(sourceChildrenKey).toBeTruthy()
+        expect(destinationChildrenKey).toBeTruthy()
+        expect(accessibleKey).toBeTruthy()
+        expect(sourceChildrenKey?.[2]).toBe(destinationChildrenKey?.[2])
+        expect(destinationChildrenKey?.[2]).toBe(accessibleKey?.[2])
+      } else {
+        await act(async () => {
+          rejectMove(new Error('Move rejected httpStatus=400'))
+        })
+        const failureMessage =
+          'The server rejected this destination. Refresh and choose a different folder.'
+        expect(await screen.findByText(failureMessage)).toBeTruthy()
+        expect(screen.getAllByText(failureMessage)).toHaveLength(1)
+        expect(screen.queryByText('Moved Projects to Archive')).toBeNull()
+        expect(
+          screen.queryByText(
+            'Moving a folder changes who can access its contents — access now follows the new location.'
+          )
+        ).toBeNull()
+      }
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    }
+  )
+
   it('reports a completed folder Move after its dialog closes in flight', async () => {
     const rows = await listAccessiblePage([
       accessibleResource('destination-1', 'Archive', 'directory', {

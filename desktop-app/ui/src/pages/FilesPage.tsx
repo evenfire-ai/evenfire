@@ -2422,8 +2422,9 @@ export function FilesPage({
       destinationId,
       version: target.version,
     }
+    const sessionStillMatches = () => moveWorkspaceRef.current.sessionScope === origin.sessionScope
     const contextStillMatches = () =>
-      moveWorkspaceRef.current.sessionScope === origin.sessionScope &&
+      sessionStillMatches() &&
       moveWorkspaceRef.current.currentResourceId === origin.currentResourceId
     let permissionsChecked = false
     if (!ownsDialog()) return
@@ -2547,20 +2548,16 @@ export function FilesPage({
         false
       )
       if (!pageActiveRef.current) return
-      if (!contextStillMatches()) {
+      if (!sessionStillMatches()) {
         closeOwnedDialog()
         return
       }
-      if (!ownsDialogGeneration()) {
-        // Closing the dialog ends its local presentation, not a Move already
-        // dispatched to the server. Report that operation's settled outcome
-        // through the page toast channel without reopening or mutating dialog
-        // state.
+      if (!contextStillMatches() || !ownsDialog()) {
+        // After dispatch, the operation owns its outcome independently of the
+        // current folder and dialog. A same-session route change cannot erase
+        // completion feedback; the generation check keeps newer dialogs safe.
         toastMoveOutcome(pushToast, outcome, target.name, destinationName, target.kind)
-        return
-      }
-      if (!ownsDialog()) {
-        setMovePermissionStatus(null)
+        closeOwnedDialog()
         return
       }
       if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
