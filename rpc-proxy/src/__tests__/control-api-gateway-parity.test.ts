@@ -296,6 +296,8 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
     }
     expect(gatewayAdmits(locations, 'GET', removed)).toBe(true)
     expect(gatewayAdmits(locations, 'POST', removed)).toBe(true)
+    // Method gate on the proxying parent location itself.
+    expect(admits('DELETE', removed)).toBe(false)
     expect(admits('GET', `${removed}/other`)).toBe(false)
   })
 })
