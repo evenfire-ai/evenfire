@@ -136,6 +136,30 @@ afterEach(() => {
 })
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
+  it('keeps the Ant Design tree surface transparent', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([childView('first', 'first.md', 'file')], 'next-page')
+      ),
+    })
+
+    renderTree()
+
+    await screen.findByRole('tree', { name: 'Shared files' })
+    const treeSurface = document.querySelector('.ant-tree')
+    expect(treeSurface).not.toBeNull()
+    expect((treeSurface as HTMLElement).style.background).toBe('transparent')
+
+    fireEvent.click(treeRow('Reports').querySelector('.ant-tree-switcher')!)
+    const loadMoreButton = await screen.findByRole('button', { name: 'Load more' })
+    expect(
+      window.getComputedStyle(loadMoreButton).getPropertyValue('--ant-color-bg-container')
+    ).not.toBe('transparent')
+  })
+
   it('does not fetch a folder before it is expanded, then loads and hides its children', async () => {
     const listChildren = vi.fn(async () =>
       listChildrenPage([childView('sub-1', 'Sub', 'directory'), childView('r-1', 'r.md', 'file')])

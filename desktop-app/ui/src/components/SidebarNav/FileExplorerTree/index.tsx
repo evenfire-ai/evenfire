@@ -48,6 +48,7 @@ import type {
 // double-click cancel it first. Files have no such ambiguity — a single-click
 // activates them immediately — so this delay applies to folders only.
 const DOUBLE_CLICK_DELAY_MS = 250
+const FILE_EXPLORER_TREE_STYLES = { root: { background: 'transparent' } }
 
 interface FileExplorerTreeDataNode extends DataNode {
   'aria-label'?: string
@@ -1321,6 +1322,7 @@ export function FileExplorerTree({
             treeData={treeData}
             expandedKeys={[...expandedIds]}
             selectedKeys={selectedId ? [selectedId] : []}
+            styles={FILE_EXPLORER_TREE_STYLES}
             switcherIcon={<CaretDownOutlined aria-hidden="true" />}
             draggable={{
               icon: <HolderOutlined aria-hidden="true" />,
