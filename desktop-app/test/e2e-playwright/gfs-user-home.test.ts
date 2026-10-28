@@ -39,6 +39,7 @@ import {
   expectNoDisclosureDenial,
   expectReadWithSentinel,
   expectToolSuccess,
+  expectWriteRefused,
   openExactAgent,
   sendAgentTurn,
 } from './helpers/gfsAgentChat'
@@ -243,8 +244,22 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
         await dialog.expectRow(agent.name, 'Read', false)
         const row = fx.accessFor(folderId, 'host', agent.subjectId)
         expect(row).toMatchObject({ relation: 'grant', permissions: ['read'], inherit: true })
+        // Same list on the subfolder: the inherited owner row is labelled Owner
+        // and has no remove/role actions (D5), while the agent row on this same
+        // resource keeps its Actions menu (positive witness).
+        const folderAccess = page.getByRole('list', { name: 'Resource access' })
+        const inheritedOwnerRow = folderAccess
+          .getByRole('listitem')
+          .filter({ has: page.getByText('Owner', { exact: true }) })
+        await expect(inheritedOwnerRow).toHaveCount(1)
+        await expect(inheritedOwnerRow.getByRole('button', { name: /^Actions for / })).toHaveCount(
+          0
+        )
+        await expect(
+          folderAccess.getByRole('button', { name: `Actions for ${agent.name}` })
+        ).toHaveCount(1)
         await page.keyboard.press('Escape')
-        // Owner row: present, labelled Owner, and without remove/role actions (D5).
+        // Home root: the direct owner row is present and protected as well.
         await page
           .getByRole('navigation', { name: 'File location' })
           .getByText(home.storageUsername!, { exact: true })
@@ -256,11 +271,6 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
           .filter({ has: page.getByText('Owner', { exact: true }) })
         await expect(ownerRow).toHaveCount(1)
         await expect(ownerRow.getByRole('button', { name: /^Actions for / })).toHaveCount(0)
-        await expect(
-          page
-            .getByRole('list', { name: 'Resource access' })
-            .getByRole('button', { name: `Actions for ${agent.name}` })
-        ).toHaveCount(1)
         await page.keyboard.press('Escape')
       })
       await test.step('agent reads (positive) and cannot write while Read', async () => {
@@ -270,8 +280,9 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
           writePrompt(filePath, `J1 denied write ${fx.runTag}`),
           'gfs-user-home'
         )
-        assertNoInfraFailureShape(turn.responseText)
-        expect(turn.responseText).not.toContain(`J1 denied write ${fx.runTag}`)
+        await expectWriteRefused(turn, `J1 denied write ${fx.runTag}`)
+        // The content is unchanged: an authorized read still returns the original.
+        await agentReads(page, agent, filePath, sentinel)
       })
       await test.step('Editor lets the agent write', async () => {
         await openHomeFolder(page, home)
@@ -649,8 +660,9 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
           writePrompt(filePath, `${sentinel} v3`),
           'gfs-user-home'
         )
-        assertNoInfraFailureShape(turn.responseText)
-        expect(turn.responseText).not.toContain(`${sentinel} v3`)
+        await expectWriteRefused(turn, `${sentinel} v3`)
+        // The content is unchanged: an authorized read still returns v2.
+        await agentReads(ownerS.page, agent, filePath, `${sentinel} v2`)
       })
       await test.step('operator revokes; Desktop shows it after refresh; agent refused', async () => {
         await operatorPanel.revoke(agentRow)

@@ -185,6 +185,31 @@ export function assertNoInfraFailureShape(responseText: string): void {
 }
 
 /**
+ * Write-denial contract for an agent that can read the file but holds no
+ * write bit: the agent really attempted `gfs_write`, every attempt ended in
+ * an error state (zero successful writes), no infra 503/not_mounted shape
+ * appeared, and the denied text never reached the transcript. The caller then
+ * proves the content is unchanged with an authorized read.
+ */
+export async function expectWriteRefused(
+  turn: { stepper: Locator; responseText: string },
+  deniedText: string
+): Promise<void> {
+  const page = turn.stepper.page()
+  assertNoInfraFailureShape(turn.responseText)
+  expect(turn.responseText).not.toContain(deniedText)
+  const writeSteps = turn.stepper
+    .locator('.stepper-step')
+    .filter({ has: page.locator('.stepper-step-fn', { hasText: 'gfs_write' }) })
+  await expect(writeSteps.first()).toBeVisible({ timeout: 15_000 })
+  const successfulWrite = writeSteps.filter({
+    hasNot: page.locator('.stepper-step-duration.state-error'),
+  })
+  await expect(successfulWrite).toHaveCount(0)
+  await expect(turn.stepper).not.toContainText(/gfsc 503|not_mounted/i)
+}
+
+/**
  * No-disclosure denial contract for NAME/PATH driving (pattern from
  * gfs-agent-file-read.test.ts): an ungranted agent cannot even resolve the
  * resource, so a denied file is deliberately indistinguishable from an absent
