@@ -6,13 +6,14 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { AppService } from '../../../../../src/appService'
-import type { DesktopRuntimeConfigState } from '../../../../../src/types'
+import type { DesktopReleaseStatus, DesktopRuntimeConfigState } from '../../../../../src/types'
 import { useAuthController } from '../useAuthController'
 import { wrapLikeElectronIpc } from './__fixtures__/ipcErrors'
 
 const mocks = vi.hoisted(() => ({
   clearQueryCache: vi.fn(),
   completeDesktopSetup: vi.fn(),
+  getDesktopReleaseStatus: vi.fn(),
   getRuntimeConfigState: vi.fn(),
   getSessionGeneration: vi.fn(),
   logoutForEnvironmentMismatch: vi.fn(),
@@ -61,6 +62,8 @@ let selectRuntimeConfigForTest: ((id: string) => Promise<DesktopRuntimeConfigSta
   null
 let setBootingForTest: ((value: boolean) => void) | null = null
 let setAuthenticatedForTest: ((value: boolean) => void) | null = null
+let refreshDesktopReleaseStatusForTest: (() => Promise<DesktopReleaseStatus | null>) | null = null
+let setDesktopReleaseStatusForTest: ((status: DesktopReleaseStatus | null) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
 let nativeAppService: AppService | null = null
 let mismatchLogoutGeneration: number | null = null
@@ -76,6 +79,8 @@ function Probe() {
   })
   setBootingForTest = auth.setBooting
   setAuthenticatedForTest = auth.setIsAuthenticated
+  refreshDesktopReleaseStatusForTest = auth.refreshDesktopReleaseStatus
+  setDesktopReleaseStatusForTest = auth.setDesktopReleaseStatus
   confirmDesktopEnvironmentSetupForTest = auth.handleConfirmDesktopEnvironmentSetup
   confirmDesktopEnvironmentSwitchForTest = auth.handleConfirmDesktopEnvironmentSwitchConfirmation
   cancelDesktopEnvironmentSwitchForTest = auth.handleCancelDesktopEnvironmentSwitchConfirmation
@@ -100,6 +105,9 @@ function Probe() {
       </div>
       <div data-testid="active-rest">
         {auth.runtimeConfigState?.currentConfig?.externalRestApiBaseUrl || 'none'}
+      </div>
+      <div data-testid="desktop-release-version">
+        {auth.desktopReleaseStatus?.latestVersion || 'none'}
       </div>
     </>
   )
@@ -138,6 +146,8 @@ beforeEach(async () => {
   selectRuntimeConfigForTest = null
   setBootingForTest = null
   setAuthenticatedForTest = null
+  refreshDesktopReleaseStatusForTest = null
+  setDesktopReleaseStatusForTest = null
   runtimeConfigModule = null
   nativeAppService = null
   mismatchLogoutGeneration = null
@@ -216,6 +226,7 @@ beforeEach(async () => {
     auth: {
       ...window.clerum?.auth,
       getRuntimeConfigState: mocks.getRuntimeConfigState,
+      getDesktopReleaseStatus: mocks.getDesktopReleaseStatus,
       getSessionGeneration: mocks.getSessionGeneration,
       saveRuntimeConfig: mocks.saveRuntimeConfig,
       selectRuntimeConfig: mocks.selectRuntimeConfig,
@@ -239,6 +250,53 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
+  it('keeps the newest backend release status when an older check resolves last', async () => {
+    const releaseStatus = (latestVersion: string): DesktopReleaseStatus => ({
+      checked: true,
+      currentVersion: '0.10.0',
+      latestVersion,
+      compatibleVersions: [latestVersion],
+      compatible: false,
+      updateAvailable: true,
+      minimumVersion: '0.1.252',
+      updateRequired: true,
+      releaseUrl: `https://github.com/evenfire-ai/evenfire/releases/tag/v${latestVersion}`,
+      releaseTag: `v${latestVersion}`,
+      updateFeedUrl: `https://github.com/evenfire-ai/evenfire/releases/download/v${latestVersion}/`,
+    })
+    let resolveOlder!: (status: DesktopReleaseStatus) => void
+    let resolveNewer!: (status: DesktopReleaseStatus) => void
+    mocks.getDesktopReleaseStatus
+      .mockImplementationOnce(() => new Promise(resolve => (resolveOlder = resolve)))
+      .mockImplementationOnce(() => new Promise(resolve => (resolveNewer = resolve)))
+
+    render(<Probe />)
+    let olderCheck!: Promise<DesktopReleaseStatus | null>
+    let newerCheck!: Promise<DesktopReleaseStatus | null>
+    act(() => {
+      setDesktopReleaseStatusForTest!(releaseStatus('0.11.0'))
+    })
+    expect(screen.getByTestId('desktop-release-version')).toHaveTextContent('0.11.0')
+
+    act(() => {
+      olderCheck = refreshDesktopReleaseStatusForTest!()
+      newerCheck = refreshDesktopReleaseStatusForTest!()
+    })
+    expect(screen.getByTestId('desktop-release-version')).toHaveTextContent('none')
+
+    await act(async () => {
+      resolveNewer(releaseStatus('0.12.0'))
+      await newerCheck
+    })
+    expect(screen.getByTestId('desktop-release-version')).toHaveTextContent('0.12.0')
+
+    await act(async () => {
+      resolveOlder(releaseStatus('0.11.0'))
+      await olderCheck
+    })
+    expect(screen.getByTestId('desktop-release-version')).toHaveTextContent('0.12.0')
+  })
+
   it.each(['generation failure', 'authentication starts', 'invalid REST endpoint'])(
     'clears the first dialog when a second link meets %s',
     async failure => {
