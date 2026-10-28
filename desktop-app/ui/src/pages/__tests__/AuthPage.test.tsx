@@ -350,9 +350,9 @@ describe('AuthPage', () => {
 
     expect(email.value).toBe('person@example.com')
     expect(password.value).toBe('correct horse battery staple')
-    expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(
-      false
-    )
+    const signIn = screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement
+    expect(signIn.disabled).toBe(false)
+    expect(signIn.classList.contains('ant-btn-primary')).toBe(true)
   })
 
   it('submits valid credentials by Enter exactly once and blocks invalid or busy submits', async () => {

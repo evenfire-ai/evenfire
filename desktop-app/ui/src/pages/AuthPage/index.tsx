@@ -148,7 +148,12 @@ export function AuthPage() {
                       onChange={event => setPassword(event.target.value)}
                     />
                   </Flex>
-                  <Button block disabled={!hasPasswordLoginCredentials || busy} htmlType="submit">
+                  <Button
+                    block
+                    disabled={!hasPasswordLoginCredentials || busy}
+                    htmlType="submit"
+                    type="primary"
+                  >
                     {authTransitioning ? (
                       <Flex align="center" gap="small" justify="center">
                         <Spin aria-hidden="true" size="small" />
