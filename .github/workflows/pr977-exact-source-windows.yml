@@ -1,0 +1,177 @@
+name: PR 977 exact-source Windows validation
+
+on:
+  push:
+    branches:
+      - test/pr977-windows-b6c720ee-20261028-1133ab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr977-windows-exact-source-b6c720ee-1133ab
+  cancel-in-progress: false
+
+jobs:
+  desktop-windows:
+    runs-on: windows-2025
+    timeout-minutes: 240
+    env:
+      PR977_SOURCE_SHA: b6c720ee5e7e152173ddb6362f1413ed6262b080
+
+    steps:
+      - name: Check out the exact PR correction source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.PR977_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out the temporary validation harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify and report the source and trigger commits
+        shell: pwsh
+        run: |
+          $triggerSha = $env:GITHUB_SHA
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nvmrc = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $triggerSha"
+          Write-Output "Validation harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          Write-Output "Repository-pinned Node version: $nvmrc"
+          if ($triggerSha -ne $harnessSha) { throw 'Harness checkout does not match workflow trigger SHA' }
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source SHA mismatch' }
+          if ($nvmrc -ne '24.22.1') { throw 'Repository Node pin is not 24.22.1' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            source/desktop-app/package-lock.json
+            source/mcp-host/package-lock.json
+
+      - name: Record hosted Windows runtime
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Output "Runner image: $env:ImageOS $env:ImageVersion ($env:RUNNER_ARCH)"
+          Write-Output "Windows: $($os.Caption) $($os.Version)"
+          Write-Output "Node: $(node --version)"
+          Write-Output "npm: $(npm --version)"
+          if ((node --version) -ne 'v24.22.1') { throw 'Unexpected Node runtime' }
+
+      - name: Overlay validation-only native test files
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source changed before test overlay' }
+          $names = @(
+            'windowsSessionAuthorityAcl.native.test.ts',
+            'windowsSessionAuthorityDurableFileOps.native.test.ts'
+          )
+          $committedLauncherTests = @(
+            'windowsSessionAuthorityAcl.launch.test.ts',
+            'windowsSessionAuthorityFileOps.launch.test.ts'
+          )
+          foreach ($name in $committedLauncherTests) {
+            $sourceTest = Join-Path 'source/desktop-app/src/__tests__' $name
+            if (-not (Test-Path $sourceTest)) { throw "Missing committed launcher test: $name" }
+          }
+          $targetDirectory = 'source/desktop-app/src/__tests__'
+          foreach ($name in $names) {
+            $target = Join-Path $targetDirectory $name
+            if (Test-Path $target) { throw "Refusing to replace source test: $name" }
+            $inputFile = Join-Path 'validation/.validation/windows' $name
+            if (-not (Test-Path $inputFile)) { throw "Missing validation test: $name" }
+            Copy-Item -LiteralPath $inputFile -Destination $target
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputFile).Hash.ToLowerInvariant()
+            Write-Output "Validation-only test overlay: $name SHA256=$hash"
+          }
+          if ((git -C source rev-parse HEAD).Trim() -ne $env:PR977_SOURCE_SHA) {
+            throw 'Application source SHA changed during test overlay'
+          }
+
+      - name: Install Host fixture dependencies
+        working-directory: source/mcp-host
+        run: npm ci
+
+      - name: Install Desktop dependencies
+        working-directory: source/desktop-app
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: source/desktop-app
+        run: npx playwright install chromium
+
+      - name: Run required native Windows ACL and durability suites
+        id: native
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'pr977-windows-native-results.json'
+          npm test -- `
+            src/__tests__/windowsSessionAuthorityAcl.native.test.ts `
+            src/__tests__/windowsSessionAuthorityAcl.launch.test.ts `
+            src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts `
+            src/__tests__/windowsSessionAuthorityFileOps.launch.test.ts `
+            --reporter=dot --reporter=json --outputFile=$report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $assertScript = Join-Path $env:GITHUB_WORKSPACE 'validation/.validation/windows/assert-native-results.mjs'
+          node $assertScript $report
+
+      - name: Build Desktop main and renderer
+        id: build
+        continue-on-error: true
+        working-directory: source/desktop-app
+        run: npm run build
+
+      - name: Verify Electron runtime
+        id: electron
+        continue-on-error: true
+        working-directory: source/desktop-app
+        run: npm run verify:electron
+
+      - name: Run the full Windows Desktop suite
+        id: desktop
+        continue-on-error: true
+        working-directory: source/desktop-app
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+        run: npm test
+
+      - name: Require every Windows validation gate to pass
+        if: always()
+        shell: pwsh
+        env:
+          NATIVE_OUTCOME: ${{ steps.native.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          ELECTRON_OUTCOME: ${{ steps.electron.outcome }}
+          DESKTOP_OUTCOME: ${{ steps.desktop.outcome }}
+        run: |
+          $gates = [ordered]@{
+            'native ACL and durability' = $env:NATIVE_OUTCOME
+            'Desktop build' = $env:BUILD_OUTCOME
+            'Electron verification' = $env:ELECTRON_OUTCOME
+            'full Desktop suite' = $env:DESKTOP_OUTCOME
+          }
+          $failed = @()
+          foreach ($gate in $gates.GetEnumerator()) {
+            Write-Output "$($gate.Key): $($gate.Value)"
+            if ($gate.Value -ne 'success') { $failed += $gate.Key }
+          }
+          if ($failed.Count -gt 0) { throw "Windows validation failed: $($failed -join ', ')" }
