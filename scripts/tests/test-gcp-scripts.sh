@@ -336,7 +336,8 @@ STUB
   if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
     CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" >/dev/null 2>&1; then
-    if grep -q 'control-api-db-migrate-123456' "$log_file"; then
+    if grep -q 'control-api-db-migrate-123456' "$log_file" && \
+       grep -q '"activeDeadlineSeconds":300' "$log_file"; then
       pass "db migration job appends CI suffix to avoid name collisions"
     else
       fail "db migration job did not include CI suffix"
@@ -344,6 +345,16 @@ STUB
     fi
   else
     fail "db migration script failed in CI suffix test"
+  fi
+
+  if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
+    CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" --timeout 180s \
+    >/dev/null 2>&1 && grep -q '"activeDeadlineSeconds":180' "$log_file"; then
+    pass "db migration Job deadline follows the configured wait budget"
+  else
+    fail "db migration Job can outlive the configured wait budget"
+    cat "$log_file"
   fi
 
   rm -rf "$tmp"
@@ -1440,16 +1451,20 @@ assert_runtime_role_provisioning_script() {
 }
 
 assert_db_migration_context_fails_closed() {
-  local missing_context denied_context
+  local missing_context denied_context invalid_timeout
   missing_context="$(bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/minikube 2>&1 || true)"
   denied_context="$(CONTEXT=denied ALLOWED_CONTEXTS=allowed \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/minikube 2>&1 || true)"
+  invalid_timeout="$(CONTEXT=allowed ALLOWED_CONTEXTS=allowed \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/minikube \
+      --timeout 0s 2>&1 || true)"
 
   if [[ "$missing_context" == *'set CONTEXT to the target kube-context'* ]] && \
-     [[ "$denied_context" == *'CONTEXT=denied is not in ALLOWED_CONTEXTS'* ]]; then
-    pass "db migration context authority fails closed"
+     [[ "$denied_context" == *'CONTEXT=denied is not in ALLOWED_CONTEXTS'* ]] && \
+     [[ "$invalid_timeout" == *'migration timeout must be 1s..1800s'* ]]; then
+    pass "db migration context and deadline authority fail closed"
   else
-    fail "db migration context authority did not fail closed"
+    fail "db migration context or deadline validation did not fail closed"
   fi
 }
 
@@ -1514,6 +1529,7 @@ assert_control_api_runtime_access_contract_is_exact() {
      grep -qx $'gfs_desktop_operator_links\tlink_lifecycle' "$profile_file" && \
      grep -qx $'desktop_user_retirement_operations\tlink_lifecycle' "$profile_file" && \
      grep -qx $'password_identifier_state\tlegacy_dml' "$profile_file" && \
+     grep -qx $'password_admission_rollout_state\tnone' "$profile_file" && \
      grep -qx $'password_verification_pace\tlegacy_dml' "$profile_file" && \
      grep -qx $'oidc_protocol_attempts\tlegacy_dml' "$profile_file" && \
      grep -qx $'password_verification_work\tinsert_delete' "$profile_file" && \

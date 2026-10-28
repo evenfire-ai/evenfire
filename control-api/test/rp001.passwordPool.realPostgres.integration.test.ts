@@ -104,12 +104,26 @@ realPg('RP-001 production credential pool ownership', () => {
       await first
     }
   }, 60_000)
-  it('releases capacity after comparison errors and completion errors', async () => {
+  it('accounts settled comparison errors and fences uncertain completion failures', async () => {
     const { userId, login } = await setup(1)
     vi.spyOn(bcrypt, 'compare').mockRejectedValueOnce(new Error('synthetic comparison failure'))
     await expect(
       login.verifyUserPassword({ userId, email: 'member@example.invalid', password })
     ).rejects.toMatchObject({ status: 503 })
+    expect(
+      (
+        await db!.pool.query(
+          `SELECT failures, successes, uncertain, provisional_operation, terminal_disposition
+             FROM password_identifier_state`
+        )
+      ).rows[0]
+    ).toMatchObject({
+      failures: [],
+      successes: [],
+      uncertain: expect.arrayContaining([expect.anything()]),
+      provisional_operation: null,
+      terminal_disposition: 'uncertain',
+    })
     await openPace()
     expect(
       await login.verifyUserPassword({ userId, email: 'member@example.invalid', password })
@@ -119,11 +133,14 @@ realPg('RP-001 production credential pool ownership', () => {
     const spy = vi.spyOn(db!.pool, 'connect')
     let completing = false
     let afterComparisonBorrows = 0
-    vi.spyOn(bcrypt, 'compare').mockImplementation(async (submitted: string, stored: string) => {
-      const result = await realCompare(submitted, stored)
-      completing = true
-      return result
-    })
+    const comparison = vi
+      .spyOn(bcrypt, 'compare')
+      .mockImplementation(async (submitted: string, stored: string) => {
+        const result = await realCompare(submitted, stored)
+        completing = true
+        return result
+      })
+    const completionComparisonCount = comparison.mock.calls.length
     spy.mockImplementation((...args: unknown[]) => {
       // Durable owner release now borrows first; fault the credential completion, not release.
       if (completing && ++afterComparisonBorrows === 2) {
@@ -136,10 +153,19 @@ realPg('RP-001 production credential pool ownership', () => {
       login.verifyUserPassword({ userId, email: 'member@example.invalid', password })
     ).rejects.toMatchObject({ status: 503 })
     spy.mockRestore()
-    vi.restoreAllMocks()
+    const pending = (
+      await db!.pool.query(
+        `SELECT provisional_phase, provisional_operation, terminal_operation
+           FROM password_identifier_state`
+      )
+    ).rows[0]
+    expect(pending.provisional_phase).toBe('running')
+    expect(pending.provisional_operation).not.toBe(pending.terminal_operation)
     await openPace()
-    expect(
-      await login.verifyUserPassword({ userId, email: 'member@example.invalid', password })
-    ).toBe(true)
+    await expect(
+      login.verifyUserPassword({ userId, email: 'member@example.invalid', password })
+    ).rejects.toMatchObject({ status: 429 })
+    expect(comparison).toHaveBeenCalledTimes(completionComparisonCount + 1)
+    vi.restoreAllMocks()
   }, 60_000)
 })

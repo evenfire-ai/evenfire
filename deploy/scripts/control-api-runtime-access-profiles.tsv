@@ -50,6 +50,7 @@ notification_deliveries	legacy_dml
 dynamic_clients	legacy_dml
 oauth_grants	legacy_dml
 oidc_protocol_attempts	legacy_dml
+password_admission_rollout_state	none
 password_identifier_state	legacy_dml
 password_verification_pace	legacy_dml
 password_verification_work	insert_delete
