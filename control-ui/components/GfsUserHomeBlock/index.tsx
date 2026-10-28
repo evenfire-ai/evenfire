@@ -16,7 +16,7 @@ const POLL_INTERVAL_MS = 5_000
 const POLL_WINDOW_MS = 60_000
 const OWNER_PERMISSIONS = ['read', 'write', 'delete', 'share', 'manage_acl']
 const BOUND_HOME_RECOVERY =
-  'In the Control UI GFS browser on drive main, move or rename any item at the reserved path, then move the home back to that path and press Retry.'
+  'A bound home folder cannot be moved or renamed from Control UI, so this needs a database correction by an administrator with cluster access. If another item is at the reserved path, first move or rename it in the Control UI GFS browser on drive main. After the correction, press Retry.'
 
 const CONFLICT_CAUSES: Record<GfsUserHomeConflict, string> = {
   path_conflict: 'An item was found at the reserved home path.',
