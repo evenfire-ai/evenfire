@@ -254,6 +254,36 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
+    CREATE OR REPLACE FUNCTION authorization_prelock_workflow_run_revisions(target_run_ids UUID[])
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- A batch must hold every team before any user, across both archive
+      -- INSERT and live DELETE triggers. Bumping also creates missing rows.
+      FOR revision IN
+        SELECT DISTINCT subject_type, subject_id
+          FROM workflow_runs AS run
+          CROSS JOIN LATERAL (VALUES
+            ('team', run.team_id::TEXT),
+            ('team', CASE
+              WHEN run.usage_team_id = 'control-plane-admin-ui' THEN NULL
+              ELSE run.usage_team_id
+            END),
+            ('user', CASE WHEN run.actor_type = 'user' THEN run.actor_id::TEXT END)
+          ) AS subjects(subject_type, subject_id)
+         WHERE run.run_id = ANY(target_run_ids)
+           AND subject_id IS NOT NULL AND subject_id <> ''
+         ORDER BY subject_type, subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
+    END;
+    $$;
+
     CREATE OR REPLACE FUNCTION authorization_bump_user_row_revision()
     RETURNS TRIGGER
     LANGUAGE plpgsql
@@ -559,6 +589,9 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     REVOKE ALL ON TABLE authorization_catalog_environment FROM PUBLIC;
     GRANT SELECT ON TABLE authorization_catalog_environment TO control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_subject_revision(TEXT, TEXT) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION authorization_prelock_workflow_run_revisions(UUID[]) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_run_revisions(UUID[])
+      TO control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_workflow_run_revision() FROM PUBLIC;
@@ -641,7 +674,7 @@ async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> 
     REVOKE ALL ON FUNCTION authorization_bump_user_revision(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_revision(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_resource_revision(TEXT, TEXT, TEXT) FROM PUBLIC;
-    -- Triggers call these as their definer; the runtime only reads revisions.
+    -- Triggers and scoped definer functions call these; runtime calls stay denied.
     -- Explicit revocation also repairs grants retained by CREATE OR REPLACE.
     REVOKE ALL ON FUNCTION authorization_bump_user_revision(UUID) FROM control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_team_revision(UUID) FROM control_api_runtime;

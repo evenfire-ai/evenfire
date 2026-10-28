@@ -21,6 +21,13 @@ describe('0134 composable catalog revisions migration', () => {
     expect(sql).not.toContain('authorization_catalog_writer_components')
     expect(sql).toContain('authorization_bump_workflow_run_revision')
     expect(sql).toContain('authorization_bump_workflow_run_audit_revision')
+    expect(sql).toContain('authorization_prelock_workflow_run_revisions(target_run_ids UUID[])')
+    expect(sql).toContain(
+      'REVOKE ALL ON FUNCTION authorization_prelock_workflow_run_revisions(UUID[]) FROM PUBLIC'
+    )
+    expect(sql).toMatch(
+      /GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_run_revisions\(UUID\[\]\)\s+TO control_api_runtime/
+    )
     expect(sql).toContain('authorization_bump_workflow_approval_revision')
     expect(sql).toContain('authorization_bump_notification_revision')
     expect(sql).toContain('authorization_bump_gfs_resource_revision')

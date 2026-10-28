@@ -46,6 +46,7 @@ const accessFoundationDefinerSignatures = [
   'authorization_bump_user_revision(pg_catalog.uuid)',
   'authorization_bump_team_revision(pg_catalog.uuid)',
   'authorization_bump_subject_revision(pg_catalog.text, pg_catalog.text)',
+  'authorization_prelock_workflow_run_revisions(pg_catalog.uuid[])',
   'authorization_bump_user_row_revision()',
   'authorization_bump_team_row_revision()',
   'authorization_bump_workflow_run_revision()',
@@ -83,9 +84,9 @@ async function readAccessFoundationDefinerState(pool: Pool) {
        FROM pg_proc procedure
        JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
       WHERE namespace.nspname = 'public'
-        AND procedure.proname = ANY($1::text[])
-      ORDER BY procedure.proname`,
-    [accessFoundationDefinerNames]
+        AND procedure.prosecdef
+        AND procedure.proname LIKE 'authorization_%'
+      ORDER BY procedure.proname`
   )
 }
 
@@ -887,6 +888,30 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         await runtimeClient.query('ROLLBACK TO SAVEPOINT direct_revision_bump')
       }
       expect(directBumpResults).toEqual(['42501', '42501', '42501'])
+      const revisionExecute = await runtimeClient.query<{ function_name: string }>(`
+        SELECT routine.proname AS function_name
+          FROM pg_proc routine
+          JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+         WHERE namespace.nspname = 'public'
+           AND routine.prosecdef
+           AND routine.proname LIKE 'authorization_%'
+           AND has_function_privilege('control_api_runtime', routine.oid, 'EXECUTE')
+         ORDER BY routine.proname
+      `)
+      expect(revisionExecute.rows).toEqual([
+        { function_name: 'authorization_prelock_workflow_run_revisions' },
+      ])
+      const prelockGrants = await runtimeClient.query<{ grantee: string }>(`
+        SELECT pg_get_userbyid(privilege.grantee) AS grantee
+          FROM pg_proc routine
+          CROSS JOIN LATERAL aclexplode(routine.proacl) privilege
+         WHERE routine.oid =
+               'public.authorization_prelock_workflow_run_revisions(uuid[])'::regprocedure
+           AND privilege.grantee <> routine.proowner
+           AND privilege.privilege_type = 'EXECUTE'
+         ORDER BY grantee
+      `)
+      expect(prelockGrants.rows).toEqual([{ grantee: 'control_api_runtime' }])
       expect(
         (
           await runtimeClient.query(

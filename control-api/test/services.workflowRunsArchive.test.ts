@@ -138,17 +138,26 @@ describe('archiveTerminalRuns', () => {
     const total = await archiveTerminalRuns(gateway)
 
     expect(total).toBe(2)
-    // Transaction shape: BEGIN → SELECT → INSERT audit → INSERT step audit → DELETE → COMMIT,
+    // Transaction shape: BEGIN → SELECT → prelock → INSERT audit → INSERT step audit → DELETE → COMMIT,
     // then one more drain SELECT returning 0 rows.
     const selectCalls = clientQuery.mock.calls.filter(([sql]) =>
       /SELECT run_id, child_recipe_name/i.test(String(sql))
     )
     expect(selectCalls.length).toBe(2) // drain batch + empty-tail
     expect(String(selectCalls[0]?.[0])).toContain('COALESCE(ttl_seconds_after_finished, $1)')
+    const prelockCalls = clientQuery.mock.calls.filter(([sql]) =>
+      /SELECT authorization_prelock_workflow_run_revisions/i.test(String(sql))
+    )
+    expect(prelockCalls).toEqual([
+      ['SELECT authorization_prelock_workflow_run_revisions($1::uuid[])', [['uuid-1', 'uuid-2']]],
+    ])
     const insertAuditCalls = clientQuery.mock.calls.filter(([sql]) =>
       /INSERT INTO workflow_runs_audit/i.test(String(sql))
     )
     expect(insertAuditCalls.length).toBe(1)
+    const calls = clientQuery.mock.calls
+    expect(calls.indexOf(prelockCalls[0]!)).toBe(calls.indexOf(selectCalls[0]!) + 1)
+    expect(calls.indexOf(insertAuditCalls[0]!)).toBe(calls.indexOf(prelockCalls[0]!) + 1)
     expect(String(insertAuditCalls[0]?.[0])).toContain('wr.started_at')
     expect(String(insertAuditCalls[0]?.[0])).toContain('wr.completed_at - wr.started_at')
     expect(String(insertAuditCalls[0]?.[0])).not.toContain('wr.completed_at - wr.created_at')
