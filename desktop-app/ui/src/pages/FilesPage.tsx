@@ -2103,6 +2103,7 @@ export function FilesPage({
     {
       key: 'kind',
       title: '',
+      width: 48,
       render: (_value, resource) => (
         <span data-testid="gfs-resource-icon" aria-hidden="true">
           {resource.kind === 'directory' ? (
@@ -2250,6 +2251,7 @@ export function FilesPage({
           data-gfs-browser="true"
           role="region"
           aria-label="EvenDrive browser"
+          styles={{ root: { background: 'transparent' } }}
           aria-busy={driveBusy}
           onDragEnter={handleGfsDragEnter}
           onDragLeave={handleGfsDragLeave}

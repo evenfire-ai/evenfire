@@ -18359,6 +18359,10 @@ pre {
 
 /* Ant Design file-table interaction feedback. Table geometry, hover and
    typography come from Ant Design; these rules communicate the drag verdict. */
+[data-gfs-browser='true'] .gfs-resource-table .ant-table {
+  background: transparent;
+}
+
 [data-gfs-browser='true'] .gfs-resource-table .gfs-resource-row[data-dragging='true'] {
   opacity: 0.55;
 }

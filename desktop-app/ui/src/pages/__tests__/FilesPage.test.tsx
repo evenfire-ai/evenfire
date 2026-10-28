@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ConfigProvider } from 'antd'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
@@ -11,6 +13,11 @@ import { childView, listChildrenPage } from '@/gfs/__fixtures__/gfsProducerFixtu
 import type { Tone } from '@/uiTypes'
 import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { FilesPage } from '../FilesPage'
+
+const filesPageStyles = readFileSync(path.join(process.cwd(), 'ui/src/styles.css'), 'utf8').replace(
+  /\s+/g,
+  ' '
+)
 
 const hookMock = vi.hoisted(() => ({
   useGfsBrowserController: vi.fn(),
@@ -557,6 +564,47 @@ describe('FilesPage', () => {
         ?.querySelector('[data-testid="gfs-resource-icon"] [data-icon]')
         ?.getAttribute('data-icon')
     ).toBe('folder')
+  })
+
+  it('keeps the browser surfaces transparent and sizes the icon column to its content', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'parent-1',
+        gfsUri: 'gfs://main/parent-1',
+        name: 'Workspace',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'dir-a',
+          rid: 'dir-a',
+          gfsUri: 'gfs://main/dir-a',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'alpha',
+          kind: 'directory',
+          path: '/alpha',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    expect(browser.style.background).toBe('transparent')
+    const iconColumn = document.querySelector<HTMLTableColElement>(
+      '.gfs-resource-table colgroup col'
+    )
+    expect(iconColumn?.style.width).toBe('48px')
+
+    const tableRule = filesPageStyles.match(
+      /\[data-gfs-browser='true'\]\s+\.gfs-resource-table\s+\.ant-table\s*{([^}]*)}/
+    )?.[1]
+    expect(tableRule).toMatch(/background:\s*transparent/)
   })
 
   it('marks unreadable rows and refuses to open them instead of failing with a download 403', async () => {
