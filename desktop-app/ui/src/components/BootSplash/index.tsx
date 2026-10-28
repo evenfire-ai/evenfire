@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Card, Flex, Spin, Typography } from 'antd'
+import { authCardWidth } from '@constants/authLayout'
 import { BOOT_SPLASH_EXIT_MS, BOOT_SPLASH_MIN_DISPLAY_MS } from '@constants/bootSplash'
 import type { BootSplashProps } from './types'
 
@@ -37,7 +38,7 @@ export function BootSplash({ loading }: BootSplashProps) {
 
   return (
     <div className={`boot-overlay${leaving ? ' boot-overlay--leaving' : ''}`}>
-      <Card className="boot-splash-card">
+      <Card className="boot-splash-card" style={{ width: authCardWidth }}>
         <Flex vertical align="center" gap="large" role="status" aria-live="polite">
           <Flex className="boot-brand" align="center" justify="center">
             <img

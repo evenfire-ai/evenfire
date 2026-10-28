@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { authCardWidth } from '@constants/authLayout'
 import { BOOT_SPLASH_EXIT_MS, BOOT_SPLASH_MIN_DISPLAY_MS } from '@constants/bootSplash'
 import { BootSplash } from '..'
 
@@ -29,5 +31,11 @@ describe('BootSplash', () => {
 
     await act(() => vi.advanceTimersByTimeAsync(1))
     expect(view.container.querySelector('.boot-overlay')).toBeNull()
+  })
+
+  it('uses the same responsive card width as the login page', () => {
+    const markup = renderToStaticMarkup(<BootSplash loading />)
+
+    expect(markup).toContain(`style="width:${authCardWidth}"`)
   })
 })
