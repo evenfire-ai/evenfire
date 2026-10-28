@@ -1697,7 +1697,7 @@ export class AppService {
       !this.logoutInProgress &&
       getActiveEnvKey() === envKey
     const producerIsCurrent = () =>
-      ownerIsCurrent() && !this.sessionAuthority.isMemoryOnlySessionExpired(priorLease.expiresAt)
+      ownerIsCurrent() && !this.sessionAuthority.isMemoryOnlySessionLeaseExpired(priorLease)
     const assertOwnerCurrent = async () => {
       if (!ownerIsCurrent()) throw new SessionTokenStorageSupersededBeforeWriteError()
       this.assertMemoryOnlySessionCurrent(priorLease)
@@ -1732,8 +1732,8 @@ export class AppService {
     let gfsPrepared = false
     let acceptedMemoryLease: MemoryOnlySessionLease | undefined
     try {
-      const expiresAt = this.sessionAuthority.memoryOnlySessionReplacementDeadline(
-        priorLease.expiresAt,
+      const deadlines = this.sessionAuthority.memoryOnlySessionReplacementDeadlines(
+        priorLease,
         candidateToken
       )
       await this.runSessionPersistence(async () => {
@@ -1773,7 +1773,13 @@ export class AppService {
               await options.beforeAcceptance()
             }
             await assertOwnerCurrent()
-            if (this.sessionAuthority.isMemoryOnlySessionExpired(expiresAt))
+            if (
+              this.sessionAuthority.isMemoryOnlySessionExpired(
+                deadlines.expiresAt,
+                Date.now(),
+                deadlines.expiresAtMonotonicMs
+              )
+            )
               throw new TemporarySessionExpiredError()
             return {
               chatBindingGeneration: initialChatBindingGeneration,
@@ -1790,7 +1796,11 @@ export class AppService {
               currentScope.environmentKey === consumers.chatScope.environmentKey &&
               currentScope.userId === consumers.chatScope.userId &&
               currentScope.teamId === consumers.chatScope.teamId &&
-              !this.sessionAuthority.isMemoryOnlySessionExpired(expiresAt)
+              !this.sessionAuthority.isMemoryOnlySessionExpired(
+                deadlines.expiresAt,
+                Date.now(),
+                deadlines.expiresAtMonotonicMs
+              )
             )
           },
           isStillOwned: (_user, consumers) => {
@@ -1805,7 +1815,7 @@ export class AppService {
             // here would falsely reject every valid staged acceptance.
             return (
               getActiveEnvKey() === envKey &&
-              !this.sessionAuthority.isMemoryOnlySessionExpired(priorLease.expiresAt)
+              !this.sessionAuthority.isMemoryOnlySessionLeaseExpired(priorLease)
             )
           },
           preparePublication: (user, consumers) => {
@@ -1821,7 +1831,7 @@ export class AppService {
             const nextLease: MemoryOnlySessionLease = {
               ...priorLease,
               marker: acceptedMarker,
-              expiresAt,
+              ...deadlines,
             }
             const nextGeneration =
               options.advanceSessionGeneration === false ? generation : generation + 1
@@ -4594,14 +4604,22 @@ export class AppService {
 
   private installAuthenticatedLogin(
     result: { token: string; me: SessionMe },
-    expectedSessionGeneration?: number
+    expectedSessionGeneration?: number,
+    memoryOnlyClockEpoch = this.sessionAuthority.captureMemoryOnlyClockEpoch()
   ): Promise<SessionState> {
     if (expectedSessionGeneration !== undefined) {
       this.assertSessionGeneration(expectedSessionGeneration)
     }
     const authenticatedAt = Date.now()
+    const authenticatedAtMonotonic = this.sessionAuthority.captureMonotonicNow()
     return this.runCredentialProducer(() =>
-      this.installAuthenticatedLoginOnce(result, authenticatedAt, expectedSessionGeneration)
+      this.installAuthenticatedLoginOnce(
+        result,
+        authenticatedAt,
+        expectedSessionGeneration,
+        authenticatedAtMonotonic,
+        memoryOnlyClockEpoch
+      )
     )
   }
 
@@ -4611,13 +4629,17 @@ export class AppService {
       me: SessionMe
     },
     authenticatedAt = Date.now(),
-    expectedSessionGeneration?: number
+    expectedSessionGeneration?: number,
+    authenticatedAtMonotonic = this.sessionAuthority.captureMonotonicNow(),
+    memoryOnlyClockEpoch = this.sessionAuthority.captureMemoryOnlyClockEpoch()
   ): Promise<SessionState> {
     return this.runSessionPersistence(() =>
       this.installAuthenticatedLoginWithinPersistence(
         result,
         authenticatedAt,
-        expectedSessionGeneration
+        expectedSessionGeneration,
+        authenticatedAtMonotonic,
+        memoryOnlyClockEpoch
       )
     )
   }
@@ -4626,7 +4648,9 @@ export class AppService {
     result: { token: string; me: SessionMe },
     envKey: string,
     pendingLogout: PendingLogoutLoginPlan,
-    authenticatedAt: number
+    authenticatedAt: number,
+    authenticatedAtMonotonic: number,
+    memoryOnlyClockEpoch: number
   ): Promise<SessionState> {
     const legacyNamespace = getActiveLegacyEnvKeyInventory()
     const legacyEnvKeys = legacyNamespace.keys
@@ -4646,13 +4670,20 @@ export class AppService {
       envKey,
       token: result.token,
       authenticatedAt,
+      authenticatedAtMonotonic,
+      memoryOnlyClockEpoch,
       pendingLogout,
       legacyEnvKeys,
       legacyNamespaceComplete: legacyNamespace.complete,
     })
     if (plan.generation !== this.sessionGeneration)
       throw new SessionTokenStorageSupersededBeforeWriteError()
-    if (plan.source === 'memory-only' && (!plan.volatileSessionId || plan.expiresAt === undefined))
+    if (
+      plan.source === 'memory-only' &&
+      (!plan.volatileSessionId ||
+        plan.expiresAt === undefined ||
+        plan.expiresAtMonotonicMs === undefined)
+    )
       throw new Error('Temporary session acceptance plan is incomplete')
 
     const assertOwned = () =>
@@ -4755,6 +4786,7 @@ export class AppService {
                   volatileSessionId: plan.volatileSessionId!,
                   marker: acceptedMarker,
                   expiresAt: plan.expiresAt!,
+                  expiresAtMonotonicMs: plan.expiresAtMonotonicMs!,
                 }
               : undefined
           const nextGeneration = plan.generation + 1
@@ -4871,7 +4903,9 @@ export class AppService {
             !acceptanceOutcomeIndeterminate &&
             gfsPrepared &&
             plan.ownerUser &&
-            runtimeOwnerIsCurrent()
+            runtimeOwnerIsUnchanged() &&
+            (!plan.ownerMemoryLease ||
+              !this.sessionAuthority.isMemoryOnlySessionLeaseExpired(plan.ownerMemoryLease))
           )
             this.activateGfsAuthScope(priorGfsIdentity)
         },
@@ -4891,7 +4925,9 @@ export class AppService {
   private async installAuthenticatedLoginWithinPersistence(
     result: { token: string; me: SessionMe },
     authenticatedAt = Date.now(),
-    expectedSessionGeneration?: number
+    expectedSessionGeneration?: number,
+    authenticatedAtMonotonic = this.sessionAuthority.captureMonotonicNow(),
+    memoryOnlyClockEpoch = this.sessionAuthority.captureMemoryOnlyClockEpoch()
   ): Promise<SessionState> {
     if (expectedSessionGeneration !== undefined)
       this.assertSessionGeneration(expectedSessionGeneration)
@@ -4919,7 +4955,9 @@ export class AppService {
         result,
         envKey,
         pendingLogout,
-        authenticatedAt
+        authenticatedAt,
+        authenticatedAtMonotonic,
+        memoryOnlyClockEpoch
       )
     } finally {
       releasePrewarm()
@@ -4929,7 +4967,8 @@ export class AppService {
   private async completePasswordLogin(
     email: string,
     password: string,
-    expectedSessionGeneration: number
+    expectedSessionGeneration: number,
+    memoryOnlyClockEpoch: number
   ): Promise<SessionState> {
     let loginRequest: ReturnType<AuthClient['passwordLogin']> | undefined
     const binding = await this.withNativeAuthEnvironmentCommit(async () => {
@@ -4943,7 +4982,7 @@ export class AppService {
     return this.withNativeAuthEnvironmentCommit(async () => {
       this.assertSessionGeneration(expectedSessionGeneration)
       this.assertAuthEnvironmentBinding(binding)
-      return this.installAuthenticatedLogin(result, expectedSessionGeneration)
+      return this.installAuthenticatedLogin(result, expectedSessionGeneration, memoryOnlyClockEpoch)
     })
   }
 
@@ -5219,11 +5258,13 @@ export class AppService {
   async googleLogin(idToken: string): Promise<SessionState> {
     let loginRequest: ReturnType<AuthClient['googleLogin']> | undefined
     let registered = false
+    let memoryOnlyClockEpoch = 0
     try {
       const sessionGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
         const sessionGeneration = this.sessionAuthority.advanceSessionGeneration(
           this.sessionGeneration
         )
+        memoryOnlyClockEpoch = this.sessionAuthority.captureMemoryOnlyClockEpoch()
         this.interactiveLoginAttempts += 1
         registered = true
         return sessionGeneration
@@ -5245,7 +5286,7 @@ export class AppService {
       return await this.withNativeAuthEnvironmentCommit(async () => {
         this.assertSessionGeneration(sessionGeneration)
         this.assertAuthEnvironmentBinding(binding)
-        return this.installAuthenticatedLogin(result, sessionGeneration)
+        return this.installAuthenticatedLogin(result, sessionGeneration, memoryOnlyClockEpoch)
       })
     } finally {
       if (registered) {
@@ -5424,9 +5465,11 @@ export class AppService {
 
   async passwordLogin(email: string, password: string): Promise<PasswordLoginResult> {
     let registered = false
+    let memoryOnlyClockEpoch = 0
     try {
       const currentLoginGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
         const generation = this.sessionAuthority.advanceSessionGeneration(this.sessionGeneration)
+        memoryOnlyClockEpoch = this.sessionAuthority.captureMemoryOnlyClockEpoch()
         hydrateDesktopRuntimeConfig()
         if (!isDesktopRuntimeConfigured()) {
           throw new Error('desktop_setup_required')
@@ -5444,7 +5487,8 @@ export class AppService {
       const accepted = await this.completePasswordLogin(
         normalizedEmail,
         password,
-        currentLoginGeneration
+        currentLoginGeneration,
+        memoryOnlyClockEpoch
       )
       return accepted
     } finally {
@@ -6854,7 +6898,13 @@ export class AppService {
           this.scheduleMemoryOnlySessionExpiry(lease, 1_000)
         }
       },
-      Math.max(0, Math.min(lease.expiresAt - Date.now(), retryDelayMs ?? Number.POSITIVE_INFINITY))
+      Math.max(
+        0,
+        Math.min(
+          this.sessionAuthority.memoryOnlySessionRemainingMs(lease),
+          retryDelayMs ?? Number.POSITIVE_INFINITY
+        )
+      )
     )
     timer.unref?.()
     this.memoryOnlySessionExpiryTimer = timer
@@ -6963,6 +7013,17 @@ export class AppService {
       this.reportDeferredLogoutFailureSafely(error)
       return false
     }
+  }
+
+  /**
+   * Node's high-resolution monotonic clock may pause while macOS sleeps. End an
+   * in-memory-only session at the suspend boundary so sleep cannot extend its
+   * elapsed-time lease; resume expiry checking remains a fallback for missed
+   * or interrupted suspend notifications.
+   */
+  endMemoryOnlySessionForSystemSuspend(): void {
+    this.sessionAuthority.recordSystemSuspend()
+    if (this.memoryOnlySession) this.endMemoryOnlySession()
   }
 
   private temporarySessionState(): Pick<SessionState, 'sessionMode' | 'expiresAt'> {

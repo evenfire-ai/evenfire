@@ -4,7 +4,9 @@ import {
   MEMORY_ONLY_SESSION_MAX_AGE_MS,
   isMemoryOnlySessionExpired,
   memoryOnlySessionDeadline,
+  memoryOnlySessionDeadlines,
   memoryOnlySessionReplacementDeadline,
+  memoryOnlySessionReplacementDeadlines,
 } from '../memoryOnlySession.js'
 
 function tokenWithExpiry(expSeconds: number): string {
@@ -29,6 +31,46 @@ describe('memory-only session lifetime', () => {
     expect(() => memoryOnlySessionDeadline(tokenWithExpiry(now / 1000), now)).toThrow('expired')
     expect(isMemoryOnlySessionExpired(now, now)).toBe(true)
     expect(isMemoryOnlySessionExpired(now + 1, now)).toBe(false)
+  })
+
+  it('keeps server and local bounds in elapsed time when the wall clock moves backward', () => {
+    const wallNow = 2_000_000_000_000
+    const monotonicNow = 120_000
+    const twelveHour = memoryOnlySessionDeadlines(
+      tokenWithExpiry(wallNow / 1000 + 12 * 60 * 60),
+      wallNow,
+      monotonicNow
+    )
+    const twentyFourHour = memoryOnlySessionDeadlines(
+      tokenWithExpiry(wallNow / 1000 + 36 * 60 * 60),
+      wallNow,
+      monotonicNow
+    )
+
+    expect(twelveHour).toEqual({
+      expiresAt: wallNow + 12 * 60 * 60 * 1000,
+      expiresAtMonotonicMs: monotonicNow + 12 * 60 * 60 * 1000,
+    })
+    expect(twentyFourHour).toEqual({
+      expiresAt: wallNow + MEMORY_ONLY_SESSION_MAX_AGE_MS,
+      expiresAtMonotonicMs: monotonicNow + MEMORY_ONLY_SESSION_MAX_AGE_MS,
+    })
+    expect(
+      isMemoryOnlySessionExpired(
+        twelveHour.expiresAt,
+        wallNow - 2 * 60 * 60 * 1000,
+        twelveHour.expiresAtMonotonicMs,
+        monotonicNow + 12 * 60 * 60 * 1000
+      )
+    ).toBe(true)
+    expect(
+      isMemoryOnlySessionExpired(
+        twentyFourHour.expiresAt,
+        wallNow + 25 * 60 * 60 * 1000,
+        twentyFourHour.expiresAtMonotonicMs,
+        monotonicNow + 1 * 60 * 60 * 1000
+      )
+    ).toBe(true)
   })
 
   it('preserves the server and local deadline bounds across generated valid expirations', () => {
@@ -79,6 +121,36 @@ describe('memory-only session lifetime', () => {
         }
       ),
       { numRuns: 10000 }
+    )
+  })
+
+  it('never extends either clock bound when a replacement token has a later expiry', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1_900_000_000, max: 2_200_000_000 }),
+        fc.integer({ min: 2 * 60 * 60, max: 23 * 60 * 60 }),
+        fc.integer({ min: 1, max: 48 * 60 * 60 }),
+        fc.integer({ min: 1_000, max: 60 * 60 * 1000 }),
+        (nowSeconds, initialLifetimeSeconds, replacementLifetimeSeconds, elapsed) => {
+          const wallNow = nowSeconds * 1000
+          const monotonicNow = elapsed
+          const current = memoryOnlySessionDeadlines(
+            tokenWithExpiry(nowSeconds + initialLifetimeSeconds),
+            wallNow,
+            monotonicNow
+          )
+          const replacement = memoryOnlySessionReplacementDeadlines(
+            current,
+            tokenWithExpiry(nowSeconds + initialLifetimeSeconds + replacementLifetimeSeconds),
+            wallNow + elapsed,
+            monotonicNow + elapsed
+          )
+
+          expect(replacement.expiresAt).toBeLessThanOrEqual(current.expiresAt)
+          expect(replacement.expiresAtMonotonicMs).toBeLessThanOrEqual(current.expiresAtMonotonicMs)
+        }
+      ),
+      { numRuns: 10_000 }
     )
   })
 })

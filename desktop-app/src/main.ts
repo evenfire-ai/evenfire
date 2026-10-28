@@ -32,6 +32,7 @@ import {
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
+import { wireMemoryOnlySessionPowerLifecycle } from './powerMonitorSessionLifecycle.js'
 import { collectInitialProtocolUrls, shouldRegisterOsProtocols } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
@@ -203,14 +204,14 @@ function emitWindowControlsState(win: BrowserWindow): void {
  * sleep is re-minted now instead of whenever its timer catches up.
  */
 function wirePowerMonitor(): void {
-  const emit = () => {
-    appService.checkTemporarySessionExpiry()
+  // performance.now() is not a suspend-inclusive clock on macOS. End an
+  // in-memory-only session before sleep rather than allowing paused elapsed
+  // time to extend local authority; the resume check handles interrupted wake.
+  wireMemoryOnlySessionPowerLifecycle(powerMonitor, appService, () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('system:resume')
     }
-  }
-  powerMonitor.on('resume', emit)
-  powerMonitor.on('unlock-screen', emit)
+  })
   powerMonitor.on('resume', notifySandboxUiHostResumed)
   powerMonitor.on('unlock-screen', notifySandboxUiHostResumed)
 }

@@ -7,9 +7,10 @@ import {
 } from './config.js'
 import { ApiError } from './httpClient.js'
 import {
+  type MemoryOnlySessionDeadlines,
   isMemoryOnlySessionExpired,
-  memoryOnlySessionDeadline,
-  memoryOnlySessionReplacementDeadline,
+  memoryOnlySessionDeadlines,
+  memoryOnlySessionReplacementDeadlines,
 } from './memoryOnlySession.js'
 import {
   type PendingExternalLogoutCas,
@@ -132,6 +133,7 @@ export type MemoryOnlySessionLease = {
   volatileSessionId: string
   marker: PendingExternalLogoutMarker
   expiresAt: number
+  expiresAtMonotonicMs: number
 }
 
 type SessionAuthorityRuntimeOwner = Readonly<{
@@ -248,6 +250,8 @@ export type FreshSessionAcceptancePlan = {
   priorVolatileSessionId?: string
   volatileSessionId?: string
   expiresAt?: number
+  expiresAtMonotonicMs?: number
+  memoryOnlyClockEpoch?: number
   generation: number
   ownerToken: string | null
   ownerUser: SessionMe | null
@@ -496,6 +500,7 @@ type SessionAuthorityCoordinatorOptions = {
  * not keep a second copy of source/lease state or a separate persistence queue.
  */
 export class SessionAuthorityCoordinator {
+  private memoryOnlyClockEpoch = 0
   private runtimeOwner: SessionAuthorityRuntimeOwner = Object.freeze({
     token: null,
     user: null,
@@ -623,6 +628,8 @@ export class SessionAuthorityCoordinator {
     envKey: string
     token: string
     authenticatedAt: number
+    authenticatedAtMonotonic?: number
+    memoryOnlyClockEpoch?: number
     pendingLogout: PendingLogoutLoginPlan
     legacyEnvKeys: readonly string[]
     legacyNamespaceComplete?: boolean
@@ -637,6 +644,7 @@ export class SessionAuthorityCoordinator {
       user: this.authenticatedUser,
       memoryLease: this.memoryLease,
     }
+    const memoryOnlyClockEpoch = input.memoryOnlyClockEpoch ?? this.memoryOnlyClockEpoch
     const expectedMarker = this.inspectPendingLogoutMarker(input.envKey)
     if (!pendingExternalLogoutMarkersMatch(expectedMarker, input.pendingLogout.marker))
       throw new SessionTokenStorageSupersededBeforeWriteError()
@@ -688,7 +696,7 @@ export class SessionAuthorityCoordinator {
             marker?.intent === 'memory-only-session' &&
             marker.volatileSessionId === frame.volatileSessionId &&
             marker.revision === frame.revision &&
-            !isMemoryOnlySessionExpired(activeLease.expiresAt)
+            !this.isMemoryOnlySessionLeaseExpired(activeLease)
           )
           if (leaseOwnsFrame) {
             purpose = 'authenticated-replacement'
@@ -714,6 +722,7 @@ export class SessionAuthorityCoordinator {
       this.authenticatedUser !== owner.user ||
       this.memoryLease !== owner.memoryLease ||
       getActiveEnvKey() !== input.envKey ||
+      (source === 'memory-only' && memoryOnlyClockEpoch !== this.memoryOnlyClockEpoch) ||
       !pendingExternalLogoutMarkersMatch(
         this.inspectPendingLogoutMarker(input.envKey),
         expectedMarker
@@ -734,8 +743,13 @@ export class SessionAuthorityCoordinator {
       ...(priorVolatileSessionId ? { priorVolatileSessionId } : {}),
       ...(volatileSessionId ? { volatileSessionId } : {}),
       ...(source === 'memory-only'
-        ? { expiresAt: this.memoryOnlySessionDeadline(input.token, input.authenticatedAt) }
+        ? memoryOnlySessionDeadlines(
+            input.token,
+            input.authenticatedAt,
+            input.authenticatedAtMonotonic ?? this.nowMonotonic()
+          )
         : {}),
+      ...(source === 'memory-only' ? { memoryOnlyClockEpoch } : {}),
       generation: owner.generation,
       ownerToken: owner.token,
       ownerUser: owner.user,
@@ -749,8 +763,10 @@ export class SessionAuthorityCoordinator {
     plan: FreshSessionAcceptancePlan,
     logoutInProgress: boolean
   ): void {
-    if (plan.ownerMemoryLease && isMemoryOnlySessionExpired(plan.ownerMemoryLease.expiresAt))
+    if (plan.ownerMemoryLease && this.isMemoryOnlySessionLeaseExpired(plan.ownerMemoryLease))
       throw new TemporarySessionExpiredError()
+    if (plan.source === 'memory-only' && plan.memoryOnlyClockEpoch !== this.memoryOnlyClockEpoch)
+      throw new SessionTokenStorageSupersededBeforeWriteError()
     if (
       logoutInProgress ||
       getActiveEnvKey() !== plan.envKey ||
@@ -773,7 +789,8 @@ export class SessionAuthorityCoordinator {
   ): boolean {
     return (
       this.isFreshSessionAcceptanceRuntimeOwnerUnchanged(plan, logoutInProgress) &&
-      (!plan.ownerMemoryLease || !isMemoryOnlySessionExpired(plan.ownerMemoryLease.expiresAt))
+      (plan.source !== 'memory-only' || plan.memoryOnlyClockEpoch === this.memoryOnlyClockEpoch) &&
+      (!plan.ownerMemoryLease || !this.isMemoryOnlySessionLeaseExpired(plan.ownerMemoryLease))
     )
   }
 
@@ -1486,20 +1503,49 @@ export class SessionAuthorityCoordinator {
     this.memoryLease = value
   }
 
-  memoryOnlySessionDeadline(token: string, now = Date.now()): number {
-    return memoryOnlySessionDeadline(token, now)
-  }
-
-  memoryOnlySessionReplacementDeadline(
-    currentDeadline: number,
+  memoryOnlySessionDeadlines(
     token: string,
-    now = Date.now()
-  ): number {
-    return memoryOnlySessionReplacementDeadline(currentDeadline, token, now)
+    wallNow = Date.now(),
+    monotonicNow = this.nowMonotonic()
+  ): MemoryOnlySessionDeadlines {
+    return memoryOnlySessionDeadlines(token, wallNow, monotonicNow)
   }
 
-  isMemoryOnlySessionExpired(deadline: number, now = Date.now()): boolean {
-    return isMemoryOnlySessionExpired(deadline, now)
+  memoryOnlySessionReplacementDeadlines(
+    current: MemoryOnlySessionDeadlines,
+    token: string,
+    wallNow = Date.now(),
+    monotonicNow = this.nowMonotonic()
+  ): MemoryOnlySessionDeadlines {
+    return memoryOnlySessionReplacementDeadlines(current, token, wallNow, monotonicNow)
+  }
+
+  isMemoryOnlySessionExpired(
+    deadline: number,
+    now = Date.now(),
+    monotonicDeadline?: number
+  ): boolean {
+    return isMemoryOnlySessionExpired(deadline, now, monotonicDeadline, this.nowMonotonic())
+  }
+
+  isMemoryOnlySessionLeaseExpired(lease: MemoryOnlySessionLease): boolean {
+    return this.isMemoryOnlySessionExpired(lease.expiresAt, Date.now(), lease.expiresAtMonotonicMs)
+  }
+
+  captureMonotonicNow(): number {
+    return this.nowMonotonic()
+  }
+
+  captureMemoryOnlyClockEpoch(): number {
+    return this.memoryOnlyClockEpoch
+  }
+
+  recordSystemSuspend(): void {
+    this.memoryOnlyClockEpoch += 1
+  }
+
+  memoryOnlySessionRemainingMs(lease: MemoryOnlySessionLease): number {
+    return Math.min(lease.expiresAt - Date.now(), lease.expiresAtMonotonicMs - this.nowMonotonic())
   }
 
   isIsolatedDevelopmentStorage(): boolean {
@@ -1571,7 +1617,7 @@ export class SessionAuthorityCoordinator {
 
   assertMemoryOnlySessionCurrent(expected = this.memoryLease): void {
     if (!expected || expected !== this.memoryLease) throw new TemporarySessionEndedError()
-    if (isMemoryOnlySessionExpired(expected.expiresAt)) throw new TemporarySessionExpiredError()
+    if (this.isMemoryOnlySessionLeaseExpired(expected)) throw new TemporarySessionExpiredError()
     if (getActiveEnvKey() !== expected.envKey) throw new TemporarySessionEnvironmentChangedError()
     const ownership = this.inspectOwnership(
       expected.envKey,
@@ -1584,7 +1630,7 @@ export class SessionAuthorityCoordinator {
 
   private assertMemoryOnlyCandidateMarkerCurrent(expected = this.memoryLease): void {
     if (!expected || expected !== this.memoryLease) throw new TemporarySessionEndedError()
-    if (isMemoryOnlySessionExpired(expected.expiresAt)) throw new TemporarySessionExpiredError()
+    if (this.isMemoryOnlySessionLeaseExpired(expected)) throw new TemporarySessionExpiredError()
     if (getActiveEnvKey() !== expected.envKey) throw new TemporarySessionEnvironmentChangedError()
     const observation = this.observeMarker(expected.envKey)
     if (observation.status !== 'observed') throw observation.error
@@ -2696,7 +2742,7 @@ export class SessionAuthorityCoordinator {
     if (
       lease?.envKey === envKey &&
       lease.volatileSessionId === marker.intent.volatileSessionId &&
-      !this.isMemoryOnlySessionExpired(lease.expiresAt)
+      !this.isMemoryOnlySessionLeaseExpired(lease)
     )
       return { kind: 'allow' }
     return { kind: 'fail-closed' }
