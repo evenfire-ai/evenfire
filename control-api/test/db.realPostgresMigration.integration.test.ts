@@ -675,7 +675,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const heldHost = 'legacy-verifier-test'
     const heldPid = process.pid
     let legacyCompletionClient: PoolClient | null = null
-    let legacyCompletionCommittedAt: number | null = null
+    let legacyCompletionFenceLowerBoundMs: number | null = null
     let migrationSettled = false
     let migrationError: unknown
     let migrationPromise: Promise<void> | undefined
@@ -780,6 +780,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         'UPDATE password_identifier_state SET revision = revision + 1 WHERE identifier_key = $1',
         [key]
       )
+      const legacyCompletionBackendPid = Number(
+        (await legacyCompletionClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      )
 
       migrationPromise = db
         .initDb({ connect: () => dbPool.connect() })
@@ -796,12 +799,19 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       while (Date.now() < guardDeadline) {
         const waiting = await dbPool.query(
           `SELECT EXISTS (
-             SELECT 1 FROM pg_stat_activity
-              WHERE datname = current_database()
-                AND pid <> pg_backend_pid()
-                AND wait_event_type = 'Lock'
-                AND query LIKE '%password_admission_rollout_state%'
-           ) AS waiting`
+             SELECT 1
+               FROM pg_stat_activity AS activity
+               JOIN pg_locks AS waiting_lock
+                 ON waiting_lock.pid = activity.pid
+                AND waiting_lock.granted = FALSE
+                AND waiting_lock.relation = 'public.password_identifier_state'::regclass
+              WHERE activity.datname = current_database()
+                AND activity.pid <> pg_backend_pid()
+                AND activity.wait_event_type = 'Lock'
+                AND activity.query LIKE '%password_admission_rollout_state%'
+                AND $1 = ANY(pg_blocking_pids(activity.pid))
+           ) AS waiting`,
+          [legacyCompletionBackendPid]
         )
         if (waiting.rows[0].waiting) {
           guardInstallWaiting = true
@@ -811,14 +821,15 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       }
       expect(guardInstallWaiting).toBe(true)
       expect(migrationSettled).toBe(false)
-      await legacyCompletionClient.query('COMMIT')
-      legacyCompletionCommittedAt = Number(
+      legacyCompletionFenceLowerBoundMs = Number(
         (
           await dbPool.query(
             'SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now'
           )
         ).rows[0].now
       )
+      expect(Number.isFinite(legacyCompletionFenceLowerBoundMs)).toBe(true)
+      await legacyCompletionClient.query('COMMIT')
       await legacyCompletionClient.query('RESET ROLE')
       legacyCompletionClient.release()
       legacyCompletionClient = null
@@ -921,7 +932,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
     expect(migrationSettled).toBe(true)
     expect(String(migrationError)).toContain('forced password admission migration failure')
-    expect(Number(fence?.fenced_at_ms)).toBeGreaterThanOrEqual(legacyCompletionCommittedAt ?? 0)
+    expect(Number(fence?.fenced_at_ms)).toBeGreaterThanOrEqual(
+      legacyCompletionFenceLowerBoundMs ?? 0
+    )
     await expectLegacyWriteRejected(
       'UPDATE password_identifier_state SET revision = revision + 1 WHERE identifier_key=$1',
       [key]
