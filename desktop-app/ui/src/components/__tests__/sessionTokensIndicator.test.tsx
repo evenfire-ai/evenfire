@@ -9,30 +9,29 @@ afterEach(cleanup)
 describe('SessionTokensIndicator', () => {
   it('shows input and output as separate compact stats', () => {
     const tokens: SessionTokensLite = { input: 11_900, output: 500 }
-    const { container } = render(<SessionTokensIndicator tokens={tokens} />)
-    const stats = container.querySelectorAll('.token-usage-stat')
-    expect(stats[0]?.textContent).toBe('11.9k')
-    expect(stats[1]?.textContent).toBe('500')
+    render(<SessionTokensIndicator tokens={tokens} />)
+    const stats = screen.getByLabelText(/Conversation token usage/)
+    expect(stats.textContent).toContain('11.9k')
+    expect(stats.textContent).toContain('500')
   })
 
   it('omits the cache glyph and cache rows when the model does not report cache', () => {
     const tokens: SessionTokensLite = { input: 100, output: 40 }
-    const { container } = render(<SessionTokensIndicator tokens={tokens} />)
-    expect(container.querySelector('.token-usage-stat--cache')).toBeNull()
-    const tooltip = container.querySelector('.token-usage-tooltip')
-    expect(tooltip?.textContent).toContain('Input')
-    expect(tooltip?.textContent).toContain('Output')
-    expect(tooltip?.textContent).not.toContain('Cache')
+    render(<SessionTokensIndicator tokens={tokens} />)
+    expect(screen.getByLabelText(/Conversation token usage/).getAttribute('aria-label')).toMatch(
+      /Input .* · Output /
+    )
+    expect(
+      screen.getByLabelText(/Conversation token usage/).getAttribute('aria-label')
+    ).not.toContain('Cache')
   })
 
   it('shows the cache glyph and tooltip cache rows when the model reports cache (even at 0)', () => {
     const tokens: SessionTokensLite = { input: 200, output: 80, cacheRead: 13, cacheWrite: 0 }
-    const { container } = render(<SessionTokensIndicator tokens={tokens} />)
-    expect(container.querySelector('.token-usage-stat--cache')).toBeTruthy()
-    const tooltip = container.querySelector('.token-usage-tooltip')
-    expect(tooltip?.textContent).toContain('Cache read')
-    expect(tooltip?.textContent).toContain('13')
-    expect(tooltip?.textContent).toContain('Cache write')
+    render(<SessionTokensIndicator tokens={tokens} />)
+    expect(screen.getByLabelText(/Conversation token usage/).getAttribute('aria-label')).toMatch(
+      /Cache read 13.*Cache write 0/
+    )
   })
 
   it('renders nothing when the total is zero', () => {

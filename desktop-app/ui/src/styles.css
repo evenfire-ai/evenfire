@@ -7729,7 +7729,7 @@ h3 {
   border-color: rgba(var(--accent-rgb), 0.3);
 }
 
-.composer textarea {
+.composer textarea:not(.ant-input) {
   min-height: 56px;
   padding: var(--space-2-5);
   border-radius: var(--radius-md);
@@ -7760,12 +7760,12 @@ h3 {
   box-shadow: 0 0 0 1px rgba(var(--focus-rgb), 0.56);
 }
 
-.composer-input-shell--drag-active textarea {
+.composer-input-shell--drag-active textarea:not(.ant-input) {
   border-color: rgba(var(--accent-rgb), 0.58);
   box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.24);
 }
 
-.composer-input-shell textarea {
+.composer-input-shell textarea:not(.ant-input) {
   display: block;
   width: 100%;
   max-height: 240px;
@@ -7776,7 +7776,7 @@ h3 {
   overflow-y: hidden;
 }
 
-.composer-input-shell textarea:focus {
+.composer-input-shell textarea:not(.ant-input):focus {
   border-color: transparent;
   box-shadow: none;
 }
@@ -7806,7 +7806,7 @@ h3 {
   border-top: 1px solid transparent;
 }
 
-.composer textarea::placeholder {
+.composer textarea:not(.ant-input)::placeholder {
   color: var(--composer-placeholder);
 }
 
@@ -10800,7 +10800,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   background: var(--bg);
 }
 
-.boot-overlay--leaving .boot-screen {
+.boot-overlay--leaving .boot-splash-card {
   animation: boot-screen-out var(--boot-exit-duration) ease forwards;
 }
 
@@ -11681,11 +11681,9 @@ pre {
     transform: rotate(180deg);
   }
 
-  /* Match the base rule's `.sidebar-collapse-toggle.ui-icon-button` specificity:
-     media queries don't add specificity, so a bare `.sidebar-collapse-toggle`
-     loses to it and the toggle would stay visible. In this viewport the sidebar
-     is an overlay menu with no persistent rail, so collapsing it is meaningless. */
-  .sidebar-collapse-toggle.ui-icon-button {
+  /* In this viewport the sidebar is an overlay menu with no persistent rail,
+     so collapsing it is meaningless. */
+  .sidebar-collapse-toggle {
     display: none;
   }
 
@@ -14126,13 +14124,6 @@ pre {
 .composer-reference-submenu {
   z-index: calc(var(--layer-dropdown) + 60);
   min-width: 210px;
-  border: 1px solid rgba(var(--edge-rgb), 0.32);
-  border-radius: var(--radius-md);
-  background: var(--panel);
-  box-shadow: var(--shadow-hard);
-  padding: var(--space-1);
-  display: grid;
-  gap: var(--space-0-5);
 }
 
 /* The primary panel stays in flow (210px fits the 340px drawer). Only the
@@ -14154,20 +14145,6 @@ pre {
   min-width: min(210px, calc(100vw - (var(--space-4) * 2)));
   max-height: min(420px, 65vh);
   overflow-y: auto;
-  scrollbar-width: thin;
-}
-
-.composer-reference-submenu::-webkit-scrollbar {
-  width: 8px;
-}
-
-.composer-reference-submenu::-webkit-scrollbar-thumb {
-  background: rgba(var(--edge-rgb), 0.4);
-  border-radius: 4px;
-}
-
-.composer-reference-submenu::-webkit-scrollbar-thumb:hover {
-  background: rgba(var(--edge-rgb), 0.6);
 }
 
 .composer-inline .composer-reference-menu-panel {
@@ -18321,4 +18298,118 @@ pre {
    text on the selected row (the row-level color above cannot reach it). */
 .left-nav .nav-latest-session.active .nav-latest-session__main {
   color: var(--text);
+}
+
+/* Ant Design file-table interaction feedback. Table geometry, hover and
+   typography come from Ant Design; these rules communicate the drag verdict. */
+[data-gfs-browser='true'] .gfs-resource-table .gfs-resource-row[data-dragging='true'] {
+  opacity: 0.55;
+}
+
+[data-gfs-browser='true'] .gfs-resource-table .gfs-resource-row[draggable='true'] {
+  cursor: grab;
+}
+
+[data-gfs-browser='true'] .gfs-resource-table .gfs-resource-row[draggable='true']:active {
+  cursor: grabbing;
+}
+
+[data-gfs-browser='true'] .gfs-resource-table .gfs-resource-row[data-drop-target='true'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.72);
+  outline-offset: -2px;
+}
+
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-target='true']
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-target='true']:hover
+  .ant-table-cell {
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='checking']
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='checking']:hover
+  .ant-table-cell {
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied']
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied']:hover
+  .ant-table-cell {
+  background: rgba(var(--danger-rgb), 0.1);
+}
+
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied'][data-drop-reason='same-parent']
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied'][data-drop-reason='same-parent']:hover
+  .ant-table-cell {
+  background: rgba(var(--edge-rgb), 0.12);
+}
+
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied'][data-drop-reason='unavailable']
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied'][data-drop-reason='target-unavailable']
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied'][data-drop-reason='source-location-unknown']
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='unavailable']
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied'][data-drop-reason='unavailable']:hover
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied'][data-drop-reason='target-unavailable']:hover
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='denied'][data-drop-reason='source-location-unknown']:hover
+  .ant-table-cell,
+[data-gfs-browser='true']
+  .gfs-resource-table
+  .gfs-resource-row[data-drop-state='unavailable']:hover
+  .ant-table-cell {
+  background: rgba(var(--warning-rgb), 0.1);
+}
+
+/* Ant Design owns workspace-tab geometry. These cues only mark the existing
+   native drag-reorder source and insertion side, which Tabs does not provide. */
+[role='toolbar'][aria-label='Workspace tabs'] .ant-tabs-tab:has([data-workspace-dragging='true']) {
+  opacity: 0.55;
+}
+
+[role='toolbar'][aria-label='Workspace tabs']
+  .ant-tabs-tab:has([data-workspace-drop-side='before']) {
+  box-shadow: inset 2px 0 0 rgba(var(--accent-rgb), 0.72);
+}
+
+[role='toolbar'][aria-label='Workspace tabs']
+  .ant-tabs-tab:has([data-workspace-drop-side='after']) {
+  box-shadow: inset -2px 0 0 rgba(var(--accent-rgb), 0.72);
 }

@@ -1,5 +1,8 @@
-import React, { useMemo, useState } from 'react'
-import { Button, DataTable, IconButton } from '@components/Common'
+import type { HTMLAttributes } from 'react'
+import { useMemo, useState } from 'react'
+import { ReloadOutlined } from '@ant-design/icons'
+import { Button as AntButton, Collapse, Empty, Flex, Table, Tag, Typography } from 'antd'
+import type { TableColumnsType } from 'antd'
 import { formatMcpServerDisplayName } from '@lib/format'
 import {
   type McpServerUiLabel,
@@ -34,8 +37,101 @@ const REASON_HINT: Record<string, string> = {
   unknown: '',
 }
 
-/** Labels that indicate the row needs operator attention. */
 const ATTENTION_LABELS: ReadonlySet<McpServerUiLabel> = new Set(['failed', 'degraded', 'stale'])
+
+function statusColor(label: McpServerUiLabel): string | undefined {
+  if (label === 'running') return 'green'
+  if (label === 'failed') return 'red'
+  if (label === 'degraded' || label === 'stale') return 'orange'
+  if (label === 'starting') return 'blue'
+  return undefined
+}
+
+function McpHealthRows({
+  rows,
+  showActions,
+  connectorActions,
+  onAuthorize,
+  onDisconnect,
+}: {
+  rows: MergedMcpServerRow[]
+  showActions: boolean
+  connectorActions?: Map<string, McpServerConnectorAction>
+  onAuthorize?: (input: ConnectorActionInput) => void
+  onDisconnect?: (input: ConnectorActionInput) => void
+}) {
+  const columns: TableColumnsType<MergedMcpServerRow> = [
+    {
+      title: 'MCP Server Name',
+      key: 'name',
+      render: (_value, row) => {
+        const hint = row.reason ? (REASON_HINT[row.reason] ?? '') : row.message || ''
+        return (
+          <Flex align="center" gap="small" wrap>
+            <Typography.Text strong title={hint || undefined}>
+              {formatMcpServerDisplayName(row.name)}
+            </Typography.Text>
+            {ATTENTION_LABELS.has(row.label) ? <Tag color="orange">Needs attention</Tag> : null}
+          </Flex>
+        )
+      },
+    },
+    {
+      title: 'Status',
+      key: 'status',
+      align: showActions ? undefined : 'right',
+      render: (_value, row) => <Tag color={statusColor(row.label)}>{LABEL_TEXT[row.label]}</Tag>,
+    },
+  ]
+
+  if (showActions) {
+    columns.push({
+      title: 'Actions',
+      key: 'actions',
+      align: 'right',
+      render: (_value, row) => {
+        const action = connectorActions?.get(row.name)
+        if (!action) return null
+        const disconnecting = action.authorized
+        return (
+          <AntButton
+            htmlType="button"
+            type={disconnecting ? 'text' : 'primary'}
+            danger={disconnecting}
+            disabled={action.busy}
+            loading={action.busy}
+            onClick={event => {
+              event.stopPropagation()
+              if (disconnecting) onDisconnect?.(action.actionInput)
+              else onAuthorize?.(action.actionInput)
+            }}
+            onKeyDown={event => event.stopPropagation()}
+            size="small"
+          >
+            {disconnecting ? 'Disconnect' : 'Authorize'}
+          </AntButton>
+        )
+      },
+    })
+  }
+
+  return (
+    <Table<MergedMcpServerRow>
+      columns={columns}
+      dataSource={rows}
+      rowKey="name"
+      size="small"
+      pagination={false}
+      onRow={row =>
+        ({
+          'data-testid': `mcp-health-row-${row.name}`,
+          'data-label': row.label,
+          'data-reason': row.reason ?? '',
+        }) as unknown as HTMLAttributes<HTMLTableRowElement>
+      }
+    />
+  )
+}
 
 export function McpServerHealthTable({
   hostRef,
@@ -64,250 +160,107 @@ export function McpServerHealthTable({
   }, [hostRef, mcpServerNames, status, now])
 
   const summary = useMemo(() => {
-    const total = table.rows.length
     let attention = 0
     for (const row of table.rows) {
       if (ATTENTION_LABELS.has(row.label)) attention += 1
     }
-    return { total, attention }
+    return { total: table.rows.length, attention }
   }, [table.rows])
 
   const refreshButton = onRefresh ? (
-    <IconButton
-      className={`mcp-health-refresh${refreshing ? ' is-refreshing' : ''}`}
-      onClick={e => {
-        // Stop toggle from firing when the user clicks the refresh icon.
-        e.stopPropagation()
+    <AntButton
+      htmlType="button"
+      type="text"
+      size="small"
+      icon={<ReloadOutlined aria-hidden="true" />}
+      onClick={event => {
+        // Refresh remains independent from the Collapse header toggle.
+        event.stopPropagation()
         void onRefresh()
       }}
       disabled={refreshing}
-      label="Refresh connector status"
-      size="sm"
+      loading={refreshing}
+      aria-label="Refresh connector status"
       title="Refresh connector status"
       data-testid="mcp-health-refresh"
-      variant="ghost"
-    >
-      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path
-          d="M8 3V1L5 4l3 3V5c2.21 0 4 1.79 4 4 0 .68-.17 1.32-.47 1.88l1.09 1.09C13.5 11.14 14 10.13 14 9c0-3.31-2.69-6-6-6zm0 10c-2.21 0-4-1.79-4-4 0-.68.17-1.32.47-1.88L3.38 6.03C2.5 6.86 2 7.87 2 9c0 3.31 2.69 6 6 6v2l3-3-3-3v2z"
-          fill="currentColor"
-        />
-      </svg>
-    </IconButton>
+    />
   ) : null
 
-  // The caret icon (▸ collapsed / ▾ expanded). SVG rotates via CSS.
-  const caret = (
-    <svg
-      className={`mcp-health-caret${isExpanded ? ' is-expanded' : ''}`}
-      viewBox="0 0 12 12"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        d="M4 2l4 4-4 4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-
-  // `<button type="button">` already handles Enter/Space natively — no
-  // explicit keyDown handler needed.
-  const toggle = () => {
-    if (alwaysExpanded) return
-    setExpanded(v => !v)
-  }
-
   if (table.rows.length === 0) {
-    if (alwaysExpanded) {
-      return (
-        <div
-          className="mcp-health-empty mcp-health-empty--table-only"
-          data-testid="mcp-health-empty"
-        >
-          <p className="muted">No connectors configured for this agent.</p>
-        </div>
-      )
-    }
-
     return (
-      <div className="mcp-health-empty" data-testid="mcp-health-empty">
-        <div className="mcp-health-heading">
-          <h4>Connectors</h4>
-          {refreshButton}
-        </div>
-        <p className="muted">No connectors configured for this agent.</p>
-      </div>
+      <Flex vertical gap="small" data-testid="mcp-health-empty">
+        {!alwaysExpanded ? (
+          <Flex align="center" justify="space-between">
+            <Typography.Title level={5}>Connectors</Typography.Title>
+            {refreshButton}
+          </Flex>
+        ) : null}
+        <Empty description="No connectors configured for this agent." />
+      </Flex>
     )
   }
 
-  return (
-    <div
-      className={`mcp-health-section${alwaysExpanded ? ' mcp-health-section--table-only' : ''}${
-        isExpanded ? ' is-expanded' : ' is-collapsed'
-      }`}
-      data-testid="mcp-health-table"
-      data-expanded={isExpanded ? 'true' : 'false'}
-    >
-      {!alwaysExpanded ? (
-        <div className="mcp-health-heading">
-          <Button
-            className="mcp-health-heading--toggle"
-            onClick={toggle}
-            aria-expanded={isExpanded}
-            aria-controls="mcp-health-rows"
-            data-testid="mcp-health-toggle"
-            variant="ghost"
-          >
-            {caret}
-            <h4>Connectors</h4>
-            <span className="mcp-health-summary" data-testid="mcp-health-summary">
-              <span className="mcp-health-summary-count">
-                {summary.total} server{summary.total === 1 ? '' : 's'}
-              </span>
-              {summary.attention > 0 ? (
-                <span
-                  className="mcp-health-summary-attention"
-                  data-testid="mcp-health-summary-attention"
-                >
-                  {summary.attention} need{summary.attention === 1 ? 's' : ''} attention
-                </span>
-              ) : null}
-            </span>
-            {table.unknownFallback ? (
-              <span className="mcp-health-fallback muted" data-testid="mcp-health-unknown-fallback">
-                Awaiting live status
-              </span>
-            ) : null}
-          </Button>
-          {refreshButton}
-        </div>
-      ) : null}
-      {isExpanded ? (
-        <div id="mcp-health-rows" className="mcp-health-rows">
-          <DataTable frameless className="agent-mcp-health-data-table">
-            <thead>
-              <tr>
-                <th className="da-table__col-header" scope="col">
-                  MCP Server Name
-                </th>
-                <th
-                  className={`da-table__col-header${showActions ? '' : ' da-table__col-header--right'}`}
-                  scope="col"
-                >
-                  Status
-                </th>
-                {showActions ? (
-                  <th className="da-table__col-header da-table__col-header--right" scope="col">
-                    Actions
-                  </th>
-                ) : null}
-              </tr>
-            </thead>
-            <tbody>
-              {table.rows.map(row => (
-                <McpServerHealthRow
-                  key={row.name}
-                  row={row}
-                  showActions={showActions}
-                  action={connectorActions?.get(row.name)}
-                  onAuthorize={onAuthorize}
-                  onDisconnect={onDisconnect}
-                />
-              ))}
-            </tbody>
-          </DataTable>
-        </div>
-      ) : null}
+  const rows = (
+    <div id="mcp-health-rows">
+      <McpHealthRows
+        rows={table.rows}
+        showActions={showActions}
+        connectorActions={connectorActions}
+        onAuthorize={onAuthorize}
+        onDisconnect={onDisconnect}
+      />
     </div>
   )
-}
-
-function McpServerHealthRow({
-  row,
-  showActions,
-  action,
-  onAuthorize,
-  onDisconnect,
-}: {
-  row: MergedMcpServerRow
-  showActions: boolean
-  action: McpServerConnectorAction | undefined
-  onAuthorize?: (input: ConnectorActionInput) => void
-  onDisconnect?: (input: ConnectorActionInput) => void
-}) {
-  const label = row.label
-  const hint = row.reason ? (REASON_HINT[row.reason] ?? '') : row.message || ''
-  const needsAttention = ATTENTION_LABELS.has(label)
 
   return (
-    <tr
-      className={`mcp-health-table-row mcp-health-row--${label}`}
-      data-testid={`mcp-health-row-${row.name}`}
-      data-label={label}
-      data-reason={row.reason ?? ''}
+    <div
+      data-testid="mcp-health-table"
+      data-expanded={isExpanded ? 'true' : 'false'}
+      aria-label={`Connector health for ${hostRef}`}
     >
-      <td className="da-table__cell">
-        <span className="mcp-health-name-cell">
-          <span className="mcp-health-name" title={hint || undefined}>
-            {formatMcpServerDisplayName(row.name)}
-          </span>
-          {needsAttention ? (
-            <span className="mcp-health-row-attention">Needs attention</span>
-          ) : null}
-        </span>
-      </td>
-      <td className={`da-table__cell${showActions ? '' : ' da-table__cell--right'}`}>
-        <span className="mcp-health-status">
-          <span
-            className={`mcp-health-chip mcp-health-chip--${label}`}
-            aria-label={LABEL_TEXT[label]}
-          >
-            {LABEL_TEXT[label]}
-          </span>
-        </span>
-      </td>
-      {showActions ? (
-        <td className="da-table__cell da-table__cell--right">
-          {action ? (
-            action.authorized ? (
-              <Button
-                color="danger"
-                disabled={action.busy}
-                loading={action.busy}
-                onClick={event => {
-                  event.stopPropagation()
-                  onDisconnect?.(action.actionInput)
-                }}
-                onKeyDown={event => event.stopPropagation()}
-                size="sm"
-                variant="ghost"
-              >
-                Disconnect
-              </Button>
-            ) : (
-              <Button
-                color="primary"
-                disabled={action.busy}
-                loading={action.busy}
-                onClick={event => {
-                  event.stopPropagation()
-                  onAuthorize?.(action.actionInput)
-                }}
-                onKeyDown={event => event.stopPropagation()}
-                size="sm"
-                variant="soft"
-              >
-                Authorize
-              </Button>
-            )
-          ) : null}
-        </td>
-      ) : null}
-    </tr>
+      {alwaysExpanded ? (
+        rows
+      ) : (
+        <Collapse
+          size="small"
+          destroyOnHidden
+          activeKey={isExpanded ? ['connectors'] : []}
+          onChange={keys => setExpanded(keys.length > 0)}
+          items={[
+            {
+              key: 'connectors',
+              label: (
+                <Flex align="center" gap="small" wrap>
+                  <span
+                    data-testid="mcp-health-toggle"
+                    aria-expanded={isExpanded}
+                    aria-controls="mcp-health-rows"
+                  >
+                    Connectors
+                  </span>
+                  <Flex align="center" gap="small" data-testid="mcp-health-summary">
+                    <Typography.Text>
+                      {summary.total} server{summary.total === 1 ? '' : 's'}
+                    </Typography.Text>
+                    {summary.attention > 0 ? (
+                      <Tag color="orange" data-testid="mcp-health-summary-attention">
+                        {summary.attention} need{summary.attention === 1 ? 's' : ''} attention
+                      </Tag>
+                    ) : null}
+                  </Flex>
+                  {table.unknownFallback ? (
+                    <Typography.Text type="secondary" data-testid="mcp-health-unknown-fallback">
+                      Awaiting live status
+                    </Typography.Text>
+                  ) : null}
+                </Flex>
+              ),
+              extra: refreshButton,
+              children: isExpanded ? rows : null,
+            },
+          ]}
+        />
+      )}
+    </div>
   )
 }

@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from 'react'
-import { Button, EmptyState } from '@components/Common'
+import { Button, Flex, Result, Typography } from 'antd'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import type { GfsReadFailureCardProps } from './types'
 
@@ -55,37 +55,37 @@ export function GfsReadFailureCard({ failure, onRetry }: GfsReadFailureCardProps
           Without it a screen-reader user is left on "Loading files…" with no
           signal that the load has settled into a failure. */}
       <div role="status">
-        <EmptyState
+        <Result
+          status={failure.kind === 'rate-limited' ? 'warning' : 'error'}
           title={
             failure.kind === 'rate-limited' ? 'Too many file requests' : 'Could not load your files'
           }
-          body={
+          subTitle={
             failure.kind === 'rate-limited'
               ? 'File listing is temporarily rate limited. Evenfire will let you retry once the server’s own window closes.'
               : describeGfsReadError(failure.message).message
           }
         />
       </div>
-      <div className="da-gfs-footer-actions">
+      <Flex align="center" gap="small" justify="space-between" wrap>
         {remainingSeconds > 0 ? (
           // Deliberately NOT a live region: it changes every second, and a
           // polite region would announce each tick. The button references it
           // instead, so asking for the button reads the wait along with it.
-          <span className="muted" id={countdownId}>
+          <Typography.Text id={countdownId} type="secondary">
             Retry available in{' '}
             <span data-testid="gfs-discovery-retry-seconds">{remainingSeconds}</span>s
-          </span>
+          </Typography.Text>
         ) : null}
         <Button
           aria-describedby={remainingSeconds > 0 ? countdownId : undefined}
           disabled={remainingSeconds > 0}
           onClick={onRetry}
-          size="sm"
-          variant="outline"
+          size="small"
         >
           Retry file listing
         </Button>
-      </div>
+      </Flex>
     </>
   )
 }

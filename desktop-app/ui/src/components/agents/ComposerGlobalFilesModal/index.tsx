@@ -1,9 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { CloseOutlined, FolderOutlined, RightOutlined } from '@ant-design/icons'
+import {
+  Alert,
+  Breadcrumb,
+  Button,
+  Checkbox,
+  Empty,
+  Flex,
+  Listy,
+  Modal,
+  Spin,
+  Tag,
+  Typography,
+} from 'antd'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
-import { Button, EmptyState, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
-import { IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import {
   type GfsDiscoveryFailure,
   useGfsBrowserController,
@@ -31,15 +43,6 @@ export function ComposerGlobalFilesModal({
   const capacity = Math.max(0, FILE_REFERENCE_MAX_COUNT - alreadyAttached)
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
   const [selected, setSelected] = useState<ComposerGlobalFileSelection>({})
-
-  useEffect(() => {
-    closeButtonRef.current?.focus()
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
 
   const toggleFile = useCallback(
     (file: ComposerGlobalFileReference) => {
@@ -116,112 +119,143 @@ export function ComposerGlobalFilesModal({
     entries.length,
   ])
 
+  const title = (
+    <Flex align="start" justify="space-between" gap="middle">
+      <Flex vertical gap="small">
+        <Typography.Text type="secondary">EvenDrive</Typography.Text>
+        <Typography.Title id="composer-global-files-title" level={4}>
+          Choose files for this message
+        </Typography.Title>
+        <Typography.Text type="secondary">
+          Browse shared folders and select multiple files.
+        </Typography.Text>
+      </Flex>
+      <Button
+        ref={closeButtonRef}
+        aria-label="Close global file picker"
+        icon={<CloseOutlined />}
+        onClick={onClose}
+        type="text"
+      />
+    </Flex>
+  )
+
+  const breadcrumbItems = [
+    {
+      title: (
+        <Button onClick={ctrl.reset} type="link">
+          Shared files
+        </Button>
+      ),
+    },
+    ...ctrl.crumbs.map((crumb, index) => ({
+      title: (
+        <Button
+          disabled={index === ctrl.crumbs.length - 1}
+          onClick={() => ctrl.goToCrumb(index)}
+          type="link"
+        >
+          {crumb.name}
+        </Button>
+      ),
+    })),
+  ]
+
+  const emptyDescription = rootListingUnsupported
+    ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
+    : ctrl.current
+      ? 'Choose another folder to continue browsing.'
+      : 'Files shared with you through the Global File System will appear here.'
+  const emptyTitle = rootListingUnsupported
+    ? 'Files cannot be listed here'
+    : ctrl.current
+      ? 'This folder is empty'
+      : 'No shared files yet'
+
   return (
-    <div
-      className="composer-global-files-modal"
-      role="presentation"
-      onMouseDown={event => {
-        if (event.target === event.currentTarget) onClose()
+    <Modal
+      aria-labelledby="composer-global-files-title"
+      afterOpenChange={open => {
+        if (open) closeButtonRef.current?.focus()
       }}
-    >
-      <section
-        className="composer-global-files-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="composer-global-files-title"
-      >
-        <header className="composer-global-files-header">
-          <span className="composer-global-files-heading-icon" aria-hidden="true">
-            <IconContexts />
-          </span>
-          <span className="composer-global-files-heading">
-            <span className="composer-global-files-eyebrow">EvenDrive</span>
-            <h3 id="composer-global-files-title">Choose files for this message</h3>
-            <span className="muted">Browse shared folders and select multiple files.</span>
-          </span>
-          <IconButton
-            ref={closeButtonRef}
-            label="Close global file picker"
-            onClick={onClose}
-            size="sm"
-            variant="ghost"
-          >
-            <IconClose />
-          </IconButton>
-        </header>
-
-        <nav className="composer-global-files-breadcrumbs" aria-label="Global file path">
-          <Button
-            className="composer-global-files-crumb"
-            color="neutral"
-            onClick={ctrl.reset}
-            size="xs"
-            variant="text"
-          >
-            Shared files
-          </Button>
-          {ctrl.crumbs.map((crumb, index) => (
-            <span className="composer-global-files-crumb-group" key={crumb.resourceId}>
-              <IconChevronRight aria-hidden="true" />
-              <Button
-                className="composer-global-files-crumb"
-                color="neutral"
-                disabled={index === ctrl.crumbs.length - 1}
-                onClick={() => ctrl.goToCrumb(index)}
-                size="xs"
-                variant="text"
-              >
-                {crumb.name}
-              </Button>
-            </span>
-          ))}
-        </nav>
-
-        <div className="composer-global-files-browser">
-          {ctrl.accessibleNotice ? <StatusBanner tone="info" text={ctrl.accessibleNotice} /> : null}
-          {/* The banner is the non-blocking half of the same failure the card
-              takes over, so it stands down when the card is up rather than
-              stating the error twice. */}
-          {error && !blockingFailure ? <StatusBanner tone="error" text={error} /> : null}
-
-          {blockingFailure ? (
-            <GfsReadFailureCard
-              failure={blockingFailure.failure}
-              onRetry={() => {
-                void blockingFailure.retry()
+      footer={
+        <Flex align="center" justify="space-between" gap="middle" wrap>
+          <Flex align="center" gap="small" wrap>
+            <Typography.Text strong>{selectedFiles.length}</Typography.Text>
+            <Typography.Text>
+              {selectedFiles.length === 1 ? 'file selected' : 'files selected'}
+            </Typography.Text>
+            {selectedFiles.length >= capacity ? (
+              <Typography.Text role="status" type="secondary">
+                Up to {FILE_REFERENCE_MAX_COUNT} files per message
+                {alreadyAttached > 0 ? ` (${alreadyAttached} already attached)` : ''}.
+              </Typography.Text>
+            ) : null}
+          </Flex>
+          <Flex gap="small">
+            <Button onClick={onClose}>Cancel</Button>
+            <Button
+              disabled={!selectedFiles.length}
+              onClick={() => {
+                onAdd(selectedFiles)
+                onClose()
               }}
-            />
-          ) : loading ? (
-            <div className="composer-global-files-loading" role="status">
-              <span className="composer-send-spinner" aria-hidden="true" />
-              Loading files…
-            </div>
-          ) : entries.length ? (
-            <div className="composer-global-files-list">
-              {entries.map(entry => {
+              type="primary"
+            >
+              {selectedFiles.length ? `Attach ${selectedFiles.length}` : 'Attach files'}
+            </Button>
+          </Flex>
+        </Flex>
+      }
+      onCancel={onClose}
+      open
+      title={title}
+    >
+      <Flex vertical gap="middle">
+        <Breadcrumb aria-label="Global file path" items={breadcrumbItems} />
+        {ctrl.accessibleNotice ? (
+          <Alert showIcon type="info" title={ctrl.accessibleNotice} />
+        ) : null}
+        {/* The banner stands down while the blocking card owns the same failure. */}
+        {error && !blockingFailure ? <Alert showIcon type="error" title={error} /> : null}
+        {blockingFailure ? (
+          <GfsReadFailureCard
+            failure={blockingFailure.failure}
+            onRetry={() => {
+              void blockingFailure.retry()
+            }}
+          />
+        ) : loading ? (
+          <Flex align="center" gap="small" role="status" aria-live="polite">
+            <Spin size="small" />
+            <Typography.Text>Loading files…</Typography.Text>
+          </Flex>
+        ) : entries.length ? (
+          <Flex vertical>
+            <Listy
+              items={entries}
+              rowKey={entry => `${entry.drive}:${entry.resourceId}`}
+              virtual={false}
+              itemRender={entry => {
                 const id = referenceId(entry.drive, entry.resourceId)
                 if (entry.kind === 'directory') {
                   return (
-                    <Button
-                      align="start"
-                      block
-                      className="composer-global-files-row composer-global-files-row--folder"
-                      color="neutral"
-                      key={entry.resourceId}
-                      onClick={() =>
-                        ctrl.current ? ctrl.openChild(entry) : ctrl.openResource(entry)
-                      }
-                      variant="ghost"
-                    >
-                      <span className="composer-global-files-entry-icon" aria-hidden="true">
-                        <IconContexts />
-                      </span>
-                      <span className="composer-global-files-entry-copy">
-                        <strong>{entry.name}</strong>
-                        <small>Folder</small>
-                      </span>
-                      <IconChevronRight className="composer-global-files-row-chevron" />
-                    </Button>
+                    <div>
+                      <Button
+                        aria-label={`Open folder ${entry.name}`}
+                        block
+                        icon={<FolderOutlined />}
+                        onClick={() =>
+                          ctrl.current ? ctrl.openChild(entry) : ctrl.openResource(entry)
+                        }
+                        type="text"
+                      >
+                        <Flex align="center" justify="space-between" flex={1}>
+                          <span>{entry.name}</span>
+                          <RightOutlined aria-hidden="true" />
+                        </Flex>
+                      </Button>
+                    </div>
                   )
                 }
 
@@ -238,98 +272,48 @@ export function ComposerGlobalFilesModal({
                 const isAttached = attached.has(id)
                 const checked = isAttached || Boolean(selected[id])
                 return (
-                  <label
-                    className={`composer-global-files-row composer-global-files-row--file${checked ? ' composer-global-files-row--selected' : ''}`}
-                    key={entry.resourceId}
-                  >
-                    <input
-                      className="composer-global-files-checkbox"
-                      type="checkbox"
-                      checked={checked}
-                      disabled={isAttached || (!checked && selectedFiles.length >= capacity)}
-                      onChange={() => toggleFile(file)}
-                    />
-                    <span className="composer-global-files-entry-icon" aria-hidden="true">
+                  <Flex align="center" justify="space-between">
+                    <Flex align="center" gap="middle">
+                      <Checkbox
+                        aria-label={`Select ${entry.name}`}
+                        checked={checked}
+                        disabled={isAttached || (!checked && selectedFiles.length >= capacity)}
+                        onChange={() => toggleFile(file)}
+                      />
                       <GfsFileIcon name={entry.name} />
-                    </span>
-                    <span className="composer-global-files-entry-copy">
-                      <strong>{entry.name}</strong>
-                      <small>{formatSharedFileSize(entry.bytes)}</small>
-                    </span>
-                    <span className="composer-global-files-selected-label">
+                      <Flex vertical>
+                        <Typography.Text>{entry.name}</Typography.Text>
+                        <Typography.Text type="secondary">
+                          {formatSharedFileSize(entry.bytes)}
+                        </Typography.Text>
+                      </Flex>
+                    </Flex>
+                    <Tag color={isAttached ? 'default' : checked ? 'success' : undefined}>
                       {isAttached ? 'Attached' : checked ? 'Selected' : 'Select'}
-                    </span>
-                  </label>
+                    </Tag>
+                  </Flex>
                 )
-              })}
-              {hasMore ? (
-                <Button
-                  className="composer-global-files-load-more"
-                  color="neutral"
-                  loading={loadingMore}
-                  onClick={loadMore}
-                  size="sm"
-                  variant="outline"
-                >
+              }}
+            />
+            {hasMore ? (
+              <Flex justify="center">
+                <Button loading={loadingMore} onClick={loadMore}>
                   Load more
                 </Button>
-              ) : null}
-            </div>
-          ) : (
-            // `unsupported` is excluded from the failure card above because no
-            // Retry can conjure an endpoint the server does not have — but that
-            // left this state to say "No shared files yet", which reports the
-            // absence of an answer as an answer. The picker is where it costs
-            // most: a user told they have nothing to attach stops looking,
-            // while the files may be there and only the listing is missing.
-            // Same copy as the Files page, because it is the same fact.
-            <EmptyState
-              title={
-                rootListingUnsupported
-                  ? 'Files cannot be listed here'
-                  : ctrl.current
-                    ? 'This folder is empty'
-                    : 'No shared files yet'
-              }
-              body={
-                rootListingUnsupported
-                  ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
-                  : ctrl.current
-                    ? 'Choose another folder to continue browsing.'
-                    : 'Files shared with you through the Global File System will appear here.'
-              }
-            />
-          )}
-        </div>
-
-        <footer className="composer-global-files-footer">
-          <span className="composer-global-files-selection-summary">
-            <strong>{selectedFiles.length}</strong>
-            <span>{selectedFiles.length === 1 ? 'file selected' : 'files selected'}</span>
-          </span>
-          {selectedFiles.length >= capacity ? (
-            <span className="composer-global-files-selection-summary" role="status">
-              Up to {FILE_REFERENCE_MAX_COUNT} files per message
-              {alreadyAttached > 0 ? ` (${alreadyAttached} already attached)` : ''}.
-            </span>
-          ) : null}
-          <span className="action-row">
-            <Button color="neutral" onClick={onClose} size="sm" variant="ghost">
-              Cancel
-            </Button>
-            <Button
-              disabled={!selectedFiles.length}
-              onClick={() => {
-                onAdd(selectedFiles)
-                onClose()
-              }}
-              size="sm"
-            >
-              {selectedFiles.length ? `Attach ${selectedFiles.length}` : 'Attach files'}
-            </Button>
-          </span>
-        </footer>
-      </section>
-    </div>
+              </Flex>
+            ) : null}
+          </Flex>
+        ) : (
+          <Empty
+            description={
+              <Flex vertical>
+                <Typography.Text>{emptyTitle}</Typography.Text>
+                <Typography.Text type="secondary">{emptyDescription}</Typography.Text>
+              </Flex>
+            }
+          />
+        )}
+      </Flex>
+    </Modal>
   )
 }

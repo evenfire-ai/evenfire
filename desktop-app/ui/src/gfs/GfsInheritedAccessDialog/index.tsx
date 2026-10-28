@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState } from 'react'
-import { Button } from '@components/Common'
+import { useEffect, useRef, useState } from 'react'
+import { Alert, Button, Descriptions, Flex, Modal, Tag, Typography } from 'antd'
 import type { GfsInheritedAccessDialogProps, GfsInheritedAccessRole } from './types'
 
 /**
@@ -27,8 +27,6 @@ export function GfsInheritedAccessDialog({
   onConfirm,
   onCancel,
 }: GfsInheritedAccessDialogProps) {
-  const titleId = useId()
-  const bodyId = useId()
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
   const previousActiveElementRef = useRef<HTMLElement | null>(null)
   const [showHelp, setShowHelp] = useState(false)
@@ -60,109 +58,104 @@ export function GfsInheritedAccessDialog({
   const lead = isRemove
     ? `Removing ${request.memberLabel} from this item will also remove them from a parent folder.`
     : `Changing ${request.memberLabel}'s permissions on this item will also change permissions on a parent folder.`
+  const transitions = [
+    ...request.folders.map(folder => ({
+      key: folder.resourceId,
+      label: folder.name,
+      currentRole: ROLE_LABELS[folder.currentRole],
+    })),
+    {
+      key: 'current-file',
+      label: request.fileName,
+      currentRole: ROLE_LABELS[request.fileCurrentRole],
+    },
+  ]
 
   return (
-    <div
-      className="da-gfs-manage-modal da-gfs-parent-update-modal"
-      role="presentation"
-      onMouseDown={event => {
-        if (event.target === event.currentTarget && !busy) onCancel()
+    <Modal
+      open={open}
+      title={showHelp ? 'How sharing works in EvenDrive' : title}
+      onCancel={() => {
+        if (!busy) onCancel()
       }}
-    >
-      <section
-        aria-describedby={bodyId}
-        aria-labelledby={titleId}
-        aria-modal="true"
-        className="da-gfs-parent-update-dialog"
-        role="alertdialog"
-      >
-        <header className="da-gfs-parent-update-dialog__header">
-          <h3 id={titleId}>{showHelp ? 'How sharing works in EvenDrive' : title}</h3>
-        </header>
-        <div className="da-gfs-parent-update-dialog__body" id={bodyId}>
+      afterOpenChange={visible => {
+        if (visible) cancelButtonRef.current?.focus()
+      }}
+      footer={
+        <Flex justify="end" gap="small">
           {showHelp ? (
-            <ul className="da-gfs-parent-update-dialog__help">
-              {HELP_POINTS.map(point => (
-                <li key={point}>{point}</li>
-              ))}
-            </ul>
-          ) : (
-            <>
-              <p className="da-gfs-parent-update-dialog__lead">
-                {lead} Alternatively, create a folder with limited access.{' '}
-                <button
-                  className="da-gfs-parent-update-dialog__learn-more"
-                  onClick={() => setShowHelp(true)}
-                  type="button"
-                >
-                  Learn more
-                </button>
-              </p>
-              <div className="da-gfs-parent-update-dialog__folders">
-                {request.folders.map(folder => (
-                  <div className="da-gfs-parent-update-dialog__folder" key={folder.resourceId}>
-                    <span className="da-gfs-parent-update-dialog__name">{folder.name}</span>
-                    <span className="da-gfs-parent-update-dialog__change">
-                      <span className="da-gfs-parent-update-dialog__role">
-                        {ROLE_LABELS[folder.currentRole]}
-                      </span>
-                      <span aria-hidden="true">→</span>
-                      <span className="da-gfs-parent-update-dialog__role da-gfs-parent-update-dialog__role--next">
-                        {nextLabel}
-                      </span>
-                    </span>
-                  </div>
-                ))}
-                <div className="da-gfs-parent-update-dialog__folder">
-                  <span className="da-gfs-parent-update-dialog__name">{request.fileName}</span>
-                  <span className="da-gfs-parent-update-dialog__change">
-                    <span className="da-gfs-parent-update-dialog__role">
-                      {ROLE_LABELS[request.fileCurrentRole]}
-                    </span>
-                    <span aria-hidden="true">→</span>
-                    <span className="da-gfs-parent-update-dialog__role da-gfs-parent-update-dialog__role--next">
-                      {nextLabel}
-                    </span>
-                  </span>
-                </div>
-              </div>
-              {request.residualEditorFolderNames && request.residualEditorFolderNames.length > 0 ? (
-                <p className="da-gfs-parent-update-dialog__residual">
-                  Sharing entries on {request.residualEditorFolderNames.join(', ')} still grant
-                  Editor access. This change does not remove them.
-                </p>
-              ) : null}
-            </>
-          )}
-        </div>
-        <footer className="da-gfs-parent-update-dialog__actions">
-          {showHelp ? (
-            <Button onClick={() => setShowHelp(false)} type="button" variant="ghost">
+            <Button htmlType="button" onClick={() => setShowHelp(false)} size="small">
               Back
             </Button>
           ) : (
             <>
               <Button
-                ref={cancelButtonRef}
+                autoFocus
                 disabled={busy}
+                htmlType="button"
                 onClick={onCancel}
-                type="button"
-                variant="ghost"
+                ref={cancelButtonRef}
+                size="small"
               >
                 Cancel
               </Button>
               <Button
-                color={isRemove ? 'danger' : undefined}
+                danger={isRemove}
+                htmlType="button"
                 loading={busy}
                 onClick={onConfirm}
-                type="button"
+                size="small"
+                type="primary"
               >
                 {isRemove ? 'Remove' : 'Update role'}
               </Button>
             </>
           )}
-        </footer>
-      </section>
-    </div>
+        </Flex>
+      }
+      closable={false}
+      destroyOnHidden
+      keyboard={!busy}
+      mask={{ closable: !busy }}
+    >
+      {showHelp ? (
+        <ul>
+          {HELP_POINTS.map(point => (
+            <li key={point}>{point}</li>
+          ))}
+        </ul>
+      ) : (
+        <Flex vertical gap="middle">
+          <Typography.Paragraph>
+            {lead} Alternatively, create a folder with limited access.{' '}
+            <Button htmlType="button" onClick={() => setShowHelp(true)} size="small" type="link">
+              Learn more
+            </Button>
+          </Typography.Paragraph>
+          <Descriptions
+            column={1}
+            items={transitions.map(transition => ({
+              key: transition.key,
+              label: transition.label,
+              children: (
+                <Flex align="center" gap="small">
+                  <Tag>{transition.currentRole}</Tag>
+                  <span aria-hidden="true">→</span>
+                  <Tag color={isRemove ? 'error' : 'processing'}>{nextLabel}</Tag>
+                </Flex>
+              ),
+            }))}
+            size="small"
+          />
+          {request.residualEditorFolderNames && request.residualEditorFolderNames.length > 0 ? (
+            <Alert
+              showIcon
+              type="warning"
+              title={`Sharing entries on ${request.residualEditorFolderNames.join(', ')} still grant Editor access. This change does not remove them.`}
+            />
+          ) : null}
+        </Flex>
+      )}
+    </Modal>
   )
 }

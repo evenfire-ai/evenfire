@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { PieChartOutlined } from '@ant-design/icons'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
-import { useClickOutside } from '@hooks/useClickOutside'
+import { Button, Flex, Listy, Popover, Progress, Spin, Typography } from 'antd'
 import type { ContextBreakdownLite } from '../../hooks/useChatStore'
 import { useContextBreakdown } from '../../hooks/useContextBreakdown'
 import { formatBucketPercent, formatContextFill, formatTokenCount } from '../../lib/format'
-import { Pill } from '../Common'
 
 export interface ContextWindowIndicatorProps {
   agentRef: string
@@ -79,9 +79,6 @@ export function ContextWindowIndicator({
 }: ContextWindowIndicatorProps) {
   const { getBreakdown, isLoading, fetchContextBreakdown } = useContextBreakdown()
   const [open, setOpen] = useState(false)
-  const containerRef = useRef<HTMLDivElement | null>(null)
-
-  useClickOutside(containerRef, open, () => setOpen(false))
 
   const breakdown = getBreakdown(agentRef, chatId)
   const loading = isLoading(agentRef, chatId)
@@ -110,14 +107,6 @@ export function ContextWindowIndicator({
     void fetchContextBreakdown(agentRef, chatId, { force: true })
   }, [agentRef, chatId, turnSignal, fetchContextBreakdown])
 
-  const handleToggle = useCallback(() => {
-    setOpen(prev => {
-      const next = !prev
-      if (next) void fetchContextBreakdown(agentRef, chatId)
-      return next
-    })
-  }, [agentRef, chatId, fetchContextBreakdown])
-
   const buckets = useMemo(() => (breakdown ? computeBuckets(breakdown) : []), [breakdown])
 
   // `undefined` = never fetched; `null` = fetched, no snapshot. Hide the chip
@@ -132,82 +121,69 @@ export function ContextWindowIndicator({
     ? formatContextFill(breakdown.totalInputTokens, breakdown.maxTokens, breakdown.fillRatio)
     : null
 
-  return (
-    <div className="context-window-indicator" ref={containerRef}>
-      <Pill
-        tone="neutral"
-        size="sm"
-        interactive
-        className={`context-window-chip${fillLabel ? '' : ' context-window-chip--loading'}`}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={fillLabel ? `Context window — ${fillLabel}` : 'Context window — loading'}
-        onClick={handleToggle}
-      >
-        <span className="context-window-chip-glyph" aria-hidden="true" />
-        {fillLabel && <span className="context-window-chip-label">{fillLabel}</span>}
-      </Pill>
-
-      {open && (
-        <div className="context-window-popover" role="dialog" aria-label="Context window breakdown">
-          {breakdown ? (
-            <>
-              <div className="context-window-popover-head">
-                <span className="context-window-popover-title">Context window</span>
-                <span className="context-window-popover-fill">{fillLabel}</span>
-              </div>
-
-              <div
-                className="context-window-bar"
-                role="img"
-                aria-label={`Context composition: ${buckets
-                  .map(b => `${b.label} ${formatBucketPercent(b.fraction)}`)
-                  .join(', ')}`}
-              >
-                {buckets.map(bucket => (
-                  <span
-                    key={bucket.key}
-                    className={`context-window-bar-seg context-window-bar-seg--${bucket.key}`}
-                    // Runtime, data-driven width fed through a CSS custom property
-                    // (consumed by `.context-window-bar-seg` in styles.css). The
-                    // per-bucket background stays class-driven from design tokens.
-                    style={{ ['--seg-width' as string]: `${(bucket.fraction * 100).toFixed(3)}%` }}
-                  />
-                ))}
-              </div>
-
-              <ul className="context-window-rows">
-                {buckets.map(bucket => (
-                  <li
-                    key={bucket.key}
-                    className="context-window-row"
-                    title={`${formatTokenCount(bucket.tokens)} tokens`}
-                  >
-                    <span
-                      className={`context-window-dot context-window-dot--${bucket.key}`}
-                      aria-hidden="true"
-                    />
-                    <span className="context-window-row-label">{bucket.label}</span>
-                    <span className="context-window-row-pct">
-                      {formatBucketPercent(bucket.fraction)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-
-              {breakdown.cacheHitRate !== undefined && (
-                <div className="context-window-cache">
-                  Average cache hit rate {formatBucketPercent(breakdown.cacheHitRate)}
-                </div>
-              )}
-            </>
-          ) : loading ? (
-            <div className="context-window-empty">Loading…</div>
-          ) : (
-            <div className="context-window-empty">No context snapshot yet.</div>
+  const content = breakdown ? (
+    <div role="dialog" aria-label="Context window breakdown">
+      <Flex align="center" justify="space-between">
+        <Typography.Text strong>Context window</Typography.Text>
+        <Typography.Text>{fillLabel}</Typography.Text>
+      </Flex>
+      <div role="list" aria-label="Context token groups">
+        <Listy
+          items={buckets}
+          rowKey="key"
+          virtual={false}
+          itemRender={bucket => (
+            <div role="listitem">
+              <Flex align="center" gap="small">
+                <Typography.Text>{bucket.label}</Typography.Text>
+                <Flex flex={1}>
+                  <Progress percent={bucket.fraction * 100} size="small" showInfo={false} />
+                </Flex>
+                <Typography.Text>{formatBucketPercent(bucket.fraction)}</Typography.Text>
+                <Typography.Text
+                  title={`${formatTokenCount(bucket.tokens)} tokens`}
+                  type="secondary"
+                >
+                  {formatTokenCount(bucket.tokens)}
+                </Typography.Text>
+              </Flex>
+            </div>
           )}
-        </div>
-      )}
+        />
+      </div>
+      {breakdown.cacheHitRate !== undefined ? (
+        <Typography.Text type="secondary">
+          Average cache hit rate {formatBucketPercent(breakdown.cacheHitRate)}
+        </Typography.Text>
+      ) : null}
     </div>
+  ) : loading ? (
+    <Typography.Text>Loading…</Typography.Text>
+  ) : (
+    <Typography.Text>No context snapshot yet.</Typography.Text>
+  )
+
+  return (
+    <Popover
+      content={content}
+      open={open}
+      onOpenChange={next => {
+        setOpen(next)
+        if (next) void fetchContextBreakdown(agentRef, chatId)
+      }}
+      title="Context window breakdown"
+      trigger="click"
+    >
+      <Button
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={fillLabel ? `Context window — ${fillLabel}` : 'Context window — loading'}
+        icon={fillLabel ? <PieChartOutlined aria-hidden="true" /> : <Spin size="small" />}
+        size="small"
+        type="text"
+      >
+        {fillLabel}
+      </Button>
+    </Popover>
   )
 }

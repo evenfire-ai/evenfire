@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, EmptyState, IconButton } from '@components/Common'
+import { ArrowLeftOutlined, FolderOutlined } from '@ant-design/icons'
+import { Alert, Button, Checkbox, Empty, Flex, Listy, Modal, Spin, Tag, Typography } from 'antd'
 import { GfsFileIcon } from '@components/GfsFileIcon'
-import { IconAttachFile, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { formatSharedFileSize, getSharedFileParentPath, joinSharedFilePath } from '@lib/sharedFiles'
 import type { ComposerAgentFileReference } from '../../uiTypes'
 
@@ -138,191 +138,160 @@ export function ComposerAgentFilesModal({
 
   const selectedValues = useMemo(() => Object.values(selected), [selected])
 
+  const goBack = () => {
+    if (currentPath === '/') setSelectedFilesystem(null)
+    else setCurrentPath(getSharedFileParentPath(currentPath))
+  }
+
   return (
-    <div className="composer-agent-files-modal" role="dialog" aria-modal="true">
-      <div className="composer-agent-files-panel">
-        <div className="composer-agent-files-header">
-          <div>
-            <h3>Agent Files</h3>
-            <p className="muted">{currentTitle}</p>
-          </div>
-          <IconButton label="Close Agent Files" onClick={onClose} size="sm" variant="ghost">
-            <IconClose />
-          </IconButton>
-        </div>
-
-        <div className="composer-agent-files-browser">
-          {error ? (
-            <div className="composer-attachment-error" role="alert">
-              {error}
-            </div>
-          ) : null}
-
-          {!selectedFilesystem ? (
-            loading ? (
-              <p className="muted">Loading agent files...</p>
-            ) : filesystems.length ? (
-              <div className="composer-agent-files-list">
-                {filesystems.map(filesystem => (
-                  <Button
-                    key={filesystem.name}
-                    align="start"
-                    className="composer-agent-file-row"
-                    color="neutral"
-                    onClick={() => {
-                      setSelectedFilesystem(filesystem.name)
-                      setCurrentPath('/')
-                    }}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    <span className="composer-reference-icon composer-reference-icon--agent-file">
-                      <IconContexts />
-                    </span>
-                    <span>
-                      <strong>{filesystem.name}</strong>
-                      <small>{filesystem.mountPath}</small>
-                    </span>
-                  </Button>
-                ))}
-              </div>
-            ) : (
-              <EmptyState title="No agent files" body="No agent filesystems are attached." />
-            )
-          ) : (
-            <>
-              <div className="composer-agent-files-toolbar">
-                <Button
-                  color="neutral"
-                  onClick={() => {
-                    if (currentPath === '/') {
-                      setSelectedFilesystem(null)
-                    } else {
-                      setCurrentPath(getSharedFileParentPath(currentPath))
-                    }
-                  }}
-                  size="xs"
-                  variant="ghost"
-                >
-                  Back
-                </Button>
-              </div>
-              {loading ? (
-                <p className="muted">Loading...</p>
-              ) : entries.length ? (
-                <div className="composer-agent-files-list">
-                  {entries.map(entry => {
-                    const fullPath = joinSharedFilePath(currentPath, entry.name)
-                    const selectableKind = entryKind(entry)
-                    const checked = selectableKind
-                      ? Boolean(
-                          selected[
-                            entryReferenceId(
-                              contextId,
-                              selectedFilesystem,
-                              fullPath,
-                              selectableKind
-                            )
-                          ]
-                        )
-                      : false
-                    if (entry.kind === 'directory') {
-                      return (
-                        <div
-                          key={`${entry.kind}:${entry.name}`}
-                          className="composer-agent-file-row"
-                        >
-                          <input
-                            type="checkbox"
-                            className="composer-agent-file-checkbox"
-                            checked={checked}
-                            aria-label={`Attach folder ${entry.name}`}
-                            onChange={() => toggleAgentFileReference(fullPath, 'directory')}
-                          />
-                          <Button
-                            align="start"
-                            className="composer-agent-file-open-target"
-                            color="neutral"
-                            onClick={() => setCurrentPath(fullPath)}
-                            size="sm"
-                            variant="ghost"
-                          >
-                            <span className="composer-reference-icon composer-reference-icon--agent-file">
-                              <IconContexts />
-                            </span>
-                            <span className="composer-agent-file-details">
-                              <strong>{entry.name}</strong>
-                              <small>directory</small>
-                            </span>
-                          </Button>
-                        </div>
-                      )
-                    }
-                    if (entry.kind !== 'file') {
-                      return (
-                        <div
-                          key={`${entry.kind}:${entry.name}`}
-                          className="composer-agent-file-row composer-agent-file-row--disabled"
-                        >
-                          <span className="composer-agent-file-checkbox-placeholder" />
-                          <span className="composer-reference-icon composer-reference-icon--agent-file">
-                            <IconAttachFile />
-                          </span>
-                          <span className="composer-agent-file-details">
-                            <strong>{entry.name}</strong>
-                            <small>{entry.kind}</small>
-                          </span>
-                        </div>
-                      )
-                    }
-                    return (
-                      <label
-                        key={`${entry.kind}:${entry.name}`}
-                        className="composer-agent-file-row composer-agent-file-select"
-                      >
-                        <input
-                          type="checkbox"
-                          className="composer-agent-file-checkbox"
-                          checked={checked}
-                          onChange={() => toggleAgentFileReference(fullPath, 'file')}
-                        />
-                        <span className="composer-reference-icon composer-reference-icon--agent-file">
-                          <GfsFileIcon name={entry.name} />
-                        </span>
-                        <span className="composer-agent-file-details">
-                          <strong>{entry.name}</strong>
-                          <small>{formatSharedFileSize(entry.size)}</small>
-                        </span>
-                      </label>
-                    )
-                  })}
-                </div>
-              ) : (
-                <EmptyState title="Empty folder" body="No entries to display." />
-              )}
-            </>
-          )}
-        </div>
-
-        <div className="composer-agent-files-footer">
-          <span className="muted">{selectedCount} selected</span>
-          <div className="action-row">
-            <Button color="neutral" onClick={onClose} size="sm" variant="ghost">
-              Cancel
-            </Button>
+    <Modal
+      footer={
+        <Flex align="center" justify="space-between" gap="middle" wrap>
+          <Typography.Text type="secondary">{selectedCount} selected</Typography.Text>
+          <Flex gap="small">
+            <Button onClick={onClose}>Cancel</Button>
             <Button
               disabled={!selectedValues.length}
               onClick={() => {
                 onAdd(selectedValues)
                 onClose()
               }}
-              size="sm"
+              type="primary"
             >
               Add
             </Button>
-          </div>
-        </div>
-      </div>
-    </div>
+          </Flex>
+        </Flex>
+      }
+      onCancel={onClose}
+      open
+      title={
+        <Flex vertical>
+          <Typography.Title level={4}>Agent Files</Typography.Title>
+          <Typography.Text type="secondary">{currentTitle}</Typography.Text>
+        </Flex>
+      }
+    >
+      <Flex vertical gap="middle">
+        {error ? <Alert showIcon type="error" title={error} /> : null}
+        {!selectedFilesystem ? (
+          loading ? (
+            <Flex align="center" gap="small" role="status" aria-live="polite">
+              <Spin size="small" />
+              <Typography.Text>Loading agent files…</Typography.Text>
+            </Flex>
+          ) : filesystems.length ? (
+            <Listy
+              items={filesystems}
+              rowKey="name"
+              virtual={false}
+              itemRender={filesystem => (
+                <Button
+                  aria-label={`Open ${filesystem.name}`}
+                  block
+                  icon={<FolderOutlined />}
+                  onClick={() => {
+                    setSelectedFilesystem(filesystem.name)
+                    setCurrentPath('/')
+                  }}
+                  type="text"
+                >
+                  <Flex vertical align="start">
+                    <Typography.Text strong>{filesystem.name}</Typography.Text>
+                    <Typography.Text type="secondary">{filesystem.mountPath}</Typography.Text>
+                  </Flex>
+                </Button>
+              )}
+            />
+          ) : (
+            <Empty description="No agent filesystems are attached." />
+          )
+        ) : (
+          <>
+            <Flex align="center" gap="small">
+              <Button icon={<ArrowLeftOutlined aria-hidden="true" />} onClick={goBack}>
+                Back
+              </Button>
+              <Typography.Text type="secondary">{currentTitle}</Typography.Text>
+            </Flex>
+            {loading ? (
+              <Flex align="center" gap="small" role="status" aria-live="polite">
+                <Spin size="small" />
+                <Typography.Text>Loading files…</Typography.Text>
+              </Flex>
+            ) : entries.length ? (
+              <Listy
+                items={entries}
+                rowKey={entry => `${entry.kind}:${entry.name}`}
+                virtual={false}
+                itemRender={entry => {
+                  const fullPath = joinSharedFilePath(currentPath, entry.name)
+                  const selectableKind = entryKind(entry)
+                  const checked = selectableKind
+                    ? Boolean(
+                        selected[
+                          entryReferenceId(contextId, selectedFilesystem, fullPath, selectableKind)
+                        ]
+                      )
+                    : false
+                  if (entry.kind === 'directory') {
+                    return (
+                      <Flex align="center" gap="middle">
+                        <Flex align="center" gap="middle" flex={1}>
+                          <Checkbox
+                            aria-label={`Attach folder ${entry.name}`}
+                            checked={checked}
+                            onChange={() => toggleAgentFileReference(fullPath, 'directory')}
+                          />
+                          <Button
+                            aria-label={`Open folder ${entry.name}`}
+                            block
+                            icon={<FolderOutlined />}
+                            onClick={() => setCurrentPath(fullPath)}
+                            type="text"
+                          >
+                            {entry.name}
+                          </Button>
+                        </Flex>
+                      </Flex>
+                    )
+                  }
+                  if (entry.kind !== 'file') {
+                    return (
+                      <Flex align="center" gap="middle">
+                        <Flex align="center" gap="middle">
+                          <Tag>{entry.kind}</Tag>
+                          <Typography.Text type="secondary">{entry.name}</Typography.Text>
+                        </Flex>
+                      </Flex>
+                    )
+                  }
+                  return (
+                    <Flex align="center" gap="middle">
+                      <Flex align="center" gap="middle" flex={1}>
+                        <Checkbox
+                          aria-label={`Attach file ${entry.name}`}
+                          checked={checked}
+                          onChange={() => toggleAgentFileReference(fullPath, 'file')}
+                        />
+                        <GfsFileIcon name={entry.name} />
+                        <Flex vertical>
+                          <Typography.Text>{entry.name}</Typography.Text>
+                          <Typography.Text type="secondary">
+                            {formatSharedFileSize(entry.size)}
+                          </Typography.Text>
+                        </Flex>
+                      </Flex>
+                    </Flex>
+                  )
+                }}
+              />
+            ) : (
+              <Empty description="No entries to display." />
+            )}
+          </>
+        )}
+      </Flex>
+    </Modal>
   )
 }

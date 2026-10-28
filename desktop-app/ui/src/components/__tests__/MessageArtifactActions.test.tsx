@@ -78,14 +78,7 @@ describe('MessageArtifactActions', () => {
     await waitFor(() => {
       expect(screen.getByText('Generated files')).toBeTruthy()
       expect(screen.getByText('PDF')).toBeTruthy()
-      expect(
-        screen.getByText((_, node) =>
-          Boolean(
-            node?.classList.contains('message-artifact-meta') &&
-            node.textContent?.replace(/\s+/g, ' ').trim() === 'PDF · 125 KB'
-          )
-        )
-      ).toBeTruthy()
+      expect(screen.getByText('PDF · 125 KB')).toBeTruthy()
       expect(screen.getByRole('button', { name: 'Download report.pdf' })).toBeTruthy()
     })
   })
@@ -234,22 +227,8 @@ describe('MessageArtifactActions', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Generated files')).toBeTruthy()
-      expect(
-        screen.getByText((_, node) =>
-          Boolean(
-            node?.classList.contains('message-artifact-meta') &&
-            node.textContent?.includes('Presentation')
-          )
-        )
-      ).toBeTruthy()
-      expect(
-        screen.getByText((_, node) =>
-          Boolean(
-            node?.classList.contains('message-artifact-meta') &&
-            node.textContent?.includes('PNG image')
-          )
-        )
-      ).toBeTruthy()
+      expect(screen.getByText(/Presentation ·/)).toBeTruthy()
+      expect(screen.getByText(/PNG image ·/)).toBeTruthy()
       expect(screen.getByRole('button', { name: 'Download deck.pptx' })).toBeTruthy()
       expect(screen.getByRole('button', { name: 'Download chart.png' })).toBeTruthy()
     })

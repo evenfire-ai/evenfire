@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { type TaskState, makeTaskKey, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
+import { Card } from 'antd'
 import type { ApprovalDecisionTarget } from '@hooks/domain/approvalDecision'
 import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
 import type { ApprovalInputPreview } from '@/uiTypes'
@@ -76,7 +77,7 @@ export function InFlightAssistantPlaceholder({
 
   return (
     <section className="chat-group assistant" data-task-id={taskId}>
-      <div className="chat-bubble assistant chat-message--in-flight">
+      <Card className="chat-message--in-flight" size="small">
         <ProgressStepper
           progress={
             si && !progress.suspendedInfo
@@ -134,7 +135,7 @@ export function InFlightAssistantPlaceholder({
               : undefined
           }
         />
-      </div>
+      </Card>
     </section>
   )
 }

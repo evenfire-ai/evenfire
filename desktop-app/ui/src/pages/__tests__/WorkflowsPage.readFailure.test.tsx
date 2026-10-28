@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { WorkflowRecipeResource } from '../../../../src/types'
 import { desktopQueryKeys } from '../../hooks/domain/queryKeys'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { WorkflowsPage } from '../WorkflowsPage'
 
 // H1 regression: a recipe that DECLARES a required input contract, but whose
@@ -41,6 +42,8 @@ function createQueryClient() {
 }
 
 describe('WorkflowsPage — recipe read failure on Trigger (H1)', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()

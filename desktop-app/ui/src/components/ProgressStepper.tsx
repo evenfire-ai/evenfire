@@ -1,5 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { Button, IconButton } from '@components/Common'
+import { useEffect, useRef, useState } from 'react'
+import {
+  CheckCircleOutlined,
+  DownOutlined,
+  ExclamationCircleOutlined,
+  StopOutlined,
+} from '@ant-design/icons'
+import { Alert, Button, Card, Divider, Flex, Spin, Steps, Tag, Tooltip, Typography } from 'antd'
+import type { StepsProps } from 'antd'
 import { extractArtifactNames } from '@lib/artifacts'
 import { formatTokenBreakdown, formatTokenCount } from '@lib/format'
 import { formatToolApprovalLabel } from '@lib/toolLabels'
@@ -19,14 +26,10 @@ interface ProgressStepperProps {
 
 function ThinkingIndicator({ label }: { label: string }) {
   return (
-    <span className="stepper-thinking" aria-live="polite">
-      <span className="stepper-thinking-dots" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </span>
-      <span>{label}</span>
-    </span>
+    <Flex align="center" gap="small" role="status" aria-live="polite">
+      <Spin size="small" />
+      <Typography.Text>{label}</Typography.Text>
+    </Flex>
   )
 }
 
@@ -42,12 +45,6 @@ function extractProgressArtifactNames(steps: ProgressStep[]): string[] {
     .filter((value): value is string => typeof value === 'string' && value.length > 0)
     .join('\n')
   return extractArtifactNames(text)
-}
-
-function stepIcon(state: 'running' | 'completed' | 'error'): string {
-  if (state === 'completed') return '\u2713'
-  if (state === 'running') return '\u25CF'
-  return '\u2717'
 }
 
 function formatDuration(ms: number): string {
@@ -129,14 +126,19 @@ function OutputPanel({
   toolCallId: string
 }) {
   const latestLines = preview.tailLines.length > 0 ? preview.tailLines : preview.headLines
-  return (
-    <div
+  const content = <pre>{latestLines.join('\n')}</pre>
+  return isError ? (
+    <Alert
+      type="error"
+      showIcon
+      title={content}
       data-testid="step-output-panel"
       data-tool-call-id={toolCallId}
-      className={`stepper-step-output${isError ? ' stepper-step-output--error' : ''}`}
-    >
-      <pre className="stepper-step-output-code">{latestLines.join('\n')}</pre>
-    </div>
+    />
+  ) : (
+    <Card size="small" data-testid="step-output-panel" data-tool-call-id={toolCallId}>
+      {content}
+    </Card>
   )
 }
 
@@ -175,91 +177,87 @@ function StepList({ steps }: { steps: TaskProgress['steps'] }) {
   }
 
   let previousIteration: number | undefined
-  return (
-    <div className="stepper-step-list">
-      {steps.map(step => {
-        const showDivider = previousIteration !== undefined && step.iteration !== previousIteration
-        previousIteration = step.iteration
-        const fnName = toolFunctionName(step)
-        const isExpanded = expandedIds.has(step.toolCallId)
-        const canExpand =
-          (step.state !== 'running' && !!step.outputPreview) ||
-          (step.state === 'running' && !!step.liveOutputPreview)
-        return (
-          <React.Fragment key={step.toolCallId}>
-            {showDivider && <div className="stepper-iteration-divider">Thinking further...</div>}
-            <div
-              data-testid={`step-row-${step.toolCallId}`}
-              className={`stepper-step${canExpand ? ' stepper-step-expandable' : ''}`}
-              onClick={canExpand ? () => toggleExpand(step.toolCallId) : undefined}
-            >
-              <span className={`stepper-step-icon state-${step.state}`}>
-                {stepIcon(step.state)}
-              </span>
-              <span className="stepper-step-name">
-                {step.displayName}
-                {fnName && <span className="stepper-step-fn">{fnName}</span>}
-              </span>
-              {step.state === 'completed' && step.durationMs != null && (
-                <span
-                  className="stepper-step-duration state-completed"
-                  title={step.tokens ? formatTokenBreakdown(step.tokens) : undefined}
-                >
-                  {formatDuration(step.durationMs)}
-                  {step.tokens && ` · ${formatTokenCount(step.tokens.input + step.tokens.output)}`}
-                </span>
-              )}
-              {step.state === 'running' && (
-                <span className="stepper-step-duration state-running">
-                  {step.elapsedMs != null
-                    ? `running · ${formatElapsed(step.elapsedMs)}`
-                    : 'running...'}
-                </span>
-              )}
-              {step.state === 'error' && (
-                <span
-                  className="stepper-step-duration state-error"
-                  title={step.errorSummary || 'error'}
-                >
-                  {step.errorSummary
-                    ? step.errorSummary.length > 60
-                      ? step.errorSummary.slice(0, 57) + '...'
-                      : step.errorSummary
-                    : 'error'}
-                </span>
-              )}
-              {canExpand && (
-                <span
-                  className={`stepper-step-chevron${isExpanded ? ' stepper-step-chevron--open' : ''}`}
-                  aria-hidden="true"
-                >
-                  {'\u25B8'}
-                </span>
-              )}
-            </div>
-            {step.inputPreview && (
-              <div data-testid="step-input-preview" className="stepper-step-input-preview">
-                {step.inputPreview}
-              </div>
-            )}
-            {step.state === 'error' && step.errorSummary && step.errorSummary.length > 60 && (
-              <div className="stepper-step-error-detail">{step.errorSummary}</div>
-            )}
-            {isExpanded && step.state !== 'running' && step.outputPreview && (
-              <OutputPanel
-                preview={step.outputPreview}
-                isError={step.state === 'error'}
-                toolCallId={step.toolCallId}
-              />
-            )}
-            {isExpanded && step.state === 'running' && step.liveOutputPreview && (
-              <OutputPanel preview={step.liveOutputPreview} toolCallId={step.toolCallId} />
-            )}
-          </React.Fragment>
-        )
-      })}
-    </div>
-  )
+  const items: NonNullable<StepsProps['items']> = steps.map(step => {
+    const showDivider = previousIteration !== undefined && step.iteration !== previousIteration
+    previousIteration = step.iteration
+    const fnName = toolFunctionName(step)
+    const isExpanded = expandedIds.has(step.toolCallId)
+    const preview = step.state === 'running' ? step.liveOutputPreview : step.outputPreview
+    const canExpand = Boolean(preview)
+    const tokenDescription = step.tokens ? formatTokenBreakdown(step.tokens) : undefined
+    const title = canExpand ? (
+      <Button
+        type="text"
+        size="small"
+        data-testid={`step-row-${step.toolCallId}`}
+        aria-expanded={isExpanded}
+        onClick={() => toggleExpand(step.toolCallId)}
+      >
+        {step.displayName}
+        {fnName ? <Typography.Text type="secondary"> {fnName}</Typography.Text> : null}
+      </Button>
+    ) : (
+      <Flex align="center" gap="small" data-testid={`step-row-${step.toolCallId}`}>
+        <Typography.Text>{step.displayName}</Typography.Text>
+        {fnName ? <Typography.Text type="secondary">{fnName}</Typography.Text> : null}
+      </Flex>
+    )
+    const duration =
+      step.state === 'completed' && step.durationMs != null ? (
+        <Tooltip title={tokenDescription}>
+          <Typography.Text
+            aria-label={tokenDescription}
+            tabIndex={0}
+            title={tokenDescription}
+            type="secondary"
+          >
+            {formatDuration(step.durationMs)}
+            {step.tokens && ` · ${formatTokenCount(step.tokens.input + step.tokens.output)}`}
+          </Typography.Text>
+        </Tooltip>
+      ) : step.state === 'running' ? (
+        <Typography.Text type="secondary">
+          {step.elapsedMs != null ? `running · ${formatElapsed(step.elapsedMs)}` : 'running...'}
+        </Typography.Text>
+      ) : step.state === 'error' ? (
+        <Typography.Text type="danger" title={step.errorSummary || 'error'}>
+          {step.errorSummary
+            ? step.errorSummary.length > 60
+              ? `${step.errorSummary.slice(0, 57)}...`
+              : step.errorSummary
+            : 'error'}
+        </Typography.Text>
+      ) : null
+    const description = (
+      <Flex vertical gap="small">
+        {showDivider ? <Divider>Thinking further...</Divider> : null}
+        {duration}
+        {step.inputPreview ? (
+          <Typography.Paragraph data-testid="step-input-preview">
+            {step.inputPreview}
+          </Typography.Paragraph>
+        ) : null}
+        {step.state === 'error' && step.errorSummary && step.errorSummary.length > 60 ? (
+          <Alert type="error" title={step.errorSummary} />
+        ) : null}
+        {isExpanded && preview ? (
+          <OutputPanel
+            preview={preview}
+            isError={step.state === 'error'}
+            toolCallId={step.toolCallId}
+          />
+        ) : null}
+      </Flex>
+    )
+    return {
+      key: step.toolCallId,
+      status: step.state === 'completed' ? 'finish' : step.state === 'error' ? 'error' : 'process',
+      title,
+      description,
+    }
+  })
+
+  return <Steps direction="vertical" size="small" items={items} />
 }
 
 export function ProgressStepper({
@@ -312,109 +310,94 @@ export function ProgressStepper({
 
   if (status === 'completed' && steps.length === 0) return null
 
-  // Completed — subtle "More details" toggle (same pattern as running state)
   if (status === 'completed' && steps.length > 0) {
     const totalDuration = steps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0)
     const errorCount = steps.filter(s => s.state === 'error').length
     const toolNames = [...new Set(steps.map(s => s.displayName))].join(', ')
     const artifactNames = extractProgressArtifactNames(steps)
     return (
-      <div data-testid="progress-stepper" className="progress-stepper status-completed">
-        <Button
-          type="button"
-          data-testid="progress-expand-btn"
-          className="stepper-details-toggle"
-          onClick={() => setExpanded(prev => !prev)}
-          aria-expanded={expanded}
-          variant="text"
-        >
-          <span className="stepper-completed-icon stepper-details-toggle-icon">
-            {errorCount > 0 ? '\u26A0' : '\u2713'}
-          </span>
-          <span>
-            {expanded
-              ? 'Hide details'
-              : `More details · ${steps.length} tool${steps.length > 1 ? 's' : ''}`}
-          </span>
-          <span
-            className={`stepper-details-chevron${expanded ? ' stepper-details-chevron--open' : ''}`}
-            aria-hidden="true"
+      <Flex vertical gap="small" data-testid="progress-stepper">
+        <Flex align="center" justify="space-between" wrap gap="small">
+          <Flex align="center" gap="small" wrap>
+            <Tag
+              icon={errorCount > 0 ? <ExclamationCircleOutlined /> : <CheckCircleOutlined />}
+              color={errorCount > 0 ? 'error' : 'success'}
+            >
+              {errorCount > 0 ? 'Completed with errors' : 'Completed'}
+            </Tag>
+            <Typography.Text type="secondary">
+              {steps.length} {steps.length === 1 ? 'tool' : 'tools'} ·{' '}
+              {formatDuration(totalDuration)}
+              {toolNames ? ` · ${toolNames}` : ''}
+            </Typography.Text>
+          </Flex>
+          <Button
+            type="text"
+            data-testid="progress-expand-btn"
+            onClick={() => setExpanded(previous => !previous)}
+            aria-expanded={expanded}
+            icon={<DownOutlined rotate={expanded ? 180 : 0} />}
           >
-            ›
-          </span>
-        </Button>
+            {expanded ? 'Hide details' : 'More details'}
+          </Button>
+        </Flex>
         {expanded && <StepList steps={steps} />}
         {expanded && hostRef && artifactNames.length > 0 && (
           <ArtifactsBadge hostRef={hostRef} artifactNames={artifactNames} />
         )}
-      </div>
+      </Flex>
     )
   }
 
   if (status === 'cancelled') {
     return (
-      <div data-testid="progress-stepper" className="progress-stepper status-cancelled">
-        <div className="stepper-cancelled-row">
-          <span className="stepper-cancelled-badge">Cancelled</span>
-          {progress.cancelReason && (
-            <span className="stepper-cancelled-reason">{progress.cancelReason}</span>
-          )}
-        </div>
+      <Flex vertical gap="small" data-testid="progress-stepper">
+        <Alert
+          type="warning"
+          showIcon
+          title="Cancelled"
+          description={progress.cancelReason || undefined}
+        />
         {steps.length > 0 && (
           <>
             <Button
-              type="button"
-              className="stepper-details-toggle"
+              type="text"
               onClick={() => setExpanded(prev => !prev)}
               aria-expanded={expanded}
-              variant="text"
+              icon={<DownOutlined rotate={expanded ? 180 : 0} />}
             >
               <span>{expanded ? 'Hide details' : 'More details'}</span>
-              <span
-                className={`stepper-details-chevron${expanded ? ' stepper-details-chevron--open' : ''}`}
-                aria-hidden="true"
-              >
-                ›
-              </span>
             </Button>
             {expanded && <StepList steps={steps} />}
           </>
         )}
-      </div>
+      </Flex>
     )
   }
 
   if (status === 'connecting') {
     return (
-      <div data-testid="progress-stepper" className="progress-stepper">
-        <div className="stepper-connecting-row">
-          <ThinkingIndicator label="Connecting" />
-          {onCancel && (
-            <IconButton
-              data-testid="progress-cancel-btn"
-              className="stepper-btn progress-cancel-btn"
-              onClick={handleCancelClick}
-              disabled={isCancelling}
-              label={stopAgentAriaLabel}
-              size="sm"
-              title={stopAgentAriaLabel}
-              variant="soft"
-            >
-              <span className="stepper-stop-symbol" aria-hidden="true">
-                ■
-              </span>
-            </IconButton>
-          )}
-        </div>
-      </div>
+      <Flex align="center" justify="space-between" gap="small" data-testid="progress-stepper">
+        <ThinkingIndicator label="Connecting" />
+        {onCancel ? (
+          <Button
+            data-testid="progress-cancel-btn"
+            onClick={handleCancelClick}
+            disabled={isCancelling}
+            aria-label={stopAgentAriaLabel}
+            size="small"
+            title={stopAgentAriaLabel}
+            type="text"
+            icon={<StopOutlined />}
+          />
+        ) : null}
+      </Flex>
     )
   }
 
   if (status === 'error') {
     return (
-      <div data-testid="progress-stepper" className="progress-stepper">
-        <span className="stepper-error-status">Progress stream error</span>
-      </div>
+      <Alert data-testid="progress-stepper" type="error" showIcon title="Progress stream error" />
     )
   }
 
@@ -432,84 +415,71 @@ export function ProgressStepper({
     const connectServer = info?.mcpServerName || 'the connector'
     const canConnect = isConnect && !!onConnect
     const approvalPending = !!info && decidedRequestId === info.requestId
+    const statusLabel = (
+      <Typography.Text role="status" aria-live="polite" aria-atomic="true">
+        {canConnect
+          ? `Connect ${connectServer} to continue`
+          : isConnect
+            ? 'A connector must be reconnected to continue. Cancel and retry if this persists.'
+            : info
+              ? `${formatToolApprovalLabel({
+                  displayName: info.displayName,
+                  toolName: info.toolName,
+                })} requires approval`
+              : 'Waiting for approval...'}
+      </Typography.Text>
+    )
     return (
-      <div data-testid="progress-stepper" className="progress-stepper status-suspended">
-        <div className="stepper-suspended-row">
-          <span className="stepper-suspended-icon">&#9888;</span>
-          <span
-            className="stepper-suspended-label"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-          >
-            {canConnect
-              ? `Connect ${connectServer} to continue`
-              : isConnect
-                ? 'A connector must be reconnected to continue. Cancel and retry if this persists.'
-                : info
-                  ? `${formatToolApprovalLabel({
-                      displayName: info.displayName,
-                      toolName: info.toolName,
-                    })} requires approval`
-                  : 'Waiting for approval...'}
-          </span>
-          {onCancel && (
-            <IconButton
-              data-testid="progress-cancel-btn"
-              className="stepper-btn progress-cancel-btn"
-              onClick={handleCancelClick}
-              disabled={isCancelling}
-              label={stopAgentAriaLabel}
-              size="sm"
-              title={stopAgentAriaLabel}
-              variant="soft"
-            >
-              <span className="stepper-stop-symbol" aria-hidden="true">
-                ■
-              </span>
-            </IconButton>
-          )}
-        </div>
+      <Flex vertical gap="small" data-testid="progress-stepper">
+        <Alert type="warning" showIcon title={statusLabel} />
+        {onCancel ? (
+          <Button
+            data-testid="progress-cancel-btn"
+            onClick={handleCancelClick}
+            disabled={isCancelling}
+            aria-label={stopAgentAriaLabel}
+            size="small"
+            title={stopAgentAriaLabel}
+            type="text"
+            icon={<StopOutlined />}
+          />
+        ) : null}
         {info?.inputPreview && !isConnect && (
-          <div data-testid="approval-input-preview" className="stepper-step-output">
-            <pre className="stepper-step-output-code">{info.inputPreview.text}</pre>
+          <Card size="small" data-testid="approval-input-preview">
+            <pre>{info.inputPreview.text}</pre>
             {info.inputPreview.truncated && (
               <p role="note">This preview is incomplete or changed by redaction.</p>
             )}
-          </div>
+          </Card>
         )}
         {info && canConnect && (
-          <div className="stepper-approval-actions">
+          <Flex gap="small">
             <Button
               data-testid="connect-mcp-btn"
-              className="stepper-btn stepper-btn-approve"
-              color="success"
+              type="primary"
               disabled={connectPending}
               onClick={() => {
                 setConnectPending(true)
                 onConnect()
               }}
-              size="sm"
-              variant="soft"
+              size="small"
             >
               {connectPending ? 'Connecting...' : `Connect ${connectServer}`}
             </Button>
-          </div>
+          </Flex>
         )}
         {info && !canConnect && !isConnect && (onApprove || onDeny) && (
-          <div className="stepper-approval-actions">
+          <Flex gap="small">
             {onApprove && (
               <Button
                 data-testid="approval-approve-btn"
-                className="stepper-btn stepper-btn-approve"
-                color="success"
+                type="primary"
                 disabled={approvalPending}
                 onClick={() => {
                   setDecidedRequestId(info.requestId)
                   onApprove()
                 }}
-                size="sm"
-                variant="soft"
+                size="small"
               >
                 {approvalPending ? 'Approving...' : 'Approve'}
               </Button>
@@ -517,88 +487,69 @@ export function ProgressStepper({
             {onDeny && (
               <Button
                 data-testid="approval-deny-btn"
-                className="stepper-btn stepper-btn-deny"
-                color="danger"
+                type="primary"
+                danger
                 disabled={approvalPending}
                 onClick={() => {
                   setDecidedRequestId(info.requestId)
                   onDeny()
                 }}
-                size="sm"
-                variant="soft"
+                size="small"
               >
                 Deny
               </Button>
             )}
-          </div>
+          </Flex>
         )}
         {steps.length > 0 && (
           <>
             <Button
-              type="button"
-              className="stepper-details-toggle"
+              type="text"
               onClick={() => setExpanded(prev => !prev)}
               aria-expanded={expanded}
-              variant="text"
+              icon={<DownOutlined rotate={expanded ? 180 : 0} />}
             >
               <span>{expanded ? 'Hide details' : 'More details'}</span>
-              <span
-                className={`stepper-details-chevron${expanded ? ' stepper-details-chevron--open' : ''}`}
-                aria-hidden="true"
-              >
-                ›
-              </span>
             </Button>
             {expanded && <StepList steps={steps} />}
           </>
         )}
-      </div>
+      </Flex>
     )
   }
 
   const hasActiveSteps = steps.length > 0
 
   return (
-    <div data-testid="progress-stepper" className="progress-stepper">
-      <div className="stepper-running-row">
+    <Flex vertical gap="small" data-testid="progress-stepper">
+      <Flex align="center" justify="space-between" gap="small">
         <ThinkingIndicator label={activeProgressLabel(progress)} />
-        {onCancel && (
-          <IconButton
+        {onCancel ? (
+          <Button
             data-testid="progress-cancel-btn"
-            className="stepper-btn progress-cancel-btn"
             onClick={handleCancelClick}
             disabled={isCancelling}
-            label={stopAgentAriaLabel}
-            size="sm"
+            aria-label={stopAgentAriaLabel}
+            size="small"
             title={stopAgentAriaLabel}
-            variant="soft"
-          >
-            <span className="stepper-stop-symbol" aria-hidden="true">
-              ■
-            </span>
-          </IconButton>
-        )}
-      </div>
+            type="text"
+            icon={<StopOutlined />}
+          />
+        ) : null}
+      </Flex>
       {hasActiveSteps && (
         <>
           <Button
-            type="button"
-            className="stepper-details-toggle"
+            type="text"
             onClick={() => setExpanded(prev => !prev)}
             aria-expanded={expanded}
-            variant="text"
+            icon={<DownOutlined rotate={expanded ? 180 : 0} />}
           >
             <span>{expanded ? 'Hide details' : 'More details'}</span>
-            <span
-              className={`stepper-details-chevron${expanded ? ' stepper-details-chevron--open' : ''}`}
-              aria-hidden="true"
-            >
-              ›
-            </span>
           </Button>
           {expanded && <StepList steps={steps} />}
         </>
       )}
-    </div>
+    </Flex>
   )
 }

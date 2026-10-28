@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
+import { CloseOutlined } from '@ant-design/icons'
 import { type TaskState, makeTaskKey, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
-import { Button, IconButton, StatusBanner } from '@components/Common'
-import { IconClose } from '@components/SidebarNav/icons'
+import { Alert, Button, Flex, Typography } from 'antd'
 import { useBrowserWindowState } from '@hooks/useBrowserWindowState'
 import { useTaskTier } from '@hooks/useTaskTier'
 import type { ProgressStep } from '../../uiTypes'
@@ -18,10 +18,10 @@ interface Props {
 function MiniSummary({ steps }: { steps: ProgressStep[] }) {
   const lastTool = steps[steps.length - 1]
   return (
-    <div className="nudge-mini-summary">
-      <span>Iteration {lastTool?.iteration ?? 0}</span>
-      {lastTool ? <span>Last tool: {lastTool.displayName}</span> : null}
-    </div>
+    <Flex gap="middle" wrap>
+      <Typography.Text>Iteration {lastTool?.iteration ?? 0}</Typography.Text>
+      {lastTool ? <Typography.Text>Last tool: {lastTool.displayName}</Typography.Text> : null}
+    </Flex>
   )
 }
 
@@ -92,40 +92,30 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
   if (dismissedTaskIds.has(taskIdentity)) return null
 
   const dismissButton = (
-    <IconButton
-      className="nudge-area__dismiss"
+    <Button
+      type="text"
       aria-label="Dismiss this suggestion"
-      label="Dismiss this suggestion"
-      size="xs"
-      variant="ghost"
+      title="Dismiss this suggestion"
+      icon={<CloseOutlined />}
       onClick={() => dismissNudge(taskIdentity)}
-    >
-      <IconClose width={14} height={14} />
-    </IconButton>
+    />
   )
 
   if (tier === 'T3') {
     return (
-      <div className="nudge-area" data-tier="T3">
-        <div className="nudge-area__header">
-          <StatusBanner tone="info" compact>
-            This task is taking longer than usual. You can keep working in another chat — we'll let
-            you know here when it's done.
-          </StatusBanner>
+      <Flex vertical gap="small" data-tier="T3">
+        <Flex align="start" gap="small">
+          <Alert
+            type="info"
+            showIcon
+            title="This task is taking longer than usual. You can keep working in another chat — we'll let you know here when it's done."
+          />
           {dismissButton}
-        </div>
-        <div className="nudge-area__footer">
-          <Button
-            className="nudge-area-action"
-            variant="soft"
-            color="primary"
-            size="sm"
-            onClick={onStartNewChat}
-          >
-            Start a new chat
-          </Button>
-        </div>
-      </div>
+        </Flex>
+        <Button type="primary" onClick={onStartNewChat}>
+          Start a new chat
+        </Button>
+      </Flex>
     )
   }
 
@@ -134,41 +124,29 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
       ? "Your agent is still working. It's safe to close this window — you'll see the result when you reopen."
       : 'Your agent is still working. Your system will notify you when it finishes.'
     return (
-      <div className="nudge-area" data-tier="T4">
-        <div className="nudge-area__header">
-          <StatusBanner tone="info" compact>
-            {text}
-          </StatusBanner>
+      <Flex vertical gap="small" data-tier="T4">
+        <Flex align="start" gap="small">
+          <Alert type="info" showIcon title={text} />
           {dismissButton}
-        </div>
-        <div className="nudge-area__footer">
-          <MiniSummary steps={state.steps} />
-        </div>
-      </div>
+        </Flex>
+        <MiniSummary steps={state.steps} />
+      </Flex>
     )
   }
 
   // T5
   return (
-    <div className="nudge-area" data-tier="T5">
-      <div className="nudge-area__header">
-        <StatusBanner tone="warn" compact>
-          Your agent is still working. If you think something might be stuck, you can refresh the
-          state.
-        </StatusBanner>
+    <Flex vertical gap="small" data-tier="T5">
+      <Flex align="start" gap="small">
+        <Alert
+          type="warning"
+          showIcon
+          title="Your agent is still working. If you think something might be stuck, you can refresh the state."
+        />
         {dismissButton}
-      </div>
-      <div className="nudge-area__footer">
-        <MiniSummary steps={state.steps} />
-        <Button
-          className="nudge-area-action"
-          variant="soft"
-          size="sm"
-          onClick={() => void onRefreshState()}
-        >
-          Refresh state
-        </Button>
-      </div>
-    </div>
+      </Flex>
+      <MiniSummary steps={state.steps} />
+      <Button onClick={() => void onRefreshState()}>Refresh state</Button>
+    </Flex>
   )
 }

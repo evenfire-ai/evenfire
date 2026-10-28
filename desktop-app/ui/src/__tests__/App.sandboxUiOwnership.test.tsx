@@ -386,7 +386,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     machineHarness.storeActiveTab = () => controller.workspaceTabs.activeTabId
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(controller))
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-      cb(0)
+      queueMicrotask(() => cb(0))
       return 1
     })
     vi.stubGlobal(
@@ -552,7 +552,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     const first = main.openCall(0).launchId
     main.navigate('/inbox')
 
-    fireEvent.click(screen.getByRole('button', { name: 'New chat', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat', selected: false }))
     await flushMacrotask()
 
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
@@ -561,7 +561,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await act(() => main.settle())
     expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Alpha', selected: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
     expect(lastLaunch()).toMatchObject({
       type: 'intent',
@@ -575,7 +575,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await renderApp()
     await openFromSidebar(ALPHA, 1)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: true }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Alpha', selected: true }))
     await flushMacrotask()
 
     expect(lastLaunch().type).toBe('intent')
@@ -624,7 +624,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await act(() => main.crash())
     await screen.findByText('The app closed unexpectedly.')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: true }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Alpha', selected: true }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
     expect(lastLaunch().type).toBe('intent')
   })
@@ -813,7 +813,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await openFromSidebar(ALPHA, 1)
 
     await act(() => main.retitle('Alpha Inbox'))
-    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Alpha Inbox', selected: true })).toBeTruthy()
 
     // The view an open replaces retitles itself before that open reaches main.
     const first = main.openCall(0).launchId
@@ -825,7 +825,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
       expect.objectContaining({ launchId: first, title: 'Stale' })
     )
     expect(main.live()?.launchId).toBe(main.openCall(1).launchId)
-    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: false })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Alpha Inbox', selected: false })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Stale' })).toBeNull()
   })
 
@@ -914,7 +914,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     sandboxUi.listApps.mockResolvedValue({ apps: BETA_RESTARTING })
     await refreshCatalogOnFocus()
     main.navigate('/inbox')
-    fireEvent.click(screen.getByRole('button', { name: 'Beta Inbox', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Beta Inbox', selected: false }))
     // Alpha retitles itself before the close the click sent reaches main.
     await act(() => main.retitle('Alpha Late'))
     await act(() => main.settle())
@@ -937,7 +937,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     // Beta is ready again: clicking its tab relaunches it.
     sandboxUi.listApps.mockResolvedValue({ apps: APP_LISTING })
     await refreshCatalogOnFocus()
-    fireEvent.click(screen.getByRole('button', { name: 'Beta Inbox', pressed: true }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Beta Inbox', selected: true }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
     expect(main.openCall(2)).toMatchObject({ recipeName: 'beta', title: 'Beta' })
     expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
@@ -951,7 +951,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
 
     // Beta turns ready between App refreshes; the picker grid loads its own list.
     sandboxUi.listApps.mockResolvedValue({ apps: APP_LISTING })
-    fireEvent.click(screen.getByRole('button', { name: 'New chat', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat', selected: false }))
     await flushMacrotask()
     act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
     fireEvent.click(await screen.findByRole('button', { name: 'Open Beta' }))
@@ -960,12 +960,12 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     const betaTab = activeWorkspaceTab(controller.workspaceTabs)!
     await flushMacrotask()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Alpha', selected: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
     await flushMacrotask()
 
     // Back to Beta before App's next refresh: it cannot be relaunched yet.
-    fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Beta', selected: false }))
     await flushMacrotask()
     expect(sandboxUi.open).toHaveBeenCalledTimes(3)
     expect(sandboxUi.close).toHaveBeenLastCalledWith({ launchId: main.openCall(2).launchId })
@@ -973,7 +973,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
 
     await refreshCatalogOnFocus()
-    fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: true }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Beta', selected: true }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(4))
     expect(main.openCall(3).recipeName).toBe('beta')
   })
@@ -1113,7 +1113,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
       await shortcut(commandId)
       expectActiveAppTabOwned()
     }
-    fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Beta', selected: false }))
     await flushMacrotask()
 
     expect(owner()?.appRef).toBe(BETA!.appRef)
@@ -1147,7 +1147,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     controller.workspaceTabs = state
     await renderApp()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Alpha', selected: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
 
     expect(lastLaunch().launch.route).toEqual({ kind: 'tab', routePath: '/kept' })

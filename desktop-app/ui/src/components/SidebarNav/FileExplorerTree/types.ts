@@ -1,4 +1,8 @@
-import type { DragEvent as ReactDragEvent } from 'react'
+import type {
+  DragEvent as ReactDragEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+} from 'react'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { GfsDropVerdict } from '@/gfs/dragSession'
@@ -20,15 +24,6 @@ export interface FileExplorerTreeProps {
 
 export interface FileExplorerNodeProps {
   node: GfsBrowserChild
-  /** 1-based ARIA depth (`aria-level`). */
-  level: number
-  /** Cache-scope key shared with the Files page's TanStack queries. */
-  scope: string
-  /** Session access is live: gates the per-node children fetch the same way the
-   *  controller gates its own children query — a revoked session fetches nothing. */
-  accessActive: boolean
-  expandedIds: ReadonlySet<string>
-  selectedId: string | null
   /** Resource id currently being moved (freezes drag starts), when a move the
    *  tree itself initiated is in flight. */
   movingResourceId?: string | null
@@ -41,15 +36,12 @@ export interface FileExplorerNodeProps {
    *  is carried — not just its state — so the deny reason reaches the row
    *  (`data-drop-reason`), the tooltip and the announcements (UX matrix §5.1). */
   dropState?: GfsDropVerdict
-  /** Verdict map shared with descendant nodes (render feedback only). */
-  dropStatesByResourceId: Readonly<Record<string, GfsDropVerdict>>
+  isExpanded: boolean
   /** Display name of the active drag's source, for reason copy that names it. */
   dragSourceName?: string | null
   onToggle: (resourceId: string) => void
   onActivateFolder: (node: GfsBrowserChild) => void
   onActivateFile: (node: GfsBrowserChild) => void
-  /** Fail-closed hook: a listing authority error revokes the session. */
-  onAuthorityFailure: (message: string) => void
   onNodeDragStart: (
     node: GfsBrowserChild,
     event: ReactDragEvent<HTMLElement>,
@@ -69,4 +61,27 @@ export interface FileExplorerNodeProps {
   ) => void
   /** Open the existing Move dialog for this node (row action / Shift+F10). */
   onRequestMove: (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => void
+  /** Register the current node's keyboard action with the Ant Design Tree host. */
+  registerKeyboardHandler: (
+    resourceId: string,
+    handler: (event: ReactKeyboardEvent<HTMLElement>) => void
+  ) => () => void
+  registerTreeNode: (metadata: FileExplorerTreeNodeMeta) => () => void
+}
+
+export interface FileExplorerNodeHandlers {
+  onClick: (event: ReactMouseEvent<HTMLElement>) => void
+  onDoubleClick: (event: ReactMouseEvent<HTMLElement>) => void
+  onDragStart: (event: ReactDragEvent<HTMLElement>) => void
+  onDragEnd: () => void
+  onDragEnterOrOver: (event: ReactDragEvent<HTMLElement>) => void
+  onDragLeave: (event: ReactDragEvent<HTMLElement>, rowElement: HTMLElement | null) => void
+  onDrop: (event: ReactDragEvent<HTMLElement>) => void
+  onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void
+}
+
+export interface FileExplorerTreeNodeMeta {
+  resourceNode: GfsBrowserChild
+  rowHandlers: FileExplorerNodeHandlers
+  dragEnabled: boolean
 }

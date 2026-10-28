@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { IconButton, MenuItem } from '@components/Common'
-import { IconMoreVertical } from '@components/SidebarNav/icons'
+import { useEffect, useRef, useState } from 'react'
+import { EllipsisOutlined } from '@ant-design/icons'
+import { Button, Dropdown } from 'antd'
+import type { MenuProps } from 'antd'
 
 type AccessRowMenuProps = {
   disabled?: boolean
@@ -11,111 +11,65 @@ type AccessRowMenuProps = {
 
 export function AccessRowMenu({ disabled = false, label, onRemove }: AccessRowMenuProps) {
   const [open, setOpen] = useState(false)
-  const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
-  const menuRef = useRef<HTMLDivElement | null>(null)
-  const close = useCallback((restoreFocus = false) => {
-    setOpen(false)
-    if (restoreFocus) triggerRef.current?.focus()
-  }, [])
+  const openRef = useRef(false)
+  const restoreFocusOnCloseRef = useRef(false)
+  openRef.current = open
+
+  useEffect(() => {
+    if (disabled) setOpen(false)
+  }, [disabled])
 
   useEffect(() => {
     if (!open) return
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) close()
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      restoreFocusOnCloseRef.current = true
+      window.setTimeout(() => {
+        if (openRef.current) restoreFocusOnCloseRef.current = false
+      }, 0)
     }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close(true)
-    }
-    document.addEventListener('mousedown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [close, open])
+    window.addEventListener('keydown', handleEscape, true)
+    return () => window.removeEventListener('keydown', handleEscape, true)
+  }, [open])
 
-  useEffect(() => {
-    if (disabled && open) close()
-  }, [close, disabled, open])
-
-  const placeMenu = useCallback(() => {
-    const trigger = triggerRef.current
-    const menu = menuRef.current
-    if (!trigger || !menu) return
-    const triggerRect = trigger.getBoundingClientRect()
-    const menuRect = menu.getBoundingClientRect()
-    const inset = 8
-    const gap = 6
-    const menuWidth = menuRect.width || 184
-    const menuHeight = menuRect.height || 52
-    const left = Math.max(
-      inset,
-      Math.min(triggerRect.right - menuWidth, window.innerWidth - menuWidth - inset)
-    )
-    const opensAbove =
-      triggerRect.bottom + gap + menuHeight > window.innerHeight - inset &&
-      triggerRect.top > menuHeight
-    const top = opensAbove
-      ? Math.max(inset, triggerRect.top - menuHeight - gap)
-      : Math.min(triggerRect.bottom + gap, window.innerHeight - menuHeight - inset)
-    setPosition({ left, top: Math.max(inset, top) })
-  }, [])
-
-  useLayoutEffect(() => {
-    if (!open) {
-      setPosition(null)
-      return
-    }
-    placeMenu()
-    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
-    window.addEventListener('resize', placeMenu)
-    window.addEventListener('scroll', placeMenu, true)
-    return () => {
-      window.removeEventListener('resize', placeMenu)
-      window.removeEventListener('scroll', placeMenu, true)
-    }
-  }, [open, placeMenu])
+  const menu: MenuProps = {
+    'aria-label': `Actions for ${label}`,
+    items: [{ key: 'remove-access', label: 'Remove access', danger: true }],
+    onClick: () => {
+      setOpen(false)
+      triggerRef.current?.focus()
+      void onRemove()
+    },
+  }
 
   return (
-    <span className="da-gfs-access-row-menu">
-      <IconButton
+    <Dropdown
+      autoFocus
+      destroyOnHidden
+      menu={menu}
+      onOpenChange={nextOpen => {
+        setOpen(nextOpen)
+        openRef.current = nextOpen
+        if (!nextOpen && restoreFocusOnCloseRef.current) {
+          restoreFocusOnCloseRef.current = false
+          triggerRef.current?.focus()
+        }
+      }}
+      open={open}
+      placement="bottomRight"
+      trigger={['click']}
+    >
+      <Button
         aria-expanded={open}
         aria-haspopup="menu"
-        className="da-gfs-resource-menu__trigger"
+        aria-label={`Actions for ${label}`}
         disabled={disabled}
-        label={`Actions for ${label}`}
-        onClick={() => setOpen(value => !value)}
+        icon={<EllipsisOutlined aria-hidden="true" />}
         ref={triggerRef}
-        size="sm"
-        variant="ghost"
-      >
-        <IconMoreVertical />
-      </IconButton>
-      {open
-        ? createPortal(
-            <div
-              aria-label={`Actions for ${label}`}
-              className="da-gfs-resource-menu__panel da-gfs-access-row-menu__panel"
-              ref={menuRef}
-              role="menu"
-              style={position ?? { left: 0, top: 0, visibility: 'hidden' }}
-            >
-              <MenuItem
-                color="danger"
-                onClick={() => {
-                  close(true)
-                  void onRemove()
-                }}
-                role="menuitem"
-              >
-                Remove access
-              </MenuItem>
-            </div>,
-            document.body
-          )
-        : null}
-    </span>
+        size="small"
+        type="text"
+      />
+    </Dropdown>
   )
 }

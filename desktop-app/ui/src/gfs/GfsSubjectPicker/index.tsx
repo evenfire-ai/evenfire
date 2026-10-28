@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { IconButton, MenuItem, TextInput } from '@components/Common'
-import { IconAgents, IconClose, IconTeams, IconUser } from '@components/SidebarNav/icons'
-import { useClickOutside } from '@hooks/useClickOutside'
+import { useMemo, useState } from 'react'
+import { AppstoreOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons'
+import { Select, Space, Spin, Tag, Typography } from 'antd'
 import type { GfsDelegationSubjectOption } from '@/gfs/delegation.types'
 import type { GfsSubjectPickerProps } from './types'
 
@@ -9,14 +8,10 @@ function subjectKey(subject: GfsDelegationSubjectOption): string {
   return `${subject.type}:${subject.id}`
 }
 
-function subjectBadge(subject: GfsDelegationSubjectOption): string {
-  return subject.badge ?? subject.type
-}
-
-function avatarContent(subject: GfsDelegationSubjectOption): React.ReactNode {
-  if (subject.type === 'team') return <IconTeams />
-  if (subject.type === 'host') return <IconAgents />
-  return <IconUser />
+function subjectIcon(subject: GfsDelegationSubjectOption) {
+  if (subject.type === 'team') return <TeamOutlined aria-hidden="true" />
+  if (subject.type === 'host') return <AppstoreOutlined aria-hidden="true" />
+  return <UserOutlined aria-hidden="true" />
 }
 
 function matchesQuery(subject: GfsDelegationSubjectOption, query: string): boolean {
@@ -35,144 +30,67 @@ export function GfsSubjectPicker({
   value,
 }: GfsSubjectPickerProps) {
   const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const rootRef = useRef<HTMLDivElement | null>(null)
-  const inputRef = useRef<HTMLInputElement | null>(null)
-  const close = useCallback(() => setOpen(false), [])
-  const selectedSet = useMemo(() => new Set(value), [value])
-  const selectedOptions = useMemo(
-    () => options.filter(option => selectedSet.has(subjectKey(option))),
-    [options, selectedSet]
+  const optionsByKey = useMemo(
+    () => new Map(options.map(subject => [subjectKey(subject), subject])),
+    [options]
   )
-  const availableOptions = useMemo(
+  const selectOptions = useMemo(
     () =>
-      options.filter(option => !selectedSet.has(subjectKey(option)) && matchesQuery(option, query)),
-    [options, query, selectedSet]
+      options.map(subject => ({
+        value: subjectKey(subject),
+        // Keep the option's accessible name stable and human-readable. AntD
+        // falls back to `value` when a ReactNode label cannot be flattened.
+        label: subject.label,
+      })),
+    [options]
   )
-
-  useClickOutside(rootRef, open, close)
-
-  useEffect(() => {
-    if (disabled) close()
-  }, [close, disabled])
-
-  const selectSubject = (subject: GfsDelegationSubjectOption) => {
-    onChange([...value, subjectKey(subject)])
-    setQuery('')
-    setOpen(true)
-    inputRef.current?.focus()
-  }
-
-  const removeSubject = (key: string) => {
-    onChange(value.filter(item => item !== key))
-    inputRef.current?.focus()
-  }
+  const allAvailableSelected =
+    options.length > 0 && options.every(subject => value.includes(subjectKey(subject)))
 
   return (
-    <div className="da-gfs-subject-picker" ref={rootRef}>
-      <div
-        className={`da-gfs-subject-picker__field${open ? ' is-open' : ''}`}
-        aria-label="People, teams, and agents"
-      >
-        {selectedOptions.map(subject => {
-          const key = subjectKey(subject)
-          return (
-            <span className="da-gfs-subject-picker__chip" key={key}>
-              <span
-                className={`da-gfs-subject-picker__avatar da-gfs-subject-picker__avatar--${subject.type}`}
-                aria-hidden="true"
-              >
-                {avatarContent(subject)}
-              </span>
-              <span className="da-gfs-subject-picker__chip-label">{subject.label}</span>
-              <IconButton
-                className="da-gfs-subject-picker__chip-remove"
-                disabled={disabled}
-                label={`Remove ${subject.label}`}
-                onClick={() => removeSubject(key)}
-                size="sm"
-                variant="ghost"
-              >
-                <IconClose />
-              </IconButton>
+    <Select
+      aria-label="Add people, teams, or agents"
+      disabled={disabled}
+      filterOption={(input, option) => {
+        const subject = optionsByKey.get(String(option?.value))
+        return subject ? matchesQuery(subject, input) : false
+      }}
+      loading={loading}
+      mode="multiple"
+      notFoundContent={
+        loading ? (
+          <Spin size="small" />
+        ) : allAvailableSelected ? (
+          'Everyone available is selected.'
+        ) : (
+          'No people, teams, or agents found.'
+        )
+      }
+      onChange={(next: string[]) => onChange(next)}
+      onOpenChange={setOpen}
+      open={open}
+      optionRender={option => {
+        const subject = optionsByKey.get(String(option.value))
+        if (!subject) return option.label
+        return (
+          <Space>
+            {subjectIcon(subject)}
+            <span>
+              <Typography.Text>{subject.label}</Typography.Text>
+              {subject.description ? (
+                <Typography.Text type="secondary"> — {subject.description}</Typography.Text>
+              ) : null}
             </span>
-          )
-        })}
-        <TextInput
-          aria-autocomplete="list"
-          aria-controls="gfs-subject-options"
-          aria-expanded={open}
-          aria-label="Add people, teams, or agents"
-          autoComplete="off"
-          className="da-gfs-subject-picker__input"
-          disabled={disabled}
-          onChange={event => {
-            setQuery(event.currentTarget.value)
-            setOpen(true)
-          }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={event => {
-            if (event.key === 'Escape') {
-              setOpen(false)
-              return
-            }
-            if (event.key === 'Backspace' && !query && value.length > 0) {
-              removeSubject(value[value.length - 1] ?? '')
-            }
-          }}
-          placeholder={selectedOptions.length === 0 ? 'Add people, teams, or agents' : ''}
-          ref={inputRef}
-          role="combobox"
-          value={query}
-        />
-      </div>
-
-      {open ? (
-        <div
-          className="da-gfs-subject-picker__menu"
-          id="gfs-subject-options"
-          role="listbox"
-          aria-label="Available people, teams, and agents"
-          aria-multiselectable="true"
-        >
-          {loading ? (
-            <span className="da-gfs-subject-picker__empty">Loading people, teams, and agents…</span>
-          ) : availableOptions.length === 0 ? (
-            <span className="da-gfs-subject-picker__empty">
-              {options.length === selectedOptions.length
-                ? 'Everyone available is selected.'
-                : 'No people, teams, or agents found.'}
-            </span>
-          ) : (
-            availableOptions.map(subject => (
-              <MenuItem
-                className="da-gfs-subject-picker__option"
-                key={subjectKey(subject)}
-                leadingIcon={
-                  <span
-                    className={`da-gfs-subject-picker__avatar da-gfs-subject-picker__avatar--${subject.type}`}
-                    aria-hidden="true"
-                  >
-                    {avatarContent(subject)}
-                  </span>
-                }
-                onClick={() => selectSubject(subject)}
-                role="option"
-                aria-selected="false"
-                trailingIcon={
-                  <span className="da-gfs-subject-picker__type">{subjectBadge(subject)}</span>
-                }
-              >
-                <span className="da-gfs-subject-picker__option-copy">
-                  <span>{subject.label}</span>
-                  {subject.description ? <small>{subject.description}</small> : null}
-                </span>
-              </MenuItem>
-            ))
-          )}
-        </div>
-      ) : null}
-    </div>
+            <Tag>{subject.badge ?? subject.type}</Tag>
+          </Space>
+        )
+      }}
+      options={selectOptions}
+      placeholder="Add people, teams, or agents"
+      showSearch
+      size="small"
+      value={value}
+    />
   )
 }
 

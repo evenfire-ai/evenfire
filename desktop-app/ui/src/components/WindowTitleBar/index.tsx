@@ -1,6 +1,12 @@
 import React from 'react'
 import { createPortal } from 'react-dom'
-import { joinClasses } from '@lib/classNames'
+import {
+  BorderOutlined,
+  CloseOutlined,
+  FullscreenExitOutlined,
+  MinusOutlined,
+} from '@ant-design/icons'
+import { Button, Flex } from 'antd'
 import type {
   TitlebarActionsPortalProps,
   WindowControlAction,
@@ -30,8 +36,10 @@ function controlLabel(action: WindowControlAction, state: WindowControlsState): 
   return state.fullscreen || state.maximized ? 'Restore window' : 'Maximize window'
 }
 
-function controlClassName(action: WindowControlAction): string {
-  return joinClasses('window-control-button', `window-control-button--${action}`)
+function controlIcon(action: WindowControlAction, state: WindowControlsState) {
+  if (action === 'close') return <CloseOutlined />
+  if (action === 'minimize') return <MinusOutlined />
+  return state.fullscreen || state.maximized ? <FullscreenExitOutlined /> : <BorderOutlined />
 }
 
 function getWindowControlsApi() {
@@ -45,8 +53,7 @@ function targetOwnsPointerGesture(target: EventTarget | null): boolean {
       [
         '.window-titlebar__controls',
         '.window-titlebar__leading',
-        '.global-search',
-        '.notification-bell-wrapper',
+        '[data-titlebar-pointer-owner]',
         'button',
         'a',
         'input',
@@ -112,38 +119,36 @@ export function WindowTitleBar({ actions, actionsRef, leadingRef }: WindowTitleB
   }, [])
 
   return (
-    <header
+    <Flex
+      component="header"
+      align="center"
       className={`window-titlebar window-titlebar--platform-${platform}`}
       data-platform={platform}
       onDoubleClick={handleTitlebarDoubleClick}
     >
-      <div className="window-titlebar__controls" role="group" aria-label="Window controls">
+      <Flex
+        className="window-titlebar__controls"
+        align="center"
+        role="group"
+        aria-label="Window controls"
+      >
         {controlOrder.map(action => (
-          <button
+          <Button
             key={action}
-            type="button"
             aria-label={controlLabel(action, controlsState)}
-            className={controlClassName(action)}
+            htmlType="button"
+            icon={controlIcon(action, controlsState)}
             onClick={() => runControl(action)}
-          >
-            <span
-              aria-hidden="true"
-              className={joinClasses(
-                'window-control-icon',
-                `window-control-icon--${action}`,
-                action === 'toggleMaximize' &&
-                  (controlsState.fullscreen || controlsState.maximized) &&
-                  'window-control-icon--restore'
-              )}
-            />
-          </button>
+            size="small"
+            type="text"
+          ></Button>
         ))}
-      </div>
-      <div className="window-titlebar__leading" ref={leadingRef} />
-      <div className="window-titlebar__actions" ref={actionsRef}>
+      </Flex>
+      <Flex className="window-titlebar__leading" ref={leadingRef} />
+      <Flex className="window-titlebar__actions" ref={actionsRef} align="center" justify="end">
         {actions}
-      </div>
-    </header>
+      </Flex>
+    </Flex>
   )
 }
 

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { HostModelsResult } from '@hooks/useChatStore'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import { ModelSelector } from '../ModelSelector'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -94,6 +95,27 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+beforeEach(installAntdDomEnvironment)
+
+function selector() {
+  return screen.getByRole('combobox', { name: /Model/ })
+}
+
+function openSelector() {
+  fireEvent.mouseDown(selector())
+}
+
+function option(name: RegExp) {
+  const label = screen
+    .getAllByText(name)
+    .find(candidate => candidate.closest('.ant-select-item-option'))
+  const visibleOption = label?.closest('.ant-select-item-option')
+  if (!(visibleOption instanceof HTMLElement)) {
+    throw new Error(`Expected a visible Ant Design option matching ${name}`)
+  }
+  return visibleOption
+}
+
 describe('ModelSelector', () => {
   it('renders nothing while data is loading (undefined) — no flash', () => {
     setHook({ data: undefined })
@@ -134,7 +156,7 @@ describe('ModelSelector', () => {
       imageInput: { state: 'unsupported', reason: 'model_unsupported' },
     })
     renderSelector()
-    const chip = screen.getByRole('button', { name: /Model — Haiku 4.5/ })
+    const chip = screen.getByRole('combobox', { name: /Model — Haiku 4.5/ })
     const describedBy = chip.getAttribute('aria-describedby')
     expect(describedBy).toBeTruthy()
     expect(document.getElementById(describedBy as string)?.textContent).toBe(
@@ -146,7 +168,7 @@ describe('ModelSelector', () => {
     setHook({ data: baseData(), imageInput: { state: 'supported', reason: 'supported' } })
     renderSelector()
     // Witness: the chip rendered.
-    const chip = screen.getByRole('button', { name: /Model — Haiku 4.5/ })
+    const chip = screen.getByRole('combobox', { name: /Model — Haiku 4.5/ })
     expect(chip.hasAttribute('aria-describedby')).toBe(false)
     expect(chip.hasAttribute('title')).toBe(false)
   })
@@ -170,11 +192,11 @@ describe('ModelSelector', () => {
       }),
     })
     renderSelector()
-    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
+    openSelector()
 
-    // Liveness witness: all three rows really rendered, so the tag assertions
-    // below cannot be satisfied by an empty or unopened list.
-    const optionOf = (name: RegExp) => screen.getByRole('menuitemradio', { name })
+    // Liveness witness: all three options really rendered, so the content
+    // assertions below cannot be satisfied by an empty or unopened list.
+    const optionOf = option
     expect(optionOf(/Opus 4\.8/).textContent).toBe('Opus 4.8')
     expect(optionOf(/Haiku 4\.5/).textContent).toBe('Haiku 4.5')
     expect(optionOf(/Sonnet 5/).textContent).toBe('Sonnet 5')
@@ -187,24 +209,21 @@ describe('ModelSelector', () => {
     expect(screen.queryByText('no images')).toBeNull()
     expect(screen.queryByText('images not verified')).toBeNull()
 
-    // Structural premise the Playwright image-capability spec asserts on the
-    // live app: a row is one span (the label) plus, on the active row, the
-    // check svg. Pinned here because this suite can actually run it.
-    expect(optionOf(/Opus 4\.8/).querySelectorAll('span')).toHaveLength(1)
-    expect(optionOf(/Haiku 4\.5/).querySelectorAll('span')).toHaveLength(1)
-    expect(optionOf(/Sonnet 5/).querySelectorAll('span')).toHaveLength(1)
+    expect(optionOf(/Opus 4\.8/).textContent).toBe('Opus 4.8')
+    expect(optionOf(/Haiku 4\.5/).textContent).toBe('Haiku 4.5')
+    expect(optionOf(/Sonnet 5/).textContent).toBe('Sonnet 5')
   })
 
   it('shows the effective model (sessionModel over hostDefault)', () => {
     setHook({ data: baseData() })
     renderSelector()
-    expect(screen.getByRole('button', { name: /Model — Haiku 4.5/ })).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: /Model — Haiku 4.5/ })).toBeTruthy()
   })
 
   it('falls back to the host default label when no session model is selected', () => {
     setHook({ data: baseData({ sessionModel: null }) })
     renderSelector()
-    expect(screen.getByRole('button', { name: /Model — Opus 4.8/ })).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: /Model — Opus 4.8/ })).toBeTruthy()
   })
 
   it('lists the allowed models and applies the badge on a successful switch', async () => {
@@ -212,8 +231,8 @@ describe('ModelSelector', () => {
     setHook({ data: baseData(), selectModel })
     renderSelector()
 
-    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Opus 4.8/ }))
+    openSelector()
+    fireEvent.click(option(/Opus 4.8/))
 
     await waitFor(() => expect(selectModel).toHaveBeenCalledWith('claude-opus-4-8'))
     await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/next message/i))
@@ -224,8 +243,8 @@ describe('ModelSelector', () => {
     setHook({ data: baseData(), selectModel })
     renderSelector()
 
-    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Haiku 4.5/ }))
+    openSelector()
+    fireEvent.click(option(/Haiku 4.5/))
 
     expect(selectModel).not.toHaveBeenCalled()
   })
@@ -233,25 +252,25 @@ describe('ModelSelector', () => {
   it('renders a disabled, non-interactive chip with a tooltip when degraded', () => {
     setHook({ data: baseData({ degraded: true }) })
     renderSelector()
-    // No menu trigger — the chip is static.
-    expect(screen.queryByRole('button')).toBeNull()
-    const chip = screen.getByLabelText(/selection unavailable/i)
-    expect(chip.getAttribute('title')).toMatch(/host default/i)
+    const control = screen.getByRole('combobox', { name: /selection unavailable/i })
+    expect((control as HTMLInputElement).disabled).toBe(true)
+    const descriptionId = control.getAttribute('aria-describedby')
+    expect(document.getElementById(descriptionId as string)?.textContent).toMatch(
+      /using the host default/i
+    )
   })
 
   it('warns when the previously selected model fell out of the allowlist', () => {
     setHook({ data: baseData({ sessionModelBlocked: 'claude-sonnet-4-5' }) })
     renderSelector()
-    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
+    openSelector()
     expect(screen.getByText(/no longer allowed/i).textContent).toContain('claude-sonnet-4-5')
   })
 
   it('defaults to downward placement (no --up modifier)', () => {
     setHook({ data: baseData() })
     const { container } = renderSelector()
-    const root = container.querySelector('.model-selector')
-    expect(root).toBeTruthy()
-    expect(root?.classList.contains('model-selector--up')).toBe(false)
+    expect(container.querySelector('[data-testid="model-selector-down"]')).toBeTruthy()
   })
 
   it('applies the upward placement modifier when placement="up" (composer)', () => {
@@ -259,8 +278,7 @@ describe('ModelSelector', () => {
     const { container } = render(
       <ModelSelector agentRef="chatllm" chatId="chat-1" placement="up" />
     )
-    const root = container.querySelector('.model-selector')
-    expect(root?.classList.contains('model-selector--up')).toBe(true)
+    expect(container.querySelector('[data-testid="model-selector-up"]')).toBeTruthy()
   })
 
   it('does not invent a Grok default when the session has no selected model', () => {
@@ -276,12 +294,16 @@ describe('ModelSelector', () => {
       }),
     })
     renderSelector()
-    expect(screen.getByRole('button', { name: /Model — Select model/ })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /Grok 4\.6/ })).toBeNull()
+    expect(screen.getByRole('combobox', { name: /Model — Select model/ })).toBeTruthy()
+    expect(
+      screen.queryByText('Grok 4.6', { selector: '.ant-select-item-option-content' })
+    ).toBeNull()
   })
 
   it('does not invent a Codex default when the session has no selected model', () => {
+    const selectModel = vi.fn(async () => true)
     setHook({
+      selectModel,
       data: baseData({
         provider: 'codex-subscription',
         hostDefault: '',
@@ -293,12 +315,13 @@ describe('ModelSelector', () => {
       }),
     })
     renderSelector()
-    expect(screen.getByRole('button', { name: /Model — Select model/ })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /GPT-5\.3/ })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
+    expect(screen.getByRole('combobox', { name: /Model — Select model/ })).toBeTruthy()
     expect(
-      screen.getByRole('menuitemradio', { name: /GPT-5\.3/ }).getAttribute('aria-checked')
-    ).toBe('false')
+      screen.queryByText('GPT-5.3', { selector: '.ant-select-item-option-content' })
+    ).toBeNull()
+    openSelector()
+    expect(option(/GPT-5\.3/).getAttribute('aria-selected')).not.toBe('true')
+    expect(selectModel).not.toHaveBeenCalled()
     expect(screen.queryByText('default')).toBeNull()
   })
 
@@ -316,10 +339,12 @@ describe('ModelSelector', () => {
       }),
     })
     renderSelector()
-    fireEvent.click(screen.getByRole('button', { name: /Model — GPT-5\.2/ }))
-    expect(screen.getByRole('menuitemradio', { name: /GPT-5\.3/ })).toBeTruthy()
-    expect(screen.getByRole('menuitemradio', { name: /GPT-5\.2/ })).toBeTruthy()
-    expect(screen.queryByRole('menuitemradio', { name: /GPT-5\.1/ })).toBeNull()
+    openSelector()
+    expect(option(/GPT-5\.3/)).toBeTruthy()
+    expect(option(/GPT-5\.2/)).toBeTruthy()
+    expect(
+      screen.queryByText('GPT-5.1', { selector: '.ant-select-item-option-content' })
+    ).toBeNull()
   })
 
   it('surfaces the inline error from a rejected switch without changing selection', () => {
@@ -328,7 +353,7 @@ describe('ModelSelector', () => {
       error: 'That model is no longer allowed — selection unchanged.',
     })
     renderSelector()
-    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
+    openSelector()
     expect(screen.getByRole('alert').textContent).toMatch(/no longer allowed/i)
   })
 })

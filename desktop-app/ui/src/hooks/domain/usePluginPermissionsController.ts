@@ -56,6 +56,16 @@ export function usePluginPermissionsController() {
     onSuccess: invalidate,
   })
 
+  const revoke = useCallback(
+    (pluginId: string, capability?: string) =>
+      revokeMutation.mutateAsync({ pluginId, ...(capability ? { capability } : {}) }),
+    [revokeMutation.mutateAsync]
+  )
+  const clearActivity = useCallback(
+    () => clearActivityMutation.mutateAsync(),
+    [clearActivityMutation.mutateAsync]
+  )
+
   /** One row per plugin; capabilities nested underneath. */
   const groups = useMemo<PluginPermissionGroup[]>(() => {
     const byPlugin = new Map<string, PluginPermissionGroup>()
@@ -116,9 +126,8 @@ export function usePluginPermissionsController() {
         : actionError,
     revoking: revokeMutation.isPending,
     clearingActivity: clearActivityMutation.isPending,
-    revoke: (pluginId: string, capability?: string) =>
-      revokeMutation.mutateAsync({ pluginId, ...(capability ? { capability } : {}) }),
-    clearActivity: () => clearActivityMutation.mutateAsync(),
+    revoke,
+    clearActivity,
     refresh: invalidate,
   }
 }

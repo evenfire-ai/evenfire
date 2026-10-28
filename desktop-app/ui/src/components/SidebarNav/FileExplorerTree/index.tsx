@@ -1,6 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { CaretDownOutlined, FolderOutlined, HolderOutlined } from '@ant-design/icons'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
+import type { InfiniteData } from '@tanstack/react-query'
+import { Alert, Button, Empty, Flex, Spin, Tag, Tree, Typography } from 'antd'
+import type { DataNode } from 'antd/es/tree'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
@@ -33,14 +36,90 @@ import { suggestNumberedMoveName } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
-import { IconChevronRight, IconContexts } from '../icons'
-import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
+import type {
+  FileExplorerNodeHandlers,
+  FileExplorerNodeProps,
+  FileExplorerTreeNodeMeta,
+  FileExplorerTreeProps,
+} from './types'
 
 // A folder's single-click (toggle) must not act before we know a double-click
 // (open its files tab) is not coming, so it is deferred by this window to let a
 // double-click cancel it first. Files have no such ambiguity — a single-click
 // activates them immediately — so this delay applies to folders only.
 const DOUBLE_CLICK_DELAY_MS = 250
+
+interface FileExplorerTreeDataNode extends DataNode {
+  'aria-label'?: string
+  'data-drop-reason'?: string
+  'data-drop-state'?: GfsDropVerdict['state']
+  resourceNode?: GfsBrowserChild
+  dragEnabled?: boolean
+}
+
+type GfsChildrenPage = Awaited<ReturnType<typeof window.clerum.gfs.listChildren>>
+
+interface GfsChildrenQuerySnapshot {
+  data?: InfiniteData<GfsChildrenPage, string | undefined>
+  error: unknown
+  isFetching: boolean
+  isFetchingNextPage: boolean
+  hasNextPage: boolean
+  fetchNextPage: () => Promise<unknown>
+}
+
+interface FileExplorerChildrenQueryObserverProps {
+  node: GfsBrowserChild
+  scope: string
+  enabled: boolean
+  onResult: (resourceId: string, result: GfsChildrenQuerySnapshot) => void
+}
+
+function FileExplorerChildrenQueryObserver({
+  node,
+  scope,
+  enabled,
+  onResult,
+}: FileExplorerChildrenQueryObserverProps) {
+  const query = useInfiniteQuery<
+    GfsChildrenPage,
+    Error,
+    InfiniteData<GfsChildrenPage, string | undefined>,
+    ReturnType<typeof desktopQueryKeys.gfsChildren>,
+    string | undefined
+  >({
+    queryKey: desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN),
+    queryFn: ({ pageParam }) =>
+      window.clerum.gfs.listChildren(node.resourceId, GFS_DRIVE_MAIN, pageParam),
+    enabled,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
+  })
+
+  useEffect(() => {
+    onResult(node.resourceId, {
+      data: query.data,
+      error: query.error,
+      isFetching: query.isFetching,
+      isFetchingNextPage: query.isFetchingNextPage,
+      hasNextPage: query.hasNextPage,
+      fetchNextPage: query.fetchNextPage,
+    })
+  }, [
+    node.resourceId,
+    onResult,
+    query.data,
+    query.error,
+    query.fetchNextPage,
+    query.hasNextPage,
+    query.isFetching,
+    query.isFetchingNextPage,
+  ])
+
+  return null
+}
 
 function errorMessage(error: unknown): string | null {
   if (!error) return null
@@ -66,6 +145,28 @@ function sortTreeItems(items: GfsBrowserChild[]): GfsBrowserChild[] {
   })
 }
 
+function childQuerySnapshotKey(scope: string, resourceId: string): string {
+  return JSON.stringify([scope, resourceId])
+}
+
+function treeItemForDragEvent(event: { target: EventTarget | null }): HTMLElement | null {
+  const target = event.target
+  return target instanceof Element ? target.closest<HTMLElement>('[role="treeitem"]') : null
+}
+
+function dropStatus(dropState: GfsDropVerdict | undefined) {
+  if (!dropState) return null
+  if (dropState.state === 'checking') return { label: 'Checking', color: 'processing' as const }
+  if (dropState.state === 'allowed') return { label: 'Allowed', color: 'success' as const }
+  if (dropState.state === 'unavailable') return { label: 'Unavailable', color: 'warning' as const }
+  if (dropState.reason === 'same-parent')
+    return { label: 'Already here', color: 'default' as const }
+  if (dropState.reason === 'unavailable' || dropState.reason === 'target-unavailable') {
+    return { label: 'Unavailable', color: 'warning' as const }
+  }
+  return { label: 'Not allowed', color: 'error' as const }
+}
+
 /**
  * One node of the sidebar file explorer. Extracted from `GfsMoveTreeFolder`
  * (recursion, expand `Set`, lazy per-node `gfsChildren` fetch, "Load more",
@@ -76,34 +177,27 @@ function sortTreeItems(items: GfsBrowserChild[]): GfsBrowserChild[] {
  * Files AND folders are draggable (rev-2 D1); directory rows are move targets,
  * and a hover-dwelling collapsed folder expands through its existing loader.
  */
-function FileExplorerNode({
+function FileExplorerNodeTitle({
   node,
-  level,
-  scope,
-  accessActive,
-  expandedIds,
-  selectedId,
+  isExpanded,
   movingResourceId,
   ancestorIds,
   ancestorCrumbs,
   dropState,
-  dropStatesByResourceId,
   dragSourceName,
   onToggle,
   onActivateFolder,
   onActivateFile,
-  onAuthorityFailure,
   onNodeDragStart,
   onNodeDragEnd,
   onNodeDragOver,
   onNodeDragLeave,
   onNodeDrop,
   onRequestMove,
+  registerKeyboardHandler,
+  registerTreeNode,
 }: FileExplorerNodeProps) {
-  const queryClient = useQueryClient()
   const isDirectory = node.kind === 'directory'
-  const isExpanded = isDirectory && expandedIds.has(node.resourceId)
-  const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
   // Server-computed: the row is visible but the session cannot read it (a
   // folder grant without inheritance; a file whose parent does not inherit).
@@ -111,42 +205,6 @@ function FileExplorerNode({
   // refuse it with a toast instead of a later download/preview 403. Absent
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
-
-  const childQueryKey = desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN)
-  const childQuery = useInfiniteQuery({
-    queryKey: childQueryKey,
-    queryFn: ({ pageParam }) =>
-      window.clerum.gfs.listChildren(node.resourceId, GFS_DRIVE_MAIN, pageParam),
-    // Gate on live access as the controller's own children query does: a revoked
-    // session fetches nothing (the subtree also unmounts as accessibleResources
-    // empties, but this keeps the guard robust to future refactors).
-    enabled: isExpanded && accessActive,
-    // Folder contents change out-of-band: agents with host grants, other
-    // sessions, and operator writes never pass through this client. The sidebar
-    // is a persistent surface, so under the app's Infinity staleTime an expanded
-    // folder would otherwise serve its first page forever — removed files linger
-    // and new files never appear until a hard reload. Revalidate on revisit and
-    // window focus, matching the controller's own children query.
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: 'always',
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
-  })
-  const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
-  const childError = childDenied
-    ? 'This folder is no longer available.'
-    : errorMessage(childQuery.error)
-  const childItems = useMemo(
-    () =>
-      childDenied ? [] : sortTreeItems((childQuery.data?.pages ?? []).flatMap(page => page.items)),
-    [childDenied, childQuery.data]
-  )
-
-  useEffect(() => {
-    if (!childQuery.error) return
-    purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure(childError)
-  }, [childError, childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
 
   // Deferred folder toggle: cancelled by a double-click within the window.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -187,7 +245,7 @@ function FileExplorerNode({
   }, [clearClickTimer, runActivate])
 
   const handleRowKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    (event: React.KeyboardEvent<HTMLElement>) => {
       if (event.key === 'Enter') {
         // Stop the native button click Enter would otherwise fire (which would run
         // the row's single-click handler — a folder's deferred toggle); Enter
@@ -195,6 +253,11 @@ function FileExplorerNode({
         event.preventDefault()
         clearClickTimer()
         runActivate()
+        return
+      }
+      if (event.key === ' ') {
+        event.preventDefault()
+        handleRowClick()
         return
       }
       // Shift+F10 opens the Move dialog for the focused row — the keyboard
@@ -205,7 +268,12 @@ function FileExplorerNode({
         onRequestMove(node, ancestorCrumbs)
       }
     },
-    [ancestorCrumbs, clearClickTimer, node, onRequestMove, runActivate]
+    [ancestorCrumbs, clearClickTimer, handleRowClick, node, onRequestMove, runActivate]
+  )
+
+  useLayoutEffect(
+    () => registerKeyboardHandler(node.resourceId, handleRowKeyDown),
+    [handleRowKeyDown, node.resourceId, registerKeyboardHandler]
   )
 
   const handleDragStart = useCallback(
@@ -217,7 +285,6 @@ function FileExplorerNode({
     [ancestorIds, clearClickTimer, node, onNodeDragStart]
   )
 
-  const isDirectoryRow = isDirectory
   const canDrag = isUnreadable !== true && movingResourceId == null
 
   // Hover a collapsed directory for FOLDER_HOVER_EXPAND_DELAY_MS to expand it
@@ -233,25 +300,14 @@ function FileExplorerNode({
   useEffect(() => clearHoverExpand, [clearHoverExpand])
 
   const handleRowDragOver = useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      // Nested rows live in the sibling `.da-file-explorer__group`, so a child
-      // drop cannot bubble through an ancestor ROW — verify the closest marked
-      // row still matches before adjudicating (rev-2 §4.1).
-      if (event.target instanceof Element) {
-        const closestRow = event.target.closest('.da-file-explorer__row')
-        if (closestRow !== null && closestRow !== event.currentTarget) return
-      }
+    (event: React.DragEvent<HTMLElement>) => {
       onNodeDragOver(node, event, ancestorIds)
     },
     [ancestorIds, node, onNodeDragOver]
   )
 
   const handleRowDrop = useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      if (event.target instanceof Element) {
-        const closestRow = event.target.closest('.da-file-explorer__row')
-        if (closestRow !== null && closestRow !== event.currentTarget) return
-      }
+    (event: React.DragEvent<HTMLElement>) => {
       // The drop ends the gesture; the browser does not necessarily fire a
       // dragleave afterwards, so this row's OWN hover-expand timer would still
       // fire and expand a folder the user never asked to open (RP-024).
@@ -262,11 +318,11 @@ function FileExplorerNode({
   )
 
   const handleRowDragEnterOrOver = useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
+    (event: React.DragEvent<HTMLElement>) => {
       handleRowDragOver(event)
       const hoverState = dropState?.state
       if (
-        isDirectoryRow &&
+        isDirectory &&
         !isExpanded &&
         (hoverState === undefined || hoverState === 'allowed' || hoverState === 'checking')
       ) {
@@ -278,40 +334,18 @@ function FileExplorerNode({
         }
       }
     },
-    [dropState, handleRowDragOver, isDirectoryRow, isExpanded, node.resourceId, onToggle]
+    [dropState, handleRowDragOver, isDirectory, isExpanded, node.resourceId, onToggle]
   )
 
   const handleRowDragLeave = useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+    (event: React.DragEvent<HTMLElement>, rowElement: HTMLElement | null) => {
+      if (rowElement?.contains(event.relatedTarget as Node | null)) return
       clearHoverExpand()
       onNodeDragLeave(node, event)
     },
     [clearHoverExpand, node, onNodeDragLeave]
   )
 
-  const loadingChildren = Boolean(isExpanded && childQuery.isFetching && !childQuery.data)
-  const hasMoreChildren = Boolean(childQuery.hasNextPage)
-  const nextAncestorIds = useMemo(
-    () => [node.resourceId, ...ancestorIds],
-    [ancestorIds, node.resourceId]
-  )
-  const nextAncestorCrumbs = useMemo<GfsCrumb[]>(
-    () => [
-      ...ancestorCrumbs,
-      {
-        resourceId: node.resourceId,
-        gfsUri: node.gfsUri,
-        name: node.name,
-        kind: 'directory',
-        version: node.version,
-        bytes: node.bytes,
-      },
-    ],
-    [ancestorCrumbs, node]
-  )
-
-  const dropStateName = isDirectory ? dropState?.state : undefined
   const dropReason = isDirectory ? gfsDropVerdictReason(dropState) : undefined
   // The deny/no-op/unknown tint carries no reason of its own; the tooltip
   // speaks the full sentence for it (one wording per reason, every surface).
@@ -319,121 +353,42 @@ function FileExplorerNode({
     dropState && dropReason !== undefined
       ? gfsDropVerdictLiveAnnouncement(dropState, node.name, dragSourceName ?? undefined)
       : undefined
+  const status = dropStatus(isDirectory ? dropState : undefined)
+  const rowHandlers: FileExplorerNodeHandlers = {
+    onClick: handleRowClick,
+    onDoubleClick: handleRowDoubleClick,
+    onDragStart: handleDragStart,
+    onDragEnd: onNodeDragEnd,
+    onDragEnterOrOver: handleRowDragEnterOrOver,
+    onDragLeave: handleRowDragLeave,
+    onDrop: handleRowDrop,
+    onKeyDown: handleRowKeyDown,
+  }
+
+  useLayoutEffect(
+    () =>
+      registerTreeNode({
+        resourceNode: node,
+        rowHandlers,
+        dragEnabled: isDirectory || canDrag,
+      }),
+    [canDrag, isDirectory, node, registerTreeNode, rowHandlers]
+  )
 
   return (
-    <div
-      aria-expanded={isDirectory ? isExpanded : undefined}
-      aria-level={level}
-      aria-selected={isSelected}
-      className="da-file-explorer__item"
-      role="treeitem"
+    <Flex
+      align="center"
+      gap="small"
+      data-resource-id={node.resourceId}
+      data-drop-state={dropState?.state}
+      data-drop-reason={dropReason}
+      title={dropReasonTooltip ?? (canDrag ? `Drag ${label} into a folder to move it` : undefined)}
     >
-      <div
-        className={`da-file-explorer__row${dropStateName ? ` is-drop-${dropStateName}` : ''}`}
-        data-drop-state={dropStateName}
-        data-drop-reason={dropReason}
-        title={dropReasonTooltip}
-        onDragEnter={isDirectory ? handleRowDragEnterOrOver : undefined}
-        onDragOver={isDirectory ? handleRowDragEnterOrOver : undefined}
-        onDragLeave={isDirectory ? handleRowDragLeave : undefined}
-        onDrop={isDirectory ? handleRowDrop : undefined}
-      >
-        {isDirectory ? (
-          <IconButton
-            aria-expanded={isExpanded}
-            className={`da-file-explorer__toggle${isExpanded ? ' is-expanded' : ''}`}
-            label={`${isExpanded ? 'Collapse' : 'Expand'} ${label}`}
-            onClick={() => onToggle(node.resourceId)}
-            size="sm"
-            variant="ghost"
-          >
-            <IconChevronRight />
-          </IconButton>
-        ) : (
-          <span className="da-file-explorer__toggle-placeholder" aria-hidden="true" />
-        )}
-        <Button
-          align="start"
-          block
-          className={`da-file-explorer__label${isSelected ? ' is-selected' : ''}${
-            isUnreadable ? ' da-file-explorer__label--no-access' : ''
-          }`}
-          color="neutral"
-          draggable={canDrag}
-          onClick={handleRowClick}
-          onDoubleClick={handleRowDoubleClick}
-          onDragStart={canDrag ? handleDragStart : undefined}
-          onDragEnd={canDrag ? onNodeDragEnd : undefined}
-          onKeyDown={handleRowKeyDown}
-          title={canDrag ? `Drag ${label} into a folder to move it` : undefined}
-          variant="text"
-        >
-          <span className="da-file-explorer__icon" aria-hidden="true">
-            {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
-          </span>
-          <span className="da-file-explorer__name">{label}</span>
-          {/* Rendered inside the label so "No access" joins the row's accessible
-              name, matching the Files page's row affordance. */}
-          {isUnreadable ? (
-            <Badge tone="neutral" className="da-file-explorer__no-access-badge">
-              No access
-            </Badge>
-          ) : null}
-        </Button>
-      </div>
-      {isExpanded ? (
-        <div className="da-file-explorer__group" role="group">
-          {loadingChildren ? (
-            <p className="da-file-explorer__message muted" role="status">
-              Loading…
-            </p>
-          ) : null}
-          {childError ? <StatusBanner tone="error" text={childError} compact /> : null}
-          {childItems.map(child => (
-            <FileExplorerNode
-              accessActive={accessActive}
-              ancestorCrumbs={nextAncestorCrumbs}
-              ancestorIds={nextAncestorIds}
-              dragSourceName={dragSourceName}
-              dropState={dropStatesByResourceId[child.resourceId]}
-              dropStatesByResourceId={dropStatesByResourceId}
-              expandedIds={expandedIds}
-              key={child.resourceId}
-              level={level + 1}
-              movingResourceId={movingResourceId}
-              node={child}
-              onActivateFile={onActivateFile}
-              onActivateFolder={onActivateFolder}
-              onAuthorityFailure={onAuthorityFailure}
-              onNodeDragEnd={onNodeDragEnd}
-              onNodeDragLeave={onNodeDragLeave}
-              onNodeDragOver={onNodeDragOver}
-              onNodeDragStart={onNodeDragStart}
-              onNodeDrop={onNodeDrop}
-              onRequestMove={onRequestMove}
-              onToggle={onToggle}
-              scope={scope}
-              selectedId={selectedId}
-            />
-          ))}
-          {hasMoreChildren ? (
-            <div className="da-file-explorer__more">
-              <Button
-                loading={childQuery.isFetchingNextPage}
-                onClick={() => void childQuery.fetchNextPage()}
-                size="xs"
-                variant="text"
-              >
-                Load more
-              </Button>
-            </div>
-          ) : null}
-          {!loadingChildren && !childError && childItems.length === 0 && !hasMoreChildren ? (
-            <p className="da-file-explorer__message muted">Empty folder.</p>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+      {isDirectory ? <FolderOutlined aria-hidden="true" /> : <GfsFileIcon name={node.name} />}
+      <Typography.Text>{label}</Typography.Text>
+      {isUnreadable ? <Tag>No access</Tag> : null}
+      {status ? <Tag color={status.color}>{status.label}</Tag> : null}
+    </Flex>
   )
 }
 
@@ -458,6 +413,7 @@ export function FileExplorerTree({
   pushToast,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
+  const queryScope = ctrl.sessionScope ?? 'anonymous'
   const queryClient = useQueryClient()
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
@@ -470,6 +426,181 @@ export function FileExplorerTree({
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [childQuerySnapshots, setChildQuerySnapshots] = useState(
+    () => new Map<string, GfsChildrenQuerySnapshot>()
+  )
+  const handleChildQueryResult = useCallback(
+    (resourceId: string, result: GfsChildrenQuerySnapshot) => {
+      setChildQuerySnapshots(previous => {
+        const key = childQuerySnapshotKey(queryScope, resourceId)
+        const current = previous.get(key)
+        if (
+          current &&
+          current.data === result.data &&
+          current.error === result.error &&
+          current.isFetching === result.isFetching &&
+          current.isFetchingNextPage === result.isFetchingNextPage &&
+          current.hasNextPage === result.hasNextPage &&
+          current.fetchNextPage === result.fetchNextPage
+        ) {
+          return previous
+        }
+        const next = new Map(previous)
+        next.set(key, result)
+        return next
+      })
+    },
+    [queryScope]
+  )
+  const treeContainerRef = useRef<HTMLDivElement>(null)
+  const treeNodeMetadataRef = useRef(new Map<string, FileExplorerTreeNodeMeta>())
+  const metadataForTreeEventTarget = useCallback((target: EventTarget | null) => {
+    if (!(target instanceof HTMLElement)) return undefined
+    const treeItem = target.closest<HTMLElement>('[role="treeitem"]')
+    const title = treeItem?.querySelector<HTMLElement>('[data-resource-id]')
+    const resourceId = title?.getAttribute('data-resource-id')
+    return resourceId ? treeNodeMetadataRef.current.get(resourceId) : undefined
+  }, [])
+  const registerTreeNode = useCallback((metadata: FileExplorerTreeNodeMeta) => {
+    const resourceId = metadata.resourceNode.resourceId
+    treeNodeMetadataRef.current.set(resourceId, metadata)
+    return () => {
+      if (treeNodeMetadataRef.current.get(resourceId) === metadata) {
+        treeNodeMetadataRef.current.delete(resourceId)
+      }
+    }
+  }, [])
+  const metadataForTreeNode = useCallback(
+    (node: { key: React.Key }) => treeNodeMetadataRef.current.get(String(node.key)),
+    []
+  )
+  const keyboardHandlersRef = useRef(
+    new Map<string, (event: React.KeyboardEvent<HTMLElement>) => void>()
+  )
+  const registerKeyboardHandler = useCallback(
+    (resourceId: string, handler: (event: React.KeyboardEvent<HTMLElement>) => void) => {
+      keyboardHandlersRef.current.set(resourceId, handler)
+      return () => {
+        if (keyboardHandlersRef.current.get(resourceId) === handler) {
+          keyboardHandlersRef.current.delete(resourceId)
+        }
+      }
+    },
+    []
+  )
+  const handleTreeKeyDownCapture = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ' && !(event.shiftKey && event.key === 'F10')) {
+      return
+    }
+    const target = event.target
+    if (target instanceof HTMLElement && target.closest('button,input,textarea,[role="button"]')) {
+      return
+    }
+    const tree = treeContainerRef.current?.querySelector<HTMLElement>(
+      '[role="tree"][aria-activedescendant]'
+    )
+    const activeId = tree?.getAttribute('aria-activedescendant')
+    const targetTreeItem =
+      target instanceof HTMLElement ? target.closest<HTMLElement>('[role="treeitem"]') : null
+    const activeNode = activeId ? document.getElementById(activeId) : null
+    const title =
+      targetTreeItem?.querySelector<HTMLElement>('[data-resource-id]') ??
+      (activeNode?.matches('[data-resource-id]')
+        ? activeNode
+        : activeNode?.querySelector<HTMLElement>('[data-resource-id]'))
+    const resourceId = title?.getAttribute('data-resource-id')
+    const handler = resourceId ? keyboardHandlersRef.current.get(resourceId) : undefined
+    if (!handler) return
+    event.preventDefault()
+    event.stopPropagation()
+    handler(event)
+  }, [])
+  const handleTreeRowClickCapture = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (
+        target.closest('.ant-tree-switcher,button,input,textarea,[role="button"],[role="checkbox"]')
+      )
+        return
+      metadataForTreeEventTarget(target)?.rowHandlers.onClick(event)
+    },
+    [metadataForTreeEventTarget]
+  )
+  const handleTreeRowDoubleClickCapture = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (
+        target.closest('.ant-tree-switcher,button,input,textarea,[role="button"],[role="checkbox"]')
+      )
+        return
+      metadataForTreeEventTarget(target)?.rowHandlers.onDoubleClick(event)
+    },
+    [metadataForTreeEventTarget]
+  )
+  const handleTreeDragStartCapture = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const metadata = metadataForTreeEventTarget(event.target)
+      if (!metadata) return
+      event.stopPropagation()
+      metadata.rowHandlers.onDragStart(event)
+    },
+    [metadataForTreeEventTarget]
+  )
+  const handleTreeDragEndCapture = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const metadata = metadataForTreeEventTarget(event.target)
+      if (!metadata) return
+      event.stopPropagation()
+      metadata.rowHandlers.onDragEnd()
+    },
+    [metadataForTreeEventTarget]
+  )
+  const handleTreeDragEnterCapture = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const metadata = metadataForTreeEventTarget(event.target)
+      if (!metadata) return
+      event.stopPropagation()
+      if (Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)) {
+        metadata.rowHandlers.onDragEnterOrOver(event)
+      }
+    },
+    [metadataForTreeEventTarget]
+  )
+  const handleTreeDragOverCapture = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const metadata = metadataForTreeEventTarget(event.target)
+      if (!metadata) return
+      event.stopPropagation()
+      if (Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)) {
+        metadata.rowHandlers.onDragEnterOrOver(event)
+      }
+    },
+    [metadataForTreeEventTarget]
+  )
+  const handleTreeDragLeaveCapture = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const metadata = metadataForTreeEventTarget(event.target)
+      if (!metadata) return
+      event.stopPropagation()
+      if (Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)) {
+        metadata.rowHandlers.onDragLeave(event, treeItemForDragEvent(event))
+      }
+    },
+    [metadataForTreeEventTarget]
+  )
+  const handleTreeDropCapture = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const metadata = metadataForTreeEventTarget(event.target)
+      if (!metadata) return
+      event.stopPropagation()
+      if (Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)) {
+        metadata.rowHandlers.onDrop(event)
+      }
+    },
+    [metadataForTreeEventTarget]
+  )
   const [dropStatesByResourceId, setDropStatesByResourceId] = useState<
     Record<string, GfsDropVerdict>
   >({})
@@ -548,22 +679,37 @@ export function FileExplorerTree({
 
   const roots = useMemo(() => sortTreeItems(ctrl.accessibleResources), [ctrl.accessibleResources])
 
+  // Keep one query observer for every directory that is currently present in
+  // the visible tree. Descendants are observed only while their parent is
+  // expanded, matching the old per-node query mount lifecycle.
+  const directoryNodes: GfsBrowserChild[] = []
+  const collectDirectoryNodes = (items: readonly GfsBrowserChild[]) => {
+    for (const item of items) {
+      if (item.kind !== 'directory') continue
+      directoryNodes.push(item)
+      if (!expandedIds.has(item.resourceId)) continue
+      const children =
+        childQuerySnapshots
+          .get(childQuerySnapshotKey(queryScope, item.resourceId))
+          ?.data?.pages.flatMap(page => page.items ?? []) ?? []
+      collectDirectoryNodes(sortTreeItems(children))
+    }
+  }
+  collectDirectoryNodes(roots)
+  const childQueriesByResourceId = childQuerySnapshots
+
   /** Cached destination names for the numbered-name ladder and suggestion —
    * the same shared children cache the Files page seeds its commit from. */
   const cachedDestinationNames = useCallback(
     (destinationId: string): Set<string> => {
       const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsBrowserChild[] }> }>(
-        desktopQueryKeys.gfsChildren(
-          ctrl.sessionScope ?? 'anonymous',
-          destinationId,
-          GFS_DRIVE_MAIN
-        )
+        desktopQueryKeys.gfsChildren(queryScope, destinationId, GFS_DRIVE_MAIN)
       )
       return new Set(
         (cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? [])
       )
     },
-    [ctrl.sessionScope, queryClient]
+    [queryScope, queryClient]
   )
 
   const handleToggle = useCallback((resourceId: string) => {
@@ -917,6 +1063,28 @@ export function FileExplorerTree({
     [authorityFailure]
   )
 
+  const processedChildErrorsRef = useRef(new Map<string, unknown>())
+  useEffect(() => {
+    directoryNodes.forEach(node => {
+      const result = childQueriesByResourceId.get(
+        childQuerySnapshotKey(queryScope, node.resourceId)
+      )
+      const queryKey = desktopQueryKeys.gfsChildren(queryScope, node.resourceId, GFS_DRIVE_MAIN)
+      const cacheKey = JSON.stringify(queryKey)
+      if (!result?.error) {
+        processedChildErrorsRef.current.delete(cacheKey)
+        return
+      }
+      if (processedChildErrorsRef.current.get(cacheKey) === result.error) return
+      processedChildErrorsRef.current.set(cacheKey, result.error)
+      purgeDeniedGfsChildren(queryClient, queryKey, result.error)
+      const childError = isGfsChildrenDenied(result.error, result.data)
+        ? 'This folder is no longer available.'
+        : errorMessage(result.error)
+      if (childError) handleAuthorityFailure(childError)
+    })
+  }, [queryScope, childQueriesByResourceId, directoryNodes, handleAuthorityFailure, queryClient])
+
   // A file now activates on single-click, so a real double-click (or accidental
   // rapid clicks) fires activation more than once. The preview path is naturally
   // idempotent — the host dedupes preview tabs by gfsUri — but a download has no
@@ -959,93 +1127,238 @@ export function FileExplorerTree({
     [authorityFailure, onOpenPreview, pushToast]
   )
 
+  const buildTreeNode = (
+    node: GfsBrowserChild,
+    ancestorIds: readonly (string | null)[],
+    ancestorCrumbs: readonly GfsCrumb[]
+  ): FileExplorerTreeDataNode => {
+    const isDirectory = node.kind === 'directory'
+    const isExpanded = isDirectory && expandedIds.has(node.resourceId)
+    const childQuery = childQueriesByResourceId.get(
+      childQuerySnapshotKey(queryScope, node.resourceId)
+    )
+    const childDenied = isGfsChildrenDenied(childQuery?.error, childQuery?.data)
+    const childError = childDenied
+      ? 'This folder is no longer available.'
+      : errorMessage(childQuery?.error)
+    const childItems =
+      childDenied || !childQuery?.data
+        ? []
+        : sortTreeItems(childQuery.data.pages.flatMap(page => page.items))
+    const loadingChildren = Boolean(isExpanded && childQuery?.isFetching && !childQuery.data)
+    const hasMoreChildren = Boolean(childQuery?.hasNextPage)
+    const nextAncestorIds = [node.resourceId, ...ancestorIds]
+    const nextAncestorCrumbs: GfsCrumb[] = [
+      ...ancestorCrumbs,
+      {
+        resourceId: node.resourceId,
+        gfsUri: node.gfsUri,
+        name: node.name,
+        kind: 'directory',
+        version: node.version,
+        bytes: node.bytes,
+      },
+    ]
+    const children: FileExplorerTreeDataNode[] = []
+
+    if (isExpanded) {
+      if (loadingChildren) {
+        children.push({
+          key: `status:${node.resourceId}:loading`,
+          selectable: false,
+          isLeaf: true,
+          title: (
+            <Flex align="center" gap="small" role="status" aria-live="polite">
+              <Spin size="small" />
+              <Typography.Text type="secondary">Loading…</Typography.Text>
+            </Flex>
+          ),
+        })
+      }
+      if (childError) {
+        children.push({
+          key: `status:${node.resourceId}:error`,
+          selectable: false,
+          isLeaf: true,
+          title: <Alert type="error" showIcon title={childError} />,
+        })
+      }
+      children.push(
+        ...childItems.map(child => buildTreeNode(child, nextAncestorIds, nextAncestorCrumbs))
+      )
+      if (hasMoreChildren && childQuery) {
+        children.push({
+          key: `status:${node.resourceId}:more`,
+          selectable: false,
+          isLeaf: true,
+          title: (
+            <Button
+              loading={childQuery.isFetchingNextPage}
+              onClick={event => {
+                event.stopPropagation()
+                void childQuery.fetchNextPage()
+              }}
+            >
+              Load more
+            </Button>
+          ),
+        })
+      }
+      if (!loadingChildren && !childError && childItems.length === 0 && !hasMoreChildren) {
+        children.push({
+          key: `status:${node.resourceId}:empty`,
+          selectable: false,
+          isLeaf: true,
+          title: <Typography.Text type="secondary">Empty folder.</Typography.Text>,
+        })
+      }
+    }
+
+    return {
+      key: node.resourceId,
+      'aria-label':
+        node.readable === false ? `${displayName(node.name)} No access` : displayName(node.name),
+      'data-drop-state': dropStatesByResourceId[node.resourceId]?.state,
+      'data-drop-reason':
+        dropStatesByResourceId[node.resourceId] === undefined
+          ? undefined
+          : gfsDropVerdictReason(dropStatesByResourceId[node.resourceId]),
+      title: (
+        <FileExplorerNodeTitle
+          ancestorCrumbs={ancestorCrumbs}
+          ancestorIds={ancestorIds}
+          dragSourceName={dragSourceName}
+          dropState={dropStatesByResourceId[node.resourceId]}
+          isExpanded={isExpanded}
+          movingResourceId={movingResourceId}
+          node={node}
+          onActivateFile={handleActivateFile}
+          onActivateFolder={handleActivateFolder}
+          onNodeDragEnd={clearDragState}
+          onNodeDragLeave={handleNodeDragLeave}
+          onNodeDragOver={handleNodeDragOver}
+          onNodeDragStart={handleNodeDragStart}
+          onNodeDrop={handleNodeDrop}
+          onRequestMove={handleRequestMove}
+          onToggle={handleToggle}
+          registerKeyboardHandler={registerKeyboardHandler}
+          registerTreeNode={registerTreeNode}
+        />
+      ),
+      isLeaf: !isDirectory,
+      resourceNode: node,
+      dragEnabled: isDirectory || (node.readable !== false && movingResourceId == null),
+      children: children.length ? children : undefined,
+    }
+  }
+  const treeData = roots.map(node =>
+    buildTreeNode(node, node.parentResourceId != null ? [node.parentResourceId] : [], [])
+  )
+
   return (
-    <div className="da-file-explorer">
-      {/* The drop verdict is painted on the target row; this live region is
-          its spoken form, so a screen reader learns whether the folder under
-          the pointer accepts the move (RP-026). */}
-      <p aria-live="polite" className="visually-hidden">
+    <Flex
+      vertical
+      gap="small"
+      ref={treeContainerRef}
+      onClickCapture={handleTreeRowClickCapture}
+      onDoubleClickCapture={handleTreeRowDoubleClickCapture}
+      onDragStartCapture={handleTreeDragStartCapture}
+      onDragEndCapture={handleTreeDragEndCapture}
+      onDragEnterCapture={handleTreeDragEnterCapture}
+      onDragOverCapture={handleTreeDragOverCapture}
+      onDragLeaveCapture={handleTreeDragLeaveCapture}
+      onDropCapture={handleTreeDropCapture}
+      onKeyDownCapture={handleTreeKeyDownCapture}
+    >
+      {/* The live region preserves spoken drop verdicts while Ant Design Tree owns the visible rows. */}
+      <Typography.Text aria-live="polite" className="visually-hidden" role="status">
         {dropVerdictAnnouncement}
-      </p>
+      </Typography.Text>
       {dropSessionLost ? (
-        // Persistent (A11): the refusal outlives the dead gesture and the
-        // revoked tree surface below — it is not a one-shot toast.
-        <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} compact />
+        <Alert type="error" showIcon title={GFS_DROP_SESSION_LOST_MESSAGE} />
       ) : null}
       {ctrl.accessState === 'revoked' ? (
-        // Mirror the Files page's revoked surface, adapted to the sidebar's
-        // compact chrome. Without this branch a revoked drive falls through to
-        // "No shared files yet." — the fail-closed purge has already dropped the
-        // discovery error and roots, so an unauthorized drive would read empty.
-        <div className="da-file-explorer__revoked" role="alert">
-          <p className="da-file-explorer__revoked-title">File access is not authorized</p>
-          {/* The revoked surface owns the session-ended sentence (A11): it
-              outlives any gesture's ownership, so a drag whose probe died
-              stays explained even after the revocation invalidated it. */}
-          <p className="da-file-explorer__revoked-body">{GFS_DROP_SESSION_LOST_MESSAGE}</p>
-          <p className="da-file-explorer__revoked-body">
-            Your current session cannot access these files. Sign in again or contact an
-            administrator.
-          </p>
-          <Button onClick={() => ctrl.retryAccess()} size="xs" variant="text">
-            Retry file access
-          </Button>
-        </div>
+        <Alert
+          type="error"
+          showIcon
+          title="File access is not authorized"
+          description={
+            <Flex vertical>
+              <Typography.Text>{GFS_DROP_SESSION_LOST_MESSAGE}</Typography.Text>
+              <Typography.Text>
+                Your current session cannot access these files. Sign in again or contact an
+                administrator.
+              </Typography.Text>
+            </Flex>
+          }
+          action={<Button onClick={() => ctrl.retryAccess()}>Retry file access</Button>}
+        />
       ) : ctrl.accessibleNotice ? (
-        <p className="da-file-explorer__message muted">{ctrl.accessibleNotice}</p>
+        <Alert type="info" showIcon title={ctrl.accessibleNotice} />
       ) : ctrl.accessibleError ? (
-        <StatusBanner tone="error" text={ctrl.accessibleError} compact />
+        <Alert type="error" showIcon title={ctrl.accessibleError} />
       ) : ctrl.loadingAccessible && roots.length === 0 ? (
-        <p className="da-file-explorer__message muted" role="status">
-          Loading files…
-        </p>
+        <Flex align="center" gap="small" role="status" aria-live="polite">
+          <Spin size="small" />
+          <Typography.Text>Loading files…</Typography.Text>
+        </Flex>
       ) : roots.length === 0 && !ctrl.hasMoreAccessible ? (
-        <p className="da-file-explorer__message muted">No shared files yet.</p>
+        <Empty description="No shared files yet." />
       ) : (
-        <div className="da-file-explorer__tree" role="tree" aria-label="Shared files">
-          {roots.map(node => (
-            <FileExplorerNode
-              accessActive={ctrl.accessState === 'active'}
-              ancestorCrumbs={[]}
-              ancestorIds={node.parentResourceId != null ? [node.parentResourceId] : []}
-              dragSourceName={dragSourceName}
-              // The forest roots are drop targets like any other row: their
-              // verdict belongs to them, so the root row receives its own
-              // state instead of only the map its children read (RP-019).
-              dropState={dropStatesByResourceId[node.resourceId]}
-              dropStatesByResourceId={dropStatesByResourceId}
-              expandedIds={expandedIds}
+        <>
+          {directoryNodes.map(node => (
+            <FileExplorerChildrenQueryObserver
+              enabled={expandedIds.has(node.resourceId) && ctrl.accessState === 'active'}
               key={node.resourceId}
-              level={1}
-              movingResourceId={movingResourceId}
               node={node}
-              onActivateFile={handleActivateFile}
-              onActivateFolder={handleActivateFolder}
-              onAuthorityFailure={handleAuthorityFailure}
-              onNodeDragEnd={clearDragState}
-              onNodeDragLeave={handleNodeDragLeave}
-              onNodeDragOver={handleNodeDragOver}
-              onNodeDragStart={handleNodeDragStart}
-              onNodeDrop={handleNodeDrop}
-              onRequestMove={handleRequestMove}
-              onToggle={handleToggle}
-              scope={ctrl.sessionScope ?? 'anonymous'}
-              selectedId={selectedId}
+              onResult={handleChildQueryResult}
+              scope={queryScope}
             />
           ))}
+          <Tree
+            aria-label="Shared files"
+            blockNode
+            treeData={treeData}
+            expandedKeys={[...expandedIds]}
+            selectedKeys={selectedId ? [selectedId] : []}
+            switcherIcon={<CaretDownOutlined aria-hidden="true" />}
+            draggable={{
+              icon: <HolderOutlined aria-hidden="true" />,
+              nodeDraggable: data => metadataForTreeNode(data)?.dragEnabled === true,
+            }}
+            allowDrop={({ dropNode, dropPosition }) =>
+              dropPosition === 0 && metadataForTreeNode(dropNode)?.resourceNode.kind === 'directory'
+            }
+            onExpand={keys => setExpandedIds(new Set(keys.map(String)))}
+            onSelect={() => undefined}
+            onDragStart={({ event, node }) =>
+              metadataForTreeNode(node)?.rowHandlers.onDragStart(event)
+            }
+            onDragEnter={({ event, node }) =>
+              metadataForTreeNode(node)?.rowHandlers.onDragEnterOrOver(event)
+            }
+            onDragOver={({ event, node }) =>
+              metadataForTreeNode(node)?.rowHandlers.onDragEnterOrOver(event)
+            }
+            onDragLeave={({ event, node }) =>
+              metadataForTreeNode(node)?.rowHandlers.onDragLeave(event, treeItemForDragEvent(event))
+            }
+            onDragEnd={({ node }) => metadataForTreeNode(node)?.rowHandlers.onDragEnd()}
+            onDrop={({ event, node }) =>
+              metadataForTreeNode(node)?.rowHandlers.onDrop(
+                event as unknown as React.DragEvent<HTMLElement>
+              )
+            }
+          />
           {ctrl.hasMoreAccessible ? (
-            <div className="da-file-explorer__more">
-              <Button
-                loading={ctrl.isFetchingMoreAccessible}
-                onClick={() => ctrl.loadMoreAccessible()}
-                size="xs"
-                variant="text"
-              >
-                Load more
-              </Button>
-            </div>
+            <Button
+              loading={ctrl.isFetchingMoreAccessible}
+              onClick={() => ctrl.loadMoreAccessible()}
+            >
+              Load more
+            </Button>
           ) : null}
-        </div>
+        </>
       )}
 
       {pendingFolderMove ? (
@@ -1126,6 +1439,6 @@ export function FileExplorerTree({
           }}
         />
       ) : null}
-    </div>
+    </Flex>
   )
 }

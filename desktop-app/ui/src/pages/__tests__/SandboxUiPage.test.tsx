@@ -91,7 +91,7 @@ describe('SandboxUiPage', () => {
     sandboxUi.focusActive.mockResolvedValue(true)
     installClerumApi()
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-      cb(0)
+      queueMicrotask(() => cb(0))
       return 1
     })
     vi.stubGlobal(

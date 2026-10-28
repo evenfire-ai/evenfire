@@ -1,15 +1,22 @@
 import { useCallback, useState } from 'react'
-import { Button, DataTable, EmptyState, Pill, StatusBanner } from '@components/Common'
-import { ConfirmDialog } from '@components/ConfirmDialog'
-import { IconWorkflows } from '@components/SidebarNav/icons'
+import { AppstoreOutlined } from '@ant-design/icons'
+import {
+  Alert,
+  Button as AntButton,
+  Card,
+  Empty,
+  Flex,
+  Modal,
+  Spin,
+  Table,
+  Tag,
+  Typography,
+} from 'antd'
+import type { TableColumnsType } from 'antd'
 import type { WorkflowRunArtifact, WorkflowRunListItem } from '../../../src/types'
 import { InputContractForm } from '../components/InputContractForm'
 import { useAuthContext } from '../contexts/AuthContext'
-import {
-  type WorkflowRecentRuns,
-  useWorkflowController,
-  useWorkflowRecentRuns,
-} from '../hooks/domain/useWorkflowController'
+import { useWorkflowController, useWorkflowRecentRuns } from '../hooks/domain/useWorkflowController'
 import { formatRelativeTime } from '../lib/format'
 import { workflowStatusPillTone } from '../lib/workflowStatus'
 import type { WorkflowSummary } from '../workflows.types'
@@ -24,84 +31,18 @@ function hasContractInputs(
   return Boolean(contract && Object.keys(contract.properties ?? {}).length > 0)
 }
 
-/**
- * Compact "Recent Runs" cell (spec 12 §5.F): the latest run's phase + relative
- * time and a run count — never the full expanded list that lived in the old
- * accordion. The latest run's artifacts stay downloadable inline.
- */
-function RecentRunsCell({
-  recent,
-  onDownload,
-  downloadingKey,
-}: {
-  recent: WorkflowRecentRuns
-  onDownload: (run: WorkflowRunListItem, artifact: WorkflowRunArtifact) => void
-  downloadingKey: string | null
-}) {
-  if (recent.loading) {
-    return <span className="muted">Loading runs…</span>
-  }
-  const run = recent.latestRun
-  if (!run) {
-    // A failed runs fetch (recent.error) is not the same as "no runs exist":
-    // surface the failure instead of the reassuring empty state.
-    if (recent.error) {
-      return <span className="muted">Failed to load runs</span>
-    }
-    return <span className="muted">No runs yet</span>
-  }
-  const when = run.startedAt ?? run.triggeredAt
-  return (
-    <span className="workflow-recent-runs">
-      <span className="workflow-recent-runs__summary">
-        <Pill tone={workflowStatusPillTone(run.phase)} size="xs">
-          {run.phase}
-        </Pill>
-        <span className="muted">{when ? formatRelativeTime(when) : 'Pending'}</span>
-        {recent.runCount > 1 ? <span className="muted">· {recent.runCount} runs</span> : null}
-      </span>
-      {run.artifacts && run.artifacts.length > 0 ? (
-        <span className="workflow-recent-runs__artifacts" aria-label="Latest run artifacts">
-          {run.artifacts.map(artifact => {
-            const key = `${run.id}:${artifact.name}`
-            return (
-              <Button
-                key={artifact.name}
-                className="workflow-run-artifact-btn"
-                color="neutral"
-                disabled={downloadingKey === key}
-                onClick={() => onDownload(run, artifact)}
-                size="xs"
-                variant="ghost"
-              >
-                {downloadingKey === key ? 'Downloading…' : artifact.name}
-              </Button>
-            )
-          })}
-        </span>
-      ) : null}
-    </span>
-  )
+function workflowStatusColor(status: string | null | undefined): string | undefined {
+  const tone = workflowStatusPillTone(status)
+  if (tone === 'success') return 'green'
+  if (tone === 'danger') return 'red'
+  return undefined
 }
 
-function WorkflowRow({
-  wf,
-  pendingTriggerKey,
-  triggerModalOpen,
-  onTrigger,
-}: {
-  wf: WorkflowSummary
-  pendingTriggerKey: string | null
-  triggerModalOpen: boolean
-  onTrigger: (wf: WorkflowSummary) => void
-}) {
+/** Compact latest-run summary; query and artifact behavior stay with the existing hook. */
+function RecentRunsCell({ wf }: { wf: WorkflowSummary }) {
   const { setStatus } = useAuthContext()
   const recent = useWorkflowRecentRuns(wf)
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null)
-
-  const rowKey = workflowKey(wf)
-  const isTriggering = pendingTriggerKey === rowKey
-  const anotherPending = pendingTriggerKey !== null && !isTriggering
 
   const handleDownload = useCallback(
     async (run: WorkflowRunListItem, artifact: WorkflowRunArtifact) => {
@@ -127,64 +68,97 @@ function WorkflowRow({
         setDownloadingKey(null)
       }
     },
-    [wf.namespace, wf.name, setStatus]
+    [setStatus, wf.name, wf.namespace]
   )
 
+  if (recent.loading) return <Spin size="small" aria-label="Loading recent runs" />
+  const run = recent.latestRun
+  if (!run) {
+    return (
+      <Typography.Text type="secondary">
+        {recent.error ? 'Failed to load runs' : 'No runs yet'}
+      </Typography.Text>
+    )
+  }
+
+  const when = run.startedAt ?? run.triggeredAt
   return (
-    <tr>
-      <td className="da-table__cell">
-        <span className="context-id-cell workflow-plugin-title">
-          <span className="agent-row-icon" aria-hidden="true">
-            <IconWorkflows />
-          </span>
-          <strong>{wf.name}</strong>
-        </span>
-      </td>
-      <td className="da-table__cell">
-        <Pill tone={workflowStatusPillTone(wf.status)} size="sm">
-          {wf.status || 'Unknown'}
-        </Pill>
-      </td>
-      <td className="da-table__cell">
-        <RecentRunsCell
-          recent={recent}
-          onDownload={handleDownload}
-          downloadingKey={downloadingKey}
-        />
-      </td>
-      <td className="da-table__cell da-table__cell--right">
-        <span className="action-row">
-          <Button
-            color="primary"
-            // While the Trigger modal is open, every row's Trigger is disabled:
-            // ConfirmDialog has no focus trap yet, so a keyboard user could
-            // otherwise Shift+Tab out and activate another row, resetting the
-            // modal's global selection state. (Central focus-trap is follow-up.)
-            disabled={!wf.triggerableByUser || anotherPending || triggerModalOpen}
-            loading={isTriggering}
-            onClick={() => onTrigger(wf)}
-            size="sm"
-            title={
-              wf.triggerableByUser
-                ? 'Trigger recipe'
-                : 'This recipe does not declare an on-demand user trigger'
-            }
-            variant="soft"
-          >
-            Trigger
-          </Button>
-          <Button
-            color="neutral"
-            loading={recent.refreshing}
-            onClick={() => void recent.refresh()}
-            size="sm"
-            variant="ghost"
-          >
-            Refresh
-          </Button>
-        </span>
-      </td>
-    </tr>
+    <Flex vertical gap="small">
+      <Flex align="center" gap="small" wrap>
+        <Tag color={workflowStatusColor(run.phase)}>{run.phase}</Tag>
+        <Typography.Text type="secondary">
+          {when ? formatRelativeTime(when) : 'Pending'}
+        </Typography.Text>
+        {recent.runCount > 1 ? (
+          <Typography.Text type="secondary">· {recent.runCount} runs</Typography.Text>
+        ) : null}
+      </Flex>
+      {run.artifacts && run.artifacts.length > 0 ? (
+        <Flex wrap gap="small" aria-label="Latest run artifacts">
+          {run.artifacts.map(artifact => {
+            const key = `${run.id}:${artifact.name}`
+            return (
+              <AntButton
+                key={artifact.name}
+                htmlType="button"
+                disabled={downloadingKey === key}
+                onClick={() => void handleDownload(run, artifact)}
+                size="small"
+                type="link"
+              >
+                {downloadingKey === key ? 'Downloading…' : artifact.name}
+              </AntButton>
+            )
+          })}
+        </Flex>
+      ) : null}
+    </Flex>
+  )
+}
+
+function WorkflowActionsCell({
+  wf,
+  pendingTriggerKey,
+  triggerModalOpen,
+  onTrigger,
+}: {
+  wf: WorkflowSummary
+  pendingTriggerKey: string | null
+  triggerModalOpen: boolean
+  onTrigger: () => void
+}) {
+  const recent = useWorkflowRecentRuns(wf)
+  const rowKey = workflowKey(wf)
+  const isTriggering = pendingTriggerKey === rowKey
+  const anotherPending = pendingTriggerKey !== null && !isTriggering
+
+  return (
+    <Flex gap="small" wrap>
+      <AntButton
+        htmlType="button"
+        type="primary"
+        disabled={!wf.triggerableByUser || anotherPending || triggerModalOpen}
+        loading={isTriggering}
+        onClick={onTrigger}
+        size="small"
+        title={
+          wf.triggerableByUser
+            ? 'Trigger recipe'
+            : 'This recipe does not declare an on-demand user trigger'
+        }
+      >
+        Trigger
+      </AntButton>
+      <AntButton
+        htmlType="button"
+        type="text"
+        loading={recent.refreshing}
+        onClick={() => void recent.refresh()}
+        size="small"
+      >
+        Refresh
+      </AntButton>
+    </Flex>
   )
 }
 
@@ -203,9 +177,8 @@ export function WorkflowsPage() {
   } = useWorkflowController({ setStatus })
 
   // Which workflow's Trigger modal is open (a recipe with an input contract).
-  // Replaces the old row-selection state that fed the inline accordion.
+  // This state remains page-owned; Ant Design only renders the dialog.
   const [triggerModalWorkflow, setTriggerModalWorkflow] = useState<WorkflowSummary | null>(null)
-  // Which row is mid-trigger, so only that row shows the busy Trigger button.
   const [pendingTriggerKey, setPendingTriggerKey] = useState<string | null>(null)
 
   const handleTrigger = useCallback(
@@ -214,14 +187,10 @@ export function WorkflowsPage() {
       setPendingTriggerKey(workflowKey(wf))
       let contract: Awaited<ReturnType<typeof handleSelectWorkflow>>
       try {
-        // Load the recipe detail so we know whether it declares inputs, and so
-        // the modal's InputContractForm binds to the controller's input state.
+        // Read the recipe detail so the modal binds to the controller's input state.
         contract = await handleSelectWorkflow(wf)
       } catch (error) {
-        // handleSelectWorkflow throws when the recipe read fails, so we can no
-        // longer tell whether it declares an input contract. Report the failure
-        // and stop — never fall through to a contract-less trigger that would
-        // skip the input modal. Matches handleTriggerWorkflow's feedback.
+        // A failed read must not look like a contract-less recipe and trigger without inputs.
         setPendingTriggerKey(null)
         setStatus(
           `Trigger failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -230,12 +199,10 @@ export function WorkflowsPage() {
         return
       }
       if (hasContractInputs(contract)) {
-        // Inputs required → open the modal; the trigger fires on confirm.
         setPendingTriggerKey(null)
         setTriggerModalWorkflow(wf)
         return
       }
-      // No inputs → trigger directly (no modal). Keep the row busy through it.
       try {
         await handleTriggerWorkflow(wf.namespace, wf.name, {})
       } finally {
@@ -249,83 +216,99 @@ export function WorkflowsPage() {
     const wf = triggerModalWorkflow
     setTriggerModalWorkflow(null)
     if (!wf) return
-    // Modal path: fire with the live edited input values (omit the explicit
-    // argument so handleTriggerWorkflow reads the controller's current inputs).
+    // The controller reads the current edited input values from its existing owner.
     setPendingTriggerKey(workflowKey(wf))
     void handleTriggerWorkflow(wf.namespace, wf.name).finally(() => setPendingTriggerKey(null))
   }, [triggerModalWorkflow, handleTriggerWorkflow])
 
-  const header = (
-    <div className="page-header">
-      <h2>Plugins</h2>
-      <p className="muted">View deployed recipes, see their recent runs, and trigger them.</p>
-    </div>
-  )
+  const columns: TableColumnsType<WorkflowSummary> = [
+    {
+      title: 'Name',
+      dataIndex: 'name',
+      key: 'name',
+      render: (_value, wf) => (
+        <Flex align="center" gap="small">
+          <AppstoreOutlined aria-hidden="true" />
+          <Typography.Text strong>{wf.name}</Typography.Text>
+        </Flex>
+      ),
+    },
+    {
+      title: 'Status',
+      dataIndex: 'status',
+      key: 'status',
+      render: (_value, wf) => (
+        <Tag color={workflowStatusColor(wf.status)}>{wf.status || 'Unknown'}</Tag>
+      ),
+    },
+    {
+      title: 'Recent Runs',
+      key: 'recent-runs',
+      render: (_value, wf) => <RecentRunsCell wf={wf} />,
+    },
+    {
+      title: 'Actions',
+      key: 'actions',
+      align: 'right',
+      render: (_value, wf) => (
+        <WorkflowActionsCell
+          wf={wf}
+          pendingTriggerKey={pendingTriggerKey}
+          triggerModalOpen={triggerModalWorkflow !== null}
+          onTrigger={() => void handleTrigger(wf)}
+        />
+      ),
+    },
+  ]
 
   const hasRows = workflows.length > 0
 
   return (
     <section className="page">
-      {header}
+      <header>
+        <Typography.Title level={2}>Plugins</Typography.Title>
+        <Typography.Paragraph type="secondary">
+          View deployed recipes, see their recent runs, and trigger them.
+        </Typography.Paragraph>
+      </header>
 
       <div className="page-layout">
-        {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
-
-        <section className="page-card mcp-servers-board-card" aria-label="Plugins">
+        {error ? <Alert type="error" showIcon role="alert" title={error} /> : null}
+        <Card aria-label="Plugins">
           {loading && !hasRows ? (
-            <EmptyState title="Loading" body="Fetching plugins…" />
+            <Spin tip="Fetching plugins…" />
           ) : !hasRows ? (
-            <EmptyState title="No recipes" body="No recipes are deployed in this cluster." />
+            <Empty description="No recipes are deployed in this cluster." />
           ) : (
-            <DataTable frameless fullBleed className="mcp-servers-data-table">
-              <thead>
-                <tr>
-                  <th className="da-table__col-header" scope="col">
-                    Name
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Status
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Recent Runs
-                  </th>
-                  <th className="da-table__col-header da-table__col-header--right" scope="col">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {workflows.map(wf => (
-                  <WorkflowRow
-                    key={workflowKey(wf)}
-                    wf={wf}
-                    pendingTriggerKey={pendingTriggerKey}
-                    triggerModalOpen={triggerModalWorkflow !== null}
-                    onTrigger={w => void handleTrigger(w)}
-                  />
-                ))}
-              </tbody>
-            </DataTable>
+            <Table<WorkflowSummary>
+              columns={columns}
+              dataSource={workflows}
+              rowKey={workflowKey}
+              size="small"
+              pagination={false}
+              className="mcp-servers-data-table"
+            />
           )}
-        </section>
+        </Card>
       </div>
 
       {triggerModalWorkflow && selectedWorkflowInputContract ? (
-        <ConfirmDialog
-          title={`Trigger ${triggerModalWorkflow.name}`}
-          cancelLabel="Cancel"
-          confirmLabel={workflowTriggerLoading ? 'Triggering…' : 'Trigger'}
+        <Modal
+          title={<Typography.Title level={4}>Trigger {triggerModalWorkflow.name}</Typography.Title>}
+          open
+          okText={workflowTriggerLoading ? 'Triggering…' : 'Trigger'}
+          cancelText="Cancel"
+          confirmLoading={workflowTriggerLoading}
           onCancel={() => setTriggerModalWorkflow(null)}
-          onConfirm={confirmModalTrigger}
-          body={
-            <InputContractForm
-              schema={selectedWorkflowInputContract}
-              values={workflowInputValues}
-              onChange={setWorkflowInputValues}
-              disabled={workflowTriggerLoading}
-            />
-          }
-        />
+          onOk={confirmModalTrigger}
+        >
+          <InputContractForm
+            schema={selectedWorkflowInputContract}
+            values={workflowInputValues}
+            onChange={setWorkflowInputValues}
+            disabled={workflowTriggerLoading}
+          />
+        </Modal>
       ) : null}
     </section>
   )

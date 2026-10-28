@@ -5,7 +5,7 @@ import {
   TaskTracker,
   makeTaskKey,
 } from '@contexts/AgentTaskTrackerContext'
-import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { InFlightAssistantPlaceholder } from '../InFlightAssistantPlaceholder'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -52,7 +52,11 @@ describe('InFlightAssistantPlaceholder (D.5)', () => {
     const tracker = new TaskTracker()
     tracker.start(makeTaskKey('agent-x', 'c1'), 'task-1', 'rejoined-unknown')
     const { container } = renderWith(tracker, new Set())
-    expect(container.querySelector('[data-task-id="task-1"]')).not.toBeNull()
+    const task = container.querySelector('[data-task-id="task-1"]')
+    expect(task).not.toBeNull()
+    expect(task?.querySelector('.ant-card')).not.toBeNull()
+    expect(task?.querySelector('.chat-bubble')).toBeNull()
+    expect(screen.getByRole('status').textContent).toContain('Connecting')
   })
 
   it('renders nothing when a local message bubble already represents the task', () => {

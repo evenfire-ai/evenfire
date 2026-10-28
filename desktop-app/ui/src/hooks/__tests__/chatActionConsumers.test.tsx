@@ -44,7 +44,7 @@ async function mountActions() {
 
 function clickFleetCreate() {
   fireEvent.click(screen.getByRole('button', { name: /More actions for/ }))
-  fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'New chat' }))
 }
 
 it('observes a ChatThread conversation click through the real app action and toast', async () => {

@@ -832,7 +832,8 @@ describe('ProgressStepper — outputPreview expand', () => {
     render(<ProgressStepper progress={makeProgress({ status: 'active', steps: [step] })} />)
     expandDetails()
     const panel = screen.getByTestId('step-output-panel')
-    expect(panel.classList.contains('stepper-step-output--error')).toBe(true)
+    expect(panel.getAttribute('role')).toBe('alert')
+    expect(panel.textContent).toContain(outputPreview.tailLines.join('\n'))
   })
 
   it('renders non-truncated output without hidden lines indicator', () => {
@@ -866,7 +867,7 @@ describe('ProgressStepper — cancel button', () => {
     const btn = screen.getByTestId('progress-cancel-btn')
     expect(btn).toBeDefined()
     expect(btn.getAttribute('aria-label')).toBe('Stop agent')
-    expect(btn.textContent).toBe('■')
+    expect(btn.querySelector('[aria-label="stop"]')).toBeTruthy()
   })
 
   it('renders cancel button on connecting status when onCancel is provided', () => {
@@ -890,7 +891,7 @@ describe('ProgressStepper — cancel button', () => {
     fireEvent.click(btn)
     expect(onCancel).toHaveBeenCalledOnce()
     expect(btn.getAttribute('aria-label')).toBe('Stopping agent')
-    expect(btn.textContent).toBe('■')
+    expect(btn.querySelector('[aria-label="stop"]')).toBeTruthy()
     expect(btn.hasAttribute('disabled')).toBe(true)
   })
 })

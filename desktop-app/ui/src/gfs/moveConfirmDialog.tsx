@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button } from '@components/Common'
+import { Button, Checkbox, Flex, Modal, Typography } from 'antd'
 
 export interface GfsMoveConfirmRequest {
   /** Sanitizable display facts of the moving folder. */
@@ -33,13 +33,11 @@ export function GfsMoveConfirmDialog({
 }: GfsMoveConfirmDialogProps) {
   const [allowNumberedRename, setAllowNumberedRename] = useState(false)
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
-  const dialogRef = useRef<HTMLElement | null>(null)
+  const dialogRef = useRef<HTMLDivElement | null>(null)
 
-  /**
-   * Focus enters the dialog and returns to the opener when it closes: a
-   * keyboard user must never be left on a removed node, and the surface
-   * behind a modal dialog must not be reachable while it is open (RP-020).
-   */
+  // Keep the established initial-focus and return-focus behavior. Ant Design
+  // owns the modal focus trap and Escape handling while this component keeps
+  // the invoking surface as its focus restoration target.
   useEffect(() => {
     const previousActiveElement =
       document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -50,111 +48,98 @@ export function GfsMoveConfirmDialog({
   }, [])
 
   useEffect(() => {
-    if (busy) return
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') onCancel()
+    const keepTabInsideDialog = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const panel = dialogRef.current?.closest<HTMLElement>('[role="dialog"]')
+      if (!panel || !(event.target instanceof Node) || !panel.contains(event.target)) return
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter(element => !element.closest('[hidden], [aria-hidden="true"]'))
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (!first || !last) {
+        event.preventDefault()
+        panel.focus()
+      } else if (
+        event.shiftKey &&
+        (document.activeElement === first || !panel.contains(document.activeElement))
+      ) {
+        event.preventDefault()
+        last.focus()
+      } else if (
+        !event.shiftKey &&
+        (document.activeElement === last || !panel.contains(document.activeElement))
+      ) {
+        event.preventDefault()
+        first.focus()
+      }
     }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [busy, onCancel])
 
-  /**
-   * Tab stays inside the dialog. The panel is a modal surface: without the
-   * wrap, a keyboard user tabs straight out of the confirmation and into the
-   * page behind it, which the modal has just taken over (RP-020).
-   */
-  function handleDialogKeyDown(event: React.KeyboardEvent<HTMLElement>) {
-    if (event.key !== 'Tab') return
-    const panel = dialogRef.current
-    if (!panel) return
-    const focusable = Array.from(
-      panel.querySelectorAll<HTMLElement>(
-        'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
-      )
-    ).filter(element => !element.closest('[hidden], [aria-hidden="true"]'))
-    if (focusable.length === 0) {
-      event.preventDefault()
-      panel.focus()
-      return
-    }
-    const first = focusable[0]
-    const last = focusable[focusable.length - 1]
-    if (!first || !last) {
-      event.preventDefault()
-      panel.focus()
-      return
-    }
-    const active = document.activeElement
-    if (event.shiftKey && (active === first || !panel.contains(active))) {
-      event.preventDefault()
-      last.focus()
-      return
-    }
-    if (!event.shiftKey && (active === last || !panel.contains(active))) {
-      event.preventDefault()
-      first.focus()
-    }
-  }
+    window.addEventListener('keydown', keepTabInsideDialog, true)
+    return () => window.removeEventListener('keydown', keepTabInsideDialog, true)
+  }, [])
 
   return (
-    <div
-      className="da-gfs-manage-modal"
-      role="presentation"
-      onMouseDown={event => {
-        if (!busy && event.target === event.currentTarget) onCancel()
+    <Modal
+      open
+      title={
+        <span aria-label={`Move folder ${request.sourceName} to ${request.destinationName}`}>
+          Move “{request.sourceName}” to “{request.destinationName}”?
+        </span>
+      }
+      onCancel={() => {
+        if (!busy) onCancel()
       }}
-    >
-      <section
-        aria-label={`Move folder ${request.sourceName} to ${request.destinationName}`}
-        aria-modal="true"
-        className="da-gfs-manage-dialog da-gfs-move-confirm-dialog"
-        onKeyDown={handleDialogKeyDown}
-        ref={dialogRef}
-        role="dialog"
-        tabIndex={-1}
-      >
-        <header className="da-gfs-manage-dialog__header">
-          <span className="da-gfs-manage-dialog__heading">
-            <h3>
-              Move “{request.sourceName}” to “{request.destinationName}”?
-            </h3>
-          </span>
-        </header>
-        <div className="da-gfs-manage-dialog__body">
-          <p className="da-gfs-move-confirm-dialog__impact">
-            Inherited access to this folder and its contents follows the new location. Direct
-            sharing entries stay with their items — including any access they grant — and you may
-            lose access.
-          </p>
-          {request.canRename ? (
-            <label className="da-gfs-move-confirm-dialog__rename-toggle">
-              <input
-                checked={allowNumberedRename}
-                disabled={busy}
-                onChange={event => setAllowNumberedRename(event.target.checked)}
-                type="checkbox"
-              />
-              <span>
-                {request.suggestedName
-                  ? `Use a numbered name if needed (e.g. “${request.suggestedName}”)`
-                  : 'Use a numbered name if needed'}
-              </span>
-            </label>
-          ) : null}
-        </div>
-        <footer className="da-gfs-move-confirm-dialog__actions">
-          <Button disabled={busy} onClick={onCancel} ref={cancelButtonRef} variant="ghost">
+      afterOpenChange={visible => {
+        if (visible) cancelButtonRef.current?.focus()
+      }}
+      footer={
+        <Flex justify="end" gap="small">
+          <Button
+            autoFocus
+            disabled={busy}
+            htmlType="button"
+            onClick={onCancel}
+            ref={cancelButtonRef}
+          >
             Cancel
           </Button>
           <Button
             disabled={busy}
+            htmlType="button"
+            loading={busy}
             onClick={() => onConfirm({ allowNumberedRename })}
-            variant="solid"
+            type="primary"
           >
             {busy ? 'Moving…' : 'Move'}
           </Button>
-        </footer>
-      </section>
-    </div>
+        </Flex>
+      }
+      closable={false}
+      destroyOnHidden
+      keyboard={!busy}
+      mask={{ closable: !busy }}
+      panelRef={dialogRef}
+    >
+      <Flex vertical gap="middle">
+        <Typography.Paragraph>
+          Inherited access to this folder and its contents follows the new location. Direct sharing
+          entries stay with their items — including any access they grant — and you may lose access.
+        </Typography.Paragraph>
+        {request.canRename ? (
+          <Checkbox
+            checked={allowNumberedRename}
+            disabled={busy}
+            onChange={event => setAllowNumberedRename(event.target.checked)}
+          >
+            {request.suggestedName
+              ? `Use a numbered name if needed (e.g. “${request.suggestedName}”)`
+              : 'Use a numbered name if needed'}
+          </Checkbox>
+        ) : null}
+      </Flex>
+    </Modal>
   )
 }

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   DESKTOP_COMMANDS,
@@ -9,6 +10,7 @@ import {
 } from '../../../../src/desktopCommands'
 import { AuthContext } from '../../contexts/AuthContext'
 import type { AuthContextValue } from '../../contexts/AuthContext'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { SettingsPage } from '../SettingsPage'
 import type { SettingsPageProps } from '../SettingsPage.types'
 
@@ -101,16 +103,20 @@ const defaultSettingsProps: SettingsPageProps = {
   onSaveChannelNotificationPreferences: vi.fn(async () => undefined),
 }
 
-function renderSettingsPage(auth?: Partial<AuthContextValue>) {
+function renderSettingsPage(
+  auth?: Partial<AuthContextValue>,
+  props: Partial<SettingsPageProps> = {}
+) {
   return render(
     <AuthContext.Provider value={makeAuthValue(auth)}>
-      <SettingsPage {...defaultSettingsProps} />
+      <SettingsPage {...defaultSettingsProps} {...props} />
     </AuthContext.Provider>
   )
 }
 
 describe('SettingsPage', () => {
   beforeEach(() => {
+    installAntdDomEnvironment()
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -216,5 +222,163 @@ describe('SettingsPage', () => {
       </AuthContext.Provider>
     )
     expect(screen.getByRole('tabpanel', { name: 'Shortcuts' })).toBeTruthy()
+  })
+
+  it('routes the theme selection through the existing theme owner', async () => {
+    const user = userEvent.setup()
+    const onThemeModeChange = vi.fn()
+    renderSettingsPage(undefined, { onThemeModeChange })
+
+    await user.click(screen.getByRole('tab', { name: 'Appearance' }))
+    await user.click(screen.getByRole('radio', { name: /Light/ }))
+
+    expect(onThemeModeChange).toHaveBeenCalledWith('light')
+  })
+
+  it('saves notification choices through the existing save callback', async () => {
+    const user = userEvent.setup()
+    const onSaveNotificationSettings = vi.fn(async () => 'granted' as const)
+    const onNotify = vi.fn()
+    renderSettingsPage(undefined, { onSaveNotificationSettings, onNotify })
+
+    await user.click(screen.getByRole('tab', { name: 'Notifications' }))
+    await user.click(
+      screen.getAllByRole('radio', { name: /Show while I'm elsewhere in Evenfire/ })[0]!
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(onSaveNotificationSettings).toHaveBeenCalledWith(
+      {
+        ...defaultSettingsProps.notificationSettings,
+        inApp: 'when_app_focused_away_from_chat',
+      },
+      { requestDesktopPermission: false }
+    )
+    expect(onNotify).toHaveBeenCalledWith('In app notification settings saved.', 'success')
+  })
+
+  it('requests desktop notification permission only through the existing desktop save action', async () => {
+    const user = userEvent.setup()
+    const onSaveNotificationSettings = vi.fn(async () => 'denied' as const)
+    const onNotify = vi.fn()
+    renderSettingsPage(undefined, { onSaveNotificationSettings, onNotify })
+
+    await user.click(screen.getByRole('tab', { name: 'Notifications' }))
+    await user.click(
+      screen.getByRole('radio', { name: /Desktop notifications Always show notifications/ })
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(onSaveNotificationSettings).toHaveBeenCalledWith(
+      { ...defaultSettingsProps.notificationSettings, desktop: 'always' },
+      { requestDesktopPermission: true }
+    )
+    expect(onNotify).toHaveBeenCalledWith(
+      'Settings saved. Desktop notifications are blocked by system permission.',
+      'error'
+    )
+  })
+
+  it('saves the verified fallback channel through the existing preference owner', async () => {
+    const user = userEvent.setup()
+    const onSaveChannelNotificationPreferences = vi.fn(async () => undefined)
+    renderSettingsPage(undefined, {
+      channelNotificationPreferences: {
+        preferredMedium: null,
+        channelFallbackEnabled: false,
+        verifiedMedia: ['telegram', 'slack'],
+      },
+      onSaveChannelNotificationPreferences,
+    })
+
+    await user.click(screen.getByRole('tab', { name: 'Notifications' }))
+    const channelSelect = screen.getByRole('combobox', { name: 'Preferred fallback channel' })
+    await user.click(channelSelect)
+    fireEvent.keyDown(channelSelect, { key: 'ArrowDown', keyCode: 40, which: 40 })
+    fireEvent.keyDown(channelSelect, { key: 'Enter', keyCode: 13, which: 13 })
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: 'Allow Telegram/Slack fallback when desktop delivery is unavailable',
+      })
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(onSaveChannelNotificationPreferences).toHaveBeenCalledWith({
+      preferredMedium: 'telegram',
+      channelFallbackEnabled: true,
+    })
+  })
+
+  it('disables notification submission while the existing save is pending', async () => {
+    const user = userEvent.setup()
+    let resolveSave: ((permission: 'default') => void) | undefined
+    const onSaveNotificationSettings = vi.fn(
+      () =>
+        new Promise<'default'>(resolve => {
+          resolveSave = resolve
+        })
+    )
+    renderSettingsPage(undefined, { onSaveNotificationSettings })
+
+    await user.click(screen.getByRole('tab', { name: 'Notifications' }))
+    await user.click(
+      screen.getAllByRole('radio', { name: /Show while I'm elsewhere in Evenfire/ })[0]!
+    )
+    const saveButton = screen.getByRole('button', { name: 'Save changes' })
+    await user.click(saveButton)
+
+    const savingButton = screen.getByRole('button', { name: 'Saving...' })
+    expect(savingButton.hasAttribute('disabled')).toBe(true)
+    expect(onSaveNotificationSettings).toHaveBeenCalledTimes(1)
+
+    resolveSave?.('default')
+  })
+
+  it('retains volume ownership and previews the normalized value on Enter', async () => {
+    const user = userEvent.setup()
+    const onNotificationSoundVolumeChange = vi.fn()
+    const onPlayNotificationSoundPreview = vi.fn()
+    function StatefulVolumeSettingsPage() {
+      const [volume, setVolume] = useState(defaultSettingsProps.notificationSettings.soundVolume)
+      return (
+        <AuthContext.Provider value={makeAuthValue()}>
+          <SettingsPage
+            {...defaultSettingsProps}
+            notificationSettings={{
+              ...defaultSettingsProps.notificationSettings,
+              soundVolume: volume,
+            }}
+            onNotificationSoundVolumeChange={value => {
+              onNotificationSoundVolumeChange(value)
+              setVolume(value)
+            }}
+            onPlayNotificationSoundPreview={onPlayNotificationSoundPreview}
+          />
+        </AuthContext.Provider>
+      )
+    }
+    render(<StatefulVolumeSettingsPage />)
+
+    await user.click(screen.getByRole('tab', { name: 'Notifications' }))
+    const volumeInput = screen.getByRole('spinbutton', {
+      name: 'Notification sound volume percentage',
+    })
+    await user.clear(volumeInput)
+    await user.type(volumeInput, '70')
+    expect((volumeInput as HTMLInputElement).value).toBe('70')
+    expect(onNotificationSoundVolumeChange).toHaveBeenCalledWith(70)
+    await user.keyboard('{Enter}')
+
+    expect(onNotificationSoundVolumeChange).toHaveBeenLastCalledWith(70)
+    expect(onPlayNotificationSoundPreview).toHaveBeenLastCalledWith(70)
+
+    const slider = screen.getByRole('slider')
+    slider.focus()
+    expect(document.activeElement).toBe(slider)
+    fireEvent.keyDown(slider, { key: 'ArrowRight', keyCode: 39, which: 39 })
+    fireEvent.keyUp(slider, { key: 'ArrowRight', keyCode: 39, which: 39 })
+    expect(slider.getAttribute('aria-valuenow')).toBe('71')
+    expect(onNotificationSoundVolumeChange).toHaveBeenLastCalledWith(71)
+    expect(onPlayNotificationSoundPreview).toHaveBeenLastCalledWith(71)
   })
 })

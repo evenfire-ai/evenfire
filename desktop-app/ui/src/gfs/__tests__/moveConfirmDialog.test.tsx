@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { GfsMoveConfirmDialog } from '../moveConfirmDialog'
 
+beforeEach(installAntdDomEnvironment)
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()

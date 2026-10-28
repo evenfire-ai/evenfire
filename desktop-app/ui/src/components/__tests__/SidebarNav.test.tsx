@@ -1,9 +1,46 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { QueuedChatDelete } from '../../contexts/AgentChatActionsContext/types'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { SidebarNav } from '../SidebarNav'
 import type { SidebarNavProps } from '../SidebarNav/types'
+
+const sidebarMocks = vi.hoisted(() => ({
+  activeChatId: null as string | null,
+  latestChatSessions: [] as Array<{
+    agentRef: string
+    id: string
+    title: string
+    remote?: boolean
+    unreadTerminal?: boolean
+  }>,
+  selectedAgent: null as string | null,
+  captureChatDeleteFence: vi.fn(async (): Promise<QueuedChatDelete> => {
+    throw new Error('no delete target')
+  }),
+  handleDeleteChatForAgent: vi.fn(async () => undefined),
+  handleLogout: vi.fn(),
+  handleRenameChatForAgent: vi.fn(async () => undefined),
+  handleSelectChatAgent: vi.fn(),
+}))
+
+beforeEach(() => {
+  installAntdDomEnvironment()
+  sidebarMocks.activeChatId = null
+  sidebarMocks.latestChatSessions = []
+  sidebarMocks.selectedAgent = null
+  sidebarMocks.captureChatDeleteFence.mockReset().mockRejectedValue(new Error('no delete target'))
+  sidebarMocks.handleDeleteChatForAgent.mockClear()
+  sidebarMocks.handleLogout.mockClear()
+  sidebarMocks.handleRenameChatForAgent.mockClear()
+  sidebarMocks.handleSelectChatAgent.mockClear()
+})
+
+afterEach(() => {
+  cleanup()
+})
 
 // SidebarNav pulls from four contexts. Mock each module so we only render
 // the logo block without standing up real providers, and so we never hit the
@@ -12,29 +49,28 @@ vi.mock('@contexts/AuthContext', () => ({
   useAuthContext: () => ({
     busy: false,
     me: { name: 'Test User', email: 'test@clerum.io' },
-    handleLogout: vi.fn(),
+    handleLogout: sidebarMocks.handleLogout,
   }),
 }))
 vi.mock('@contexts/ChatListContext', () => ({
   useChatListContext: () => ({
-    activeChatId: null,
-    latestChatSessions: [],
+    activeChatId: sidebarMocks.activeChatId,
+    latestChatSessions: sidebarMocks.latestChatSessions,
     latestChatSessionsLoading: false,
+    sessionStateByChatKey: {},
   }),
 }))
 vi.mock('@contexts/AgentChatActionsContext', () => ({
   useAgentChatActionsContext: () => ({
-    captureChatDeleteFence: vi.fn(async () => {
-      throw new Error('no delete target')
-    }),
-    handleRenameChatForAgent: vi.fn(),
-    handleDeleteChatForAgent: vi.fn(),
+    captureChatDeleteFence: sidebarMocks.captureChatDeleteFence,
+    handleRenameChatForAgent: sidebarMocks.handleRenameChatForAgent,
+    handleDeleteChatForAgent: sidebarMocks.handleDeleteChatForAgent,
   }),
 }))
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
-    selectedAgent: null,
-    handleSelectChatAgent: vi.fn(),
+    selectedAgent: sidebarMocks.selectedAgent,
+    handleSelectChatAgent: sidebarMocks.handleSelectChatAgent,
   }),
 }))
 // The real tree pulls TanStack Query and GFS contexts; the sidebar tests only
@@ -127,23 +163,15 @@ describe('SidebarNav logo', () => {
 
     // Files is a top-level nav item, never nested inside the Settings popover.
     fireEvent.click(screen.getByTestId('nav-settings-menu'))
-    const settingsMenu = document.querySelector('.sidebar-settings-menu')
-    expect(settingsMenu?.querySelector('[data-testid="nav-files"]')).toBeNull()
+    const settingsMenu = screen.getByRole('menu')
+    expect(settingsMenu.querySelector('[data-testid="nav-files"]')).toBeNull()
   })
 
-  it('mounts the hard-drive SVG inside the EvenDrive nav item so the icon is visible', () => {
+  it('uses the Ant Design hard-drive icon inside the EvenDrive nav item', () => {
     const { container } = render(<SidebarNav {...baseProps()} />)
     const filesLink = container.querySelector('[data-testid="nav-files"]')
-    const icon = filesLink?.querySelector('.ui-nav-item__icon svg')
-    expect(icon).toBeTruthy()
-    expect(icon?.getAttribute('viewBox')).toBe('0 0 24 24')
-    // Lucide hard-drive outline plus the separator line and two activity dots.
-    // (Supersedes dev's paperclip alignment: this branch deliberately moved
-    // the EvenDrive nav item to a hard-drive icon.)
-    expect(icon?.querySelector('path')?.getAttribute('d')).toContain(
-      'M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89'
-    )
-    expect(icon?.querySelectorAll('line')).toHaveLength(3)
+    expect(filesLink?.querySelector('[data-icon="hdd"]')).toBeTruthy()
+    expect(filesLink?.querySelector('.anticon-hdd')?.getAttribute('aria-hidden')).toBe('true')
   })
 
   it('routes a controlled palette request through desktop collapse behavior', () => {
@@ -295,13 +323,12 @@ describe('SidebarNav flattened resources menu', () => {
     render(<SidebarNav {...baseProps()} />)
     fireEvent.click(screen.getByTestId('nav-settings-menu'))
 
-    const settingsMenu = document.querySelector('.sidebar-settings-menu')
-    expect(settingsMenu).not.toBeNull()
+    const settingsMenu = screen.getByRole('menu')
     // Direct descendants (no wrapping submenu element between them and the popover).
     for (const testId of ['nav-agents', 'nav-mcp-servers', 'nav-workflows']) {
       const item = screen.getByTestId(testId)
       expect(item.closest('.sidebar-data-submenu')).toBeNull()
-      expect(settingsMenu?.contains(item)).toBe(true)
+      expect(settingsMenu.contains(item)).toBe(true)
     }
   })
 
@@ -401,5 +428,92 @@ describe('SidebarNav Files label engages the file explorer', () => {
     fireEvent.click(toggle)
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(screen.queryByTestId('file-explorer-tree')).toBeNull()
+  })
+})
+
+describe('SidebarNav Ant Design menus preserve their behavior owners', () => {
+  it('restores focus to Settings after Escape closes its Ant Design menu', async () => {
+    render(<SidebarNav {...baseProps()} />)
+    const trigger = screen.getByTestId('nav-settings-menu')
+    fireEvent.click(trigger)
+
+    const menu = await screen.findByRole('menu')
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    expect(menu.closest('.sidebar-settings-menu-wrapper')).not.toBeNull()
+    fireEvent.keyDown(menu, { key: 'Escape' })
+
+    await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'))
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('routes Settings menu choices and Logout through the current owners', async () => {
+    const onSelect = vi.fn()
+    const onSettingsMenuOpenChange = vi.fn()
+    render(<SidebarNav {...baseProps({ onSelect, onSettingsMenuOpenChange })} />)
+
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Agents' }))
+    expect(onSelect).toHaveBeenCalledWith('agents')
+    expect(onSettingsMenuOpenChange.mock.calls).toEqual([[true], [false]])
+
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Logout' }))
+    expect(sidebarMocks.handleLogout).toHaveBeenCalledOnce()
+  })
+
+  it('opens a session through navigation state and renames via Enter', async () => {
+    sidebarMocks.latestChatSessions = [
+      { agentRef: 'agent-one', id: 'chat-one', title: 'Existing chat', remote: true },
+    ]
+    render(<SidebarNav {...baseProps()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Existing chat' }))
+    expect(sidebarMocks.handleSelectChatAgent).toHaveBeenCalledWith('agent-one', {
+      selectLatest: false,
+      chatId: 'chat-one',
+      isRemote: true,
+      title: 'Existing chat',
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Session options for Existing chat' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }))
+    const renameInput = await screen.findByRole('textbox', { name: 'Rename session' })
+    expect(document.activeElement).toBe(renameInput)
+    fireEvent.change(renameInput, { target: { value: 'Renamed chat' } })
+    fireEvent.keyDown(renameInput, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(sidebarMocks.handleRenameChatForAgent).toHaveBeenCalledWith(
+        'agent-one',
+        'chat-one',
+        'Renamed chat'
+      )
+    )
+  })
+
+  it('keeps the delete confirmation behind the existing delete-fence owner', async () => {
+    sidebarMocks.latestChatSessions = [
+      { agentRef: 'agent-one', id: 'chat-one', title: 'Existing chat' },
+    ]
+    sidebarMocks.captureChatDeleteFence.mockResolvedValue({
+      agentRef: 'agent-one',
+      fence: {} as never,
+      hostAuthorityEpoch: 1,
+    })
+    render(<SidebarNav {...baseProps()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Session options for Existing chat' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+
+    expect(sidebarMocks.captureChatDeleteFence).toHaveBeenCalledWith('agent-one')
+    expect(await screen.findByRole('dialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await waitFor(() =>
+      expect(sidebarMocks.handleDeleteChatForAgent).toHaveBeenCalledWith(
+        'agent-one',
+        'chat-one',
+        expect.objectContaining({ agentRef: 'agent-one', hostAuthorityEpoch: 1 })
+      )
+    )
   })
 })

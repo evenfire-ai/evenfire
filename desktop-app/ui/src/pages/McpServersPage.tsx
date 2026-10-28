@@ -1,5 +1,7 @@
 import { useMemo } from 'react'
-import { Button, DataTable, EmptyState, Pill, ReferenceTag, StatusBanner } from '@components/Common'
+import { ApiOutlined } from '@ant-design/icons'
+import { Alert, Button as AntButton, Card, Empty, Flex, Spin, Table, Tag, Typography } from 'antd'
+import type { TableColumnsType } from 'antd'
 import {
   authenticationLabel,
   connectorScopeLabel,
@@ -17,131 +19,6 @@ import {
 } from '../hooks/domain/useConnectorsController'
 import { clickableRowProps } from '../lib/clickableRowProps'
 
-function ConnectorRowView({
-  row,
-  busy,
-  agentDisplayByName,
-  onAuthorize,
-  onDisconnect,
-  onOpenAgent,
-}: {
-  row: ConnectorRow
-  busy: boolean
-  // Visible agent name (spec.host) from the catalog map, as everywhere else in
-  // the app (AppHeader, ContextDetailsPage, TeamsPage). Falls back to the raw
-  // identifier for agents absent from the map (e.g. cross-team), not `|| name`.
-  agentDisplayByName: Record<string, string>
-  onAuthorize: (input: ConnectorActionInput) => void
-  onDisconnect: (input: ConnectorActionInput) => void
-  onOpenAgent: (agentName: string) => void
-}) {
-  const { connector, contextRef, agentName } = row
-  const presentation = statusPresentation(connector.status)
-  const authentication = authenticationLabel(connector)
-  const scope = connectorScopeLabel(connector)
-  const caption = scopeCaption(connector)
-  // The action IPC needs a hostRef to mint the token; the row is per
-  // (connector, agent), so we act under the row's own agent.
-  const actionInput: ConnectorActionInput = {
-    agentName,
-    contextRef,
-    connector,
-  }
-
-  // Every row deep-links to ITS agent's Connectors tab. In the agent-centric
-  // model every row has an agent (contextless `oauth-user` rows included), so
-  // every row is clickable.
-  const rowProps = {
-    className: 'da-table__row--clickable',
-    ...clickableRowProps(() => onOpenAgent(agentName), {
-      ariaLabel: `Open connectors for agent ${agentName}`,
-    }),
-  }
-
-  return (
-    <tr {...rowProps}>
-      <td className="da-table__cell">
-        <span className="context-id-cell">
-          <strong>{formatMcpServerDisplayName(connector.name)}</strong>
-          {connector.provider ? <span className="muted"> · {connector.provider}</span> : null}
-        </span>
-      </td>
-
-      <td className="da-table__cell">
-        {/* Presentational: the whole row already navigates to this agent, so the
-            tag carries no click/key handlers of its own. Visible display name
-            (spec.host) from the catalog map, as everywhere else in the app;
-            falls back to the raw identifier for agents absent from the map
-            (e.g. cross-team), not `|| name`. */}
-        <ReferenceTag
-          kind="agent"
-          title={agentDisplayByName[agentName] ?? agentName}
-          aria-label={`Agent ${agentDisplayByName[agentName] ?? agentName}`}
-        >
-          {agentDisplayByName[agentName] ?? agentName}
-        </ReferenceTag>
-      </td>
-
-      <td className="da-table__cell">
-        <Pill tone="neutral" size="sm" title={caption ?? undefined}>
-          {scope}
-        </Pill>
-      </td>
-
-      <td className="da-table__cell">
-        {authentication ? (
-          <Pill tone="neutral" size="sm">
-            {authentication}
-          </Pill>
-        ) : null}
-      </td>
-
-      <td className="da-table__cell">
-        <Pill tone={presentation.tone} size="sm">
-          {presentation.label}
-        </Pill>
-      </td>
-
-      <td className="da-table__cell da-table__cell--right">
-        {!isActionableConnector(connector) ? null : connector.status === 'authorized' ? (
-          <Button
-            color="danger"
-            disabled={busy}
-            loading={busy}
-            onClick={event => {
-              // Keep the click on the button — don't trigger the row navigation.
-              event.stopPropagation()
-              onDisconnect(actionInput)
-            }}
-            // Same guard for keyboard: Enter/Space on the button must not bubble
-            // to the row's onKeyDown and navigate as well.
-            onKeyDown={event => event.stopPropagation()}
-            size="sm"
-            variant="ghost"
-          >
-            Disconnect
-          </Button>
-        ) : (
-          <Button
-            color="primary"
-            disabled={busy}
-            loading={busy}
-            onClick={event => {
-              event.stopPropagation()
-              onAuthorize(actionInput)
-            }}
-            onKeyDown={event => event.stopPropagation()}
-            size="sm"
-            variant="soft"
-          >
-            Authorize
-          </Button>
-        )}
-      </td>
-    </tr>
-  )
-}
-
 export function McpServersPage() {
   const { loading, error, actionError, agents, pendingKey, authorize, disconnect } =
     useConnectorsController()
@@ -149,81 +26,131 @@ export function McpServersPage() {
   const { handleOpenAgentWorkspace } = useNavigationContext()
 
   const rows = useMemo(() => deriveConnectorRows(agents), [agents])
+  const columns: TableColumnsType<ConnectorRow> = [
+    {
+      title: 'Connector',
+      key: 'connector',
+      render: (_value, row) => (
+        <Flex align="center" gap="small">
+          <ApiOutlined aria-hidden="true" />
+          <Typography.Text strong>{formatMcpServerDisplayName(row.connector.name)}</Typography.Text>
+          {row.connector.provider ? (
+            <Typography.Text type="secondary">· {row.connector.provider}</Typography.Text>
+          ) : null}
+        </Flex>
+      ),
+    },
+    {
+      title: 'Agent',
+      key: 'agent',
+      render: (_value, row) => {
+        const displayName = agentDisplayByName[row.agentName] ?? row.agentName
+        return <Tag aria-label={`Agent ${displayName}`}>{displayName}</Tag>
+      },
+    },
+    {
+      title: 'Scope',
+      key: 'scope',
+      render: (_value, row) => (
+        <Tag title={scopeCaption(row.connector) ?? undefined}>
+          {connectorScopeLabel(row.connector)}
+        </Tag>
+      ),
+    },
+    {
+      title: 'Authentication',
+      key: 'authentication',
+      render: (_value, row) => {
+        const authentication = authenticationLabel(row.connector)
+        return authentication ? <Tag>{authentication}</Tag> : null
+      },
+    },
+    {
+      title: 'Status',
+      key: 'status',
+      render: (_value, row) => {
+        const presentation = statusPresentation(row.connector.status)
+        const color =
+          presentation.tone === 'success'
+            ? 'green'
+            : presentation.tone === 'warning'
+              ? 'orange'
+              : undefined
+        return <Tag color={color}>{presentation.label}</Tag>
+      },
+    },
+    {
+      title: 'Actions',
+      key: 'actions',
+      align: 'right',
+      render: (_value, row) => {
+        if (!isActionableConnector(row.connector)) return null
+        const busy = pendingKey === row.grantKey
+        const actionInput: ConnectorActionInput = {
+          agentName: row.agentName,
+          contextRef: row.contextRef,
+          connector: row.connector,
+        }
+        const authorized = row.connector.status === 'authorized'
+        return (
+          <AntButton
+            htmlType="button"
+            type={authorized ? 'text' : 'primary'}
+            danger={authorized}
+            disabled={busy}
+            loading={busy}
+            onClick={event => {
+              // Keep row navigation separate from connector grant actions.
+              event.stopPropagation()
+              if (authorized) void disconnect(actionInput)
+              else void authorize(actionInput)
+            }}
+            onKeyDown={event => event.stopPropagation()}
+            size="small"
+          >
+            {authorized ? 'Disconnect' : 'Authorize'}
+          </AntButton>
+        )
+      },
+    },
+  ]
   const hasRows = rows.length > 0
 
   return (
     <section className="page">
-      <div className="page-header">
-        <h2>Connectors</h2>
-        <p className="muted">
+      <header>
+        <Typography.Title level={2}>Connectors</Typography.Title>
+        <Typography.Paragraph type="secondary">
           Review the connectors available across your agents, authorize the ones that require setup,
           and disconnect the ones you no longer want.
-        </p>
-      </div>
+        </Typography.Paragraph>
+      </header>
 
       <div className="page-layout">
         {(actionError ?? error) ? (
-          <StatusBanner tone="error">{actionError ?? error}</StatusBanner>
+          <Alert type="error" showIcon role="alert" title={actionError ?? error} />
         ) : null}
-
-        <section className="page-card mcp-servers-board-card" aria-label="Connectors">
+        <Card aria-label="Connectors">
           {loading && !hasRows ? (
-            <EmptyState title="Loading" body="Fetching your connectors…" />
+            <Spin tip="Fetching your connectors…" />
           ) : !hasRows ? (
-            <EmptyState
-              title="No connectors"
-              body="No agents with connectors are available for your account yet."
-            />
+            <Empty description="No agents with connectors are available for your account yet." />
           ) : (
-            <DataTable frameless fullBleed className="mcp-servers-data-table">
-              <thead>
-                <tr>
-                  <th className="da-table__col-header" scope="col">
-                    Connector
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Agent
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Scope
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Authentication
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Status
-                  </th>
-                  <th className="da-table__col-header da-table__col-header--right" scope="col">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map(row => (
-                  <ConnectorRowView
-                    key={row.renderKey}
-                    row={row}
-                    // Busy is a property of the GRANT, never the render row:
-                    // authorizing/disconnecting a shared grant must show every
-                    // sibling row busy, so anchor on grantKey (matches the
-                    // controller's pendingKey = connectorRowKey).
-                    busy={pendingKey === row.grantKey}
-                    agentDisplayByName={agentDisplayByName}
-                    onAuthorize={input => {
-                      // The hook records any write failure in `actionError` and
-                      // never rejects, so the call site no longer swallows it.
-                      void authorize(input)
-                    }}
-                    onDisconnect={input => {
-                      void disconnect(input)
-                    }}
-                    onOpenAgent={agentName => handleOpenAgentWorkspace(agentName, 'mcp-servers')}
-                  />
-                ))}
-              </tbody>
-            </DataTable>
+            <Table<ConnectorRow>
+              data-testid="mcp-servers-table"
+              columns={columns}
+              dataSource={rows}
+              rowKey="renderKey"
+              size="small"
+              pagination={false}
+              onRow={row => ({
+                ...clickableRowProps(() => handleOpenAgentWorkspace(row.agentName, 'mcp-servers'), {
+                  ariaLabel: `Open connectors for agent ${row.agentName}`,
+                }),
+              })}
+            />
           )}
-        </section>
+        </Card>
       </div>
     </section>
   )

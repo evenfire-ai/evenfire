@@ -8,6 +8,16 @@ import {
   useState,
 } from 'react'
 import {
+  ApiOutlined,
+  AppstoreOutlined,
+  CodeOutlined,
+  CopyOutlined,
+  FolderOutlined,
+  MessageOutlined,
+  MoreOutlined,
+  SendOutlined,
+} from '@ant-design/icons'
+import {
   type QueuedChatDelete,
   useAgentChatActionsContext,
 } from '@contexts/AgentChatActionsContext'
@@ -17,13 +27,11 @@ import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
-import { Button, IconButton, MenuItem } from '@components/Common'
-import { ConfirmDialog } from '@components/ConfirmDialog'
+import { Button, Collapse, Dropdown, Input, type InputRef, Modal, Skeleton, Typography } from 'antd'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
 import { SecureHtmlPreview } from '@components/SecureHtmlPreview'
-import { IconConnectors, IconContexts, IconWorkflows } from '@components/SidebarNav/icons'
 import { WorkflowRunArtifactActions } from '@components/WorkflowRunArtifactActions'
 import {
   AGENT_ERROR_CODE_LABELS,
@@ -139,9 +147,9 @@ function extractWorkflowArtifactScopeFromProgress(
 }
 
 function getChatMessageAttachmentIcon(attachment: ChatMessageAttachment) {
-  if (attachment.type === 'plugin') return <IconWorkflows />
-  if (attachment.type === 'connector') return <IconConnectors />
-  if (attachment.type === 'agent_file') return <IconContexts />
+  if (attachment.type === 'plugin') return <AppstoreOutlined aria-hidden="true" />
+  if (attachment.type === 'connector') return <ApiOutlined aria-hidden="true" />
+  if (attachment.type === 'agent_file') return <FolderOutlined aria-hidden="true" />
   return <GfsFileIcon name={attachment.filename || attachment.label} />
 }
 
@@ -228,24 +236,26 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
             title={typeLabel}
           >
             {previewable ? (
-              <button
-                type="button"
+              <Button
+                htmlType="button"
+                type="link"
+                size="small"
                 className="message-attachment-preview-trigger"
                 onClick={() => setPreviewAttachmentId(attachment.id)}
                 title={typeLabel}
               >
                 {chipBody}
-              </button>
+              </Button>
             ) : (
               chipBody
             )}
             {downloadable ? (
               <Button
+                htmlType="button"
                 className="message-attachment-download-button"
-                color="neutral"
                 onClick={() => downloadResponseFileAttachment(attachment)}
-                size="xs"
-                variant="text"
+                size="small"
+                type="text"
               >
                 Download
               </Button>
@@ -322,7 +332,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     deletion: QueuedChatDelete
   } | null>(null)
   const dedicatedSessionsRef = useRef<HTMLDivElement | null>(null)
-  const sessionRenameInputRef = useRef<HTMLInputElement | null>(null)
+  const sessionRenameInputRef = useRef<InputRef | null>(null)
   const chatThreadRef = useRef<HTMLDivElement | null>(null)
   const sessionRenameClosedRef = useRef(false)
   const chatListRef = useRef(chatList)
@@ -434,6 +444,9 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     const handleOutside = (event: MouseEvent) => {
       const target = event.target as Node
       if (dedicatedSessionsRef.current?.contains(target)) return
+      if (target instanceof Element && target.closest('[data-session-menu-popup]') !== null) {
+        return
+      }
       setSessionMenuChatId(null)
     }
     const handleEscape = (event: KeyboardEvent) => {
@@ -698,10 +711,11 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
       {activeChatId && hasOlderMessages && (
         <div className="chat-history-page-control">
           <Button
-            type="button"
-            variant="outline"
-            size="sm"
+            htmlType="button"
+            size="small"
             disabled={olderMessagesLoading}
+            loading={olderMessagesLoading}
+            type="default"
             onClick={() => void handleLoadOlderMessages()}
           >
             {olderMessagesLoading ? 'Loading older messages…' : 'Load older messages'}
@@ -813,10 +827,22 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                     `${message.content.slice(0, 177)}...`
                                   )}
                                 </div>
-                                <details className="error-bubble-details">
-                                  <summary>Details</summary>
-                                  <pre className="error-bubble-details-text">{message.content}</pre>
-                                </details>
+                                <Collapse
+                                  className="error-bubble-details"
+                                  size="small"
+                                  items={[
+                                    {
+                                      key: 'details',
+                                      label: 'Details',
+                                      forceRender: true,
+                                      children: (
+                                        <pre className="error-bubble-details-text">
+                                          {message.content}
+                                        </pre>
+                                      ),
+                                    },
+                                  ]}
+                                />
                               </div>
                             </div>
                           ) : (
@@ -891,25 +917,27 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                 )}
                               </div>
                               {resendSource ? (
-                                <IconButton
+                                <Button
+                                  htmlType="button"
+                                  type="text"
+                                  size="small"
+                                  shape="circle"
                                   className="message-resend-button message-copy-button message-copy-button--inline"
                                   onClick={() => handleResendMessage(resendSource)}
                                   aria-label={
                                     message.role === 'user' ? 'Resend message' : 'Resend prompt'
                                   }
-                                  label={
+                                  title={
                                     message.role === 'user' ? 'Resend message' : 'Resend prompt'
                                   }
-                                  size="xs"
-                                  variant="ghost"
-                                >
-                                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                                    <path fill="none" d="M0 0h24v24H0V0z" />
-                                    <path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z" />
-                                  </svg>
-                                </IconButton>
+                                  icon={<SendOutlined aria-hidden="true" />}
+                                />
                               ) : null}
-                              <IconButton
+                              <Button
+                                htmlType="button"
+                                type="text"
+                                size="small"
+                                shape="circle"
                                 className={`message-copy-button message-copy-button--inline${
                                   copiedMessageKey === message.messageKey ? ' copied' : ''
                                 }`}
@@ -919,20 +947,11 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                 aria-label={
                                   copiedMessageKey === message.messageKey ? 'Copied' : 'Copy text'
                                 }
-                                label={
-                                  copiedMessageKey === message.messageKey ? 'Copied' : 'Copy text'
+                                title={
+                                  copiedMessageKey === message.messageKey ? 'Copied!' : 'Copy text'
                                 }
-                                size="xs"
-                                variant="ghost"
-                              >
-                                <svg viewBox="0 0 24 24" aria-hidden="true">
-                                  <path fill="none" d="M0 0h24v24H0V0z" />
-                                  <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
-                                </svg>
-                                {copiedMessageKey === message.messageKey && (
-                                  <span className="copy-tooltip">Copied!</span>
-                                )}
-                              </IconButton>
+                                icon={<CopyOutlined aria-hidden="true" />}
+                              />
                             </footer>
                           )}
                         </article>
@@ -959,12 +978,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
         ))}
       {activeChatId && chatMessagesLoading && groupedWithKeys.length === 0 && (
         <section className="chat-group assistant" aria-label="Loading conversation">
-          <div className="chat-bubble assistant chat-loading-bubble">
-            <div className="chat-loading-skeleton">
-              <div className="chat-loading-skeleton-row chat-loading-skeleton-row-title" />
-              <div className="chat-loading-skeleton-row" />
-              <div className="chat-loading-skeleton-row chat-loading-skeleton-row-short" />
-            </div>
+          <div className="chat-bubble assistant chat-loading-bubble" role="status">
+            <Skeleton active title paragraph={{ rows: 2 }} />
           </div>
         </section>
       )}
@@ -1020,46 +1035,43 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                         {chat.title.trim() === '?' ? (
                           '?'
                         ) : /html|code|dev/i.test(chat.title) ? (
-                          '</>'
+                          <CodeOutlined />
                         ) : (
-                          <svg viewBox="0 0 24 24">
-                            <path fill="none" d="M0 0h24v24H0V0z" />
-                            <path d="M4 4h16v12H5.17L4 17.17V4m0-2c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2H4z" />
-                          </svg>
+                          <MessageOutlined />
                         )}
                       </span>
                       {isRenaming ? (
-                        <input
+                        <Input
                           ref={sessionRenameInputRef}
                           className="agent-dedicated-session-rename-input"
                           aria-label="Rename session"
                           value={sessionRenameValue}
                           onChange={event => setSessionRenameValue(event.target.value)}
                           onKeyDown={event => {
-                            if (event.key === 'Enter') {
-                              event.preventDefault()
-                              commitSessionRename()
-                            }
                             if (event.key === 'Escape') {
                               event.preventDefault()
                               cancelSessionRename()
                             }
+                          }}
+                          onPressEnter={event => {
+                            event.preventDefault()
+                            commitSessionRename()
                           }}
                           onBlur={commitSessionRename}
                           maxLength={100}
                         />
                       ) : (
                         <Button
-                          align="start"
+                          htmlType="button"
                           block
                           className="agent-dedicated-session-title-btn"
-                          color="transparent"
+                          type="text"
                           onClick={() => onSelectChat(chat.id)}
-                          size="sm"
                           title={chat.title}
-                          variant="text"
                         >
-                          <span className="agent-dedicated-session-title">{chat.title}</span>
+                          <Typography.Text className="agent-dedicated-session-title" ellipsis>
+                            {chat.title}
+                          </Typography.Text>
                         </Button>
                       )}
                     </span>
@@ -1075,49 +1087,43 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                         {formatRelativeTime(chat.updatedAt)}
                       </span>
                       {!isRenaming && (
-                        <IconButton
-                          className="agent-dedicated-session-menu-btn"
-                          aria-label={`Session actions for ${chat.title}`}
-                          aria-haspopup="true"
-                          aria-expanded={isMenuOpen}
-                          label={`Session actions for ${chat.title}`}
-                          onClick={event => {
-                            event.stopPropagation()
-                            setSessionMenuChatId(previous =>
-                              previous === chat.id ? null : chat.id
-                            )
+                        <Dropdown
+                          destroyOnHidden
+                          menu={{
+                            items: [
+                              { key: 'rename', label: 'Rename' },
+                              { key: 'delete', label: 'Delete', danger: true },
+                            ],
+                            onClick: ({ key }) => {
+                              if (key === 'rename') startSessionRename(chat.id, chat.title)
+                              if (key === 'delete') void deleteSession(chat.id, chat.title)
+                            },
                           }}
-                          size="xs"
-                          variant="ghost"
+                          onOpenChange={open => setSessionMenuChatId(open ? chat.id : null)}
+                          open={isMenuOpen}
+                          placement="bottomRight"
+                          popupRender={menu => <div data-session-menu-popup="true">{menu}</div>}
+                          trigger={['click']}
                         >
-                          &#8230;
-                        </IconButton>
+                          <Button
+                            htmlType="button"
+                            type="text"
+                            size="small"
+                            shape="circle"
+                            className="agent-dedicated-session-menu-btn"
+                            aria-label={`Session actions for ${chat.title}`}
+                            aria-haspopup="menu"
+                            aria-expanded={isMenuOpen}
+                            title={`Session actions for ${chat.title}`}
+                            icon={<MoreOutlined aria-hidden="true" />}
+                            onClick={event => event.stopPropagation()}
+                          />
+                        </Dropdown>
                       )}
                       <span className="agent-dedicated-session-chevron" aria-hidden="true">
                         ›
                       </span>
                     </span>
-                    {isMenuOpen && !isRenaming && (
-                      <div
-                        className="agent-dedicated-session-menu"
-                        role="group"
-                        aria-label={`Session actions for ${chat.title}`}
-                      >
-                        <MenuItem
-                          className="agent-dedicated-session-menu-item"
-                          onClick={() => startSessionRename(chat.id, chat.title)}
-                        >
-                          Rename
-                        </MenuItem>
-                        <MenuItem
-                          className="agent-dedicated-session-menu-item danger"
-                          color="danger"
-                          onClick={() => deleteSession(chat.id, chat.title)}
-                        >
-                          Delete
-                        </MenuItem>
-                      </div>
-                    )}
                   </div>
                 )
               })}
@@ -1127,33 +1133,33 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                 </span>
                 {hasMoreSessions && !showAllSessions && (
                   <Button
-                    color="neutral"
+                    htmlType="button"
                     onClick={() => setShowAllSessions(true)}
-                    size="xs"
-                    variant="text"
+                    size="small"
+                    type="text"
                   >
                     Show more
                   </Button>
                 )}
                 {showAllSessions && sortedChats.length > SESSION_PREVIEW_LIMIT && (
                   <Button
-                    color="neutral"
+                    htmlType="button"
                     onClick={() => setShowAllSessions(false)}
-                    size="xs"
-                    variant="text"
+                    size="small"
+                    type="text"
                   >
                     Show less
                   </Button>
                 )}
                 {showAllSessions && chatListHasMoreRemoteSessions && loadMoreChatSessions && (
                   <Button
-                    color="neutral"
+                    htmlType="button"
                     disabled={chatListMoreLoading}
                     onClick={() => {
                       void loadMoreChatSessions()
                     }}
-                    size="xs"
-                    variant="text"
+                    size="small"
+                    type="text"
                   >
                     {chatListMoreLoading ? 'Loading…' : 'Load more'}
                   </Button>
@@ -1164,18 +1170,21 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
         </section>
       )}
       {pendingDeleteSession ? (
-        <ConfirmDialog
+        <Modal
+          open
           title="Delete session?"
-          body={
-            <p>
-              Delete <strong>{pendingDeleteSession.title}</strong>? Messages cannot be recovered.
-            </p>
-          }
-          confirmLabel="Delete"
-          tone="danger"
+          okText="Delete"
+          cancelText="Cancel"
+          okButtonProps={{ danger: true }}
+          cancelButtonProps={{ autoFocus: true }}
           onCancel={() => setPendingDeleteSession(null)}
-          onConfirm={confirmDeleteSession}
-        />
+          onOk={confirmDeleteSession}
+        >
+          <Typography.Text>
+            Delete <Typography.Text strong>{pendingDeleteSession.title}</Typography.Text>? Messages
+            cannot be recovered.
+          </Typography.Text>
+        </Modal>
       ) : null}
       <div ref={chatEndRef} />
     </div>

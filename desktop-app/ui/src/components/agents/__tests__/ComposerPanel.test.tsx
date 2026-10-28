@@ -19,6 +19,7 @@ import {
   imageInputBlockMessage,
 } from '../../../../../src/imageInputDecision'
 import type { WorkflowRecipeListResult } from '../../../../../src/types'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import type {
   ComposerFileAttachment,
   ComposerImageAttachment,
@@ -167,6 +168,7 @@ function setScrollHeight(textarea: HTMLTextAreaElement, value: number) {
 }
 
 beforeEach(() => {
+  installAntdDomEnvironment()
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
@@ -262,26 +264,27 @@ describe.each([
     const viewport = container.querySelector('.composer-textarea-viewport')
 
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
-    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
-    fireEvent.click(screen.getByRole('button', { name: /Model — Haiku 4.5/ }))
-
     const contextMenu = container.querySelector('.composer-reference-menu-panel')
+    expect(contextMenu).toBeTruthy()
+    expect(viewport?.contains(contextMenu)).toBe(false)
+
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
     // The submenu is portaled to document.body, so it lives outside the
     // component subtree entirely — query the whole document for it.
     const submenu = document.querySelector('.composer-reference-submenu')
-    const modelMenu = container.querySelector('.model-selector-popover')
-
-    expect(contextMenu).toBeTruthy()
     expect(submenu).toBeTruthy()
-    expect(modelMenu).toBeTruthy()
-    expect(viewport?.contains(contextMenu)).toBe(false)
     expect(viewport?.contains(submenu)).toBe(false)
-    expect(viewport?.contains(modelMenu)).toBe(false)
     expect(shell?.contains(contextMenu)).toBe(true)
-    // Portaled: no longer a descendant of the composer shell (or the container).
     expect(shell?.contains(submenu)).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: /Model — Haiku 4.5/ }))
+    const modelMenu = document.querySelector('.ant-select-dropdown')
+    expect(modelMenu).toBeTruthy()
+    expect(viewport?.contains(modelMenu)).toBe(false)
     expect(container.contains(submenu)).toBe(false)
-    expect(shell?.contains(modelMenu)).toBe(true)
+    // Ant Design Select portals its popup out of the clipped composer subtree.
+    expect(shell?.contains(modelMenu)).toBe(false)
     expect(cssRule('\\.composer-input-shell')).not.toMatch(/overflow\s*:/)
     expect(cssRule('\\.composer-textarea-viewport')).toMatch(/overflow\s*:\s*hidden/)
   })
@@ -1272,11 +1275,15 @@ describe('ComposerPanel attachments chip row (STORY-38)', () => {
     expect(actionsMock.handleRemoveComposerReferenceAttachment).not.toHaveBeenCalled()
   })
 
-  it('styles the clear control and the count as part of the inline chip row', () => {
+  it('keeps the clear action and count together in the attachment group', () => {
     composerState.composerImageAttachments = [firstImage]
     render(<ComposerPanel inline />)
-    expect(cssRule('.composer-attachments-count')).toContain('white-space: nowrap')
-    expect(cssRule('.composer-attachments-clear')).toContain('cursor: pointer')
+    const list = screen.getByTestId('composer-attachments-list')
+    const count = screen.getByTestId('composer-attachments-count')
+    const clear = screen.getByRole('button', { name: 'Clear all attachments' })
+    expect(list.contains(count)).toBe(true)
+    expect(list.contains(clear)).toBe(true)
+    expect(count.parentElement).toBe(clear.parentElement)
   })
 })
 
@@ -1393,15 +1400,13 @@ describe('ComposerPanel document attachments (#678)', () => {
     expect(sendButton().disabled).toBe(false)
   })
 
-  it('gives a document chip its own icon class, not the image one', async () => {
+  it('uses an Ant Design document icon for document attachments', async () => {
     composerState.composerFileAttachments = [await notesFile()]
     render(<ComposerPanel inline />)
 
     const chip = screen.getByTestId('composer-file-chip')
-    // Witness: the chip renders its icon at all.
-    expect(chip.querySelector('.composer-reference-icon')).not.toBeNull()
-    expect(chip.querySelector('.composer-reference-icon--uploaded-file')).not.toBeNull()
-    expect(chip.querySelector('.composer-reference-icon--uploaded-image')).toBeNull()
+    expect(chip.querySelector('svg[data-icon="file-text"]')).not.toBeNull()
+    expect(chip.querySelector('svg[data-icon="picture"]')).toBeNull()
   })
 
   it('removes a document through its chip button', async () => {

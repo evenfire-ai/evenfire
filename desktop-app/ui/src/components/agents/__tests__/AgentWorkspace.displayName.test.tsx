@@ -177,15 +177,14 @@ describe('AgentWorkspace title selector — visible agent name (R1-M3)', () => {
     render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
 
     // Collapsed trigger label = the display.
-    const triggerLabel = document.querySelector('.agent-title-selector-trigger-label')
-    expect(triggerLabel?.textContent).toBe('Alpha Host')
+    const trigger = screen.getByRole('button', { name: 'Switch chat agent' })
+    expect(trigger.textContent).toContain('Alpha Host')
 
     // Open the dropdown and assert the option row renders the display, not the id.
-    fireEvent.click(screen.getByRole('button', { name: 'Switch chat agent' }))
-    const optionRow = document.querySelector('.agent-title-selector-row-label')
-    expect(optionRow?.textContent).toBe('Alpha Host')
+    fireEvent.click(trigger)
+    expect(screen.getByRole('button', { name: 'Alpha Host' })).toBeTruthy()
     // The 3-dots aria-label is derived from the visible label too.
-    expect(screen.getByRole('menuitem', { name: 'Open Alpha Host sections' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open Alpha Host sections' })).toBeTruthy()
   })
 
   it('falls back to the identifier in the trigger when no display exists', () => {
@@ -195,11 +194,10 @@ describe('AgentWorkspace title selector — visible agent name (R1-M3)', () => {
 
     render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
 
-    const triggerLabel = document.querySelector('.agent-title-selector-trigger-label')
-    expect(triggerLabel?.textContent).toBe('alpha')
+    const trigger = screen.getByRole('button', { name: 'Switch chat agent' })
+    expect(trigger.textContent).toContain('alpha')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Switch chat agent' }))
-    const optionRow = document.querySelector('.agent-title-selector-row-label')
-    expect(optionRow?.textContent).toBe('alpha')
+    fireEvent.click(trigger)
+    expect(screen.getByRole('button', { name: 'alpha' })).toBeTruthy()
   })
 })

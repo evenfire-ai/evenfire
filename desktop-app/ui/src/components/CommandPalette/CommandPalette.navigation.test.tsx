@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { CommandPalette } from '.'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 
 const scrollIntoView = vi.fn()
 
+beforeEach(installAntdDomEnvironment)
 afterEach(() => {
   vi.restoreAllMocks()
   scrollIntoView.mockReset()
@@ -27,20 +29,21 @@ describe('CommandPalette arrow navigation', () => {
     )
 
     const input = screen.getByRole('textbox', { name: 'Search commands' })
-    const options = screen.getAllByRole('option')
-    await waitFor(() => expect(options[0]?.getAttribute('aria-selected')).toBe('true'))
+    await waitFor(() =>
+      expect(screen.getAllByRole('option')[0]?.getAttribute('aria-selected')).toBe('true')
+    )
     scrollIntoView.mockClear()
 
     fireEvent.keyDown(input, { key: 'ArrowDown' })
     await waitFor(() => {
-      expect(options[1]?.getAttribute('aria-selected')).toBe('true')
+      expect(screen.getAllByRole('option')[1]?.getAttribute('aria-selected')).toBe('true')
       expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'nearest' })
     })
 
     scrollIntoView.mockClear()
     fireEvent.keyDown(input, { key: 'ArrowUp' })
     await waitFor(() => {
-      expect(options[0]?.getAttribute('aria-selected')).toBe('true')
+      expect(screen.getAllByRole('option')[0]?.getAttribute('aria-selected')).toBe('true')
       expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'nearest' })
     })
   })

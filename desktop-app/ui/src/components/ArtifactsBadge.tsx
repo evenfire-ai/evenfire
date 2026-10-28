@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button } from '@components/Common'
+import { FileTextOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Flex, Tag, Typography } from 'antd'
 
 interface ArtifactInfo {
   name: string
@@ -105,46 +106,48 @@ export function ArtifactsBadge({ hostRef, artifactNames }: ArtifactsBadgeProps) 
   }
 
   return (
-    <div className="artifacts-badge-container" title={loadError || undefined}>
+    <Flex vertical gap="small">
       {loadError && (
-        <p className="artifacts-badge-error">
-          Artifact catalog unavailable. Showing filenames from message output.
-        </p>
+        <Alert
+          type="warning"
+          showIcon
+          title="Artifact catalog unavailable. Showing filenames from message output."
+          description={loadError}
+        />
       )}
       <Button
-        className="artifacts-badge-toggle"
+        type={expanded ? 'primary' : 'default'}
+        size="small"
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
-        color="primary"
-        size="xs"
-        variant="soft"
+        aria-controls="generated-artifacts-list"
       >
-        <span className="artifacts-badge-icon">&#128196;</span>
+        <FileTextOutlined />
         {artifacts.length} artifact{artifacts.length > 1 ? 's' : ''} generated
       </Button>
       {expanded && (
-        <div className="artifacts-badge-list">
-          {artifacts.map(a => (
-            <div key={a.name} className="artifacts-badge-item">
-              <span className={`artifacts-format-badge fmt-${a.format}`}>
-                {formatBadge(a.format)}
-              </span>
-              <span className="artifacts-filename">{a.name}</span>
-              <span className="artifacts-size">{formatSize(a.sizeBytes)}</span>
-              <Button
-                className="artifacts-download-btn"
-                color="primary"
-                disabled={downloading === a.name}
-                onClick={() => void handleDownload(a.name)}
-                size="xs"
-                variant="soft"
-              >
-                {downloading === a.name ? '...' : 'Download'}
-              </Button>
-            </div>
-          ))}
-        </div>
+        <Card id="generated-artifacts-list" size="small" title="Generated artifacts">
+          <Flex vertical gap="small">
+            {artifacts.map(a => (
+              <Flex key={a.name} align="center" gap="small" wrap>
+                <Tag>{formatBadge(a.format)}</Tag>
+                <Typography.Text>{a.name}</Typography.Text>
+                <Typography.Text type="secondary">{formatSize(a.sizeBytes)}</Typography.Text>
+                <Button
+                  type="default"
+                  size="small"
+                  aria-busy={downloading === a.name}
+                  loading={downloading === a.name}
+                  disabled={downloading === a.name}
+                  onClick={() => void handleDownload(a.name)}
+                >
+                  Download
+                </Button>
+              </Flex>
+            ))}
+          </Flex>
+        </Card>
       )}
-    </div>
+    </Flex>
   )
 }

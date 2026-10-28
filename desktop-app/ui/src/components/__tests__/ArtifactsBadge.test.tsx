@@ -332,7 +332,7 @@ describe('ArtifactsBadge — download', () => {
     URL.revokeObjectURL = origRevokeObjectURL
   })
 
-  it("shows '...' while download is in progress", async () => {
+  it('shows a busy, disabled download control while the file download is in progress', async () => {
     let resolveDownload: (value: ArrayBuffer) => void
     const downloadPromise = new Promise<ArrayBuffer>(resolve => {
       resolveDownload = resolve
@@ -350,15 +350,15 @@ describe('ArtifactsBadge — download', () => {
 
     fireEvent.click(screen.getByText(/3 artifacts generated/))
 
-    const downloadButtons = screen.getAllByText('Download')
+    const downloadButton = screen.getAllByRole('button', { name: 'Download' })[0]!
 
     await act(async () => {
-      fireEvent.click(downloadButtons[0]!)
+      fireEvent.click(downloadButton)
     })
 
-    // The first button should show "..." while downloading
     await waitFor(() => {
-      expect(screen.getByText('...')).toBeDefined()
+      expect(downloadButton.getAttribute('aria-busy')).toBe('true')
+      expect((downloadButton as HTMLButtonElement).disabled).toBe(true)
     })
 
     // Resolve the download

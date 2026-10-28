@@ -23,9 +23,9 @@ async function mountPortalEraShell(page: Page, drawerOpen: boolean): Promise<voi
           <div class="top-bar top-bar--titlebar">
             <div class="header-left">
               <div class="global-search global-search--titlebar is-open">
-                <input class="search-input" aria-label="Search" />
-                <div class="global-search-results">
-                  <div class="search-results-card"><button id="search-result">Search result</button></div>
+                <input aria-label="Search" />
+                <div class="ant-popover" style="position:absolute;top:100%;right:0;width:720px;z-index:var(--layer-dropdown)">
+                  <div><button id="search-result">Search result</button></div>
                 </div>
               </div>
             </div>
@@ -52,7 +52,7 @@ async function mountPortalEraShell(page: Page, drawerOpen: boolean): Promise<voi
 
 async function topmostAtOverlap(page: Page): Promise<string | null> {
   return page.evaluate(() => {
-    const result = document.querySelector('.global-search-results')
+    const result = document.querySelector('.ant-popover')
     const drawer = document.querySelector('.chat-drawer')
     if (!result || !drawer) return null
 
@@ -65,7 +65,7 @@ async function topmostAtOverlap(page: Page): Promise<string | null> {
     if (left >= right || top >= bottom) return null
 
     const topmost = document.elementFromPoint((left + right) / 2, (top + bottom) / 2)
-    if (topmost?.closest('.global-search-results')) return 'search-result'
+    if (topmost?.closest('.ant-popover')) return 'search-result'
     if (topmost?.closest('.chat-drawer')) return 'chat-drawer'
     return null
   })

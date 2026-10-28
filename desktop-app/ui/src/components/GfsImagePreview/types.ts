@@ -1,5 +1,3 @@
-import type { ReactNode } from 'react'
-
 /**
  * Where the preview bytes come from (exactly one):
  * - `gfsUri` — fetched from GFS by URI (Files/preview surfaces).
@@ -28,9 +26,8 @@ export type GfsImagePreviewProps = {
 /**
  * The de-modalized image preview (spec 18 §3.B.2): the `<img>` + its fetch,
  * copy, and size-guard, WITHOUT the portal/backdrop/close/Escape chrome. Both
- * the surviving modal and `FilePreviewPage` mount it. `headerActions` is a slot
- * for chrome-owned controls (the modal's close button); `headingLevel` lets a
- * page use `h2` while the modal keeps `h3`.
+ * the surviving modal and `FilePreviewPage` mount it. `headingLevel` lets a
+ * page use `h2` while the modal keeps `h3`; the modal title is owned by AntD.
  */
 export type GfsImagePreviewBodyProps = {
   byteLength: number
@@ -38,6 +35,6 @@ export type GfsImagePreviewBodyProps = {
   mimeType: string
   onDownloadError?: (error: unknown) => void
   titleId?: string
-  headerActions?: ReactNode
+  hideTitle?: boolean
   headingLevel?: 2 | 3
 } & GfsImagePreviewSource

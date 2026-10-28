@@ -1,5 +1,5 @@
-import { IconButton } from '@components/Common'
-import { IconMaximize, IconNewChat, IconPanelRightClose } from '@components/SidebarNav/icons'
+import { FullscreenOutlined, PlusOutlined, RightOutlined } from '@ant-design/icons'
+import { Button, Drawer, Flex } from 'antd'
 import { CHAT_DRAWER_MAX_ABSOLUTE, CHAT_DRAWER_MIN_WIDTH } from '@hooks/useChatDrawerResize'
 import type { ChatDrawerProps } from './types'
 
@@ -51,44 +51,59 @@ export function ChatDrawer({
         onMouseDown={onResizeHandleMouseDown}
         onKeyDown={onResizeHandleKeyDown}
       />
-      <header className="chat-drawer__header">
-        <div className="chat-drawer__header-main">{header}</div>
-        <div className="chat-drawer__header-actions">
-          <IconButton
-            color="neutral"
-            variant="ghost"
-            size="sm"
-            label="New chat"
-            title="New chat"
-            onClick={onNewChat}
-          >
-            <IconNewChat />
-          </IconButton>
-          <IconButton
-            color="neutral"
-            variant="ghost"
-            size="sm"
-            label="Open chat in full screen"
-            title="Open chat in full screen"
-            onClick={onExpandFullScreen}
-          >
-            <IconMaximize />
-          </IconButton>
-          <IconButton
-            color="neutral"
-            variant="ghost"
-            size="sm"
-            label="Collapse chat drawer"
-            title="Collapse chat drawer"
-            onClick={onToggle}
-          >
-            <IconPanelRightClose />
-          </IconButton>
+      <Drawer
+        aria-label="Chat"
+        aria-modal={false}
+        autoFocus={false}
+        closable={false}
+        destroyOnHidden={false}
+        extra={
+          <Flex align="center" gap="small" className="chat-drawer__header-actions">
+            <Button
+              aria-label="New chat"
+              htmlType="button"
+              icon={<PlusOutlined aria-hidden="true" />}
+              size="small"
+              type="text"
+              title="New chat"
+              onClick={onNewChat}
+            />
+            <Button
+              aria-label="Open chat in full screen"
+              htmlType="button"
+              icon={<FullscreenOutlined aria-hidden="true" />}
+              size="small"
+              type="text"
+              title="Open chat in full screen"
+              onClick={onExpandFullScreen}
+            />
+            <Button
+              aria-label="Collapse chat drawer"
+              htmlType="button"
+              icon={<RightOutlined aria-hidden="true" />}
+              size="small"
+              type="text"
+              title="Collapse chat drawer"
+              onClick={onToggle}
+            />
+          </Flex>
+        }
+        forceRender
+        focusable={{ trap: false, focusTriggerAfterClose: false }}
+        getContainer={false}
+        keyboard={false}
+        mask={false}
+        open={ready}
+        placement="right"
+        rootStyle={{ position: 'absolute', inset: 0 }}
+        size={width}
+        title={<div className="chat-drawer__header-main">{header}</div>}
+        zIndex={1}
+      >
+        <div className="chat-drawer__surface" ref={containerRef as React.RefObject<HTMLDivElement>}>
+          {children}
         </div>
-      </header>
-      <div className="chat-drawer__surface" ref={containerRef as React.RefObject<HTMLDivElement>}>
-        {children}
-      </div>
+      </Drawer>
     </aside>
   )
 }

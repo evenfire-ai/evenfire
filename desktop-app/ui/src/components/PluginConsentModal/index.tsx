@@ -1,6 +1,6 @@
 import { type CSSProperties, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Button } from '@components/Common'
+import { Button, Card, Checkbox, Flex, Typography } from 'antd'
 import type { PluginConsentModalProps } from './types'
 
 /**
@@ -112,57 +112,55 @@ export function PluginConsentModal({ request, onResolve }: PluginConsentModalPro
           modality here would misdescribe the DOM to assistive tech. The plugin
           cannot exploit the un-dimmed chrome — main hides the plugin's own
           WebContentsView while this prompt is up. */}
-      <div className="confirm-dialog da-plugin-consent" role="dialog" aria-labelledby={titleId}>
-        <h3 id={titleId}>{request.pluginTitle} wants access to your information</h3>
+      <Card
+        role="dialog"
+        aria-labelledby={titleId}
+        title={
+          <Typography.Title id={titleId} level={3}>
+            {request.pluginTitle} wants access to your information
+          </Typography.Title>
+        }
+      >
+        <Flex vertical gap="middle">
+          {request.priorPromptCount > 0 ? (
+            <Typography.Text type="secondary">
+              This plugin has asked for permissions {request.priorPromptCount + 1} times this
+              session.
+            </Typography.Text>
+          ) : null}
 
-        {request.priorPromptCount > 0 ? (
-          <p className="muted da-plugin-consent__count">
-            This plugin has asked for permissions {request.priorPromptCount + 1} times this session.
-          </p>
-        ) : null}
+          <Flex vertical gap="small">
+            {request.rows.map(row => (
+              <Checkbox
+                key={row.capability}
+                checked={checked.has(row.capability)}
+                onChange={() => toggle(row.capability)}
+              >
+                <Flex vertical>
+                  <Typography.Text strong>{row.title}</Typography.Text>
+                  <Typography.Text type="secondary">{row.dataDescription}</Typography.Text>
+                </Flex>
+              </Checkbox>
+            ))}
+          </Flex>
 
-        <ul className="da-plugin-consent__rows">
-          {request.rows.map(row => (
-            <li key={row.capability} className="da-plugin-consent__row">
-              <label className="da-plugin-consent__label">
-                <input
-                  type="checkbox"
-                  checked={checked.has(row.capability)}
-                  onChange={() => toggle(row.capability)}
-                />
-                <span>
-                  <span className="da-plugin-consent__row-title">{row.title}</span>
-                  <span className="da-plugin-consent__row-detail muted">{row.dataDescription}</span>
-                </span>
-              </label>
-            </li>
-          ))}
-        </ul>
+          <Typography.Text type="secondary">
+            You can change this any time in Settings → Plugin permissions.
+          </Typography.Text>
 
-        <p className="muted da-plugin-consent__footer">
-          You can change this any time in Settings → Plugin permissions.
-        </p>
-
-        <div className="confirm-dialog-actions">
-          <Button
-            color="neutral"
-            onClick={() => onResolve(request.promptId, [])}
-            size="sm"
-            variant="ghost"
-          >
-            Deny
-          </Button>
-          <Button
-            ref={allowButtonRef}
-            color="primary"
-            disabled={checked.size === 0}
-            onClick={() => onResolve(request.promptId, [...checked])}
-            size="sm"
-          >
-            Allow
-          </Button>
-        </div>
-      </div>
+          <Flex justify="end" gap="small">
+            <Button onClick={() => onResolve(request.promptId, [])}>Deny</Button>
+            <Button
+              ref={allowButtonRef}
+              type="primary"
+              disabled={checked.size === 0}
+              onClick={() => onResolve(request.promptId, [...checked])}
+            >
+              Allow
+            </Button>
+          </Flex>
+        </Flex>
+      </Card>
     </div>,
     document.body
   )

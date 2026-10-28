@@ -1,33 +1,24 @@
 import { useContext, useLayoutEffect, useRef, useState } from 'react'
+import { CloseOutlined } from '@ant-design/icons'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListContext } from '@contexts/ChatListContext'
-import { Button } from '@components/Common'
+import { Tabs, type TabsRef, Typography } from 'antd'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import type { WorkspaceTabStripProps } from './types'
 
+export const WORKSPACE_TABS_ID = 'workspace-tabs'
+
 type DropSide = 'before' | 'after'
 type DropTarget = { id: string; side: DropSide }
 
-/** Which half of a tab the cursor is over — the insertion side for the drop. */
-function sideFromEvent(event: React.DragEvent<HTMLElement>): DropSide {
-  const rect = event.currentTarget.getBoundingClientRect()
+/** Which half of the target tab the cursor is over — the insertion side for the drop. */
+function sideFromEvent(event: React.DragEvent<HTMLElement>, target: HTMLElement): DropSide {
+  const rect = target.getBoundingClientRect()
   return event.clientX < rect.left + rect.width / 2 ? 'before' : 'after'
 }
 
-/**
- * The single global workspace strip (spec 01 §4.2, mini-spec 03 §3). It renders
- * every tab in the universal store — chat, app, files, settings — and is the
- * only tab strip in the app (it absorbs the old chat-only `ChatTabs`). Chat tabs
- * show their live session badge via `sessionStateByChatKey`, exactly as the
- * former strip did; non-chat tabs carry no badge. Selecting a tab activates it
- * (the seam derives the route from the active tab); the close control removes it.
- *
- * Tabs reorder by native HTML5 drag & drop (mouse) and by Alt+ArrowLeft/Right
- * on the focused select control (keyboard). The drag ghost / drop-indicator
- * feedback is local UI state only; the order itself lives in the store via
- * `onReorder`, which never changes which tab is active.
- */
+/** The selected tab and chat surface are controlled by Evenfire's workspace store. */
 export function WorkspaceTabStrip({
   tabs,
   activeTabId,
@@ -37,154 +28,189 @@ export function WorkspaceTabStrip({
   panelId,
 }: WorkspaceTabStripProps) {
   const chatList = useContext(ChatListContext)
+  const tabsRef = useRef<TabsRef | null>(null)
+  const stripRef = useRef<HTMLDivElement | null>(null)
+  const draggingIdRef = useRef<string | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
-  const stripRef = useRef<HTMLDivElement | null>(null)
-  // Set when a KEYBOARD close removes the active tab's control: the close, unlike a
-  // reorder, drops the keyed node the user was on, so focus would fall to <body>.
-  // Consumed by the layout effect once the neighbour becomes active this commit.
+  // Set only for a keyboard close of the active tab. Pointer close leaves focus
+  // with the pointer and must not move it to another tab.
   const focusAfterActiveCloseRef = useRef(false)
 
+  const tabIndexFromTarget = (target: EventTarget | null): number => {
+    if (!(target instanceof Element)) return -1
+    const tabControl = target.closest<HTMLElement>('[role="tab"]')
+    if (!tabControl) return -1
+    return Array.from(
+      tabsRef.current?.nativeElement?.querySelectorAll<HTMLElement>('[role="tab"]') ?? []
+    ).indexOf(tabControl)
+  }
+
   const clearDrag = () => {
+    draggingIdRef.current = null
     setDraggingId(null)
     setDropTarget(null)
   }
 
-  // Restore keyboard focus after a close removed the active tab. The reorder path
-  // keeps focus for free (the moved node survives, keyed by id); the close does not,
-  // so move focus to whichever tab took over — or to the strip itself when the
-  // workspace is now empty — rather than letting it drop to <body>.
+  // Restore focus after an active tab close and connect AntD's selected tab to
+  // the app-owned chat surface. AntD Tabs exposes internal pane relationships;
+  // this strip deliberately keeps route content mounted in App, so its empty
+  // internal panes are hidden and the actual surface owns the active relation.
   useLayoutEffect(() => {
+    const root = tabsRef.current?.nativeElement
+    const tabControls = Array.from(root?.querySelectorAll<HTMLElement>('[role="tab"]') ?? [])
+    for (const control of tabControls) control.removeAttribute('aria-controls')
+
+    if (panelId && activeTabId) {
+      const activeIndex = tabs.findIndex(tab => tab.id === activeTabId)
+      const activeControl = tabControls[activeIndex]
+      if (activeControl) activeControl.setAttribute('aria-controls', panelId)
+    }
+
+    for (const [index, closeButton] of Array.from(
+      root?.querySelectorAll<HTMLButtonElement>('.ant-tabs-tab-remove') ?? []
+    ).entries()) {
+      const tab = tabs[index]
+      if (!tab) continue
+      closeButton.setAttribute('aria-label', `Close ${tab.title}`)
+      closeButton.setAttribute('title', `Close ${tab.title}`)
+    }
+
     if (!focusAfterActiveCloseRef.current) return
     focusAfterActiveCloseRef.current = false
-    const strip = stripRef.current
-    if (!strip) return
-    const nextActive = strip.querySelector<HTMLElement>(
-      '.chat-view-tab.is-active .chat-view-tab__select'
-    )
-    ;(nextActive ?? strip).focus()
-  }, [activeTabId])
+    const nextActive = root?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+    ;(nextActive ?? stripRef.current)?.focus()
+  }, [activeTabId, panelId, tabs])
 
-  const handleCloseClick = (event: React.MouseEvent<HTMLButtonElement>, tab: WorkspaceTab) => {
-    // Enter/Space on a button reports `detail === 0`; a pointer click reports >= 1.
-    // Only manage focus for keyboard users closing the ACTIVE tab: a pointer user
-    // does not need it, and forcing focus on click could surprise them.
-    if (event.detail === 0 && tab.id === activeTabId) {
+  const handleCloseCapture = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.detail !== 0 || activeTabId === null) return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const closeButton = target.closest('button')
+    const tabControl = closeButton?.parentElement?.querySelector<HTMLElement>('[role="tab"]')
+    const index = tabControl ? tabIndexFromTarget(tabControl) : -1
+    if (index >= 0 && tabs[index]?.id === activeTabId) {
       focusAfterActiveCloseRef.current = true
     }
-    onClose(tab.id)
   }
 
-  const handleDrop = (event: React.DragEvent<HTMLElement>, target: WorkspaceTab) => {
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    const targetIndex = tabIndexFromTarget(event.target)
+    const targetTab = tabs[targetIndex]
+    if (!targetTab) {
+      clearDrag()
+      return
+    }
     event.preventDefault()
-    const fromId = event.dataTransfer.getData('text/plain') || draggingId
-    const side = sideFromEvent(event)
+    const tabControl = (event.target as Element).closest<HTMLElement>('[role="tab"]')
+    const targetNode = tabControl?.parentElement ?? tabControl
+    const fromId = event.dataTransfer.getData('text/plain') || draggingIdRef.current
+    const side = targetNode ? sideFromEvent(event, targetNode) : 'before'
     clearDrag()
-    if (!fromId || fromId === target.id) return
+    if (!fromId || fromId === targetTab.id) return
     const fromIndex = tabs.findIndex(tab => tab.id === fromId)
-    const targetIndex = tabs.findIndex(tab => tab.id === target.id)
-    if (fromIndex < 0 || targetIndex < 0) return
-    // The reducer's `toIndex` is the final index in the array WITHOUT the dragged
-    // tab: when the dragged tab sits before the target, removing it shifts the
-    // target left by one, so the drop slot moves with it.
+    if (fromIndex < 0) return
+    // The reducer's `toIndex` is the final index without the dragged tab. Removing
+    // a left-side source shifts the target index left by one.
     const targetAdjusted = targetIndex - (fromIndex < targetIndex ? 1 : 0)
     onReorder(fromId, side === 'after' ? targetAdjusted + 1 : targetAdjusted)
   }
 
-  const handleSelectKeyDown = (
-    event: React.KeyboardEvent<HTMLButtonElement>,
-    tab: WorkspaceTab,
-    index: number
-  ) => {
-    if (!event.altKey) return
-    if (event.key === 'ArrowLeft') {
-      event.preventDefault()
-      onReorder(tab.id, index - 1)
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault()
-      onReorder(tab.id, index + 1)
-    }
-  }
-
   return (
     <div
-      className="chat-view-tabs"
-      role="toolbar"
       aria-label="Workspace tabs"
+      onClickCapture={handleCloseCapture}
+      onDragEnd={clearDrag}
+      onDragOver={event => {
+        const targetIndex = tabIndexFromTarget(event.target)
+        const targetTab = tabs[targetIndex]
+        if (!targetTab) {
+          setDropTarget(null)
+          return
+        }
+        event.preventDefault()
+        if (!draggingId || targetTab.id === draggingId) {
+          setDropTarget(null)
+          return
+        }
+        const tabControl = (event.target as Element).closest<HTMLElement>('[role="tab"]')
+        const targetNode = tabControl?.parentElement ?? tabControl
+        setDropTarget({
+          id: targetTab.id,
+          side: targetNode ? sideFromEvent(event, targetNode) : 'before',
+        })
+      }}
+      onDragStart={event => {
+        const index = tabIndexFromTarget(event.target)
+        const tab = tabs[index]
+        if (!tab) return
+        event.dataTransfer.setData('text/plain', tab.id)
+        event.dataTransfer.effectAllowed = 'move'
+        draggingIdRef.current = tab.id
+        setDraggingId(tab.id)
+      }}
+      onDrop={handleDrop}
+      onKeyDownCapture={event => {
+        if (!event.altKey || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return
+        const index = tabIndexFromTarget(event.target)
+        const tab = tabs[index]
+        if (!tab) return
+        event.preventDefault()
+        event.stopPropagation()
+        onReorder(tab.id, index + (event.key === 'ArrowLeft' ? -1 : 1))
+      }}
       ref={stripRef}
+      role="toolbar"
       tabIndex={-1}
     >
-      <div className="chat-view-tabs__scroller">
-        <div className="chat-view-tabs__list">
-          {tabs.map((tab, index) => {
-            const active = tab.id === activeTabId
-            const sessionState =
-              tab.kind === 'chat' && tab.chat?.agentRef && tab.chat?.chatId
-                ? chatList?.sessionStateByChatKey[makeTaskKey(tab.chat.agentRef, tab.chat.chatId)]
-                : undefined
-            const drop = dropTarget?.id === tab.id ? dropTarget.side : undefined
-            const className =
-              `chat-view-tab${active ? ' is-active' : ''}` +
-              `${draggingId === tab.id ? ' is-dragging' : ''}` +
-              `${drop === 'before' ? ' is-drop-before' : ''}` +
-              `${drop === 'after' ? ' is-drop-after' : ''}`
-            return (
-              <div
-                className={className}
+      <Tabs
+        activeKey={activeTabId ?? ''}
+        hideAdd
+        id={panelId ? WORKSPACE_TABS_ID : undefined}
+        items={tabs.map(tab => {
+          const sessionState =
+            tab.kind === 'chat' && tab.chat?.agentRef && tab.chat?.chatId
+              ? chatList?.sessionStateByChatKey[makeTaskKey(tab.chat.agentRef, tab.chat.chatId)]
+              : undefined
+          return {
+            key: tab.id,
+            closable: true,
+            closeIcon: <CloseOutlined aria-hidden="true" />,
+            label: (
+              <span
+                aria-label={tab.title}
+                data-workspace-dragging={draggingId === tab.id ? 'true' : undefined}
+                data-workspace-drop-side={dropTarget?.id === tab.id ? dropTarget.side : undefined}
                 draggable
-                key={tab.id}
-                onDragEnd={clearDrag}
-                onDragOver={event => {
-                  // preventDefault always, so a drop on the source tab is a valid
-                  // (no-op) target; but don't paint a drop indicator on the tab
-                  // being dragged — it would show `is-dragging` and `is-drop-*`
-                  // at once.
-                  event.preventDefault()
-                  if (tab.id === draggingId) {
-                    setDropTarget(null)
-                    return
-                  }
-                  setDropTarget({ id: tab.id, side: sideFromEvent(event) })
-                }}
-                onDragStart={event => {
-                  event.dataTransfer.setData('text/plain', tab.id)
-                  event.dataTransfer.effectAllowed = 'move'
-                  setDraggingId(tab.id)
-                }}
-                onDrop={event => handleDrop(event, tab)}
               >
-                <Button
-                  align="start"
-                  aria-controls={active ? panelId : undefined}
-                  aria-label={tab.title}
-                  aria-pressed={active}
-                  className="chat-view-tab__select"
-                  color="neutral"
-                  onClick={() => onSelect(tab.id)}
-                  onKeyDown={event => handleSelectKeyDown(event, tab, index)}
-                  size="sm"
-                  variant="ghost"
-                >
-                  {tab.kind === 'chat' && (
-                    <ChatStateBadge sessionState={sessionState} unreadTerminal={false} />
-                  )}
-                  <span className="chat-view-tab__label">{tab.title}</span>
-                </Button>
-                <Button
-                  aria-label={`Close ${tab.title}`}
-                  className="chat-view-tab__close"
-                  color="neutral"
-                  onClick={event => handleCloseClick(event, tab)}
-                  size="xs"
-                  variant="ghost"
-                >
-                  <span aria-hidden="true">×</span>
-                </Button>
-              </div>
-            )
-          })}
-        </div>
-      </div>
+                {tab.kind === 'chat' ? (
+                  <ChatStateBadge sessionState={sessionState} unreadTerminal={false} />
+                ) : null}
+                <Typography.Text ellipsis title={tab.title}>
+                  {tab.title}
+                </Typography.Text>
+              </span>
+            ),
+            children: null,
+          }
+        })}
+        locale={{ removeAriaLabel: 'Close tab' }}
+        onChange={tabId => onSelect(tabId)}
+        onTabClick={tabId => {
+          // Ant Design only calls onChange when the selected key changes. The
+          // existing app-tab contract also uses a click on the current tab to
+          // recover a crashed or newly available embedded app.
+          if (tabId === activeTabId) onSelect(tabId)
+        }}
+        onEdit={(key, action) => {
+          if (action !== 'remove' || typeof key !== 'string') return
+          onClose(key)
+        }}
+        ref={tabsRef}
+        size="small"
+        styles={{ body: { display: 'none' } }}
+        type="editable-card"
+      />
     </div>
   )
 }

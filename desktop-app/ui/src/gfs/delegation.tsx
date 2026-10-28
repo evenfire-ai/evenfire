@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Button, DropdownSelect, StatusBanner } from '@components/Common'
+import { Alert, Button, Checkbox, Select } from 'antd'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { GfsSubjectPicker } from '@/gfs/GfsSubjectPicker'
 import type { GfsDelegationPanelProps } from './delegation.types'
@@ -44,8 +44,8 @@ function permissionsForRole(
  * when a host is part of the selection the whole grant is capped to the host
  * permission set (read/write) and stripped of anything else.
  *
- * Composes the shared Common primitives through the GFS picker controls per the
- * desktop-app/ui frontend rules — no raw inputs/buttons.
+ * Ant Design owns this panel's controls while these local state and callbacks
+ * continue to own the grant behavior.
  */
 
 export function GfsDelegationPanel({
@@ -103,10 +103,13 @@ export function GfsDelegationPanel({
   // A Leader without manage_acl (canDelegate=false) sees no controls.
   if (!affordances.canDelegate) {
     return (
-      <div className="da-gfs-delegation__empty" role="note">
-        <strong>Read-only access</strong>
-        <span>You do not have delegation rights on this folder.</span>
-      </div>
+      <Alert
+        role="note"
+        showIcon
+        title="Read-only access"
+        description="You do not have delegation rights on this folder."
+        type="info"
+      />
     )
   }
 
@@ -123,12 +126,12 @@ export function GfsDelegationPanel({
           value={subjectKeys}
         />
         {subjectKeys.length > 0 ? (
-          <DropdownSelect
-            ariaLabel="Access role for selected recipients"
+          <Select
+            aria-label="Access role for selected recipients"
             disabled={busy}
             onChange={value => setRole(value as AccessRole)}
             options={roleOptions}
-            placeholder="Role"
+            size="small"
             value={role}
           />
         ) : null}
@@ -138,19 +141,19 @@ export function GfsDelegationPanel({
           Agents, workflows, and plugins use read/write access only.
         </p>
       ) : null}
-      {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
+      {subjectOptionsError ? (
+        <Alert role="alert" showIcon type="error" title={subjectOptionsError} />
+      ) : null}
       {subjectKeys.length > 0 ? (
         <div className="da-gfs-delegation__scope-actions">
           {isDirectory ? (
-            <label className="da-gfs-delegation__inherit">
-              <input
-                checked={inherit}
-                disabled={busy}
-                onChange={event => setInherit(event.target.checked)}
-                type="checkbox"
-              />
-              <span>Include contents of this folder</span>
-            </label>
+            <Checkbox
+              checked={inherit}
+              disabled={busy}
+              onChange={event => setInherit(event.target.checked)}
+            >
+              Include contents of this folder
+            </Checkbox>
           ) : null}
           <div className="da-gfs-delegation__actions">
             <Button
@@ -159,13 +162,14 @@ export function GfsDelegationPanel({
                 setSubjectKeys([])
                 setRole('read')
               }}
-              type="button"
-              variant="ghost"
+              htmlType="button"
+              type="default"
+              variant="text"
             >
               Back
             </Button>
             <Button
-              type="button"
+              htmlType="button"
               loading={busy}
               disabled={busy || bits.length === 0}
               onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
@@ -175,7 +179,7 @@ export function GfsDelegationPanel({
           </div>
         </div>
       ) : null}
-      {error !== null && <StatusBanner tone="error" text={error} />}
+      {error !== null ? <Alert role="alert" showIcon type="error" title={error} /> : null}
     </div>
   )
 }

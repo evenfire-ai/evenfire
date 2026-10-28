@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { Button, StatusBanner } from '@components/Common'
-import { IconCopy } from '@components/SidebarNav/icons'
+import { CopyOutlined } from '@ant-design/icons'
+import { Alert, Button, Flex, Typography } from 'antd'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { estimateBase64DecodedLength } from '@lib/base64Size'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
@@ -23,7 +23,7 @@ export function GfsImagePreviewBody({
   mimeType,
   onDownloadError,
   titleId,
-  headerActions,
+  hideTitle = false,
   headingLevel = 3,
 }: GfsImagePreviewBodyProps) {
   const generatedTitleId = useId()
@@ -35,7 +35,6 @@ export function GfsImagePreviewBody({
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
   const onDownloadErrorRef = useRef(onDownloadError)
-  const HeadingTag = `h${headingLevel}` as const
 
   useEffect(() => {
     onDownloadErrorRef.current = onDownloadError
@@ -136,31 +135,29 @@ export function GfsImagePreviewBody({
 
   return (
     <>
-      <header className="da-gfs-image-preview-dialog__header">
-        <div className="da-gfs-image-preview-dialog__header-main">
+      <Flex align="center" justify="space-between" wrap>
+        <Flex align="center" gap="small">
           <Button
-            className="da-gfs-image-preview-dialog__copy"
             aria-label={
               copyState === 'copied' ? 'Copied image to clipboard' : 'Copy image to clipboard'
             }
-            color="neutral"
             disabled={!sourceBlob}
+            icon={<CopyOutlined aria-hidden="true" />}
             onClick={() => void copyImageToClipboard()}
-            variant="ghost"
+            size="small"
+            type="text"
           >
-            <IconCopy width={18} height={18} />
-            <span className="da-gfs-preview-button__label">
-              {copyState === 'copied' ? 'Copied' : 'Copy'}
-            </span>
+            {copyState === 'copied' ? 'Copied' : 'Copy'}
           </Button>
-          <HeadingTag className="da-gfs-preview-title" id={headingId}>
-            {fileName}
-          </HeadingTag>
-        </div>
-        <div className="da-gfs-image-preview-dialog__header-actions">{headerActions}</div>
-      </header>
+          {!hideTitle ? (
+            <Typography.Title id={headingId} level={headingLevel}>
+              {fileName}
+            </Typography.Title>
+          ) : null}
+        </Flex>
+      </Flex>
       <div className="da-gfs-image-preview-dialog__body">
-        {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
+        {previewError ? <Alert showIcon title={previewError} type="error" /> : null}
         {!previewError && !previewUrl ? (
           <div className="da-gfs-image-preview-dialog__loading" role="status">
             Loading image preview…

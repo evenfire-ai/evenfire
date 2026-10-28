@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
+import { DownOutlined, MoreOutlined, RobotOutlined } from '@ant-design/icons'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { DataTable, EmptyState, IconButton, MenuItem, StatusBanner } from '@components/Common'
+import { Alert, Button, Dropdown, Empty, Spin, Table } from 'antd'
 import { PageBreadcrumb } from '@components/PageBreadcrumb'
 import type { PageBreadcrumbItem } from '@components/PageBreadcrumb/types'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
-import { IconAgents } from '@components/SidebarNav/icons'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import {
   type ConnectorActionInput,
@@ -19,7 +19,6 @@ import {
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
-import { useClickOutside } from '@hooks/useClickOutside'
 import { deriveConnectorRows } from '@lib/connectorRows'
 import { deriveScopedMembers } from '@lib/scopedMembers'
 import type { ScopedMemberContextDetails, ScopedMemberTeamRow } from '@lib/scopedMembers.types'
@@ -57,7 +56,7 @@ function AgentHero({
   return (
     <div className="agent-details-hero agent-details-hero--flush">
       <span className="agent-details-avatar" aria-hidden="true">
-        <IconAgents />
+        <RobotOutlined />
       </span>
       <div className="agent-details-identity">
         <strong className="agent-details-name">{agentName || 'Agent'}</strong>
@@ -123,7 +122,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     null
   )
   const [chatAgentRouteMenuOpen, setChatAgentRouteMenuOpen] = useState(false)
-  const chatAgentRouteMenuRef = useRef<HTMLSpanElement | null>(null)
 
   const mcpHealthNow = undefined
 
@@ -151,10 +149,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     )
     return () => window.clearTimeout(timeoutId)
   }, [activeChatId, showScrollToBottom])
-
-  useClickOutside(chatAgentRouteMenuRef, chatAgentRouteMenuOpen, () =>
-    setChatAgentRouteMenuOpen(false)
-  )
 
   const selectedAgentMcpServerNames = selectedAgent
     ? selectedAgentMcpServers.map(server => server.name)
@@ -265,7 +259,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
       ? {
           label: rootBreadcrumbLabel,
           onClick: () => onSelectChatAgent(selectedAgent, { selectLatest: false }),
-          className: 'page-breadcrumb-link--plain-action',
         }
       : { label: rootBreadcrumbLabel }
   const routeSubtitle =
@@ -333,41 +326,32 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   )
 
   const chatAgentRouteMenu = isChatMode && selectedAgent && (
-    <span className="agent-workspace-agent-route-menu" ref={chatAgentRouteMenuRef}>
-      <IconButton
-        className="agent-workspace-agent-route-trigger"
-        color="neutral"
-        label={`Open ${selectedAgent} options`}
-        size="xs"
-        variant="ghost"
+    <Dropdown
+      trigger={['click']}
+      placement="bottomRight"
+      autoFocus
+      open={chatAgentRouteMenuOpen}
+      onOpenChange={setChatAgentRouteMenuOpen}
+      menu={{
+        items: AGENT_ROUTE_OPTIONS.map(route => ({
+          key: route,
+          label: AGENT_ROUTE_LABELS[route],
+          onClick: () => {
+            setChatAgentRouteMenuOpen(false)
+            onOpenAgentWorkspace(selectedAgent, route)
+          },
+        })),
+      }}
+    >
+      <Button
+        type="text"
+        htmlType="button"
+        aria-label={`Open ${selectedAgent} options`}
         aria-haspopup="menu"
         aria-expanded={chatAgentRouteMenuOpen}
-        onClick={() => setChatAgentRouteMenuOpen(open => !open)}
-      >
-        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-          <circle cx="3.5" cy="8" r="1.2" />
-          <circle cx="8" cy="8" r="1.2" />
-          <circle cx="12.5" cy="8" r="1.2" />
-        </svg>
-      </IconButton>
-      {chatAgentRouteMenuOpen && (
-        <span className="agent-workspace-agent-route-menu-panel" role="menu">
-          {AGENT_ROUTE_OPTIONS.map(route => (
-            <MenuItem
-              key={route}
-              className="agent-workspace-agent-route-menu-item"
-              onClick={() => {
-                setChatAgentRouteMenuOpen(false)
-                onOpenAgentWorkspace(selectedAgent, route)
-              }}
-              role="menuitem"
-            >
-              {AGENT_ROUTE_LABELS[route]}
-            </MenuItem>
-          ))}
-        </span>
-      )}
-    </span>
+        icon={<MoreOutlined />}
+      />
+    </Dropdown>
   )
 
   // Chat-mode breadcrumb agent label. The agent NAME always shows. The route
@@ -505,7 +489,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                   it must surface that error — otherwise a failed
                   authorize/disconnect from this panel is silent (R1-B1). */}
               {connectorActionError ? (
-                <StatusBanner tone="error">{connectorActionError}</StatusBanner>
+                <Alert type="error" showIcon title={connectorActionError} />
               ) : null}
 
               <McpServerHealthTable
@@ -534,39 +518,27 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
               {(contextsError || teamsError) && !scopedMembers.length ? (
                 // Error before loading/content: a failed access-catalog or team
                 // directory read otherwise rendered a permanent "No members".
-                <StatusBanner tone="error">{contextsError ?? teamsError}</StatusBanner>
+                <Alert type="error" showIcon title={contextsError ?? teamsError} />
               ) : (contextsLoading || teamsLoading) && !scopedMembers.length ? (
-                <EmptyState title="Loading" body="Fetching members…" />
+                <Spin description="Fetching members…" />
               ) : scopedMembers.length ? (
-                <DataTable className="agent-members-data-table">
-                  <thead>
-                    <tr>
-                      <th className="da-table__col-header" scope="col">
-                        Member
-                      </th>
-                      <th className="da-table__col-header" scope="col">
-                        Email
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {scopedMembers.map(member => (
-                      <tr key={member.id}>
-                        <td className="da-table__cell">
-                          <span className="context-members-name">{member.label}</span>
-                        </td>
-                        <td className="da-table__cell">
-                          <span className="context-members-email">{member.secondary || '-'}</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </DataTable>
-              ) : (
-                <EmptyState
-                  title="No members"
-                  body="No members are available for this agent in the current API scope."
+                <Table
+                  size="small"
+                  pagination={false}
+                  rowKey="id"
+                  dataSource={scopedMembers}
+                  columns={[
+                    { title: 'Member', dataIndex: 'label', key: 'member' },
+                    {
+                      title: 'Email',
+                      dataIndex: 'secondary',
+                      key: 'email',
+                      render: (email: string | undefined) => email || '-',
+                    },
+                  ]}
                 />
+              ) : (
+                <Empty description="No members are available for this agent in the current API scope." />
               )}
             </section>
           )}
@@ -578,10 +550,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
               {selectedAgentContext ? (
                 <SharedFilesTab contextId={selectedAgentContext} />
               ) : (
-                <EmptyState
-                  title="No agent files"
-                  body="No context is currently mapped to this agent."
-                />
+                <Empty description="No context is currently mapped to this agent." />
               )}
             </section>
           )}
@@ -608,19 +577,13 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
               <ChatThread onScrollPositionChange={handleScrollPositionChange} />
               {showDelayedScrollToBottom && (
                 <div className="chat-scroll-to-bottom">
-                  <IconButton
-                    className="chat-scroll-to-bottom-button"
-                    color="neutral"
-                    label="Scroll to latest messages"
+                  <Button
+                    aria-label="Scroll to latest messages"
                     onClick={scrollChatToBottom}
-                    size="sm"
-                    variant="solid"
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M12 4v14" />
-                      <path d="m6 12 6 6 6-6" />
-                    </svg>
-                  </IconButton>
+                    type="primary"
+                    shape="circle"
+                    icon={<DownOutlined />}
+                  ></Button>
                 </div>
               )}
             </div>

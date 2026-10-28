@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Alert, Button, Card, Empty, Flex, Listy, Tag, Typography } from 'antd'
 import type { WorkflowRunArtifact } from '../../../src/types'
 
 type WorkflowRunArtifactActionsProps = {
@@ -68,48 +69,47 @@ export function WorkflowRunArtifactActions({ workflow }: WorkflowRunArtifactActi
   }
 
   return (
-    <section
-      className="workflow-run-artifacts"
+    <Card
+      size="small"
       aria-label={`${workflow.label} artifacts`}
       data-testid="workflow-chat-artifacts"
     >
-      <header className="workflow-run-artifacts__header">
-        <span>Workflow results</span>
-        {runArtifacts ? (
-          <span className="muted" data-testid="workflow-chat-run-id">
-            Results ready
-          </span>
-        ) : null}
-        <button
-          type="button"
-          className="ghost-btn mini-btn"
-          onClick={() => void loadArtifacts()}
-          disabled={loading}
-        >
+      <Flex align="center" justify="space-between" gap="small" wrap>
+        <Typography.Text strong>Workflow results</Typography.Text>
+        {runArtifacts ? <Tag data-testid="workflow-chat-run-id">Results ready</Tag> : null}
+        <Button type="text" onClick={() => void loadArtifacts()} disabled={loading}>
           {loading ? 'Checking...' : 'Refresh'}
-        </button>
-      </header>
+        </Button>
+      </Flex>
       {runArtifacts?.artifacts.length ? (
-        <div className="workflow-run-artifacts__list">
-          {runArtifacts.artifacts.map(artifact => (
-            <button
-              key={artifact.name}
-              type="button"
-              className="workflow-run-artifact-btn"
-              data-testid="workflow-chat-artifact-download"
-              onClick={() => void downloadArtifact(artifact)}
-              disabled={downloading === artifact.name}
-            >
-              {downloading === artifact.name ? 'Downloading...' : `Download ${artifact.name}`}
-            </button>
-          ))}
-        </div>
+        <Listy
+          items={runArtifacts.artifacts}
+          rowKey="name"
+          virtual={false}
+          itemRender={artifact => (
+            <Flex align="center" justify="space-between">
+              <Typography.Text>{artifact.name}</Typography.Text>
+              <Button
+                data-testid="workflow-chat-artifact-download"
+                loading={downloading === artifact.name}
+                onClick={() => void downloadArtifact(artifact)}
+              >
+                {downloading === artifact.name ? 'Downloading...' : `Download ${artifact.name}`}
+              </Button>
+            </Flex>
+          )}
+        />
       ) : (
-        <p className="workflow-run-artifacts__empty muted">
-          {loading ? 'Checking workflow results...' : 'No downloadable workflow results yet.'}
-        </p>
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={
+            loading ? 'Checking workflow results...' : 'No downloadable workflow results yet.'
+          }
+        />
       )}
-      {message ? <p className="workflow-run-artifacts__message">{message}</p> : null}
-    </section>
+      {message ? (
+        <Alert type={message.startsWith('Saved ') ? 'success' : 'error'} title={message} />
+      ) : null}
+    </Card>
   )
 }

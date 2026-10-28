@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
@@ -14,7 +14,21 @@ import { GfsMoveDialog } from '../moveDialog'
  * across pages.
  */
 
-afterEach(cleanup)
+beforeEach(() => {
+  vi.stubGlobal(
+    'ResizeObserver',
+    class ResizeObserverStub {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  )
+})
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 const target = { resourceId: 'file-1', name: 'notes.txt', kind: 'file' as const }
 
@@ -40,6 +54,10 @@ const parentCrumb: GfsCrumb = {
   kind: 'directory',
   version: 1,
   bytes: 0,
+}
+
+function treeRow(name: string | RegExp, root: HTMLElement = document.body) {
+  return within(root).getByRole('treeitem', { name })
 }
 
 function renderDialog(
@@ -78,6 +96,81 @@ function renderDialog(
 }
 
 describe('GfsMoveDialog pagination', () => {
+  it('hides previous-scope folders and selection before the new scope responds', async () => {
+    let childCalls = 0
+    let releaseNewChildren!: () => void
+    const listAccessible = vi.fn(async () => ({
+      items: [folder(parentCrumb.resourceId, parentCrumb.name)],
+      nextCursor: null,
+    }))
+    const listChildren = vi.fn((resourceId: string) => {
+      if (resourceId !== parentCrumb.resourceId)
+        return Promise.resolve({ items: [], nextCursor: null })
+      childCalls += 1
+      if (childCalls === 1) {
+        return Promise.resolve({
+          items: [folder('old-destination', 'Old destination')],
+          nextCursor: null,
+        })
+      }
+      return new Promise<unknown>(resolve => {
+        releaseNewChildren = () =>
+          resolve({
+            items: [folder('new-destination', 'New destination')],
+            nextCursor: null,
+          })
+      })
+    })
+    const onMove = vi.fn(async () => undefined)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const makeDialog = (scope: string) => (
+      <QueryClientProvider client={queryClient}>
+        <GfsMoveDialog
+          target={target}
+          initialCrumbs={[parentCrumb]}
+          sessionScope={scope}
+          onMove={onMove}
+          onClose={vi.fn()}
+        />
+      </QueryClientProvider>
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listAccessible, listChildren } },
+    })
+    const view = render(makeDialog('old-environment'))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+
+    await fireEvent.click(await within(dialog).findByRole('treeitem', { name: 'Old destination' }))
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Move here (Old destination)' })
+        .hasAttribute('disabled')
+    ).toBe(false)
+
+    view.rerender(makeDialog('new-environment'))
+
+    await waitFor(() => expect(childCalls).toBe(2))
+    const dialogAfterScopeChange = screen.getByRole('dialog', { name: 'Move file notes.txt' })
+    await waitFor(() =>
+      expect(
+        within(dialogAfterScopeChange).queryByRole('treeitem', { name: 'Old destination' })
+      ).toBeNull()
+    )
+    expect(
+      within(dialogAfterScopeChange).queryByRole('button', { name: 'Move here (Old destination)' })
+    ).toBeNull()
+    expect(
+      (within(dialogAfterScopeChange).getByRole('button', { name: 'Move' }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
+
+    await act(async () => {
+      releaseNewChildren()
+    })
+    expect(await within(dialog).findByRole('treeitem', { name: 'New destination' })).toBeTruthy()
+  })
+
   it('purges cached destination rows after an expanded folder is denied', async () => {
     let childReads = 0
     const listAccessible = vi.fn(async () => ({
@@ -92,10 +185,12 @@ describe('GfsMoveDialog pagination', () => {
     const { queryClient } = renderDialog({ listAccessible, listChildren })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    const tree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
-    expect(await within(tree).findByRole('button', { name: 'Product' })).toBeTruthy()
-    await fireEvent.click(within(tree).getByRole('button', { name: 'Expand Product' }))
-    expect(await within(tree).findByRole('button', { name: 'Assets' })).toBeTruthy()
+    const tree = await within(dialog).findByRole('tree', {
+      name: 'EvenDrive destination folders',
+    })
+    expect(await within(tree).findByRole('treeitem', { name: 'Product' })).toBeTruthy()
+    await fireEvent.click(treeRow('Product', tree).querySelector('.ant-tree-switcher')!)
+    expect(await within(tree).findByRole('treeitem', { name: 'Assets' })).toBeTruthy()
 
     await act(async () => {
       await queryClient.invalidateQueries({
@@ -104,8 +199,8 @@ describe('GfsMoveDialog pagination', () => {
     })
 
     expect(listChildren).toHaveBeenCalledTimes(2)
-    await waitFor(() => expect(within(tree).queryByRole('button', { name: 'Assets' })).toBeNull())
-    expect(within(tree).getByRole('button', { name: 'Product' })).toBeTruthy()
+    await waitFor(() => expect(within(tree).queryByRole('treeitem', { name: 'Assets' })).toBeNull())
+    expect(within(tree).getByRole('treeitem', { name: 'Product' })).toBeTruthy()
   })
 
   it('loads page two of the root destinations and commits a move to a page-two folder', async () => {
@@ -125,21 +220,20 @@ describe('GfsMoveDialog pagination', () => {
     expect(within(dialog).queryByText('Suggested')).toBeNull()
     expect(within(dialog).queryByText('Starred')).toBeNull()
     expect(within(dialog).queryByText('All locations')).toBeNull()
-    const archive = await within(dialog).findByRole('button', { name: 'Archive' })
-    expect(archive.classList.contains('da-gfs-move-dialog__tree-select')).toBe(true)
+    expect(await within(dialog).findByRole('treeitem', { name: 'Archive' })).toBeTruthy()
     // Page two is not silently fetched, but reachable through Load more.
-    expect(within(dialog).queryByRole('button', { name: 'Deep Storage' })).toBeNull()
+    expect(within(dialog).queryByRole('treeitem', { name: 'Deep Storage' })).toBeNull()
     expect(within(dialog).getByRole('button', { name: 'Load more' })).toBeTruthy()
 
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Load more' }))
 
-    expect(await within(dialog).findByRole('button', { name: 'Deep Storage' })).toBeTruthy()
+    expect(await within(dialog).findByRole('treeitem', { name: 'Deep Storage' })).toBeTruthy()
     // Page-one rows stay rendered while additional pages load.
-    expect(within(dialog).getByRole('button', { name: 'Archive' })).toBeTruthy()
+    expect(within(dialog).getByRole('treeitem', { name: 'Archive' })).toBeTruthy()
     expect(within(dialog).queryByRole('button', { name: 'Load more' })).toBeNull()
 
     // A page-two destination selects and commits like a page-one row.
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Deep Storage' }))
+    await fireEvent.click(within(dialog).getByRole('treeitem', { name: 'Deep Storage' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Deep Storage)' }))
 
     expect(onMove).toHaveBeenCalledWith('deep-9', 'Deep Storage')
@@ -161,21 +255,31 @@ describe('GfsMoveDialog pagination', () => {
     renderDialog({ listAccessible, listChildren }, { onMove })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    const tree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
-    expect(await within(tree).findByRole('button', { name: 'Product' })).toBeTruthy()
+    const tree = await within(dialog).findByRole('tree', {
+      name: 'EvenDrive destination folders',
+    })
+    expect(await within(tree).findByRole('treeitem', { name: 'Product' })).toBeTruthy()
 
-    await fireEvent.click(within(tree).getByRole('button', { name: 'Expand Product' }))
-    expect(await within(tree).findByRole('button', { name: 'Assets' })).toBeTruthy()
-    expect(within(tree).getByRole('button', { name: 'Product' })).toBeTruthy()
+    await fireEvent.click(treeRow('Product', tree).querySelector('.ant-tree-switcher')!)
+    expect(await within(tree).findByRole('treeitem', { name: 'Assets' })).toBeTruthy()
+    expect(within(tree).getByRole('treeitem', { name: 'Product' })).toBeTruthy()
 
     // Selecting a folder also opens it, so the next level is available without
     // leaving the current tree view.
-    await fireEvent.click(within(tree).getByRole('button', { name: 'Assets' }))
-    expect(await within(tree).findByRole('button', { name: 'Reports' })).toBeTruthy()
+    await fireEvent.click(
+      within(tree).getByRole('treeitem', { name: 'Assets' }).querySelector('[data-resource-id]')!
+    )
+    expect(await within(tree).findByRole('treeitem', { name: /Reports/ })).toBeTruthy()
 
-    await fireEvent.click(within(tree).getByRole('button', { name: 'Reports' }))
+    await fireEvent.click(
+      within(tree)
+        .getByRole('treeitem', { name: /Reports/ })
+        .querySelector('[data-resource-id]')!
+    )
     expect(
-      within(tree).getByRole('button', { name: 'Reports' }).getAttribute('aria-selected')
+      within(tree)
+        .getByRole('treeitem', { name: /Reports/ })
+        .getAttribute('aria-selected')
     ).toBe('true')
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Reports)' }))
 
@@ -208,14 +312,16 @@ describe('GfsMoveDialog pagination', () => {
     )
 
     const dialog = await screen.findByRole('dialog', { name: 'Move folder Docs' })
-    expect(await within(dialog).findByRole('button', { name: 'Archive' })).toBeTruthy()
+    expect(await within(dialog).findByRole('treeitem', { name: 'Archive' })).toBeTruthy()
     // The moved resource itself is never offered as a destination — on any page.
-    expect(within(dialog).queryByRole('button', { name: 'Docs' })).toBeNull()
+    expect(within(dialog).queryByRole('treeitem', { name: 'Docs' })).toBeNull()
 
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Load more' }))
-    expect(await within(dialog).findByRole('button', { name: 'Nested Vault' })).toBeTruthy()
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    expect(listChildren).toHaveBeenNthCalledWith(2, 'folder-1', 'main', 'p2')
+    expect(await within(dialog).findByRole('treeitem', { name: 'Nested Vault' })).toBeTruthy()
 
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Nested Vault' }))
+    await fireEvent.click(within(dialog).getByRole('treeitem', { name: 'Nested Vault' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Nested Vault)' }))
 
     expect(onMove).toHaveBeenCalledWith('nested-7', 'Nested Vault')
@@ -297,7 +403,7 @@ describe('GfsMoveDialog no-op destination guard', () => {
     // No breadcrumb context: the pill is honest about the unknown name.
     expect(within(dialog).getByText('another shared folder')).toBeTruthy()
 
-    const productRow = await within(dialog).findByRole('button', { name: 'Product' })
+    const productRow = await within(dialog).findByRole('treeitem', { name: 'Product' })
     await fireEvent.click(productRow)
     const noOpButton = within(dialog).getByRole('button', {
       name: 'Move here (Product)',
@@ -306,7 +412,7 @@ describe('GfsMoveDialog no-op destination guard', () => {
     expect(within(dialog).getByText(/is already in/)).toBeTruthy()
 
     // A different destination still commits normally.
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    await fireEvent.click(within(dialog).getByRole('treeitem', { name: 'Archive' }))
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     expect(onMove).toHaveBeenCalledWith('arch-1', 'Archive')
     expect(onMove).toHaveBeenCalledTimes(1)

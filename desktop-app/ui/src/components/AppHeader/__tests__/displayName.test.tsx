@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { AccessCatalog } from '../../../../../src/types'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import { AppHeader } from '../index'
+
+beforeEach(installAntdDomEnvironment)
 
 // UT-11 (spec §5, F3 desktop-app) — Agent WITHOUT fallback.
 // The agents menu must render the visible name (spec.host, surfaced as the

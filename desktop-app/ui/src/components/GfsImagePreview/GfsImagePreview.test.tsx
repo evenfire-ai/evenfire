@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { GfsImagePreview } from './index'
 
 describe('GfsImagePreview layout', () => {
@@ -9,6 +10,7 @@ describe('GfsImagePreview layout', () => {
   let resizeObserverCallback: (() => void) | null = null
 
   beforeEach(() => {
+    installAntdDomEnvironment()
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -72,20 +74,14 @@ describe('GfsImagePreview layout', () => {
       />
     )
 
-    const modal = screen.getByRole('presentation')
-    const copyButton = screen.getByRole('button', { name: 'Copy image to clipboard' })
-    expect(copyButton.classList.contains('ui-button')).toBe(true)
-    expect(copyButton.classList.contains('da-gfs-image-preview-dialog__copy')).toBe(true)
+    const modal = document.querySelector('.ant-modal-root') as HTMLElement
+    const dialog = screen.getByRole('dialog', { name: 'diagram.png' })
+    const copyButton = within(dialog).getByRole('button', { name: 'Copy image to clipboard' })
+    expect(copyButton.classList.contains('ant-btn')).toBe(true)
     expect(copyButton.textContent).toContain('Copy')
-    const closeButton = screen.getByRole('button', { name: 'Close image preview' })
-    expect(closeButton.classList.contains('ui-button')).toBe(true)
-    expect(closeButton.classList.contains('da-gfs-image-preview-dialog__close')).toBe(true)
-    const headerMain = screen
-      .getByRole('dialog', { name: 'diagram.png' })
-      .querySelector('.da-gfs-image-preview-dialog__header-main')
-    expect(headerMain?.contains(copyButton)).toBe(true)
-    expect(headerMain?.firstElementChild).toBe(copyButton)
-    expect(headerMain?.contains(closeButton)).toBe(false)
+    const closeButton = within(dialog).getByRole('button', { name: 'Close image preview' })
+    expect(closeButton.classList.contains('ant-modal-close')).toBe(true)
+    expect(dialog.contains(copyButton)).toBe(true)
     expect((modal as HTMLElement).style.left).toBe('74px')
     expect((modal as HTMLElement).style.right).toBe('0px')
 
@@ -117,7 +113,9 @@ describe('GfsImagePreview layout', () => {
     expect(await screen.findByText(/File unavailable/)).toBeTruthy()
     const dialog = screen.getByRole('dialog', { name: 'diagram.png' })
     const title = screen.getByRole('heading', { name: 'diagram.png' })
-    expect(dialog.getAttribute('aria-labelledby')).toBe(title.id)
+    expect(
+      dialog.querySelector(`#${dialog.getAttribute('aria-labelledby')}`)?.contains(title)
+    ).toBe(true)
     expect(screen.getByRole('button', { name: 'Close image preview' })).toBeTruthy()
   })
 
@@ -137,7 +135,9 @@ describe('GfsImagePreview layout', () => {
 
     const dialog = screen.getByRole('dialog', { name: 'File unavailable' })
     const title = within(dialog).getByRole('heading', { name: 'File unavailable', level: 3 })
-    expect(dialog.getAttribute('aria-labelledby')).toBe(title.id)
+    expect(
+      dialog.querySelector(`#${dialog.getAttribute('aria-labelledby')}`)?.contains(title)
+    ).toBe(true)
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close image preview' }))
     expect(onClose).toHaveBeenCalledOnce()
     expect(downloadPreview).not.toHaveBeenCalled()

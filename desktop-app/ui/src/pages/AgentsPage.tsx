@@ -1,5 +1,5 @@
 import type { RefObject } from 'react'
-import { EmptyState } from '@components/Common'
+import { Alert, Card, Empty, Flex, Spin, Typography } from 'antd'
 import { AgentWorkspace } from '../components/agents/AgentWorkspace'
 import { FleetBoard } from '../components/agents/FleetBoard'
 import { useNavigationContext } from '../contexts/NavigationContext'
@@ -21,24 +21,23 @@ export function AgentsPage({ scrollContainerRef }: AgentsPageProps) {
     )
   ) : (
     <section className="page">
-      <div className="page-header">
-        <h2>Agents</h2>
-        <p className="muted">Create, manage, and monitor your AI agents from one place.</p>
-      </div>
-      <section className="page-card">
-        {loading ? (
-          <EmptyState title="Loading" body="Fetching authorized agents..." />
-        ) : error ? (
-          <div className="composer-error">
-            <p className="error-text">{error}</p>
-          </div>
-        ) : (
-          <EmptyState
-            title="No agents available"
-            body="You do not currently have authorized agents."
-          />
-        )}
-      </section>
+      <Flex vertical gap="middle">
+        <header>
+          <Typography.Title level={2}>Agents</Typography.Title>
+          <Typography.Paragraph type="secondary">
+            Create, manage, and monitor your AI agents from one place.
+          </Typography.Paragraph>
+        </header>
+        <Card>
+          {loading ? (
+            <Spin tip="Fetching authorized agents..." />
+          ) : error ? (
+            <Alert type="error" showIcon role="alert" title={error} />
+          ) : (
+            <Empty description="You do not currently have authorized agents." />
+          )}
+        </Card>
+      </Flex>
     </section>
   )
 }

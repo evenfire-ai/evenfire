@@ -19,7 +19,7 @@ import {
 //   - notification-bell IconButton -> opens role="dialog" "Notifications and approvals"
 //   - inbox rows: data-testid="notification-menu-item" and "workflow-approval-card"
 //   - empty inbox: ".notification-menu-empty" ("No notifications or pending approvals right now.")
-//   - global search: TextInput aria-label="Search" -> results in ".global-search-results"
+//   - global search: Input aria-label="Search" -> Ant Design search-results region
 //   - no results: ".search-results-empty"; loading: ".search-results-loading"
 // We deliberately do NOT click Approve/Deny (those mutate the backend).
 
@@ -91,11 +91,11 @@ test('optional QA recorder: Desktop inbox and search journey — global search',
     // state must render — we only assert the panel reaches a terminal state
     // without error, regardless of how much directory data has hydrated.
     await searchInput.fill('chatllm')
-    const resultsPanel = page!.locator('.global-search-results')
+    const resultsPanel = page!.getByRole('region', { name: 'Search results' })
     await expect(resultsPanel).toBeVisible({ timeout: 20_000 })
-    const resultItem = page!.locator('.search-result-item').first()
-    const noResults = page!.locator('.search-results-empty')
-    const searchLoading = page!.locator('.search-results-loading')
+    const resultItem = resultsPanel.getByRole('button').first()
+    const noResults = resultsPanel.getByText(/No matches for/)
+    const searchLoading = resultsPanel.getByRole('status').first()
     await expect(resultItem.or(noResults).or(searchLoading)).toBeVisible({ timeout: 20_000 })
 
     await screenshotAndLog(page!, testInfo, 'desktop-global-search-known-term')

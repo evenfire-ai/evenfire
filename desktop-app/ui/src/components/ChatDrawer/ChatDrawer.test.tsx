@@ -5,10 +5,12 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { ChatDrawer } from '.'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 
 const stylesheet = readFileSync(path.join(process.cwd(), 'ui', 'src', 'styles.css'), 'utf8')
 
 beforeEach(() => {
+  installAntdDomEnvironment()
   const style = document.createElement('style')
   style.dataset.testStyles = 'chat-drawer'
   style.textContent = `${readFileSync(
@@ -77,14 +79,13 @@ describe('ChatDrawer', () => {
     expect(onToggle).toHaveBeenCalledTimes(1)
   })
 
-  it('sizes the header CTA icons to the app standard (16px), not the raw viewBox', () => {
+  it('renders the header actions with Ant Design buttons and icons', () => {
     const { container } = renderDrawer()
-    const svgs = container.querySelectorAll('.chat-drawer__header-actions .ui-icon-button svg')
+    const svgs = container.querySelectorAll('.chat-drawer__header-actions .ant-btn-icon svg')
     expect(svgs.length).toBe(3)
-    svgs.forEach(svg => {
-      expect(getComputedStyle(svg as Element).width).toBe('16px')
-      expect(getComputedStyle(svg as Element).height).toBe('16px')
-    })
+    expect(container.querySelectorAll('.chat-drawer__header-actions .ui-icon-button')).toHaveLength(
+      0
+    )
   })
 
   it('stays hidden and inert until the embed acknowledges its shrunk bounds', () => {

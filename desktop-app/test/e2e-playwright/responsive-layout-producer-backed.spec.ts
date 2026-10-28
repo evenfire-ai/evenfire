@@ -174,7 +174,7 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       await resizeDesktop(app!, 900)
       const [mobileSearch, mobileHeader] = await Promise.all([
         bounds(search),
-        bounds(page.locator('.header-left')),
+        bounds(page.getByTestId('header-left')),
       ])
       expect(Math.round(mobileSearch.width)).toBe(Math.round(mobileHeader.width))
     })

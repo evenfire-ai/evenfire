@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { Button } from '@components/Common'
+import { Alert, Button, Card, Flex, Modal, Tag, Typography } from 'antd'
 import {
   HTML_PREVIEW_ACTIVE_SANDBOX,
   HTML_PREVIEW_ALLOW_ACTIVE_MODE,
@@ -54,22 +53,6 @@ export function SecureHtmlPreview({
   }, [fullViewOpen, fullscreenOnly, onRequestClose])
 
   useEffect(() => {
-    if (!fullViewOpen) return
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setFullViewOpen(false)
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.body.style.overflow = previousOverflow
-      window.removeEventListener('keydown', onKeyDown)
-    }
-  }, [fullViewOpen])
-
-  useEffect(() => {
     if (loaded || exceedsSizeLimit) return
     const timer = window.setTimeout(() => {
       setTimedOut(true)
@@ -97,16 +80,20 @@ export function SecureHtmlPreview({
   const renderInlinePreviewContent = () => {
     if (exceedsSizeLimit) {
       return (
-        <p className="message-html-preview-note">
-          Preview blocked: HTML exceeds safe limit ({formatBytes(maxBytes)}).
-        </p>
+        <Alert
+          type="warning"
+          showIcon
+          title={`Preview blocked: HTML exceeds safe limit (${formatBytes(maxBytes)}).`}
+        />
       )
     }
     if (timedOut) {
       return (
-        <p className="message-html-preview-note">
-          Preview timed out. Open the full view or download the file instead.
-        </p>
+        <Alert
+          type="warning"
+          showIcon
+          title="Preview timed out. Open the full view or download the file instead."
+        />
       )
     }
     return (
@@ -135,89 +122,53 @@ export function SecureHtmlPreview({
     )
   }
 
-  const fullscreenPortal =
-    fullViewOpen &&
-    createPortal(
-      <div
-        className="message-html-preview-fullscreen-overlay"
-        onClick={() => setFullViewOpen(false)}
-        role="presentation"
-      >
-        <section
-          className="message-html-preview-fullscreen-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-label={`${title} full view`}
-          onClick={event => event.stopPropagation()}
-        >
-          <header className="message-html-preview-fullscreen-head">
-            <div>
-              <strong>{title}</strong>
-              <p className="muted">{formatBytes(htmlSizeBytes)}</p>
-            </div>
-            <Button
-              className="message-html-preview-fullscreen-close"
-              color="neutral"
-              onClick={() => setFullViewOpen(false)}
-              size="xs"
-              variant="ghost"
-            >
-              Back to chat
-            </Button>
-          </header>
-          {renderFullscreenPreviewContent()}
-        </section>
-      </div>,
-      document.body
-    )
+  const fullscreenModal = (
+    <Modal
+      open={fullViewOpen}
+      title={
+        <Flex vertical>
+          <Typography.Text strong>{title}</Typography.Text>
+          <Typography.Text type="secondary">{formatBytes(htmlSizeBytes)}</Typography.Text>
+        </Flex>
+      }
+      footer={null}
+      onCancel={() => setFullViewOpen(false)}
+      destroyOnHidden
+      width="90vw"
+    >
+      {renderFullscreenPreviewContent()}
+    </Modal>
+  )
 
   if (fullscreenOnly) {
-    return fullscreenPortal || null
+    return fullscreenModal
   }
 
   return (
-    <div className="message-html-preview" role="group" aria-label={title}>
-      <div className="message-html-preview-head">
-        <strong>{title}</strong>
-        <span className="message-html-preview-badge">{formatBytes(htmlSizeBytes)}</span>
-      </div>
-      <div className="message-html-preview-warning">
-        <span
-          aria-label="Untrusted HTML warning"
-          className="message-html-preview-warning__icon"
-          role="img"
+    <Card
+      size="small"
+      title={title}
+      extra={<Tag>{formatBytes(htmlSizeBytes)}</Tag>}
+      aria-label={title}
+    >
+      <Flex vertical gap="small">
+        <Alert
+          type="warning"
+          showIcon
           title="Untrusted HTML preview. Review carefully before interacting."
-        >
-          !
-        </span>
-        Untrusted HTML preview. Review carefully before interacting.
-      </div>
-      <div className="message-html-preview-controls">
-        <Button
-          className="message-html-preview-open-full-btn"
-          color="neutral"
-          onClick={() => setFullViewOpen(true)}
-          size="xs"
-          variant="ghost"
-        >
-          Open full view
-        </Button>
-        <Button color="neutral" onClick={handleDownload} size="xs" variant="ghost">
-          Download HTML
-        </Button>
-        {HTML_PREVIEW_ALLOW_ACTIVE_MODE && (
-          <Button
-            color="neutral"
-            onClick={() => setActiveModeEnabled(previous => !previous)}
-            size="xs"
-            variant="ghost"
-          >
-            {activeModeEnabled ? 'Disable active HTML' : 'Enable active HTML'}
-          </Button>
-        )}
-      </div>
-      {renderInlinePreviewContent()}
-      {fullscreenPortal}
-    </div>
+        />
+        <Flex align="center" gap="small" wrap>
+          <Button onClick={() => setFullViewOpen(true)}>Open full view</Button>
+          <Button onClick={handleDownload}>Download HTML</Button>
+          {HTML_PREVIEW_ALLOW_ACTIVE_MODE && (
+            <Button onClick={() => setActiveModeEnabled(previous => !previous)}>
+              {activeModeEnabled ? 'Disable active HTML' : 'Enable active HTML'}
+            </Button>
+          )}
+        </Flex>
+        {renderInlinePreviewContent()}
+      </Flex>
+      {fullscreenModal}
+    </Card>
   )
 }

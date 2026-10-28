@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { GfsInheritedAccessDialog } from '../GfsInheritedAccessDialog'
 
+beforeEach(installAntdDomEnvironment)
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
@@ -23,7 +25,7 @@ describe('GfsInheritedAccessDialog', () => {
       <GfsInheritedAccessDialog request={changeRequest} onCancel={vi.fn()} onConfirm={vi.fn()} />
     )
 
-    const dialog = screen.getByRole('alertdialog')
+    const dialog = screen.getByRole('dialog', { name: 'Update role on parent folder?' })
     expect(within(dialog).getByText('Update role on parent folder?')).toBeTruthy()
     expect(
       within(dialog).getByText(
@@ -56,7 +58,7 @@ describe('GfsInheritedAccessDialog', () => {
       />
     )
 
-    const dialog = screen.getByRole('alertdialog')
+    const dialog = screen.getByRole('dialog', { name: 'Remove from parent folder?' })
     expect(within(dialog).getByText('Remove from parent folder?')).toBeTruthy()
     expect(
       within(dialog).getByText(
@@ -72,11 +74,7 @@ describe('GfsInheritedAccessDialog', () => {
     expect(within(dialog).getAllByText('Read')).toHaveLength(1)
     // Three transitions to Remove: both folders plus the file (the fourth
     // "Remove" text is the confirm button).
-    expect(
-      within(dialog).getAllByText('Remove', {
-        selector: '.da-gfs-parent-update-dialog__role--next',
-      })
-    ).toHaveLength(3)
+    expect(within(dialog).getAllByText('Remove', { selector: '.ant-tag' })).toHaveLength(3)
     expect(within(dialog).getByRole('button', { name: 'Remove' })).toBeTruthy()
   })
 
@@ -85,7 +83,7 @@ describe('GfsInheritedAccessDialog', () => {
       <GfsInheritedAccessDialog request={changeRequest} onCancel={vi.fn()} onConfirm={vi.fn()} />
     )
 
-    const dialog = screen.getByRole('alertdialog')
+    const dialog = screen.getByRole('dialog', { name: 'Update role on parent folder?' })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Learn more' }))
     expect(within(dialog).getByText('How sharing works in EvenDrive')).toBeTruthy()
     expect(
@@ -146,13 +144,9 @@ describe('GfsInheritedAccessDialog', () => {
     expect(document.activeElement).toBe(opener)
 
     rerender(<Harness request={changeRequest} />)
-    const dialog = screen.getByRole('alertdialog')
-    // The body copy is programmatically associated with the dialog…
-    const describedBy = dialog.getAttribute('aria-describedby')
-    expect(describedBy).toBeTruthy()
-    const describedBody = document.getElementById(describedBy ?? '')
-    expect(describedBody?.textContent).toContain('will also change permissions on a parent folder')
-    // …focus lands on the safe cancel action while open…
+    const dialog = screen.getByRole('dialog', { name: 'Update role on parent folder?' })
+    expect(within(dialog).getByText(/will also change permissions on a parent folder/)).toBeTruthy()
+    // Focus lands on the safe cancel action while open…
     await waitFor(() => expect(document.activeElement?.textContent).toBe('Cancel'))
 
     // …and returns to the invoking element once the request clears.

@@ -1,16 +1,30 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
-import { useAuthContext } from '@contexts/AuthContext'
-import { Button, Field, IconButton, SelectInput, TabButton, TextInput } from '@components/Common'
-import { PluginPermissions } from '@components/PluginPermissions'
 import {
-  IconBell,
-  IconConnectors,
-  IconDesktopNotifications,
-  IconSettings,
-  IconThemeSun,
-  IconVolume,
-  IconVolumeOff,
-} from '@components/SidebarNav/icons'
+  ApiOutlined,
+  AudioMutedOutlined,
+  BellOutlined,
+  DesktopOutlined,
+  SettingOutlined,
+  SoundOutlined,
+  SunOutlined,
+} from '@ant-design/icons'
+import { useAuthContext } from '@contexts/AuthContext'
+import {
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  Descriptions,
+  Flex,
+  InputNumber,
+  Radio,
+  Select,
+  Slider,
+  Table,
+  Tabs,
+  Typography,
+} from 'antd'
+import { PluginPermissions } from '@components/PluginPermissions'
 import { NOTIFICATION_PREFERENCE_OPTIONS } from '@constants/notificationSettings'
 import {
   LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
@@ -108,37 +122,30 @@ function NotificationPreferenceField({
   onChange: (value: ChatNotificationPreference) => void
 }) {
   return (
-    <div className="settings-field">
-      <div className="settings-radio-list">
+    <Radio.Group
+      aria-labelledby={labelledBy}
+      name={id}
+      value={value}
+      onChange={event => onChange(event.target.value)}
+    >
+      <Flex vertical gap="small">
         {NOTIFICATION_PREFERENCE_OPTIONS.map(option => (
-          <label
+          <Radio
             key={option.value}
-            className={`settings-radio-option${option.value === value ? ' is-selected' : ''}`}
-            htmlFor={`${id}-${option.value}`}
+            id={`${id}-${option.value}`}
+            value={option.value}
             title={option.description}
+            aria-labelledby={`${labelledBy} ${id}-${option.value}-title`}
+            aria-describedby={`${id}-${option.value}-description`}
           >
-            <input
-              id={`${id}-${option.value}`}
-              type="radio"
-              name={id}
-              value={option.value}
-              aria-labelledby={`${labelledBy} ${id}-${option.value}-title`}
-              aria-describedby={`${id}-${option.value}-description`}
-              checked={option.value === value}
-              onChange={() => onChange(option.value)}
-            />
-            <span className="settings-radio-copy">
-              <span id={`${id}-${option.value}-title`} className="settings-radio-title">
-                {option.label}
-              </span>
-              <span id={`${id}-${option.value}-description`} className="visually-hidden">
-                {option.description}
-              </span>
+            <span id={`${id}-${option.value}-title`}>{option.label}</span>
+            <span id={`${id}-${option.value}-description`} className="visually-hidden">
+              {option.description}
             </span>
-          </label>
+          </Radio>
         ))}
-      </div>
-    </div>
+      </Flex>
+    </Radio.Group>
   )
 }
 
@@ -154,37 +161,30 @@ function ThemePreferenceField({
   onChange: (value: ThemeMode) => void
 }) {
   return (
-    <div className="settings-field settings-field--compact">
-      <div className="settings-radio-list">
+    <Radio.Group
+      aria-labelledby={labelledBy}
+      name={id}
+      value={value}
+      onChange={event => onChange(event.target.value)}
+    >
+      <Flex vertical gap="small">
         {THEME_MODE_OPTIONS.map(option => (
-          <label
+          <Radio
             key={option.value}
-            className={`settings-radio-option${option.value === value ? ' is-selected' : ''}`}
-            htmlFor={`${id}-${option.value}`}
+            id={`${id}-${option.value}`}
+            value={option.value}
             title={option.description}
+            aria-labelledby={`${labelledBy} ${id}-${option.value}-title`}
+            aria-describedby={`${id}-${option.value}-description`}
           >
-            <input
-              id={`${id}-${option.value}`}
-              type="radio"
-              name={id}
-              value={option.value}
-              aria-labelledby={`${labelledBy} ${id}-${option.value}-title`}
-              aria-describedby={`${id}-${option.value}-description`}
-              checked={option.value === value}
-              onChange={() => onChange(option.value)}
-            />
-            <span className="settings-radio-copy">
-              <span id={`${id}-${option.value}-title`} className="settings-radio-title">
-                {option.label}
-              </span>
-              <span id={`${id}-${option.value}-description`} className="visually-hidden">
-                {option.description}
-              </span>
+            <span id={`${id}-${option.value}-title`}>{option.label}</span>
+            <span id={`${id}-${option.value}-description`} className="visually-hidden">
+              {option.description}
             </span>
-          </label>
+          </Radio>
         ))}
-      </div>
-    </div>
+      </Flex>
+    </Radio.Group>
   )
 }
 
@@ -198,7 +198,7 @@ function NotificationSoundVolumeField({
   onPreview: (value: number) => void
 }) {
   const volume = sanitizeNotificationVolume(value)
-  const label = volume === 0 ? 'Muted' : `${volume}%`
+  const volumeLabel = volume === 0 ? 'Muted' : `${volume}%`
   const applyVolume = (nextValue: string | number, options: { preview?: boolean } = {}) => {
     const nextVolume = sanitizeNotificationVolume(nextValue)
     onChange(nextVolume)
@@ -206,65 +206,38 @@ function NotificationSoundVolumeField({
   }
 
   return (
-    <div className="settings-field">
-      <label className="settings-volume-label" htmlFor="settings-notification-sound-volume">
-        Alert volume
-      </label>
-      <div className="settings-volume-row">
-        <IconButton
-          className="settings-volume-mute-button"
-          aria-pressed={volume === 0}
-          label={volume === 0 ? 'Notification sounds muted' : 'Mute notification sounds'}
-          onClick={() => onChange(0)}
-          variant="soft"
-        >
-          {volume === 0 ? <IconVolumeOff /> : <IconVolume />}
-        </IconButton>
-        <input
-          id="settings-notification-sound-volume"
-          className="settings-volume-slider"
-          type="range"
-          min="0"
-          max="100"
-          step="1"
-          value={volume}
-          aria-valuetext={label}
-          onChange={event => applyVolume(event.currentTarget.value)}
-          onPointerUp={event => applyVolume(event.currentTarget.value, { preview: true })}
-          onKeyUp={event => {
-            if (
-              event.key === 'ArrowLeft' ||
-              event.key === 'ArrowRight' ||
-              event.key === 'ArrowUp' ||
-              event.key === 'ArrowDown' ||
-              event.key === 'Home' ||
-              event.key === 'End' ||
-              event.key === 'PageUp' ||
-              event.key === 'PageDown'
-            ) {
-              applyVolume(event.currentTarget.value, { preview: true })
-            }
-          }}
-        />
-        <TextInput
-          className="settings-volume-input"
-          type="number"
-          min="0"
-          max="100"
-          step="1"
-          inputMode="numeric"
-          aria-label="Notification sound volume percentage"
-          value={volume}
-          onChange={event => applyVolume(event.currentTarget.value)}
-          onBlur={event => applyVolume(event.currentTarget.value, { preview: true })}
-          onKeyDown={event => {
-            if (event.key === 'Enter') {
-              applyVolume(event.currentTarget.value, { preview: true })
-            }
-          }}
-        />
-      </div>
-    </div>
+    <Flex align="center" gap="middle" wrap>
+      <Typography.Text id="settings-notification-sound-label">Alert volume</Typography.Text>
+      <Button
+        aria-label={volume === 0 ? 'Notification sounds muted' : 'Mute notification sounds'}
+        aria-pressed={volume === 0}
+        htmlType="button"
+        icon={volume === 0 ? <AudioMutedOutlined /> : <SoundOutlined />}
+        onClick={() => onChange(0)}
+      />
+      <Slider
+        ariaLabelledByForHandle="settings-notification-sound-label"
+        ariaValueTextFormatterForHandle={() => volumeLabel}
+        min={0}
+        max={100}
+        step={1}
+        value={volume}
+        onChange={nextVolume => applyVolume(nextVolume)}
+        onChangeComplete={nextVolume => applyVolume(nextVolume, { preview: true })}
+      />
+      <InputNumber
+        aria-label="Notification sound volume percentage"
+        type="number"
+        min={0}
+        max={100}
+        step={1}
+        inputMode="numeric"
+        value={volume}
+        onChange={nextVolume => applyVolume(nextVolume ?? '')}
+        onBlur={() => applyVolume(volume, { preview: true })}
+        onPressEnter={() => applyVolume(volume, { preview: true })}
+      />
+    </Flex>
   )
 }
 
@@ -512,583 +485,506 @@ export function SettingsPage({
     }
   }
 
-  return (
-    <section className="page settings-page">
-      <div className="page-header">
-        <h2>Settings</h2>
-      </div>
+  const settingsContent = (
+    <Flex vertical gap="middle">
+      {activeSettingsTab === 'shortcuts' ? (
+        <Card
+          title={
+            <Flex align="center" gap="small">
+              <SettingOutlined aria-hidden="true" />
+              <Typography.Title id="settings-shortcuts-heading" level={3}>
+                Keyboard shortcuts
+              </Typography.Title>
+            </Flex>
+          }
+        >
+          <Flex vertical gap="middle">
+            <Typography.Text type="secondary">
+              Desktop commands available from the keyboard.
+            </Typography.Text>
+            <Table
+              aria-label="Keyboard shortcuts"
+              columns={[
+                {
+                  title: 'Shortcut',
+                  key: 'shortcut',
+                  render: (_, command) => (
+                    <kbd>{formatDesktopShortcut(command.defaultBinding!, shortcutPlatform)}</kbd>
+                  ),
+                },
+                {
+                  title: 'Action',
+                  key: 'action',
+                  render: (_, command) => (
+                    <Flex vertical>
+                      <Typography.Text strong>{command.label}</Typography.Text>
+                      <Typography.Text type="secondary">{command.description}</Typography.Text>
+                    </Flex>
+                  ),
+                },
+              ]}
+              dataSource={shortcutCommands}
+              pagination={false}
+              rowKey="id"
+              size="small"
+            />
+          </Flex>
+        </Card>
+      ) : null}
 
-      <div className="page-tabs settings-tabs" role="tablist" aria-label="Settings sections">
-        <TabButton
-          active={activeSettingsTab === 'account'}
-          className="page-tab"
-          id="settings-tab-account"
-          role="tab"
-          aria-controls="settings-panel-account"
-          onClick={() => setActiveSettingsTab('account')}
+      {activeSettingsTab === 'account' ? (
+        <Card
+          title={
+            <Flex align="center" gap="small">
+              <SettingOutlined aria-hidden="true" />
+              <Typography.Title id="settings-account-heading" level={3}>
+                Account
+              </Typography.Title>
+            </Flex>
+          }
         >
-          Account
-        </TabButton>
-        <TabButton
-          active={activeSettingsTab === 'appearance'}
-          className="page-tab"
-          id="settings-tab-appearance"
-          role="tab"
-          aria-controls="settings-panel-appearance"
-          onClick={() => setActiveSettingsTab('appearance')}
-        >
-          Appearance
-        </TabButton>
-        <TabButton
-          active={activeSettingsTab === 'notifications'}
-          className="page-tab"
-          id="settings-tab-notifications"
-          role="tab"
-          aria-controls="settings-panel-notifications"
-          onClick={() => setActiveSettingsTab('notifications')}
-        >
-          Notifications
-        </TabButton>
-        <TabButton
-          active={activeSettingsTab === 'plugins'}
-          className="page-tab"
-          id="settings-tab-plugins"
-          role="tab"
-          aria-controls="settings-panel-plugins"
-          onClick={() => setActiveSettingsTab('plugins')}
-        >
-          Plugin permissions
-        </TabButton>
-        {hasSocialChannelsAccess ? (
-          <TabButton
-            active={activeSettingsTab === 'social'}
-            className="page-tab"
-            id="settings-tab-social"
-            role="tab"
-            aria-controls="settings-panel-social"
-            onClick={() => setActiveSettingsTab('social')}
-          >
-            Social channels
-          </TabButton>
-        ) : null}
-        <TabButton
-          active={activeSettingsTab === 'shortcuts'}
-          className="page-tab"
-          id="settings-tab-shortcuts"
-          role="tab"
-          aria-controls="settings-panel-shortcuts"
-          onClick={() => setActiveSettingsTab('shortcuts')}
-        >
-          Shortcuts
-        </TabButton>
-        <TabButton
-          active={activeSettingsTab === 'information'}
-          className="page-tab"
-          id="settings-tab-information"
-          role="tab"
-          aria-controls="settings-panel-information"
-          onClick={() => setActiveSettingsTab('information')}
-        >
-          Information
-        </TabButton>
-      </div>
-
-      <div className="page-layout settings-layout">
-        {activeSettingsTab === 'shortcuts' ? (
-          <section
-            className="settings-tab-panel"
-            id="settings-panel-shortcuts"
-            role="tabpanel"
-            aria-labelledby="settings-tab-shortcuts"
-          >
-            <section
-              className="page-card settings-card"
-              aria-labelledby="settings-shortcuts-heading"
-            >
-              <div className="page-card__header">
-                <div className="settings-card-title-row">
-                  <span className="settings-card-title-icon" aria-hidden="true">
-                    <IconSettings />
-                  </span>
-                  <div>
-                    <h3 id="settings-shortcuts-heading">Keyboard shortcuts</h3>
-                    <p className="muted">Desktop commands available from the keyboard.</p>
-                  </div>
-                </div>
-              </div>
-              <div
-                aria-label="Keyboard shortcuts"
-                className="da-grid settings-shortcuts-grid"
-                role="table"
-                style={
-                  {
-                    '--da-grid-cols': 'minmax(12ch, 0.55fr) minmax(0, 1.45fr)',
-                  } as React.CSSProperties
+          <Flex vertical gap="middle">
+            <Typography.Text type="secondary">
+              Manage your Evenfire account details in Profile UI.
+            </Typography.Text>
+            <Descriptions
+              column={1}
+              size="small"
+              items={[
+                {
+                  key: 'account-name',
+                  label: 'Account name',
+                  children: me?.name || me?.email || 'Unknown account',
+                },
+                { key: 'email', label: 'Email', children: me?.email || email || 'No email' },
+              ]}
+            />
+            <Flex gap="small" wrap>
+              <Button
+                htmlType="button"
+                onClick={() =>
+                  void handleOpenProfileSettings({ section: 'profile', action: 'password' })
                 }
               >
-                <div className="da-grid__head" role="row">
-                  <span className="da-grid__col-header" role="columnheader">
-                    Shortcut
-                  </span>
-                  <span className="da-grid__col-header" role="columnheader">
-                    Action
-                  </span>
-                </div>
-                <div className="da-grid__body" role="rowgroup">
-                  {shortcutCommands.map(command => (
-                    <div className="da-grid__row da-grid__row--compact" key={command.id} role="row">
-                      <span className="da-grid__cell" role="cell">
-                        <kbd>
-                          {formatDesktopShortcut(command.defaultBinding!, shortcutPlatform)}
-                        </kbd>
-                      </span>
-                      <span className="da-grid__cell settings-shortcuts-action" role="cell">
-                        <strong>{command.label}</strong>
-                        <span>{command.description}</span>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </section>
-          </section>
-        ) : null}
+                Update password
+              </Button>
+              <Button
+                htmlType="button"
+                onClick={() => void handleOpenProfileSettings({ section: 'profile' })}
+                type="primary"
+              >
+                Edit
+              </Button>
+            </Flex>
+          </Flex>
+        </Card>
+      ) : null}
 
-        {activeSettingsTab === 'account' ? (
-          <section
-            className="settings-tab-panel"
-            id="settings-panel-account"
-            role="tabpanel"
-            aria-labelledby="settings-tab-account"
-          >
-            <section className="page-card settings-card" aria-labelledby="settings-account-heading">
-              <div className="page-card__header">
-                <div className="settings-card-title-row">
-                  <span className="settings-card-title-icon" aria-hidden="true">
-                    <IconSettings />
-                  </span>
-                  <div>
-                    <h3 id="settings-account-heading">Account</h3>
-                    <p className="muted">Manage your Evenfire account details in Profile UI.</p>
-                  </div>
-                </div>
-              </div>
-              <div className="settings-form settings-account-summary">
-                <div className="settings-readonly-row">
-                  <span className="settings-readonly-label">Account name</span>
-                  <span>{me?.name || me?.email || 'Unknown account'}</span>
-                </div>
-                <div className="settings-readonly-row">
-                  <span className="settings-readonly-label">Email</span>
-                  <span>{me?.email || email || 'No email'}</span>
-                </div>
-              </div>
-              <div className="settings-actions settings-account-actions">
-                <Button
-                  type="button"
-                  color="neutral"
-                  onClick={() =>
-                    void handleOpenProfileSettings({ section: 'profile', action: 'password' })
-                  }
-                >
-                  Update password
-                </Button>
-                <Button
-                  type="button"
-                  onClick={() => void handleOpenProfileSettings({ section: 'profile' })}
-                >
-                  Edit
-                </Button>
-              </div>
-            </section>
-          </section>
-        ) : null}
+      {activeSettingsTab === 'appearance' ? (
+        <Card
+          title={
+            <Flex align="center" gap="small">
+              <SunOutlined aria-hidden="true" />
+              <Typography.Title id="settings-theme-heading" level={3}>
+                Theme
+              </Typography.Title>
+            </Flex>
+          }
+        >
+          <Flex vertical gap="middle">
+            <Typography.Text type="secondary">Choose the desktop app color mode.</Typography.Text>
+            <ThemePreferenceField
+              id="settings-theme-mode"
+              labelledBy="settings-theme-heading"
+              value={themeMode}
+              onChange={onThemeModeChange}
+            />
+          </Flex>
+        </Card>
+      ) : null}
 
-        {activeSettingsTab === 'appearance' ? (
-          <section
-            className="settings-tab-panel"
-            id="settings-panel-appearance"
-            role="tabpanel"
-            aria-labelledby="settings-tab-appearance"
-          >
-            <section className="page-card settings-card" aria-labelledby="settings-theme-heading">
-              <div className="page-card__header">
-                <div className="settings-card-title-row">
-                  <span className="settings-card-title-icon" aria-hidden="true">
-                    <IconThemeSun />
-                  </span>
-                  <div>
-                    <h3 id="settings-theme-heading">Theme</h3>
-                    <p className="muted">Choose the desktop app color mode.</p>
-                  </div>
-                </div>
-              </div>
-              <div className="settings-form">
-                <ThemePreferenceField
-                  id="settings-theme-mode"
-                  labelledBy="settings-theme-heading"
-                  value={themeMode}
-                  onChange={onThemeModeChange}
-                />
-              </div>
-            </section>
-          </section>
-        ) : null}
+      {activeSettingsTab === 'plugins' ? (
+        <Flex vertical gap="middle">
+          <PluginPermissions />
+        </Flex>
+      ) : null}
 
-        {activeSettingsTab === 'plugins' ? (
-          <section
-            className="settings-tab-panel"
-            id="settings-panel-plugins"
-            role="tabpanel"
-            aria-labelledby="settings-tab-plugins"
-          >
-            <PluginPermissions />
-          </section>
-        ) : null}
-
-        {activeSettingsTab === 'notifications' ? (
-          <section
-            className="settings-tab-panel"
-            id="settings-panel-notifications"
-            role="tabpanel"
-            aria-labelledby="settings-tab-notifications"
-          >
-            <form
-              className="page-card settings-card"
-              onSubmit={event => handleSubmit(event, 'inApp')}
+      {activeSettingsTab === 'notifications' ? (
+        <section>
+          <form onSubmit={event => handleSubmit(event, 'inApp')}>
+            <Card
+              title={
+                <Flex align="center" gap="small">
+                  <BellOutlined aria-hidden="true" />
+                  <Typography.Title id="settings-in-app-heading" level={3}>
+                    In App Notifications
+                  </Typography.Title>
+                </Flex>
+              }
             >
-              <div className="page-card__header">
-                <div className="settings-card-title-row">
-                  <span className="settings-card-title-icon" aria-hidden="true">
-                    <IconBell />
-                  </span>
-                  <div>
-                    <h3 id="settings-in-app-heading">In App Notifications</h3>
-                    <p className="muted">
-                      Choose when agent replies and app updates appear in the notification bell.
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="settings-form">
+              <Flex vertical gap="middle">
+                <Typography.Text type="secondary">
+                  Choose when agent replies and app updates appear in the notification bell.
+                </Typography.Text>
                 <NotificationPreferenceField
                   id="settings-in-app-notifications"
                   labelledBy="settings-in-app-heading"
                   value={draftSettings.inApp}
                   onChange={value => updateDraftSetting('inApp', value)}
                 />
+                {hasInAppChanges ? (
+                  <Button htmlType="submit" disabled={savingSection === 'inApp'} type="primary">
+                    {savingSection === 'inApp' ? 'Saving...' : 'Save changes'}
+                  </Button>
+                ) : null}
+              </Flex>
+            </Card>
+          </form>
 
-                {hasInAppChanges && (
-                  <div className="settings-actions">
-                    <Button type="submit" disabled={savingSection === 'inApp'}>
-                      {savingSection === 'inApp' ? 'Saving...' : 'Save changes'}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </form>
-
-            <form
-              className="page-card settings-card"
-              onSubmit={event => handleSubmit(event, 'desktop')}
+          <form onSubmit={event => handleSubmit(event, 'desktop')}>
+            <Card
+              title={
+                <Flex align="center" gap="small">
+                  <DesktopOutlined aria-hidden="true" />
+                  <Typography.Title id="settings-desktop-heading" level={3}>
+                    Desktop notifications
+                  </Typography.Title>
+                </Flex>
+              }
             >
-              <div className="page-card__header">
-                <div className="settings-card-title-row">
-                  <span className="settings-card-title-icon" aria-hidden="true">
-                    <IconDesktopNotifications />
-                  </span>
-                  <div>
-                    <h3 id="settings-desktop-heading">Desktop notifications</h3>
-                    <p className="muted">{permissionLabel}</p>
-                  </div>
-                </div>
-              </div>
-              <div className="settings-form">
+              <Flex vertical gap="middle">
+                <Typography.Text type="secondary">{permissionLabel}</Typography.Text>
                 <NotificationPreferenceField
                   id="settings-desktop-notifications"
                   labelledBy="settings-desktop-heading"
                   value={draftSettings.desktop}
                   onChange={value => updateDraftSetting('desktop', value)}
                 />
+                {hasDesktopChanges ? (
+                  <Button htmlType="submit" disabled={savingSection === 'desktop'} type="primary">
+                    {savingSection === 'desktop' ? 'Saving...' : 'Save changes'}
+                  </Button>
+                ) : null}
+              </Flex>
+            </Card>
+          </form>
 
-                {hasDesktopChanges && (
-                  <div className="settings-actions">
-                    <Button type="submit" disabled={savingSection === 'desktop'}>
-                      {savingSection === 'desktop' ? 'Saving...' : 'Save changes'}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </form>
-
-            <section
-              className="page-card settings-card"
-              aria-labelledby="settings-channel-fallback-heading"
-            >
-              <div className="page-card__header">
-                <div className="settings-card-title-row">
-                  <span className="settings-card-title-icon" aria-hidden="true">
-                    <IconBell />
-                  </span>
-                  <div>
-                    <h3 id="settings-channel-fallback-heading">Channel fallback</h3>
-                    <p className="muted">
-                      SDK workflow notifications are delivered to the desktop app first. Choose
-                      whether Telegram or Slack should receive them if the desktop app does not
-                      acknowledge in time.
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="settings-form settings-channel-fallback-form">
-                <Field label="Preferred fallback channel" htmlFor="settings-preferred-medium">
-                  <SelectInput
-                    id="settings-preferred-medium"
-                    value={draftPreferredMedium ?? ''}
-                    disabled={
-                      channelNotificationPreferencesLoading ||
-                      channelNotificationPreferences.verifiedMedia.length === 0
-                    }
-                    onChange={event => {
-                      const value = event.target.value
-                      setDraftPreferredMedium(
-                        value === 'telegram' || value === 'slack' ? value : null
-                      )
-                    }}
-                  >
-                    <option value="">
-                      {channelNotificationPreferences.verifiedMedia.length > 1
-                        ? 'Most recently verified channel'
-                        : 'No verified channel'}
-                    </option>
-                    {channelNotificationPreferences.verifiedMedia.map(medium => (
-                      <option key={medium} value={medium}>
-                        {medium === 'telegram' ? 'Telegram' : 'Slack'}
-                      </option>
-                    ))}
-                  </SelectInput>
-                </Field>
-                <label className="settings-checkbox-option">
-                  <input
-                    type="checkbox"
-                    checked={draftChannelFallbackEnabled}
-                    disabled={channelNotificationPreferencesLoading}
-                    onChange={event => setDraftChannelFallbackEnabled(event.target.checked)}
-                  />
-                  <span>Allow Telegram/Slack fallback when desktop delivery is unavailable</span>
+          <Card
+            title={
+              <Flex align="center" gap="small">
+                <BellOutlined aria-hidden="true" />
+                <Typography.Title id="settings-channel-fallback-heading" level={3}>
+                  Channel fallback
+                </Typography.Title>
+              </Flex>
+            }
+          >
+            <Flex vertical gap="middle">
+              <Typography.Text type="secondary">
+                SDK workflow notifications are delivered to the desktop app first. Choose whether
+                Telegram or Slack should receive them if the desktop app does not acknowledge in
+                time.
+              </Typography.Text>
+              <Flex vertical gap="small">
+                <label id="settings-preferred-medium-label" htmlFor="settings-preferred-medium">
+                  Preferred fallback channel
                 </label>
-                {hasChannelPreferenceChanges ? (
-                  <div className="settings-actions">
-                    <Button
-                      type="button"
-                      disabled={channelNotificationPreferencesSaving}
-                      onClick={() =>
-                        void onSaveChannelNotificationPreferences({
-                          preferredMedium: draftPreferredMedium,
-                          channelFallbackEnabled: draftChannelFallbackEnabled,
-                        })
-                      }
-                    >
-                      {channelNotificationPreferencesSaving ? 'Saving...' : 'Save changes'}
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            </section>
-
-            <section
-              className="page-card settings-card"
-              aria-labelledby="settings-notification-sound-heading"
-            >
-              <div className="page-card__header">
-                <div className="settings-card-title-row">
-                  <span className="settings-card-title-icon" aria-hidden="true">
-                    <IconVolume />
-                  </span>
-                  <div>
-                    <h3 id="settings-notification-sound-heading">Notification sound</h3>
-                    <p className="muted">Manage the alert volume for notification sounds.</p>
-                  </div>
-                </div>
-              </div>
-              <div className="settings-form">
-                <NotificationSoundVolumeField
-                  value={notificationSettings.soundVolume}
-                  onChange={onNotificationSoundVolumeChange}
-                  onPreview={onPlayNotificationSoundPreview}
+                <Select
+                  id="settings-preferred-medium"
+                  aria-labelledby="settings-preferred-medium-label"
+                  value={draftPreferredMedium ?? ''}
+                  disabled={
+                    channelNotificationPreferencesLoading ||
+                    channelNotificationPreferences.verifiedMedia.length === 0
+                  }
+                  options={[
+                    {
+                      value: '',
+                      label:
+                        channelNotificationPreferences.verifiedMedia.length > 1
+                          ? 'Most recently verified channel'
+                          : 'No verified channel',
+                    },
+                    ...channelNotificationPreferences.verifiedMedia.map(medium => ({
+                      value: medium,
+                      label: medium === 'telegram' ? 'Telegram' : 'Slack',
+                    })),
+                  ]}
+                  onChange={value =>
+                    setDraftPreferredMedium(
+                      value === 'telegram' || value === 'slack' ? value : null
+                    )
+                  }
                 />
-              </div>
-            </section>
-          </section>
-        ) : null}
+              </Flex>
+              <Checkbox
+                checked={draftChannelFallbackEnabled}
+                disabled={channelNotificationPreferencesLoading}
+                onChange={event => setDraftChannelFallbackEnabled(event.target.checked)}
+              >
+                Allow Telegram/Slack fallback when desktop delivery is unavailable
+              </Checkbox>
+              {hasChannelPreferenceChanges ? (
+                <Button
+                  htmlType="button"
+                  disabled={channelNotificationPreferencesSaving}
+                  onClick={() =>
+                    void onSaveChannelNotificationPreferences({
+                      preferredMedium: draftPreferredMedium,
+                      channelFallbackEnabled: draftChannelFallbackEnabled,
+                    })
+                  }
+                  type="primary"
+                >
+                  {channelNotificationPreferencesSaving ? 'Saving...' : 'Save changes'}
+                </Button>
+              ) : null}
+            </Flex>
+          </Card>
 
-        {activeSettingsTab === 'information' ? (
-          <section
-            className="settings-tab-panel"
-            id="settings-panel-information"
-            role="tabpanel"
-            aria-labelledby="settings-tab-information"
+          <Card
+            title={
+              <Flex align="center" gap="small">
+                <SoundOutlined aria-hidden="true" />
+                <Typography.Title id="settings-notification-sound-heading" level={3}>
+                  Notification sound
+                </Typography.Title>
+              </Flex>
+            }
           >
-            <section className="page-card settings-card" aria-label="Connection endpoints">
-              <div className="settings-form">
-                <dl className="settings-runtime-details settings-runtime-details--diagnostics">
-                  <div>
-                    <dt>Desktop app version</dt>
-                    <dd>
-                      {endpointDiagnostics.appInfo?.version ||
-                        endpointDiagnostics.releaseStatus?.currentVersion ||
-                        getVersionValue(null, { loading: endpointDiagnostics.loading })}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>External REST API URL</dt>
-                    <dd>{activeRuntimeConfig?.externalRestApiBaseUrl || 'Not configured'}</dd>
-                  </div>
-                  <div>
-                    <dt>External REST API version</dt>
-                    <dd>
-                      {getVersionValue(endpointDiagnostics.releaseStatus?.externalRestApiVersion, {
-                        loading: endpointDiagnostics.loading,
-                      })}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>RPC proxy URL</dt>
-                    <dd>
-                      {activeRuntimeConfig?.rpcProxyBaseUrl ||
-                        'Will be discovered from External REST API'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>RPC proxy version</dt>
-                    <dd>
-                      {getVersionValue(endpointDiagnostics.releaseStatus?.rpcProxyVersion, {
-                        loading: endpointDiagnostics.loading,
-                      })}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Release ID</dt>
-                    <dd>
-                      {endpointDiagnostics.releaseStatus?.releaseId ||
-                        getVersionValue(null, { loading: endpointDiagnostics.loading })}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Desktop target version</dt>
-                    <dd>
-                      {endpointDiagnostics.releaseStatus
-                        ? endpointDiagnostics.releaseStatus.latestVersion
-                        : getVersionValue(null, { loading: endpointDiagnostics.loading })}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Minimum desktop version</dt>
-                    <dd>
-                      {endpointDiagnostics.releaseStatus
-                        ? endpointDiagnostics.releaseStatus.minimumVersion
-                        : getVersionValue(null, { loading: endpointDiagnostics.loading })}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Update required</dt>
-                    <dd>
-                      {endpointDiagnostics.releaseStatus
-                        ? endpointDiagnostics.releaseStatus.updateRequired
-                          ? 'Yes'
-                          : 'No'
-                        : endpointDiagnostics.loading
-                          ? 'Checking...'
-                          : 'Not checked'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Release URL</dt>
-                    <dd>{endpointDiagnostics.releaseStatus?.releaseUrl || 'Not reported'}</dd>
-                  </div>
-                  <div>
-                    <dt>External REST API health</dt>
-                    <dd>{getHealthLabel(endpointDiagnostics.dependencyHealth?.externalRestApi)}</dd>
-                  </div>
-                  <div>
-                    <dt>RPC proxy health</dt>
-                    <dd>{getHealthLabel(endpointDiagnostics.dependencyHealth?.rpcProxy)}</dd>
-                  </div>
-                  <div>
-                    <dt>Last checked</dt>
-                    <dd>{endpointDiagnostics.checkedAt || 'Not checked'}</dd>
-                  </div>
-                </dl>
-                {endpointDiagnostics.releaseError ? (
-                  <p className="settings-runtime-diagnostic-error" role="alert">
-                    Release check failed: {endpointDiagnostics.releaseError}
-                  </p>
-                ) : null}
-                {endpointDiagnostics.healthError ? (
-                  <p className="settings-runtime-diagnostic-error" role="alert">
-                    Health check failed: {endpointDiagnostics.healthError}
-                  </p>
-                ) : null}
-              </div>
-            </section>
-          </section>
-        ) : null}
+            <Flex vertical gap="middle">
+              <Typography.Text type="secondary">
+                Manage the alert volume for notification sounds.
+              </Typography.Text>
+              <NotificationSoundVolumeField
+                value={notificationSettings.soundVolume}
+                onChange={onNotificationSoundVolumeChange}
+                onPreview={onPlayNotificationSoundPreview}
+              />
+            </Flex>
+          </Card>
+        </section>
+      ) : null}
 
-        {activeSettingsTab === 'social' && hasSocialChannelsAccess ? (
-          <section
-            className="settings-tab-panel"
-            id="settings-panel-social"
-            role="tabpanel"
-            aria-labelledby="settings-tab-social"
-          >
-            <section
-              className="page-card settings-card"
-              aria-labelledby="settings-social-channels-heading"
-            >
-              <div className="page-card__header">
-                <div className="settings-card-title-row">
-                  <span className="settings-card-title-icon" aria-hidden="true">
-                    <IconConnectors />
-                  </span>
-                  <div>
-                    <h3 id="settings-social-channels-heading">Social channels</h3>
-                    <p className="muted">Connect and manage authorized external conversations.</p>
-                  </div>
-                </div>
-              </div>
-              <div className="settings-social-channel-list">
-                {availableSocialMedia.map(medium => {
-                  const label = socialChannelLabel(medium)
-                  const connected = connectedSocialMedia.has(medium)
-                  return (
-                    <div className="settings-social-channel-row" key={medium}>
-                      <div className="settings-social-channel-copy">
-                        <span className="settings-social-channel-name">
-                          {connected ? `${label} connected` : `Setup ${label}`}
-                        </span>
-                        <span className="muted">
-                          {connected
-                            ? `Manage your connected ${label} conversations in Profile UI.`
-                            : `Connect ${label} from Profile UI to use it with this account.`}
-                        </span>
-                      </div>
-                      <Button
-                        type="button"
-                        color={connected ? 'neutral' : 'primary'}
-                        onClick={() =>
-                          void handleOpenProfileSettings({ section: 'social', network: medium })
-                        }
-                      >
-                        {connected ? 'Manage' : 'Setup'}
-                      </Button>
-                    </div>
-                  )
-                })}
-              </div>
-            </section>
-          </section>
-        ) : null}
-      </div>
-    </section>
+      {activeSettingsTab === 'information' ? (
+        <Card aria-label="Connection endpoints">
+          <Flex vertical gap="middle">
+            <Descriptions
+              column={1}
+              size="small"
+              items={[
+                {
+                  key: 'desktop-version',
+                  label: 'Desktop app version',
+                  children:
+                    endpointDiagnostics.appInfo?.version ||
+                    endpointDiagnostics.releaseStatus?.currentVersion ||
+                    getVersionValue(null, { loading: endpointDiagnostics.loading }),
+                },
+                {
+                  key: 'rest-url',
+                  label: 'External REST API URL',
+                  children: activeRuntimeConfig?.externalRestApiBaseUrl || 'Not configured',
+                },
+                {
+                  key: 'rest-version',
+                  label: 'External REST API version',
+                  children: getVersionValue(
+                    endpointDiagnostics.releaseStatus?.externalRestApiVersion,
+                    {
+                      loading: endpointDiagnostics.loading,
+                    }
+                  ),
+                },
+                {
+                  key: 'rpc-url',
+                  label: 'RPC proxy URL',
+                  children:
+                    activeRuntimeConfig?.rpcProxyBaseUrl ||
+                    'Will be discovered from External REST API',
+                },
+                {
+                  key: 'rpc-version',
+                  label: 'RPC proxy version',
+                  children: getVersionValue(endpointDiagnostics.releaseStatus?.rpcProxyVersion, {
+                    loading: endpointDiagnostics.loading,
+                  }),
+                },
+                {
+                  key: 'release-id',
+                  label: 'Release ID',
+                  children:
+                    endpointDiagnostics.releaseStatus?.releaseId ||
+                    getVersionValue(null, { loading: endpointDiagnostics.loading }),
+                },
+                {
+                  key: 'target-version',
+                  label: 'Desktop target version',
+                  children: endpointDiagnostics.releaseStatus
+                    ? endpointDiagnostics.releaseStatus.latestVersion
+                    : getVersionValue(null, { loading: endpointDiagnostics.loading }),
+                },
+                {
+                  key: 'minimum-version',
+                  label: 'Minimum desktop version',
+                  children: endpointDiagnostics.releaseStatus
+                    ? endpointDiagnostics.releaseStatus.minimumVersion
+                    : getVersionValue(null, { loading: endpointDiagnostics.loading }),
+                },
+                {
+                  key: 'update-required',
+                  label: 'Update required',
+                  children: endpointDiagnostics.releaseStatus
+                    ? endpointDiagnostics.releaseStatus.updateRequired
+                      ? 'Yes'
+                      : 'No'
+                    : endpointDiagnostics.loading
+                      ? 'Checking...'
+                      : 'Not checked',
+                },
+                {
+                  key: 'release-url',
+                  label: 'Release URL',
+                  children: endpointDiagnostics.releaseStatus?.releaseUrl || 'Not reported',
+                },
+                {
+                  key: 'rest-health',
+                  label: 'External REST API health',
+                  children: getHealthLabel(endpointDiagnostics.dependencyHealth?.externalRestApi),
+                },
+                {
+                  key: 'rpc-health',
+                  label: 'RPC proxy health',
+                  children: getHealthLabel(endpointDiagnostics.dependencyHealth?.rpcProxy),
+                },
+                {
+                  key: 'last-checked',
+                  label: 'Last checked',
+                  children: endpointDiagnostics.checkedAt || 'Not checked',
+                },
+              ]}
+            />
+            {endpointDiagnostics.releaseError ? (
+              <Alert
+                showIcon
+                type="error"
+                title={`Release check failed: ${endpointDiagnostics.releaseError}`}
+              />
+            ) : null}
+            {endpointDiagnostics.healthError ? (
+              <Alert
+                showIcon
+                type="error"
+                title={`Health check failed: ${endpointDiagnostics.healthError}`}
+              />
+            ) : null}
+          </Flex>
+        </Card>
+      ) : null}
+
+      {activeSettingsTab === 'social' && hasSocialChannelsAccess ? (
+        <Card
+          title={
+            <Flex align="center" gap="small">
+              <ApiOutlined aria-hidden="true" />
+              <Typography.Title id="settings-social-channels-heading" level={3}>
+                Social channels
+              </Typography.Title>
+            </Flex>
+          }
+        >
+          <Flex vertical gap="middle">
+            <Typography.Text type="secondary">
+              Connect and manage authorized external conversations.
+            </Typography.Text>
+            <Flex vertical gap="middle">
+              {availableSocialMedia.map(medium => {
+                const label = socialChannelLabel(medium)
+                const connected = connectedSocialMedia.has(medium)
+                return (
+                  <Flex align="center" gap="middle" justify="space-between" key={medium} wrap>
+                    <Flex vertical>
+                      <Typography.Text strong>
+                        {connected ? `${label} connected` : `Setup ${label}`}
+                      </Typography.Text>
+                      <Typography.Text type="secondary">
+                        {connected
+                          ? `Manage your connected ${label} conversations in Profile UI.`
+                          : `Connect ${label} from Profile UI to use it with this account.`}
+                      </Typography.Text>
+                    </Flex>
+                    <Button
+                      htmlType="button"
+                      onClick={() =>
+                        void handleOpenProfileSettings({ section: 'social', network: medium })
+                      }
+                      type={connected ? 'default' : 'primary'}
+                    >
+                      {connected ? 'Manage' : 'Setup'}
+                    </Button>
+                  </Flex>
+                )
+              })}
+            </Flex>
+          </Flex>
+        </Card>
+      ) : null}
+    </Flex>
+  )
+
+  const settingsTabItems = [
+    {
+      key: 'account',
+      label: 'Account',
+      children: activeSettingsTab === 'account' ? settingsContent : null,
+    },
+    {
+      key: 'appearance',
+      label: 'Appearance',
+      children: activeSettingsTab === 'appearance' ? settingsContent : null,
+    },
+    {
+      key: 'notifications',
+      label: 'Notifications',
+      children: activeSettingsTab === 'notifications' ? settingsContent : null,
+    },
+    {
+      key: 'plugins',
+      label: 'Plugin permissions',
+      children: activeSettingsTab === 'plugins' ? settingsContent : null,
+    },
+    ...(hasSocialChannelsAccess
+      ? [
+          {
+            key: 'social',
+            label: 'Social channels',
+            children: activeSettingsTab === 'social' ? settingsContent : null,
+          },
+        ]
+      : []),
+    {
+      key: 'shortcuts',
+      label: 'Shortcuts',
+      children: activeSettingsTab === 'shortcuts' ? settingsContent : null,
+    },
+    {
+      key: 'information',
+      label: 'Information',
+      children: activeSettingsTab === 'information' ? settingsContent : null,
+    },
+  ]
+
+  return (
+    <Flex vertical gap="middle">
+      <Typography.Title level={2}>Settings</Typography.Title>
+
+      <Tabs
+        aria-label="Settings sections"
+        activeKey={activeSettingsTab}
+        destroyOnHidden
+        items={settingsTabItems}
+        onChange={key => setActiveSettingsTab(key as SettingsTab)}
+      />
+    </Flex>
   )
 }

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render } from '@testing-library/react'
 import { fleetRowHostRefs } from '../../../../../test/e2e-playwright/helpers/fleetRowHostRefs'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import { FleetBoard } from '../FleetBoard'
 
 // The stateless-wake spec reads hostRefs from the rendered FleetBoard rows.
@@ -46,6 +47,8 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
 }))
 
 describe('fleetRowHostRefs on rendered FleetBoard rows', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
   })

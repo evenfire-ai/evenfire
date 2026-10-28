@@ -8,26 +8,24 @@ afterEach(cleanup)
 
 describe('MessageTokens', () => {
   it('shows input and output as separate compact stats', () => {
-    const { container } = render(<MessageTokens tokens={{ input: 11_900, output: 500 }} />)
-    const stats = container.querySelectorAll('.token-usage-stat')
-    expect(stats[0]?.textContent).toBe('11.9k')
-    expect(stats[1]?.textContent).toBe('500')
+    render(<MessageTokens tokens={{ input: 11_900, output: 500 }} />)
+    const stats = screen.getByLabelText(/Turn token usage/)
+    expect(stats.textContent).toContain('11.9k')
+    expect(stats.textContent).toContain('500')
   })
 
   it('omits the cache glyph and cache rows when the model does not report cache', () => {
-    const { container } = render(<MessageTokens tokens={{ input: 100, output: 40 }} />)
-    expect(container.querySelector('.token-usage-stat--cache')).toBeNull()
-    expect(container.querySelector('.token-usage-tooltip')?.textContent).not.toContain('Cache')
+    render(<MessageTokens tokens={{ input: 100, output: 40 }} />)
+    expect(screen.getByLabelText(/Turn token usage/).getAttribute('aria-label')).not.toContain(
+      'Cache'
+    )
   })
 
   it('shows the cache glyph and tooltip cache rows when cache is reported (even at 0)', () => {
-    const { container } = render(
-      <MessageTokens tokens={{ input: 200, output: 80, cacheRead: 13, cacheWrite: 0 }} />
+    render(<MessageTokens tokens={{ input: 200, output: 80, cacheRead: 13, cacheWrite: 0 }} />)
+    expect(screen.getByLabelText(/Turn token usage/).getAttribute('aria-label')).toMatch(
+      /Cache read 13.*Cache write 0/
     )
-    expect(container.querySelector('.token-usage-stat--cache')).toBeTruthy()
-    const tooltip = container.querySelector('.token-usage-tooltip')
-    expect(tooltip?.textContent).toContain('Cache read')
-    expect(tooltip?.textContent).toContain('Cache write')
   })
 
   it('renders nothing when input+output is zero — incl. a cache-only turn (no "0" stats)', () => {

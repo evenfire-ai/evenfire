@@ -1,13 +1,24 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Button, IconButton, StatusBanner } from '@components/Common'
+import { AppstoreOutlined, CopyOutlined, ReloadOutlined } from '@ant-design/icons'
+import {
+  Alert,
+  Button,
+  Card,
+  Col,
+  Empty,
+  Flex,
+  Pagination,
+  Row,
+  Skeleton,
+  Spin,
+  Tag,
+  Typography,
+} from 'antd'
 import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
-import { joinClasses } from '@lib/classNames'
 import { embedFailureMessage, embedViewState, httpStatusOf } from '@lib/embedOwnershipView'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
 import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
-import { IconCopy, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
-import { clickableRowProps } from '../lib/clickableRowProps'
 import { toActiveSandboxUiApp } from '../lib/sandboxUiAppSelection'
 import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
 import type { SandboxUiPageProps } from './SandboxUiPage.types'
@@ -177,31 +188,26 @@ let nextSandboxFindClientRequestId = 0
 // be unreadable. The OS composes the native `title` tooltip over that native
 // view, so it is the only label affordance that can actually be seen.
 function TitlebarLeadingAction({
-  className,
   label,
   pressed,
   onClick,
-  children,
+  icon,
 }: {
-  className: string
   label: string
   pressed?: boolean
   onClick: () => void
-  children: React.ReactNode
+  icon: React.ReactNode
 }) {
   return (
-    <span className="titlebar-leading-action">
-      <IconButton
-        variant="ghost"
-        size="sm"
-        className={joinClasses('titlebar-leading-action__btn', className)}
-        label={label}
-        aria-pressed={pressed}
-        onClick={onClick}
-      >
-        {children}
-      </IconButton>
-    </span>
+    <Button
+      type="text"
+      size="small"
+      icon={icon}
+      title={label}
+      aria-label={label}
+      aria-pressed={pressed}
+      onClick={onClick}
+    />
   )
 }
 
@@ -453,60 +459,38 @@ export function SandboxUiPage({
   }, [embedLive, mountedLaunchId, shellOverlayOpen])
 
   if (view.kind === 'mounted' || view.kind === 'minting') {
-    // Only failures of the launch that owns the tab right now; one from a view
-    // the user already left must not surface on its replacement.
     const showRefreshBanner =
       refreshError !== null &&
       view.kind === 'mounted' &&
       refreshError.launchId === view.launch.launchId
-    // The refresh/copy pair only exists while 'mounted'. The chat-drawer toggle
-    // moved to the app header (mini-spec 04a §C), so the leading slot carries no
-    // drawer control any more. In the 'minting' state both are absent, so
-    // portaling the wrapper unconditionally would inject an empty <div> into the
-    // shared title bar. Only portal when at least one control will render.
     const hasLeadingActions = view.kind === 'mounted'
     return (
-      <section className="page" data-testid="sandbox-ui-mounted">
-        {/* App actions live in the native title bar's leading slot (icon-only,
-            label in a hover flyout). They render through a portal only once the
-            title bar has published its container; there is no inline fallback,
-            mirroring how the header search/bell portal works. "Back to apps" is
-            intentionally gone — the sidebar owns the return to the app picker;
-            the chat-drawer toggle now lives in the app header. */}
-        {titlebarLeadingContainer &&
-          hasLeadingActions &&
-          createPortal(
-            <div className="window-titlebar__leading-actions">
-              <TitlebarLeadingAction
-                className="sandbox-ui-refresh-btn"
-                label="Refresh app content"
-                onClick={() => onRefresh?.()}
-              >
-                <IconRefresh />
-              </TitlebarLeadingAction>
-              <TitlebarLeadingAction
-                className="sandbox-ui-copy-link-btn"
-                label="Copy current app link"
-                onClick={() => void onCopyDeepLink()}
-              >
-                <IconCopy />
-              </TitlebarLeadingAction>
-            </div>,
-            titlebarLeadingContainer
-          )}
-        {showRefreshBanner && (
-          <StatusBanner tone="error">
-            <span>{`Session refresh failed: ${refreshError.message}.`}</span>
-            <Button
-              className="sandbox-ui-status-action"
-              size="xs"
-              variant="outline"
-              onClick={() => onRelaunch?.()}
-            >
-              Retry
-            </Button>
-          </StatusBanner>
-        )}
+      <Flex vertical flex={1} data-testid="sandbox-ui-mounted">
+        {titlebarLeadingContainer && hasLeadingActions
+          ? createPortal(
+              <div className="window-titlebar__leading-actions">
+                <TitlebarLeadingAction
+                  label="Refresh app content"
+                  icon={<ReloadOutlined />}
+                  onClick={() => onRefresh?.()}
+                />
+                <TitlebarLeadingAction
+                  label="Copy current app link"
+                  icon={<CopyOutlined />}
+                  onClick={() => void onCopyDeepLink()}
+                />
+              </div>,
+              titlebarLeadingContainer
+            )
+          : null}
+        {showRefreshBanner ? (
+          <Alert
+            type="error"
+            showIcon
+            title={`Session refresh failed: ${refreshError.message}.`}
+            action={<Button onClick={() => onRelaunch?.()}>Retry</Button>}
+          />
+        ) : null}
         {localSearchOpen ? (
           <SandboxCurrentContentSearch
             focusRequestId={localSearchRequestId}
@@ -520,213 +504,182 @@ export function SandboxUiPage({
             state={localSearchState}
           />
         ) : null}
-        {/* The slot div is the rectangle the WebContentsView floats above
-            after the selected app completes its initial load. */}
+        {/* This slot remains the measured rectangle owned by Electron's native WebContentsView. */}
         <div ref={embedSlotRef} className="sandbox-ui-embed-slot">
-          {embedPreviewDataUrl && (
+          {embedPreviewDataUrl ? (
             <img
               className="sandbox-ui-embed-preview"
               src={embedPreviewDataUrl}
               alt=""
               data-testid="sandbox-ui-embed-preview"
             />
-          )}
-          {view.kind === 'minting' && (
-            <div className="sandbox-ui-loading" role="status" aria-live="polite">
-              <span className="sandbox-ui-loading__mark" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-              </span>
-              <span className="sandbox-ui-loading__text">Loading app</span>
-            </div>
-          )}
+          ) : null}
+          {view.kind === 'minting' ? (
+            <Flex align="center" justify="center" role="status" aria-live="polite">
+              <Spin size="small" />
+              <Typography.Text>Loading app</Typography.Text>
+            </Flex>
+          ) : null}
         </div>
-      </section>
+      </Flex>
     )
   }
 
   const failure = view.kind === 'failed' ? view.failure : null
   const failureBanner =
     failure === null ? null : failure.kind === 'crashed' ? (
-      <StatusBanner tone="error">
-        <span>{embedFailureMessage(failure)}</span>
-        <Button
-          className="sandbox-ui-status-action"
-          size="xs"
-          variant="outline"
-          onClick={() => onRelaunch?.()}
-        >
-          Reopen
-        </Button>
-      </StatusBanner>
+      <Alert
+        type="error"
+        showIcon
+        title={embedFailureMessage(failure)}
+        action={<Button onClick={() => onRelaunch?.()}>Reopen</Button>}
+      />
     ) : (
-      <StatusBanner
-        tone="error"
-        text={`${activeAppRef ?? 'App'}: ${embedFailureMessage(failure)}`}
+      <Alert
+        type="error"
+        showIcon
+        title={`${activeAppRef ?? 'App'}: ${embedFailureMessage(failure)}`}
       />
     )
 
+  const pageHeader = (
+    <Flex vertical>
+      <Typography.Title level={2}>Apps</Typography.Title>
+      <Typography.Paragraph type="secondary">
+        Discover and launch tools to help you work smarter.
+      </Typography.Paragraph>
+    </Flex>
+  )
+
   if (apps === null) {
     return (
-      <section className="page apps-page" aria-busy="true">
-        <div className="apps-page-header">
-          <div className="apps-page-header-text">
-            <h2>Apps</h2>
-            <p className="muted">Discover and launch tools to help you work smarter.</p>
-          </div>
-        </div>
-
-        <div className="apps-page-showcase" role="status" aria-live="polite">
-          <span className="visually-hidden">Fetching app catalog...</span>
-          <div className="apps-page-copy apps-page-copy--skeleton" aria-hidden="true">
-            <span className="apps-skeleton-line apps-skeleton-line--slogan" />
-            <span className="apps-skeleton-line apps-skeleton-line--intro" />
-            <span className="apps-skeleton-line apps-skeleton-line--intro-short" />
-          </div>
-
-          <div className="apps-grid apps-grid--skeleton" aria-hidden="true">
-            <div className="apps-grid__card apps-grid__card--skeleton">
-              <span className="apps-skeleton-icon" />
-              <span className="apps-skeleton-line apps-skeleton-line--title" />
-              <span className="apps-skeleton-pill" />
-              <span className="apps-skeleton-line apps-skeleton-line--meta" />
-              <span className="apps-skeleton-line apps-skeleton-line--body" />
-              <span className="apps-skeleton-line apps-skeleton-line--body-short" />
-            </div>
-          </div>
-        </div>
-      </section>
+      <Flex vertical gap="large" aria-busy="true">
+        {pageHeader}
+        <Flex vertical gap="large" role="status" aria-live="polite">
+          <Typography.Text>Fetching app catalog...</Typography.Text>
+          <Skeleton active title paragraph={{ rows: 4 }} />
+          <Skeleton active title paragraph={{ rows: 4 }} />
+        </Flex>
+      </Flex>
     )
   }
 
   if (apps.length === 0) {
     return (
-      <section className="page apps-page">
-        {error && <StatusBanner tone="error" text={error} />}
+      <Flex vertical gap="large">
+        {error ? <Alert type="error" showIcon title={error} /> : null}
         {failureBanner}
-
-        <div className="apps-page-header">
-          <div className="apps-page-header-text">
-            <h2>Apps</h2>
-            <p className="muted">Discover and launch tools to help you work smarter.</p>
-          </div>
-        </div>
-
-        <div className="apps-page-showcase">
-          <div className="apps-page-copy" role="status" aria-live="polite">
-            <p className="apps-page-slogan">No available apps yet</p>
-            <p className="apps-page-intro">Ask an admin if you expected to see one here.</p>
-          </div>
-        </div>
-      </section>
+        {pageHeader}
+        <Empty
+          image={<AppstoreOutlined />}
+          description={
+            <Flex vertical>
+              <Typography.Text>No available apps yet</Typography.Text>
+              <Typography.Text type="secondary">
+                Ask an admin if you expected to see one here.
+              </Typography.Text>
+            </Flex>
+          }
+        />
+      </Flex>
     )
   }
 
   const appIcon = (app: SandboxUiAppListing) =>
-    app.icon ? <img src={app.icon} alt="" width={20} height={20} /> : <IconSandboxUi />
+    app.icon ? <img src={app.icon} alt="" width={20} height={20} /> : <AppstoreOutlined />
 
-  const appStatusPill = (app: SandboxUiAppListing) => {
-    const pill = phasePill(app.phase ?? null)
-    return <span className={`apps-status-pill apps-status-pill--${pill.tone}`}>{pill.label}</span>
+  const appStatusTag = (app: SandboxUiAppListing) => {
+    const status = phasePill(app.phase ?? null)
+    const color =
+      status.tone === 'allowed'
+        ? 'success'
+        : status.tone === 'warning'
+          ? 'warning'
+          : status.tone === 'denied'
+            ? 'error'
+            : status.tone === 'info'
+              ? 'processing'
+              : 'default'
+    return <Tag color={color}>{status.label}</Tag>
   }
 
-  const previewApps = apps.map(app => ({ app, key: app.appRef }))
-
-  const totalAppPages = Math.max(1, Math.ceil(previewApps.length / APP_PAGE_SIZE))
+  const totalAppPages = Math.max(1, Math.ceil(apps.length / APP_PAGE_SIZE))
   const visibleAppsPage = Math.min(appsPage, totalAppPages - 1)
-  const visibleApps = previewApps.slice(
+  const visibleApps = apps.slice(
     visibleAppsPage * APP_PAGE_SIZE,
     visibleAppsPage * APP_PAGE_SIZE + APP_PAGE_SIZE
   )
-  const showAppPagination = totalAppPages > 1
-
-  const gridCardProps = (app: SandboxUiAppListing, activatable: boolean, activate: () => void) => {
-    if (!activatable) return {}
-    return clickableRowProps(activate, { ariaLabel: `Open ${appLabel(app)}` })
-  }
 
   return (
-    <section className="page apps-page">
-      {error && <StatusBanner tone="error" text={error} />}
+    <Flex vertical gap="large">
+      {error ? <Alert type="error" showIcon title={error} /> : null}
       {failureBanner}
-
-      <div className="apps-page-header">
-        <div className="apps-page-header-text">
-          <h2>Apps</h2>
-          <p className="muted">Discover and launch tools to help you work smarter.</p>
-        </div>
-      </div>
-
-      <div className="apps-page-showcase">
-        <div className="apps-page-copy">
-          <p className="apps-page-slogan">Purpose-built workspaces, right where your team works.</p>
-          <p className="apps-page-intro">
-            Apps are embedded workspaces your team can open inside Evenfire for focused workflows,
-            quick reviews, and task-specific tools without leaving the desktop app.
-          </p>
-        </div>
-
-        <div className="apps-grid">
-          {visibleApps.map(({ app, key }) => {
-            const activatable = app.ready
-            const activate = (): void => {
-              if (!activatable) return
-              onLaunchApp(toActiveSandboxUiApp(app))
-            }
-            return (
-              <div
-                key={key}
-                className={`apps-grid__card${activatable ? ' apps-grid__card--clickable' : ''}`}
+      {pageHeader}
+      <Flex vertical gap="middle">
+        <Typography.Title level={4}>
+          Purpose-built workspaces, right where your team works.
+        </Typography.Title>
+        <Typography.Paragraph>
+          Apps are embedded workspaces your team can open inside Evenfire for focused workflows,
+          quick reviews, and task-specific tools without leaving the desktop app.
+        </Typography.Paragraph>
+      </Flex>
+      <Row>
+        {visibleApps.map(app => {
+          const activatable = app.ready
+          const activate = (): void => {
+            if (activatable) onLaunchApp(toActiveSandboxUiApp(app))
+          }
+          const actionProps = activatable
+            ? {
+                role: 'button' as const,
+                tabIndex: 0,
+                'aria-label': `Open ${appLabel(app)}`,
+                onClick: activate,
+                onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    activate()
+                  }
+                },
+              }
+            : { 'aria-disabled': true }
+          return (
+            <Col key={app.appRef} xs={24} sm={12} md={8} lg={8}>
+              <Card
+                hoverable={activatable}
                 aria-disabled={activatable ? undefined : true}
-                {...gridCardProps(app, activatable, activate)}
+                {...actionProps}
               >
-                <span aria-hidden="true" className="apps-grid__card-icon">
-                  {appIcon(app)}
-                </span>
-                <span className="apps-grid__card-title">{appLabel(app)}</span>
-                {appStatusPill(app)}
-                <span className="apps-card-meta__updated">
-                  {formatLastUpdated(app.updatedAt ?? null)}
-                </span>
-                {app.description ? (
-                  <span className="apps-grid__card-desc">{app.description}</span>
-                ) : null}
-              </div>
-            )
-          })}
-        </div>
-
-        {showAppPagination && (
-          <div className="apps-pagination" aria-label="App pages">
-            <button
-              type="button"
-              className="apps-pagination__btn apps-pagination__btn--prev"
-              aria-label="Previous apps page"
-              disabled={visibleAppsPage === 0}
-              onClick={() => setAppsPage(page => Math.max(0, page - 1))}
-            >
-              <span className="apps-pagination__chevron" aria-hidden="true">
-                &lsaquo;
-              </span>
-            </button>
-            <span className="apps-pagination__label">
-              {visibleAppsPage + 1} / {totalAppPages}
-            </span>
-            <button
-              type="button"
-              className="apps-pagination__btn"
-              aria-label="Next apps page"
-              disabled={visibleAppsPage >= totalAppPages - 1}
-              onClick={() => setAppsPage(page => Math.min(totalAppPages - 1, page + 1))}
-            >
-              <span className="apps-pagination__chevron" aria-hidden="true">
-                &rsaquo;
-              </span>
-            </button>
-          </div>
-        )}
-      </div>
-    </section>
+                <Flex vertical gap="small">
+                  <Flex align="center" gap="small" wrap>
+                    {appIcon(app)}
+                    <Typography.Text strong>{appLabel(app)}</Typography.Text>
+                  </Flex>
+                  {appStatusTag(app)}
+                  <Typography.Text type="secondary">
+                    {formatLastUpdated(app.updatedAt ?? null)}
+                  </Typography.Text>
+                  {app.description ? (
+                    <Typography.Paragraph>{app.description}</Typography.Paragraph>
+                  ) : null}
+                </Flex>
+              </Card>
+            </Col>
+          )
+        })}
+      </Row>
+      {totalAppPages > 1 ? (
+        <Pagination
+          aria-label="App pages"
+          current={visibleAppsPage + 1}
+          pageSize={APP_PAGE_SIZE}
+          showSizeChanger={false}
+          showTotal={() => `${visibleAppsPage + 1} / ${totalAppPages}`}
+          total={apps.length}
+          onChange={page => setAppsPage(page - 1)}
+        />
+      ) : null}
+    </Flex>
   )
 }

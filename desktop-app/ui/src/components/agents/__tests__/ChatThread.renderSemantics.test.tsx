@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import type { AgentChatMessage } from '../../../uiTypes'
 import { ChatThread } from '../ChatThread'
 
@@ -13,7 +14,7 @@ const composerStateValue = {
   requestComposerFocus: vi.fn(),
 }
 const chatListValue = {
-  chatList: [],
+  chatList: [] as Array<{ id: string; title: string; updatedAt: string }>,
   chatListLoading: false,
   sessionStateByChatId: {},
 }
@@ -21,13 +22,16 @@ const actionsValue = {
   chatEndRef: { current: null },
   handleSelectChat: vi.fn(),
   handleRenameChat: vi.fn(),
-  captureChatDeleteFence: vi.fn(async () => {
-    throw new Error('no delete target')
-  }),
+  captureChatDeleteFence: vi.fn(
+    async (): Promise<{ agentRef: string; fence: never; hostAuthorityEpoch: number }> => {
+      throw new Error('no delete target')
+    }
+  ),
   handleDeleteChat: vi.fn(),
 }
 const runtimeValue = { cancelTask: vi.fn() }
 let messages: AgentChatMessage[] = []
+let activeChatId: string | null = 'chat-1'
 
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => navigationValue,
@@ -55,7 +59,7 @@ vi.mock('@contexts/ChatThreadStateContext', () => ({
     hasOlderMessages: false,
     olderMessagesLoading: false,
     handleLoadOlderMessages: vi.fn(),
-    activeChatId: 'chat-1',
+    activeChatId,
     activityByMessageId: {},
     progressByMessageId: {},
     localSearchQuery: '',
@@ -70,12 +74,53 @@ vi.mock('../NudgeArea', () => ({ NudgeArea: () => null }))
 vi.mock('../ChatStateBadge', () => ({ ChatStateBadge: () => null }))
 vi.mock('@components/MessageArtifactActions', () => ({ MessageArtifactActions: () => null }))
 
+beforeEach(installAntdDomEnvironment)
+
 afterEach(() => {
   cleanup()
   messages = []
+  activeChatId = 'chat-1'
+  chatListValue.chatList = []
   vi.clearAllMocks()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+})
+
+describe('ChatThread session actions', () => {
+  const deletion = { agentRef: 'agent-x', fence: {} as never, hostAuthorityEpoch: 1 }
+
+  beforeEach(() => {
+    activeChatId = null
+    chatListValue.chatList = [
+      { id: 'chat-2', title: 'Existing session', updatedAt: '2026-10-27T12:00:00.000Z' },
+    ]
+  })
+
+  it('keeps the rename action available through the Ant Design dropdown and input', async () => {
+    render(<ChatThread />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Session actions for Existing session' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }))
+
+    const input = await screen.findByRole('textbox', { name: 'Rename session' })
+    fireEvent.change(input, { target: { value: 'Renamed session' } })
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 })
+
+    expect(actionsValue.handleRenameChat).toHaveBeenCalledWith('chat-2', 'Renamed session')
+  })
+
+  it('keeps deletion behind the existing fence and Ant Design confirmation modal', async () => {
+    actionsValue.captureChatDeleteFence.mockResolvedValueOnce(deletion)
+    render(<ChatThread />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Session actions for Existing session' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+
+    expect(actionsValue.captureChatDeleteFence).toHaveBeenCalledWith('agent-x')
+    expect(await screen.findByRole('dialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(actionsValue.handleDeleteChat).toHaveBeenCalledWith('chat-2', deletion)
+  })
 })
 
 describe('ChatThread semantic renderer compatibility', () => {

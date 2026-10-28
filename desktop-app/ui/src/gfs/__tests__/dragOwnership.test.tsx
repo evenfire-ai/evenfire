@@ -149,12 +149,17 @@ for (const surface of ['sidebar', 'files'] as const) {
       sourceKind: 'file' | 'directory' = 'directory',
       delayed = false,
       denyTarget = false,
-      parkResolve = false
+      parkResolve = false,
+      delayHover = false
     ) {
       const bits = await affordancesResult(heldAffordances(['read', 'write', 'delete']))
       let release!: () => void
       const gate = new Promise<void>(resolve => {
         release = resolve
+      })
+      let releaseHover!: () => void
+      const hoverGate = new Promise<void>(resolve => {
+        releaseHover = resolve
       })
       let parked = delayed
       const affordances = vi.fn(async (id: string, _drive: string) => {
@@ -162,6 +167,7 @@ for (const surface of ['sidebar', 'files'] as const) {
           parked = false
           await gate
         }
+        if (delayHover && id === 'hover') await hoverGate
         return denyTarget && id === 'target' ? affordancesResult(heldAffordances(['read'])) : bits
       })
       // The COMMIT-TIME resolve is the last read before the PATCH. Parking it
@@ -241,20 +247,24 @@ for (const surface of ['sidebar', 'files'] as const) {
       )
       const rendered = render(view())
       if (surface === 'sidebar') {
-        fireEvent.click(screen.getByRole('button', { name: 'Expand Grand' }))
-        await screen.findByRole('button', { name: 'Source' })
+        const grand = await screen.findByRole('treeitem', { name: 'Grand' })
+        fireEvent.click(grand.querySelector('.ant-tree-switcher')!)
+        await screen.findByRole('treeitem', { name: 'Source' })
       }
       const row = (name: string) => {
-        const button = screen.getByRole('button', {
-          name: surface === 'sidebar' ? name : `Open ${name}`,
-        })
-        return surface === 'sidebar'
-          ? button.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
-          : button
+        if (surface === 'sidebar') {
+          const treeItem = screen.getByRole('treeitem', { name })
+          const content = treeItem.querySelector<HTMLElement>('[data-resource-id]')
+          if (!content) throw new Error(`File explorer row did not render: ${name}`)
+          return content
+        }
+        return screen.getByRole('button', { name: `Open ${name}` })
       }
       const dataTransfer = transfer()
       const sourceElement = () =>
-        screen.getByRole('button', { name: surface === 'sidebar' ? 'Source' : 'Open Source' })
+        surface === 'sidebar'
+          ? screen.getByRole('treeitem', { name: 'Source' })
+          : screen.getByRole('button', { name: 'Open Source' })
       const start = () => fireEvent.dragStart(sourceElement(), { dataTransfer })
       const drop = () => fireEvent.drop(row('Target'), { dataTransfer })
       const dropState = (name: string) => row(name).getAttribute('data-drop-state')
@@ -268,6 +278,7 @@ for (const surface of ['sidebar', 'files'] as const) {
         drop,
         dataTransfer,
         release,
+        releaseHover,
         releaseResolve,
         resolve,
         moveResource,
@@ -284,12 +295,13 @@ for (const surface of ['sidebar', 'files'] as const) {
     it.each(['file', 'directory'] as const)(
       'rejects late %s admission and preserves the newer cross-surface hover check',
       async kind => {
-        const h = await setup(kind, true)
+        const h = await setup(kind, true, false, false, true)
         h.start()
         h.drop()
         await waitFor(() => expect(h.affordances).toHaveBeenCalledWith('target', 'main'))
         expect(h.api().beginDrag(externalSource())).toBe(true)
         fireEvent.dragOver(h.row('Hover'), { dataTransfer: h.dataTransfer })
+        await waitFor(() => expect(h.affordances).toHaveBeenCalledWith('hover', 'main'))
         expect(h.dropState('Hover')).toBe('checking')
         await act(async () => {
           h.release()
@@ -299,7 +311,10 @@ for (const surface of ['sidebar', 'files'] as const) {
         expect(h.toast).not.toHaveBeenCalled()
         expect(h.dropState('Hover')).toBe('checking')
         expect(h.api().activeSource()?.resourceId).toBe('external')
-        await waitFor(() => expect(h.affordances).toHaveBeenCalledWith('hover', 'main'))
+        await act(async () => {
+          h.releaseHover()
+        })
+        await waitFor(() => expect(h.dropState('Hover')).toBe('allowed'))
         fireEvent.drop(h.row('Hover'), { dataTransfer: h.dataTransfer })
         await waitFor(() => expect(h.moveResource).toHaveBeenCalled())
         expect(h.moveResource.mock.calls[0]![0]).toBe('external')

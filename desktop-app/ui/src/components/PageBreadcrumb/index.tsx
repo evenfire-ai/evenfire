@@ -1,47 +1,33 @@
+import { Breadcrumb, Button, Typography } from 'antd'
 import type { PageBreadcrumbProps } from './types'
-
-function BreadcrumbSeparator() {
-  return (
-    <span className="page-breadcrumb-separator" aria-hidden="true">
-      /
-    </span>
-  )
-}
 
 export function PageBreadcrumb({ ariaLabel, items }: PageBreadcrumbProps) {
   if (items.length === 0) return null
 
   return (
-    <nav className="page-breadcrumb" aria-label={ariaLabel}>
-      {items.map((item, index) => {
-        const isLast = index === items.length - 1
-        return (
-          <span className="page-breadcrumb-item" key={index}>
-            {item.onClick ? (
-              <button
-                className={`page-breadcrumb-link ${isLast ? 'is-current' : ''}${
-                  item.className ? ` ${item.className}` : ''
-                }`}
-                onClick={item.onClick}
-                type="button"
-                aria-current={isLast ? 'page' : undefined}
-              >
-                {item.label}
-              </button>
-            ) : (
-              <span
-                className={`page-breadcrumb-link ${isLast ? 'is-current' : ''}${
-                  item.className ? ` ${item.className}` : ''
-                }`}
-                aria-current={isLast ? 'page' : undefined}
-              >
-                {item.label}
-              </span>
-            )}
-            {!isLast ? <BreadcrumbSeparator /> : null}
-          </span>
-        )
+    <Breadcrumb
+      aria-label={ariaLabel}
+      separator="/"
+      items={items.map((item, index) => {
+        const isCurrent = index === items.length - 1
+        return {
+          title: item.onClick ? (
+            <Button
+              aria-current={isCurrent ? 'page' : undefined}
+              htmlType="button"
+              onClick={item.onClick}
+              size="small"
+              type="link"
+            >
+              {item.label}
+            </Button>
+          ) : (
+            <Typography.Text aria-current={isCurrent ? 'page' : undefined}>
+              {item.label}
+            </Typography.Text>
+          ),
+        }
       })}
-    </nav>
+    />
   )
 }

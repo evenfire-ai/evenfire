@@ -1,5 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
-import { Button, TextInput } from '@components/Common'
+import { ArrowDownOutlined, ArrowUpOutlined, CloseOutlined } from '@ant-design/icons'
+import { Button, Flex, Input, Typography } from 'antd'
+import type { InputRef } from 'antd'
 import type { SandboxCurrentContentSearchProps } from './types'
 
 export default function SandboxCurrentContentSearch({
@@ -10,18 +12,30 @@ export default function SandboxCurrentContentSearch({
   query,
   state,
 }: SandboxCurrentContentSearchProps) {
-  const inputRef = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<InputRef>(null)
 
   useLayoutEffect(() => {
     inputRef.current?.focus()
   }, [focusRequestId])
 
+  const matchStatus =
+    state.status === 'pending'
+      ? 'Searching…'
+      : state.status === 'results'
+        ? `${state.current}/${state.total}`
+        : state.status === 'empty'
+          ? '0/0'
+          : state.status === 'unavailable'
+            ? state.reason
+            : state.status === 'error'
+              ? 'Search failed'
+              : '—'
+
   return (
-    <div className="current-content-search" role="search" aria-label="Search current app">
-      <TextInput
+    <Flex align="center" gap="small" role="search" aria-label="Search current app">
+      <Input
         ref={inputRef}
         aria-label="Find in current app"
-        className="current-content-search__input"
         onChange={event => onQueryChange(event.currentTarget.value)}
         onKeyDown={event => {
           if (event.key === 'Escape') {
@@ -35,48 +49,22 @@ export default function SandboxCurrentContentSearch({
         placeholder="Find in current app"
         value={query}
       />
-      <span className="current-content-search__count" role="status" aria-live="polite">
-        {state.status === 'pending'
-          ? 'Searching…'
-          : state.status === 'results'
-            ? `${state.current}/${state.total}`
-            : state.status === 'empty'
-              ? '0/0'
-              : state.status === 'unavailable'
-                ? state.reason
-                : state.status === 'error'
-                  ? 'Search failed'
-                  : '—'}
-      </span>
+      <Typography.Text role="status" aria-live="polite">
+        {matchStatus}
+      </Typography.Text>
       <Button
         aria-label="Previous app match"
-        color="neutral"
         disabled={state.status !== 'results'}
+        icon={<ArrowUpOutlined />}
         onClick={() => onMove('previous')}
-        size="xs"
-        variant="ghost"
-      >
-        ↑
-      </Button>
+      />
       <Button
         aria-label="Next app match"
-        color="neutral"
         disabled={state.status !== 'results'}
+        icon={<ArrowDownOutlined />}
         onClick={() => onMove('next')}
-        size="xs"
-        variant="ghost"
-      >
-        ↓
-      </Button>
-      <Button
-        aria-label="Close current app search"
-        color="neutral"
-        onClick={onClose}
-        size="xs"
-        variant="ghost"
-      >
-        ×
-      </Button>
-    </div>
+      />
+      <Button aria-label="Close current app search" icon={<CloseOutlined />} onClick={onClose} />
+    </Flex>
   )
 }

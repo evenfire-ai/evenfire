@@ -367,7 +367,7 @@ describe('App activates app tabs only through its activation seam', () => {
     controller = makeController(writes)
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(controller))
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-      cb(0)
+      queueMicrotask(() => cb(0))
       return 1
     })
     vi.stubGlobal(
@@ -470,14 +470,14 @@ describe('App activates app tabs only through its activation seam', () => {
     await renderApp()
     await openFromSidebar(ALPHA, 1)
 
-    fireEvent.click(screen.getByRole('button', { name: 'New chat', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat', selected: false }))
     await flushMacrotask()
-    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Alpha', selected: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
     await flushMacrotask()
 
     // Closing the active chat tab activates its right neighbor, the Alpha tab.
-    fireEvent.click(screen.getByRole('button', { name: 'New chat', pressed: false }))
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat', selected: false }))
     await flushMacrotask()
     fireEvent.click(screen.getByRole('button', { name: 'Close New chat' }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
@@ -590,8 +590,8 @@ describe('App activates app tabs only through its activation seam', () => {
   it('keeps a pending store update when a tab shortcut activates another tab', async () => {
     await renderWithRetitledLiveAlpha(() => shortcutCommandCb?.('tabs.select1', 'host'))
 
-    expect(screen.getByRole('button', { name: 'New chat', pressed: true })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: false })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'New chat', selected: true })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Alpha Inbox', selected: false })).toBeTruthy()
     expectActivationsOnlyThroughSeam(1)
   })
 
@@ -600,8 +600,8 @@ describe('App activates app tabs only through its activation seam', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Close New chat' }))
     )
 
-    expect(screen.queryByRole('button', { name: 'New chat' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
+    expect(screen.queryByRole('tab', { name: 'New chat' })).toBeNull()
+    expect(screen.getByRole('tab', { name: 'Alpha Inbox', selected: true })).toBeTruthy()
     expectActivationsOnlyThroughSeam(1)
   })
 })

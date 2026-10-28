@@ -1,12 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { DropdownSelect, StatusBanner } from '@components/Common'
-import {
-  IconAgents,
-  IconContexts,
-  IconTeams,
-  IconUser,
-  IconWorkflows,
-} from '@components/SidebarNav/icons'
+import { AppstoreOutlined, RobotOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons'
+import { Alert, Avatar, Empty, Flex, Listy, Select, Spin, Tooltip, Typography } from 'antd'
 import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
@@ -37,11 +31,11 @@ function subjectKind(
 }
 
 function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
-  if (kind === 'agent') return <IconAgents />
-  if (kind === 'context') return <IconContexts />
-  if (kind === 'team') return <IconTeams />
-  if (kind === 'workflow') return <IconWorkflows />
-  return <IconUser />
+  if (kind === 'agent') return <RobotOutlined />
+  if (kind === 'context') return <AppstoreOutlined />
+  if (kind === 'team') return <TeamOutlined />
+  if (kind === 'workflow') return <AppstoreOutlined />
+  return <UserOutlined />
 }
 
 /**
@@ -115,6 +109,20 @@ const ROLE_OPTIONS = [
   { value: 'read', label: 'Read' },
   { value: 'editor', label: 'Editor' },
 ]
+
+type AccessListRow = {
+  key: string
+  testId: string
+  inherited?: boolean
+  subject: { type: string; id?: string }
+  label: string
+  permissions: string[]
+  selectableRole: boolean
+  roleDisabled: boolean
+  onRoleChange?: (role: GfsAccessRole) => void | Promise<void>
+  onRemove: () => void | Promise<void>
+  removeDisabled: boolean
+}
 
 export function GfsGrantList({
   items,
@@ -193,6 +201,61 @@ export function GfsGrantList({
   const hasRows = showGrantRows || showShareRows || showMergedRows
   const hasAnyError = Boolean(error || shareError)
 
+  const rows: AccessListRow[] = []
+  if (showGrantRows) {
+    visibleItems.forEach(item => {
+      if (mergedByKey.has(subjectKey(item.subject))) return
+      const label = subjectLabel(item.subject, agents, subjects)
+      rows.push({
+        key: `grant:${item.id}`,
+        testId: `gfs-access-row-grant-${item.id}`,
+        subject: item.subject,
+        label,
+        permissions: item.permissions,
+        selectableRole: true,
+        roleDisabled: updatingRole || !onChangeRole,
+        onRoleChange: role => onChangeRole?.(item, label, role),
+        onRemove: () => onRevoke(item, label),
+        removeDisabled: revoking,
+      })
+    })
+  }
+  if (showMergedRows) {
+    ;[...mergedByKey.values()].forEach(row => {
+      const label = subjectLabel(row.subject, agents, subjects)
+      rows.push({
+        key: `inherited:${subjectKey(row.subject)}`,
+        testId: `gfs-access-row-inherited-${subjectKey(row.subject)}`,
+        inherited: true,
+        subject: row.subject,
+        label,
+        permissions: row.permissions,
+        selectableRole: true,
+        roleDisabled: updatingRole || !onChangeInheritedRole,
+        onRoleChange: role => onChangeInheritedRole?.(row, label, role),
+        onRemove: () => onRemoveInherited?.(row, label),
+        removeDisabled: revoking || !onRemoveInherited,
+      })
+    })
+  }
+  if (showShareRows) {
+    visibleShares.forEach(item => {
+      if (mergedByKey.has(subjectKey(item.subject))) return
+      const label = subjectLabel(item.subject, agents, subjects)
+      rows.push({
+        key: `share:${item.id}`,
+        testId: `gfs-access-row-share-${item.id}`,
+        subject: item.subject,
+        label,
+        permissions: item.permissions,
+        selectableRole: false,
+        roleDisabled: false,
+        onRemove: () => onRevokeShare?.(item, label),
+        removeDisabled: revokingShare || !onRevokeShare,
+      })
+    })
+  }
+
   // ONE informational banner. The hidden-members sentence subsumes the
   // derivation notice when it applies (it already covers access inherited
   // from parent folders), so the surface never shows two overlapping lines.
@@ -207,168 +270,103 @@ export function GfsGrantList({
   return (
     <>
       {stableNotice ? (
-        <StatusBanner
-          tone="info"
-          text={stableNotice}
+        <Tooltip
+          trigger={['hover', 'focus']}
           title={
             stableNotice === derivationNotice ? (derivationNoticeHint ?? undefined) : undefined
           }
-        />
+        >
+          <div tabIndex={0}>
+            <Alert showIcon type="info" title={stableNotice} />
+          </div>
+        </Tooltip>
       ) : null}
       {hasAnyError ? (
-        <div className="da-gfs-grant-list__errors" data-testid="gfs-access-list-error">
+        <Flex vertical gap="small" data-testid="gfs-access-list-error">
           {error ? (
-            <StatusBanner
-              tone={error.severity === 'quiet' ? 'info' : 'error'}
-              text={error.message}
+            <Alert
+              showIcon
+              type={error.severity === 'quiet' ? 'info' : 'error'}
+              title={error.message}
             />
           ) : null}
           {shareError ? (
-            <StatusBanner
-              tone={shareError.severity === 'quiet' ? 'info' : 'error'}
-              text={shareError.message}
+            <Alert
+              showIcon
+              type={shareError.severity === 'quiet' ? 'info' : 'error'}
+              title={shareError.message}
             />
           ) : null}
-        </div>
+        </Flex>
       ) : null}
       {hasRows ? (
-        <ul className="da-gfs-grant-list" aria-label="Resource access">
-          {showGrantRows
-            ? visibleItems.map(item => {
-                if (mergedByKey.has(subjectKey(item.subject))) return null
-                const label = subjectLabel(item.subject, agents, subjects)
-                const kind = subjectKind(item.subject)
-                return (
-                  <li
-                    className="da-gfs-grant-list__row"
-                    data-testid={`gfs-access-row-grant-${item.id}`}
-                    key={`grant:${item.id}`}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={`da-gfs-grant-list__avatar da-gfs-grant-list__avatar--${kind}`}
-                      data-subject-kind={kind}
-                    >
-                      <AccessSubjectIcon kind={kind} />
-                    </span>
-                    <span className="da-gfs-grant-list__identity">
-                      <span className="da-gfs-grant-list__label">{label}</span>
-                    </span>
-                    <span className="da-gfs-grant-list__meta">
-                      <DropdownSelect
-                        ariaLabel={`Access role for ${label}`}
-                        className="da-gfs-grant-list__role"
-                        disabled={updatingRole || !onChangeRole}
-                        onChange={value => void onChangeRole?.(item, label, value as GfsAccessRole)}
-                        options={ROLE_OPTIONS}
-                        placeholder="Role"
-                        portal
-                        value={roleForPermissions(item.permissions)}
+        <div role="list" aria-label="Resource access">
+          <Listy
+            items={rows}
+            rowKey="key"
+            virtual={false}
+            itemRender={row => {
+              const kind = subjectKind(row.subject)
+              return (
+                <div
+                  data-inherited={row.inherited ? 'true' : undefined}
+                  data-testid={row.testId}
+                  role="listitem"
+                >
+                  <Flex align="center" justify="space-between" wrap>
+                    <Flex align="center" gap="small">
+                      <Avatar
+                        aria-hidden="true"
+                        data-subject-kind={kind}
+                        icon={<AccessSubjectIcon kind={kind} />}
                       />
-                    </span>
-                    <AccessRowMenu
-                      disabled={revoking}
-                      label={label}
-                      onRemove={() => onRevoke(item, label)}
-                    />
-                  </li>
-                )
-              })
-            : null}
-          {showMergedRows
-            ? [...mergedByKey.values()].map(row => {
-                const label = subjectLabel(row.subject, agents, subjects)
-                const kind = subjectKind(row.subject)
-                return (
-                  <li
-                    className="da-gfs-grant-list__row"
-                    data-inherited="true"
-                    data-testid={`gfs-access-row-inherited-${subjectKey(row.subject)}`}
-                    key={`inherited:${subjectKey(row.subject)}`}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={`da-gfs-grant-list__avatar da-gfs-grant-list__avatar--${kind}`}
-                      data-subject-kind={kind}
-                    >
-                      <AccessSubjectIcon kind={kind} />
-                    </span>
-                    <span className="da-gfs-grant-list__identity">
-                      <span className="da-gfs-grant-list__label">{label}</span>
-                    </span>
-                    <span className="da-gfs-grant-list__meta">
-                      {/* Normal toggleable row: any edit opens the
-                          parent-folder confirmation in the page. */}
-                      <DropdownSelect
-                        ariaLabel={`Access role for ${label}`}
-                        className="da-gfs-grant-list__role"
-                        disabled={updatingRole || !onChangeInheritedRole}
-                        onChange={value =>
-                          void onChangeInheritedRole?.(row, label, value as GfsAccessRole)
-                        }
-                        options={ROLE_OPTIONS}
-                        placeholder="Role"
-                        portal
-                        value={roleForPermissions(row.permissions)}
+                      <Typography.Text>{row.label}</Typography.Text>
+                    </Flex>
+                    <Flex align="center" gap="small" wrap>
+                      {row.selectableRole ? (
+                        <Select
+                          aria-label={`Access role for ${row.label}`}
+                          disabled={row.roleDisabled}
+                          onChange={value => void row.onRoleChange?.(value as GfsAccessRole)}
+                          options={ROLE_OPTIONS}
+                          size="small"
+                          value={roleForPermissions(row.permissions)}
+                        />
+                      ) : (
+                        <Typography.Text>
+                          {roleForPermissions(row.permissions) === 'editor' ? 'Editor' : 'Read'}
+                        </Typography.Text>
+                      )}
+                      <AccessRowMenu
+                        disabled={row.removeDisabled}
+                        label={row.label}
+                        onRemove={row.onRemove}
                       />
-                    </span>
-                    <AccessRowMenu
-                      disabled={revoking || !onRemoveInherited}
-                      label={label}
-                      onRemove={() => void onRemoveInherited?.(row, label)}
-                    />
-                  </li>
-                )
-              })
-            : null}
-          {showShareRows
-            ? visibleShares.map(item => {
-                if (mergedByKey.has(subjectKey(item.subject))) return null
-                const label = subjectLabel(item.subject, agents, subjects)
-                const kind = subjectKind(item.subject)
-                return (
-                  <li
-                    className="da-gfs-grant-list__row"
-                    data-testid={`gfs-access-row-share-${item.id}`}
-                    key={`share:${item.id}`}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={`da-gfs-grant-list__avatar da-gfs-grant-list__avatar--${kind}`}
-                      data-subject-kind={kind}
-                    >
-                      <AccessSubjectIcon kind={kind} />
-                    </span>
-                    <span className="da-gfs-grant-list__identity">
-                      <span className="da-gfs-grant-list__label">{label}</span>
-                    </span>
-                    <span className="da-gfs-grant-list__meta">
-                      <span className="da-gfs-grant-list__role-label">
-                        {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
-                      </span>
-                    </span>
-                    <AccessRowMenu
-                      disabled={revokingShare || !onRevokeShare}
-                      label={label}
-                      onRemove={() => onRevokeShare?.(item, label)}
-                    />
-                  </li>
-                )
-              })
-            : null}
-        </ul>
+                    </Flex>
+                  </Flex>
+                </div>
+              )
+            }}
+          />
+        </div>
       ) : !hasAnyError && hiddenCount > 0 ? (
         // The filter removed every row: never claim an empty folder.
         loading ? (
-          <p className="muted">Loading access…</p>
+          <Flex align="center" gap="small">
+            <Spin size="small" />
+            <Typography.Text>Loading access…</Typography.Text>
+          </Flex>
         ) : (
-          <p className="muted">{ONLY_HIDDEN_ACCESS_NOTICE}</p>
+          <Typography.Text type="secondary">{ONLY_HIDDEN_ACCESS_NOTICE}</Typography.Text>
         )
       ) : !hasAnyError ? (
         loading ? (
-          <p className="muted">Loading access…</p>
+          <Flex align="center" gap="small">
+            <Spin size="small" />
+            <Typography.Text>Loading access…</Typography.Text>
+          </Flex>
         ) : derivationNotice ? null : (
-          <p className="muted">No one has access yet.</p>
+          <Empty description="No one has access yet." />
         )
       ) : null}
     </>

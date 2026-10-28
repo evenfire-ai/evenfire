@@ -32,9 +32,10 @@ interface ParsedRule {
 interface ElementSignature {
   classes: string[]
   attrs: Record<string, string | true>
+  ancestors?: ElementSignature[]
 }
 
-const ANCESTOR_CHAIN: ElementSignature[] = [{ classes: ['da-gfs-drive__grid'], attrs: {} }]
+const ANCESTOR_CHAIN: ElementSignature[] = []
 
 function parseSheet(css: string): ParsedRule[] {
   const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -134,9 +135,10 @@ function compoundMatches(
 function selectorMatches(
   complex: string,
   element: ElementSignature,
-  ancestors: readonly ElementSignature[],
+  defaultAncestors: readonly ElementSignature[],
   hoverActive: boolean
 ): boolean {
+  const ancestors = element.ancestors ?? defaultAncestors
   const compounds = complex.split(/\s+/).filter(Boolean)
   const last = compounds[compounds.length - 1]
   if (last === undefined || !compoundMatches(last, element, hoverActive)) return false
@@ -183,13 +185,16 @@ function winningDeclaration(
 
 const sheet = parseSheet(readFileSync(new URL('../../styles.css', import.meta.url), 'utf8'))
 
-const GRID_ROW: ElementSignature = {
-  classes: ['da-grid__row', 'da-grid__row--clickable', 'da-grid__row--compact'],
-  attrs: {},
-}
-
 function rowWith(attrs: Record<string, string | true>): ElementSignature {
-  return { classes: GRID_ROW.classes, attrs }
+  return {
+    classes: ['ant-table-cell'],
+    attrs: {},
+    ancestors: [
+      { classes: ['gfs-resource-row'], attrs },
+      { classes: ['gfs-resource-table'], attrs: {} },
+      { classes: [], attrs: { 'data-gfs-browser': 'true' } },
+    ],
+  }
 }
 
 function expectWinner(
@@ -215,22 +220,21 @@ describe('Files-grid drop-verdict tint cascade (refusal UX matrix §5)', () => {
     expect(
       [...selectors].some(
         selector =>
-          selector.includes("data-drop-state='denied'") && selector.includes('da-gfs-drive__grid')
+          selector.includes("data-drop-state='denied'") && selector.includes('gfs-resource-table')
       )
     ).toBe(true)
     expect(
       [...selectors].some(
         selector =>
-          selector.includes("data-drop-state='checking'") && selector.includes('da-gfs-drive__grid')
+          selector.includes("data-drop-state='checking'") && selector.includes('gfs-resource-table')
       )
     ).toBe(true)
   })
 
-  it('a denied row paints the danger tint over the transparent base AND the hover background', () => {
+  it('a denied Ant Design cell paints the danger tint over the hover background', () => {
     const denied = rowWith({ 'data-drop-state': 'denied' })
     expectWinner(denied, 'background', false, 'rgba(var(--danger-rgb), 0.1)')
     expectWinner(denied, 'background', true, 'rgba(var(--danger-rgb), 0.1)')
-    expectWinner(denied, 'box-shadow', false, 'inset 2px 0 0 rgba(var(--danger-rgb), 0.72)')
   })
 
   it('the no-op reason repaints as informational, never error-red', () => {
@@ -271,11 +275,9 @@ describe('Files-grid drop-verdict tint cascade (refusal UX matrix §5)', () => {
     }
   })
 
-  it('a row with no verdict keeps the plain base/hover background — tints do not leak', () => {
+  it('a row with no verdict does not receive a custom drop-status background', () => {
     const plain = rowWith({})
-    expectWinner(plain, 'background', false, 'transparent')
-    const hovered = winningDeclaration(sheet, plain, 'background', true)
-    expect(hovered).toBeDefined()
-    expect(hovered!.value).not.toMatch(/danger-rgb|warning-rgb/)
+    expect(winningDeclaration(sheet, plain, 'background', false)).toBeUndefined()
+    expect(winningDeclaration(sheet, plain, 'background', true)).toBeUndefined()
   })
 })

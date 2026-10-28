@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { useAgentActivityContext } from '@contexts/AgentActivityContext'
+import { Card, Col, Empty, Flex, Row, Statistic, Typography } from 'antd'
 
 export function ActivityDashboard() {
   const { selectedAgentActivitySummary } = useAgentActivityContext()
@@ -72,32 +73,36 @@ export function ActivityDashboard() {
   }, [selectedAgentActivitySummary.conversationsPerDay])
 
   return (
-    <section className="agent-activity-dashboard" aria-label="Agent activity">
-      <div className="agent-activity-overview">
-        <article className="agent-activity-metric-card">
-          <h4>Conversations</h4>
-          <strong>{selectedAgentActivitySummary.conversations}</strong>
-        </article>
-        <article className="agent-activity-metric-card">
-          <h4>Messages</h4>
-          <strong>{selectedAgentActivitySummary.messages}</strong>
-        </article>
-        <article className="agent-activity-metric-card">
-          <h4>Tool calls</h4>
-          <strong>{selectedAgentActivitySummary.toolCalls}</strong>
-        </article>
-        <article className="agent-activity-metric-card">
-          <h4>Errors</h4>
-          <strong>{selectedAgentActivitySummary.errors}</strong>
-        </article>
-      </div>
+    <Flex component="section" vertical gap="middle" aria-label="Agent activity">
+      <Row gutter={[16, 16]}>
+        <Col xs={12} sm={6}>
+          <Card size="small">
+            <Statistic title="Conversations" value={selectedAgentActivitySummary.conversations} />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card size="small">
+            <Statistic title="Messages" value={selectedAgentActivitySummary.messages} />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card size="small">
+            <Statistic title="Tool calls" value={selectedAgentActivitySummary.toolCalls} />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card size="small">
+            <Statistic title="Errors" value={selectedAgentActivitySummary.errors} />
+          </Card>
+        </Col>
+      </Row>
 
-      <article className="agent-activity-chart-card">
-        <div className="agent-activity-chart-header">
-          <h4>Activity over time</h4>
-          <span className="muted">Conversations per day</span>
-        </div>
-        <div className="agent-activity-chart-shell">
+      <Card
+        size="small"
+        title="Activity over time"
+        extra={<Typography.Text type="secondary">Conversations per day</Typography.Text>}
+      >
+        <Flex vertical gap="small">
           {activityChart.points.length > 0 ? (
             <>
               <svg
@@ -180,10 +185,10 @@ export function ActivityDashboard() {
               </div>
             </>
           ) : (
-            <div className="agent-activity-chart-empty">No activity yet.</div>
+            <Empty description="No activity yet." />
           )}
-        </div>
-      </article>
-    </section>
+        </Flex>
+      </Card>
+    </Flex>
   )
 }

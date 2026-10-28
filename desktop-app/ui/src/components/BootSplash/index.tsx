@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Card, Flex, Spin, Typography } from 'antd'
 import { BOOT_SPLASH_EXIT_MS, BOOT_SPLASH_MIN_DISPLAY_MS } from '@constants/bootSplash'
 import type { BootSplashProps } from './types'
 
@@ -36,23 +37,25 @@ export function BootSplash({ loading }: BootSplashProps) {
 
   return (
     <div className={`boot-overlay${leaving ? ' boot-overlay--leaving' : ''}`}>
-      <section className="boot-screen glass-card" role="status" aria-live="polite">
-        <div className="boot-brand">
-          <img
-            className="brand-lockup brand-lockup--light"
-            src="./logotype-light.svg"
-            alt=""
-            aria-hidden="true"
-          />
-          <img
-            className="brand-lockup brand-lockup--dark"
-            src="./logotype-dark.svg"
-            alt="Evenfire"
-          />
-        </div>
-        <div className="boot-progress" aria-hidden="true" />
-        <p className="boot-status muted">Loading session…</p>
-      </section>
+      <Card className="boot-splash-card">
+        <Flex vertical align="center" gap="large" role="status" aria-live="polite">
+          <Flex className="boot-brand" align="center" justify="center">
+            <img
+              className="brand-lockup brand-lockup--light"
+              src="./logotype-light.svg"
+              alt=""
+              aria-hidden="true"
+            />
+            <img
+              className="brand-lockup brand-lockup--dark"
+              src="./logotype-dark.svg"
+              alt="Evenfire"
+            />
+          </Flex>
+          <Spin size="large" />
+          <Typography.Text type="secondary">Loading session…</Typography.Text>
+        </Flex>
+      </Card>
     </div>
   )
 }

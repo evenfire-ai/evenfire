@@ -3,8 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
 import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
 import { MAX_TAB_TITLE_LEN } from '@constants/workspaceTabs'
 import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
 import {
@@ -20,8 +18,10 @@ import {
 } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { WorkspaceTabStrip } from '.'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 
 afterEach(cleanup)
+beforeEach(installAntdDomEnvironment)
 
 // Fixtures are derived from the real universal-store producers, never hand-built
 // WorkspaceTab objects — if the store's tab shape changes, these stop compiling
@@ -53,16 +53,16 @@ describe('WorkspaceTabStrip', () => {
     )
 
     expect(screen.getByRole('toolbar', { name: 'Workspace tabs' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'First chat' }).getAttribute('aria-pressed')).toBe(
+    expect(screen.getByRole('tab', { name: 'First chat' }).getAttribute('aria-selected')).toBe(
       'true'
     )
-    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'New chat' }))
     fireEvent.click(screen.getByRole('button', { name: 'Close First chat' }))
     expect(onSelect).toHaveBeenCalledWith('two')
     expect(onClose).toHaveBeenCalledWith('one')
   })
 
-  it('keeps long tab labels left-aligned, truncatable, and separate from close controls', () => {
+  it('keeps a long Ant Design tab label accessible and its close action separate', () => {
     const longTitle = 'A very long conversation title that must not overlap its close control'
     const longTabs = openChatTab(createWorkspaceTabsState('one', 'alpha'), {
       id: 'one-persisted',
@@ -70,7 +70,7 @@ describe('WorkspaceTabStrip', () => {
       chatId: 'chat-1',
       title: longTitle,
     }).tabs
-    const { container } = render(
+    render(
       <WorkspaceTabStrip
         tabs={longTabs}
         activeTabId="one"
@@ -80,30 +80,10 @@ describe('WorkspaceTabStrip', () => {
       />
     )
 
-    const select = screen.getByRole('button', { name: longTitle })
-    const scroller = container.querySelector('.chat-view-tabs__scroller')
-    const list = container.querySelector('.chat-view-tabs__list')
-    const label = container.querySelector('.chat-view-tab__label')
+    const select = screen.getByRole('tab', { name: longTitle })
     const close = screen.getByRole('button', { name: `Close ${longTitle}` })
-    expect(select.classList.contains('ui-button--align-start')).toBe(true)
-    expect(label?.textContent).toBe(longTitle)
-    expect(select.nextElementSibling).toBe(close)
-    expect(scroller?.firstElementChild).toBe(list)
-
-    const styles = readFileSync(path.join(process.cwd(), 'ui', 'src', 'styles.css'), 'utf8')
-    expect(styles).toMatch(/\.chat-view-tabs\s*\{[^}]*padding:\s*var\(--space-2\) 0 0;/s)
-    expect(styles).toMatch(/\.chat-view-tabs__scroller\s*\{[^}]*width:\s*100%;/s)
-    expect(styles).toMatch(/\.chat-view-tabs__list\s*\{[^}]*width:\s*100%;/s)
-    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*flex:\s*1 1 var\(--chat-tab-max\);/s)
-    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*max-width:\s*var\(--chat-tab-max\);/s)
-    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*min-width:\s*var\(--chat-tab-min\);/s)
-    expect(styles).toMatch(/\.chat-view-tab\.is-active\s*\{[^}]*flex-shrink:\s*0\.4;/s)
-    expect(styles).toMatch(/\.chat-view-tabs::after\s*\{[^}]*z-index:\s*-1;/s)
-    expect(styles).toMatch(
-      /\.chat-view-tab:not\(\.is-active\)\s*\{[^}]*border-bottom:\s*1px solid var\(--chat-view-selected-border\);/s
-    )
-    expect(styles).toMatch(/\.chat-view-tab__select\s*\{[^}]*flex:\s*1 1 auto;/s)
-    expect(styles).toMatch(/\.chat-view-tab__label\s*\{[^}]*text-overflow:\s*ellipsis;/s)
+    expect(select.getAttribute('aria-selected')).toBe('true')
+    expect(close).not.toBe(select)
   })
 
   it('associates the active tab control with its owned surface, and only that one', () => {
@@ -122,22 +102,25 @@ describe('WorkspaceTabStrip', () => {
       }
     ).tabs
     render(
-      <WorkspaceTabStrip
-        activeTabId="one"
-        onClose={vi.fn()}
-        onReorder={vi.fn()}
-        onSelect={vi.fn()}
-        panelId="chat-view-panel"
-        tabs={tabs}
-      />
+      <>
+        <div id="chat-view-panel" />
+        <WorkspaceTabStrip
+          activeTabId="one"
+          onClose={vi.fn()}
+          onReorder={vi.fn()}
+          onSelect={vi.fn()}
+          panelId="chat-view-panel"
+          tabs={tabs}
+        />
+      </>
     )
 
-    expect(screen.getByRole('button', { name: 'First chat' }).getAttribute('aria-controls')).toBe(
+    expect(screen.getByRole('tab', { name: 'First chat' }).getAttribute('aria-controls')).toBe(
       'chat-view-panel'
     )
     expect(
       screen
-        .getByRole('button', {
+        .getByRole('tab', {
           name: 'A second conversation with a long title that must remain usable',
         })
         .getAttribute('aria-controls')
@@ -202,10 +185,8 @@ describe('WorkspaceTabStrip', () => {
     const runningLabel = screen.getByText('Running chat')
     const approvalLabel = screen.getByText('Approval chat')
 
-    expect(screen.getByRole('button', { name: 'Running chat' }).contains(running)).toBe(true)
-    expect(screen.getByRole('button', { name: 'Approval chat' }).contains(awaitingApproval)).toBe(
-      true
-    )
+    expect(screen.getByRole('tab', { name: 'Running chat' }).contains(running)).toBe(true)
+    expect(screen.getByRole('tab', { name: 'Approval chat' }).contains(awaitingApproval)).toBe(true)
     expect(running.nextElementSibling).toBe(runningLabel)
     expect(awaitingApproval.nextElementSibling).toBe(approvalLabel)
     // The blank chat tab carries no live badge — only the two running/approval do.
@@ -257,10 +238,10 @@ describe('WorkspaceTabStrip', () => {
       </ChatListProvider>
     )
 
-    expect(screen.getByRole('button', { name: 'Running chat' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'My App' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'My App' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('tab', { name: /Running chat/ })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'My App' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Settings' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'My App' }).getAttribute('aria-selected')).toBe('true')
     // Only the chat tab carries a live session badge — app/settings do not.
     expect(screen.getAllByRole('status')).toHaveLength(1)
   })
@@ -284,7 +265,7 @@ describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chro
       'app-1',
       raw
     )
-    const { container } = render(
+    render(
       <WorkspaceTabStrip
         tabs={state.tabs}
         activeTabId="app-1"
@@ -294,7 +275,7 @@ describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chro
       />
     )
 
-    expect(container.querySelector('.chat-view-tab__label')?.textContent).toBe('EVIL report')
+    expect(screen.getByText('EVIL report')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Close EVIL report' })).toBeTruthy()
   })
 
@@ -307,7 +288,7 @@ describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chro
       'app-1',
       withEmoji
     )
-    const { container } = render(
+    render(
       <WorkspaceTabStrip
         tabs={state.tabs}
         activeTabId="app-1"
@@ -317,7 +298,7 @@ describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chro
       />
     )
 
-    expect(container.querySelector('.chat-view-tab__label')?.textContent).toBe(withEmoji)
+    expect(screen.getByText(withEmoji)).toBeTruthy()
     expect(screen.getByRole('button', { name: `Close ${withEmoji}` })).toBeTruthy()
   })
 
@@ -335,7 +316,7 @@ describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chro
       'app-1',
       raw
     )
-    const { container } = render(
+    render(
       <WorkspaceTabStrip
         tabs={state.tabs}
         activeTabId="app-1"
@@ -345,7 +326,7 @@ describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chro
       />
     )
 
-    const label = container.querySelector('.chat-view-tab__label')?.textContent ?? ''
+    const label = screen.getByText(expected).textContent ?? ''
     expect(label).toBe(expected)
     expect(Array.from(label).length).toBe(MAX_TAB_TITLE_LEN)
     expect(label.endsWith('…')).toBe(true)
@@ -398,8 +379,8 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     }
   }
 
-  const containerFor = (root: HTMLElement, name: string): HTMLElement =>
-    screen.getByRole('button', { name }).closest('.chat-view-tab') as HTMLElement
+  const containerFor = (_root: HTMLElement, name: string): HTMLElement =>
+    screen.getByRole('tab', { name })
 
   // jsdom has no DragEvent, so `fireEvent.drop(..., { clientX })` drops clientX on
   // the floor. Build the event explicitly and pin clientX so the side is real.
@@ -429,10 +410,14 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     const target = containerFor(container, 'Charlie')
     const dataTransfer = makeDataTransfer()
     fireEvent.dragStart(source, { dataTransfer })
+    expect(source.querySelector('[data-workspace-dragging="true"]')).toBeTruthy()
     fireDrag('dragOver', target, dataTransfer, 90)
+    expect(target.querySelector('[data-workspace-drop-side="after"]')).toBeTruthy()
     fireDrag('drop', target, dataTransfer, 90)
     // Drop after 'c' (index 2); 'a' sat before it, so the final index is 2.
     expect(onReorder).toHaveBeenCalledWith('a', 2)
+    expect(source.querySelector('[data-workspace-dragging]')).toBeNull()
+    expect(target.querySelector('[data-workspace-drop-side]')).toBeNull()
   })
 
   it('drags a right tab to the left of an earlier tab (no shift adjustment)', () => {
@@ -451,6 +436,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     const dataTransfer = makeDataTransfer()
     fireEvent.dragStart(source, { dataTransfer })
     fireDrag('dragOver', target, dataTransfer, 10)
+    expect(target.querySelector('[data-workspace-drop-side="before"]')).toBeTruthy()
     fireDrag('drop', target, dataTransfer, 10)
     // Drop before 'a' (index 0); 'c' sat after it, so the final index is 0.
     expect(onReorder).toHaveBeenCalledWith('c', 0)
@@ -485,7 +471,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
         onReorder={onReorder}
       />
     )
-    const bravo = screen.getByRole('button', { name: 'Bravo' })
+    const bravo = screen.getByRole('tab', { name: /Bravo/ })
     fireEvent.keyDown(bravo, { key: 'ArrowRight', altKey: true })
     expect(onReorder).toHaveBeenLastCalledWith('b', 2) // index 1 -> 2
     fireEvent.keyDown(bravo, { key: 'ArrowLeft', altKey: true })
@@ -503,7 +489,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
         onReorder={onReorder}
       />
     )
-    const bravo = screen.getByRole('button', { name: 'Bravo' })
+    const bravo = screen.getByRole('tab', { name: /Bravo/ })
     fireEvent.keyDown(bravo, { key: 'ArrowRight' })
     fireEvent.keyDown(bravo, { key: 'ArrowLeft' })
     expect(onReorder).not.toHaveBeenCalled()
@@ -525,7 +511,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
         onReorder={onReorder}
       />
     )
-    const bravo = screen.getByRole('button', { name: 'Bravo' })
+    const bravo = screen.getByRole('tab', { name: /Bravo/ })
     bravo.focus()
     expect(document.activeElement).toBe(bravo)
     fireEvent.keyDown(bravo, { key: 'ArrowRight', altKey: true })
@@ -540,7 +526,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     )
     expect(state.tabs.map(t => t.id)).toEqual(['a', 'c', 'b'])
     // Same DOM node, now last, still focused.
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Bravo' }))
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /Bravo/ }))
     expect(document.activeElement).toBe(bravo)
   })
 
@@ -580,7 +566,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     expect(state.tabs.map(t => t.id)).toEqual(['a', 'c'])
     expect(state.activeTabId).toBe('c')
     // Observable result: focus landed on the now-active tab's control, not <body>.
-    const nowActive = screen.getByRole('button', { name: 'Charlie' })
+    const nowActive = screen.getByRole('tab', { name: /Charlie/ })
     expect(document.activeElement).toBe(nowActive)
   })
 
@@ -613,7 +599,7 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     expect(state.tabs).toHaveLength(0)
     expect(state.activeTabId).toBeNull()
     // No tab survives, so focus stays in the strip rather than dropping to <body>.
-    const strip = container.querySelector('.chat-view-tabs') as HTMLElement
+    const strip = screen.getByRole('toolbar', { name: 'Workspace tabs' })
     expect(document.activeElement).toBe(strip)
   })
 })

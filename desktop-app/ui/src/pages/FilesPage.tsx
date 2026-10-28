@@ -1,5 +1,8 @@
 import {
+  type HTMLAttributes,
   type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useId,
@@ -7,7 +10,34 @@ import {
   useRef,
   useState,
 } from 'react'
+import {
+  CheckOutlined,
+  CloseOutlined,
+  DownloadOutlined,
+  EditOutlined,
+  FolderAddOutlined,
+  FolderOutlined,
+  RightOutlined,
+  ShareAltOutlined,
+  UploadOutlined,
+} from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  Alert,
+  Button as AntButton,
+  Breadcrumb,
+  Card,
+  Empty,
+  Flex,
+  Input,
+  Modal,
+  Progress,
+  Spin,
+  Table,
+  Tag,
+  Typography,
+} from 'antd'
+import type { TableColumnsType } from 'antd'
 import {
   GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
   GFS_UPLOAD_NAME_RETRY_LIMIT,
@@ -16,23 +46,9 @@ import {
   normalizeGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
-import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
-import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
-import {
-  IconAttachFile,
-  IconCheck,
-  IconChevronRight,
-  IconClose,
-  IconConnectors,
-  IconContexts,
-  IconDownload,
-  IconEdit,
-  IconShare,
-  IconUpload,
-} from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
@@ -245,7 +261,6 @@ type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'version'>
 type GfsInlineRenameProps = {
   value: string
   busy?: boolean
-  className?: string
   onChange: (value: string) => void
   onCancel: () => void
   onSubmit: () => void
@@ -254,7 +269,6 @@ type GfsInlineRenameProps = {
 function GfsInlineRename({
   value,
   busy = false,
-  className,
   onChange,
   onCancel,
   onSubmit,
@@ -262,47 +276,40 @@ function GfsInlineRename({
   return (
     <form
       aria-label="Rename resource"
-      className={`da-gfs-inline-rename${className ? ` ${className}` : ''}`}
       onClick={event => event.stopPropagation()}
       onSubmit={event => {
         event.preventDefault()
         onSubmit()
       }}
     >
-      <TextInput
+      <Input
         aria-label="New name"
         autoFocus
-        className="da-gfs-inline-rename__input"
-        dense
+        size="small"
         value={value}
         onChange={event => onChange(event.currentTarget.value)}
         onFocus={event => event.currentTarget.select()}
       />
-      <span className="da-gfs-inline-rename__actions">
-        <IconButton
-          color="success"
-          className="da-gfs-inline-rename__confirm"
+      <Flex align="center" gap="small">
+        <AntButton
+          aria-label="Save name"
+          title="Save name"
           disabled={!value.trim()}
-          label="Save name"
           loading={busy}
-          size="xs"
-          type="submit"
-          variant="soft"
-        >
-          <IconCheck />
-        </IconButton>
-        <IconButton
-          className="da-gfs-inline-rename__cancel"
+          htmlType="submit"
+          icon={<CheckOutlined aria-hidden="true" />}
+          size="small"
+        />
+        <AntButton
+          aria-label="Cancel rename"
+          title="Cancel rename"
           disabled={busy}
-          label="Cancel rename"
-          size="xs"
-          type="button"
-          variant="ghost"
+          htmlType="button"
+          icon={<CloseOutlined aria-hidden="true" />}
+          size="small"
           onClick={onCancel}
-        >
-          <IconClose />
-        </IconButton>
-      </span>
+        />
+      </Flex>
     </form>
   )
 }
@@ -2092,22 +2099,152 @@ export function FilesPage({
     current && crumbs.some(crumb => crumb.resourceId === current.resourceId)
   )
 
+  const resourceColumns: TableColumnsType<GfsDriveResource> = [
+    {
+      key: 'kind',
+      title: '',
+      render: (_value, resource) => (
+        <span data-testid="gfs-resource-icon" aria-hidden="true">
+          {resource.kind === 'directory' ? (
+            <FolderOutlined />
+          ) : (
+            <GfsFileIcon name={resource.name} />
+          )}
+        </span>
+      ),
+    },
+    {
+      key: 'name',
+      title: 'Name',
+      render: (_value, resource) => (
+        <Flex vertical gap="small">
+          {renameTarget?.resourceId === resource.resourceId ? (
+            <GfsInlineRename
+              onCancel={() => setRenameTarget(null)}
+              onChange={setRenameDraft}
+              onSubmit={() => void handleRenameTarget()}
+              value={renameDraft}
+              busy={ctrl.mutating}
+            />
+          ) : (
+            <AntButton htmlType="button" type="link" onClick={() => openResource(resource)}>
+              {resource.name || resource.drive}
+            </AntButton>
+          )}
+          {resource.readable === false ? <Tag>No access</Tag> : null}
+        </Flex>
+      ),
+    },
+    {
+      key: 'size',
+      title: 'Size',
+      align: 'right',
+      render: (_value, resource) => (
+        <Typography.Text type="secondary" data-testid="gfs-resource-size">
+          {formatSharedFileSize(resource.bytes)}
+        </Typography.Text>
+      ),
+    },
+    {
+      key: 'actions',
+      title: 'Actions',
+      align: 'right',
+      render: (_value, resource) => (
+        <Flex align="center" gap="small" wrap>
+          {rowCanManage(resource) ? (
+            <AntButton
+              htmlType="button"
+              type="text"
+              size="small"
+              icon={<ShareAltOutlined aria-hidden="true" />}
+              aria-label={`Share ${resource.name || resource.drive}`}
+              onClick={() => openManage(resource)}
+            />
+          ) : null}
+          {resource.kind === 'file' ? (
+            <AntButton
+              htmlType="button"
+              type="text"
+              size="small"
+              icon={<DownloadOutlined aria-hidden="true" />}
+              aria-label={`Download ${resource.name}`}
+              onClick={() => void handleDownload(resource.gfsUri, resource.name)}
+              disabled={resource.readable === false}
+            />
+          ) : null}
+          {rowCanRename(resource) ? (
+            <AntButton
+              htmlType="button"
+              type="text"
+              size="small"
+              icon={<EditOutlined aria-hidden="true" />}
+              aria-label={`Rename ${resource.name || resource.drive}`}
+              onClick={() => openRenameTarget(resource)}
+            />
+          ) : null}
+          {resource.kind === 'directory' ? (
+            <GfsResourceMenu
+              {...folderMenuPropsFor(
+                resource,
+                {
+                  canManage: rowCanManage(resource),
+                  canRename: rowCanRename(resource),
+                  canDelete: rowCanDelete(resource),
+                },
+                {
+                  onOpen: () => openResource(resource),
+                  onOpenChange: open =>
+                    ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null),
+                }
+              )}
+            />
+          ) : (
+            <GfsResourceMenu
+              resourceName={resource.name}
+              onManage={rowCanManage(resource) ? () => openManage(resource) : undefined}
+              onCopyLink={() => void handleCopyLink(resource.gfsUri)}
+              onDelete={rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined}
+              onOpenChange={open =>
+                ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
+              }
+              onRename={rowCanRename(resource) ? () => openRenameTarget(resource) : undefined}
+              onMove={() => setMoveTarget(resource)}
+              onPreview={
+                resource.readable !== false && isGfsPreviewFile(resource.name)
+                  ? () => void openFilePreview(resource)
+                  : undefined
+              }
+              onDownload={
+                resource.readable !== false && resource.kind === 'file'
+                  ? () => void handleDownload(resource.gfsUri, resource.name)
+                  : undefined
+              }
+            />
+          )}
+        </Flex>
+      ),
+    },
+  ]
+
   return (
-    <section className="page da-gfs-page">
+    <section aria-label="Files">
       {/* The drop verdict is painted on the target row; this live region is
           its spoken form, so a screen reader learns whether the folder under
           the pointer accepts the move (RP-026). */}
       <p aria-live="polite" className="visually-hidden">
         {dropVerdictAnnouncement}
       </p>
-      <div className="page-header">
-        <h2>Files</h2>
-        <p className="muted">Browse and manage everything shared with you in one place.</p>
-      </div>
+      <Flex vertical gap="large">
+        <Flex vertical gap="small">
+          <Typography.Title level={2}>Files</Typography.Title>
+          <Typography.Text type="secondary">
+            Browse and manage everything shared with you in one place.
+          </Typography.Text>
+        </Flex>
 
-      <div className="page-layout da-gfs-layout">
-        <section
-          className="page-card da-gfs-drive"
+        <Card
+          data-gfs-browser="true"
+          role="region"
           aria-label="EvenDrive browser"
           aria-busy={driveBusy}
           onDragEnter={handleGfsDragEnter}
@@ -2115,174 +2252,214 @@ export function FilesPage({
           onDragOver={handleGfsDragOver}
           onDrop={event => void handleGfsDrop(event)}
         >
-          <div className="page-card__header da-gfs-drive__header">
-            <div className="da-gfs-drive__title-row">
-              <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
-                <Button
-                  className="da-gfs-drive__breadcrumb"
-                  color="neutral"
-                  disabled={!current}
-                  onClick={() => {
-                    manageReturnCrumbsRef.current = null
-                    setManageOpen(false)
-                    ctrl.reset()
-                  }}
-                  variant="text"
-                >
-                  Shared with me
-                </Button>
-                {crumbs.map((crumb, index) => (
-                  <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
-                    <IconChevronRight aria-hidden="true" />
-                    {renameTarget?.resourceId === crumb.resourceId ? (
-                      <GfsInlineRename
-                        className="da-gfs-drive__inline-rename"
-                        onCancel={() => setRenameTarget(null)}
-                        onChange={setRenameDraft}
-                        onSubmit={() => void handleRenameTarget()}
-                        value={renameDraft}
-                        busy={ctrl.mutating}
-                      />
-                    ) : (
-                      <Button
-                        className={`da-gfs-drive__breadcrumb${
-                          dragOverFolderId === crumb.resourceId
-                            ? ' da-gfs-drive__breadcrumb--allowed'
-                            : ''
-                        }`}
-                        color="neutral"
-                        // The ACTIVE crumb stays a live drop target (Control UI
-                        // parity): a listing row dropped here is the same-parent
-                        // no-op ("already in"), and an item dragged from another
-                        // surface (the sidebar tree) moves INTO the open folder.
-                        // Only the click is inert — you are already here.
-                        aria-current={index === crumbs.length - 1 ? 'page' : undefined}
-                        title={
-                          gfsDropVerdictReason(dropStatesById[crumb.resourceId]) !== undefined
-                            ? gfsDropVerdictLiveAnnouncement(
-                                dropStatesById[crumb.resourceId]!,
-                                crumb.name,
-                                dragSourceName ?? undefined
-                              )
-                            : undefined
-                        }
-                        data-drop-state={dropStatesById[crumb.resourceId]?.state}
-                        data-drop-reason={gfsDropVerdictReason(dropStatesById[crumb.resourceId])}
-                        onClick={
-                          index === crumbs.length - 1 ? undefined : () => ctrl.goToCrumb(index)
-                        }
-                        onDragEnter={event => handleCrumbDragOver(event, crumb, index)}
-                        onDragOver={event => handleCrumbDragOver(event, crumb, index)}
-                        onDragLeave={handleFolderDragLeave}
-                        onDrop={event =>
-                          void handleFolderDrop(event, {
-                            resourceId: crumb.resourceId,
-                            name: crumb.name,
-                            kind: 'directory',
-                          })
-                        }
-                        variant="text"
-                      >
-                        {crumb.name}
-                      </Button>
-                    )}
-                  </span>
-                ))}
-              </nav>
-              {!current ? (
-                <GfsResourceMenu
-                  resourceName="Shared with me"
-                  onOpenGfsLink={() => setOpenLinkOpen(true)}
-                />
+          <Flex vertical gap="middle">
+            <Flex align="center" gap="middle" justify="space-between" wrap>
+              <Flex data-testid="gfs-title-row" align="center" gap="small" wrap>
+                <nav aria-label="File location">
+                  <Breadcrumb
+                    separator={<RightOutlined aria-hidden="true" />}
+                    items={[
+                      {
+                        key: 'root',
+                        title: (
+                          <AntButton
+                            htmlType="button"
+                            type="link"
+                            disabled={!current}
+                            onClick={() => {
+                              manageReturnCrumbsRef.current = null
+                              setManageOpen(false)
+                              ctrl.reset()
+                            }}
+                          >
+                            Shared with me
+                          </AntButton>
+                        ),
+                      },
+                      ...crumbs.map((crumb, index) => ({
+                        key: crumb.resourceId,
+                        title:
+                          renameTarget?.resourceId === crumb.resourceId ? (
+                            <GfsInlineRename
+                              onCancel={() => setRenameTarget(null)}
+                              onChange={setRenameDraft}
+                              onSubmit={() => void handleRenameTarget()}
+                              value={renameDraft}
+                              busy={ctrl.mutating}
+                            />
+                          ) : (
+                            <AntButton
+                              htmlType="button"
+                              type="link"
+                              aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+                              title={
+                                gfsDropVerdictReason(dropStatesById[crumb.resourceId]) !== undefined
+                                  ? gfsDropVerdictLiveAnnouncement(
+                                      dropStatesById[crumb.resourceId]!,
+                                      crumb.name,
+                                      dragSourceName ?? undefined
+                                    )
+                                  : undefined
+                              }
+                              data-drop-state={dropStatesById[crumb.resourceId]?.state}
+                              data-drop-reason={gfsDropVerdictReason(
+                                dropStatesById[crumb.resourceId]
+                              )}
+                              onClick={
+                                index === crumbs.length - 1
+                                  ? undefined
+                                  : () => ctrl.goToCrumb(index)
+                              }
+                              onDragEnter={event => handleCrumbDragOver(event, crumb, index)}
+                              onDragOver={event => handleCrumbDragOver(event, crumb, index)}
+                              onDragLeave={handleFolderDragLeave}
+                              onDrop={event =>
+                                void handleFolderDrop(event, {
+                                  resourceId: crumb.resourceId,
+                                  name: crumb.name,
+                                  kind: 'directory',
+                                })
+                              }
+                            >
+                              {crumb.name}
+                            </AntButton>
+                          ),
+                      })),
+                    ]}
+                  />
+                </nav>
+                {!current ? (
+                  <GfsResourceMenu
+                    resourceName="Shared with me"
+                    onOpenGfsLink={() => setOpenLinkOpen(true)}
+                  />
+                ) : null}
+                {current && !currentIsFile && currentIsBeingRenamed && !currentIsInBreadcrumbs ? (
+                  <GfsInlineRename
+                    onCancel={() => setRenameTarget(null)}
+                    onChange={setRenameDraft}
+                    onSubmit={() => void handleRenameTarget()}
+                    value={renameDraft}
+                    busy={ctrl.mutating}
+                  />
+                ) : null}
+                {current && !currentIsFile && !currentIsBeingRenamed ? (
+                  <GfsResourceMenu
+                    {...folderMenuPropsFor(crumbAsResource(current), {
+                      canManage: canManageCurrent,
+                      canRename: canWriteCurrent,
+                      canDelete: canDeleteCurrent,
+                    })}
+                  />
+                ) : null}
+              </Flex>
+              {currentIsFolder && canWriteCurrent ? (
+                <Flex data-testid="gfs-header-actions" align="center" gap="small" wrap>
+                  <AntButton
+                    htmlType="button"
+                    disabled={ctrl.mutating}
+                    icon={<FolderAddOutlined aria-hidden="true" />}
+                    onClick={openCreateFolder}
+                    size="small"
+                    type="primary"
+                  >
+                    New folder
+                  </AntButton>
+                  <AntButton
+                    htmlType="button"
+                    disabled={ctrl.mutating}
+                    icon={<UploadOutlined aria-hidden="true" />}
+                    onClick={() => uploadInputRef.current?.click()}
+                    size="small"
+                  >
+                    Upload file
+                  </AntButton>
+                  <input
+                    aria-label="Upload file"
+                    className="visually-hidden"
+                    ref={uploadInputRef}
+                    type="file"
+                    onChange={event => {
+                      const file = event.currentTarget.files?.[0]
+                      event.currentTarget.value = ''
+                      void handleUploadFile(file)
+                    }}
+                  />
+                </Flex>
               ) : null}
-              {current && !currentIsFile && currentIsBeingRenamed && !currentIsInBreadcrumbs ? (
-                <GfsInlineRename
-                  className="da-gfs-drive__inline-rename"
-                  onCancel={() => setRenameTarget(null)}
-                  onChange={setRenameDraft}
-                  onSubmit={() => void handleRenameTarget()}
-                  value={renameDraft}
-                  busy={ctrl.mutating}
-                />
-              ) : null}
-              {current && !currentIsFile && !currentIsBeingRenamed ? (
-                <GfsResourceMenu
-                  {...folderMenuPropsFor(crumbAsResource(current), {
-                    canManage: canManageCurrent,
-                    canRename: canWriteCurrent,
-                    canDelete: canDeleteCurrent,
-                  })}
-                />
-              ) : null}
-            </div>
-            {currentIsFolder && canWriteCurrent ? (
-              <div className="da-gfs-drive__header-actions">
-                <Button disabled={ctrl.mutating} onClick={openCreateFolder} size="sm">
-                  <IconContexts width={16} height={16} />
-                  New folder
-                </Button>
-                <Button
-                  color="neutral"
-                  disabled={ctrl.mutating}
-                  onClick={() => uploadInputRef.current?.click()}
-                  size="sm"
-                  variant="outline"
-                >
-                  <IconUpload width={16} height={16} />
-                  Upload file
-                </Button>
-                <input
-                  aria-label="Upload file"
-                  className="visually-hidden"
-                  ref={uploadInputRef}
-                  type="file"
-                  onChange={event => {
-                    const file = event.currentTarget.files?.[0]
-                    event.currentTarget.value = ''
-                    void handleUploadFile(file)
-                  }}
-                />
-              </div>
-            ) : null}
-          </div>
+            </Flex>
+          </Flex>
 
           {dragActive || droppedUploadCount > 0 ? (
-            <div className="composer-drop-overlay da-gfs-drop-overlay" role="status">
-              {droppedUploadCount > 0
-                ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
-                : droppedUploadRestriction ||
-                  `Drop files to upload to ${current?.name || 'this folder'}`}
-            </div>
+            <Alert
+              className="da-gfs-drop-overlay"
+              role="status"
+              showIcon
+              type="info"
+              title={
+                droppedUploadCount > 0
+                  ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
+                  : droppedUploadRestriction ||
+                    `Drop files to upload to ${current?.name || 'this folder'}`
+              }
+            />
           ) : null}
 
           {dropSessionLost ? (
             // Persistent (A11): the refusal outlives the dead gesture and the
             // revoked surface below — it is not a one-shot toast.
-            <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+            <Alert role="alert" showIcon type="error" title={GFS_DROP_SESSION_LOST_MESSAGE} />
           ) : null}
           {zipJob ? (
-            <div className="da-gfs-zip-progress" role="status" data-testid="gfs-zip-progress">
-              <span className="da-gfs-zip-progress__label">
-                {zipJob.progress.phase === 'listing'
-                  ? `Preparing ${zipJob.folderName}.zip — reading folder contents…`
-                  : zipJob.progress.phase === 'downloading'
-                    ? `Preparing ${zipJob.folderName}.zip — downloading ${zipJob.progress.filesAdded} of ${zipJob.progress.filesFound} ${zipJob.progress.filesFound === 1 ? 'file' : 'files'}…`
-                    : `Preparing ${zipJob.folderName}.zip — assembling archive…`}
-              </span>
-              <button
-                type="button"
-                className="da-gfs-zip-progress__stop"
-                aria-label="Stop preparing zip"
-                onClick={() => zipAbortRef.current?.abort()}
-              >
-                Stop
-              </button>
-            </div>
+            <Alert
+              role="status"
+              showIcon
+              type="info"
+              data-testid="gfs-zip-progress"
+              title={
+                <Flex align="center" gap="middle" justify="space-between" wrap>
+                  <Flex vertical>
+                    <Typography.Text>
+                      {zipJob.progress.phase === 'listing'
+                        ? `Preparing ${zipJob.folderName}.zip — reading folder contents…`
+                        : zipJob.progress.phase === 'downloading'
+                          ? `Preparing ${zipJob.folderName}.zip — downloading ${zipJob.progress.filesAdded} of ${zipJob.progress.filesFound} ${zipJob.progress.filesFound === 1 ? 'file' : 'files'}…`
+                          : `Preparing ${zipJob.folderName}.zip — assembling archive…`}
+                    </Typography.Text>
+                    {zipJob.progress.phase === 'downloading' ? (
+                      <Progress
+                        percent={
+                          zipJob.progress.filesFound > 0
+                            ? Math.round(
+                                (zipJob.progress.filesAdded / zipJob.progress.filesFound) * 100
+                              )
+                            : 0
+                        }
+                        size="small"
+                        status="active"
+                      />
+                    ) : (
+                      <Spin size="small" />
+                    )}
+                  </Flex>
+                  <AntButton
+                    htmlType="button"
+                    size="small"
+                    aria-label="Stop preparing zip"
+                    onClick={() => zipAbortRef.current?.abort()}
+                  >
+                    Stop
+                  </AntButton>
+                </Flex>
+              }
+            />
           ) : null}
 
-          {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
+          {accessibleNotice ? (
+            <Alert role="status" showIcon type="info" title={accessibleNotice} />
+          ) : null}
           {unavailableLocation ? (
-            <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+            <Alert role="alert" showIcon type="error" title={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
           ) : null}
           {visibleError && !accessRevoked && !blockingFailure ? (
             // Presented, not raw. The banner is the non-blocking half of the
@@ -2290,7 +2467,12 @@ export function FilesPage({
             // surface left leaking `Error invoking remote method '…'` at the
             // user — which is what it did for every failure the card declines
             // to take over, a rate-limited `Load more` among them.
-            <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
+            <Alert
+              role="alert"
+              showIcon
+              type="error"
+              title={describeGfsReadError(visibleError).message}
+            />
           ) : null}
 
           {accessRevoked ? (
@@ -2298,16 +2480,23 @@ export function FilesPage({
               {/* The revoked surface owns the session-ended sentence (A11): it
                   outlives any gesture's ownership, so a drag whose probe died
                   stays explained even after the revocation invalidated it. */}
-              <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
-              <EmptyState
-                title="File access is not authorized"
-                body="Your current Desktop session cannot access this location. Sign in again or contact an administrator."
+              <Alert role="alert" showIcon type="error" title={GFS_DROP_SESSION_LOST_MESSAGE} />
+              <Empty
+                description={
+                  <Flex vertical gap="small">
+                    <Typography.Title level={5}>File access is not authorized</Typography.Title>
+                    <Typography.Text type="secondary">
+                      Your current Desktop session cannot access this location. Sign in again or
+                      contact an administrator.
+                    </Typography.Text>
+                  </Flex>
+                }
               />
-              <div className="da-gfs-footer-actions">
-                <Button onClick={() => ctrl.retryAccess()} size="sm" variant="outline">
+              <Flex justify="center">
+                <AntButton htmlType="button" onClick={() => ctrl.retryAccess()} size="small">
                   Retry file access
-                </Button>
-              </div>
+                </AntButton>
+              </Flex>
             </>
           ) : blockingFailure ? (
             <GfsReadFailureCard
@@ -2317,29 +2506,25 @@ export function FilesPage({
               }}
             />
           ) : visibleLoading ? (
-            <div
-              className="da-gfs-loading"
+            <Flex
               role="status"
               aria-label="Loading files"
               aria-live="polite"
+              align="center"
+              gap="small"
             >
-              <span className="da-gfs-loading__dots" aria-hidden="true">
-                <span className="da-gfs-loading__dot" />
-                <span className="da-gfs-loading__dot" />
-                <span className="da-gfs-loading__dot" />
-              </span>
-              <span>Loading files…</span>
-            </div>
+              <Spin aria-hidden="true" size="small" />
+              <Typography.Text>Loading files…</Typography.Text>
+            </Flex>
           ) : currentIsFile ? (
-            <div className="da-gfs-current-file">
-              <span className="da-gfs-current-file__icon" aria-hidden="true">
-                {currentIsFile ? <GfsFileIcon name={current.name} /> : <IconAttachFile />}
+            <Flex align="start" gap="middle">
+              <span aria-hidden="true">
+                <GfsFileIcon name={current.name} />
               </span>
-              <div className="da-gfs-current-file__copy">
-                <div className="da-gfs-current-file__title-row">
+              <Flex vertical gap="small">
+                <Flex align="center" gap="small">
                   {currentIsBeingRenamed ? (
                     <GfsInlineRename
-                      className="da-gfs-current-file__inline-rename"
                       onCancel={() => setRenameTarget(null)}
                       onChange={setRenameDraft}
                       onSubmit={() => void handleRenameTarget()}
@@ -2348,7 +2533,7 @@ export function FilesPage({
                     />
                   ) : (
                     <>
-                      <h3>{current.name}</h3>
+                      <Typography.Title level={3}>{current.name}</Typography.Title>
                       <GfsResourceMenu
                         resourceName={current.name}
                         onManage={
@@ -2376,14 +2561,14 @@ export function FilesPage({
                       />
                     </>
                   )}
-                </div>
-                <p className="muted">
+                </Flex>
+                <Typography.Text type="secondary">
                   {currentPreviewAvailable
                     ? 'Preview this file again or use the menu to manage and download it.'
                     : 'Use the menu to manage, download, or copy this file’s EvenDrive link.'}
-                </p>
-              </div>
-            </div>
+                </Typography.Text>
+              </Flex>
+            </Flex>
           ) : visibleResources.length === 0 ? (
             // `unsupported` earns its own copy because the other two assert
             // something this branch cannot know. An older server that has no
@@ -2393,464 +2578,312 @@ export function FilesPage({
             // appear because the user pressed a button. The banner above already
             // points at opening a link, so this states the one thing it does
             // not: the list is missing, the files may not be.
-            <EmptyState
-              title={
-                rootListingUnsupported
-                  ? 'Files cannot be listed here'
-                  : currentIsFolder
-                    ? 'This folder is empty'
-                    : 'No shared files yet'
-              }
-              body={
-                rootListingUnsupported
-                  ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
-                  : currentIsFolder
-                    ? 'Files and folders added here will appear in this list.'
-                    : 'Resources shared directly with you or your teams will appear here.'
+            <Empty
+              description={
+                <Flex vertical gap="small">
+                  <Typography.Title level={5}>
+                    {rootListingUnsupported
+                      ? 'Files cannot be listed here'
+                      : currentIsFolder
+                        ? 'This folder is empty'
+                        : 'No shared files yet'}
+                  </Typography.Title>
+                  <Typography.Text type="secondary">
+                    {rootListingUnsupported
+                      ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
+                      : currentIsFolder
+                        ? 'Files and folders added here will appear in this list.'
+                        : 'Resources shared directly with you or your teams will appear here.'}
+                  </Typography.Text>
+                </Flex>
               }
             />
           ) : (
-            <div
-              className="da-grid da-gfs-drive__grid"
-              style={{
-                '--da-grid-cols':
-                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem',
-              }}
-            >
-              <div className="da-grid__head">
-                <span className="da-grid__col-header" aria-hidden="true" />
-                <span className="da-grid__col-header">Name</span>
-                <span className="da-grid__col-header da-gfs-drive__size-column da-grid__col-header--right">
-                  Size
-                </span>
-                <span className="da-grid__col-header da-grid__col-header--right">Actions</span>
-              </div>
-              <div className="da-grid__body">
-                {visibleResources.map(resource => {
-                  const isDragging =
-                    draggingResourceId === resource.resourceId ||
-                    movingResourceId === resource.resourceId
-                  const isDropTarget = dragOverFolderId === resource.resourceId
-                  const dropState =
-                    resource.kind === 'directory' ? dropStatesById[resource.resourceId] : undefined
-                  const dropReason = gfsDropVerdictReason(dropState)
-                  // The deny/no-op/unknown tint carries no reason of its own;
-                  // the tooltip speaks the full sentence (one wording per
-                  // reason, every surface).
-                  const dropReasonTooltip =
-                    dropState && dropReason !== undefined
-                      ? gfsDropVerdictLiveAnnouncement(
-                          dropState,
-                          resource.name,
-                          dragSourceName ?? undefined
-                        )
-                      : undefined
-                  const canDragResource =
-                    resource.readable !== false && movingResourceId === null && !ctrl.mutating
-                  return (
-                    <div
-                      className="da-grid__row da-grid__row--clickable da-grid__row--compact"
-                      key={resource.resourceId}
-                      draggable={canDragResource}
-                      title={
-                        dropReasonTooltip ??
-                        (canDragResource
-                          ? `Drag ${resource.name} into a folder to move it`
-                          : undefined)
-                      }
-                      data-dragging={isDragging ? 'true' : undefined}
-                      data-drop-target={isDropTarget ? 'true' : undefined}
-                      data-drop-state={dropState?.state}
-                      data-drop-reason={dropReason}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={
-                        resource.readable === false
-                          ? `${resource.name || resource.drive} (no read access)`
-                          : `Open ${resource.name || resource.drive}`
-                      }
-                      onClick={event => {
-                        if (isEventFromNestedInteractive(event)) return
-                        openResource(resource)
-                      }}
-                      onKeyDown={event => {
-                        if (event.key !== 'Enter' && event.key !== ' ') return
-                        if (isEventFromNestedInteractive(event)) return
-                        event.preventDefault()
-                        openResource(resource)
-                      }}
-                      onDragStart={
-                        canDragResource
-                          ? event => handleResourceDragStart(event, resource)
-                          : undefined
-                      }
-                      onDragEnd={canDragResource ? handleResourceDragEnd : undefined}
-                      onDragEnter={
-                        resource.kind === 'directory'
-                          ? event => handleFolderDragOver(event, resource)
-                          : undefined
-                      }
-                      onDragOver={
-                        resource.kind === 'directory'
-                          ? event => handleFolderDragOver(event, resource)
-                          : undefined
-                      }
-                      onDragLeave={
-                        resource.kind === 'directory' ? handleFolderDragLeave : undefined
-                      }
-                      onDrop={
-                        resource.kind === 'directory'
-                          ? event =>
-                              void handleFolderDrop(event, {
-                                resourceId: resource.resourceId,
-                                name: resource.name,
-                                kind: 'directory',
-                              })
-                          : undefined
-                      }
-                    >
-                      <span className="da-gfs-list__icon da-grid__cell" aria-hidden="true">
-                        {resource.kind === 'directory' ? (
-                          <IconContexts />
-                        ) : (
-                          <GfsFileIcon name={resource.name} />
-                        )}
-                      </span>
-                      <span className="da-gfs-list__identity da-grid__cell">
-                        <span className="da-gfs-list__name">
-                          {renameTarget?.resourceId === resource.resourceId ? (
-                            <GfsInlineRename
-                              onCancel={() => setRenameTarget(null)}
-                              onChange={setRenameDraft}
-                              onSubmit={() => void handleRenameTarget()}
-                              value={renameDraft}
-                              busy={ctrl.mutating}
-                            />
-                          ) : (
-                            <Button
-                              align="start"
-                              block
-                              onClick={() => openResource(resource)}
-                              variant="text"
-                            >
-                              {resource.name || resource.drive}
-                            </Button>
-                          )}
-                          {resource.readable === false ? (
-                            <Badge tone="neutral">No access</Badge>
-                          ) : null}
-                        </span>
-                      </span>
-                      <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">
-                        {formatSharedFileSize(resource.bytes)}
-                      </span>
-                      <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
-                        {rowCanManage(resource) ? (
-                          <IconButton
-                            label={`Share ${resource.name || resource.drive}`}
-                            onClick={() => openManage(resource)}
-                            size="sm"
-                            variant="ghost"
-                          >
-                            <IconShare width={16} height={16} />
-                          </IconButton>
-                        ) : null}
-                        {resource.kind === 'file' ? (
-                          <IconButton
-                            label={`Download ${resource.name}`}
-                            onClick={() => void handleDownload(resource.gfsUri, resource.name)}
-                            size="sm"
-                            variant="ghost"
-                            disabled={resource.readable === false}
-                          >
-                            <IconDownload width={16} height={16} />
-                          </IconButton>
-                        ) : null}
-                        {rowCanRename(resource) ? (
-                          <IconButton
-                            label={`Rename ${resource.name || resource.drive}`}
-                            onClick={() => openRenameTarget(resource)}
-                            size="sm"
-                            variant="ghost"
-                          >
-                            <IconEdit width={16} height={16} />
-                          </IconButton>
-                        ) : null}
-                        {resource.kind === 'directory' ? (
-                          <GfsResourceMenu
-                            {...folderMenuPropsFor(
-                              resource,
-                              {
-                                canManage: rowCanManage(resource),
-                                canRename: rowCanRename(resource),
-                                canDelete: rowCanDelete(resource),
-                              },
-                              {
-                                onOpen: () => openResource(resource),
-                                onOpenChange: open =>
-                                  ctrl.setRowAffordancesResourceId(
-                                    open ? resource.resourceId : null
-                                  ),
-                              }
-                            )}
-                          />
-                        ) : (
-                          <GfsResourceMenu
-                            resourceName={resource.name}
-                            onManage={
-                              rowCanManage(resource) ? () => openManage(resource) : undefined
-                            }
-                            onCopyLink={() => void handleCopyLink(resource.gfsUri)}
-                            onDelete={
-                              rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined
-                            }
-                            onOpenChange={open =>
-                              ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
-                            }
-                            onRename={
-                              rowCanRename(resource) ? () => openRenameTarget(resource) : undefined
-                            }
-                            onMove={() => setMoveTarget(resource)}
-                            onPreview={
-                              resource.readable !== false && isGfsPreviewFile(resource.name)
-                                ? () => void openFilePreview(resource)
-                                : undefined
-                            }
-                            onDownload={
-                              resource.readable !== false && resource.kind === 'file'
-                                ? () => void handleDownload(resource.gfsUri, resource.name)
-                                : undefined
-                            }
-                          />
-                        )}
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
+            <Table<GfsDriveResource>
+              data-testid="gfs-resource-table"
+              className="gfs-resource-table"
+              columns={resourceColumns}
+              dataSource={visibleResources}
+              rowKey="resourceId"
+              rowClassName="gfs-resource-row"
+              size="small"
+              pagination={false}
+              onRow={resource => {
+                const isDragging =
+                  draggingResourceId === resource.resourceId ||
+                  movingResourceId === resource.resourceId
+                const isDropTarget = dragOverFolderId === resource.resourceId
+                const dropState =
+                  resource.kind === 'directory' ? dropStatesById[resource.resourceId] : undefined
+                const dropReason = gfsDropVerdictReason(dropState)
+                const dropReasonTooltip =
+                  dropState && dropReason !== undefined
+                    ? gfsDropVerdictLiveAnnouncement(
+                        dropState,
+                        resource.name,
+                        dragSourceName ?? undefined
+                      )
+                    : undefined
+                const canDragResource =
+                  resource.readable !== false && movingResourceId === null && !ctrl.mutating
 
+                const rowProps = {
+                  draggable: canDragResource,
+                  title:
+                    dropReasonTooltip ??
+                    (canDragResource
+                      ? 'Drag ' + resource.name + ' into a folder to move it'
+                      : undefined),
+                  role: 'button',
+                  tabIndex: 0,
+                  'aria-label':
+                    resource.readable === false
+                      ? (resource.name || resource.drive) + ' (no read access)'
+                      : 'Open ' + (resource.name || resource.drive),
+                  'data-testid': 'gfs-resource-row-' + resource.resourceId,
+                  'data-resource-kind': resource.kind,
+                  'data-dragging': isDragging ? 'true' : undefined,
+                  'data-drop-target': isDropTarget ? 'true' : undefined,
+                  'data-drop-state': dropState?.state,
+                  'data-drop-reason': dropReason,
+                  onClick: (event: ReactMouseEvent<HTMLTableRowElement>) => {
+                    if (isEventFromNestedInteractive(event)) return
+                    openResource(resource)
+                  },
+                  onKeyDown: (event: ReactKeyboardEvent<HTMLTableRowElement>) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return
+                    if (isEventFromNestedInteractive(event)) return
+                    event.preventDefault()
+                    openResource(resource)
+                  },
+                  onDragStart: canDragResource
+                    ? (event: ReactDragEvent<HTMLTableRowElement>) =>
+                        handleResourceDragStart(event, resource)
+                    : undefined,
+                  onDragEnd: canDragResource ? handleResourceDragEnd : undefined,
+                  onDragEnter:
+                    resource.kind === 'directory'
+                      ? (event: ReactDragEvent<HTMLTableRowElement>) =>
+                          handleFolderDragOver(event, resource)
+                      : undefined,
+                  onDragOver:
+                    resource.kind === 'directory'
+                      ? (event: ReactDragEvent<HTMLTableRowElement>) =>
+                          handleFolderDragOver(event, resource)
+                      : undefined,
+                  onDragLeave: resource.kind === 'directory' ? handleFolderDragLeave : undefined,
+                  onDrop:
+                    resource.kind === 'directory'
+                      ? (event: ReactDragEvent<HTMLTableRowElement>) =>
+                          void handleFolderDrop(event, {
+                            resourceId: resource.resourceId,
+                            name: resource.name,
+                            kind: 'directory',
+                          })
+                      : undefined,
+                } as unknown as HTMLAttributes<HTMLTableRowElement>
+                return rowProps
+              }}
+            />
+          )}
           {hasMoreVisible ? (
-            <div className="da-gfs-footer-actions">
-              <Button
+            <Flex justify="center">
+              <AntButton
+                htmlType="button"
                 loading={loadingMoreVisible}
                 onClick={currentIsFolder ? ctrl.loadMore : ctrl.loadMoreAccessible}
-                size="sm"
-                variant="outline"
+                size="small"
               >
                 Load more
-              </Button>
-            </div>
+              </AntButton>
+            </Flex>
           ) : null}
-        </section>
-      </div>
+        </Card>
+      </Flex>
 
-      {openLinkOpen ? (
-        <div
-          className="da-gfs-link-modal"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget) setOpenLinkOpen(false)
-          }}
-        >
-          <section
-            className="da-gfs-link-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="gfs-link-dialog-title"
-          >
-            <header className="da-gfs-link-dialog__header">
-              <span className="da-gfs-link-dialog__icon" aria-hidden="true">
-                <IconConnectors />
-              </span>
-              <span className="da-gfs-link-dialog__heading">
-                <span className="da-gfs-eyebrow">Direct access</span>
-                <h3 id="gfs-link-dialog-title">Open EvenDrive link</h3>
-                <span className="muted">
-                  Paste an EvenDrive link to jump directly to a shared resource.
-                </span>
-              </span>
-              <IconButton
-                label="Close EvenDrive link dialog"
-                onClick={() => setOpenLinkOpen(false)}
-                size="sm"
-                variant="ghost"
-              >
-                <IconClose />
-              </IconButton>
-            </header>
-            <div className="da-gfs-link-dialog__body">
-              <GfsFilePicker
-                onOpen={handleOpenGfsLink}
-                onOpened={() => setOpenLinkOpen(false)}
-                busy={resolving}
-                error={openError}
-              />
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <Modal
+        open={openLinkOpen}
+        onCancel={() => setOpenLinkOpen(false)}
+        closable={{ 'aria-label': 'Close EvenDrive link dialog' }}
+        destroyOnHidden
+        footer={null}
+        keyboard={false}
+        title="Open EvenDrive link"
+      >
+        <Flex vertical gap="middle">
+          <Typography.Text type="secondary">
+            Paste an EvenDrive link to jump directly to a shared resource.
+          </Typography.Text>
+          <GfsFilePicker
+            onOpen={handleOpenGfsLink}
+            onOpened={() => setOpenLinkOpen(false)}
+            busy={resolving}
+            error={openError}
+          />
+        </Flex>
+      </Modal>
 
-      {manageOpen && current ? (
-        <div
-          className="da-gfs-manage-modal"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget) closeManage()
-          }}
-        >
-          <section
-            className="da-gfs-manage-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Share ${currentIsFolder ? 'folder' : 'file'} ${current.name}`}
-          >
-            <header className="da-gfs-manage-dialog__header">
-              <span
-                className={`da-gfs-manage-dialog__icon${currentIsFolder ? ' da-gfs-manage-dialog__icon--folder' : ''}`}
-                aria-hidden="true"
-              >
-                {currentIsFolder ? <IconContexts /> : <GfsFileIcon name={current.name} />}
+      <Modal
+        open={manageOpen && Boolean(current)}
+        onCancel={closeManage}
+        aria-label={
+          current ? `Share ${currentIsFolder ? 'folder' : 'file'} ${current.name}` : undefined
+        }
+        closable={false}
+        destroyOnHidden
+        footer={null}
+        keyboard={false}
+        title={
+          <Flex align="center" gap="middle" justify="space-between">
+            <Flex align="center" gap="small">
+              <span aria-hidden="true">
+                {currentIsFolder ? (
+                  <FolderOutlined />
+                ) : current ? (
+                  <GfsFileIcon name={current.name} />
+                ) : null}
               </span>
-              <span className="da-gfs-manage-dialog__heading">
-                {renameOpen ? (
-                  <form
-                    className="da-gfs-manage-dialog__title-edit"
-                    aria-label="Rename resource"
-                    onSubmit={event => {
-                      event.preventDefault()
-                      void handleRenameCurrent()
-                    }}
-                  >
-                    <TextInput
-                      aria-label="New name"
-                      autoFocus
-                      value={renameName}
-                      onChange={event => setRenameName(event.currentTarget.value)}
-                    />
-                    <Button loading={ctrl.mutating} size="sm" type="submit">
-                      Save
-                    </Button>
-                    <Button
-                      onClick={() => setRenameOpen(false)}
-                      size="sm"
-                      type="button"
-                      variant="ghost"
-                    >
-                      Cancel
-                    </Button>
-                  </form>
-                ) : (
-                  <h3>Share “{current.name}”</h3>
-                )}
-              </span>
-              <span className="da-gfs-manage-dialog__top-actions">
-                <IconButton
-                  autoFocus
-                  label="Close share dialog"
-                  onClick={closeManage}
-                  size="sm"
-                  variant="ghost"
+              {renameOpen ? (
+                <form
+                  aria-label="Rename resource"
+                  onSubmit={event => {
+                    event.preventDefault()
+                    void handleRenameCurrent()
+                  }}
                 >
-                  <IconClose />
-                </IconButton>
-              </span>
-            </header>
-
-            <div className="da-gfs-manage-dialog__body">
-              {canDeleteCurrent && deleteOpen ? (
-                <div className="da-gfs-inline-form" role="alertdialog" aria-label="Delete resource">
-                  <span className="da-gfs-inline-form__copy">Delete {current.name}?</span>
-                  <Button
-                    color="danger"
-                    loading={ctrl.mutating}
-                    onClick={() => void handleDeleteCurrent()}
-                    size="sm"
-                  >
-                    Delete
-                  </Button>
-                  <Button
-                    onClick={() => setDeleteOpen(false)}
-                    size="sm"
-                    type="button"
-                    variant="ghost"
+                  <Input
+                    aria-label="New name"
+                    autoFocus
+                    size="small"
+                    value={renameName}
+                    onChange={event => setRenameName(event.currentTarget.value)}
+                  />
+                  <AntButton htmlType="submit" loading={ctrl.mutating} size="small" type="primary">
+                    Save
+                  </AntButton>
+                  <AntButton
+                    htmlType="button"
+                    onClick={() => setRenameOpen(false)}
+                    size="small"
+                    type="text"
                   >
                     Cancel
-                  </Button>
-                </div>
-              ) : null}
+                  </AntButton>
+                </form>
+              ) : (
+                <Typography.Title
+                  aria-label={`Share ${currentIsFolder ? 'folder' : 'file'} ${current?.name ?? ''}`}
+                  level={4}
+                >
+                  Share “{current?.name ?? ''}”
+                </Typography.Title>
+              )}
+            </Flex>
+            <AntButton
+              autoFocus
+              aria-label="Close share dialog"
+              title="Close share dialog"
+              htmlType="button"
+              icon={<CloseOutlined aria-hidden="true" />}
+              onClick={closeManage}
+              size="small"
+              type="text"
+            />
+          </Flex>
+        }
+      >
+        {current ? (
+          <Flex vertical gap="large">
+            {canDeleteCurrent && deleteOpen ? (
+              <div className="da-gfs-inline-form" role="alertdialog" aria-label="Delete resource">
+                <span className="da-gfs-inline-form__copy">Delete {current.name}?</span>
+                <AntButton
+                  htmlType="button"
+                  danger
+                  loading={ctrl.mutating}
+                  onClick={() => void handleDeleteCurrent()}
+                  size="small"
+                >
+                  Delete
+                </AntButton>
+                <AntButton
+                  htmlType="button"
+                  onClick={() => setDeleteOpen(false)}
+                  size="small"
+                  type="text"
+                >
+                  Cancel
+                </AntButton>
+              </div>
+            ) : null}
 
-              <section className="da-gfs-manage-section da-gfs-manage-section--access">
+            <section className="da-gfs-manage-section da-gfs-manage-section--access">
+              <div className="da-gfs-manage-section__header">
+                <div>
+                  <h4>Add people, teams, agents, or workflows</h4>
+                </div>
+              </div>
+              {loadingAffordances ? (
+                <p className="muted">Refreshing permissions…</p>
+              ) : affordancesError ? (
+                <Alert role="alert" showIcon type="error" title={affordancesError} />
+              ) : affordances ? (
+                <>
+                  <GfsDelegationPanel
+                    affordances={affordances}
+                    subjectOptions={grantSubjectOptions}
+                    subjectOptionsLoading={
+                      teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
+                    }
+                    subjectOptionsError={mergeErrorMessages(
+                      teamDirectoryQuery.error,
+                      myAgentsQuery.error
+                    )}
+                    isDirectory={currentIsFolder}
+                    onGrant={handleGrant}
+                    onDetailViewChange={setShareDetailsOpen}
+                  />
+                </>
+              ) : (
+                <p className="muted">Loading permissions…</p>
+              )}
+            </section>
+
+            {!shareDetailsOpen ? (
+              <section className="da-gfs-manage-section da-gfs-manage-section--grants">
                 <div className="da-gfs-manage-section__header">
                   <div>
-                    <h4>Add people, teams, agents, or workflows</h4>
+                    <h4>People with access</h4>
                   </div>
                 </div>
-                {loadingAffordances ? (
-                  <p className="muted">Refreshing permissions…</p>
-                ) : affordancesError ? (
-                  <StatusBanner tone="error" text={affordancesError} />
-                ) : affordances ? (
-                  <>
-                    <GfsDelegationPanel
-                      affordances={affordances}
-                      subjectOptions={grantSubjectOptions}
-                      subjectOptionsLoading={
-                        teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
-                      }
-                      subjectOptionsError={mergeErrorMessages(
-                        teamDirectoryQuery.error,
-                        myAgentsQuery.error
-                      )}
-                      isDirectory={currentIsFolder}
-                      onGrant={handleGrant}
-                      onDetailViewChange={setShareDetailsOpen}
-                    />
-                  </>
-                ) : (
-                  <p className="muted">Loading permissions…</p>
-                )}
+                <GfsGrantList
+                  agents={agentSubjects}
+                  derivationNotice={inheritedAccessNotice}
+                  derivationNoticeHint={inheritedAccessNoticeHint}
+                  error={grantsError}
+                  inheritedItems={ctrl.inheritedAccess}
+                  items={ctrl.grants}
+                  loading={ctrl.loadingGrants || ctrl.loadingShares || ctrl.loadingInheritedAccess}
+                  // FILES AND FOLDERS merge inherited rows (the reported
+                  // folder bug); the dialog itself only opens with a target.
+                  mergeInherited
+                  onChangeInheritedRole={handleInheritedRoleChange}
+                  onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
+                  onRemoveInherited={handleInheritedRemove}
+                  onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
+                  onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
+                  revoking={ctrl.revoking}
+                  revokingShare={ctrl.revokingShare}
+                  shareError={sharesError}
+                  shares={ctrl.shares}
+                  subjects={delegationSubjects}
+                  updatingRole={updatingAccessRole}
+                />
               </section>
-
-              {!shareDetailsOpen ? (
-                <section className="da-gfs-manage-section da-gfs-manage-section--grants">
-                  <div className="da-gfs-manage-section__header">
-                    <div>
-                      <h4>People with access</h4>
-                    </div>
-                  </div>
-                  <GfsGrantList
-                    agents={agentSubjects}
-                    derivationNotice={inheritedAccessNotice}
-                    derivationNoticeHint={inheritedAccessNoticeHint}
-                    error={grantsError}
-                    inheritedItems={ctrl.inheritedAccess}
-                    items={ctrl.grants}
-                    loading={
-                      ctrl.loadingGrants || ctrl.loadingShares || ctrl.loadingInheritedAccess
-                    }
-                    // FILES AND FOLDERS merge inherited rows (the reported
-                    // folder bug); the dialog itself only opens with a target.
-                    mergeInherited
-                    onChangeInheritedRole={handleInheritedRoleChange}
-                    onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
-                    onRemoveInherited={handleInheritedRemove}
-                    onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
-                    onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
-                    revoking={ctrl.revoking}
-                    revokingShare={ctrl.revokingShare}
-                    shareError={sharesError}
-                    shares={ctrl.shares}
-                    subjects={delegationSubjects}
-                    updatingRole={updatingAccessRole}
-                  />
-                </section>
-              ) : null}
-            </div>
-          </section>
-        </div>
-      ) : null}
+            ) : null}
+          </Flex>
+        ) : null}
+      </Modal>
 
       <GfsInheritedAccessDialog
         busy={updatingAccessRole}
@@ -2890,83 +2923,99 @@ export function FilesPage({
         onConfirm={() => void confirmParentUpdate()}
       />
 
-      {createFolderOpen && currentIsFolder && canWriteCurrent ? (
-        <div
-          className="da-gfs-manage-modal da-gfs-new-folder-modal"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget && !ctrl.mutating) closeCreateFolder()
-          }}
-        >
-          <section
-            aria-describedby={createFolderDescriptionId}
-            aria-labelledby={createFolderTitleId}
-            aria-modal="true"
-            className="da-gfs-new-folder-dialog"
-            onMouseDown={event => event.stopPropagation()}
-            role="dialog"
+      <Modal
+        open={createFolderOpen && currentIsFolder && canWriteCurrent}
+        onCancel={() => {
+          if (!ctrl.mutating) closeCreateFolder()
+        }}
+        aria-describedby={createFolderDescriptionId}
+        closable={false}
+        destroyOnHidden
+        footer={null}
+        keyboard={false}
+        mask={{ closable: !ctrl.mutating }}
+        title={
+          <Typography.Title id={createFolderTitleId} level={4}>
+            New folder
+          </Typography.Title>
+        }
+      >
+        <Flex vertical gap="middle">
+          <Typography.Text id={createFolderDescriptionId} type="secondary">
+            Create a new folder in {current?.name ?? ''}.
+          </Typography.Text>
+          <form
+            aria-label="Create folder"
+            onSubmit={event => {
+              event.preventDefault()
+              void handleCreateFolder()
+            }}
           >
-            <header className="da-gfs-new-folder-dialog__header">
-              <h3 id={createFolderTitleId}>New folder</h3>
-            </header>
-            <p className="da-gfs-new-folder-dialog__copy" id={createFolderDescriptionId}>
-              Create a new folder in {current.name}.
-            </p>
-            <form
-              aria-label="Create folder"
-              className="da-gfs-new-folder-dialog__form"
-              onSubmit={event => {
-                event.preventDefault()
-                void handleCreateFolder()
-              }}
-            >
-              <label className="da-gfs-new-folder-dialog__field" htmlFor={createFolderInputId}>
+            <Flex vertical gap="middle">
+              <label htmlFor={createFolderInputId}>
                 <span>Folder name</span>
-                <TextInput
+                <Input
                   aria-label="Folder name"
                   autoComplete="off"
                   autoFocus
                   disabled={ctrl.mutating}
                   id={createFolderInputId}
                   placeholder="e.g. research-notes"
+                  size="small"
                   spellCheck={false}
                   value={createFolderName}
                   onChange={event => setCreateFolderName(event.currentTarget.value)}
                 />
               </label>
-              {createFolderError ? <StatusBanner tone="error" text={createFolderError} /> : null}
-              <footer className="da-gfs-new-folder-dialog__actions">
-                <Button
+              {createFolderError ? (
+                <Alert role="alert" showIcon type="error" title={createFolderError} />
+              ) : null}
+              <Flex justify="end" gap="small">
+                <AntButton
+                  htmlType="button"
                   disabled={ctrl.mutating}
                   onClick={closeCreateFolder}
-                  type="button"
-                  variant="ghost"
+                  size="small"
+                  type="text"
                 >
                   Cancel
-                </Button>
-                <Button disabled={!createFolderName.trim()} loading={ctrl.mutating} type="submit">
+                </AntButton>
+                <AntButton
+                  htmlType="submit"
+                  disabled={!createFolderName.trim()}
+                  loading={ctrl.mutating}
+                  size="small"
+                  type="primary"
+                >
                   Create folder
-                </Button>
-              </footer>
-            </form>
-          </section>
-        </div>
-      ) : null}
+                </AntButton>
+              </Flex>
+            </Flex>
+          </form>
+        </Flex>
+      </Modal>
 
-      {deleteTarget ? (
-        <ConfirmDialog
-          body={
-            deleteTarget.kind === 'directory'
+      <Modal
+        open={Boolean(deleteTarget)}
+        onCancel={() => setDeleteTarget(null)}
+        onOk={() => {
+          if (deleteTarget) void handleDeleteResource(deleteTarget)
+        }}
+        cancelButtonProps={{ autoFocus: true }}
+        confirmLoading={ctrl.mutating}
+        destroyOnHidden
+        okText="Delete"
+        okType="danger"
+        title={deleteTarget ? `Delete ${deleteTarget.name}?` : 'Delete resource'}
+      >
+        {deleteTarget ? (
+          <Typography.Text>
+            {deleteTarget.kind === 'directory'
               ? 'The folder and everything inside it will be deleted for everyone with access.'
-              : 'The file will be deleted for everyone with access.'
-          }
-          confirmLabel="Delete"
-          onCancel={() => setDeleteTarget(null)}
-          onConfirm={() => void handleDeleteResource(deleteTarget)}
-          title={`Delete ${deleteTarget.name}?`}
-          tone="danger"
-        />
-      ) : null}
+              : 'The file will be deleted for everyone with access.'}
+          </Typography.Text>
+        ) : null}
+      </Modal>
 
       {moveTarget ? (
         <GfsMoveDialog

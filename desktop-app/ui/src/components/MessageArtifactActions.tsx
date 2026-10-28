@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { DownloadOutlined, FileTextOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Flex, Modal, Spin, Tag, Typography } from 'antd'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Button } from '@components/Common'
 import { HTML_PREVIEW_ARTIFACT_MAX_BYTES } from '@constants/htmlPreview'
 import { extractArtifactNames } from '@lib/artifacts'
 
@@ -57,12 +57,6 @@ function formatSize(bytes: number): string {
 function getArtifactFormatLabel(artifact: ArtifactInfo): string {
   const format = artifact.format || artifact.name.split('.').pop() || 'file'
   return format.toUpperCase()
-}
-
-function getArtifactFormatClassName(artifact: ArtifactInfo): string {
-  return getArtifactFormatLabel(artifact)
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, '-')
 }
 
 function getArtifactTypeLabel(artifact: ArtifactInfo): string {
@@ -197,20 +191,6 @@ export function MessageArtifactActions({ hostRef, content }: MessageArtifactActi
     })
   }
 
-  useEffect(() => {
-    if (!fullscreenHtmlFile) return
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeFullscreenHtml()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.body.style.overflow = previousOverflow
-      window.removeEventListener('keydown', onKeyDown)
-    }
-  }, [fullscreenHtmlFile])
-
   if (!hostRef || mentionedFilenames.length === 0) return null
 
   async function fetchArtifactBuffer(filename: string): Promise<ArrayBuffer> {
@@ -304,173 +284,124 @@ export function MessageArtifactActions({ hostRef, content }: MessageArtifactActi
   if (!catalogLoading && availableArtifacts && artifacts.length === 0 && !actionError) return null
 
   return (
-    <div className="message-artifact-actions">
-      {catalogLoading && (
-        <p className="message-artifact-note muted">Checking generated artifacts...</p>
-      )}
+    <Flex vertical gap="small">
+      {catalogLoading && <Spin size="small" description="Checking generated artifacts..." />}
       {catalogUnavailable && artifacts.length > 0 && (
-        <p className="message-artifact-note muted">
-          Artifact catalog is unavailable right now. You can still try direct downloads.
-        </p>
+        <Alert
+          type="warning"
+          showIcon
+          title="Artifact catalog is unavailable right now. You can still try direct downloads."
+        />
       )}
       {artifacts.length > 0 && (
-        <section className="message-artifact-panel" aria-label="Generated files">
-          <header className="message-artifact-panel-header">
-            <span className="message-artifact-panel-title">
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M4.5 2.5h4.2L12 5.8v7.7H4.5z" />
-                <path d="M8.7 2.5v3.3H12" />
-              </svg>
+        <Card
+          size="small"
+          title={
+            <Flex align="center" gap="small">
+              <FileTextOutlined />
               Generated files
-            </span>
-            {artifacts.length > 1 && (
+            </Flex>
+          }
+          extra={
+            artifacts.length > 1 ? (
               <Button
-                className="message-artifact-download-all-btn"
-                color="primary"
+                type="link"
+                loading={downloadingAll}
+                disabled={Boolean(downloadingFile)}
+                icon={<DownloadOutlined aria-hidden="true" />}
                 onClick={() => void handleDownloadAll()}
-                disabled={downloadingAll || Boolean(downloadingFile)}
-                size="xs"
-                variant="text"
               >
-                <span>{downloadingAll ? 'Downloading...' : 'Download all'}</span>
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <path d="M8 2.5v7" />
-                  <path d="m4.8 6.6 3.2 3.2 3.2-3.2" />
-                  <path d="M3.5 12.5h9" />
-                </svg>
+                Download all
               </Button>
-            )}
-          </header>
-          <div className="message-artifact-list">
+            ) : null
+          }
+        >
+          <Flex vertical gap="small">
             {artifacts.map(artifact => (
-              <div key={artifact.name} className="message-artifact-item">
-                <span
-                  className={`message-artifact-format message-artifact-format--${getArtifactFormatClassName(
-                    artifact
-                  )}`}
-                >
-                  {getArtifactFormatLabel(artifact)}
-                </span>
-                <span className="message-artifact-file-copy">
-                  <span className="message-artifact-filename">{artifact.name}</span>
-                  <span className="message-artifact-meta">
-                    {getArtifactTypeLabel(artifact)}
-                    <span aria-hidden="true"> · </span>
-                    {formatSize(artifact.sizeBytes)}
-                  </span>
-                </span>
-                <span className="message-artifact-actions-cell">
+              <Flex key={artifact.name} align="center" gap="small" wrap>
+                <Tag>{getArtifactFormatLabel(artifact)}</Tag>
+                <Flex vertical>
+                  <Typography.Text>{artifact.name}</Typography.Text>
+                  <Typography.Text type="secondary">
+                    {getArtifactTypeLabel(artifact)} · {formatSize(artifact.sizeBytes)}
+                  </Typography.Text>
+                </Flex>
+                <Flex align="center" gap="small">
                   {supportsPreview(artifact.name) && (
                     <Button
-                      type="button"
-                      className="message-artifact-preview-btn"
+                      type="link"
                       onClick={() => void handleTogglePreview(artifact.name)}
-                      color="neutral"
-                      disabled={loadingPreviewFile === artifact.name}
+                      loading={loadingPreviewFile === artifact.name}
                       aria-label={
                         previewOpenByFile[artifact.name]
                           ? `Hide ${artifact.name}`
                           : `Preview ${artifact.name}`
                       }
-                      title={
-                        previewOpenByFile[artifact.name]
-                          ? `Hide ${artifact.name}`
-                          : `Preview ${artifact.name}`
-                      }
-                      size="xs"
-                      variant="text"
                     >
-                      {loadingPreviewFile === artifact.name
-                        ? 'Rendering...'
-                        : previewOpenByFile[artifact.name]
-                          ? 'Hide'
-                          : 'Preview'}
+                      {previewOpenByFile[artifact.name] ? 'Hide' : 'Preview'}
                     </Button>
                   )}
                   <Button
-                    className="message-artifact-download-btn"
-                    color="primary"
+                    type="primary"
+                    icon={<DownloadOutlined aria-hidden="true" />}
+                    loading={downloadingFile === artifact.name}
                     onClick={() => void handleDownload(artifact.name)}
                     disabled={downloadingFile === artifact.name || downloadingAll}
                     aria-label={`Download ${artifact.name}`}
-                    size="sm"
-                    title={`Download ${artifact.name}`}
-                    variant="soft"
                   >
-                    <span>{downloadingFile === artifact.name ? 'Downloading...' : 'Download'}</span>
-                    <svg viewBox="0 0 16 16" aria-hidden="true">
-                      <path d="M8 2.5v7" />
-                      <path d="m4.8 6.6 3.2 3.2 3.2-3.2" />
-                      <path d="M3.5 12.5h9" />
-                    </svg>
+                    Download
                   </Button>
-                </span>
-              </div>
+                </Flex>
+              </Flex>
             ))}
-          </div>
-        </section>
+          </Flex>
+        </Card>
       )}
       {visiblePreviews.map(filename => (
-        <div key={filename} className="message-artifact-html-preview">
-          <div className="message-artifact-html-preview-head">
-            <strong>{filename}</strong>
-          </div>
+        <Card key={filename} size="small" title={filename}>
           {previewBlockedByFile[filename] ? (
-            <p className="message-html-preview-note">{previewBlockedByFile[filename]}</p>
+            <Alert type="warning" showIcon title={previewBlockedByFile[filename]} />
           ) : markdownPreviewByFile[filename] ? (
-            <div className="message-artifact-markdown-preview markdown-content">
+            <div className="markdown-content">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {markdownPreviewByFile[filename] || ''}
               </ReactMarkdown>
             </div>
           ) : (
-            <p className="muted">Preparing preview...</p>
+            <Spin size="small" description="Preparing preview..." />
           )}
-        </div>
+        </Card>
       ))}
-      {fullscreenHtmlFile &&
-        htmlPreviewByFile[fullscreenHtmlFile] &&
-        createPortal(
-          <div
-            className="message-html-preview-fullscreen-overlay"
-            onClick={closeFullscreenHtml}
-            role="presentation"
-          >
-            <section
-              className="message-html-preview-fullscreen-dialog"
-              role="dialog"
-              aria-modal="true"
-              aria-label={`Artifact preview: ${fullscreenHtmlFile}`}
-              onClick={event => event.stopPropagation()}
-            >
-              <header className="message-html-preview-fullscreen-head">
-                <div>
-                  <strong>{`Artifact preview: ${fullscreenHtmlFile}`}</strong>
-                  <p className="muted">Untrusted HTML preview</p>
-                </div>
-                <Button
-                  className="ghost-btn mini-btn message-html-preview-fullscreen-close"
-                  color="neutral"
-                  onClick={closeFullscreenHtml}
-                  size="xs"
-                  variant="ghost"
-                >
-                  Back to chat
-                </Button>
-              </header>
-              <iframe
-                className="message-html-preview-fullscreen-frame"
-                title={`Artifact preview: ${fullscreenHtmlFile}`}
-                sandbox=""
-                referrerPolicy="no-referrer"
-                loading="eager"
-                srcDoc={htmlPreviewByFile[fullscreenHtmlFile]}
-              />
-            </section>
-          </div>,
-          document.body
-        )}
-      {actionError && <p className="message-artifact-error">{actionError}</p>}
-    </div>
+      <Modal
+        open={Boolean(fullscreenHtmlFile && htmlPreviewByFile[fullscreenHtmlFile])}
+        title={
+          <Flex vertical>
+            <Typography.Text
+              strong
+            >{`Artifact preview: ${fullscreenHtmlFile ?? ''}`}</Typography.Text>
+            <Typography.Text type="secondary">Untrusted HTML preview</Typography.Text>
+          </Flex>
+        }
+        footer={null}
+        onCancel={closeFullscreenHtml}
+        destroyOnHidden
+        width="90vw"
+      >
+        {fullscreenHtmlFile ? (
+          <Flex vertical gap="small">
+            <Button onClick={closeFullscreenHtml}>Back to chat</Button>
+            <iframe
+              className="message-html-preview-fullscreen-frame"
+              title={`Artifact preview: ${fullscreenHtmlFile}`}
+              sandbox=""
+              referrerPolicy="no-referrer"
+              loading="eager"
+              srcDoc={htmlPreviewByFile[fullscreenHtmlFile]}
+            />
+          </Flex>
+        ) : null}
+      </Modal>
+      {actionError && <Alert type="error" showIcon title={actionError} />}
+    </Flex>
   )
 }

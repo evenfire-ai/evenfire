@@ -1,13 +1,13 @@
 import { useState } from 'react'
-import { Button, Field, StatusBanner, TextInput } from '@components/Common'
+import { Alert, Button, Form, Input, Space } from 'antd'
 import type { GfsFilePickerProps } from './filePicker.types'
 
 /**
  * P2-S06 / P4-S07 — Desktop gfs:// open bar (renderer). Drives the GFS browser:
  * the user pastes a gfs:// link and the page resolves it THROUGH the API (no
  * local mirror), starting navigation at that resource. A revoked grant surfaces
- * as the API error on open. Composes the shared Common primitives per the
- * desktop-app/ui frontend rules.
+ * as the API error on open. The component state and submit contract stay here;
+ * Ant Design owns the visible controls.
  */
 
 export function GfsFilePicker({
@@ -33,27 +33,23 @@ export function GfsFilePicker({
         void submit()
       }}
     >
-      <Field label="EvenDrive link" htmlFor="gfs-uri-input">
-        <div className="da-gfs-file-picker__row">
-          <div className="da-gfs-file-picker__input">
-            <span className="da-gfs-file-picker__scheme" aria-hidden="true">
-              URI
-            </span>
-            <TextInput
-              autoFocus
-              id="gfs-uri-input"
-              aria-label="EvenDrive link"
-              placeholder="gfs://main/<rid>"
-              value={uri}
-              onChange={e => setUri(e.target.value)}
-            />
-          </div>
-          <Button type="submit" disabled={busy || !valid} loading={busy}>
+      <Form.Item label="EvenDrive link" htmlFor="gfs-uri-input">
+        <Space.Compact block>
+          <Input
+            autoFocus
+            id="gfs-uri-input"
+            aria-label="EvenDrive link"
+            placeholder="gfs://main/<rid>"
+            prefix="URI"
+            value={uri}
+            onChange={event => setUri(event.target.value)}
+          />
+          <Button type="primary" htmlType="submit" disabled={busy || !valid} loading={busy}>
             Open
           </Button>
-        </div>
-      </Field>
-      {error ? <StatusBanner tone="error" text={error} /> : null}
+        </Space.Compact>
+      </Form.Item>
+      {error ? <Alert role="alert" showIcon type="error" title={error} /> : null}
     </form>
   )
 }

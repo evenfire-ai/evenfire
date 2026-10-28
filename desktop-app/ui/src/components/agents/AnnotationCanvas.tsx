@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { Button, IconButton } from '@components/Common'
-import { IconCopy, IconEdit } from '@components/SidebarNav/icons'
+import { CloseOutlined, CopyOutlined, EditOutlined } from '@ant-design/icons'
+import { Alert, Button, Flex, Input, Modal, Slider, Typography } from 'antd'
 import { copyImageBlobToClipboard } from '@lib/imageClipboard'
 import type { ComposerImageAttachment } from '../../uiTypes'
 
@@ -234,37 +233,30 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
     }
   }, [attachment.dataBase64, attachment.mimeType, copyBusy])
 
-  return createPortal(
-    <div className="composer-image-preview-overlay" onClick={onClose} role="presentation">
-      <div
-        className="composer-image-preview-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={attachment.name}
-        onClick={event => event.stopPropagation()}
-      >
-        <IconButton
-          className="composer-image-preview-close"
-          onClick={onClose}
-          label="Close image preview"
-          size="sm"
-          variant="ghost"
-        >
-          ×
-        </IconButton>
-        <div className="composer-image-preview-actions">
+  return (
+    <Modal
+      open
+      title={attachment.name}
+      footer={null}
+      onCancel={onClose}
+      width="90vw"
+      closeIcon={
+        <span aria-label="Close image preview">
+          <CloseOutlined />
+        </span>
+      }
+    >
+      <Flex vertical gap="small">
+        <Flex align="center" gap="small" wrap>
           {!previewIsAnnotating ? (
             <>
               <Button
-                color="neutral"
                 onClick={() => {
                   setAnnotationError(null)
                   setPreviewIsAnnotating(true)
                 }}
-                size="xs"
-                variant="ghost"
+                icon={<EditOutlined aria-hidden="true" />}
               >
-                <IconEdit width={16} height={16} />
                 Annotate
               </Button>
               <Button
@@ -275,13 +267,11 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
                       ? 'Could not copy image'
                       : 'Copy image to clipboard'
                 }
-                color="neutral"
+                loading={copyBusy}
                 disabled={copyBusy}
                 onClick={() => void handleCopyImage()}
-                size="xs"
-                variant="ghost"
+                icon={<CopyOutlined aria-hidden="true" />}
               >
-                <IconCopy width={16} height={16} />
                 <span aria-live="polite">
                   {copyState === 'copied'
                     ? 'Copied'
@@ -293,61 +283,55 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
             </>
           ) : (
             <>
-              <label className="composer-image-preview-color">
-                <span>Color</span>
-                <input
+              <Flex align="center" gap="small">
+                <Typography.Text>Color</Typography.Text>
+                <Input
+                  aria-label="Annotation color"
                   type="color"
                   value={annotationColor}
                   onChange={event => setAnnotationColor(event.target.value)}
                 />
-              </label>
-              <label className="composer-image-preview-brush">
-                <span>Brush</span>
-                <input
-                  type="range"
+              </Flex>
+              <Flex align="center" gap="small">
+                <Typography.Text>Brush size</Typography.Text>
+                <Slider
+                  aria-label="Brush size"
                   min={2}
                   max={20}
                   value={annotationBrushPx}
-                  onChange={event => setAnnotationBrushPx(Number(event.target.value) || 5)}
+                  onChange={value => setAnnotationBrushPx(value)}
                 />
-              </label>
+              </Flex>
               <Button
-                color="neutral"
                 onClick={() => {
                   initializeAnnotationCanvas().catch(error => {
                     setAnnotationError(error instanceof Error ? error.message : String(error))
                   })
                 }}
                 disabled={annotationBusy}
-                size="xs"
-                variant="ghost"
               >
                 Reset
               </Button>
               <Button
-                color="neutral"
                 onClick={() => {
                   setPreviewIsAnnotating(false)
                   setAnnotationError(null)
                 }}
                 disabled={annotationBusy}
-                size="xs"
-                variant="ghost"
               >
                 Cancel
               </Button>
               <Button
-                color="neutral"
+                type="primary"
                 onClick={() => void handleSaveAnnotatedAttachment()}
+                loading={annotationBusy}
                 disabled={annotationBusy}
-                size="xs"
-                variant="ghost"
               >
-                {annotationBusy ? 'Saving...' : 'Save drawing'}
+                Save drawing
               </Button>
             </>
           )}
-        </div>
+        </Flex>
         {previewIsAnnotating ? (
           <canvas
             ref={annotationCanvasRef}
@@ -361,12 +345,11 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
         ) : (
           <img src={attachment.previewDataUrl} alt={attachment.name} />
         )}
-        {annotationError && <p className="composer-image-preview-error">{annotationError}</p>}
-        <p className="composer-image-preview-meta">
+        {annotationError ? <Alert type="error" showIcon title={annotationError} /> : null}
+        <Typography.Text type="secondary">
           {attachment.name} · {Math.max(1, Math.round(attachment.sizeBytes / 1024))} KB
-        </p>
-      </div>
-    </div>,
-    document.body
+        </Typography.Text>
+      </Flex>
+    </Modal>
   )
 }

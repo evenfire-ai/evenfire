@@ -1,3 +1,4 @@
+import { Alert, Button } from 'antd'
 import type { ToastStackProps } from './types'
 
 // Each toast div sets its own role (role="status" for info/success,
@@ -11,34 +12,27 @@ export function ToastStack({ items, onDismiss }: ToastStackProps) {
   return (
     <aside className="toast-stack">
       {items.map(item => (
-        <div
+        <Alert
+          action={
+            item.action ? (
+              <Button
+                htmlType="button"
+                onClick={() => {
+                  item.action?.onAction()
+                  onDismiss?.(item.id)
+                }}
+                size="small"
+              >
+                {item.action.label}
+              </Button>
+            ) : undefined
+          }
           key={item.id}
+          title={item.text}
           role={item.tone === 'error' ? 'alert' : 'status'}
-          className={`toast tone-${item.tone}`}
-        >
-          <span aria-hidden className="toast-icon">
-            {item.tone === 'success'
-              ? '●'
-              : item.tone === 'error'
-                ? '!'
-                : item.tone === 'warn'
-                  ? '▲'
-                  : 'i'}
-          </span>
-          <span className="toast-body">{item.text}</span>
-          {item.action ? (
-            <button
-              type="button"
-              className="toast-action"
-              onClick={() => {
-                item.action?.onAction()
-                onDismiss?.(item.id)
-              }}
-            >
-              {item.action.label}
-            </button>
-          ) : null}
-        </div>
+          showIcon
+          type={item.tone === 'warn' ? 'warning' : item.tone}
+        />
       ))}
     </aside>
   )

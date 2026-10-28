@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { StatusBanner } from '@components/Common'
+import { Alert, Spin } from 'antd'
 import { GFS_VIDEO_PREVIEW_MAX_BYTES } from '@constants/gfsVideoPreview'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsVideoPreviewSize } from '@lib/gfsVideoPreview'
@@ -82,10 +82,10 @@ export function GfsVideoPreviewBody({
         {headerActions}
       </header>
       <div className="da-gfs-video-preview-dialog__body">
-        {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
+        {previewError ? <Alert showIcon title={previewError} type="error" /> : null}
         {!previewError && !previewUrl ? (
-          <div className="da-gfs-video-preview-dialog__loading" role="status">
-            Loading video preview…
+          <div role="status">
+            <Spin description="Loading video preview…" />
           </div>
         ) : null}
         {previewUrl && !previewError ? (

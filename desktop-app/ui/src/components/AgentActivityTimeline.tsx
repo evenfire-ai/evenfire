@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button } from '@components/Common'
+import { Alert, Button, Flex, Tag, Timeline, Typography } from 'antd'
 import { formatTime } from '../lib/format'
 import type { AgentMessageActivity } from '../uiTypes'
 
@@ -14,6 +14,13 @@ function labelForStatus(status: AgentMessageActivity['status']): string {
   if (status === 'completed') return 'Activity complete'
   if (status === 'no_activity') return 'No activity'
   return 'Activity error'
+}
+
+function statusColor(status: AgentMessageActivity['status']) {
+  if (status === 'streaming' || status === 'reconnecting') return 'processing' as const
+  if (status === 'completed') return 'success' as const
+  if (status === 'error') return 'error' as const
+  return 'default' as const
 }
 
 export function AgentActivityTimeline({ activity }: Props) {
@@ -38,58 +45,68 @@ export function AgentActivityTimeline({ activity }: Props) {
     return () => window.clearTimeout(timer)
   }, [events.length, visibleCount])
 
+  const timelineItems = visibleEvents.map(event => {
+    const expanded = Boolean(expandedByEventId[event.eventId])
+    return {
+      key: event.eventId,
+      color: event.severity === 'error' ? 'red' : event.severity === 'warn' ? 'orange' : 'blue',
+      title: (
+        <Flex align="center" gap="small" wrap>
+          <Typography.Text type="secondary">
+            {formatTime(new Date(event.ts).getTime())}
+          </Typography.Text>
+          <Tag
+            color={
+              event.severity === 'error'
+                ? 'error'
+                : event.severity === 'warn'
+                  ? 'warning'
+                  : 'default'
+            }
+          >
+            {event.type}
+          </Tag>
+          <Typography.Text>{event.title}</Typography.Text>
+          <Button
+            type="link"
+            aria-expanded={expanded}
+            aria-controls={`activity-details-${event.eventId}`}
+            onClick={() =>
+              setExpandedByEventId(previous => ({
+                ...previous,
+                [event.eventId]: !previous[event.eventId],
+              }))
+            }
+          >
+            {expanded ? 'Hide details' : 'Details'}
+          </Button>
+        </Flex>
+      ),
+      content: expanded ? (
+        <pre id={`activity-details-${event.eventId}`}>
+          {JSON.stringify(event.meta || {}, null, 2)}
+        </pre>
+      ) : null,
+    }
+  })
+
   return (
-    <section className="activity-timeline" aria-live="polite">
-      <header className="activity-header">
-        <strong>Activity</strong>
-        <span className={`activity-status ${activity.status}`}>
-          {labelForStatus(activity.status)}
-          {activity.status === 'streaming' && (
-            <span className="activity-caret" aria-hidden="true" />
-          )}
-        </span>
-      </header>
-
+    <section aria-label="Activity" aria-live="polite">
+      <Flex align="center" gap="small">
+        <Typography.Title level={5}>Activity</Typography.Title>
+        <Tag color={statusColor(activity.status)}>{labelForStatus(activity.status)}</Tag>
+      </Flex>
       {!visibleEvents.length ? (
-        <p className="activity-empty muted">{labelForStatus(activity.status)}</p>
+        <Typography.Paragraph type="secondary">
+          {labelForStatus(activity.status)}
+        </Typography.Paragraph>
       ) : (
-        <div className="activity-event-list">
-          {visibleEvents.map(event => {
-            const expanded = Boolean(expandedByEventId[event.eventId])
-            return (
-              <article key={event.eventId} className={`activity-event severity-${event.severity}`}>
-                <div className="activity-row">
-                  <time className="activity-time">{formatTime(new Date(event.ts).getTime())}</time>
-                  <span className="activity-type">{event.type}</span>
-                  <span className="activity-title">{event.title}</span>
-                  <Button
-                    color="neutral"
-                    onClick={() =>
-                      setExpandedByEventId(previous => ({
-                        ...previous,
-                        [event.eventId]: !previous[event.eventId],
-                      }))
-                    }
-                    aria-expanded={expanded}
-                    size="xs"
-                    variant="ghost"
-                  >
-                    {expanded ? 'Hide details' : 'Details'}
-                  </Button>
-                </div>
-                {expanded && (
-                  <pre className="activity-meta">{JSON.stringify(event.meta || {}, null, 2)}</pre>
-                )}
-              </article>
-            )
-          })}
-        </div>
+        <Timeline items={timelineItems} />
       )}
-
-      {activity.redactionCount > 0 && (
-        <p className="activity-redaction muted">Some fields were redacted for safety.</p>
-      )}
-      {activity.errorMessage && <p className="activity-error muted">{activity.errorMessage}</p>}
+      {activity.redactionCount > 0 ? (
+        <Alert type="info" showIcon title="Some fields were redacted for safety." />
+      ) : null}
+      {activity.errorMessage ? <Alert type="error" showIcon title={activity.errorMessage} /> : null}
     </section>
   )
 }

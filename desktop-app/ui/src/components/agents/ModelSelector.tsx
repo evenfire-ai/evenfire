@@ -1,20 +1,15 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { ReloadOutlined, RobotOutlined } from '@ant-design/icons'
+import { Alert, Button, Empty, Flex, Select, Tag, Tooltip } from 'antd'
 import type { HostModelOption } from '@hooks/useChatStore'
-import { useClickOutside } from '@hooks/useClickOutside'
 import { useHostModels } from '@hooks/useHostModels'
 import { isBrokerBackedProvider } from '@lib/hostModelSelectionStore'
-import { Pill } from '../Common'
 
 export interface ModelSelectorProps {
   /** The agent IS the hostRef for desktop chats (mirrors ContextWindowIndicator). */
   agentRef: string
   chatId: string
-  /**
-   * Which way the popover expands. `'down'` (default) anchors it below the chip
-   * for the top indicators row; `'up'` anchors it above the chip for the
-   * composer, where the chip sits at the bottom of the window and a downward
-   * menu would clip off-screen.
-   */
+  /** Placement follows the owning surface; Ant Design positions the popup. */
   placement?: 'down' | 'up'
 }
 
@@ -37,25 +32,9 @@ function modelLabel(name: string, options: HostModelOption[]): string {
 }
 
 /**
- * Per-session model selector for the chat indicators row (R2), sat next to the
- * agent title and context-window chip. Shows the effective model
- * (`sessionModel ?? hostDefault`, except broker-backed Codex which never
- * invents a default) and, on click, a popover listing the allowed models.
- * Stale/disabled catalog rows stay hidden from new picks unless they are the
- * saved session selection. Choosing one applies it to the NEXT task
- * ("applies to your next message" — R2.5).
- *
- * Visibility / degraded rules:
- *   - Hidden entirely until the model list loads and when the host predates the
- *     endpoint (`data` null/undefined) — no noisy error (R2.6).
- *   - A FAILED fetch (`state === 'error'`, #654 M7) is different: nothing is
- *     known, so the chip stays visible as a retry affordance rather than
- *     silently leaving the composer without a capability verdict.
- *   - `degraded` (allowlist ConfigMap unavailable, R3.5): the chip is disabled
- *     and shows only the host default with an explanatory tooltip.
- *   - `sessionModelBlocked` (R2.2): a warning notice tells the user their prior
- *     model fell out of the allowlist and the default is in use.
- *   - A `model_not_allowed` rejection (R2, 403): inline error, selection unchanged.
+ * Per-session model selector for the chat indicators row, beside the agent
+ * title and context-window control. The hook remains the state and request
+ * owner; Ant Design owns the selector, popup, options, notices, and focus.
  */
 export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSelectorProps) {
   const {
@@ -74,29 +53,16 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   } = useHostModels(agentRef, chatId)
   const [open, setOpen] = useState(false)
   const [applied, setApplied] = useState(false)
-  const containerRef = useRef<HTMLDivElement | null>(null)
+  const imageHintId = useId()
+  const unavailableHintId = useId()
 
-  useClickOutside(containerRef, open, () => setOpen(false))
-
-  // Reset transient popover UI when the chat/agent changes — the hook is mounted
-  // un-keyed, so without this a lingering "applies to your next message" badge or
-  // an open popover from the previous chat would carry over after a switch.
+  // Reset transient UI when the chat/agent changes. The hook is mounted
+  // un-keyed, so an open popup or confirmation must not carry between chats.
   useEffect(() => {
     setOpen(false)
     setApplied(false)
   }, [agentRef, chatId])
 
-  // ESC closes the popover, matching AgentTitleSelector's keyboard UX.
-  useEffect(() => {
-    if (!open) return
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open])
-
-  // Auto-dismiss the confirmation badge.
   useEffect(() => {
     if (!applied) return
     const timeoutId = window.setTimeout(() => setApplied(false), APPLIED_BADGE_MS)
@@ -113,9 +79,20 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
       data ? data.models.filter(option => isOfferedForNewPick(option, data.sessionModel)) : [],
     [data]
   )
-  // `title` alone is not announced by screen readers, so the image hint is also
-  // exposed through aria-describedby.
-  const imageHintId = useId()
+  const options = useMemo(() => {
+    const available = offeredModels.map(option => ({
+      value: option.name,
+      label: option.displayName?.trim() || option.name,
+      disabled: saving,
+    }))
+    // Preserve a visible saved/default label even when an older server omits
+    // that value from its current catalog. It remains unavailable for picking.
+    if (effectiveModel && !offeredModels.some(option => option.name === effectiveModel)) {
+      available.unshift({ value: effectiveModel, label: effectiveLabel, disabled: true })
+    }
+    return available
+  }, [effectiveLabel, effectiveModel, offeredModels, saving])
+
   const imageHint =
     imageInput.state === 'supported'
       ? undefined
@@ -133,171 +110,110 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
     [effectiveModel, selectModel]
   )
 
-  // Placement modifier: the composer anchors the chip at the bottom of the
-  // window, so the popover must expand upward instead of downward.
-  const rootClassName = `model-selector${placement === 'up' ? ' model-selector--up' : ''}`
-  // Caret points toward where the menu will appear: for a downward menu it
-  // points down when closed / up when open; for an upward menu it's inverted.
-  const caretPointsUp = placement === 'up' ? !open : open
-  const caretPath = caretPointsUp ? 'm4.5 10 3.5-3.5L11.5 10' : 'm4.5 6 3.5 3.5L11.5 6'
-
-  // #654 M7 — a failed fetch is not "this host has no models". Offer a retry
-  // instead of hiding, so the user is not left with a silently capability-less
-  // composer and no way to recover.
   if (!data && state === 'error') {
     return (
-      <div className={rootClassName}>
-        <Pill
-          tone="warning"
-          size="sm"
-          interactive
-          className="model-selector-chip"
-          aria-label="Models unavailable — retry loading the model list"
-          title={loadError ?? 'The model list could not be loaded. Retry.'}
-          onClick={() => void refresh()}
-        >
-          <span className="model-selector-chip-glyph" aria-hidden="true" />
-          <span className="model-selector-chip-label">Models unavailable</span>
-        </Pill>
-      </div>
+      <Button
+        aria-label="Models unavailable — retry loading the model list"
+        title={loadError ?? 'The model list could not be loaded. Retry.'}
+        icon={<ReloadOutlined />}
+        onClick={() => void refresh()}
+      >
+        Models unavailable
+      </Button>
     )
   }
 
-  // Hidden until we have a model list to show (undefined = loading first fetch,
-  // null = the host predates the model endpoint). No flashing empty chip.
+  // undefined means the first fetch is in progress; null means this host
+  // predates the model endpoint. Neither state presents a false empty list.
   if (!data) return null
 
-  // Degraded: the allowlist is unavailable, so only the host default is usable.
-  // Render a static, non-interactive chip with an explanatory tooltip.
-  if (data.degraded) {
-    return (
-      <div
-        className={rootClassName}
-        data-testid={`model-selector-${placement}`}
-        data-host-ref={agentRef}
-        data-provider={data.provider}
-        data-model={effectiveModel}
-      >
-        <Pill
-          tone="neutral"
-          size="sm"
-          className="model-selector-chip model-selector-chip--disabled"
-          aria-label={`Model ${effectiveLabel} (selection unavailable)`}
-          title="Model selection is unavailable right now — using the host default."
-        >
-          <span className="model-selector-chip-glyph" aria-hidden="true" />
-          <span className="model-selector-chip-label">{effectiveLabel}</span>
-        </Pill>
-      </div>
-    )
-  }
+  const placementValue = placement === 'up' ? 'topLeft' : 'bottomLeft'
+  const selectControl = (
+    <Select
+      aria-describedby={data.degraded ? unavailableHintId : imageHint ? imageHintId : undefined}
+      aria-label={
+        data.degraded
+          ? `Model ${effectiveLabel} (selection unavailable)`
+          : `Model — ${effectiveLabel}`
+      }
+      data-model-id={effectiveModel}
+      data-testid="selected-chat-model"
+      disabled={data.degraded}
+      loading={saving}
+      notFoundContent={
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="No models are available for this agent."
+        />
+      }
+      onChange={value => void handleSelect(String(value))}
+      onOpenChange={nextOpen => {
+        setOpen(nextOpen)
+        if (!nextOpen) return
+        clearError()
+        void refresh()
+      }}
+      open={open}
+      options={options}
+      placement={placementValue}
+      placeholder={effectiveLabel || SELECT_MODEL_LABEL}
+      popupRender={menu => (
+        <>
+          {data.sessionModelBlocked ? (
+            <Alert
+              showIcon
+              type="warning"
+              title={
+                <>
+                  Your previous model <strong>{data.sessionModelBlocked}</strong> is no longer
+                  allowed; the default is in use.
+                </>
+              }
+            />
+          ) : null}
+          {conflicted ? (
+            <Alert
+              showIcon
+              type="warning"
+              title="This chat’s model changed elsewhere; re-checking the current selection."
+              role="status"
+            />
+          ) : null}
+          {error ? <Alert showIcon type="error" title={error} /> : null}
+          {menu}
+        </>
+      )}
+      status={data.sessionModelBlocked ? 'warning' : undefined}
+      value={effectiveModel || undefined}
+      aria-invalid={Boolean(error)}
+    />
+  )
 
   return (
-    <div
-      className={rootClassName}
-      ref={containerRef}
-      data-testid={`model-selector-${placement}`}
-      data-host-ref={agentRef}
-      data-provider={data.provider}
-      data-model={effectiveModel}
-    >
-      <Pill
-        tone={data.sessionModelBlocked ? 'warning' : 'neutral'}
-        size="sm"
-        interactive
-        className="model-selector-chip"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={`Model — ${effectiveLabel}`}
-        data-testid="selected-chat-model"
-        data-model-id={effectiveModel}
-        title={imageHint}
-        aria-describedby={imageHint ? imageHintId : undefined}
-        onClick={() => {
-          clearError()
-          if (!open) void refresh()
-          setOpen(prev => !prev)
-        }}
-      >
-        <span className="model-selector-chip-glyph" aria-hidden="true" />
-        <span className="model-selector-chip-label">{effectiveLabel}</span>
-        <svg
-          className="model-selector-chip-caret"
-          viewBox="0 0 16 16"
-          aria-hidden="true"
-          focusable="false"
-        >
-          <path d={caretPath} />
-        </svg>
-      </Pill>
-      {imageHint && (
-        <span id={imageHintId} className="visually-hidden">
+    <Flex align="center" gap="small" data-testid={`model-selector-${placement}`}>
+      <RobotOutlined aria-hidden="true" />
+      {imageHint ? (
+        <span id={imageHintId} hidden>
           {imageHint}
         </span>
+      ) : null}
+      {data.degraded ? (
+        <>
+          <Tooltip title="Model selection is unavailable right now; using the host default.">
+            <span>{selectControl}</span>
+          </Tooltip>
+          <span id={unavailableHintId} hidden>
+            Model selection is unavailable right now; using the host default.
+          </span>
+        </>
+      ) : (
+        selectControl
       )}
-
-      {(applied || pending) && (
-        <span className="model-selector-applied" role="status" aria-live="polite">
+      {applied || pending ? (
+        <Tag color="processing" role="status" aria-live="polite">
           Applies to your next message
-        </span>
-      )}
-
-      {open && (
-        <div className="model-selector-popover" role="menu" aria-label="Select model">
-          {data.sessionModelBlocked && (
-            <p className="model-selector-notice model-selector-notice--warning">
-              Your previous model <strong>{data.sessionModelBlocked}</strong> is no longer allowed —
-              using the default.
-            </p>
-          )}
-          {conflicted && (
-            <p className="model-selector-notice model-selector-notice--warning" role="status">
-              This chat’s model changed elsewhere — re-checking the current selection.
-            </p>
-          )}
-          {error && (
-            <p className="model-selector-notice model-selector-notice--error" role="alert">
-              {error}
-            </p>
-          )}
-          {offeredModels.length ? (
-            <ul className="model-selector-list">
-              {offeredModels.map(option => {
-                const isActive = option.name === effectiveModel
-                return (
-                  <li key={option.name}>
-                    <button
-                      type="button"
-                      role="menuitemradio"
-                      data-testid={`model-option-${option.name}`}
-                      aria-checked={isActive}
-                      className={`model-selector-item${isActive ? ' model-selector-item--active' : ''}`}
-                      disabled={saving}
-                      onClick={() => void handleSelect(option.name)}
-                    >
-                      <span className="model-selector-item-label">
-                        {option.displayName?.trim() || option.name}
-                      </span>
-                      {isActive && (
-                        <svg
-                          className="model-selector-item-check"
-                          viewBox="0 0 16 16"
-                          aria-hidden="true"
-                          focusable="false"
-                        >
-                          <path d="m3.5 8.5 3 3 6-6" />
-                        </svg>
-                      )}
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          ) : (
-            <p className="model-selector-notice">No models are available for this agent.</p>
-          )}
-        </div>
-      )}
-    </div>
+        </Tag>
+      ) : null}
+    </Flex>
   )
 }

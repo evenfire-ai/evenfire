@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { InputContractForm, buildInitialInputValues } from '../InputContractForm'
 
 afterEach(cleanup)
+beforeEach(installAntdDomEnvironment)
 
 describe('buildInitialInputValues', () => {
   it('returns an empty object when schema is undefined', () => {
@@ -125,8 +128,9 @@ describe('InputContractForm', () => {
     expect(screen.getByText('rows')).toBeTruthy()
   })
 
-  it('renders a select for enum fields', () => {
+  it('renders a Select for enum fields and keeps its value owner external', async () => {
     const onChange = vi.fn()
+    const user = userEvent.setup()
     render(
       <InputContractForm
         schema={{
@@ -138,10 +142,9 @@ describe('InputContractForm', () => {
         onChange={onChange}
       />
     )
-    const select = screen.getByLabelText('tier') as HTMLSelectElement
-    expect(select.tagName).toBe('SELECT')
-    expect(select.options).toHaveLength(3)
-    fireEvent.change(select, { target: { value: 'pro' } })
+    const select = screen.getByRole('combobox', { name: 'tier' })
+    await user.click(select.closest('.ant-select')!)
+    await user.click(await screen.findByTitle('pro'))
     expect(onChange).toHaveBeenCalledWith({ tier: 'pro' })
   })
 

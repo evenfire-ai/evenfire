@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import { AppHeader } from '../index'
+
+beforeEach(installAntdDomEnvironment)
 
 // The titlebar search opens its reusable results surface on focus, even before
 // the user types. The input keeps the short titlebar label while the results
@@ -82,49 +85,42 @@ describe('AppHeader global search idle collapse', () => {
     vi.clearAllMocks()
   })
 
-  it('opens the results surface with the scope prompt when an empty field is focused', async () => {
+  it('opens the Ant Design results surface when the search field is focused', async () => {
     const user = userEvent.setup()
-    const { container } = render(<AppHeader />)
-    const search = container.querySelector('.global-search')
+    render(<AppHeader />)
     const input = screen.getByRole('textbox', { name: 'Search' })
-    expect(search).not.toBeNull()
     expect(input.getAttribute('placeholder')).toBe('Search')
 
     await user.click(input)
-    expect(search?.classList.contains('is-open')).toBe(true)
+    expect(input.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('region', { name: 'Search results' })).toBeTruthy()
     expect(screen.getByText('Search agents, connectors, plugins or apps...')).toBeTruthy()
 
     await user.tab()
     expect(document.activeElement).not.toBe(input)
-    expect(search?.classList.contains('is-open')).toBe(true)
+    expect(input.getAttribute('aria-expanded')).toBe('true')
   })
 
   it('keeps the results surface open when the typed query is cleared', async () => {
     const user = userEvent.setup()
-    const { container } = render(<AppHeader />)
-    const search = container.querySelector('.global-search')
+    render(<AppHeader />)
     const input = screen.getByRole('textbox', { name: 'Search' })
 
     await user.type(input, 'agent')
-    expect(search?.classList.contains('is-open')).toBe(true)
+    expect(input.getAttribute('aria-expanded')).toBe('true')
 
     await user.clear(input)
-    expect(search?.classList.contains('is-open')).toBe(true)
+    expect(input.getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByText('Search agents, connectors, plugins or apps...')).toBeTruthy()
   })
 
   it('renders explicit titlebar search chrome for contrast', () => {
     const { container } = render(<AppHeader placement="titlebar" />)
 
-    expect(container.querySelector('.global-search--titlebar')).toBeTruthy()
-    expect(container.querySelector('.search-input--titlebar')).toBeTruthy()
-    const icon = container.querySelector<HTMLElement>('.global-search__titlebar-icon')
-    const placeholder = container.querySelector<HTMLElement>('.search-input__titlebar-placeholder')
-    const bell = container.querySelector<HTMLElement>('.notification-bell--titlebar')
-
-    expect(icon?.textContent).toBe('⌕')
-    expect(placeholder?.textContent).toBe('Search')
-    expect(bell).toBeTruthy()
+    const input = screen.getByRole('textbox', { name: 'Search' })
+    expect(input.getAttribute('placeholder')).toBe('Search')
+    expect(input.parentElement?.querySelector('svg')).not.toBeNull()
+    expect(screen.getByTestId('notification-bell')).toBeTruthy()
   })
 
   it('opens titlebar search results for a command focus request', () => {

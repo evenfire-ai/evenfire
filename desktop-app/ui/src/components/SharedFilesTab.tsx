@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, EmptyState } from '@components/Common'
+import { ArrowUpOutlined, FolderOpenOutlined } from '@ant-design/icons'
+import { Alert, Breadcrumb, Button, Empty, Spin, Table, Typography } from 'antd'
 import { useContextsDataController } from '../hooks/domain/useContextsDataController'
 import type {
   SharedFileDirEntry,
@@ -155,36 +156,26 @@ export function SharedFilesTab({ contextId }: Props) {
   }, [contextId, currentPath, loadSharedFilesDirectory, refreshSharedFiles, selectedSfs])
 
   const renderHeader = () => (
-    <div className="shared-files-browser-header">
-      <nav className="shared-files-crumbs" aria-label="Agent Files breadcrumbs">
-        {breadcrumbs.map((c, idx) => (
-          <span key={`${c.label}-${idx}`} className="shared-files-crumb">
-            {idx > 0 ? <span className="shared-files-crumb-sep">/</span> : null}
-            {c.onClick ? (
-              <Button
-                className="shared-files-link"
-                color="transparent"
-                onClick={c.onClick}
-                size="xs"
-                variant="text"
-              >
-                {c.label}
-              </Button>
-            ) : (
-              <span>{c.label}</span>
-            )}
-          </span>
-        ))}
-      </nav>
+    <div>
+      <Breadcrumb
+        aria-label="Agent Files breadcrumbs"
+        items={breadcrumbs.map((crumb, index) => ({
+          key: `${crumb.label}-${index}`,
+          title: crumb.onClick ? (
+            <Button type="link" size="small" onClick={crumb.onClick}>
+              {crumb.label}
+            </Button>
+          ) : (
+            crumb.label
+          ),
+        }))}
+      />
       <Button
-        className="shared-files-refresh"
-        color="neutral"
         onClick={() => void handleRefreshCurrentView()}
         disabled={loadingList || Boolean(selectedSfs && loadingDir)}
-        size="xs"
-        variant="ghost"
+        loading={loadingList || Boolean(selectedSfs && loadingDir)}
       >
-        {loadingList || (selectedSfs && loadingDir) ? '…' : 'Refresh'}
+        Refresh
       </Button>
     </div>
   )
@@ -192,51 +183,46 @@ export function SharedFilesTab({ contextId }: Props) {
   // Virtual-root view: list each attached SFS as a directory entry.
   const renderVirtualRoot = () => {
     if (loadingList && !filesystems) {
-      return <p className="muted">Loading attached filesystems…</p>
+      return <Spin description="Loading attached filesystems…" />
     }
     if (listError) {
-      return <div className="message message--error">{listError}</div>
+      return <Alert type="error" showIcon title={listError} />
     }
     if (!filesystems || filesystems.length === 0) {
-      return (
-        <EmptyState
-          title="No agent files"
-          body="No agent filesystems are attached to this context."
-        />
-      )
+      return <Empty description="No agent filesystems are attached to this context." />
     }
     return (
-      <table className="shared-files-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Mount path</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filesystems.map(fs => (
-            <tr key={fs.name}>
-              <td>
-                <Button
-                  className="shared-files-link"
-                  color="transparent"
-                  onClick={() => {
-                    setSelectedSfs(fs.name)
-                    setCurrentPath('/')
-                  }}
-                  size="xs"
-                  variant="text"
-                >
-                  📁 {fs.name}
-                </Button>
-              </td>
-              <td className="muted">
-                <code>{fs.mountPath}</code>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <Table
+        size="small"
+        pagination={false}
+        rowKey="name"
+        dataSource={filesystems}
+        columns={[
+          {
+            title: 'Name',
+            dataIndex: 'name',
+            key: 'name',
+            render: (name: string) => (
+              <Button
+                type="link"
+                icon={<FolderOpenOutlined />}
+                onClick={() => {
+                  setSelectedSfs(name)
+                  setCurrentPath('/')
+                }}
+              >
+                {name}
+              </Button>
+            ),
+          },
+          {
+            title: 'Mount path',
+            dataIndex: 'mountPath',
+            key: 'mountPath',
+            render: (mountPath: string) => <Typography.Text code>{mountPath}</Typography.Text>,
+          },
+        ]}
+      />
     )
   }
 
@@ -244,97 +230,100 @@ export function SharedFilesTab({ contextId }: Props) {
   const renderInsideSfs = () => {
     return (
       <>
-        {dirError ? <div className="message message--error">{dirError}</div> : null}
-        {downloadError ? <div className="message message--error">{downloadError}</div> : null}
+        {dirError ? <Alert type="error" showIcon title={dirError} /> : null}
+        {downloadError ? <Alert type="error" showIcon title={downloadError} /> : null}
 
-        <Button
-          className="shared-files-up"
-          color="neutral"
-          onClick={goUp}
-          size="xs"
-          variant="ghost"
-        >
-          ← Up
+        <Button onClick={goUp} icon={<ArrowUpOutlined />}>
+          Up
         </Button>
 
         {loadingDir ? (
-          <p className="muted">Loading…</p>
+          <Spin description="Loading…" />
         ) : entries.length === 0 ? (
-          <EmptyState title="Empty directory" body="No entries to display." />
+          <Empty description="No entries to display." />
         ) : (
-          <table className="shared-files-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Size</th>
-                <th>Modified</th>
-                <th aria-label="Action" />
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map(entry => {
-                const fullPath = joinSharedFilePath(currentPath, entry.name)
-                const downloading = downloadingPath === fullPath
-                return (
-                  <tr key={entry.name}>
-                    <td>
-                      {entry.kind === 'directory' ? (
-                        <Button
-                          className="shared-files-link"
-                          color="transparent"
-                          onClick={() => setCurrentPath(fullPath)}
-                          size="xs"
-                          variant="text"
-                        >
-                          📁 {entry.name}
-                        </Button>
-                      ) : (
-                        <span>
-                          {entry.kind === 'file' ? '📄 ' : '🔗 '}
-                          {entry.name}
-                        </span>
-                      )}
-                    </td>
-                    <td>{entry.kind === 'file' ? formatSharedFileSize(entry.size) : '—'}</td>
-                    <td className="muted">{new Date(entry.mtime).toLocaleString()}</td>
-                    <td>
-                      {entry.kind === 'file' ? (
-                        <Button
-                          className="shared-files-download"
-                          color="primary"
-                          disabled={downloading}
-                          onClick={() => handleDownload(entry)}
-                          size="xs"
-                          variant="soft"
-                        >
-                          {downloading ? 'Saving…' : 'Download'}
-                        </Button>
-                      ) : null}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+          <Table
+            size="small"
+            pagination={false}
+            rowKey="name"
+            dataSource={entries}
+            columns={[
+              {
+                title: 'Name',
+                dataIndex: 'name',
+                key: 'name',
+                render: (name: string, entry: SharedFileDirEntry) => {
+                  const fullPath = joinSharedFilePath(currentPath, name)
+                  if (entry.kind === 'directory') {
+                    return (
+                      <Button
+                        type="link"
+                        icon={<FolderOpenOutlined />}
+                        onClick={() => setCurrentPath(fullPath)}
+                      >
+                        {name}
+                      </Button>
+                    )
+                  }
+                  return (
+                    <Typography.Text>
+                      {entry.kind === 'file' ? '📄 ' : '🔗 '}
+                      {name}
+                    </Typography.Text>
+                  )
+                },
+              },
+              {
+                title: 'Size',
+                dataIndex: 'size',
+                key: 'size',
+                render: (size: number, entry: SharedFileDirEntry) =>
+                  entry.kind === 'file' ? formatSharedFileSize(size) : '—',
+              },
+              {
+                title: 'Modified',
+                dataIndex: 'mtime',
+                key: 'modified',
+                render: (mtime: number) => new Date(mtime).toLocaleString(),
+              },
+              {
+                title: 'Action',
+                key: 'action',
+                render: (_value: unknown, entry: SharedFileDirEntry) => {
+                  if (entry.kind !== 'file') return null
+                  const fullPath = joinSharedFilePath(currentPath, entry.name)
+                  const downloading = downloadingPath === fullPath
+                  return (
+                    <Button
+                      type="primary"
+                      disabled={downloading}
+                      loading={downloading}
+                      onClick={() => void handleDownload(entry)}
+                    >
+                      {downloading ? 'Saving…' : 'Download'}
+                    </Button>
+                  )
+                },
+              },
+            ]}
+          />
         )}
 
         {truncated ? (
-          <p className="muted">
-            Listing was truncated by the server. Narrow the path to see more entries.
-          </p>
+          <Alert
+            type="info"
+            showIcon
+            title="Listing was truncated by the server. Narrow the path to see more entries."
+          />
         ) : null}
       </>
     )
   }
 
   return (
-    <div className="shared-files-tab">
-      <div className="shared-files-tab-main">
-        {renderHeader()}
-        <div className="shared-files-browser">
-          {selectedSfs ? renderInsideSfs() : renderVirtualRoot()}
-        </div>
-      </div>
+    <div>
+      {renderHeader()}
+      <div>{selectedSfs ? renderInsideSfs() : renderVirtualRoot()}</div>
     </div>
   )
 }

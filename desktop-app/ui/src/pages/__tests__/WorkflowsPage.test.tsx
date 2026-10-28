@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { WorkflowInputContractSchema } from '../../../../src/types'
 import {
   useWorkflowController,
   useWorkflowRecentRuns,
 } from '../../hooks/domain/useWorkflowController'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { WorkflowsPage } from '../WorkflowsPage'
 
 const setStatusSpy = vi.fn()
@@ -85,6 +86,8 @@ function renderWorkflowsPage(
 }
 
 describe('WorkflowsPage', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
@@ -135,7 +138,7 @@ describe('WorkflowsPage', () => {
     expect(
       within(dialog).getByRole('heading', { name: /Trigger e2e-ondemand-simple/ })
     ).toBeTruthy()
-    expect(dialog.querySelector('.input-contract-form')).not.toBeNull()
+    expect(within(dialog).getByRole('heading', { name: 'Inputs' })).toBeTruthy()
     // Not fired until the user confirms.
     expect(handleTriggerWorkflow).not.toHaveBeenCalled()
 
@@ -166,9 +169,8 @@ describe('WorkflowsPage', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
-  // H2: while the Trigger modal is open, every row's Trigger button is disabled.
-  // ConfirmDialog has no focus trap, so a keyboard user could otherwise tab to
-  // another row and activate it, resetting the modal's global selection state.
+  // H2: while the Trigger modal is open, every row's Trigger button stays disabled
+  // so another row cannot replace the modal's current workflow selection.
   it('disables every row Trigger button while the Trigger modal is open', async () => {
     const WF_A = { ...WORKFLOW, name: 'recipe-a' }
     const WF_B = { ...WORKFLOW, name: 'recipe-b' }
@@ -314,7 +316,7 @@ describe('WorkflowsPage', () => {
       ],
     })
 
-    expect(screen.getByText('completed').className).toContain('ui-pill--success')
-    expect(screen.getByText('failed').className).toContain('ui-pill--danger')
+    expect(screen.getByText('completed').closest('.ant-tag')?.className).toContain('ant-tag-green')
+    expect(screen.getByText('failed').closest('.ant-tag')?.className).toContain('ant-tag-red')
   })
 })

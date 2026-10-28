@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { AccessCatalog, RpcConnectorsResult } from '../../../../src/types'
 import { desktopQueryKeys } from '../../hooks/domain/queryKeys'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { McpServersPage } from '../McpServersPage'
 
 // Capture the navigation handlers the page deep-links through. Hoisted so the
@@ -113,13 +114,11 @@ function renderPage(result: RpcConnectorsResult) {
 }
 
 const allRows = (container: HTMLElement) =>
-  Array.from(container.querySelectorAll<HTMLElement>('.mcp-servers-data-table tbody tr'))
-const rowName = (row: HTMLElement) =>
-  row.querySelector('.context-id-cell')?.textContent?.trim() ?? ''
-const agentTag = (row: HTMLElement) =>
-  row.querySelector('.reference-tag--agent .reference-tag__label')?.textContent?.trim() ?? null
-const chipText = (row: HTMLElement) =>
-  row.querySelector('td:nth-child(5) .ui-pill')?.textContent?.trim() ?? null
+  Array.from(container.querySelectorAll<HTMLElement>('[data-testid="mcp-servers-table"] tbody tr'))
+const cells = (row: HTMLElement) => (row as HTMLTableRowElement).cells
+const rowName = (row: HTMLElement) => cells(row)[0]?.textContent?.trim() ?? ''
+const agentTag = (row: HTMLElement) => cells(row)[1]?.textContent?.trim() ?? null
+const chipText = (row: HTMLElement) => cells(row)[4]?.textContent?.trim() ?? null
 const cellByColumn = (container: HTMLElement, row: HTMLElement, columnName: string) => {
   const header = within(container).getByRole('columnheader', { name: columnName })
   const cellIndex = (header as HTMLTableCellElement).cellIndex
@@ -135,7 +134,9 @@ const rowBy = (rows: HTMLElement[], name: string, agent: string) => {
   return row
 }
 
-describe('McpServersPage — da-table layout + navigation', () => {
+describe('McpServersPage — Ant Design table + navigation', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
@@ -199,7 +200,7 @@ describe('McpServersPage — da-table layout + navigation', () => {
     const alphaMonday = rowBy(allRows(container), 'monday', 'agent-alpha')
     // The agent tag renders as a plain (non-button) tag: the row already
     // navigates to that agent, so the tag carries no click/key handlers.
-    const tag = alphaMonday.querySelector('.reference-tag--agent')
+    const tag = cells(alphaMonday)[1]?.querySelector('.ant-tag') ?? null
     expect(tag).not.toBeNull()
     expect(tag?.tagName.toLowerCase()).toBe('span')
     // The only actionable button in an authorized row is Disconnect.
@@ -268,9 +269,9 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(publicData.textContent).not.toContain('No authentication')
 
     // oauth-user scope pill surfaces the blast-radius caption as a tooltip.
-    expect(monday.querySelector('.ui-pill')?.getAttribute('title')).toMatch(
-      /Affects all your agents/i
-    )
+    expect(
+      cellByColumn(container, monday, 'Scope')?.querySelector('.ant-tag')?.getAttribute('title')
+    ).toMatch(/Affects all your agents/i)
   })
 
   it('(f) shows agent DISPLAY names from the catalog map, not the raw host id (R1-M12)', async () => {

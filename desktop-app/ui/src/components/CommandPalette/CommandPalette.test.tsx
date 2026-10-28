@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { CommandPalette } from '.'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 
+beforeEach(installAntdDomEnvironment)
 afterEach(cleanup)
 
 describe('CommandPalette', () => {
-  it('filters commands only, navigates, executes eligible actions, and closes', () => {
+  it('filters commands only, navigates, executes eligible actions, and closes', async () => {
     const onExecute = vi.fn()
     const onClose = vi.fn()
     render(
@@ -18,7 +20,7 @@ describe('CommandPalette', () => {
       />
     )
     const input = screen.getByRole('textbox', { name: 'Search commands' })
-    expect(document.activeElement).toBe(input)
+    await waitFor(() => expect(document.activeElement).toBe(input))
     expect(screen.getByText('New chat tab')).toBeTruthy()
     expect(screen.queryByText('Search Results')).toBeNull()
 
@@ -48,15 +50,14 @@ describe('CommandPalette', () => {
         onExecute={onExecute}
       />
     )
-    const dialog = screen.getByRole('dialog', { name: 'Command palette' })
-    fireEvent.keyDown(dialog, { key: 'ArrowUp' })
-    fireEvent.keyDown(dialog, { key: 'Enter' })
+    const input = screen.getByRole('textbox', { name: 'Search commands' })
+    fireEvent.keyDown(input, { key: 'ArrowUp' })
+    fireEvent.keyDown(input, { key: 'Enter' })
     expect(onExecute).toHaveBeenCalled()
     expect(screen.getByText('Ctrl+K')).toBeTruthy()
     fireEvent.click(screen.getByRole('option', { name: /Keyboard shortcuts/ }))
     expect(onExecute).toHaveBeenLastCalledWith('settings.shortcuts')
 
-    const input = screen.getByRole('textbox', { name: 'Search commands' })
     input.focus()
     fireEvent.keyDown(input, { key: 'Tab', shiftKey: true })
     expect(document.activeElement).not.toBe(input)

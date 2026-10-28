@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MCP_INIT_AUTH_FAILED_MESSAGE } from '../../../../src/mcpServerHealth'
 import type { HostRuntimeStatus, McpServerHealthRow } from '../../../../src/types'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { McpServerHealthTable } from '../McpServerHealthTable'
 
+beforeEach(installAntdDomEnvironment)
 afterEach(cleanup)
 
 const NOW = Date.parse('2026-04-21T18:00:00.000Z')

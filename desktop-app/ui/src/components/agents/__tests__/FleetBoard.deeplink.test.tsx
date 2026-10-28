@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import { FleetBoard } from '../FleetBoard'
 
 // FleetBoard deep-links: a fleet row and its Connectors column must both open
@@ -47,6 +48,8 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
 }))
 
 describe('FleetBoard — deep-link to the Connectors tab', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
@@ -64,6 +67,13 @@ describe('FleetBoard — deep-link to the Connectors tab', () => {
     render(<FleetBoard />)
     fireEvent.click(screen.getByRole('button', { name: 'Open connectors for Agent X' }))
     expect(nav.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-x', 'mcp-servers')
+  })
+
+  it('routes Ant Design row-menu actions through the existing workspace callback', async () => {
+    render(<FleetBoard />)
+    fireEvent.click(screen.getByRole('button', { name: 'More actions for Agent X' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Activity' }))
+    expect(nav.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-x', 'activity')
   })
 
   // Rename propagation: the fleet table leads with the catalog display name

@@ -1,4 +1,4 @@
-import { Field, SelectInput, TextInput } from '@components/Common'
+import { Checkbox, Flex, Form, Input, Select, Typography } from 'antd'
 import type {
   WorkflowInputContractProperty,
   WorkflowInputContractSchema,
@@ -34,8 +34,8 @@ export function InputContractForm({
   const required = new Set(schema.required ?? [])
 
   return (
-    <div className="input-contract-form">
-      <h4>Inputs</h4>
+    <Flex vertical>
+      <Typography.Title level={4}>Inputs</Typography.Title>
       {entries.map(([key, property]) => {
         const current = values[key]
         const fieldId = `input-${key}`
@@ -48,15 +48,14 @@ export function InputContractForm({
         if (property.type === 'boolean') {
           const checked = Boolean(current ?? property.default ?? false)
           return (
-            <Field key={key} htmlFor={fieldId} label={label} hint={property.description}>
-              <input
+            <Form.Item key={key} htmlFor={fieldId} label={label} help={property.description}>
+              <Checkbox
                 id={fieldId}
-                type="checkbox"
                 checked={checked}
                 disabled={disabled}
                 onChange={event => onChange({ ...values, [key]: event.target.checked })}
               />
-            </Field>
+            </Form.Item>
           )
         }
 
@@ -64,20 +63,16 @@ export function InputContractForm({
 
         if (property.enum && property.enum.length > 0) {
           return (
-            <Field key={key} htmlFor={fieldId} label={label} hint={property.description}>
-              <SelectInput
+            <Form.Item key={key} htmlFor={fieldId} label={label} help={property.description}>
+              <Select
                 id={fieldId}
+                size="small"
                 value={rawValue}
                 disabled={disabled}
-                onChange={event => onChange({ ...values, [key]: event.target.value })}
-              >
-                {property.enum.map(option => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </SelectInput>
-            </Field>
+                onChange={value => onChange({ ...values, [key]: value })}
+                options={property.enum.map(option => ({ value: option, label: option }))}
+              />
+            </Form.Item>
           )
         }
 
@@ -85,10 +80,11 @@ export function InputContractForm({
         const inputType = isNumeric ? 'number' : 'text'
 
         return (
-          <Field key={key} htmlFor={fieldId} label={label} hint={property.description}>
-            <TextInput
+          <Form.Item key={key} htmlFor={fieldId} label={label} help={property.description}>
+            <Input
               id={fieldId}
               type={inputType}
+              size="small"
               value={rawValue}
               disabled={disabled}
               onChange={event =>
@@ -100,10 +96,10 @@ export function InputContractForm({
                 })
               }
             />
-          </Field>
+          </Form.Item>
         )
       })}
-    </div>
+    </Flex>
   )
 }
 

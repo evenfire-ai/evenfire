@@ -1,3 +1,4 @@
+import { Flex } from 'antd'
 import type { ChatViewWorkspaceProps } from './types'
 
 /**
@@ -10,18 +11,25 @@ export function ChatViewWorkspace({
   children,
   localSearch,
   surfaceId = 'current-chat-surface',
+  labelledBy,
 }: ChatViewWorkspaceProps) {
   return (
-    <section className="chat-view-workspace">
-      <section
+    <Flex component="section" vertical className="chat-view-workspace">
+      <Flex
+        component="section"
+        vertical
         aria-label="Current chat"
+        aria-labelledby={labelledBy}
         className="chat-view-surface"
         data-selected-surface="chat"
         id={surfaceId}
+        role="tabpanel"
       >
         {localSearch}
-        <div className="chat-view-surface__content">{children}</div>
-      </section>
-    </section>
+        <Flex vertical className="chat-view-surface__content">
+          {children}
+        </Flex>
+      </Flex>
+    </Flex>
   )
 }

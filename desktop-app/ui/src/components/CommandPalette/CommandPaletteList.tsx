@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Button } from '@components/Common'
+import { Button, Empty, Flex, Typography } from 'antd'
 import {
   type DesktopCommandDefinition,
   type DesktopCommandId,
@@ -22,7 +22,7 @@ export function CommandPaletteList({
   platform,
   selectedId,
 }: CommandPaletteListProps) {
-  const itemRefs = useRef(new Map<DesktopCommandId, HTMLButtonElement>())
+  const itemRefs = useRef(new Map<DesktopCommandId, HTMLElement>())
 
   useEffect(() => {
     if (!selectedId) return
@@ -32,41 +32,44 @@ export function CommandPaletteList({
     }
   }, [selectedId])
 
+  if (commands.length === 0) {
+    return <Empty description="No matching commands." image={Empty.PRESENTED_IMAGE_SIMPLE} />
+  }
+
   return (
-    <div className="command-palette__list" role="listbox" aria-label="Desktop commands">
-      {commands.length ? (
-        commands.map(command => {
-          const commandId = command.id as DesktopCommandId
-          const eligible = isEligible(commandId)
-          const selected = eligible && selectedId === commandId
-          return (
-            <Button
-              ref={element => {
-                if (element) itemRefs.current.set(commandId, element)
-                else itemRefs.current.delete(commandId)
-              }}
-              aria-selected={selected}
-              className={`command-palette__item${selected ? ' is-selected' : ''}`}
-              color="neutral"
-              disabled={!eligible}
-              key={command.id}
-              onClick={() => onExecute(commandId)}
-              role="option"
-              variant="ghost"
-            >
-              <span className="command-palette__item-copy">
-                <strong>{command.label}</strong>
-                <span>{command.description}</span>
-              </span>
+    <Flex vertical gap="small" role="listbox" aria-label="Desktop commands">
+      {commands.map(command => {
+        const commandId = command.id as DesktopCommandId
+        const eligible = isEligible(commandId)
+        const selected = eligible && selectedId === commandId
+
+        return (
+          <Button
+            ref={element => {
+              if (element) itemRefs.current.set(commandId, element)
+              else itemRefs.current.delete(commandId)
+            }}
+            aria-selected={selected}
+            block
+            disabled={!eligible}
+            htmlType="button"
+            key={command.id}
+            onClick={() => onExecute(commandId)}
+            role="option"
+            type={selected ? 'primary' : 'text'}
+          >
+            <Flex align="center" gap="middle" justify="space-between">
+              <Flex vertical align="start">
+                <Typography.Text strong>{command.label}</Typography.Text>
+                <Typography.Text type="secondary">{command.description}</Typography.Text>
+              </Flex>
               {command.defaultBinding ? (
                 <kbd>{formatDesktopShortcut(command.defaultBinding, platform)}</kbd>
               ) : null}
-            </Button>
-          )
-        })
-      ) : (
-        <p className="command-palette__empty">No matching commands.</p>
-      )}
-    </div>
+            </Flex>
+          </Button>
+        )
+      })}
+    </Flex>
   )
 }

@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef } from 'react'
-import { Button } from '@components/Common'
+import { useRef } from 'react'
+import { Button, Flex, Modal } from 'antd'
 import type { ConfirmDialogProps } from './types'
 
 export function ConfirmDialog({
@@ -11,49 +11,38 @@ export function ConfirmDialog({
   title,
   tone = 'primary',
 }: ConfirmDialogProps) {
-  const titleId = useId()
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
 
-  useEffect(() => {
-    cancelButtonRef.current?.focus()
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel()
-    }
-    window.addEventListener('keydown', handleEscape)
-    return () => window.removeEventListener('keydown', handleEscape)
-  }, [onCancel])
-
   return (
-    <div
-      className="confirm-dialog-backdrop"
-      role="presentation"
-      onMouseDown={event => {
-        if (event.target === event.currentTarget) onCancel()
+    <Modal
+      open
+      title={title}
+      onCancel={onCancel}
+      afterOpenChange={visible => {
+        if (visible) cancelButtonRef.current?.focus()
       }}
-    >
-      <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <h3 id={titleId}>{title}</h3>
-        <div className="confirm-dialog-body">{body}</div>
-        <div className="confirm-dialog-actions">
-          <Button
-            ref={cancelButtonRef}
-            color="neutral"
-            onClick={onCancel}
-            size="sm"
-            variant="ghost"
-          >
+      footer={
+        <Flex justify="end" gap="small">
+          <Button htmlType="button" onClick={onCancel} ref={cancelButtonRef} size="small">
             {cancelLabel}
           </Button>
           <Button
-            className={`composer-send-button composer-send-button-compact confirm-dialog-confirm confirm-dialog-confirm--${tone}`}
-            color={tone === 'danger' ? 'danger' : 'primary'}
+            danger={tone === 'danger'}
+            htmlType="button"
             onClick={onConfirm}
-            size="sm"
+            size="small"
+            type="primary"
           >
             {confirmLabel}
           </Button>
-        </div>
-      </div>
-    </div>
+        </Flex>
+      }
+      closable={false}
+      keyboard
+      maskClosable
+      destroyOnHidden
+    >
+      {body}
+    </Modal>
   )
 }

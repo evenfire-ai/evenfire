@@ -1,17 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { EllipsisOutlined, RobotOutlined } from '@ant-design/icons'
 import { useAgentActivityContext } from '@contexts/AgentActivityContext'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import {
-  Button,
-  DataTable,
-  DataTableFilter,
-  EmptyState,
-  MenuItem,
-  ReferenceTag,
-} from '@components/Common'
-import { IconAgents } from '@components/SidebarNav/icons'
+import { Button as AntButton, Dropdown, Empty, Flex, Select, Table, Tag, Typography } from 'antd'
+import type { MenuProps, TableColumnsType } from 'antd'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
@@ -29,6 +22,20 @@ const AGENT_ROUTE_ACTIONS = AGENT_ROUTE_OPTIONS.map(route => ({
 }))
 
 type AgentScopeFilter = 'all' | 'team' | 'mine'
+
+type AgentFleetRow = {
+  agent: string
+  display: string
+  status: 'running' | 'idle' | 'error'
+  statusLabel: string
+  statusDescription: string
+  mcpServers: string[]
+  mcpServerCount: number | null
+  userScoped: boolean
+  teamScoped: boolean
+  teamScopes: Array<{ id: string; name: string }>
+  lastActiveLabel: string
+}
 
 const AGENT_SCOPE_FILTER_OPTIONS: Array<{ label: string; value: AgentScopeFilter }> = [
   { label: 'All agents', value: 'all' },
@@ -57,11 +64,7 @@ export function FleetBoard() {
 
   const [agentScopeFilter, setAgentScopeFilter] = useState<AgentScopeFilter>('all')
   const [fleetMenuAgent, setFleetMenuAgent] = useState<string | null>(null)
-  const [fleetMenuPosition, setFleetMenuPosition] = useState<{ top: number; left: number } | null>(
-    null
-  )
   const [pendingCreateChatForAgent, setPendingCreateChatForAgent] = useState<string | null>(null)
-  const fleetMenuRef = useRef<HTMLDivElement | null>(null)
 
   const agentMockDescription =
     'Workspace assistant for operations and support tasks. (Mock description; backend profile connection pending.)'
@@ -77,32 +80,16 @@ export function FleetBoard() {
     void ensureTeamsHydrated()
   }, [ensureTeamsHydrated])
 
-  // Fleet menu outside-click + escape + resize/scroll close effect
+  // Ant Design Dropdown owns outside-click and Escape behavior. Preserve the
+  // prior close-on-viewport-change lifecycle for the open row menu.
   useEffect(() => {
     if (!fleetMenuAgent) return
-    const handleOutside = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (fleetMenuRef.current?.contains(target)) return
-      setFleetMenuAgent(null)
-      setFleetMenuPosition(null)
-    }
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setFleetMenuAgent(null)
-        setFleetMenuPosition(null)
-      }
-    }
     const closeOnViewportChange = () => {
       setFleetMenuAgent(null)
-      setFleetMenuPosition(null)
     }
-    window.addEventListener('mousedown', handleOutside)
-    window.addEventListener('keydown', handleEscape)
     window.addEventListener('resize', closeOnViewportChange)
     window.addEventListener('scroll', closeOnViewportChange, true)
     return () => {
-      window.removeEventListener('mousedown', handleOutside)
-      window.removeEventListener('keydown', handleEscape)
       window.removeEventListener('resize', closeOnViewportChange)
       window.removeEventListener('scroll', closeOnViewportChange, true)
     }
@@ -149,7 +136,7 @@ export function FleetBoard() {
     return [...new Set(agentNames.map(agentName => agentName.trim()).filter(Boolean))]
   }, [agentNames])
 
-  const agentFleetRows = useMemo(
+  const agentFleetRows = useMemo<AgentFleetRow[]>(
     () =>
       [...allFleetAgentNames]
         .sort((a, b) => a.localeCompare(b))
@@ -210,6 +197,163 @@ export function FleetBoard() {
     return agentFleetRows
   }, [agentScopeFilter, agentFleetRows])
 
+  const fleetMenuItems: MenuProps['items'] = [
+    { key: 'new-chat', label: 'New chat' },
+    { type: 'divider' },
+    ...AGENT_ROUTE_ACTIONS.map(action => ({
+      key: `route:${action.route}`,
+      label: action.label,
+    })),
+  ]
+
+  const handleFleetMenuAction = (agentName: string, key: string) => {
+    setFleetMenuAgent(null)
+    if (key === 'new-chat') {
+      setPendingCreateChatForAgent(agentName)
+      onSelectAgent(agentName, { selectLatest: false })
+      return
+    }
+    const route = key.startsWith('route:') ? key.slice('route:'.length) : ''
+    if (AGENT_ROUTE_OPTIONS.includes(route as (typeof AGENT_ROUTE_OPTIONS)[number])) {
+      onOpenAgentWorkspace(agentName, route as (typeof AGENT_ROUTE_OPTIONS)[number])
+    }
+  }
+
+  const columns: TableColumnsType<AgentFleetRow> = [
+    {
+      key: 'agent',
+      title: 'Agent name',
+      render: (_value, row) => (
+        <Flex align="center" gap="small" className="agent-row-main">
+          <RobotOutlined aria-hidden="true" />
+          <Flex vertical className="agent-row-main-copy">
+            <Typography.Text strong>{row.display}</Typography.Text>
+            {row.display !== row.agent ? (
+              <Typography.Text className="agent-row-description" title={row.agent} type="secondary">
+                {row.agent}
+              </Typography.Text>
+            ) : null}
+            <Typography.Text
+              className="agent-row-description"
+              title={agentMockDescription}
+              type="secondary"
+            >
+              {agentMockDescription}
+            </Typography.Text>
+          </Flex>
+        </Flex>
+      ),
+    },
+    {
+      key: 'access',
+      title: (
+        <Flex align="center" justify="space-between" gap="small">
+          <span>Access</span>
+          <Select<AgentScopeFilter>
+            aria-label="Filter agents by access"
+            size="small"
+            value={agentScopeFilter}
+            options={AGENT_SCOPE_FILTER_OPTIONS}
+            onChange={setAgentScopeFilter}
+          />
+        </Flex>
+      ),
+      render: (_value, row) => (
+        <Flex wrap gap="small" aria-label={`Access for ${row.display}`}>
+          {row.userScoped ? <Tag color="blue">My agents</Tag> : null}
+          {row.teamScopes.map(team => (
+            <Tag key={`${row.agent}:${team.id}`} color="green" title={team.name}>
+              {team.name}
+            </Tag>
+          ))}
+          {!row.userScoped && !row.teamScopes.length ? (
+            <Typography.Text type="secondary">No access source</Typography.Text>
+          ) : null}
+        </Flex>
+      ),
+    },
+    {
+      key: 'last-active',
+      title: 'Last active',
+      render: (_value, row) => (
+        <Typography.Text type="secondary">{row.lastActiveLabel}</Typography.Text>
+      ),
+    },
+    {
+      key: 'connectors',
+      title: 'Connectors',
+      render: (_value, row) => (
+        <AntButton
+          htmlType="button"
+          type="text"
+          size="small"
+          onClick={event => {
+            event.stopPropagation()
+            onOpenAgentWorkspace(row.agent, 'mcp-servers')
+          }}
+          onKeyDown={event => event.stopPropagation()}
+          aria-label={`Open connectors for ${row.display}`}
+        >
+          <Flex align="center" gap="small" wrap>
+            {row.mcpServerCount == null ? (
+              <Typography.Text title={mcpServerMappingUnavailableMessage} type="secondary">
+                Unavailable
+              </Typography.Text>
+            ) : row.mcpServers.length === 0 ? (
+              <Typography.Text type="secondary">None</Typography.Text>
+            ) : (
+              <>
+                {row.mcpServers.slice(0, 3).map(serverName => (
+                  <Tag
+                    key={`${row.agent}:${serverName}`}
+                    title={formatMcpServerDisplayName(serverName)}
+                  >
+                    {formatMcpServerAcronym(serverName)}
+                  </Tag>
+                ))}
+                {row.mcpServers.length > 3 ? (
+                  <Typography.Text type="secondary">+{row.mcpServers.length - 3}</Typography.Text>
+                ) : null}
+              </>
+            )}
+          </Flex>
+        </AntButton>
+      ),
+    },
+    {
+      key: 'actions',
+      title: 'Actions',
+      align: 'center',
+      render: (_value, row) => (
+        <Dropdown
+          trigger={['click']}
+          placement="bottomRight"
+          open={fleetMenuAgent === row.agent}
+          menu={{
+            items: fleetMenuItems,
+            onClick: ({ key, domEvent }) => {
+              domEvent.stopPropagation()
+              handleFleetMenuAction(row.agent, key)
+            },
+          }}
+          onOpenChange={open => setFleetMenuAgent(open ? row.agent : null)}
+        >
+          <AntButton
+            htmlType="button"
+            type="text"
+            size="small"
+            icon={<EllipsisOutlined aria-hidden="true" />}
+            onClick={event => event.stopPropagation()}
+            onKeyDown={event => event.stopPropagation()}
+            aria-label={`More actions for ${row.display}`}
+            aria-haspopup="menu"
+            aria-expanded={fleetMenuAgent === row.agent}
+          />
+        </Dropdown>
+      ),
+    },
+  ]
+
   return (
     <section className="page">
       <div className="page-header">
@@ -219,222 +363,25 @@ export function FleetBoard() {
 
       <div className="page-layout">
         <section className="page-card agents-fleet-board-card">
-          <section className="agents-table-card">
+          <section>
             {!filteredFleetRows.length ? (
-              <EmptyState title="No agents" body="No agents match the selected filter." />
+              <Empty description="No agents match the selected filter." />
             ) : (
-              <DataTable frameless fullBleed className="agents-data-table">
-                <thead>
-                  <tr>
-                    <th className="da-table__col-header" scope="col">
-                      Agent name
-                    </th>
-                    <th className="da-table__col-header" scope="col">
-                      <DataTableFilter
-                        active={agentScopeFilter !== 'all'}
-                        ariaLabel="Filter agents by access"
-                        label="Access"
-                        options={AGENT_SCOPE_FILTER_OPTIONS}
-                        value={agentScopeFilter}
-                        variant="icon"
-                        onChange={setAgentScopeFilter}
-                      />
-                    </th>
-                    <th className="da-table__col-header" scope="col">
-                      Last active
-                    </th>
-                    <th className="da-table__col-header" scope="col">
-                      Connectors
-                    </th>
-                    <th className="da-table__col-header da-table__col-header--center" scope="col">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredFleetRows.map(row => (
-                    <tr
-                      key={row.agent}
-                      className="da-table__row--clickable agents-table-row-clickable"
-                      {...clickableRowProps(() => onOpenAgentWorkspace(row.agent, 'mcp-servers'), {
-                        ariaLabel: `Open agent ${row.display}`,
-                      })}
-                    >
-                      <td className="da-table__cell">
-                        <div className="agent-row-main">
-                          <span className="agent-row-icon" aria-hidden="true">
-                            <IconAgents />
-                          </span>
-                          <div className="agent-row-main-copy">
-                            <strong>{row.display}</strong>
-                            {row.display !== row.agent && (
-                              <span className="agent-row-description" title={row.agent}>
-                                {row.agent}
-                              </span>
-                            )}
-                            <span className="agent-row-description" title={agentMockDescription}>
-                              {agentMockDescription}
-                            </span>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="da-table__cell">
-                        <div
-                          className="agent-row-scope-tags"
-                          aria-label={`Access for ${row.display}`}
-                        >
-                          {row.userScoped && <ReferenceTag kind="user">My agents</ReferenceTag>}
-                          {row.teamScopes.map(team => (
-                            <ReferenceTag
-                              key={`${row.agent}:${team.id}`}
-                              kind="team"
-                              title={team.name}
-                            >
-                              {team.name}
-                            </ReferenceTag>
-                          ))}
-                          {!row.userScoped && !row.teamScopes.length && (
-                            <span className="agent-table-muted">No access source</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="da-table__cell">
-                        <span className="agent-table-muted">{row.lastActiveLabel}</span>
-                      </td>
-                      <td className="da-table__cell">
-                        <button
-                          type="button"
-                          className="agent-table-mcp-button"
-                          onClick={event => {
-                            event.stopPropagation()
-                            onOpenAgentWorkspace(row.agent, 'mcp-servers')
-                          }}
-                          onKeyDown={event => event.stopPropagation()}
-                          aria-label={`Open connectors for ${row.display}`}
-                        >
-                          <span className="agent-table-mcp agent-table-mcp-list">
-                            {row.mcpServerCount == null && (
-                              <span
-                                className="agent-table-mcp-unavailable"
-                                title={mcpServerMappingUnavailableMessage}
-                              >
-                                Unavailable
-                              </span>
-                            )}
-                            {row.mcpServerCount != null && row.mcpServers.length === 0 && (
-                              <span className="agent-table-mcp-unavailable">None</span>
-                            )}
-                            {row.mcpServerCount != null && row.mcpServers.length > 0 && (
-                              <>
-                                {row.mcpServers.slice(0, 3).map(serverName => (
-                                  <span
-                                    key={`${row.agent}:${serverName}`}
-                                    className="agent-mcp-dot"
-                                    title={formatMcpServerDisplayName(serverName)}
-                                  >
-                                    {formatMcpServerAcronym(serverName)}
-                                  </span>
-                                ))}
-                                {row.mcpServers.length > 3 && (
-                                  <span className="agent-table-muted">
-                                    +{row.mcpServers.length - 3}
-                                  </span>
-                                )}
-                              </>
-                            )}
-                          </span>
-                        </button>
-                      </td>
-                      <td className="da-table__cell da-table__cell--center">
-                        <div className="agent-table-actions-cell">
-                          <Button
-                            className="agent-table-row-action"
-                            color="neutral"
-                            onClick={event => {
-                              event.stopPropagation()
-                              const trigger = event.currentTarget
-                              const rect = trigger.getBoundingClientRect()
-                              const menuWidth = 136
-                              const menuHeight = 240
-                              const edgePadding = 8
-                              const openUp =
-                                rect.bottom + menuHeight + edgePadding > window.innerHeight
-                              const top = openUp ? rect.top - menuHeight - 6 : rect.bottom + 6
-                              const left = Math.max(
-                                edgePadding,
-                                Math.min(
-                                  rect.right - menuWidth,
-                                  window.innerWidth - menuWidth - edgePadding
-                                )
-                              )
-                              if (fleetMenuAgent === row.agent) {
-                                setFleetMenuAgent(null)
-                                setFleetMenuPosition(null)
-                                return
-                              }
-                              setFleetMenuAgent(row.agent)
-                              setFleetMenuPosition({ top, left })
-                            }}
-                            onKeyDown={event => event.stopPropagation()}
-                            aria-label={`More actions for ${row.display}`}
-                            aria-haspopup="menu"
-                            aria-expanded={fleetMenuAgent === row.agent}
-                            size="xs"
-                            variant="ghost"
-                          >
-                            ...
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </DataTable>
+              <Table<AgentFleetRow>
+                columns={columns}
+                dataSource={filteredFleetRows}
+                rowKey="agent"
+                size="small"
+                pagination={false}
+                rowClassName="agents-table-row-clickable"
+                onRow={row => ({
+                  ...clickableRowProps(() => onOpenAgentWorkspace(row.agent, 'mcp-servers'), {
+                    ariaLabel: `Open agent ${row.display}`,
+                  }),
+                })}
+              />
             )}
           </section>
-          {fleetMenuAgent &&
-            fleetMenuPosition &&
-            createPortal(
-              <div
-                ref={fleetMenuRef}
-                className="agent-fleet-row-menu"
-                role="menu"
-                style={{ top: fleetMenuPosition.top, left: fleetMenuPosition.left }}
-              >
-                <MenuItem
-                  className="agent-fleet-row-menu-item"
-                  onClick={event => {
-                    event.stopPropagation()
-                    const agentName = fleetMenuAgent
-                    if (!agentName) return
-                    setFleetMenuAgent(null)
-                    setFleetMenuPosition(null)
-                    setPendingCreateChatForAgent(agentName)
-                    onSelectAgent(agentName, { selectLatest: false })
-                  }}
-                >
-                  New chat
-                </MenuItem>
-                <div className="agent-fleet-row-menu-divider" role="separator" />
-                {AGENT_ROUTE_ACTIONS.map(action => (
-                  <MenuItem
-                    key={action.route}
-                    className="agent-fleet-row-menu-item"
-                    onClick={event => {
-                      event.stopPropagation()
-                      const agentName = fleetMenuAgent
-                      if (!agentName) return
-                      setFleetMenuAgent(null)
-                      setFleetMenuPosition(null)
-                      onOpenAgentWorkspace(agentName, action.route)
-                    }}
-                  >
-                    {action.label}
-                  </MenuItem>
-                ))}
-              </div>,
-              document.body
-            )}
         </section>
       </div>
     </section>

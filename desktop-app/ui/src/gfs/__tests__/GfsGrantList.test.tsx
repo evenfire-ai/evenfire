@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { GfsGrantList } from '../GfsGrantList'
 import type {
   GfsGrantListItem,
@@ -20,6 +22,14 @@ import { mergeInheritedAccessItem } from '../inheritedAccessMerge'
  */
 
 afterEach(cleanup)
+beforeEach(installAntdDomEnvironment)
+
+async function chooseRole(label: string, role: string) {
+  const select = screen.getByRole('combobox', { name: `Access role for ${label}` })
+  const user = userEvent.setup()
+  await user.click(select.closest('.ant-select')!)
+  await user.click(await screen.findByTitle(role))
+}
 
 const HIDDEN_ACCESS_NOTICE_TEXT =
   'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
@@ -79,29 +89,33 @@ describe('GfsGrantList', () => {
       />
     )
 
-    const agentRow = screen.getByText('Chat LLM').closest('li')!
+    const agentRow = screen.getByText('Chat LLM').closest<HTMLElement>('[role="listitem"]')!
     expect(agentRow.querySelector('[data-subject-kind="agent"] svg')).not.toBeNull()
     expect(within(agentRow).queryByText(/direct grant|\bhost\b/i)).toBeNull()
     expect(
-      within(agentRow).getByRole('button', { name: 'Access role for Chat LLM' }).textContent
+      within(agentRow).getByRole('combobox', { name: 'Access role for Chat LLM' }).parentElement
+        ?.textContent
     ).toContain('Editor')
     expect(within(agentRow).queryByText('Includes contents')).toBeNull()
     expect(within(agentRow).queryByText('X')).toBeNull()
     const actions = within(agentRow).getByRole('button', { name: 'Actions for Chat LLM' })
-    expect(actions.className).toContain('da-gfs-resource-menu__trigger')
-    expect(actions.querySelectorAll('circle')).toHaveLength(3)
+    expect(actions.className).toContain('ant-btn')
+    expect(actions.querySelector('.anticon-ellipsis')).not.toBeNull()
 
-    const userRow = screen.getByText('Test Two').closest('li')!
+    const userRow = screen.getByText('Test Two').closest<HTMLElement>('[role="listitem"]')!
     expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()
     expect(within(userRow).queryByText(/direct grant|\buser\b/i)).toBeNull()
     expect(
-      within(userRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
+      within(userRow).getByRole('combobox', { name: 'Access role for Test Two' }).parentElement
+        ?.textContent
     ).toContain('Read')
     expect(within(userRow).queryByText('Includes contents')).toBeNull()
 
     // Unresolvable subject ids stay visible as raw ids — never hidden.
     expect(screen.getByText('1st:mcp-host/unknown')).toBeTruthy()
-    const workflowRow = screen.getByText('monthly-report').closest('li')!
+    const workflowRow = screen
+      .getByText('monthly-report')
+      .closest<HTMLElement>('[role="listitem"]')!
     expect(workflowRow.querySelector('[data-subject-kind="workflow"] svg')).not.toBeNull()
   })
 
@@ -215,13 +229,13 @@ describe('GfsGrantList', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for Chat LLM' }))
     const menu = screen.getByRole('menu', { name: 'Actions for Chat LLM' })
-    expect(menu.parentElement).toBe(document.body)
+    expect(document.body.contains(menu)).toBe(true)
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Remove access' }))
 
     expect(onRevoke).toHaveBeenCalledWith(item, 'Chat LLM')
   })
 
-  it('changes a member between the grouped Read and Editor roles', () => {
+  it('changes a member between the grouped Read and Editor roles', async () => {
     const onChangeRole = vi.fn()
     const item = grantItem({ subject: { type: 'user', id: 'user-2' } })
     render(
@@ -234,9 +248,7 @@ describe('GfsGrantList', () => {
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Access role for Test Two' }))
-    expect(screen.getByRole('listbox').parentElement).toBe(document.body)
-    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+    await chooseRole('Test Two', 'Editor')
     expect(onChangeRole).toHaveBeenCalledWith(item, 'Test Two', 'editor')
   })
 
@@ -282,7 +294,7 @@ describe('GfsGrantList', () => {
     )
 
     const banner = screen.getByText('Only people with manage access can view who has access here.')
-    expect(banner.closest('.status-banner')?.className).toContain('tone-info')
+    expect(banner.closest('.ant-alert')?.className).toContain('ant-alert-info')
     expect(screen.queryByRole('list')).toBeNull()
     expect(screen.queryByRole('button', { name: /Actions for/ })).toBeNull()
   })
@@ -299,7 +311,7 @@ describe('GfsGrantList', () => {
     )
 
     const banner = screen.getByText('listGrants exploded')
-    expect(banner.closest('.status-banner')?.className).toContain('tone-error')
+    expect(banner.closest('.ant-alert')?.className).toContain('ant-alert-error')
   })
 
   it('renders an empty notice when nothing has been granted', () => {
@@ -348,7 +360,8 @@ describe('GfsGrantList', () => {
       const userRow = screen.getByTestId(userInheritedRowTestId)
       expect(within(userRow).getByText('Test Two')).toBeTruthy()
       expect(
-        within(userRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
+        within(userRow).getByRole('combobox', { name: 'Access role for Test Two' }).parentElement
+          ?.textContent
       ).toContain('Editor')
       expect(within(userRow).getByRole('button', { name: 'Actions for Test Two' })).toBeTruthy()
       // Normal-looking row: no inherited label, no muted duplicate.
@@ -359,7 +372,8 @@ describe('GfsGrantList', () => {
 
       const teamRow = screen.getByTestId(teamInheritedRowTestId)
       expect(
-        within(teamRow).getByRole('button', { name: 'Access role for Core Team' }).textContent
+        within(teamRow).getByRole('combobox', { name: 'Access role for Core Team' }).parentElement
+          ?.textContent
       ).toContain('Read')
     })
 
@@ -382,7 +396,8 @@ describe('GfsGrantList', () => {
       const mergedRow = screen.getByTestId(userInheritedRowTestId)
       // Effective role is the strongest across direct and inherited sources.
       expect(
-        within(mergedRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
+        within(mergedRow).getByRole('combobox', { name: 'Access role for Test Two' }).parentElement
+          ?.textContent
       ).toContain('Editor')
     })
 
@@ -410,7 +425,7 @@ describe('GfsGrantList', () => {
       expect(screen.getByTestId('gfs-access-row-inherited-user:user-3')).toBeTruthy()
     })
 
-    it('fires the inherited change and remove callbacks for merged rows', () => {
+    it('fires the inherited change and remove callbacks for merged rows', async () => {
       const onChangeInheritedRole = vi.fn()
       const onRemoveInherited = vi.fn()
       const item = inheritedItem({})
@@ -428,8 +443,7 @@ describe('GfsGrantList', () => {
       )
 
       const row = screen.getByTestId(userInheritedRowTestId)
-      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
-      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+      await chooseRole('Test Two', 'Read')
       expect(onChangeInheritedRole).toHaveBeenCalledTimes(1)
       const [changedRow, label, role] = onChangeInheritedRole.mock.calls[0]!
       expect(changedRow.inherited).toBe(item)
@@ -499,11 +513,11 @@ describe('GfsGrantList', () => {
       )
 
       const banner = screen.getByText(/Inherited access could not be loaded/)
-      expect(banner.closest('.status-banner')?.className).toContain('tone-info')
+      expect(banner.closest('.ant-alert')?.className).toContain('ant-alert-info')
       expect(screen.queryByText('No one has access yet.')).toBeNull()
     })
 
-    it('keeps direct-only rows editable alongside merged rows and never the empty notice', () => {
+    it('keeps direct-only rows editable alongside merged rows and never the empty notice', async () => {
       const onRevoke = vi.fn()
       const grant = grantItem({ id: 'grant-1' })
       render(
@@ -521,8 +535,7 @@ describe('GfsGrantList', () => {
       )
 
       expect(screen.queryByText('No one has access yet.')).toBeNull()
-      fireEvent.click(screen.getByRole('button', { name: 'Access role for Chat LLM' }))
-      fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+      await chooseRole('Chat LLM', 'Editor')
       fireEvent.click(screen.getByRole('button', { name: 'Actions for Chat LLM' }))
       fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
       expect(onRevoke).toHaveBeenCalled()
@@ -550,7 +563,7 @@ describe('GfsGrantList', () => {
 
     // The share failure is visible…
     const banner = screen.getByText('listShares exploded')
-    expect(banner.closest('.status-banner')?.className).toContain('tone-error')
+    expect(banner.closest('.ant-alert')?.className).toContain('ant-alert-error')
     // …but the grant row and its revoke action stay available and work.
     const grantRow = screen.getByTestId('gfs-access-row-grant-grant-1')
     expect(within(grantRow).getByText('Chat LLM')).toBeTruthy()

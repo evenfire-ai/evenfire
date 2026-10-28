@@ -10,6 +10,7 @@ import {
   NotificationsContext,
   WorkspaceActionsProvider,
 } from '@contexts/index'
+import { Button, Descriptions, Empty, Flex, Modal, Typography } from 'antd'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { ChatDrawer } from '@components/ChatDrawer'
@@ -17,7 +18,7 @@ import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatSwitcher } from '@components/ChatSwitcher'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
-import { Button, ToastStack } from '@components/Common'
+import { ToastStack } from '@components/Common/ToastStack'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
@@ -25,7 +26,7 @@ import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
-import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
+import { WORKSPACE_TABS_ID, WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
@@ -230,54 +231,48 @@ function DesktopUpdateRequiredDialog({
   latestVersion: string
   onDownload: () => void
 }) {
-  const titleId = React.useId()
-  const descriptionId = React.useId()
   const detailsId = React.useId()
   const [detailsOpen, setDetailsOpen] = React.useState(false)
 
   return (
-    <div className="desktop-update-dialog-backdrop" role="presentation">
-      <section
-        aria-describedby={descriptionId}
-        aria-labelledby={titleId}
-        aria-modal="true"
-        className="desktop-update-dialog"
-        role="dialog"
-      >
-        <h3 id={titleId}>Desktop update required</h3>
-        <div className="desktop-update-dialog__body" id={descriptionId}>
-          <p>
-            This workspace requires the latest version of Evenfire Desktop before you can continue.
-          </p>
-        </div>
-        <div className="desktop-update-dialog__actions">
-          <Button block onClick={onDownload}>
-            Download update
-          </Button>
-        </div>
-        <button
-          type="button"
-          className="desktop-update-dialog__more-info"
+    <Modal
+      open
+      title="Desktop update required"
+      footer={null}
+      closable={false}
+      keyboard={false}
+      maskClosable={false}
+    >
+      <Flex vertical gap="middle">
+        <Typography.Paragraph>
+          This workspace requires the latest version of Evenfire Desktop before you can continue.
+        </Typography.Paragraph>
+        <Button block onClick={onDownload} size="small" type="primary">
+          Download update
+        </Button>
+        <Button
           aria-controls={detailsId}
           aria-expanded={detailsOpen}
           onClick={() => setDetailsOpen(open => !open)}
+          size="small"
+          type="link"
         >
           {detailsOpen ? 'Hide info' : 'More info'}
-        </button>
+        </Button>
         {detailsOpen ? (
-          <dl className="desktop-update-dialog__versions" id={detailsId}>
-            <div>
-              <dt>Installed</dt>
-              <dd>{currentVersion}</dd>
-            </div>
-            <div>
-              <dt>Latest</dt>
-              <dd>{latestVersion}</dd>
-            </div>
-          </dl>
+          <div id={detailsId} aria-label="Version information" role="region">
+            <Descriptions
+              column={1}
+              items={[
+                { key: 'installed', label: 'Installed', children: currentVersion },
+                { key: 'latest', label: 'Latest', children: latestVersion },
+              ]}
+              size="small"
+            />
+          </div>
         ) : null}
-      </section>
-    </div>
+      </Flex>
+    </Modal>
   )
 }
 
@@ -1505,7 +1500,9 @@ export function App() {
       setChatDrawerContentTop(null)
       return
     }
-    const strip = contentPanelRef.current?.querySelector('.chat-view-tabs')
+    const strip = contentPanelRef.current?.querySelector(
+      '[role="toolbar"][aria-label="Workspace tabs"] .ant-tabs'
+    )
     if (!strip) {
       setChatDrawerContentTop(null)
       return
@@ -2980,21 +2977,35 @@ export function App() {
                                   )}
                                   {vm.navItem === DESKTOP_ROUTES.chat &&
                                     (workspaceTabs.tabs.length === 0 ? (
-                                      <section className="chat-view-workspace" aria-label="Home">
-                                        <div className="chat-view-surface">
-                                          <div className="workspace-home-empty">
-                                            <h2>Nothing open</h2>
+                                      <Flex
+                                        component="section"
+                                        vertical
+                                        className="chat-view-workspace"
+                                        aria-label="Home"
+                                      >
+                                        <Flex
+                                          component="section"
+                                          vertical
+                                          className="chat-view-surface"
+                                        >
+                                          <Flex vertical className="workspace-home-empty">
+                                            <Empty image={null} description="Nothing open" />
                                             <Button onClick={handleNewWorkspaceChatTab}>
                                               New chat
                                             </Button>
-                                            <p className="muted">
+                                            <Typography.Text type="secondary">
                                               or open something from the sidebar
-                                            </p>
-                                          </div>
-                                        </div>
-                                      </section>
+                                            </Typography.Text>
+                                          </Flex>
+                                        </Flex>
+                                      </Flex>
                                     ) : (
                                       <ChatViewWorkspace
+                                        labelledBy={
+                                          workspaceTabs.activeTabId
+                                            ? `${WORKSPACE_TABS_ID}-tab-${workspaceTabs.activeTabId}`
+                                            : undefined
+                                        }
                                         localSearch={
                                           chatLocalSearchOpen ? (
                                             <ChatLocalSearch

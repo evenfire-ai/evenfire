@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
 import { createWorkspaceTabsState, newChatTab, openChatTab } from '@lib/workspaceTabs'
 import { ChatSwitcher } from '.'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 
 afterEach(cleanup)
+beforeEach(installAntdDomEnvironment)
 
 // Derive the tab list from the real universal-store producers instead of
 // hand-writing WorkspaceTab objects — if the tab shape changes, this fixture
@@ -30,40 +33,47 @@ const tabs = newChatTab(
 ).tabs
 
 describe('ChatSwitcher', () => {
-  it('shows the active chat in the trigger and lists open chats on demand', () => {
+  it('shows the active chat in the trigger and lists open chats on demand', async () => {
     const onSelect = vi.fn()
+    const user = userEvent.setup()
     render(<ChatSwitcher tabs={tabs} activeTabId="one" onSelect={onSelect} onNewChat={vi.fn()} />)
 
-    const trigger = screen.getByRole('button', { name: 'Open chats' })
-    expect(trigger.textContent).toContain('First chat')
+    const trigger = screen.getByRole('combobox', { name: 'Open chats' })
+    expect(trigger.closest('.ant-select')?.textContent).toContain('First chat')
     // Collapsed: options are not in the tree.
     expect(screen.queryByRole('listbox')).toBeNull()
 
-    fireEvent.click(trigger)
-    const listbox = screen.getByRole('listbox', { name: 'Open chats' })
+    await user.click(trigger.closest('.ant-select')!)
+    const listbox = screen.getByRole('listbox')
     expect(listbox).toBeTruthy()
-    const options = screen.getAllByRole('option')
-    expect(options.map(option => option.textContent)).toEqual([
-      'First chat',
-      'Second chat',
-      'New chat',
-    ])
-    expect(options[0]?.getAttribute('aria-selected')).toBe('true')
+    const options = Array.from(
+      document.querySelectorAll<HTMLElement>('.ant-select-dropdown-list .ant-select-item-option')
+    )
+    const firstChat = options.find(option => option.textContent?.includes('First chat'))!
+    const secondChat = options.find(option => option.textContent?.includes('Second chat'))!
+    expect(firstChat).toBeTruthy()
+    expect(secondChat).toBeTruthy()
+    const accessibleSecondChat = screen.getByRole('option', { name: 'Second chat' })
+    expect(accessibleSecondChat.textContent).toContain('Second chat')
+    expect(screen.getByRole('button', { name: 'New chat' })).toBeTruthy()
+    expect(firstChat.classList.contains('ant-select-item-option-selected')).toBe(true)
 
-    fireEvent.click(screen.getByRole('option', { name: 'Second chat' }))
+    await user.click(secondChat)
     expect(onSelect).toHaveBeenCalledWith('two')
   })
 
-  it('exposes a new-chat action that closes the menu', () => {
+  it('exposes a new-chat action that closes the menu', async () => {
     const onNewChat = vi.fn()
+    const user = userEvent.setup()
     render(<ChatSwitcher tabs={tabs} activeTabId="one" onSelect={vi.fn()} onNewChat={onNewChat} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
-    fireEvent.click(screen.getByRole('button', { name: '+ New chat' }))
+    const trigger = screen.getByRole('combobox', { name: 'Open chats' })
+    await user.click(trigger.closest('.ant-select')!)
+    await user.click(screen.getByRole('button', { name: 'New chat' }))
     expect(onNewChat).toHaveBeenCalledTimes(1)
-    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
   })
 
-  it('opens the menu when the focus request id increments (the chat.switcher shortcut)', () => {
+  it('opens and focuses the menu when the chat.switcher shortcut requests it', async () => {
     const { rerender } = render(
       <ChatSwitcher
         tabs={tabs}
@@ -84,7 +94,9 @@ describe('ChatSwitcher', () => {
         focusRequestId={1}
       />
     )
-    expect(screen.getByRole('listbox', { name: 'Open chats' })).toBeTruthy()
+    expect(screen.getByRole('listbox')).toBeTruthy()
+    const trigger = screen.getByRole('combobox', { name: 'Open chats' })
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
   })
 
   it('reuses per-chat session badges from sessionStateByChatKey', () => {

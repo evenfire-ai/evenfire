@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Button, TextInput } from '@components/Common'
+import { CloseOutlined, SearchOutlined } from '@ant-design/icons'
+import { Button, Input } from 'antd'
+import type { InputRef } from 'antd'
 import { findLoadedChatMessageMatches, wrapMatchIndex } from '@lib/chatLocalSearch'
 import type { ChatLocalSearchProps } from './types'
 
 export function ChatLocalSearch({ models, onClose, onSearchStateChange }: ChatLocalSearchProps) {
   const [query, setQuery] = useState('')
   const [currentIndex, setCurrentIndex] = useState(0)
-  const inputRef = useRef<HTMLInputElement | null>(null)
+  const inputRef = useRef<InputRef | null>(null)
   const matches = useMemo(() => findLoadedChatMessageMatches(models, query), [models, query])
   const currentMatch = matches[currentIndex] ?? null
 
@@ -33,10 +35,11 @@ export function ChatLocalSearch({ models, onClose, onSearchStateChange }: ChatLo
 
   return (
     <div className="current-content-search" role="search" aria-label="Search loaded chat messages">
-      <TextInput
+      <Input
         ref={inputRef}
         aria-label="Find in current chat"
-        className="current-content-search__input"
+        prefix={<SearchOutlined aria-hidden="true" />}
+        size="small"
         onChange={event => {
           setQuery(event.currentTarget.value)
           setCurrentIndex(0)
@@ -58,31 +61,25 @@ export function ChatLocalSearch({ models, onClose, onSearchStateChange }: ChatLo
       </span>
       <Button
         aria-label="Previous match"
-        color="neutral"
+        icon={<span aria-hidden="true">↑</span>}
+        size="small"
         onClick={() => move(-1)}
-        size="xs"
-        variant="ghost"
-      >
-        ↑
-      </Button>
+        type="text"
+      />
       <Button
         aria-label="Next match"
-        color="neutral"
+        icon={<span aria-hidden="true">↓</span>}
+        size="small"
         onClick={() => move(1)}
-        size="xs"
-        variant="ghost"
-      >
-        ↓
-      </Button>
+        type="text"
+      />
       <Button
         aria-label="Close current chat search"
-        color="neutral"
+        icon={<CloseOutlined aria-hidden="true" />}
+        size="small"
         onClick={onClose}
-        size="xs"
-        variant="ghost"
-      >
-        ×
-      </Button>
+        type="text"
+      />
       <span className="visually-hidden">
         Only messages already loaded in this chat are searched.
       </span>

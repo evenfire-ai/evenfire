@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { RefObject } from 'react'
 import { useAgentActivityContext } from '@contexts/AgentActivityContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { EmptyState } from '@components/Common'
+import { Alert, Card, Empty, Flex, Skeleton, Spin, Typography } from 'antd'
 import { AgentWorkspace } from '@components/agents/AgentWorkspace'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { pickLatestAgent } from '@lib/agents'
@@ -35,23 +35,22 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
     return (
       <section className="page">
         <div className="page-header">
-          <h2>Chat</h2>
-          <p className="muted">Start a conversation with an authorized agent.</p>
+          <Typography.Title level={2}>Chat</Typography.Title>
+          <Typography.Paragraph type="secondary">
+            Start a conversation with an authorized agent.
+          </Typography.Paragraph>
         </div>
-        <section className="page-card">
+        <Card>
           {loading ? (
-            <EmptyState title="Loading" body="Fetching authorized agents..." />
+            <Flex justify="center">
+              <Spin tip="Fetching authorized agents..." />
+            </Flex>
           ) : error ? (
-            <div className="composer-error">
-              <p className="error-text">{error}</p>
-            </div>
+            <Alert showIcon title={error} type="error" />
           ) : (
-            <EmptyState
-              title="No agents available"
-              body="You do not currently have authorized agents in this team."
-            />
+            <Empty description="You do not currently have authorized agents in this team." />
           )}
-        </section>
+        </Card>
       </section>
     )
   }
@@ -61,28 +60,15 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
 
 function ChatPageSkeleton() {
   return (
-    <section className="agent-page chat-page-skeleton" aria-busy="true">
-      <span className="visually-hidden">Fetching authorized agents...</span>
-      <div className="agent-workspace-shell page-card">
-        <div className="agent-chat-nav-stack">
-          <div className="agent-workspace-head">
-            <div className="agent-workspace-head-row">
-              <div className="agent-workspace-heading-stack">
-                <span className="chat-skeleton-line chat-skeleton-line--breadcrumb" />
-                <span className="chat-skeleton-line chat-skeleton-line--subtitle" />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="agent-workspace-body-slot chat-page-skeleton__body">
-          <span className="chat-skeleton-line chat-skeleton-line--greeting" />
-          <div className="chat-page-skeleton__composer">
-            <span className="chat-skeleton-line chat-skeleton-line--composer" />
-            <span className="chat-skeleton-send" />
-          </div>
-        </div>
-      </div>
+    <section aria-busy="true" aria-label="Loading chat">
+      <Flex vertical gap="large">
+        <Skeleton active paragraph={{ rows: 1 }} />
+        <Skeleton active paragraph={{ rows: 3 }} />
+        <Flex align="center" gap="small">
+          <Skeleton.Input active block />
+          <Skeleton.Button active />
+        </Flex>
+      </Flex>
     </section>
   )
 }

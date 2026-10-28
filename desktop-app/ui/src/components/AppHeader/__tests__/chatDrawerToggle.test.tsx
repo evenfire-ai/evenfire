@@ -74,20 +74,17 @@ describe('AppHeader chat-drawer toggle', () => {
     const { container } = render(
       <AppHeader placement="titlebar" drawerAvailable={false} onToggleChatDrawer={vi.fn()} />
     )
-    // The interactive control is gone, but its slot is held so the search pill
-    // and bell keep their position when the toggle appears/disappears.
+    // The interactive control is gone, but an Ant Design button reserves its
+    // slot so the search field and bell keep their relative position.
     const placeholder = screen.getByTestId('chat-drawer-toggle-placeholder')
-    expect(placeholder.tagName).toBe('SPAN')
+    expect(placeholder.tagName).toBe('BUTTON')
     expect(placeholder.getAttribute('aria-hidden')).toBe('true')
-    // Carries `.chat-drawer-toggle` — the class that sizes the box — so it
-    // reserves the real toggle's footprint (jsdom can't measure layout, so the
-    // shared sizing class is the closest guard against the slot collapsing).
-    expect(placeholder.classList.contains('chat-drawer-toggle')).toBe(true)
+    expect((placeholder as HTMLButtonElement).disabled).toBe(true)
+    expect(placeholder.classList.contains('chat-drawer-toggle--placeholder')).toBe(true)
 
-    // Same position as the real toggle: between the search (.header-left) and the
-    // bell (.header-utilities).
-    const left = container.querySelector('.header-left')
-    const utilities = container.querySelector('.header-utilities')
+    // Same position as the real toggle: between the search and the bell.
+    const left = container.querySelector('[data-testid="header-left"]')
+    const utilities = container.querySelector('[data-testid="header-utilities"]')
     expect(left).not.toBeNull()
     expect(utilities).not.toBeNull()
     expect(
@@ -121,10 +118,9 @@ describe('AppHeader chat-drawer toggle', () => {
     expect(toggle.getAttribute('aria-label')).toBe('Open chat drawer')
     expect(toggle.getAttribute('aria-pressed')).toBe('false')
 
-    // Positioned in the DOM between the search (.header-left) and the bell
-    // (.header-utilities), as R3 requires.
-    const left = container.querySelector('.header-left')
-    const utilities = container.querySelector('.header-utilities')
+    // Positioned in the DOM between the search and the bell, as R3 requires.
+    const left = container.querySelector('[data-testid="header-left"]')
+    const utilities = container.querySelector('[data-testid="header-utilities"]')
     expect(left).not.toBeNull()
     expect(utilities).not.toBeNull()
     expect(left!.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()

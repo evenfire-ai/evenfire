@@ -284,7 +284,8 @@ describe('ChatThread tool-steps fallback (#582)', () => {
 
     render(<ChatThread />)
 
-    expect(screen.getByText(/More details · 2 tools/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /More details/ })).toBeTruthy()
+    expect(screen.getByText(/2 tools ·/)).toBeTruthy()
     expect(screen.getAllByTestId('progress-stepper')).toHaveLength(1)
   })
 
@@ -363,8 +364,9 @@ describe('ChatThread tool-steps fallback (#582)', () => {
     // Exactly one stepper — the live one — not one live + one hydrated fallback.
     expect(screen.getAllByTestId('progress-stepper')).toHaveLength(1)
     // Live progress has 1 step → "1 tool"; the hydrated fallback (2 steps) must NOT render.
-    expect(screen.getByText(/More details · 1 tool\b/i)).toBeTruthy()
-    expect(screen.queryByText(/More details · 2 tools/i)).toBeNull()
+    expect(screen.getByRole('button', { name: /More details/ })).toBeTruthy()
+    expect(screen.getByText(/1 tool ·/)).toBeTruthy()
+    expect(screen.queryByText(/2 tools ·/)).toBeNull()
   })
 
   it('renders and invokes the older-history page control', async () => {

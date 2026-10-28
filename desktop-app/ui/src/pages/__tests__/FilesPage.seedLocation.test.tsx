@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useEffect, useRef, useState } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
@@ -8,6 +8,7 @@ import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { createEmptyWorkspaceTabsState, openFilesTab, setFilesTabPath } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 import { FilesPage } from '../FilesPage'
 
 // This suite mounts the REAL FilesPage on the REAL useGfsBrowserController (T1:
@@ -149,6 +150,8 @@ function renderHarness() {
 }
 
 describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', () => {
+  beforeEach(installAntdDomEnvironment)
+
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()

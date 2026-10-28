@@ -1,5 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ApiOutlined,
+  AppstoreOutlined,
+  DeploymentUnitOutlined,
+  DownOutlined,
+  HddOutlined,
+  LeftOutlined,
+  LogoutOutlined,
+  MessageOutlined,
+  MoreOutlined,
+  PlusOutlined,
+  RightOutlined,
+  SettingOutlined,
+} from '@ant-design/icons'
+import {
   type QueuedChatDelete,
   useAgentChatActionsContext,
 } from '@contexts/AgentChatActionsContext'
@@ -7,26 +21,23 @@ import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { Button, IconButton, MenuItem, NavItem as NavItemControl } from '@components/Common'
-import { ConfirmDialog } from '@components/ConfirmDialog'
+import {
+  Avatar,
+  Button,
+  Dropdown,
+  Flex,
+  Input,
+  type InputRef,
+  type MenuProps,
+  Modal,
+  Typography,
+} from 'antd'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/navigation'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import type { NavItem } from '@/uiTypes'
 import { FileExplorerTree } from './FileExplorerTree'
-import {
-  IconAgents,
-  IconChat,
-  IconChevronRight,
-  IconConnectors,
-  IconHardDrive,
-  IconMoreHorizontal,
-  IconNewChat,
-  IconSandboxUi,
-  IconSettings,
-  IconWorkflows,
-} from './icons'
 import type { SidebarNavProps } from './types'
 
 const MOBILE_SIDEBAR_QUERY = '(max-width: 900px)'
@@ -77,6 +88,7 @@ export function SidebarNav({
     title: string
     deletion: QueuedChatDelete
   } | null>(null)
+  const settingsMenuOpenRef = useRef(false)
   const lastToggleRequestIdRef = useRef(0)
   const desktopAppInfo = useDesktopAppInfo()
   const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
@@ -84,9 +96,11 @@ export function SidebarNav({
   const settingsMenuRef = useRef<HTMLDivElement | null>(null)
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const sessionsRef = useRef<HTMLDivElement | null>(null)
-  const renameInputRef = useRef<HTMLInputElement | null>(null)
+  const renameInputRef = useRef<InputRef | null>(null)
   const updateSettingsMenuOpen = React.useCallback(
     (open: boolean) => {
+      if (settingsMenuOpenRef.current === open) return
+      settingsMenuOpenRef.current = open
       setSettingsMenuOpen(open)
       onSettingsMenuOpenChange?.(open)
     },
@@ -165,13 +179,13 @@ export function SidebarNav({
           id: DESKTOP_ROUTES.chat,
           label: 'Chat',
           testId: 'nav-chat',
-          icon: <IconChat />,
+          icon: <MessageOutlined aria-hidden="true" />,
         },
         {
           id: DESKTOP_ROUTES.apps,
           label: 'Apps',
           testId: 'nav-sandbox-ui',
-          icon: <IconSandboxUi />,
+          icon: <AppstoreOutlined aria-hidden="true" />,
         },
       ],
       []
@@ -188,19 +202,19 @@ export function SidebarNav({
         id: DESKTOP_ROUTES.agents,
         label: 'Agents',
         testId: 'nav-agents',
-        icon: <IconAgents />,
+        icon: <DeploymentUnitOutlined aria-hidden="true" />,
       },
       {
         id: DESKTOP_ROUTES.connectors,
         label: 'Connectors',
         testId: 'nav-mcp-servers',
-        icon: <IconConnectors />,
+        icon: <ApiOutlined aria-hidden="true" />,
       },
       {
         id: DESKTOP_ROUTES.plugins,
         label: 'Plugins',
         testId: 'nav-workflows',
-        icon: <IconWorkflows />,
+        icon: <AppstoreOutlined aria-hidden="true" />,
       },
     ],
     []
@@ -282,6 +296,40 @@ export function SidebarNav({
     closeSettingsMenuWithFocus()
   }
 
+  const settingsMenuItems: MenuProps['items'] = [
+    ...dataRouteItems.map(item => ({
+      key: item.id,
+      label: item.label,
+      icon: item.icon,
+      'data-testid': item.testId,
+    })),
+    {
+      key: DESKTOP_ROUTES.settings,
+      label: 'Settings',
+      icon: <SettingOutlined aria-hidden="true" />,
+      'data-testid': 'nav-settings',
+    },
+    { type: 'divider', key: 'account-actions-divider' },
+    {
+      key: 'logout',
+      label: 'Logout',
+      icon: <LogoutOutlined aria-hidden="true" />,
+      danger: true,
+      disabled: busy,
+      'data-testid': 'logout-btn',
+    },
+  ]
+
+  const handleSettingsMenuClick: NonNullable<MenuProps['onClick']> = ({ key }) => {
+    if (key === 'logout') {
+      updateSettingsMenuOpen(false)
+      setMobileMenuOpen(false)
+      onLogout()
+      return
+    }
+    handleSelect(key as NavItem)
+  }
+
   return (
     <>
       <aside
@@ -290,8 +338,9 @@ export function SidebarNav({
           mobileMenuOpen ? ' mobile-open' : ''
         }`}
       >
-        <button
-          type="button"
+        <Button
+          htmlType="button"
+          type="text"
           className="sidebar-mobile-backdrop"
           aria-label="Close navigation menu"
           onClick={() => {
@@ -300,8 +349,9 @@ export function SidebarNav({
           }}
         />
         <div className="sidebar-logo">
-          <button
-            type="button"
+          <Button
+            htmlType="button"
+            type="text"
             className="sidebar-logo-link"
             onClick={handleLogoClick}
             aria-label={isMobileSidebarViewport() ? 'Open navigation menu' : 'Go to Chat'}
@@ -321,27 +371,20 @@ export function SidebarNav({
               alt="Evenfire"
             />
             <span className="sidebar-mobile-menu-indicator" aria-hidden="true">
-              <svg viewBox="0 0 16 16">
-                <path d="m4.5 6 3.5 3.5L11.5 6" />
-              </svg>
+              <DownOutlined />
             </span>
-          </button>
-          <IconButton
-            type="button"
+          </Button>
+          <Button
+            htmlType="button"
+            type="text"
+            size="small"
+            shape="circle"
             className="sidebar-collapse-toggle"
-            label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            icon={<LeftOutlined aria-hidden="true" />}
             onClick={() => onCollapsedChange(!collapsed)}
-            variant="ghost"
-          >
-            <svg
-              className={`sidebar-collapse-icon${collapsed ? ' expanded' : ''}`}
-              viewBox="0 0 16 16"
-              aria-hidden="true"
-            >
-              <path d="m10 3-5 5 5 5" />
-            </svg>
-          </IconButton>
+          />
         </div>
 
         <div className="sidebar-menu-surface">
@@ -355,38 +398,44 @@ export function SidebarNav({
                   title={collapsed ? item.label : undefined}
                   data-tooltip={item.label}
                 >
-                  <NavItemControl
+                  <Button
+                    htmlType="button"
+                    type="text"
+                    block
                     data-testid={item.testId}
                     className="nav-link-main"
                     onClick={() => handleSelect(item.id)}
                     aria-label={item.label}
-                    leadingIcon={item.icon}
-                    trailingIcon={
-                      <span className="nav-tooltip" role="tooltip">
-                        {item.label}
-                      </span>
-                    }
+                    aria-current={navItem === item.id ? 'page' : undefined}
+                    title={collapsed ? item.label : undefined}
+                    icon={item.icon}
                   >
-                    {item.label}
-                  </NavItemControl>
+                    {collapsed ? null : item.label}
+                  </Button>
                   {item.id === DESKTOP_ROUTES.chat && !collapsed && (
-                    <IconButton
+                    <Button
+                      htmlType="button"
+                      type="text"
+                      size="small"
+                      shape="circle"
                       className="nav-link-new-chat"
-                      label="New chat"
+                      aria-label="New chat"
                       title="New chat"
                       data-testid="nav-new-chat"
+                      icon={<PlusOutlined aria-hidden="true" />}
                       onClick={event => {
                         event.stopPropagation()
                         onNewChat()
                       }}
-                      variant="ghost"
-                    >
-                      <IconNewChat />
-                    </IconButton>
+                    />
                   )}
-                  <IconButton
+                  <Button
+                    htmlType="button"
+                    type="text"
+                    size="small"
+                    shape="circle"
                     className="nav-link-session-toggle"
-                    label={
+                    aria-label={
                       item.id === DESKTOP_ROUTES.chat
                         ? chatSessionsOpen
                           ? 'Collapse chat sessions'
@@ -396,6 +445,23 @@ export function SidebarNav({
                           : 'Expand apps'
                     }
                     aria-expanded={item.id === DESKTOP_ROUTES.chat ? chatSessionsOpen : appsOpen}
+                    title={
+                      item.id === DESKTOP_ROUTES.chat
+                        ? chatSessionsOpen
+                          ? 'Collapse chat sessions'
+                          : 'Expand chat sessions'
+                        : appsOpen
+                          ? 'Collapse apps'
+                          : 'Expand apps'
+                    }
+                    icon={
+                      <RightOutlined
+                        aria-hidden="true"
+                        rotate={
+                          (item.id === DESKTOP_ROUTES.chat ? chatSessionsOpen : appsOpen) ? 90 : 0
+                        }
+                      />
+                    }
                     onClick={event => {
                       event.stopPropagation()
                       if (item.id === DESKTOP_ROUTES.chat) {
@@ -405,16 +471,7 @@ export function SidebarNav({
                         setAppsOpen(open => !open)
                       }
                     }}
-                    variant="ghost"
-                  >
-                    <IconChevronRight
-                      className={
-                        (item.id === DESKTOP_ROUTES.chat ? chatSessionsOpen : appsOpen)
-                          ? 'expanded'
-                          : ''
-                      }
-                    />
-                  </IconButton>
+                  />
                 </div>
 
                 {item.id === DESKTOP_ROUTES.chat && chatSessionsOpen && (
@@ -444,7 +501,7 @@ export function SidebarNav({
                               >
                                 {isRenaming ? (
                                   <div className="nav-latest-session__main nav-latest-session__main--editing">
-                                    <input
+                                    <Input
                                       ref={renameInputRef}
                                       className="nav-latest-session__rename-input"
                                       aria-label="Rename session"
@@ -454,11 +511,11 @@ export function SidebarNav({
                                       onBlur={() => {
                                         void commitSessionRename()
                                       }}
+                                      onPressEnter={event => {
+                                        event.preventDefault()
+                                        void commitSessionRename()
+                                      }}
                                       onKeyDown={event => {
-                                        if (event.key === 'Enter') {
-                                          event.preventDefault()
-                                          void commitSessionRename()
-                                        }
                                         if (event.key === 'Escape') {
                                           event.preventDefault()
                                           cancelSessionRename()
@@ -467,8 +524,10 @@ export function SidebarNav({
                                     />
                                   </div>
                                 ) : (
-                                  <button
-                                    type="button"
+                                  <Button
+                                    htmlType="button"
+                                    type="text"
+                                    block
                                     className="nav-latest-session__main"
                                     aria-label={`Open ${session.title}`}
                                     onClick={() => {
@@ -483,14 +542,17 @@ export function SidebarNav({
                                     }}
                                   >
                                     <span className="nav-latest-session__copy">
-                                      <span className="nav-latest-session__title">
+                                      <Typography.Text className="nav-latest-session__title">
                                         {session.title}
-                                      </span>
-                                      <span className="nav-latest-session__agent">
+                                      </Typography.Text>
+                                      <Typography.Text
+                                        className="nav-latest-session__agent"
+                                        type="secondary"
+                                      >
                                         {session.agentRef}
-                                      </span>
+                                      </Typography.Text>
                                     </span>
-                                  </button>
+                                  </Button>
                                 )}
                                 {/* Badge cell always holds grid column 3. */}
                                 <span className="nav-latest-session__badge">
@@ -505,48 +567,51 @@ export function SidebarNav({
                                     />
                                   )}
                                 </span>
-                                <IconButton
-                                  className="nav-latest-session__menu-button"
-                                  label={`Session options for ${session.title}`}
-                                  aria-haspopup="menu"
-                                  aria-expanded={isMenuOpen}
-                                  onClick={event => {
-                                    event.stopPropagation()
-                                    setSessionMenuId(isMenuOpen ? null : sessionKey)
+                                <Dropdown
+                                  destroyOnHidden
+                                  getPopupContainer={trigger =>
+                                    trigger.parentElement ?? document.body
+                                  }
+                                  menu={{
+                                    items: [
+                                      { key: 'rename', label: 'Rename' },
+                                      { key: 'delete', label: 'Delete', danger: true },
+                                    ],
+                                    onClick: ({ key }) => {
+                                      if (key === 'rename') startSessionRename(session)
+                                      if (key === 'delete') void requestDeleteSession(session)
+                                    },
                                   }}
-                                  variant="ghost"
+                                  onOpenChange={open => setSessionMenuId(open ? sessionKey : null)}
+                                  open={isMenuOpen}
+                                  placement="bottomRight"
+                                  trigger={['click']}
                                 >
-                                  <IconMoreHorizontal />
-                                </IconButton>
-                                {isMenuOpen && (
-                                  <div className="nav-latest-session__menu" role="menu">
-                                    <MenuItem
-                                      role="menuitem"
-                                      onClick={() => startSessionRename(session)}
-                                    >
-                                      Rename
-                                    </MenuItem>
-                                    <MenuItem
-                                      role="menuitem"
-                                      color="danger"
-                                      className="danger"
-                                      onClick={() => void requestDeleteSession(session)}
-                                    >
-                                      Delete
-                                    </MenuItem>
-                                  </div>
-                                )}
+                                  <Button
+                                    htmlType="button"
+                                    type="text"
+                                    size="small"
+                                    shape="circle"
+                                    className="nav-latest-session__menu-button"
+                                    aria-label={`Session options for ${session.title}`}
+                                    aria-haspopup="menu"
+                                    aria-expanded={isMenuOpen}
+                                    title={`Session options for ${session.title}`}
+                                    icon={<MoreOutlined aria-hidden="true" />}
+                                    onClick={event => event.stopPropagation()}
+                                  />
+                                </Dropdown>
                               </div>
                             )
                           })}
                         </div>
                         {latestSessionsToggleVisible && (
                           <Button
+                            htmlType="button"
                             className="nav-latest-sessions__toggle"
                             onClick={() => handleSelect(DESKTOP_ROUTES.chat)}
-                            color="neutral"
-                            size="xs"
-                            variant="text"
+                            size="small"
+                            type="link"
                           >
                             Show all
                           </Button>
@@ -564,18 +629,21 @@ export function SidebarNav({
                       {availableSandboxUiApps.map(app => {
                         const isActive = activeSandboxUiApp?.appRef === app.appRef
                         return (
-                          <button
+                          <Button
                             key={app.appRef}
-                            type="button"
+                            htmlType="button"
+                            type="text"
+                            block
                             className={`nav-available-app${isActive ? ' active' : ''}`}
                             aria-label={`Open ${app.label}`}
+                            aria-current={isActive ? 'page' : undefined}
                             onClick={() => {
                               onOpenSandboxUiApp(app)
                               setMobileMenuOpen(false)
                             }}
                           >
                             <span className="nav-available-app__label">{app.label}</span>
-                          </button>
+                          </Button>
                         )
                       })}
                     </div>
@@ -590,33 +658,36 @@ export function SidebarNav({
               title={collapsed ? 'Files' : undefined}
               data-tooltip="Files"
             >
-              <NavItemControl
+              <Button
+                htmlType="button"
+                type="text"
+                block
                 data-testid="nav-files"
                 className="nav-link-main"
                 onClick={handleFilesNavSelect}
                 aria-label="Files"
-                leadingIcon={<IconHardDrive />}
-                trailingIcon={
-                  <span className="nav-tooltip" role="tooltip">
-                    EvenDrive
-                  </span>
-                }
+                aria-current={navItem === DESKTOP_ROUTES.files ? 'page' : undefined}
+                title={collapsed ? 'EvenDrive' : undefined}
+                icon={<HddOutlined aria-hidden="true" />}
               >
-                EvenDrive
-              </NavItemControl>
-              <IconButton
+                {collapsed ? null : 'EvenDrive'}
+              </Button>
+              <Button
+                htmlType="button"
+                type="text"
+                size="small"
+                shape="circle"
                 className="nav-link-session-toggle"
-                label={filesExplorerOpen ? 'Collapse file explorer' : 'Expand file explorer'}
+                aria-label={filesExplorerOpen ? 'Collapse file explorer' : 'Expand file explorer'}
                 aria-expanded={filesExplorerOpen}
+                title={filesExplorerOpen ? 'Collapse file explorer' : 'Expand file explorer'}
                 data-testid="nav-files-explorer-toggle"
+                icon={<RightOutlined aria-hidden="true" rotate={filesExplorerOpen ? 90 : 0} />}
                 onClick={event => {
                   event.stopPropagation()
                   setFilesExplorerOpen(open => !open)
                 }}
-                variant="ghost"
-              >
-                <IconChevronRight className={filesExplorerOpen ? 'expanded' : ''} />
-              </IconButton>
+              />
             </div>
 
             {!collapsed && filesExplorerOpen && (
@@ -634,141 +705,84 @@ export function SidebarNav({
             <div
               className="sidebar-settings-menu-wrapper"
               ref={settingsMenuRef}
-              onKeyDown={handleSettingsMenuKeyDown}
+              onKeyDownCapture={handleSettingsMenuKeyDown}
             >
-              <NavItemControl
-                ref={settingsTriggerRef}
-                data-testid="nav-settings-menu"
-                active={settingsMenuActive}
-                className={`nav-link sidebar-settings-trigger${settingsMenuOpen ? ' open' : ''}`}
-                onClick={() => {
-                  updateSettingsMenuOpen(!settingsMenuOpen)
+              <Dropdown
+                destroyOnHidden
+                getPopupContainer={() => settingsMenuRef.current ?? document.body}
+                menu={{
+                  items: settingsMenuItems,
+                  onClick: handleSettingsMenuClick,
+                  selectable: true,
+                  selectedKeys: [navItem],
                 }}
-                aria-haspopup="menu"
-                aria-expanded={settingsMenuOpen}
-                title={collapsed ? 'Settings' : undefined}
-                data-tooltip="Settings"
-                leadingIcon={<IconSettings />}
-                trailingIcon={
-                  <>
-                    <span className="sidebar-settings-chevron" aria-hidden="true">
-                      <svg viewBox="0 0 16 16">
-                        <path d="m4.5 6 3.5 3.5L11.5 6" />
-                      </svg>
-                    </span>
-                    <span className="nav-tooltip" role="tooltip">
-                      Settings
-                    </span>
-                  </>
-                }
+                onOpenChange={updateSettingsMenuOpen}
+                open={settingsMenuOpen}
+                placement={mobileMenuOpen ? 'bottomLeft' : 'topLeft'}
+                popupRender={menu => (
+                  <Flex vertical gap="small">
+                    <div className="sidebar-settings-profile" aria-label="Signed in account">
+                      <Avatar className="sidebar-settings-profile-avatar" size="small">
+                        {initials}
+                      </Avatar>
+                      <Flex vertical className="sidebar-settings-profile-copy">
+                        <Typography.Text
+                          className="sidebar-settings-profile-name"
+                          data-testid="user-display-name"
+                          strong
+                        >
+                          {displayName}
+                        </Typography.Text>
+                        <Typography.Text
+                          className="sidebar-settings-profile-email"
+                          type="secondary"
+                        >
+                          {email || 'No email'}
+                        </Typography.Text>
+                      </Flex>
+                    </div>
+                    {menu}
+                  </Flex>
+                )}
+                trigger={['click']}
               >
-                Settings
-              </NavItemControl>
-
-              {settingsMenuOpen && (
-                <div className="sidebar-settings-menu" role="menu">
-                  <div className="sidebar-settings-profile" aria-label="Signed in account">
-                    <div className="sidebar-settings-profile-avatar" aria-hidden="true">
-                      <span>{initials}</span>
-                    </div>
-                    <div className="sidebar-settings-profile-copy">
-                      <p className="sidebar-settings-profile-name" data-testid="user-display-name">
-                        {displayName}
-                      </p>
-                      <p className="sidebar-settings-profile-email">{email || 'No email'}</p>
-                    </div>
-                  </div>
-
-                  {dataRouteItems.map(item => (
-                    <MenuItem
-                      key={item.id}
-                      data-testid={item.testId}
-                      active={navItem === item.id}
-                      className="sidebar-settings-menu-item sidebar-settings-route"
-                      onClick={() => handleSelect(item.id)}
-                      role="menuitem"
-                      leadingIcon={item.icon}
-                    >
-                      {item.label}
-                    </MenuItem>
-                  ))}
-
-                  <MenuItem
-                    data-testid="nav-settings"
-                    active={navItem === DESKTOP_ROUTES.settings}
-                    className="sidebar-settings-menu-item sidebar-settings-route"
-                    onClick={() => handleSelect(DESKTOP_ROUTES.settings)}
-                    role="menuitem"
-                    leadingIcon={<IconSettings />}
-                  >
-                    Settings
-                  </MenuItem>
-
-                  <MenuItem
-                    data-testid="logout-btn"
-                    className="sidebar-settings-menu-item sidebar-settings-route logout-link"
-                    color="danger"
-                    onClick={() => {
-                      updateSettingsMenuOpen(false)
-                      setMobileMenuOpen(false)
-                      onLogout()
-                    }}
-                    disabled={busy}
-                    role="menuitem"
-                    leadingIcon={
-                      <svg
-                        className="logout-icon"
-                        width="16"
-                        height="16"
-                        viewBox="0 0 16 16"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        aria-hidden="true"
-                      >
-                        <path
-                          d="M5.5 3H10.5C11.3284 3 12 3.67157 12 4.5V11.5C12 12.3284 11.3284 13 10.5 13H5.5"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                        <path
-                          d="M8 8L12 8"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                        <path
-                          d="M6.5 6L4 8L6.5 10"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    }
-                  >
-                    Logout
-                  </MenuItem>
-                </div>
-              )}
+                <Button
+                  ref={settingsTriggerRef}
+                  htmlType="button"
+                  type="text"
+                  block
+                  data-testid="nav-settings-menu"
+                  className={`nav-link sidebar-settings-trigger${settingsMenuOpen ? ' open' : ''}${
+                    settingsMenuActive ? ' active' : ''
+                  }`}
+                  onClick={event => event.stopPropagation()}
+                  aria-current={settingsMenuActive ? 'page' : undefined}
+                  aria-haspopup="menu"
+                  aria-expanded={settingsMenuOpen}
+                  title={collapsed ? 'Settings' : undefined}
+                  data-tooltip="Settings"
+                  icon={<SettingOutlined aria-hidden="true" />}
+                >
+                  <span className="nav-link-label">Settings</span>
+                  <span className="sidebar-settings-chevron" aria-hidden="true">
+                    <RightOutlined rotate={settingsMenuOpen ? 90 : 0} />
+                  </span>
+                </Button>
+              </Dropdown>
             </div>
           </div>
         </div>
       </aside>
       {pendingDeleteSession ? (
-        <ConfirmDialog
+        <Modal
+          open
           title="Delete session?"
-          body={
-            <>
-              Delete <strong>{pendingDeleteSession.title}</strong>? Messages cannot be recovered.
-            </>
-          }
-          confirmLabel="Delete"
-          tone="danger"
+          okText="Delete"
+          cancelText="Cancel"
+          okButtonProps={{ danger: true }}
+          cancelButtonProps={{ autoFocus: true }}
           onCancel={() => setPendingDeleteSession(null)}
-          onConfirm={() => {
+          onOk={() => {
             void onDeleteChatForAgent(
               pendingDeleteSession.agentRef,
               pendingDeleteSession.chatId,
@@ -776,7 +790,12 @@ export function SidebarNav({
             )
             setPendingDeleteSession(null)
           }}
-        />
+        >
+          <Typography.Text>
+            Delete <Typography.Text strong>{pendingDeleteSession.title}</Typography.Text>? Messages
+            cannot be recovered.
+          </Typography.Text>
+        </Modal>
       ) : null}
     </>
   )

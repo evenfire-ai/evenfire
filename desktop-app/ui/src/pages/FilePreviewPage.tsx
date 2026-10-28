@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { EmptyState } from '@components/Common'
+import { Result, Typography } from 'antd'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
@@ -117,7 +117,11 @@ export function FilePreviewPage({
     <section className="page">
       <div className="da-gfs-preview-page">
         {denied || unavailable || accessRevoked ? (
-          <EmptyState title="File unavailable" body="This item is no longer available." />
+          <Result
+            status="warning"
+            title={<Typography.Title level={3}>File unavailable</Typography.Title>}
+            subTitle="This item is no longer available."
+          />
         ) : (
           <>
             {fileKind === 'image' ? (

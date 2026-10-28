@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import type { AgentWorkspaceRoute } from '../../../uiTypes'
 import { AgentTitleSelector } from '../AgentTitleSelector'
 
@@ -13,6 +14,7 @@ const OPTIONS = [
 ]
 
 function renderSelector(overrides: Partial<React.ComponentProps<typeof AgentTitleSelector>> = {}) {
+  installAntdDomEnvironment()
   const onSelectAgent = vi.fn()
   const onOpenRoute = vi.fn()
   const utils = render(
@@ -38,44 +40,25 @@ function openMenu() {
 // role="menuitem" (the dropdown is a role="menu" container). Query within the
 // menu so we only match the row items, not the trigger.
 function menu() {
-  return screen.getByRole('menu')
+  const firstMenu = screen.getAllByRole('menu')[0]
+  if (!firstMenu) throw new Error('Expected the agent menu to be rendered')
+  return firstMenu
+}
+
+function menuAt(index: number) {
+  const foundMenu = screen.getAllByRole('menu')[index]
+  if (!foundMenu) throw new Error(`Expected Ant Design menu at index ${index}`)
+  return foundMenu
 }
 
 // Returns the name menuitem (role=menuitem) whose label matches, or null.
 function findNameItem(label: string) {
-  return (
-    within(menu())
-      .getAllByRole('menuitem')
-      .find(item => (item.textContent || '').trim() === label) || null
-  )
+  return within(menu()).getByRole('button', { name: label })
 }
 
 // Returns the dots menuitem for a given agent label.
 function findDotsItem(label: string) {
-  return screen.getByRole('menuitem', { name: `Open ${label} sections` })
-}
-
-// jsdom performs no layout, so every getBoundingClientRect() is 0×0 and the two
-// rows' anchors are indistinguishable. Stub each row's dots button with a
-// distinct rect so the sub-menu's computed coordinates reveal which row it is
-// anchored to.
-function stubRect(el: Element, rect: { top: number; right: number }) {
-  el.getBoundingClientRect = () =>
-    ({
-      top: rect.top,
-      right: rect.right,
-      bottom: rect.top + 16,
-      left: rect.right - 10,
-      width: 10,
-      height: 16,
-      x: rect.right - 10,
-      y: rect.top,
-      toJSON: () => ({}),
-    }) as DOMRect
-}
-
-function submenuEl() {
-  return document.querySelector('.agent-title-selector-submenu') as HTMLElement | null
+  return screen.getByRole('button', { name: `Open ${label} sections` })
 }
 
 afterEach(() => {
@@ -108,17 +91,20 @@ describe('AgentTitleSelector', () => {
     expect(findNameItem('Alpha')?.getAttribute('aria-current')).toBeNull()
   })
 
-  it('selects an agent when its name is clicked and closes the menu', () => {
+  it('selects an agent when its name is clicked and closes the menu', async () => {
     const { onSelectAgent } = renderSelector()
     openMenu()
     const gamma = findNameItem('Gamma')
     expect(gamma).not.toBeNull()
-    fireEvent.click(gamma as HTMLElement)
+    fireEvent.click(gamma)
 
     expect(onSelectAgent).toHaveBeenCalledTimes(1)
     expect(onSelectAgent).toHaveBeenCalledWith('gamma')
-    // Menu closed after selection.
-    expect(screen.queryByRole('menu')).toBeNull()
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: 'Switch chat agent' }).getAttribute('aria-expanded')
+      ).toBe('false')
+    })
   })
 
   it('does not re-select the already-selected agent when its name is clicked', () => {
@@ -126,7 +112,7 @@ describe('AgentTitleSelector', () => {
     openMenu()
     const alpha = findNameItem('Alpha')
     expect(alpha).not.toBeNull()
-    fireEvent.click(alpha as HTMLElement)
+    fireEvent.click(alpha)
 
     expect(onSelectAgent).not.toHaveBeenCalled()
   })
@@ -161,7 +147,7 @@ describe('AgentTitleSelector', () => {
     expect(screen.queryByRole('menuitem', { name: 'Connectors' })).not.toBeNull()
 
     fireEvent.click(dots)
-    expect(screen.queryByRole('menuitem', { name: 'Connectors' })).toBeNull()
+    expect(dots.getAttribute('aria-expanded')).toBe('false')
   })
 
   it('shows the empty label when there are no options', () => {
@@ -174,84 +160,66 @@ describe('AgentTitleSelector', () => {
     const { container } = renderSelector()
     openMenu()
     const menuEl = screen.getByRole('menu')
-    expect(container.querySelector('.agent-title-selector')?.contains(menuEl)).toBe(false)
-    expect(menuEl.parentElement).toBe(document.body)
+    expect(container.contains(menuEl)).toBe(false)
+    expect(document.body.contains(menuEl)).toBe(true)
   })
 
-  it('portals the nested sections sub-menu out of the (scrollable) menu so it cannot be clipped', () => {
+  it('renders the sections menu in its own Ant Design popup', () => {
     renderSelector()
     openMenu()
     fireEvent.click(findDotsItem('Beta'))
 
-    const submenu = document.querySelector('.agent-title-selector-submenu')
-    expect(submenu).toBeTruthy()
-    // Not a descendant of the menu (which is a max-height/overflow scroll box):
-    // it hangs off document.body so the overflow can't crop it.
-    const menuEl = screen
-      .getAllByRole('menu')
-      .find(el => el.classList.contains('agent-title-selector-menu'))
-    expect(menuEl?.contains(submenu)).toBe(false)
-    expect(submenu?.parentElement).toBe(document.body)
+    const menus = screen.getAllByRole('menu')
+    expect(menus).toHaveLength(2)
+    const mainMenu = menus[0]
+    const routeMenu = menus[1]
+    if (!mainMenu || !routeMenu) throw new Error('Expected separate agent and route menus')
+    expect(mainMenu.contains(routeMenu)).toBe(false)
+    expect(document.body.contains(routeMenu)).toBe(true)
   })
 
-  it('re-anchors the sections sub-menu when jumping straight from one row to another', () => {
-    renderSelector()
+  it('opens route actions for a different agent without changing the selected agent', () => {
+    const { onOpenRoute, onSelectAgent } = renderSelector()
     openMenu()
+    fireEvent.click(findDotsItem('Gamma'))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Connectors' }))
 
-    const betaDots = findDotsItem('Beta')
-    const gammaDots = findDotsItem('Gamma')
-    // Distinct top so the sub-menu's fixed `top` reveals which row it follows.
-    stubRect(betaDots, { top: 100, right: 50 })
-    stubRect(gammaDots, { top: 300, right: 50 })
-
-    // Expand Beta → sub-menu positioned at Beta's anchor (top 100).
-    fireEvent.click(betaDots)
-    expect(submenuEl()?.style.top).toBe('100px')
-
-    // Jump straight to Gamma WITHOUT closing the menu first. The regression:
-    // with a single shared anchor ref, useFlyoutPosition never recomputes and
-    // the sub-menu stays pinned to Beta's coordinates (top 100).
-    fireEvent.click(gammaDots)
-    expect(submenuEl()?.style.top).toBe('300px')
+    expect(onOpenRoute).toHaveBeenCalledWith('gamma', 'mcp-servers')
+    expect(onSelectAgent).not.toHaveBeenCalled()
   })
 
-  it('keeps the menu open when a mousedown lands inside the portaled menu or sub-menu', () => {
+  it('keeps the menu open for internal clicks and closes after a route action', async () => {
     renderSelector()
     openMenu()
-    fireEvent.mouseDown(
-      screen.getAllByRole('menu').find(el => el.classList.contains('agent-title-selector-menu'))!
-    )
+    fireEvent.mouseDown(menu())
     expect(screen.queryByRole('menu')).not.toBeNull()
 
-    // Open the nested sub-menu (portaled) and mousedown inside it: still open.
     fireEvent.click(findDotsItem('Beta'))
-    fireEvent.mouseDown(document.querySelector('.agent-title-selector-submenu') as HTMLElement)
-    expect(document.querySelector('.agent-title-selector-submenu')).not.toBeNull()
-    // The route item still fires its click (guard kept it mounted through mousedown).
     fireEvent.click(screen.getByRole('menuitem', { name: 'Connectors' }))
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: 'Switch chat agent' }).getAttribute('aria-expanded')
+      ).toBe('false')
+    })
   })
 
-  it('moves keyboard focus into the portaled menu when it opens', () => {
+  it('moves keyboard focus into the Ant Design menu when it opens', async () => {
     renderSelector()
     openMenu()
-    // The menu is portaled to document.body; without moving focus into it, a
-    // keyboard user's Tab jumps from the trigger past the menu to the next
-    // header control. Focus must land on the first row item (Alpha's name).
-    expect(document.activeElement).toBe(findNameItem('Alpha'))
+    await waitFor(() => expect(menu().contains(document.activeElement)).toBe(true))
   })
 
-  it('moves focus into a sections sub-menu on expand and back to its row on ESC', () => {
+  it('moves focus into the sections menu and returns it to the trigger on ESC', async () => {
     renderSelector()
     openMenu()
     fireEvent.click(findDotsItem('Beta'))
-    const submenu = submenuEl()
-    const firstRoute = submenu?.querySelector<HTMLElement>('[role="menuitem"]')
-    expect(firstRoute).not.toBeNull()
-    expect(document.activeElement).toBe(firstRoute)
+    const routeMenu = menuAt(1)
+    await waitFor(() => expect(routeMenu.contains(document.activeElement)).toBe(true))
 
-    // ESC collapses the sub-menu and returns focus to the row's dots button.
-    fireEvent.keyDown(document.body, { key: 'Escape' })
-    expect(submenuEl()).toBeNull()
-    expect(document.activeElement).toBe(findDotsItem('Beta'))
+    fireEvent.keyDown(routeMenu, { key: 'Escape' })
+    await waitFor(() => {
+      expect(findDotsItem('Beta').getAttribute('aria-expanded')).toBe('false')
+      expect(document.activeElement).toBe(findDotsItem('Beta'))
+    })
   })
 })

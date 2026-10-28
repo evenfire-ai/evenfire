@@ -39,7 +39,7 @@ describe('SecureHtmlPreview', () => {
       />
     )
 
-    expect(container.querySelector('.message-html-preview-warning')?.textContent).toContain(
+    expect(screen.getByRole('alert').textContent).toContain(
       'Untrusted HTML preview. Review carefully before interacting.'
     )
   })

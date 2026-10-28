@@ -4,4 +4,5 @@ export type ChatViewWorkspaceProps = {
   children: ReactNode
   localSearch?: ReactNode
   surfaceId?: string
+  labelledBy?: string
 }

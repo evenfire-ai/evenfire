@@ -83,11 +83,7 @@ async function mountDelete(origin: 'thread' | 'sidebar', chatIds = ['chat-1', 'c
   const row = chats.findIndex(chat => chat.id === 'chat-1')
   const menuName = origin === 'thread' ? 'Session actions for' : 'Session options for'
   fireEvent.click(screen.getAllByRole('button', { name: `${menuName} ${chats[row]!.title}` })[row]!)
-  fireEvent.click(
-    origin === 'thread'
-      ? screen.getByRole('button', { name: 'Delete' })
-      : screen.getByRole('menuitem', { name: 'Delete' })
-  )
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
   await screen.findByRole('dialog', { name: 'Delete session?' })
   // The session list is the blank dedicated view. A real navigation while its
   // confirmation is open makes the captured chat active, as an app notification

@@ -9,11 +9,11 @@
 // http(s):/mailto:/# fragments; code blocks render as plain `pre` > `code`.
 // Covered by the GfsMarkdownPreview and GfsMarkdownPreviewBody suites.
 import { useEffect, useId, useRef, useState } from 'react'
+import { CopyOutlined } from '@ant-design/icons'
+import { Alert, Button, Flex, Spin, Typography } from 'antd'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Button, StatusBanner } from '@components/Common'
-import { IconCopy } from '@components/SidebarNav/icons'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
@@ -88,7 +88,6 @@ export function GfsMarkdownPreviewBody({
   gfsUri,
   onDownloadError,
   titleId,
-  headerActions,
   headingLevel = 3,
 }: GfsMarkdownPreviewBodyProps) {
   const generatedTitleId = useId()
@@ -100,7 +99,6 @@ export function GfsMarkdownPreviewBody({
   const mountedRef = useRef(true)
   const onDownloadErrorRef = useRef(onDownloadError)
   const isPlainText = isPlainTextName(fileName)
-  const HeadingTag = `h${headingLevel}` as const
 
   useEffect(() => {
     onDownloadErrorRef.current = onDownloadError
@@ -179,36 +177,30 @@ export function GfsMarkdownPreviewBody({
 
   return (
     <>
-      <header className="da-gfs-markdown-preview-dialog__header">
-        <HeadingTag className="da-gfs-preview-title" id={headingId}>
+      <Flex align="center" justify="space-between" wrap>
+        <Typography.Title id={headingId} level={headingLevel}>
           {fileName}
-        </HeadingTag>
-        <div className="da-gfs-markdown-preview-dialog__header-actions">
-          <Button
-            className="da-gfs-markdown-preview-dialog__copy"
-            aria-label={
-              copyState === 'copied'
-                ? 'Copied preview contents to clipboard'
-                : 'Copy preview contents to clipboard'
-            }
-            color="neutral"
-            disabled={source === null}
-            onClick={() => void copySourceToClipboard()}
-            variant="ghost"
-          >
-            <IconCopy width={18} height={18} />
-            <span className="da-gfs-preview-button__label">
-              {copyState === 'copied' ? 'Copied' : 'Copy'}
-            </span>
-          </Button>
-          {headerActions}
-        </div>
-      </header>
+        </Typography.Title>
+        <Button
+          aria-label={
+            copyState === 'copied'
+              ? 'Copied preview contents to clipboard'
+              : 'Copy preview contents to clipboard'
+          }
+          disabled={source === null}
+          icon={<CopyOutlined aria-hidden="true" />}
+          onClick={() => void copySourceToClipboard()}
+          size="small"
+          type="text"
+        >
+          {copyState === 'copied' ? 'Copied' : 'Copy'}
+        </Button>
+      </Flex>
       <div className="da-gfs-markdown-preview-dialog__body">
-        {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
+        {previewError ? <Alert showIcon title={previewError} type="error" /> : null}
         {!previewError && source === null ? (
-          <div className="da-gfs-markdown-preview-dialog__loading" role="status">
-            Loading preview…
+          <div role="status">
+            <Spin description="Loading preview…" />
           </div>
         ) : null}
         {source !== null && !previewError ? (

@@ -1,10 +1,25 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { BellOutlined, DeleteOutlined, MessageOutlined, SearchOutlined } from '@ant-design/icons'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
+import {
+  Badge,
+  Button,
+  Card,
+  Drawer,
+  Empty,
+  Flex,
+  Input,
+  type InputRef,
+  Listy,
+  Popover,
+  Space,
+  Spin,
+  Tag,
+  Typography,
+} from 'antd'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Button, IconButton, Pill, SelectableOption, TextInput } from '@components/Common'
-import { IconChat } from '@components/SidebarNav/icons'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -62,13 +77,6 @@ function resolveNotificationActionText(
     .replace(/^approval required for /i, '')
     .trim()
   return sanitized || raw
-}
-
-function notificationPillClass(kind: AppNotificationKind): string {
-  if (kind === 'approval_required') return 'approval'
-  if (kind === 'workflow_completed') return 'workflow'
-  if (kind === 'sdk_notification') return 'workflow'
-  return 'reply'
 }
 
 function notificationPillTone(kind: AppNotificationKind): 'warning' | 'accent' | 'success' {
@@ -137,8 +145,8 @@ export const HeaderActions = React.memo(function HeaderActions({
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [notificationTraySettled, setNotificationTraySettled] = useState(false)
-  const searchRef = useRef<HTMLDivElement | null>(null)
-  const searchInputRef = useRef<HTMLInputElement | null>(null)
+  const searchRef = useRef<HTMLElement | null>(null)
+  const searchInputRef = useRef<InputRef | null>(null)
   const notificationsRef = useRef<HTMLDivElement | null>(null)
   const searchDirectoryInFlightRef = useRef(false)
   const searchDirectoryRefreshQueryRef = useRef('')
@@ -472,177 +480,504 @@ export const HeaderActions = React.memo(function HeaderActions({
     void ensurePluginsAppsLoaded()
   }, [ensurePluginsAppsLoaded, hasSearch, searchOpen])
 
-  const Container = titlebarPlacement ? 'div' : 'header'
+  const searchResultsContent = (
+    <Card
+      id="global-search-results"
+      aria-label="Search results"
+      role="region"
+      size="small"
+      styles={{ body: { maxHeight: 'min(68vh, 560px)', overflowY: 'auto' } }}
+    >
+      <Flex vertical gap="small">
+        {hasSearch ? (
+          <Flex align="center" justify="space-between">
+            <Typography.Text strong>Search Results</Typography.Text>
+            <Typography.Text type="secondary">
+              {totalMatches} match{totalMatches === 1 ? '' : 'es'}
+            </Typography.Text>
+          </Flex>
+        ) : (
+          <Typography.Text type="secondary">{SEARCH_RESULTS_PROMPT}</Typography.Text>
+        )}
+
+        {teamDirectoryLoading && !teamDirectoryHydrated && (
+          <Flex align="center" gap="small" role="status">
+            <Spin size="small" />
+            <Typography.Text type="secondary">
+              Loading agents from your other teams...
+            </Typography.Text>
+          </Flex>
+        )}
+
+        {pluginsAppsLoading && !searchPlugins.length && !searchApps.length && (
+          <Flex align="center" gap="small" role="status">
+            <Spin size="small" />
+            <Typography.Text type="secondary">Loading plugins and apps...</Typography.Text>
+          </Flex>
+        )}
+
+        {filteredAgents.length > 0 && (
+          <section aria-label="Agents">
+            <Typography.Text strong type="secondary">
+              Agents
+            </Typography.Text>
+            <Listy
+              items={filteredAgents}
+              itemRender={agent => (
+                <Button
+                  block
+                  htmlType="button"
+                  onClick={() => navigateToSection('agents')}
+                  type="text"
+                >
+                  <Flex align="center" flex="1" justify="space-between">
+                    <Flex vertical align="start">
+                      <Typography.Text strong>{agent.display}</Typography.Text>
+                      <Typography.Text type="secondary">
+                        {agent.teamNames.length
+                          ? `Teams: ${agent.teamNames.join(', ')}`
+                          : 'No team mapping'}
+                      </Typography.Text>
+                    </Flex>
+                  </Flex>
+                </Button>
+              )}
+              rowKey="key"
+            />
+          </section>
+        )}
+
+        {filteredConnectors.length > 0 && (
+          <section aria-label="Connectors">
+            <Typography.Text strong type="secondary">
+              Connectors
+            </Typography.Text>
+            <Listy
+              items={filteredConnectors}
+              itemRender={connector => (
+                <Button
+                  block
+                  htmlType="button"
+                  onClick={() => navigateToSection('connectors')}
+                  type="text"
+                >
+                  <Flex vertical align="start">
+                    <Typography.Text strong>{connector.value}</Typography.Text>
+                    <Typography.Text type="secondary">
+                      {connector.teamNames.length
+                        ? `Agents: ${connector.teamNames.join(', ')}`
+                        : 'Available connector'}
+                    </Typography.Text>
+                  </Flex>
+                </Button>
+              )}
+              rowKey="key"
+            />
+          </section>
+        )}
+
+        {filteredPlugins.length > 0 && (
+          <section aria-label="Plugins">
+            <Typography.Text strong type="secondary">
+              Plugins
+            </Typography.Text>
+            <Listy
+              items={filteredPlugins}
+              itemRender={plugin => (
+                <Button
+                  block
+                  htmlType="button"
+                  onClick={() => navigateToSection('plugins')}
+                  type="text"
+                >
+                  <Flex align="center" flex="1" justify="space-between">
+                    <Flex vertical align="start">
+                      <Typography.Text strong>{plugin.name}</Typography.Text>
+                      <Typography.Text type="secondary">
+                        {plugin.namespace} · {plugin.status ?? 'Status unknown'}
+                      </Typography.Text>
+                    </Flex>
+                    <Tag>Plugin</Tag>
+                  </Flex>
+                </Button>
+              )}
+              rowKey="key"
+            />
+          </section>
+        )}
+
+        {filteredApps.length > 0 && (
+          <section aria-label="Apps">
+            <Typography.Text strong type="secondary">
+              Apps
+            </Typography.Text>
+            <Listy
+              items={filteredApps}
+              itemRender={app => (
+                <Button
+                  block
+                  htmlType="button"
+                  onClick={() => navigateToSection('apps')}
+                  type="text"
+                >
+                  <Flex align="center" flex="1" justify="space-between">
+                    <Flex vertical align="start">
+                      <Typography.Text strong>{app.label}</Typography.Text>
+                      <Typography.Text type="secondary">
+                        {app.description ? `${app.description} · ` : ''}
+                        {app.ready ? 'Ready' : 'Starting up'}
+                      </Typography.Text>
+                    </Flex>
+                    <Tag>App</Tag>
+                  </Flex>
+                </Button>
+              )}
+              rowKey="key"
+            />
+          </section>
+        )}
+
+        {hasSearch && !totalMatches && !teamDirectoryLoading && !pluginsAppsLoading && (
+          <Empty
+            description={`No matches for "${searchQuery.trim()}". Try an agent, connector, plugin, or app.`}
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
+        )}
+      </Flex>
+    </Card>
+  )
+
+  const notificationBell = (
+    <Badge
+      count={totalAttentionCount}
+      data-testid={totalAttentionCount > 0 ? 'notification-bell-badge' : undefined}
+      overflowCount={9}
+      title={null}
+    >
+      <Button
+        htmlType="button"
+        shape="circle"
+        size="small"
+        type="text"
+        data-testid="notification-bell"
+        aria-label="Notifications and approvals"
+        aria-haspopup="dialog"
+        aria-expanded={notificationsOpen}
+        title={notificationButtonLabel}
+        onClick={() => {
+          setNotificationsOpen(open => !open)
+          setSearchOpen(false)
+        }}
+      >
+        <BellOutlined aria-hidden="true" />
+      </Button>
+    </Badge>
+  )
+
+  const notificationTrayContent = (
+    <Card
+      aria-hidden={!notificationTrayVisible}
+      aria-label={notificationTrayVisible ? 'Notifications and approvals' : undefined}
+      role={notificationTrayVisible ? 'dialog' : undefined}
+      size="small"
+    >
+      <Flex vertical gap="middle">
+        {pendingApprovalsCount > 0 && (
+          <section aria-label="Pending approvals">
+            <Flex vertical gap="small">
+              <Typography.Text strong>Pending approvals</Typography.Text>
+              <Typography.Text type="secondary">
+                Approve or deny workflow requests that are waiting on you.
+              </Typography.Text>
+              <Listy
+                items={pendingApprovals}
+                itemRender={approval => {
+                  const actionInFlight = pendingApprovalActionId === approval.id
+                  const msUntilExpiry = new Date(approval.expiresAt).getTime() - Date.now()
+                  const isExpired = msUntilExpiry <= 0
+                  const isExpiringSoon = !isExpired && msUntilExpiry < 60_000
+
+                  return (
+                    <Card data-testid="workflow-approval-card" size="small">
+                      <Flex align="start" justify="space-between" wrap>
+                        <Flex vertical>
+                          <Typography.Text strong>{approval.recipeName}</Typography.Text>
+                          <Typography.Text type="secondary">
+                            {approval.recipeNamespace}
+                          </Typography.Text>
+                        </Flex>
+                        <Typography.Text type="secondary">
+                          Requested {formatApprovalTimestamp(approval.requestedAt, 'relative')}
+                        </Typography.Text>
+                      </Flex>
+
+                      <Typography.Paragraph>{approval.payload.message}</Typography.Paragraph>
+
+                      <Flex gap="small" wrap>
+                        {approval.correlation?.stepId && (
+                          <Tag>Step: {approval.correlation.stepId}</Tag>
+                        )}
+                        {approval.target.teamName && <Tag>Team: {approval.target.teamName}</Tag>}
+                        <Tag color={isExpired ? 'error' : isExpiringSoon ? 'warning' : undefined}>
+                          {isExpired
+                            ? 'Expired'
+                            : `Expires ${formatApprovalTimestamp(approval.expiresAt, 'absolute')}`}
+                        </Tag>
+                      </Flex>
+
+                      <Flex align="center" gap="small" wrap>
+                        {isExpired ? (
+                          <Typography.Text type="danger">This approval has expired</Typography.Text>
+                        ) : (
+                          <>
+                            <Button
+                              data-testid="workflow-approval-approve"
+                              disabled={actionInFlight}
+                              htmlType="button"
+                              onClick={() => void onDecidePendingApproval(approval.id, 'approve')}
+                              size="small"
+                              type="primary"
+                            >
+                              {actionInFlight ? 'Working...' : 'Approve'}
+                            </Button>
+                            <Button
+                              data-testid="workflow-approval-deny"
+                              danger
+                              disabled={actionInFlight}
+                              htmlType="button"
+                              onClick={() => void onDecidePendingApproval(approval.id, 'deny')}
+                              size="small"
+                            >
+                              Deny
+                            </Button>
+                          </>
+                        )}
+                      </Flex>
+                    </Card>
+                  )
+                }}
+                rowKey="id"
+              />
+            </Flex>
+          </section>
+        )}
+
+        {notifications.length > 0 && (
+          <section aria-label="Inbox">
+            <Flex align="start" justify="space-between" wrap>
+              <Flex vertical>
+                <Flex align="center" gap="small">
+                  <Typography.Text strong>Inbox ({inboxNotificationCount})</Typography.Text>
+                  {pendingApprovalsLoading && (
+                    <span aria-label="Refreshing inbox" role="status">
+                      <Spin size="small" />
+                    </span>
+                  )}
+                </Flex>
+                <Typography.Text type="secondary">
+                  Updates from agents, workflows, and plugins.
+                </Typography.Text>
+              </Flex>
+              <Button htmlType="button" onClick={onClearNotifications} size="small">
+                Clear
+              </Button>
+            </Flex>
+            <Listy
+              items={notifications}
+              itemRender={notification => {
+                const clickable = notification.kind !== 'approval_required'
+                const pillTone = notificationPillTone(notification.kind)
+
+                return (
+                  <Card
+                    data-testid="notification-menu-item"
+                    onClick={event => handleNotificationCardClick(event, notification)}
+                    onKeyDown={event => handleNotificationCardKeyDown(event, notification)}
+                    role={clickable ? 'button' : undefined}
+                    size="small"
+                    tabIndex={clickable ? 0 : undefined}
+                  >
+                    <Flex align="start" justify="space-between" wrap>
+                      {agentsCatalogLoading ? (
+                        <span aria-label="Loading agent name" role="status">
+                          <Spin size="small" />
+                        </span>
+                      ) : (
+                        <Typography.Text strong data-testid="notification-agent">
+                          {notificationAgentDisplay(notification.agentName)}
+                        </Typography.Text>
+                      )}
+                      <Typography.Text type="secondary">
+                        {formatNotificationTime(notification.timestamp)}
+                      </Typography.Text>
+                    </Flex>
+                    {notification.kind === 'approval_required' ? (
+                      <Typography.Paragraph>
+                        {resolveNotificationActionText(notification)}
+                      </Typography.Paragraph>
+                    ) : (
+                      <div>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {notificationPreviewText(notification.kind, notification.text)}
+                        </ReactMarkdown>
+                      </div>
+                    )}
+                    <Flex align="center" justify="space-between" wrap>
+                      <Tag
+                        color={pillTone === 'accent' ? 'blue' : pillTone}
+                        data-testid="notification-kind"
+                      >
+                        {notificationPillLabel(notification.kind)}
+                      </Tag>
+                      <Space wrap>
+                        <Button
+                          aria-label="Delete notification"
+                          danger
+                          htmlType="button"
+                          onClick={() => onRemoveNotification(notification.id)}
+                          shape="circle"
+                          size="small"
+                          title="Delete notification"
+                          type="text"
+                        >
+                          <DeleteOutlined aria-hidden="true" />
+                        </Button>
+                        {clickable && (
+                          <Button
+                            htmlType="button"
+                            onClick={() => openNotification(notification)}
+                            size="small"
+                          >
+                            Open
+                          </Button>
+                        )}
+                        {notification.kind === 'approval_required' &&
+                          !notification.approvalState && (
+                            <>
+                              <Button
+                                disabled={
+                                  Boolean(notificationActionById[notification.id]) ||
+                                  !notification.approval
+                                }
+                                htmlType="button"
+                                onClick={() => {
+                                  if (!notification.approval) return
+                                  void onApproveNotification(notification)
+                                }}
+                                size="small"
+                                type="primary"
+                              >
+                                {notificationActionById[notification.id] === 'approving'
+                                  ? 'Approving...'
+                                  : 'Approve'}
+                              </Button>
+                              <Button
+                                danger
+                                disabled={
+                                  Boolean(notificationActionById[notification.id]) ||
+                                  !notification.approval
+                                }
+                                htmlType="button"
+                                onClick={() => {
+                                  if (!notification.approval) return
+                                  void onDenyNotification(notification)
+                                }}
+                                size="small"
+                              >
+                                {notificationActionById[notification.id] === 'denying'
+                                  ? 'Denying...'
+                                  : 'Deny'}
+                              </Button>
+                            </>
+                          )}
+                        {notification.kind === 'approval_required' &&
+                          notification.approvalState && (
+                            <Typography.Text
+                              type={
+                                notification.approvalState === 'approved' ? 'success' : 'danger'
+                              }
+                            >
+                              {notification.approvalState === 'approved' ? 'Approved' : 'Denied'}
+                            </Typography.Text>
+                          )}
+                      </Space>
+                    </Flex>
+                  </Card>
+                )
+              }}
+              rowKey="id"
+            />
+          </section>
+        )}
+
+        {showNotificationTrayEmpty && (
+          <Empty
+            description="No notifications or pending approvals right now."
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
+        )}
+      </Flex>
+    </Card>
+  )
 
   return (
-    <Container className={`top-bar${titlebarPlacement ? ' top-bar--titlebar' : ''}`}>
-      <div className="header-left">
-        <div
+    <Flex
+      align="center"
+      className="top-bar"
+      component={titlebarPlacement ? 'div' : 'header'}
+      gap="small"
+      justify="flex-end"
+      wrap={false}
+    >
+      <Flex
+        align="center"
+        className="header-left"
+        data-testid="header-left"
+        flex={titlebarPlacement ? '1 1 auto' : '0 0 auto'}
+        justify={titlebarPlacement ? 'flex-end' : undefined}
+      >
+        <Flex
+          align="center"
           className={`global-search${titlebarPlacement ? ' global-search--titlebar' : ''}${
             searchOpen ? ' is-open' : ''
           }`}
+          data-titlebar-pointer-owner={titlebarPlacement ? 'true' : undefined}
+          flex={titlebarPlacement ? '0 1 auto' : '0 0 auto'}
           ref={searchRef}
         >
-          {titlebarPlacement ? (
-            <span aria-hidden="true" className="global-search__titlebar-icon">
-              ⌕
-            </span>
-          ) : null}
-          <TextInput
-            ref={searchInputRef}
-            type="text"
-            placeholder={titlebarPlacement ? '' : SEARCH_PLACEHOLDER}
-            className={`search-input${titlebarPlacement ? ' search-input--titlebar' : ''}`}
-            aria-label="Search"
-            title={SEARCH_PLACEHOLDER}
-            value={searchQuery}
-            onChange={event => {
-              setSearchQuery(event.target.value)
-              setSearchOpen(true)
-            }}
-            onFocus={() => setSearchOpen(true)}
-            onKeyDown={event => {
-              if (event.key === 'Escape') {
-                setSearchOpen(false)
-              }
-            }}
-          />
-          {titlebarPlacement && !searchQuery ? (
-            <span aria-hidden="true" className="search-input__titlebar-placeholder">
-              {SEARCH_PLACEHOLDER}
-            </span>
-          ) : null}
-          {searchOpen && (
-            <div className="global-search-results">
-              <div className="search-results-card">
-                {hasSearch ? (
-                  <div className="search-results-header-row">
-                    <strong>Search Results</strong>
-                    <span className="search-results-meta">
-                      {totalMatches} match{totalMatches === 1 ? '' : 'es'}
-                    </span>
-                  </div>
-                ) : (
-                  <p className="search-results-prompt">{SEARCH_RESULTS_PROMPT}</p>
-                )}
-
-                {teamDirectoryLoading && !teamDirectoryHydrated && (
-                  <p className="search-results-loading">Loading agents from your other teams...</p>
-                )}
-
-                {pluginsAppsLoading && !searchPlugins.length && !searchApps.length && (
-                  <p className="search-results-loading">Loading plugins and apps...</p>
-                )}
-
-                {Boolean(filteredAgents.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Agents</header>
-                    <div className="search-results-list">
-                      {filteredAgents.map(agent => (
-                        <SelectableOption
-                          key={agent.key}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToSection('agents')}
-                          size="sm"
-                        >
-                          <div className="search-result-main">
-                            <strong>{agent.display}</strong>
-                            <span className="search-result-subline">
-                              {agent.teamNames.length
-                                ? `Teams: ${agent.teamNames.join(', ')}`
-                                : 'No team mapping'}
-                            </span>
-                          </div>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {Boolean(filteredConnectors.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Connectors</header>
-                    <div className="search-results-list">
-                      {filteredConnectors.map(connector => (
-                        <SelectableOption
-                          key={connector.key}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToSection('connectors')}
-                          size="sm"
-                        >
-                          <div className="search-result-main">
-                            <strong>{connector.value}</strong>
-                            <span className="search-result-subline">
-                              {connector.teamNames.length
-                                ? `Agents: ${connector.teamNames.join(', ')}`
-                                : 'Available connector'}
-                            </span>
-                          </div>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {Boolean(filteredPlugins.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Plugins</header>
-                    <div className="search-results-list">
-                      {filteredPlugins.map(plugin => (
-                        <SelectableOption
-                          key={plugin.key}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToSection('plugins')}
-                          size="sm"
-                        >
-                          <div className="search-result-main">
-                            <strong>{plugin.name}</strong>
-                            <span className="search-result-subline">
-                              {plugin.namespace} · {plugin.status ?? 'Status unknown'}
-                            </span>
-                          </div>
-                          <span className="search-result-tag">Plugin</span>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {Boolean(filteredApps.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Apps</header>
-                    <div className="search-results-list">
-                      {filteredApps.map(app => (
-                        <SelectableOption
-                          key={app.key}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToSection('apps')}
-                          size="sm"
-                        >
-                          <div className="search-result-main">
-                            <strong>{app.label}</strong>
-                            <span className="search-result-subline">
-                              {app.description ? `${app.description} · ` : ''}
-                              {app.ready ? 'Ready' : 'Starting up'}
-                            </span>
-                          </div>
-                          <span className="search-result-tag">App</span>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {hasSearch && !totalMatches && !teamDirectoryLoading && !pluginsAppsLoading && (
-                  <p className="search-results-empty">
-                    No matches for "{searchQuery.trim()}". Try an agent, connector, plugin, or app.
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+          <Popover
+            content={searchResultsContent}
+            getPopupContainer={() => searchRef.current ?? document.body}
+            onOpenChange={setSearchOpen}
+            open={searchOpen}
+            placement="bottomRight"
+            trigger={[]}
+          >
+            <Input
+              ref={searchInputRef}
+              type="text"
+              size="small"
+              placeholder={SEARCH_PLACEHOLDER}
+              prefix={titlebarPlacement ? <SearchOutlined aria-hidden="true" /> : undefined}
+              aria-label="Search"
+              aria-controls="global-search-results"
+              aria-expanded={searchOpen}
+              title={SEARCH_PLACEHOLDER}
+              value={searchQuery}
+              onChange={event => {
+                setSearchQuery(event.target.value)
+                setSearchOpen(true)
+              }}
+              onFocus={() => setSearchOpen(true)}
+              onKeyDown={event => {
+                if (event.key === 'Escape') {
+                  setSearchOpen(false)
+                }
+              }}
+            />
+          </Popover>
+        </Flex>
+      </Flex>
 
       {/* Chat-drawer toggle (mini-spec 04a §C/R3): between the search and the
           bell. Ghost style like the bell (`--titlebar` variant). On chat tabs
@@ -651,373 +986,87 @@ export const HeaderActions = React.memo(function HeaderActions({
           the toggle doesn't reflow the search pill and bell sideways. */}
       {onToggleChatDrawer ? (
         drawerAvailable ? (
-          <IconButton
-            className="chat-drawer-toggle"
+          <Button
+            htmlType="button"
+            shape="circle"
+            size="small"
+            type="text"
             data-testid="chat-drawer-toggle"
-            color="neutral"
-            variant="ghost"
             aria-label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
             aria-pressed={chatDrawerOpen}
-            label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
             title={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
             onClick={onToggleChatDrawer}
           >
-            <IconChat />
-          </IconButton>
+            <MessageOutlined aria-hidden="true" />
+          </Button>
         ) : (
-          <span
-            className="chat-drawer-toggle chat-drawer-toggle--placeholder"
-            data-testid="chat-drawer-toggle-placeholder"
+          <Button
             aria-hidden="true"
+            className="chat-drawer-toggle--placeholder"
+            disabled
+            htmlType="button"
+            shape="circle"
+            size="small"
+            tabIndex={-1}
+            type="text"
+            data-testid="chat-drawer-toggle-placeholder"
           />
         )
       ) : null}
 
-      <div className="header-utilities">
-        <div className="notification-bell-wrapper" ref={notificationsRef}>
-          <IconButton
-            className={`notification-bell${titlebarPlacement ? ' notification-bell--titlebar' : ''}${
-              totalAttentionCount > 0 ? ' has-attention' : ''
-            }`}
-            data-testid="notification-bell"
-            aria-label="Notifications and approvals"
-            aria-haspopup="dialog"
-            aria-expanded={notificationsOpen}
-            label="Notifications and approvals"
-            title={notificationButtonLabel}
-            onClick={() => {
-              setNotificationsOpen(open => !open)
-              setSearchOpen(false)
-            }}
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={titlebarPlacement ? '2.25' : '2'}
+      <Flex align="center" data-testid="header-utilities" flex="0 0 auto">
+        <div
+          className="notification-bell-wrapper"
+          data-titlebar-pointer-owner={titlebarPlacement ? 'true' : undefined}
+          ref={notificationsRef}
+        >
+          {notificationTrayUsesDrawer ? (
+            <>
+              {notificationBell}
+              {notificationTrayVisible && (
+                <Drawer
+                  autoFocus={false}
+                  closable={false}
+                  getContainer={false}
+                  keyboard={false}
+                  mask={false}
+                  onClose={() => setNotificationsOpen(false)}
+                  open
+                  placement="right"
+                  rootStyle={{ position: 'fixed' }}
+                  styles={{
+                    wrapper: {
+                      top: 'calc(var(--window-titlebar-height) + var(--space-2))',
+                      right: 'var(--space-4)',
+                      bottom: 'var(--space-4)',
+                      left: notificationTrayLeft === null ? undefined : notificationTrayLeft,
+                      width:
+                        notificationTrayLeft === null
+                          ? 'var(--app-notification-drawer-width)'
+                          : 'auto',
+                    },
+                  }}
+                >
+                  {notificationTrayContent}
+                </Drawer>
+              )}
+            </>
+          ) : (
+            <Popover
+              content={notificationTrayContent}
+              destroyOnHidden
+              fresh
+              getPopupContainer={() => notificationsRef.current ?? document.body}
+              onOpenChange={setNotificationsOpen}
+              open={notificationTrayVisible}
+              placement="bottomRight"
+              trigger={[]}
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
-              />
-            </svg>
-            {totalAttentionCount > 0 && (
-              <span
-                className="notification-bell-badge"
-                data-testid="notification-bell-badge"
-                aria-hidden="true"
-              >
-                {totalAttentionCount > 9 ? '9+' : totalAttentionCount}
-              </span>
-            )}
-          </IconButton>
-          {notificationTrayVisible && (
-            <div
-              className={`notification-menu${
-                notificationTrayUsesDrawer ? ' notification-menu--app-drawer' : ''
-              }${
-                notificationTrayUsesDrawer && notificationTrayLeft !== null
-                  ? ' notification-menu--embed-aligned'
-                  : ''
-              }`}
-              style={
-                notificationTrayUsesDrawer && notificationTrayLeft !== null
-                  ? ({
-                      '--notification-drawer-left': `${notificationTrayLeft}px`,
-                    } as React.CSSProperties)
-                  : undefined
-              }
-              role="dialog"
-              aria-label="Notifications and approvals"
-            >
-              <div className="notification-menu-body">
-                {pendingApprovalsCount > 0 && (
-                  <section className="notification-menu-section">
-                    <div className="notification-menu-section-header">
-                      <div className="notification-menu-section-heading">
-                        <strong>Pending approvals</strong>
-                        <span className="notification-menu-section-meta">
-                          Approve or deny workflow requests that are waiting on you.
-                        </span>
-                      </div>
-                    </div>
-                    <div className="notification-approval-list">
-                      {pendingApprovals.map(approval => {
-                        const actionInFlight = pendingApprovalActionId === approval.id
-                        const msUntilExpiry = new Date(approval.expiresAt).getTime() - Date.now()
-                        const isExpired = msUntilExpiry <= 0
-                        const isExpiringSoon = !isExpired && msUntilExpiry < 60_000
-
-                        return (
-                          <article
-                            key={approval.id}
-                            data-testid="workflow-approval-card"
-                            className={`notification-item${isExpiringSoon ? ' expiring-soon' : ''}${
-                              isExpired ? ' expired' : ''
-                            }`}
-                          >
-                            <div className="notification-item-head">
-                              <div className="notification-item-title-block">
-                                <strong className="notification-item-recipe">
-                                  {approval.recipeName}
-                                </strong>
-                                <span className="notification-item-namespace">
-                                  {approval.recipeNamespace}
-                                </span>
-                              </div>
-                              <span className="notification-item-time">
-                                Requested{' '}
-                                {formatApprovalTimestamp(approval.requestedAt, 'relative')}
-                              </span>
-                            </div>
-
-                            <p className="notification-item-message">{approval.payload.message}</p>
-
-                            <div className="notification-item-meta">
-                              {approval.correlation?.stepId && (
-                                <Pill className="notification-item-chip" tone="neutral">
-                                  Step: {approval.correlation.stepId}
-                                </Pill>
-                              )}
-                              {approval.target.teamName && (
-                                <Pill className="notification-item-chip" tone="neutral">
-                                  Team: {approval.target.teamName}
-                                </Pill>
-                              )}
-                              <Pill
-                                className="notification-item-chip"
-                                tone={isExpired ? 'danger' : isExpiringSoon ? 'warning' : 'neutral'}
-                              >
-                                {isExpired
-                                  ? 'Expired'
-                                  : `Expires ${formatApprovalTimestamp(approval.expiresAt, 'absolute')}`}
-                              </Pill>
-                            </div>
-
-                            <div className="notification-item-actions">
-                              {isExpired ? (
-                                <span className="notification-item-expired-label">
-                                  This approval has expired
-                                </span>
-                              ) : (
-                                <>
-                                  <Button
-                                    className="approval-action-btn approve"
-                                    color="success"
-                                    data-testid="workflow-approval-approve"
-                                    onClick={() =>
-                                      void onDecidePendingApproval(approval.id, 'approve')
-                                    }
-                                    disabled={actionInFlight}
-                                    size="sm"
-                                    variant="soft"
-                                  >
-                                    {actionInFlight ? 'Working...' : 'Approve'}
-                                  </Button>
-                                  <Button
-                                    className="approval-action-btn deny"
-                                    color="danger"
-                                    data-testid="workflow-approval-deny"
-                                    onClick={() =>
-                                      void onDecidePendingApproval(approval.id, 'deny')
-                                    }
-                                    disabled={actionInFlight}
-                                    size="sm"
-                                    variant="soft"
-                                  >
-                                    Deny
-                                  </Button>
-                                </>
-                              )}
-                            </div>
-                          </article>
-                        )
-                      })}
-                    </div>
-                  </section>
-                )}
-
-                {notifications.length > 0 && (
-                  <section className="notification-menu-section">
-                    <div className="notification-menu-section-header">
-                      <div className="notification-menu-section-heading">
-                        <div className="notification-menu-title-row">
-                          <strong>Inbox ({inboxNotificationCount})</strong>
-                          {pendingApprovalsLoading && (
-                            <span
-                              className="notification-inline-spinner"
-                              aria-label="Refreshing inbox"
-                            />
-                          )}
-                        </div>
-                        <span className="notification-menu-section-meta">
-                          Updates from agents, workflows, and plugins.
-                        </span>
-                      </div>
-                      <div className="notification-menu-header-actions">
-                        <Button
-                          className="notification-clear-btn"
-                          color="neutral"
-                          onClick={onClearNotifications}
-                          size="sm"
-                          variant="soft"
-                        >
-                          Clear
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="notification-menu-list">
-                      {notifications.map(notification => (
-                        <div
-                          key={notification.id}
-                          data-testid="notification-menu-item"
-                          className={`notification-menu-item${
-                            notification.kind === 'approval_required' ? '' : ' is-clickable'
-                          }${notification.read ? '' : ' unread'}`}
-                          onClick={event => handleNotificationCardClick(event, notification)}
-                          onKeyDown={event => handleNotificationCardKeyDown(event, notification)}
-                          role={notification.kind === 'approval_required' ? undefined : 'button'}
-                          tabIndex={notification.kind === 'approval_required' ? undefined : 0}
-                        >
-                          <div className="notification-menu-item-header">
-                            <p className="notification-menu-agent">
-                              {/* While the access catalog is still loading the
-                               * display-name map is unknown — skeleton the line
-                               * instead of flashing the raw slug (QA parity with
-                               * the control-ui header fix). */}
-                              {agentsCatalogLoading ? (
-                                <span
-                                  className="notification-menu-agent-skeleton"
-                                  aria-label="Loading agent name"
-                                />
-                              ) : (
-                                notificationAgentDisplay(notification.agentName)
-                              )}
-                            </p>
-                            <span className="notification-menu-time">
-                              {formatNotificationTime(notification.timestamp)}
-                            </span>
-                          </div>
-                          {notification.kind === 'approval_required' ? (
-                            <p className="notification-menu-text">
-                              {resolveNotificationActionText(notification)}
-                            </p>
-                          ) : (
-                            <div className="notification-menu-text notification-menu-text--markdown">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {notificationPreviewText(notification.kind, notification.text)}
-                              </ReactMarkdown>
-                            </div>
-                          )}
-                          <div className="notification-menu-footer">
-                            <Pill
-                              className={`notification-pill notification-pill-footer ${notificationPillClass(
-                                notification.kind
-                              )}`}
-                              tone={notificationPillTone(notification.kind)}
-                            >
-                              {notificationPillLabel(notification.kind)}
-                            </Pill>
-                            <div className="notification-menu-actions">
-                              <IconButton
-                                className="notification-delete-btn"
-                                color="danger"
-                                label="Delete notification"
-                                onClick={() => onRemoveNotification(notification.id)}
-                                size="sm"
-                                title="Delete notification"
-                                variant="ghost"
-                              >
-                                <svg viewBox="0 0 16 16" aria-hidden="true">
-                                  <path d="M3.5 4.5h9" />
-                                  <path d="M6 4.5V3.6c0-.6.5-1.1 1.1-1.1h1.8c.6 0 1.1.5 1.1 1.1v.9" />
-                                  <path d="M5 4.5v8.1c0 .7.6 1.4 1.4 1.4h3.2c.8 0 1.4-.7 1.4-1.4V4.5" />
-                                  <path d="M7 7v4.5" />
-                                  <path d="M9 7v4.5" />
-                                </svg>
-                              </IconButton>
-                              {notification.kind !== 'approval_required' && (
-                                <Button
-                                  className="notification-open-btn"
-                                  color="primary"
-                                  onClick={() => openNotification(notification)}
-                                  size="xs"
-                                  variant="soft"
-                                >
-                                  Open
-                                </Button>
-                              )}
-                              {notification.kind === 'approval_required' &&
-                                !notification.approvalState && (
-                                  <>
-                                    <Button
-                                      className="notification-action-btn approve"
-                                      color="success"
-                                      disabled={
-                                        Boolean(notificationActionById[notification.id]) ||
-                                        !notification.approval
-                                      }
-                                      onClick={() => {
-                                        if (!notification.approval) return
-                                        void onApproveNotification(notification)
-                                      }}
-                                      size="xs"
-                                      variant="soft"
-                                    >
-                                      {notificationActionById[notification.id] === 'approving'
-                                        ? 'Approving...'
-                                        : 'Approve'}
-                                    </Button>
-                                    <Button
-                                      className="notification-action-btn deny"
-                                      color="danger"
-                                      disabled={
-                                        Boolean(notificationActionById[notification.id]) ||
-                                        !notification.approval
-                                      }
-                                      onClick={() => {
-                                        if (!notification.approval) return
-                                        void onDenyNotification(notification)
-                                      }}
-                                      size="xs"
-                                      variant="soft"
-                                    >
-                                      {notificationActionById[notification.id] === 'denying'
-                                        ? 'Denying...'
-                                        : 'Deny'}
-                                    </Button>
-                                  </>
-                                )}
-                              {notification.kind === 'approval_required' &&
-                                notification.approvalState && (
-                                  <span
-                                    className={`notification-action-state ${notification.approvalState}`}
-                                  >
-                                    {notification.approvalState === 'approved'
-                                      ? 'Approved'
-                                      : 'Denied'}
-                                  </span>
-                                )}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {showNotificationTrayEmpty && (
-                  <p className="notification-menu-empty">
-                    No notifications or pending approvals right now.
-                  </p>
-                )}
-              </div>
-            </div>
+              {notificationBell}
+            </Popover>
           )}
         </div>
-      </div>
-    </Container>
+      </Flex>
+    </Flex>
   )
 })

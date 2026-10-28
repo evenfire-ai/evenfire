@@ -1,16 +1,14 @@
-import { useEffect, useId, useRef } from 'react'
-import { createPortal } from 'react-dom'
-import { Button } from '@components/Common'
-import { IconClose } from '@components/SidebarNav/icons'
+import { useId, useRef } from 'react'
+import { CloseOutlined } from '@ant-design/icons'
+import { Modal, Result, Typography } from 'antd'
 import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { GfsImagePreviewBody } from './Body'
 import type { GfsImagePreviewProps } from './types'
 
 /**
- * Modal chrome around {@link GfsImagePreviewBody} (spec 18 §3.B.2): portal,
- * backdrop, `role="dialog"`, focus-on-open, Escape-to-close, and the workspace
- * backdrop positioning. The body owns the fetch/copy/size-guard so both this
- * modal and `FilePreviewPage` share one implementation.
+ * Ant Design modal chrome around the specialized image renderer. The existing
+ * workspace-relative positioning remains owned by the layout hook; the body
+ * retains its bounded fetch, object URL lifecycle, and copy behavior.
  */
 export function GfsImagePreview({
   byteLength,
@@ -24,75 +22,48 @@ export function GfsImagePreview({
   onDownloadError,
 }: GfsImagePreviewProps) {
   const titleId = useId()
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null)
-  const backdropStyle = useWorkspaceModalStyle()
+  const modalPanelRef = useRef<HTMLDivElement | null>(null)
+  const rootStyle = useWorkspaceModalStyle()
 
-  useEffect(() => {
-    closeButtonRef.current?.focus()
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
-
-  const closeButton = (
-    <Button
-      className="da-gfs-image-preview-dialog__close"
-      data-preview-close
-      ref={closeButtonRef}
-      aria-label="Close image preview"
-      color="neutral"
-      onClick={onClose}
-      variant="ghost"
-    >
-      <IconClose width={18} height={18} />
-    </Button>
-  )
-
-  return createPortal(
-    <div
-      className="da-gfs-image-preview-modal"
-      role="presentation"
-      style={backdropStyle}
-      onMouseDown={event => {
-        if (event.target === event.currentTarget) onClose()
+  return (
+    <Modal
+      open
+      title={
+        <Typography.Title id={titleId} level={3}>
+          {unavailable ? 'File unavailable' : fileName}
+        </Typography.Title>
+      }
+      onCancel={onClose}
+      afterOpenChange={visible => {
+        if (visible) {
+          modalPanelRef.current?.querySelector<HTMLElement>('.ant-modal-close')?.focus()
+        }
       }}
+      closable={{
+        'aria-label': 'Close image preview',
+        closeIcon: <CloseOutlined aria-hidden="true" />,
+      }}
+      destroyOnHidden
+      footer={null}
+      keyboard
+      panelRef={modalPanelRef}
+      styles={{ root: rootStyle }}
     >
-      <section
-        className="da-gfs-image-preview-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-      >
-        {unavailable ? (
-          <>
-            <header className="da-gfs-image-preview-dialog__header">
-              <h3 id={titleId}>File unavailable</h3>
-              {closeButton}
-            </header>
-            <div className="da-gfs-image-preview-dialog__body">
-              <div className="empty-state">
-                <p className="muted">This item is no longer available.</p>
-              </div>
-            </div>
-          </>
-        ) : (
-          <GfsImagePreviewBody
-            key={`${gfsUri}:${reloadVersion ?? 0}`}
-            byteLength={byteLength}
-            fileName={fileName}
-            gfsUri={gfsUri}
-            dataBase64={dataBase64}
-            mimeType={mimeType}
-            onDownloadError={onDownloadError}
-            titleId={titleId}
-            headerActions={closeButton}
-          />
-        )}
-      </section>
-    </div>,
-    document.body
+      {unavailable ? (
+        <Result status="warning" subTitle="This item is no longer available." />
+      ) : (
+        <GfsImagePreviewBody
+          key={`${gfsUri}:${reloadVersion ?? 0}`}
+          byteLength={byteLength}
+          fileName={fileName}
+          gfsUri={gfsUri}
+          dataBase64={dataBase64}
+          mimeType={mimeType}
+          onDownloadError={onDownloadError}
+          hideTitle
+        />
+      )}
+    </Modal>
   )
 }
 

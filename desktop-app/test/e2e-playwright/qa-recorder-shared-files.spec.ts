@@ -45,7 +45,7 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
     // (1) Shell proof — the Files page heading and the GFS browser card always
     // render for an authenticated user, regardless of how much is shared.
     const filesHeading = page.getByRole('heading', { name: 'Files', exact: true })
-    const browserCard = page.locator('.da-gfs-drive')
+    const browserCard = page.locator('[data-gfs-browser="true"]')
     await expect(filesHeading).toBeVisible({ timeout: 20_000 })
     await expect(browserCard).toBeVisible({ timeout: 20_000 })
 
@@ -54,7 +54,7 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
     const loadingFiles = page.getByText('Loading files…', { exact: true })
     const emptyRoot = page.getByText('No shared files yet', { exact: true })
     const emptyFolder = page.getByText('This folder is empty', { exact: true })
-    const anyRow = page.locator('.da-gfs-drive__grid .da-grid__row').first()
+    const anyRow = page.locator('.gfs-resource-table [data-testid^="gfs-resource-row-"]').first()
     await expect(loadingFiles.or(emptyRoot).or(emptyFolder).or(anyRow)).toBeVisible({
       timeout: 20_000,
     })
@@ -70,10 +70,7 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
     // Download affordance: when a file row is present it exposes a Download
     // button. We only assert its presence — we never click it, because the
     // native save dialog is not reliably drivable in the recorder.
-    const fileRow = page
-      .locator('.da-gfs-drive__grid .da-grid__row')
-      .filter({ has: page.locator('.da-gfs-drive__type', { hasText: 'File' }) })
-      .first()
+    const fileRow = page.locator('.gfs-resource-table [data-resource-kind="file"]').first()
     if (await fileRow.isVisible().catch(() => false)) {
       await expect(fileRow.getByRole('button', { name: /Download / })).toBeVisible({
         timeout: 20_000,
@@ -83,18 +80,17 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
     await screenshotAndLog(page, testInfo, 'desktop-shared-files-root')
 
     // (2) If a directory row is present, open it and assert no crash.
-    const folderRow = page
-      .locator('.da-gfs-drive__grid .da-grid__row')
-      .filter({ has: page.locator('.da-gfs-drive__type', { hasText: 'Folder' }) })
-      .first()
+    const folderRow = page.locator('.gfs-resource-table [data-resource-kind="directory"]').first()
     if (await folderRow.isVisible().catch(() => false)) {
-      await folderRow.locator('.da-gfs-list__name button').first().click()
+      await folderRow.getByRole('button', { name: /^Open / }).click()
 
       // After navigation the card either loads, lists the folder contents, or
       // reports the folder is empty. The shell itself stays mounted (no crash).
       const insideLoading = page.getByText('Loading files…', { exact: true })
       const insideEmpty = page.getByText('This folder is empty', { exact: true })
-      const insideRow = page.locator('.da-gfs-drive__grid .da-grid__row').first()
+      const insideRow = page
+        .locator('.gfs-resource-table [data-testid^="gfs-resource-row-"]')
+        .first()
       await expect(insideLoading.or(insideEmpty).or(insideRow)).toBeVisible({
         timeout: 20_000,
       })

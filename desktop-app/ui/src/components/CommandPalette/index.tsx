@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { TextInput } from '@components/Common'
+import { Input, type InputRef, Modal } from 'antd'
 import { DESKTOP_COMMANDS, type DesktopCommandId } from '../../../../src/desktopCommands'
 import { CommandPaletteList } from './CommandPaletteList'
 import type { CommandPaletteProps } from './types'
@@ -14,7 +14,7 @@ export function CommandPalette({
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<DesktopCommandId | null>(null)
   const dialogRef = useRef<HTMLDivElement | null>(null)
-  const inputRef = useRef<HTMLInputElement | null>(null)
+  const inputRef = useRef<InputRef | null>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const restoreFocusOnUnmountRef = useRef(restorePreviousFocus)
   const commands = useMemo(() => {
@@ -33,10 +33,13 @@ export function CommandPalette({
 
   useLayoutEffect(() => {
     previousFocusRef.current = document.activeElement as HTMLElement | null
-    const input = inputRef.current
-    input?.focus()
+    const input = inputRef.current?.input
+    inputRef.current?.focus()
     const verificationFrame = requestAnimationFrame(() => {
-      if (input?.isConnected && document.activeElement !== input) input.focus()
+      const currentInput = inputRef.current
+      if (currentInput?.input?.isConnected && document.activeElement !== input) {
+        currentInput.focus()
+      }
     })
     return () => {
       cancelAnimationFrame(verificationFrame)
@@ -71,31 +74,31 @@ export function CommandPalette({
   }
 
   return (
-    <div
-      className="command-palette-backdrop"
-      onKeyDown={event => {
-        if (event.key !== 'Escape') return
-        event.preventDefault()
-        onClose()
+    <Modal
+      open
+      closable={false}
+      footer={null}
+      focusable={{ focusTriggerAfterClose: false, trap: true }}
+      afterOpenChange={open => {
+        if (open) inputRef.current?.focus()
       }}
-      onMouseDown={event => {
-        if (event.target === event.currentTarget) onClose()
-      }}
-      role="presentation"
+      onCancel={onClose}
+      title={<span className="visually-hidden">Command palette</span>}
     >
       <div
         ref={dialogRef}
-        aria-label="Command palette"
-        aria-modal="true"
-        className="command-palette"
-        onKeyDown={event => {
+        onKeyDownCapture={event => {
           if (event.key === 'ArrowDown') {
             event.preventDefault()
             moveSelection(1)
           } else if (event.key === 'ArrowUp') {
             event.preventDefault()
             moveSelection(-1)
-          } else if (event.key === 'Enter' && selectedId) {
+          } else if (
+            event.key === 'Enter' &&
+            selectedId &&
+            event.target === inputRef.current?.input
+          ) {
             event.preventDefault()
             execute(selectedId)
           } else if (event.key === 'Tab') {
@@ -115,17 +118,14 @@ export function CommandPalette({
             }
           }
         }}
-        role="dialog"
       >
-        <div className="command-palette__header">
-          <TextInput
-            ref={inputRef}
-            aria-label="Search commands"
-            onChange={event => setQuery(event.currentTarget.value)}
-            placeholder="Type a command"
-            value={query}
-          />
-        </div>
+        <Input
+          ref={inputRef}
+          aria-label="Search commands"
+          onChange={event => setQuery(event.currentTarget.value)}
+          placeholder="Type a command"
+          value={query}
+        />
         <CommandPaletteList
           commands={commands}
           isEligible={isEligible}
@@ -134,6 +134,6 @@ export function CommandPalette({
           selectedId={selectedId}
         />
       </div>
-    </div>
+    </Modal>
   )
 }

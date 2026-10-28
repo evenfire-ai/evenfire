@@ -54,7 +54,7 @@ describe('SandboxUiPage contextual-search focus ownership', () => {
     sandboxUi.focusActive.mockResolvedValue(true)
     installSandboxBridge()
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      callback(0)
+      queueMicrotask(() => callback(0))
       return 1
     })
     vi.stubGlobal(

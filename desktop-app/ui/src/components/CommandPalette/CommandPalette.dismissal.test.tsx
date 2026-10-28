@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { CommandPalette } from '.'
+import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 
+beforeEach(installAntdDomEnvironment)
 afterEach(cleanup)
 
 function renderPalette(onClose = vi.fn(), onExecute = vi.fn()) {
@@ -40,8 +42,8 @@ describe('CommandPalette modal dismissal ownership', () => {
   })
 
   it('dismisses only true backdrop pointer clicks', () => {
-    const { container, onClose, onExecute } = renderPalette()
-    const backdrop = container.querySelector('.command-palette-backdrop') as HTMLElement
+    const { onClose, onExecute } = renderPalette()
+    const backdrop = document.querySelector('.ant-modal-wrap') as HTMLElement
     const panel = screen.getByRole('dialog', { name: 'Command palette' })
     const input = screen.getByRole('textbox', { name: 'Search commands' })
     const result = screen.getByRole('option', { name: /New chat tab/ })
@@ -60,6 +62,7 @@ describe('CommandPalette modal dismissal ownership', () => {
     expect(onClose).not.toHaveBeenCalled()
 
     fireEvent.mouseDown(backdrop)
+    fireEvent.click(backdrop)
     expect(onClose).toHaveBeenCalledOnce()
   })
 
@@ -80,8 +83,10 @@ describe('CommandPalette modal dismissal ownership', () => {
       ) : null
     }
 
-    const { container } = render(<Owner />)
-    fireEvent.mouseDown(container.querySelector('.command-palette-backdrop') as HTMLElement)
+    render(<Owner />)
+    const backdrop = document.querySelector('.ant-modal-wrap') as HTMLElement
+    fireEvent.mouseDown(backdrop)
+    fireEvent.click(backdrop)
     await new Promise<void>(resolve =>
       requestAnimationFrame(() => {
         expect(document.activeElement).toBe(previous)
