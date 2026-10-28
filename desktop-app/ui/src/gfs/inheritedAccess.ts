@@ -176,7 +176,8 @@ export async function deriveGfsInheritedAccess(
         [],
         parent.resourceId,
         folderLabel,
-        grant.subjectProfile
+        grant.subjectProfile,
+        grant.homeOwner
       )
     }
     for (const share of shares ?? []) {
@@ -231,7 +232,8 @@ export async function deriveGfsInheritedAccess(
     shareIds: string[],
     folderResourceId: string,
     folderLabel: string,
-    subjectProfile?: GfsSubjectProfile
+    subjectProfile?: GfsSubjectProfile,
+    homeOwner?: true
   ): void {
     const key = inheritedSubjectKey(subject)
     const previous = bySubject.get(key) ?? null
@@ -241,6 +243,7 @@ export async function deriveGfsInheritedAccess(
       { resourceId: folderResourceId, name: folderLabel }
     )
     merged.subjectProfile = subjectProfile ?? previous?.subjectProfile
+    if (homeOwner || previous?.homeOwner) merged.homeOwner = true
     bySubject.set(key, merged)
   }
 }

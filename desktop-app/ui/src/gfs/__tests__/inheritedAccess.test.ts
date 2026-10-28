@@ -57,6 +57,43 @@ describe('deriveGfsInheritedAccess', () => {
     vi.restoreAllMocks()
   })
 
+  it('retains an owner grant marker when later ancestor contributions are merged', async () => {
+    installClerumGfs(
+      async uri => {
+        if (uri.endsWith(FILE_ID.replace(/-/g, ''))) {
+          return resolveView(FILE_ID, 'report.md', FOLDER_ID, 'file')
+        }
+        if (uri.endsWith(FOLDER_ID.replace(/-/g, ''))) {
+          return resolveView(FOLDER_ID, 'home', ROOT_ID)
+        }
+        return resolveView(ROOT_ID, '', null)
+      },
+      async resourceId =>
+        grantsListPage([
+          {
+            id: resourceId === FOLDER_ID ? 'owner-grant' : 'ancestor-grant',
+            drive: 'main',
+            resourceId,
+            subject: { type: 'user', id: 'owner' },
+            permissions: ['read'],
+            inherit: true,
+            ...(resourceId === FOLDER_ID ? { homeOwner: true as const } : {}),
+          },
+        ]),
+      async () => sharesListPage([])
+    )
+
+    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
+
+    expect(result.coverage).toBe('complete')
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]?.homeOwner).toBe(true)
+    expect(result.items[0]?.sources.map(source => source.grantId)).toEqual([
+      'owner-grant',
+      'ancestor-grant',
+    ])
+  })
+
   it('retains home identity profiles for inherited grants and shares', async () => {
     installClerumGfs(
       async uri => {

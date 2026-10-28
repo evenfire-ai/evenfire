@@ -150,14 +150,19 @@ describe('My home', () => {
     ).toBeTruthy()
     expect(screen.getByRole('treeitem', { name: 'Shared with me' })).toBeTruthy()
     cleanup()
+    const listAccessible = vi.fn(async () =>
+      listAccessiblePage([accessibleResource('shared', 'Shared project', 'directory')])
+    )
     installClerum({
       getHome: async () => {
         throw new Error('home service unavailable')
       },
+      listAccessible,
     })
     renderTree()
     expect(await screen.findAllByText('home service unavailable')).not.toHaveLength(0)
-    expect(screen.queryByText('No shared files yet.')).toBeNull()
+    expect(await screen.findByRole('button', { name: 'Shared project' })).toBeTruthy()
+    expect(listAccessible).toHaveBeenCalledWith(undefined, undefined)
     cleanup()
     installClerum({ getHome: async () => homeView({ state: 'retired' }) })
     renderTree()

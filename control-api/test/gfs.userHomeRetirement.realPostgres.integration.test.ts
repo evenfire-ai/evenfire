@@ -454,6 +454,75 @@ describeRealPostgres('user-home retirement on PostgreSQL', () => {
     ).toEqual([{ gfs_uri: `gfs://${f.drive}/${f.home}` }])
   })
 
+  it('audits and logs retirement cleanup when the user has no home row', async () => {
+    const f = await fixture()
+    const user = await createUser(database.pool, 'User Without Home')
+    await database.pool.query('DELETE FROM gfs_user_homes WHERE user_id=$1', [user])
+    expect(await homeState(database.pool, user)).toBeUndefined()
+    await database.pool.query(
+      `INSERT INTO gfs_grants(drive,resource_id,subject_type,subject_id,permissions,inherit)
+       VALUES ($1,$2,'user',$3,'{read}',false),($1,$2,'user',$4,'{read}',false)`,
+      [f.drive, f.outside, user, f.other]
+    )
+    const grantSubjects = async () =>
+      (
+        await database.pool.query<{ subject_id: string }>(
+          `SELECT subject_id FROM gfs_grants
+            WHERE resource_id=$1 AND subject_type='user' AND subject_id=ANY($2::text[])
+            ORDER BY subject_id`,
+          [f.outside, [user, f.other]]
+        )
+      ).rows.map(row => row.subject_id)
+    expect(await grantSubjects()).toEqual([user, f.other].sort())
+
+    const logger = rootLogger as unknown as Record<symbol, unknown>
+    const oldStream = logger[pino.symbols.streamSym]
+    const oldLevel = rootLogger.level
+    const lines: Array<Record<string, unknown>> = []
+    logger[pino.symbols.streamSym] = {
+      write: (line: string) => {
+        lines.push(JSON.parse(line))
+        return true
+      },
+    }
+    rootLogger.level = 'info'
+    try {
+      await request(app)
+        .delete(`/admin/users/${user}`)
+        .set('Idempotency-Key', randomUUID())
+        .send({ reason: 'Retirement test' })
+        .expect(200)
+      expect(await grantSubjects()).toEqual([f.other])
+      const audit = await database.pool.query(
+        `SELECT op, gfs_uri FROM gfs_audit
+          WHERE subject=$1 AND op='user_home.retired' ORDER BY sequence_no`,
+        [`user:${user}`]
+      )
+      expect(audit.rows).toEqual([{ op: 'user_home.retired', gfs_uri: null }])
+      const recorded = lines.filter(
+        line => line.event === 'user_home.retired' && line.userId === user
+      )
+      expect(recorded).toHaveLength(1)
+      expect(recorded[0]).toMatchObject({
+        conflictCode: null,
+        conflictDetail: null,
+        homeGrants: 0,
+        userGrants: 1,
+        agentGrants: 0,
+        homeShares: 0,
+        userShares: 0,
+      })
+      const ownerAudit = await database.pool.query(
+        `SELECT op FROM gfs_audit WHERE subject=$1 AND op='user_home.provisioned'`,
+        [`user:${f.owner}`]
+      )
+      expect(ownerAudit.rows).toEqual([{ op: 'user_home.provisioned' }])
+    } finally {
+      logger[pino.symbols.streamSym] = oldStream
+      rootLogger.level = oldLevel
+    }
+  })
+
   it.each([false, true])(
     'serializes concurrent retirements with overlapping grants (second home=%s)',
     async secondHome => {

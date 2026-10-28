@@ -110,9 +110,9 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
   }, 60_000)
 
   async function seedHome(
-    kind: 'missing' | 'narrowed' | 'no-inherit' = 'missing'
+    kind: 'missing' | 'narrowed' | 'no-inherit' = 'missing',
+    userId = randomUUID()
   ): Promise<Fixture> {
-    const userId = randomUUID()
     const root = randomUUID()
     const users = randomUUID()
     const resourceId = randomUUID()
@@ -181,6 +181,27 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
     )
     return userId
   }
+
+  it('restores the lowercase owner grant for an uppercase route id', async () => {
+    const fixture = await seedHome('missing', 'abcdefab-cdef-4abc-8abc-abcdefabcdef')
+    const response = await request(app)
+      .post(`/gfs/user-homes/${fixture.userId.toUpperCase()}/restore-owner`)
+      .set('x-test-operator', 'yes')
+    expect(response.status).toBe(200)
+    expect(response.body.home).toMatchObject({ userId: fixture.userId, state: 'ready' })
+    const rows = await fixturePool.query(
+      `SELECT subject_id, permissions, inherit FROM gfs_grants
+        WHERE drive = $1 AND resource_id = $2 AND subject_type = 'user'`,
+      [fixture.drive, fixture.resourceId]
+    )
+    expect(rows.rows).toEqual([
+      {
+        subject_id: fixture.userId,
+        permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        inherit: true,
+      },
+    ])
+  })
 
   it.each(['missing', 'narrowed', 'no-inherit'] as const)(
     'restores a %s owner grant atomically and rejects a second restore',

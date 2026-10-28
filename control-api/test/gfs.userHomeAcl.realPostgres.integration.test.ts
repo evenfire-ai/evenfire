@@ -108,6 +108,49 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
     return result.rows[0]!.id
   }
 
+  it('marks only the bound owner grant for the owner, a manager, and an operator', async () => {
+    const manager = await createUser(database.pool, 'Manager')
+    const managerGrant = await grant(home, 'user', manager, ALL, true)
+    const contextGrant = await grant(home, 'context', owner, ['read'], false)
+    for (const caller of [owner, manager, 'operator']) {
+      const response = request(app).get('/grants').query({ drive, resourceId: home })
+      if (caller === 'operator') response.set('x-operator', 'yes')
+      else response.set('x-user', caller)
+      const { body } = await response.expect(200)
+      expect(body.items).toHaveLength(3)
+      const ownerRow = body.items.find(
+        (item: { subject: { type: string; id: string } }) =>
+          item.subject.type === 'user' && item.subject.id === owner
+      )
+      expect(ownerRow.homeOwner).toBe(true)
+      const otherRows = body.items.filter((item: { id: string }) =>
+        [managerGrant, contextGrant].includes(item.id)
+      )
+      expect(otherRows).toHaveLength(2)
+      expect(otherRows.map((item: object) => Object.hasOwn(item, 'homeOwner'))).toEqual([
+        false,
+        false,
+      ])
+    }
+
+    const folder = (
+      await database.pool.query<{ resource_id: string }>(
+        `INSERT INTO gfs_resources (drive,parent_resource_id,name,kind,path_cache)
+         VALUES ($1,$2,'folder','directory','/folder') RETURNING resource_id::text`,
+        [drive, home]
+      )
+    ).rows[0]!.resource_id
+    const ownerOnFolder = await grant(folder, 'user', owner, ['read'], true)
+    const { body } = await request(app)
+      .get('/grants')
+      .set('x-user', owner)
+      .query({ drive, resourceId: folder })
+      .expect(200)
+    expect(body.items).toHaveLength(1)
+    expect(body.items[0].id).toBe(ownerOnFolder)
+    expect(Object.hasOwn(body.items[0], 'homeOwner')).toBe(false)
+  })
+
   it('protects the owner grant while the owner can revoke another grant and an operator can narrow it', async () => {
     const other = await createUser(database.pool, 'Other')
     const ownerRow = await database.pool.query<{ id: string }>(

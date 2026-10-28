@@ -51,6 +51,7 @@ export interface GfsGrantListItem {
   resourceId: string
   subject: { type: string; id?: string }
   subjectProfile?: GfsSubjectProfile
+  homeOwner?: true
   permissions: string[]
   inherit: boolean
 }
@@ -105,6 +106,7 @@ export interface GfsInheritedAccessSource {
 export interface GfsInheritedAccessItem {
   subject: { type: string; id?: string }
   subjectProfile?: GfsSubjectProfile
+  homeOwner?: true
   permissions: string[]
   /** Contributing ancestor folder labels, nearest first, deduplicated. */
   inheritedFrom: string[]
