@@ -121,6 +121,7 @@ export async function signCurrentExternalGfsUserToken(
           principalType: 'user',
         })
       },
+      undefined,
       { onDatabaseFailure: externalSessionDatabaseFailure }
     )
   } catch (error) {

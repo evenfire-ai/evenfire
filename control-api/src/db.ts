@@ -6950,17 +6950,11 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
-  txPoolOrOptions: Pool | DbTransactionOptions = pool,
-  explicitOptions: DbTransactionOptions = {}
+  // Injectable only so the carrier's client lifecycle can be unit-tested against
+  // a fake Pool; production always uses the module-level core pool.
+  txPool: Pool = pool,
+  options: DbTransactionOptions = {}
 ): Promise<T> {
-  // Tests may inject a Pool to exercise client lifecycle behavior. Session
-  // persistence callers may provide a failure mapper so database errors retain
-  // typed provenance; cancellable callers use the same bounded pool with signal.
-  const isPool = typeof (txPoolOrOptions as Pool).connect === 'function'
-  const txPool = isPool ? (txPoolOrOptions as Pool) : pool
-  const options: DbTransactionOptions = isPool
-    ? explicitOptions
-    : (txPoolOrOptions as DbTransactionOptions)
   const signal = options.signal
   const mapDatabaseFailure = (error: unknown): unknown =>
     options.onDatabaseFailure ? options.onDatabaseFailure(error) : error

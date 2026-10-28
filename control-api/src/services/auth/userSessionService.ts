@@ -326,7 +326,7 @@ export async function validateUserSessionClaims(
         mode: 'read_write',
         onDatabaseFailure: options.onDatabaseFailure,
       })
-    : withTransaction(work, { onDatabaseFailure: options.onDatabaseFailure })
+    : withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function renewUserSession(

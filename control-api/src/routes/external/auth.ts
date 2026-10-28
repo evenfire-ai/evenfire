@@ -9,7 +9,6 @@ import {
   handleExternalSessionBackendFailure,
   requireExternalSessionRateLimitContext,
 } from '../../middleware/externalSessionAuth.js'
-import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
 import { requireAuthenticatedExternalUserRateLimitContext } from '../../middleware/externalUserRateLimitPolicy.js'
 import {
   passwordLoginSourceAdmission,
