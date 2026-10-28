@@ -2268,6 +2268,7 @@ export function FilesPage({
                         title: (
                           <AntButton
                             htmlType="button"
+                            size="small"
                             type="link"
                             disabled={!current}
                             onClick={() => {
@@ -2294,6 +2295,7 @@ export function FilesPage({
                           ) : (
                             <AntButton
                               htmlType="button"
+                              size="small"
                               type="link"
                               aria-current={index === crumbs.length - 1 ? 'page' : undefined}
                               title={

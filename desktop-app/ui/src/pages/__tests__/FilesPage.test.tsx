@@ -5879,6 +5879,47 @@ describe('FilesPage', () => {
     expect(reset).toHaveBeenCalledOnce()
   })
 
+  it('keeps breadcrumb labels and the active folder menu on the same compact height', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'nested-1',
+        gfsUri: 'gfs://main/nested-1',
+        name: 'Nested',
+        kind: 'directory',
+        version: 2,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+        },
+        {
+          resourceId: 'nested-1',
+          gfsUri: 'gfs://main/nested-1',
+          name: 'Nested',
+          kind: 'directory',
+          version: 2,
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    const breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
+    const controls = [
+      within(breadcrumbs).getByRole('button', { name: 'Shared with me' }),
+      within(breadcrumbs).getByRole('button', { name: 'Product' }),
+      within(breadcrumbs).getByRole('button', { name: 'Nested' }),
+      screen.getByRole('button', { name: 'Options for Nested' }),
+    ]
+
+    expect(controls.every(control => control.classList.contains('ant-btn-sm'))).toBe(true)
+  })
+
   it('mounts the ⋯ menu only on the active folder beside the breadcrumb, never on crumbs or the open file', async () => {
     const fullBits = {
       held: ['read', 'write', 'delete', 'manage_acl'],
