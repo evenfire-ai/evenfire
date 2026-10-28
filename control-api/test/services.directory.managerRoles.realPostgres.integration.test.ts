@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
-import type { Pool } from 'pg'
+import { Pool } from 'pg'
 import {
   deleteManagedUserForUser,
   listManagedPendingInvitationsForUser,
@@ -27,15 +27,24 @@ const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('team manager role lookup on PostgreSQL', () => {
+  let adminPool: Pool
   let database: Awaited<ReturnType<typeof createUserHomeDatabase>>
 
   beforeAll(async () => {
-    database = await createUserHomeDatabase(adminUrl!)
+    adminPool = new Pool({ connectionString: adminUrl! })
+    database = await createUserHomeDatabase(adminUrl!, adminPool)
     holder.pool = database.pool
   }, 60_000)
   afterAll(async () => {
-    holder.pool = undefined
-    await database?.close()
+    try {
+      holder.pool = undefined
+      if (database) {
+        await database.closeConnections()
+        await adminPool.query(`DROP DATABASE "${database.database}"`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   }, 60_000)
 
   async function fixture() {

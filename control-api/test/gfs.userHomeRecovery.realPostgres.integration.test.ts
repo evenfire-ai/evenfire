@@ -105,7 +105,7 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
         await adminPool.query(`DROP DATABASE ${quoteIdent(database)}`)
       }
     } finally {
-      await endPoolAndWaitForClients(adminPool)
+      await adminPool?.end()
     }
   }, 60_000)
 

@@ -21,6 +21,7 @@ import { createAdminUser } from '../src/services/directory/users.js'
 import { GfsUserHomeReconciler } from '../src/services/gfsUserHomeReconciler.js'
 import { createPostgresDisconnectBlackhole } from './helpers/realPostgresCancellation.js'
 import { createPostgresFatalCommitReplyInjector } from './helpers/realPostgresFatalCommit.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import {
   createDrive,
   createUser,
@@ -46,19 +47,28 @@ const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('user-home provisioning on PostgreSQL', () => {
+  let adminPool: Pool
   let database: Awaited<ReturnType<typeof createUserHomeDatabase>>
   let drive: string
   let rootId: string
 
   beforeAll(async () => {
     if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
-    database = await createUserHomeDatabase(adminUrl)
+    adminPool = new Pool({ connectionString: adminUrl })
+    database = await createUserHomeDatabase(adminUrl, adminPool)
     holder.pool = database.pool
   }, 60_000)
 
   afterAll(async () => {
-    holder.pool = undefined
-    await database?.close()
+    try {
+      holder.pool = undefined
+      if (database) {
+        await database.closeConnections()
+        await adminPool.query(`DROP DATABASE "${database.database}"`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   }, 60_000)
 
   beforeEach(async () => {
@@ -771,7 +781,7 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
       )
       expect(audit.rows).toEqual([{ op: 'user_home.provisioned', outcome: 'allowed' }])
     } finally {
-      await runtimePool.end()
+      await endPoolAndWaitForClients(runtimePool)
     }
   })
 
@@ -876,7 +886,7 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
       )
     } finally {
       held.release()
-      await limitedPool.end()
+      await endPoolAndWaitForClients(limitedPool)
     }
     // The transaction committed; a later fenced attempt sees the existing home.
     expect(await provisionUserHome(user, { drive, dbPool: database.pool })).toBe('unchanged')
@@ -923,8 +933,8 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
       const backend = await injector.backendReady
       await injector.commitAckWithheld
       expect(
-        (await database.pool.query('SELECT pg_terminate_backend($1) AS terminated', [backend]))
-          .rows[0].terminated
+        (await adminPool.query('SELECT pg_terminate_backend($1) AS terminated', [backend])).rows[0]
+          .terminated
       ).toBe(true)
       expect(await provisioning).toBe('ready')
       expect(unknown).toBe(1)
@@ -936,7 +946,7 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
       ).toBeGreaterThan(statements.findIndex(sql => sql.includes('pg_advisory_xact_lock')))
       await assertReady(user)
     } finally {
-      await carrierPool.end()
+      await endPoolAndWaitForClients(carrierPool)
       await injector.close()
     }
   }, 30_000)
@@ -993,9 +1003,9 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
       )
       state = activity.rows[0]?.state
     } finally {
-      if (backendPid) await database.pool.query('SELECT pg_terminate_backend($1)', [backendPid])
+      if (backendPid) await adminPool.query('SELECT pg_terminate_backend($1)', [backendPid])
       await proxy.close()
-      await carrierPool.end()
+      await endPoolAndWaitForClients(carrierPool)
     }
     expect(await provisionUserHome(user, { drive, dbPool: database.pool })).toBe('unchanged')
     await assertReady(user)
@@ -1097,10 +1107,10 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
       rootLogger.level = oldLevel
       logger[streamSymbol] = oldStream
       if (!released) held.release()
-      if (backendPid) await database.pool.query('SELECT pg_terminate_backend($1)', [backendPid])
+      if (backendPid) await adminPool.query('SELECT pg_terminate_backend($1)', [backendPid])
       await proxy.close()
-      await carrierPool.end()
-      await limitedPool.end()
+      await endPoolAndWaitForClients(carrierPool)
+      await endPoolAndWaitForClients(limitedPool)
     }
   }, 30_000)
 })
