@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   observePendingExternalLogoutRaw,
+  recordPendingKeytarCleanup,
   stageAcceptancePendingMarker,
 } from '../pendingExternalLogout.js'
 import {
@@ -20,6 +21,7 @@ import {
   type SessionAuthorityCandidate,
   type SessionAuthorityCleanupDebt,
   type SessionAuthorityCredentialSource,
+  SessionAuthorityProjectionIntegrityError,
   type SessionAuthorityRecord,
   SessionAuthorityRecordCapacityError,
   SessionAuthorityRecordConflictError,
@@ -2268,6 +2270,50 @@ describe('session authority record repository contract', () => {
     expect(restored?.token).toBe('fixture-prior-accepted-source')
     expect(restored?.accepted.record.frame.source).toEqual(old.record.frame.source)
     expect(restored?.accepted.record.frame.source).not.toEqual(candidate.source)
+  })
+
+  it('rejects an orphaned writer candidate when only the external marker bytes change', async () => {
+    recordPendingKeytarCleanup(directory, envKey, 'active-keytar')
+    const repo = repository()
+    initialize(repo)
+    const candidate = await preparePersistentCandidate(repo, 'fixture-marker-precondition-token')
+    const verifiedRecord = observed(repo).record
+    const before = observePendingExternalLogoutRaw(directory, envKey)
+    const storedCandidate = verifiedRecord.candidates.find(
+      item => item.transactionId === candidate.transactionId
+    )
+    if (!storedCandidate) throw new Error('Verified writer candidate is missing')
+    expect(storedCandidate.observedExternalMarker).toEqual({
+      kind: before.kind,
+      revision: before.marker?.revision ?? null,
+      digest: before.rawDigest,
+    })
+
+    const markerFile = path.join(directory, `pending-external-logout-${sha256(envKey)}`)
+    const sameMarkerDifferentBytes = JSON.stringify({
+      version: 1,
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'active-keytar',
+      revision: before.marker?.revision,
+    })
+    fs.writeFileSync(markerFile, sameMarkerDifferentBytes, { mode: 0o600 })
+    const after = observePendingExternalLogoutRaw(directory, envKey)
+    expect(after.marker).toEqual(before.marker)
+    expect(after.kind).toBe(before.kind)
+    expect(after.rawDigest).not.toBe(before.rawDigest)
+
+    const reconciliationError =
+      await SessionAuthorityAcceptanceTransaction.reconcilePendingAcceptanceProjection(
+        authorityStore,
+        directory,
+        envKey
+      ).then(
+        () => null,
+        error => error
+      )
+    expect(reconciliationError).toBeInstanceOf(SessionAuthorityProjectionIntegrityError)
+    expect(reconciliationError).toMatchObject({ source: 'marker' })
+    expect(observed(repo).record.candidates).toContainEqual(storedCandidate)
   })
 
   it('reconciles fence-retirement uncertainty across both restart namespace outcomes', async () => {
