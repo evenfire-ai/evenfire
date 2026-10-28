@@ -25,7 +25,7 @@ export function OnboardingPage({ onboarding }: OnboardingPageProps) {
   const { step, canGoBack, answerOrigin, answerRunStyle, goToManual, back } = onboarding
 
   return (
-    <main>
+    <main tabIndex={-1}>
       <Flex align="center" justify="center" style={{ minHeight: authPageMinHeight }}>
         <Card style={{ width: authCardWidth }}>
           <Flex vertical gap="large">

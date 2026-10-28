@@ -38,6 +38,9 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
     null
   )
   const runtimeDockTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const runtimeDockHasFocusRef = useRef(false)
+  const authBusyRef = useRef(busy || authTransitioning)
+  authBusyRef.current = busy || authTransitioning
 
   const runtimeConfigOptions = runtimeConfigState?.options || []
   const activeRuntimeConfigId = runtimeConfigState?.activeOptionId ?? null
@@ -64,7 +67,7 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
 
   const handleRuntimeOptionSelect = (optionId: string) => {
     setRuntimeMenuOpen(false)
-    runtimeDockTriggerRef.current?.focus()
+    if (!busy && !authTransitioning) runtimeDockTriggerRef.current?.focus()
     if (
       optionId === activeRuntimeConfigId &&
       (selectedRuntimeConfig?.source === 'localhost' ||
@@ -88,12 +91,53 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       setRuntimeMenuOpen(false)
-      runtimeDockTriggerRef.current?.focus()
+      if (!busy && !authTransitioning) runtimeDockTriggerRef.current?.focus()
     }
 
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [runtimeMenuOpen])
+  }, [runtimeMenuOpen, busy, authTransitioning])
+
+  useEffect(() => {
+    const isRuntimeDockTarget = (target: EventTarget | null) => {
+      if (!(target instanceof Node)) return false
+      const runtimeMenu = document.getElementById(runtimeDockPanelId)
+      return Boolean(
+        runtimeDockTriggerRef.current?.contains(target) || runtimeMenu?.contains(target)
+      )
+    }
+    const handleFocusIn = (event: FocusEvent) => {
+      if (authBusyRef.current) return
+      runtimeDockHasFocusRef.current = isRuntimeDockTarget(event.target)
+    }
+    const handleFocusOut = (event: FocusEvent) => {
+      if (authBusyRef.current) return
+      runtimeDockHasFocusRef.current = isRuntimeDockTarget(event.relatedTarget)
+    }
+
+    document.addEventListener('focusin', handleFocusIn)
+    document.addEventListener('focusout', handleFocusOut)
+    return () => {
+      document.removeEventListener('focusin', handleFocusIn)
+      document.removeEventListener('focusout', handleFocusOut)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!busy && !authTransitioning) {
+      return
+    }
+
+    if (runtimeMenuOpen) setRuntimeMenuOpen(false)
+    if (!runtimeDockHasFocusRef.current) return
+
+    const focusReleaseTimer = window.setTimeout(() => {
+      document.querySelector<HTMLElement>('main[tabindex="-1"]')?.focus()
+      runtimeDockHasFocusRef.current = false
+    }, 0)
+
+    return () => window.clearTimeout(focusReleaseTimer)
+  }, [runtimeMenuOpen, busy, authTransitioning])
 
   if (!runtimeConfigState) return null
 
@@ -166,7 +210,7 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
       <aside>
         <Dropdown
           open={runtimeMenuOpen}
-          onOpenChange={open => setRuntimeMenuOpen(open)}
+          onOpenChange={open => setRuntimeMenuOpen(open && !busy && !authTransitioning)}
           placement="topRight"
           popupRender={() => popup}
           trigger={['click']}
@@ -178,6 +222,7 @@ export function RuntimeConfigDock({ onAddEnvironment }: RuntimeConfigDockProps) 
               title: 'Open environment selector',
             }}
             aria-label="Open environment selector"
+            disabled={busy || authTransitioning}
             htmlType="button"
             icon={<SettingOutlined aria-hidden="true" />}
             ref={trigger => {

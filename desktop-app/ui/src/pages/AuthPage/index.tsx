@@ -1,7 +1,8 @@
 import type { FormEvent } from 'react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import { Alert, Button, Card, Flex, Input, Spin, Typography } from 'antd'
+import type { InputRef } from 'antd'
 import { AuthBrand } from '@components/AuthBrand'
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
 import { authCardWidth, authPageMinHeight } from '@constants/authLayout'
@@ -20,6 +21,7 @@ export function AuthPage() {
     busy,
     email,
     password,
+    isAuthenticated,
     runtimeConfigSetupName,
     runtimeConfigSetupExternalRestApiBaseUrl,
     authTransitioning,
@@ -40,12 +42,41 @@ export function AuthPage() {
     Boolean(runtimeConfigSetupName.trim()) &&
     Boolean(runtimeConfigSetupExternalRestApiBaseUrl.trim())
   const [forgotPasswordBusy, setForgotPasswordBusy] = useState(false)
+  const passwordInputRef = useRef<InputRef>(null)
+  const loginStatusRef = useRef<HTMLSpanElement>(null)
+  const loginAttemptRef = useRef(false)
+  const loginTransitionStartedRef = useRef(false)
+
+  useEffect(() => {
+    if (!loginAttemptRef.current) return
+    if (busy && authTransitioning) {
+      loginTransitionStartedRef.current = true
+      loginStatusRef.current?.focus()
+      return
+    }
+    if (busy || authTransitioning || !loginTransitionStartedRef.current) return
+
+    loginAttemptRef.current = false
+    loginTransitionStartedRef.current = false
+    if (!isAuthenticated) passwordInputRef.current?.focus()
+  }, [authTransitioning, busy, isAuthenticated])
 
   const handlePasswordSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!busy && hasPasswordLoginCredentials) {
+      loginAttemptRef.current = true
+      loginTransitionStartedRef.current = false
       handlePasswordLogin()
     }
+  }
+
+  const handleSwitchLoginBackendClick = () => {
+    loginAttemptRef.current = true
+    loginTransitionStartedRef.current = false
+    const switchLoginPromise = handleSwitchLoginBackend()
+    void Promise.resolve(switchLoginPromise).finally(() => {
+      if (!loginTransitionStartedRef.current) loginAttemptRef.current = false
+    })
   }
 
   const handleForgotPasswordClick = async () => {
@@ -75,7 +106,7 @@ export function AuthPage() {
   }
 
   return (
-    <main>
+    <main tabIndex={-1}>
       <Flex align="center" justify="center" style={{ minHeight: authPageMinHeight }}>
         <Card style={{ width: authCardWidth }}>
           <Flex vertical gap="large">
@@ -131,6 +162,7 @@ export function AuthPage() {
                   <Flex vertical gap="small">
                     <label htmlFor="email-input">Email</label>
                     <Input
+                      disabled={busy}
                       id="email-input"
                       type="email"
                       placeholder="you@evenfire.com"
@@ -141,7 +173,9 @@ export function AuthPage() {
                   <Flex vertical gap="small">
                     <label htmlFor="password-input">Password</label>
                     <Input
+                      disabled={busy}
                       id="password-input"
+                      ref={passwordInputRef}
                       type="password"
                       placeholder="Your password"
                       value={password}
@@ -163,6 +197,17 @@ export function AuthPage() {
                       'Sign in'
                     )}
                   </Button>
+                  {authTransitioning ? (
+                    <span
+                      ref={loginStatusRef}
+                      aria-live="polite"
+                      className="visually-hidden"
+                      role="status"
+                      tabIndex={-1}
+                    >
+                      Signing in...
+                    </span>
+                  ) : null}
                   <Button
                     block
                     disabled={busy || forgotPasswordBusy}
@@ -185,7 +230,7 @@ export function AuthPage() {
                             block
                             disabled={busy}
                             htmlType="button"
-                            onClick={() => void handleSwitchLoginBackend()}
+                            onClick={handleSwitchLoginBackendClick}
                           >
                             {`Switch to ${backendSwitchHint.targetLabel} & retry`}
                           </Button>
