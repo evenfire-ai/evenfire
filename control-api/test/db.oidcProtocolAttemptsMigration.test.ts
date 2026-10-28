@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 
 vi.mock('pg', () => ({
   Pool: vi.fn(function MockPool() {
@@ -37,6 +38,20 @@ describe(`${VERSION} migration`, () => {
     expect(sql).not.toMatch(
       /CREATE TABLE IF NOT EXISTS (users|teams|invitations|sessions|access_requests)/i
     )
+  })
+
+  it('registers the relation in the production runtime access profile', () => {
+    const source = readFileSync(
+      new URL('../../deploy/scripts/control-api-runtime-access-profiles.tsv', import.meta.url),
+      'utf8'
+    )
+    const entries = source
+      .split('\n')
+      .filter(line => line && !line.startsWith('#'))
+      .map(line => line.split('\t'))
+      .filter(([relation]) => relation === 'oidc_protocol_attempts')
+
+    expect(entries).toEqual([['oidc_protocol_attempts', 'legacy_dml']])
   })
 
   it('applies exactly once through initDb after earlier migrations are present', async () => {
