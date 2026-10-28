@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { StyleProvider, createCache } from '@ant-design/cssinjs'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
@@ -373,6 +374,7 @@ describe('SettingsPage', () => {
     expect(onPlayNotificationSoundPreview).toHaveBeenLastCalledWith(70)
 
     const slider = screen.getByRole('slider')
+    expect(slider.closest('.ant-slider')?.parentElement?.style.flexGrow).toBe('1')
     slider.focus()
     expect(document.activeElement).toBe(slider)
     fireEvent.keyDown(slider, { key: 'ArrowRight', keyCode: 39, which: 39 })
@@ -380,5 +382,61 @@ describe('SettingsPage', () => {
     expect(slider.getAttribute('aria-valuenow')).toBe('71')
     expect(onNotificationSoundVolumeChange).toHaveBeenLastCalledWith(71)
     expect(onPlayNotificationSoundPreview).toHaveBeenLastCalledWith(71)
+  })
+
+  it('separates the notification setting sections', async () => {
+    const user = userEvent.setup()
+    renderSettingsPage()
+
+    await user.click(screen.getByRole('tab', { name: 'Notifications' }))
+
+    const section = screen.getByRole('heading', { name: 'In App Notifications' }).closest('section')
+    expect(section?.classList.contains('ant-flex-gap-small')).toBe(true)
+  })
+
+  it('keeps notification title spacing scoped to the notifications tab', () => {
+    const styleContainer = document.createElement('div')
+    document.body.append(styleContainer)
+    const view = render(
+      <StyleProvider cache={createCache()} container={styleContainer}>
+        <AuthContext.Provider value={makeAuthValue()}>
+          <SettingsPage {...defaultSettingsProps} />
+        </AuthContext.Provider>
+      </StyleProvider>
+    )
+
+    try {
+      expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy()
+      const typographyStyles = Array.from(styleContainer.querySelectorAll('style'))
+        .map(style => style.textContent)
+        .join('\n')
+      expect(typographyStyles).not.toContain('--ant-typography-title-margin-top:0px')
+      expect(typographyStyles).not.toContain('--ant-typography-title-margin-bottom:0px')
+    } finally {
+      view.unmount()
+      styleContainer.remove()
+    }
+  })
+
+  it('aligns notification section heading text with its icon', async () => {
+    const user = userEvent.setup()
+    renderSettingsPage()
+
+    await user.click(screen.getByRole('tab', { name: 'Notifications' }))
+
+    for (const name of [
+      'In App Notifications',
+      'Desktop notifications',
+      'Channel fallback',
+      'Notification sound',
+    ]) {
+      const heading = screen.getByRole('heading', { name })
+      expect(heading.parentElement?.classList.contains('ant-flex-align-center')).toBe(true)
+    }
+    const typographyStyles = Array.from(document.head.querySelectorAll('style'))
+      .map(style => style.textContent)
+      .join('\n')
+    expect(typographyStyles).toContain('--ant-typography-title-margin-top:0px')
+    expect(typographyStyles).toContain('--ant-typography-title-margin-bottom:0px')
   })
 })

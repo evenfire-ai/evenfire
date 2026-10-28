@@ -14,6 +14,7 @@ import {
   Button,
   Card,
   Checkbox,
+  ConfigProvider,
   Descriptions,
   Flex,
   InputNumber,
@@ -70,6 +71,15 @@ type EndpointDiagnostics = {
   healthError: string
   checkedAt: string | null
   loading: boolean
+}
+
+const NOTIFICATION_TITLE_THEME = {
+  components: {
+    Typography: {
+      titleMarginTop: 0,
+      titleMarginBottom: 0,
+    },
+  },
 }
 
 function getPermissionLabel(permission: DesktopNotificationPermission): string {
@@ -215,16 +225,18 @@ function NotificationSoundVolumeField({
         icon={volume === 0 ? <AudioMutedOutlined /> : <SoundOutlined />}
         onClick={() => onChange(0)}
       />
-      <Slider
-        ariaLabelledByForHandle="settings-notification-sound-label"
-        ariaValueTextFormatterForHandle={() => volumeLabel}
-        min={0}
-        max={100}
-        step={1}
-        value={volume}
-        onChange={nextVolume => applyVolume(nextVolume)}
-        onChangeComplete={nextVolume => applyVolume(nextVolume, { preview: true })}
-      />
+      <Flex flex={1}>
+        <Slider
+          ariaLabelledByForHandle="settings-notification-sound-label"
+          ariaValueTextFormatterForHandle={() => volumeLabel}
+          min={0}
+          max={100}
+          step={1}
+          value={volume}
+          onChange={nextVolume => applyVolume(nextVolume)}
+          onChangeComplete={nextVolume => applyVolume(nextVolume, { preview: true })}
+        />
+      </Flex>
       <InputNumber
         aria-label="Notification sound volume percentage"
         type="number"
@@ -610,15 +622,17 @@ export function SettingsPage({
       ) : null}
 
       {activeSettingsTab === 'notifications' ? (
-        <section>
+        <Flex vertical gap="small" component="section">
           <form onSubmit={event => handleSubmit(event, 'inApp')}>
             <Card
               title={
                 <Flex align="center" gap="small">
                   <BellOutlined aria-hidden="true" />
-                  <Typography.Title id="settings-in-app-heading" level={3}>
-                    In App Notifications
-                  </Typography.Title>
+                  <ConfigProvider theme={NOTIFICATION_TITLE_THEME}>
+                    <Typography.Title id="settings-in-app-heading" level={3}>
+                      In App Notifications
+                    </Typography.Title>
+                  </ConfigProvider>
                 </Flex>
               }
             >
@@ -646,9 +660,11 @@ export function SettingsPage({
               title={
                 <Flex align="center" gap="small">
                   <DesktopOutlined aria-hidden="true" />
-                  <Typography.Title id="settings-desktop-heading" level={3}>
-                    Desktop notifications
-                  </Typography.Title>
+                  <ConfigProvider theme={NOTIFICATION_TITLE_THEME}>
+                    <Typography.Title id="settings-desktop-heading" level={3}>
+                      Desktop notifications
+                    </Typography.Title>
+                  </ConfigProvider>
                 </Flex>
               }
             >
@@ -673,9 +689,11 @@ export function SettingsPage({
             title={
               <Flex align="center" gap="small">
                 <BellOutlined aria-hidden="true" />
-                <Typography.Title id="settings-channel-fallback-heading" level={3}>
-                  Channel fallback
-                </Typography.Title>
+                <ConfigProvider theme={NOTIFICATION_TITLE_THEME}>
+                  <Typography.Title id="settings-channel-fallback-heading" level={3}>
+                    Channel fallback
+                  </Typography.Title>
+                </ConfigProvider>
               </Flex>
             }
           >
@@ -746,9 +764,11 @@ export function SettingsPage({
             title={
               <Flex align="center" gap="small">
                 <SoundOutlined aria-hidden="true" />
-                <Typography.Title id="settings-notification-sound-heading" level={3}>
-                  Notification sound
-                </Typography.Title>
+                <ConfigProvider theme={NOTIFICATION_TITLE_THEME}>
+                  <Typography.Title id="settings-notification-sound-heading" level={3}>
+                    Notification sound
+                  </Typography.Title>
+                </ConfigProvider>
               </Flex>
             }
           >
@@ -763,7 +783,7 @@ export function SettingsPage({
               />
             </Flex>
           </Card>
-        </section>
+        </Flex>
       ) : null}
 
       {activeSettingsTab === 'information' ? (
