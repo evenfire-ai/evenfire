@@ -6388,7 +6388,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyPasswordSuccessAdmissionSchema,
   },
   {
-    version: '0130_oidc_protocol_attempts',
+    version: '0131_oidc_protocol_attempts',
+    // The protocol-attempt migration was unpublished when dev assigned slot 0130.
+    // Preserve databases that recorded the original feature-branch identifier.
+    legacyVersions: ['0130_oidc_protocol_attempts'],
     apply: applyOidcProtocolAttemptSchema,
   },
 ]

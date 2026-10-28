@@ -7,15 +7,14 @@ vi.mock('pg', () => ({
   }),
 }))
 
-const VERSION = '0130_oidc_protocol_attempts'
+const VERSION = '0131_oidc_protocol_attempts'
 
 describe(`${VERSION} migration`, () => {
   it('is registered after the latest development migration', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(VERSION)
-    expect(CONTROL_API_MIGRATIONS.at(-2)?.version).toBe(
-      '0129_workflow_schedules_concurrency_policy'
-    )
+    expect(CONTROL_API_MIGRATIONS.at(-2)?.version).toBe('0130_password_login_success_admission')
+    expect(CONTROL_API_MIGRATIONS.at(-1)?.legacyVersions).toEqual(['0130_oidc_protocol_attempts'])
   })
 
   it('creates only purpose-bound OIDC protocol attempts with encrypted transient proof inputs', async () => {
@@ -76,6 +75,33 @@ describe(`${VERSION} migration`, () => {
       expect.stringContaining('INSERT INTO schema_migrations(version)'),
       [VERSION]
     )
+    expect(release).toHaveBeenCalledOnce()
+  })
+
+  it('records the original feature migration receipt without rerunning its schema', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const applied = CONTROL_API_MIGRATIONS.filter(candidate => candidate.version !== VERSION).map(
+      candidate => ({ version: candidate.version })
+    )
+    applied.push({ version: '0130_oidc_protocol_attempts' })
+    const query = vi.fn(async (sql: string) =>
+      sql.includes('SELECT version FROM schema_migrations')
+        ? { rows: applied, rowCount: applied.length }
+        : { rows: [], rowCount: 0 }
+    )
+    const release = vi.fn()
+
+    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO schema_migrations(version)'),
+      [VERSION]
+    )
+    expect(
+      query.mock.calls.filter(([sql]) =>
+        String(sql).includes('CREATE TABLE IF NOT EXISTS oidc_protocol_attempts')
+      )
+    ).toHaveLength(0)
     expect(release).toHaveBeenCalledOnce()
   })
 })

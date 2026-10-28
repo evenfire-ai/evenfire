@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
-import { initDb } from '../src/db.js'
+import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
 import {
   type OidcProtocolAttemptBinding,
   cancelOidcProtocolAttempt,
@@ -170,5 +170,32 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
       expiresAt: new Date(Date.now() - 60_000),
     })
     expect(await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, expiredState, BINDING)).toBeNull()
+  })
+
+  it('adopts the original feature migration receipt without rerunning its schema', async () => {
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0131_oidc_protocol_attempts'
+    )
+    expect(migration?.legacyVersions).toEqual(['0130_oidc_protocol_attempts'])
+
+    await pool!.query('DROP TABLE oidc_protocol_attempts')
+    await pool!.query('DELETE FROM schema_migrations WHERE version = $1', [migration!.version])
+    await pool!.query(
+      `INSERT INTO schema_migrations(version) VALUES ($1)
+       ON CONFLICT (version) DO NOTHING`,
+      ['0130_oidc_protocol_attempts']
+    )
+
+    await initDb({ connect: () => pool!.connect() })
+
+    const receipt = await pool!.query<{ version: string }>(
+      'SELECT version FROM schema_migrations WHERE version = $1',
+      [migration!.version]
+    )
+    const relation = await pool!.query<{ relation: string | null }>(
+      "SELECT to_regclass('public.oidc_protocol_attempts') AS relation"
+    )
+    expect(receipt.rows).toEqual([{ version: '0131_oidc_protocol_attempts' }])
+    expect(relation.rows[0]?.relation).toBeNull()
   })
 })
