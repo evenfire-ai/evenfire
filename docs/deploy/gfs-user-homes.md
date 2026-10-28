@@ -44,10 +44,11 @@ depends on this alignment. Desktop carries the drive returned by the server.
 The release places `GFS_HOME_DRIVE` in the public base Control API ConfigMap
 and the Minikube override. A missing value disables the reconciler and leaves
 unprovisioned homes pending; there is no `main` fallback. If the drive root is
-not ready, the affected row stays pending with `drive_not_ready`. If an
-existing home's drive differs from the configured drive, inventory reports
-`driveMismatch` and the reconciler leaves the home untouched; changing the
-drive does not create a second home or migrate the existing one.
+not ready, the affected row stays pending with `drive_not_ready`. Do not change
+`GFS_HOME_DRIVE` after rollout: a home keeps the drive it was created on,
+changing the value does not create a second home or migrate the existing one,
+and the reconciler only provisions pending rows with no drive or the configured
+drive.
 
 ## Rollout and per-cluster verification
 
@@ -67,8 +68,8 @@ drive does not create a second home or migrate the existing one.
    `/Users` to a GFS layout. Backfill and provisioning run automatically; a
    60-second tick is a scheduling interval, not a completion deadline.
 4. In each cluster, open the operator home inventory and watch the overall
-   `pending` count fall to zero. Review all `conflict` and `driveMismatch`
-   entries separately. Production follows dev through the existing promotion.
+   `pending` count fall to zero. Review all `conflict` entries separately.
+   Production follows dev through the existing promotion.
 
 The inventory counts registry rows, so `pending = 0` alone does not prove that
 backfill has discovered every active user. Compare the inventory with the
@@ -104,7 +105,7 @@ success nor a failure.
 
 For an operator using the API, the inventory route is
 `GET /api/v1/gfs/user-homes?state=&cursor=&limit=`. It returns `items`,
-`nextCursor`, and total `counts` for the four states and `driveMismatch`.
+`nextCursor`, and total `counts` for the four states.
 The page limit is 1–100, with a default of 50. Invalid state, limit, or cursor
 returns HTTP 400 with `invalid_state`, `invalid_limit`, or `invalid_cursor`.
 `GET /api/v1/gfs/user-homes/:userId` returns `{ home }` or 404
@@ -112,39 +113,51 @@ returns HTTP 400 with `invalid_state`, `invalid_limit`, or `invalid_cursor`.
 
 ## Conflicts and recovery
 
-Use the user detail block as an operator. Do not adopt, overwrite, move, or
-delete a foreign directory to make a conflict disappear.
+Use the user detail block as an operator. Never delete a foreign item or adopt
+it as the home to make a conflict disappear; renaming or moving it out of the
+reserved path in the Control UI GFS browser is allowed.
 
-| Conflict                  | Cause                                                                       | Operator action                                                                                                 |
-| ------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `path_conflict`           | The proposed home path already belongs to a different resource.             | Enter a valid unused folder name and select **Retry**. The existing resource and its contents remain untouched. |
-| `ancestor_grant_conflict` | A non-operator grant or share on the drive root or `/Users` is inheritable. | Review and resolve the exposure with operator authority, then select **Retry**.                                 |
-| `ownership_conflict`      | A bound home's owner grant is missing, narrowed, or no longer inheritable.  | Select **Restore owner access**. Retry cannot restore this grant.                                               |
+| Conflict                              | Cause                                                                                                                              | Operator action                                                                                                                                                                                              |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `path_conflict`, home not yet created | Another item occupies `/Users/<name>`.                                                                                             | Rename or move that item in the GFS browser and select **Retry**, or enter a different valid folder name and select **Retry**. The item and its contents are never changed by the reconciler.                 |
+| `path_conflict`, home already bound   | The bound home is no longer at `/Users/<name>`. This happens only through a manual database change.                               | A bound home root cannot be moved or renamed, even by an operator. An administrator with cluster access corrects the path in the database; move any item occupying the reserved path first, then select **Retry**. |
+| `ancestor_grant_conflict`             | A user, team, agent, or context grant or share on the drive root or `/Users` is inheritable (created before this release, or by a direct database change). | Remove the entry or make it non-inheritable with operator authority, then select **Retry**.                                                                                                                   |
+| `ownership_conflict`                  | A bound home's owner grant is missing, narrowed, or no longer inheritable.                                                         | Select **Restore owner access**, or re-grant the owner all five permissions with inheritance in the grant panel. Retry cannot restore this grant.                                                             |
 
-Retry accepts an optional storage name for `path_conflict` or
-`ancestor_grant_conflict`. An accepted request returns HTTP 202 with a pending
-home; the next reconciler tick attempts provisioning. An invalid name returns
-422 `invalid_name` without changing the row. A non-retryable state returns
-409 `home_not_retryable`; an ownership conflict returns 409
+Retry accepts an optional storage name. For a home that was never bound
+(`path_conflict` or `ancestor_grant_conflict`), a new valid name is reserved;
+an invalid name returns 422 `invalid_name` without changing the row. For a
+bound home, the name cannot change: a different name returns 409
+`home_not_retryable` without changing the row, while no name or the same name
+is accepted. An accepted request returns HTTP 202 with a pending home; the next
+reconciler tick attempts provisioning. Another non-retryable state returns 409
+`home_not_retryable`; an ownership conflict returns 409
 `home_owner_grant_requires_operator_restore`. A missing home returns 404.
 
 Restore owner access is available only for `ownership_conflict`. It restores
 all five owner permissions with inheritance and returns HTTP 200 with the
 ready home. Another state returns 409 `home_not_in_ownership_conflict`; a
-missing home returns 404. A reconciler tick does not restore the grant on its
-own. A non-operator attempting to revoke or narrow the owner grant receives
-403 `home_owner_grant_protected`.
+missing home returns 404. An operator grant update that gives the owner all
+five permissions with inheritance has the same effect and moves the home to
+`ready`; an update that leaves the grant narrowed keeps `ownership_conflict`.
+A reconciler tick never restores the grant on its own. A non-operator
+attempting to revoke or narrow the owner grant receives 403
+`home_owner_grant_protected`.
 
 ## Ancestor access and delegated permissions
 
-Non-operators cannot create inheritable grants or descendant-including shares
-on the drive root or `/Users`: the request returns 409
-`ancestor_home_exposure`. Operators are not subject to that guard. Review
-inheritable non-operator entries at both ancestors before provisioning or
-retiring homes; an operator-created entry can expose a home or block its
-provisioning. Existing GFS authorization applies inheritable ancestor grants
-and shares to descendants (`gfs-controller/src/authz/resolve.ts:91` and
-`gfs-controller/src/authz/resolve.ts:112`).
+Nobody, operators included, can create an inheritable grant or a
+descendant-including share for a user, team, agent, or context on the drive
+root or `/Users`: the request returns 409 `ancestor_home_exposure`, and Control
+UI explains it in the grant panel. GFS authorization applies such entries to
+every descendant (`gfs-controller/src/authz/resolve.ts:91` and
+`gfs-controller/src/authz/resolve.ts:112`), so one entry there would reach every
+home. Operators keep their intrinsic access everywhere, can grant explicit
+non-inheritable access on any folder including the root, `/Users`, and any
+home, and can use inheritance on any other folder. Operator-subject entries
+are not affected. An entry that existed before this release blocks
+provisioning as `ancestor_grant_conflict` until an operator removes it or makes
+it non-inheritable.
 
 Permissions do not cascade when their grantor loses access. If A gives B
 `manage_acl`, B grants C access, and A revokes B, C's entry remains until an
@@ -170,12 +183,11 @@ This includes operator-created grants for those captured agents. An agent
 still associated with another active user or a team is not removed by this
 agent-specific rule; there is no global orphan sweep.
 
-The intended result is that only operators can reach the retained home until
-an operator grants access again. Home-tree cleanup does not remove entries on
-the drive root or `/Users`. Because an operator may create inheritable entries
-there, review those ancestors too before treating a retired home as
-operator-only. A retired user's next Desktop action shows
-`desktop_user_retired`; open views are not forcibly closed.
+The result is that only operators can reach the retained home until an
+operator grants access again; no inheritable entry on the drive root or
+`/Users` can reach it (see the previous section). A retired user's session is
+rejected with 401 by Control API session authentication on the next request,
+and Desktop returns to its sign-in page; open views are not forcibly closed.
 
 ## Rollback and startup repair
 
@@ -188,8 +200,8 @@ After roll-forward, the planned startup repair runs once per Control API
 process start, before its first regular tick, in batches of 50. For ready or
 conflict rows, it cleans home entries for users retired or deleted during the
 window. It marks a ready home with a missing or narrowed owner grant as
-`ownership_conflict`. An operator must use **Restore owner access**; the
-repair does not re-grant it. It is not run on every tick.
+`ownership_conflict`. An operator restores it as described under conflicts;
+the repair does not re-grant it. It is not run on every tick.
 
 Startup repair is conditional on its T1 cost gate: a pass over 10,000 ready
 homes with nothing to repair must finish in under five seconds using index
@@ -200,6 +212,8 @@ repair.
 A hard delete during rollback can also remove the user's agent associations
 before repair runs: the `user_agents` foreign key cascades on deletion
 (`control-api/src/db.ts:321`). The repair may therefore lack the information
-needed to identify that user's agent grants outside the home. Review those
-grants separately using available records; do not assume startup repair removed
-them. Review ancestor entries as described above as well.
+needed to identify that user's agent grants outside the home. The repair still
+removes the home entries and the user's own grants and shares; review that
+user's agent grants outside the home separately using available records, and
+do not assume startup repair removed them. Releases before this one leave the
+same rows when a user is deleted.
