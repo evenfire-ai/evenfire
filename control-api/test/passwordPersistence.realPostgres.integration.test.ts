@@ -1431,6 +1431,11 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     try {
       const completion = completePasswordEvaluation(capture, true, lease)
       await blackhole.commitForwarded
+      const replyDeadline = Date.now() + 2_000
+      while (blackhole.discardedReplyBytes === 0 && Date.now() < replyDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(blackhole.discardedReplyBytes).toBeGreaterThan(0)
       blackhole.failClientAfterCommitForwarded()
       outcome = await completion.then(
         () => new Error('completion unexpectedly acknowledged a withheld COMMIT reply'),

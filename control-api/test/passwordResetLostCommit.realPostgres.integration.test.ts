@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import bcrypt from 'bcryptjs'
 import { randomBytes } from 'node:crypto'
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 import { initDb } from '../src/db.js'
 import { sendPasswordAdmissionError } from '../src/middleware/passwordLoginAdmission.js'
@@ -47,6 +47,94 @@ vi.mock('../src/db.js', async importOriginal => {
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const realPg = adminUrl ? describe : describe.skip
 
+type PasswordResetState = {
+  reset_status: string
+  sibling_status: string
+  password_hash: string
+  owners: number
+}
+
+async function readPasswordResetState(
+  observer: Pool,
+  resetInvitationId: string,
+  siblingInvitationId: string,
+  userId: string
+) {
+  return observer.query<PasswordResetState>(
+    `SELECT i.status AS reset_status,
+            sibling.status AS sibling_status,
+            u.password_hash,
+            (SELECT COUNT(*)::int FROM password_verification_work) AS owners
+       FROM invitations i
+       JOIN invitations sibling ON sibling.id = $2
+       JOIN users u ON u.id = $3
+      WHERE i.id = $1`,
+    [resetInvitationId, siblingInvitationId, userId]
+  )
+}
+
+async function waitForCommitGate(observer: Pool, applicationName: string): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    const activity = await observer.query<{
+      state: string
+      wait_event_type: string | null
+      wait_event: string | null
+      query: string | null
+    }>(
+      `SELECT state, wait_event_type, wait_event, query
+         FROM pg_stat_activity
+        WHERE application_name = $1`,
+      [applicationName]
+    )
+    if (
+      activity.rows.some(
+        row =>
+          row.state === 'active' &&
+          row.wait_event_type === 'Lock' &&
+          row.wait_event === 'advisory' &&
+          row.query?.trim() === 'COMMIT'
+      )
+    ) {
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('PostgreSQL COMMIT did not reach the controlled advisory-lock gate')
+}
+
+async function waitForCommittedPasswordReset(
+  observer: Pool,
+  resetInvitationId: string,
+  siblingInvitationId: string,
+  userId: string
+): Promise<PasswordResetState> {
+  const deadline = Date.now() + 2_000
+  let latest: PasswordResetState | undefined
+  while (Date.now() < deadline) {
+    latest = (
+      await readPasswordResetState(observer, resetInvitationId, siblingInvitationId, userId)
+    ).rows[0]
+    if (
+      latest?.reset_status === 'accepted' &&
+      latest.sibling_status === 'revoked' &&
+      latest.owners === 0
+    ) {
+      return latest
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(
+    `Committed password-reset state was not visible before the observer deadline: ${JSON.stringify(
+      latest && {
+        reset_status: latest.reset_status,
+        sibling_status: latest.sibling_status,
+        owners: latest.owners,
+      }
+    )}`
+  )
+}
+
 realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () => {
   const database = `r2h2_reset_commit_${randomBytes(6).toString('hex')}`
   const oldPassword = 'Synthetic-R2-H2-Old-Password'
@@ -62,6 +150,24 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
   let siblingInvitationId: string
   let userId: string
   let originalHash: string
+  let commitGateClient: PoolClient | undefined
+  let commitGateKey = 0
+  let commitGateHeld = false
+
+  async function releaseCommitGate() {
+    const client = commitGateClient
+    if (!client) return
+    commitGateClient = undefined
+    const wasHeld = commitGateHeld
+    commitGateHeld = false
+    try {
+      if (wasHeld) {
+        await client.query('SELECT pg_advisory_unlock($1::bigint)', [String(commitGateKey)])
+      }
+    } finally {
+      client.release()
+    }
+  }
 
   beforeAll(async () => {
     admin = new Pool({ connectionString: adminUrl })
@@ -98,6 +204,7 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
     try {
       blackhole?.allowReplies()
       await blackhole?.close()
+      await releaseCommitGate()
       if (proxyPool) await endPoolAndWaitForClients(proxyPool)
       if (normalPool) await endPoolAndWaitForClients(normalPool)
       if (observer) await endPoolAndWaitForClients(observer)
@@ -109,72 +216,108 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
 
   it('reports an unknown outcome without replay when reset committed but PostgreSQL reply was lost', async () => {
     holder.unknownCommitOutcomes = 0
-    blackhole = await createPostgresCommitReplyBlackhole(connectionString)
-    proxyPool = new Pool({ connectionString: blackhole.connectionString, max: 4 })
+    commitGateKey = randomBytes(4).readUInt32BE(0) + 1
+    const commitApplicationName = `lost_commit_${randomBytes(6).toString('hex')}`
+    commitGateClient = await observer.connect()
+    try {
+      await normalPool.query(`
+        CREATE FUNCTION hold_lost_commit_until_test_release() RETURNS trigger AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(${commitGateKey}::bigint);
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `)
+      await normalPool.query(`
+        CREATE CONSTRAINT TRIGGER hold_lost_commit_until_test_release
+        AFTER UPDATE ON users DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION hold_lost_commit_until_test_release()
+      `)
+      await commitGateClient.query('SELECT pg_advisory_lock($1::bigint)', [String(commitGateKey)])
+      commitGateHeld = true
 
-    const outcomePromise = withPasswordWorkLease(lease => {
-      holder.pool = proxyPool
-      return setInvitationPasswordForEmail(email, resetInvitationId, newPassword, userId, lease)
-    }).then(
-      value => ({ value }),
-      error => ({ error })
-    )
+      blackhole = await createPostgresCommitReplyBlackhole(connectionString)
+      const proxyUrl = new URL(blackhole.connectionString)
+      proxyUrl.searchParams.set('application_name', commitApplicationName)
+      proxyUrl.searchParams.set('options', '-c lock_timeout=0')
+      proxyPool = new Pool({ connectionString: proxyUrl.toString(), max: 4 })
 
-    await blackhole.commitForwarded
-    const committed = await observer.query(
-      `SELECT i.status AS reset_status,
-              sibling.status AS sibling_status,
-              u.password_hash,
-              (SELECT COUNT(*)::int FROM password_verification_work) AS owners
-         FROM invitations i
-         JOIN invitations sibling ON sibling.id = $2
-         JOIN users u ON u.id = $3
-        WHERE i.id = $1`,
-      [resetInvitationId, siblingInvitationId, userId]
-    )
-    expect(committed.rows[0]).toMatchObject({
-      reset_status: 'accepted',
-      sibling_status: 'revoked',
-      owners: 0,
-    })
-    expect(await bcrypt.compare(newPassword, committed.rows[0].password_hash as string)).toBe(true)
+      const outcomePromise = withPasswordWorkLease(lease => {
+        holder.pool = proxyPool!
+        return setInvitationPasswordForEmail(email, resetInvitationId, newPassword, userId, lease)
+      }).then(
+        value => ({ value }),
+        error => ({ error })
+      )
 
-    const replyDeadline = Date.now() + 2_000
-    while (blackhole.discardedReplyBytes === 0 && Date.now() < replyDeadline) {
-      await new Promise(resolve => setTimeout(resolve, 10))
+      await blackhole.commitForwarded
+      await waitForCommitGate(observer, commitApplicationName)
+      const beforeCommit = (
+        await readPasswordResetState(observer, resetInvitationId, siblingInvitationId, userId)
+      ).rows[0]
+      expect(beforeCommit).toMatchObject({
+        reset_status: 'pending',
+        sibling_status: 'pending',
+        owners: 1,
+        password_hash: originalHash,
+      })
+      expect(await bcrypt.compare(oldPassword, beforeCommit.password_hash)).toBe(true)
+
+      await releaseCommitGate()
+      const committed = await waitForCommittedPasswordReset(
+        observer,
+        resetInvitationId,
+        siblingInvitationId,
+        userId
+      )
+      expect(committed).toMatchObject({
+        reset_status: 'accepted',
+        sibling_status: 'revoked',
+        owners: 0,
+      })
+      expect(await bcrypt.compare(newPassword, committed.password_hash)).toBe(true)
+
+      const replyDeadline = Date.now() + 2_000
+      while (blackhole.discardedReplyBytes === 0 && Date.now() < replyDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(blackhole.discardedReplyBytes).toBeGreaterThan(0)
+      blackhole.failClientAfterCommitForwarded()
+
+      const outcome = await outcomePromise
+      expect(outcome).toMatchObject({
+        error: {
+          status: 503,
+          reason: 'authority_failure',
+          publicError: 'recovery_outcome_unknown',
+        },
+      })
+      if ('error' in outcome) {
+        expect(outcome.error.message).toBe('authority_unavailable')
+        expect(outcome.error.message).not.toMatch(/password|sql|invitation|database/i)
+      }
+      expect(blackhole.commands.filter(command => command === 'COMMIT')).toHaveLength(1)
+      expect(holder.unknownCommitOutcomes).toBe(1)
+
+      const responseApp = express()
+      responseApp.post('/password-reset', (_req, res) => {
+        if ('error' in outcome) sendPasswordAdmissionError(outcome.error, res)
+        else res.status(500).json({ error: 'unexpected successful response' })
+      })
+      const publicResponse = await request(responseApp).post('/password-reset').send({})
+      expect(publicResponse.status).toBe(503)
+      expect(publicResponse.body).toEqual({
+        error: 'recovery_outcome_unknown',
+        retryAfterSeconds: 2,
+      })
+      expect(publicResponse.headers['retry-after']).toBe('2')
+      expect(publicResponse.headers['cache-control']).toBe('no-store')
+      expect(publicResponse.headers['set-cookie']).toBeUndefined()
+    } finally {
+      await releaseCommitGate()
+      await normalPool.query('DROP TRIGGER IF EXISTS hold_lost_commit_until_test_release ON users')
+      await normalPool.query('DROP FUNCTION IF EXISTS hold_lost_commit_until_test_release()')
     }
-    expect(blackhole.discardedReplyBytes).toBeGreaterThan(0)
-    blackhole.failClientAfterCommitForwarded()
-
-    const outcome = await outcomePromise
-    expect(outcome).toMatchObject({
-      error: {
-        status: 503,
-        reason: 'authority_failure',
-        publicError: 'recovery_outcome_unknown',
-      },
-    })
-    if ('error' in outcome) {
-      expect(outcome.error.message).toBe('authority_unavailable')
-      expect(outcome.error.message).not.toMatch(/password|sql|invitation|database/i)
-    }
-    expect(blackhole.commands.filter(command => command === 'COMMIT')).toHaveLength(1)
-    expect(holder.unknownCommitOutcomes).toBe(1)
-
-    const responseApp = express()
-    responseApp.post('/password-reset', (_req, res) => {
-      if ('error' in outcome) sendPasswordAdmissionError(outcome.error, res)
-      else res.status(500).json({ error: 'unexpected successful response' })
-    })
-    const publicResponse = await request(responseApp).post('/password-reset').send({})
-    expect(publicResponse.status).toBe(503)
-    expect(publicResponse.body).toEqual({
-      error: 'recovery_outcome_unknown',
-      retryAfterSeconds: 2,
-    })
-    expect(publicResponse.headers['retry-after']).toBe('2')
-    expect(publicResponse.headers['cache-control']).toBe('no-store')
-    expect(publicResponse.headers['set-cookie']).toBeUndefined()
   }, 20_000)
 
   it('keeps reset proof retryable when PostgreSQL rejects COMMIT definitively', async () => {
