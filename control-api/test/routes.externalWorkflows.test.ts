@@ -349,7 +349,8 @@ describe('routes/external/workflows', () => {
         .get(path)
         .set('x-user-session-token', 'user-session-token')
         .expect(status)
-      expect(mockAuthenticateExternalUserSession).toHaveBeenCalledTimes(2)
+      // One live session validation per request, as in dev (P-7).
+      expect(mockAuthenticateExternalUserSession).toHaveBeenCalledOnce()
       expect(mockPoolQuery).toHaveBeenCalled()
       expect(mockRateLimitCheck).not.toHaveBeenCalled()
     })

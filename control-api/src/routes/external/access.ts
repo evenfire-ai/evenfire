@@ -9,6 +9,7 @@ import {
   type ExternalAuthedRequest,
   requireCompletedExternalSessionAuthenticationWithPublicErrors,
   requireExternalSessionLimiterIdentityWithPublicErrors,
+  requireValidExternalSessionTokenWithPublicErrors,
 } from '../../middleware/externalSessionAuth.js'
 import { requireAuthenticatedExternalUserRateLimitContext } from '../../middleware/externalUserRateLimitPolicy.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
@@ -149,9 +150,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/access/capabilities',
-    requireExternalSessionLimiterIdentityWithPublicErrors,
-    requireAuthenticatedExternalUserRateLimitContext,
-    requireCompletedExternalSessionAuthenticationWithPublicErrors,
+    requireValidExternalSessionTokenWithPublicErrors,
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       try {
         const policy = await resolveEffectiveUserAccessPolicy({
@@ -226,9 +225,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/access/resolve',
-    requireExternalSessionLimiterIdentityWithPublicErrors,
-    requireAuthenticatedExternalUserRateLimitContext,
-    requireCompletedExternalSessionAuthenticationWithPublicErrors,
+    requireValidExternalSessionTokenWithPublicErrors,
     asyncHandler((req, res, next) => requireEffectiveV2Contract('action', req, res, next)),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const body = req.body as Record<string, unknown> | undefined

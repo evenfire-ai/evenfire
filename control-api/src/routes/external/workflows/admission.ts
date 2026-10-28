@@ -1,17 +1,13 @@
 import { attachAccessExecutionBudget } from '../../../middleware/accessExecutionBudget.js'
-import {
-  requireCompletedExternalSessionAuthenticationWithPublicErrors,
-  requireExternalSessionLimiterIdentityWithPublicErrors,
-} from '../../../middleware/externalSessionAuth.js'
-import { requireAuthenticatedExternalUserRateLimitContext } from '../../../middleware/externalUserRateLimitPolicy.js'
+import { requireValidExternalSessionTokenWithPublicErrors } from '../../../middleware/externalSessionAuth.js'
 import { bindCompletedExternalWorkflowCaller } from '../../workflows/shared/auth.js'
 import { workflowTriggerRateLimit } from '../../workflows/shared/rateLimit.js'
 
+// One session validation per request, as in dev and on every other protected
+// route: no limiter sits between identity and policy here.
 export const externalWorkflowReadAdmission = Object.freeze([
   attachAccessExecutionBudget,
-  requireExternalSessionLimiterIdentityWithPublicErrors,
-  requireAuthenticatedExternalUserRateLimitContext,
-  requireCompletedExternalSessionAuthenticationWithPublicErrors,
+  requireValidExternalSessionTokenWithPublicErrors,
   bindCompletedExternalWorkflowCaller,
 ])
 
@@ -20,8 +16,6 @@ export const externalWorkflowReadAdmission = Object.freeze([
 export const externalWorkflowTriggerAdmission = Object.freeze([
   attachAccessExecutionBudget,
   workflowTriggerRateLimit(),
-  requireExternalSessionLimiterIdentityWithPublicErrors,
-  requireAuthenticatedExternalUserRateLimitContext,
-  requireCompletedExternalSessionAuthenticationWithPublicErrors,
+  requireValidExternalSessionTokenWithPublicErrors,
   bindCompletedExternalWorkflowCaller,
 ])
