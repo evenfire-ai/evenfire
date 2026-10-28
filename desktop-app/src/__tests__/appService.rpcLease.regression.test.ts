@@ -648,6 +648,107 @@ describe('temporary AppService RPC lease', () => {
     )
   })
 
+  it('rejects distinct stale A RPC bearer through the public operation after B is accepted', async () => {
+    const firstToken = sessionToken('rpc-lease-user-a')
+    const secondUser = { ...me, id: 'rpc-lease-user-b', email: 'new@example.test' }
+    const secondToken = sessionToken(secondUser.id)
+    const rpcTokenA = 'derived-rpc-bearer-owner-a' // PUBLIC_SYNTHETIC_BEARER_FIXTURE
+    const rpcTokenB = 'derived-rpc-bearer-owner-b' // PUBLIC_SYNTHETIC_BEARER_FIXTURE
+    let loginNumber = 0
+    const dispatchedAuthorization: Array<string | null> = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/v2/password-login')) {
+        loginNumber += 1
+        return credentialResponse(
+          loginNumber === 1 ? firstToken : secondToken,
+          loginNumber === 1 ? me : secondUser
+        )
+      }
+      if (url.endsWith('/api/v1/me')) {
+        return meResponse(url.includes('rest.rpc-lease-b.test') ? secondUser : me)
+      }
+      if (url.endsWith('/api/v1/rpc/token'))
+        return rpcTokenResponse(loginNumber === 1 ? rpcTokenA : rpcTokenB)
+      if (url.endsWith('/api/v1/sandbox-ui/apps')) {
+        dispatchedAuthorization.push(new Headers(init?.headers).get('authorization'))
+        return new Response(JSON.stringify({ apps: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return Promise.reject(new Error(`unexpected HTTP request: ${url}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const config = await import('../config.js')
+    await config.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'http://rest.rpc-lease.test',
+      rpcProxyBaseUrl: 'http://proxy.rpc-lease.test',
+      appName: 'Environment A',
+    })
+    const service = createService()
+    vi.spyOn(service as any, 'resolveRuntimeConfigIfNeeded').mockResolvedValue(undefined)
+    const credentials = new Map<string, string>()
+    keytar.getPassword.mockImplementation(
+      async (service, account) => credentials.get(`${service}::${account}`) ?? null
+    )
+    keytar.setPassword.mockImplementation(async (service, account, value) => {
+      credentials.set(`${service}::${account}`, value)
+    })
+    keytar.deletePassword.mockImplementation(async (service, account) =>
+      credentials.delete(`${service}::${account}`)
+    )
+    await expect(service.passwordLogin(me.email, 'first-password')).resolves.toMatchObject({
+      authenticated: true,
+    })
+
+    const entered = deferred<string>()
+    const release = deferred<void>()
+    const rpcClient = (service as any).rpcClient
+    const listSandboxUiApps = rpcClient.listSandboxUiApps.bind(rpcClient)
+    vi.spyOn(rpcClient, 'listSandboxUiApps').mockImplementation(async (token: string) => {
+      if (token === rpcTokenA) {
+        entered.resolve(token)
+        await release.promise
+      }
+      return listSandboxUiApps(token)
+    })
+
+    // The public AppService operation has already captured A's distinct derived RPC bearer.
+    const pendingA = service.listSandboxUiApps()
+    await expect(entered.promise).resolves.toBe(rpcTokenA)
+
+    const logout = await service.logout()
+    if (logout.kind !== 'committed') throw new Error('session A logout did not commit')
+    await service.saveRuntimeConfig(
+      {
+        externalRestApiBaseUrl: 'http://rest.rpc-lease-b.test',
+        rpcProxyBaseUrl: 'http://proxy.rpc-lease-b.test',
+        appName: 'Environment B',
+      },
+      logout.sessionGeneration
+    )
+    await expect(service.passwordLogin(secondUser.email, 'second-password')).resolves.toMatchObject(
+      {
+        authenticated: true,
+      }
+    )
+    await expect(service.listSandboxUiApps()).resolves.toEqual({ apps: [] })
+    expect(dispatchedAuthorization).toEqual([`Bearer ${rpcTokenB}`])
+
+    const callsBeforeRelease = fetchMock.mock.calls.length
+    release.resolve()
+    await expect(pendingA).rejects.toThrow(
+      'The credential is not owned by the current authenticated session'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(callsBeforeRelease)
+    expect(dispatchedAuthorization).toEqual([`Bearer ${rpcTokenB}`])
+    expect(service.getCachedUserId()).toBe(secondUser.id)
+    await expect(service.listSandboxUiApps()).resolves.toEqual({ apps: [] })
+    expect(dispatchedAuthorization.at(-1)).toBe(`Bearer ${rpcTokenB}`)
+  })
+
   it('rejects a persistent GFS stream bearer held before logout at the fetch dispatch boundary', async () => {
     const firstToken = sessionToken('rpc-lease-user-a')
     const firstUser = { ...me, id: 'rpc-lease-user-a', email: 'first@example.test' }
