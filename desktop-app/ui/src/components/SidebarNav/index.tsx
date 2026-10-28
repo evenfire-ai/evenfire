@@ -382,7 +382,9 @@ export function SidebarNav({
             className="sidebar-collapse-toggle"
             aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            icon={<LeftOutlined aria-hidden="true" />}
+            icon={
+              collapsed ? <RightOutlined aria-hidden="true" /> : <LeftOutlined aria-hidden="true" />
+            }
             onClick={() => onCollapsedChange(!collapsed)}
           />
         </div>

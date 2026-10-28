@@ -1642,6 +1642,14 @@ h3 {
   user-select: none;
 }
 
+.sidebar-logo .sidebar-collapse-toggle {
+  position: absolute;
+  inset-inline-end: calc(-1 * var(--space-2));
+  top: 50%;
+  margin: 0;
+  transform: translateY(-50%);
+}
+
 .sidebar-logo-link {
   display: flex;
   align-items: center;
@@ -2814,7 +2822,7 @@ h3 {
 
 .left-nav.collapsed .sidebar-collapse-toggle {
   position: absolute;
-  right: -4px;
+  inset-inline-end: -4px;
   top: 50%;
   margin: 0;
   margin-top: -14px;

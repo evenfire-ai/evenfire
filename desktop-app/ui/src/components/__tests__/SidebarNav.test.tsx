@@ -174,6 +174,25 @@ describe('SidebarNav logo', () => {
     expect(filesLink?.querySelector('.anticon-hdd')?.getAttribute('aria-hidden')).toBe('true')
   })
 
+  it('points the sidebar toggle toward its action', () => {
+    const onCollapsedChange = vi.fn()
+    const { rerender } = render(
+      <SidebarNav {...baseProps({ collapsed: false, onCollapsedChange })} />
+    )
+
+    const collapseButton = screen.getByRole('button', { name: 'Collapse sidebar' })
+    expect(collapseButton.querySelector('[data-icon="left"]')).not.toBeNull()
+    fireEvent.click(collapseButton)
+    expect(onCollapsedChange).toHaveBeenCalledWith(true)
+
+    rerender(<SidebarNav {...baseProps({ collapsed: true, onCollapsedChange })} />)
+
+    const expandButton = screen.getByRole('button', { name: 'Expand sidebar' })
+    expect(expandButton.querySelector('[data-icon="right"]')).not.toBeNull()
+    fireEvent.click(expandButton)
+    expect(onCollapsedChange).toHaveBeenLastCalledWith(false)
+  })
+
   it('routes a controlled palette request through desktop collapse behavior', () => {
     const onCollapsedChange = vi.fn()
     const { rerender } = render(
