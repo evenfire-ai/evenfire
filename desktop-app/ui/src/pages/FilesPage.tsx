@@ -3161,10 +3161,12 @@ export function FilesPage({
               ) : null}
             </div>
           ) : null}
-          {Object.entries(ctrl.moveSourceParentStatusById ?? {}).map(([resourceId, status]) =>
-            status.rateLimited && status.httpStatus === 429 && status.error ? (
+          {Object.entries(ctrl.moveSourceParentStatusById ?? {}).map(([resourceId, status]) => {
+            if (!status.error || resourceId === current?.resourceId) return null
+            const rateLimited = status.rateLimited && status.httpStatus === 429
+            return (
               <div key={resourceId} role="alert">
-                <StatusBanner tone="warn">
+                <StatusBanner tone={rateLimited ? 'warn' : 'error'}>
                   <span>Could not verify Move permissions: {status.error}</span>
                 </StatusBanner>
                 <Button
@@ -3176,8 +3178,8 @@ export function FilesPage({
                   Retry permission check
                 </Button>
               </div>
-            ) : null
-          )}
+            )
+          })}
           {pendingGfsDeepLinkFailure ? (
             <div role="alert">
               <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />

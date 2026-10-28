@@ -8,6 +8,7 @@ import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
+  affordancesFailureMessage,
   childView,
   listAccessiblePage,
   listChildrenPage,
@@ -1008,5 +1009,92 @@ describe('FilesPage stale permission action oracle', () => {
     const menu = screen.getByRole('menu', { name: 'Actions for Shared folder' })
     expect.soft(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeTruthy()
     client.clear()
+  })
+
+  it('shows one retryable source-parent error for shared rows and retries permission only', async () => {
+    const sharedFiles = await listAccessiblePage([
+      accessibleResource('shared-file-a', 'Shared A.txt', 'file', {
+        parentResourceId: 'shared-source-parent',
+        permissions: ['read'],
+      }),
+      accessibleResource('shared-file-b', 'Shared B.txt', 'file', {
+        parentResourceId: 'shared-source-parent',
+        permissions: ['read'],
+      }),
+    ])
+    const sourceParentError = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'shared-source-parent'
+    )
+    let sourceParentReads = 0
+    const produceAffordances = appServiceAffordanceProducer(resourceId => {
+      if (resourceId !== 'shared-source-parent') {
+        return Promise.resolve(heldPermissionResponse(['read']))
+      }
+      sourceParentReads += 1
+      return sourceParentReads === 1
+        ? Promise.reject(new Error(sourceParentError))
+        : Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
+    })
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    const moveResource = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => sharedFiles),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances,
+          moveResource,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(<FilesPage pendingGfsUri={null} />, { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for Shared A.txt' })
+      await screen.findByRole('button', { name: 'Options for Shared B.txt' })
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Shared A.txt' }))
+
+      const sourceParentKey = desktopQueryKeys.gfsAffordances(
+        'test-environment:user-1:team-1',
+        'shared-source-parent',
+        'main'
+      )
+      await waitFor(() => expect(sourceParentReads).toBe(1))
+      await waitFor(() => expect(client.getQueryState(sourceParentKey)?.status).toBe('error'))
+      const sourceParentCalls = () =>
+        affordances.mock.calls.filter(([resourceId]) => resourceId === 'shared-source-parent')
+
+      expect(screen.getAllByRole('alert')).toHaveLength(1)
+      expect(screen.getByText(/Could not verify Move permissions:/)).toBeTruthy()
+      expect(screen.getAllByRole('button', { name: 'Retry permission check' })).toHaveLength(1)
+      const menu = screen.getByRole('menu', { name: 'Actions for Shared A.txt' })
+      expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+      expect(moveResource).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+      await waitFor(() => expect(sourceParentReads).toBe(2))
+      await waitFor(() => expect(client.getQueryState(sourceParentKey)?.status).toBe('success'))
+
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(sourceParentCalls()).toHaveLength(2)
+      expect(sourceParentCalls()).toEqual([
+        ['shared-source-parent', 'main'],
+        ['shared-source-parent', 'main'],
+      ])
+      expect(
+        within(screen.getByRole('menu', { name: 'Actions for Shared A.txt' })).getByRole(
+          'menuitem',
+          { name: 'Move to' }
+        )
+      ).toBeTruthy()
+      expect(moveResource).not.toHaveBeenCalled()
+    } finally {
+      client.clear()
+    }
   })
 })
