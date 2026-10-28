@@ -225,6 +225,32 @@ describe.each([
   ['inline new-chat', true],
   ['docked conversation', false],
 ])('ComposerPanel %s', (_name, inline) => {
+  it('renders add-context labels through Ant Design menu slots', () => {
+    render(<ComposerPanel inline={inline} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+
+    for (const label of ['Plugins', 'Connectors']) {
+      const item = screen.getByRole('menuitem', { name: new RegExp(label) })
+      const title = item.querySelector('.ant-menu-title-content')
+
+      expect(title?.textContent).toContain(label)
+      expect(title?.classList.contains('ant-menu-title-content-with-extra')).toBe(true)
+      expect(title?.querySelector('.ant-menu-item-extra')).toBeTruthy()
+      expect(title?.querySelector('div')).toBeNull()
+    }
+
+    const agentFilesItem = screen.queryByRole('menuitem', { name: 'Agent Files' })
+    if (agentFilesItem) {
+      const title = agentFilesItem.querySelector('.ant-menu-title-content')
+      expect(title?.textContent).toContain('Agent Files')
+      expect(title?.querySelector('div')).toBeNull()
+      if (title && title.querySelector('[aria-disabled="true"]')) {
+        expect(title.classList.contains('ant-menu-title-content-with-extra')).toBe(true)
+        expect(title.querySelector('.ant-menu-item-extra')).toBeTruthy()
+      }
+    }
+  })
+
   it('grows, caps scrolling, and shrinks its text viewport without covering it with actions', () => {
     const { container, rerender } = render(<ComposerPanel inline={inline} />)
     const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement

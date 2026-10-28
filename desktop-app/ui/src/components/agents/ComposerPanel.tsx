@@ -952,16 +952,15 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           key: 'plugins',
                           icon: <AppstoreOutlined aria-hidden="true" />,
                           label: (
-                            <Flex
-                              align="center"
+                            <span
+                              ref={pluginsItemRef}
                               aria-expanded={composerSubmenu === 'plugins'}
                               aria-haspopup="menu"
-                              justify="space-between"
                             >
-                              <span ref={pluginsItemRef}>Plugins</span>
-                              <RightOutlined aria-hidden="true" />
-                            </Flex>
+                              Plugins
+                            </span>
                           ),
+                          extra: <RightOutlined aria-hidden="true" />,
                           onClick: () => setComposerSubmenu('plugins'),
                           onMouseEnter: () => setComposerSubmenu('plugins'),
                         },
@@ -969,16 +968,15 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           key: 'connectors',
                           icon: <ApiOutlined aria-hidden="true" />,
                           label: (
-                            <Flex
-                              align="center"
+                            <span
+                              ref={connectorsItemRef}
                               aria-expanded={composerSubmenu === 'connectors'}
                               aria-haspopup="menu"
-                              justify="space-between"
                             >
-                              <span ref={connectorsItemRef}>Connectors</span>
-                              <RightOutlined aria-hidden="true" />
-                            </Flex>
+                              Connectors
+                            </span>
                           ),
+                          extra: <RightOutlined aria-hidden="true" />,
                           onClick: () => setComposerSubmenu('connectors'),
                           onMouseEnter: () => setComposerSubmenu('connectors'),
                         },
@@ -987,20 +985,23 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                               {
                                 key: 'agent-files',
                                 icon: <FolderOutlined aria-hidden="true" />,
-                                label: agentFilesDisabled ? (
-                                  <Flex
-                                    align="center"
-                                    aria-disabled="true"
-                                    aria-expanded={composerSubmenu === 'agent-files'}
-                                    aria-haspopup="menu"
-                                    justify="space-between"
+                                label: (
+                                  <span
+                                    ref={agentFilesItemRef}
+                                    aria-disabled={agentFilesDisabled || undefined}
+                                    aria-expanded={
+                                      agentFilesDisabled
+                                        ? composerSubmenu === 'agent-files'
+                                        : undefined
+                                    }
+                                    aria-haspopup={agentFilesDisabled ? 'menu' : undefined}
                                   >
-                                    <span ref={agentFilesItemRef}>Agent Files</span>
-                                    <RightOutlined aria-hidden="true" />
-                                  </Flex>
-                                ) : (
-                                  <span ref={agentFilesItemRef}>Agent Files</span>
+                                    Agent Files
+                                  </span>
                                 ),
+                                extra: agentFilesDisabled ? (
+                                  <RightOutlined aria-hidden="true" />
+                                ) : undefined,
                                 onClick: agentFilesDisabled ? undefined : openAgentFilesModal,
                                 onMouseEnter: () =>
                                   setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null),
