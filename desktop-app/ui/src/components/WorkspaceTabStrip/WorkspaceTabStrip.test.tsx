@@ -2,7 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
-import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { MAX_TAB_TITLE_LEN } from '@constants/workspaceTabs'
 import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
 import {
@@ -20,8 +22,21 @@ import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { WorkspaceTabStrip } from '.'
 import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
 
-afterEach(cleanup)
-beforeEach(installAntdDomEnvironment)
+beforeEach(() => {
+  installAntdDomEnvironment()
+  const style = document.createElement('style')
+  style.dataset.testStyles = 'workspace-tab-strip'
+  style.textContent = `${readFileSync(
+    path.join(process.cwd(), 'ui', 'src', 'styles', 'tokens.css'),
+    'utf8'
+  )}\n${readFileSync(path.join(process.cwd(), 'ui', 'src', 'styles.css'), 'utf8')}`
+  document.head.append(style)
+})
+
+afterEach(() => {
+  cleanup()
+  document.querySelector('[data-test-styles="workspace-tab-strip"]')?.remove()
+})
 
 // Fixtures are derived from the real universal-store producers, never hand-built
 // WorkspaceTab objects — if the store's tab shape changes, these stop compiling
@@ -84,6 +99,41 @@ describe('WorkspaceTabStrip', () => {
     const close = screen.getByRole('button', { name: `Close ${longTitle}` })
     expect(select.getAttribute('aria-selected')).toBe('true')
     expect(close).not.toBe(select)
+  })
+
+  it('keeps legacy native-button rules off Ant Design tab close controls', async () => {
+    await act(async () => {
+      render(
+        <WorkspaceTabStrip
+          tabs={twoChatTabs}
+          activeTabId="one"
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      )
+      await Promise.resolve()
+    })
+
+    const close = screen.getByRole('button', { name: 'Close First chat' })
+    const stylesheet = document.querySelector<HTMLStyleElement>(
+      '[data-test-styles="workspace-tab-strip"]'
+    )?.sheet
+    const nativeButtonSelectors = Array.from(stylesheet?.cssRules ?? [])
+      .filter((rule): rule is CSSStyleRule => 'selectorText' in rule)
+      .flatMap(rule => rule.selectorText.split(',').map(selector => selector.trim()))
+      .filter(selector => selector.startsWith('button'))
+    const globalButtonSelectors = nativeButtonSelectors.filter(selector =>
+      /^button(?=$|:|\s|\[)/.test(selector)
+    )
+
+    expect(globalButtonSelectors.length).toBeGreaterThan(0)
+    expect(
+      globalButtonSelectors.every(selector =>
+        selector.replaceAll('"', "'").includes(":not([class*='ant-'])")
+      )
+    ).toBe(true)
+    expect(globalButtonSelectors.filter(selector => close.matches(selector))).toEqual([])
   })
 
   it('associates the active tab control with its owned surface, and only that one', () => {

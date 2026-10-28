@@ -11441,7 +11441,7 @@ label {
 input,
 textarea,
 select,
-button {
+button:not([class*='ant-']) {
   width: 100%;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-control);
@@ -11465,7 +11465,7 @@ textarea {
   background: var(--control-bg-strong);
 }
 
-button {
+button:not([class*='ant-']) {
   width: auto;
   background: var(--accent);
   border-color: transparent;
@@ -11477,7 +11477,7 @@ button {
   color: var(--accent-contrast);
 }
 
-button:hover:enabled {
+button:not([class*='ant-']):hover:enabled {
   background: var(--accent-strong);
   transform: none;
   filter: none;
@@ -11515,7 +11515,7 @@ button:hover:enabled {
   filter: none;
 }
 
-button:disabled {
+button:not([class*='ant-']):disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -11523,7 +11523,7 @@ button:disabled {
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
-button:focus-visible {
+button:not([class*='ant-']):focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
 }
