@@ -1,5 +1,8 @@
 // E2E_GUARDIAN_IPC_FLOW: Resource mutations and reads are brokered through Electron IPC.
 import { type Page, expect } from '@playwright/test'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 export class DesktopResourceView {
   constructor(private readonly page: Page) {}
@@ -15,10 +18,21 @@ export class DesktopResourceView {
   }
 
   async uploadFile(name: string, bytes: Buffer): Promise<void> {
-    await this.page
-      .getByLabel('Upload file', { exact: true })
-      .setInputFiles({ name, mimeType: 'text/plain', buffer: bytes })
-    await expect(this.page.getByRole('button', { name: `Open ${name}` })).toBeVisible()
+    // Desktop uploads stream from disk: FilesPage resolves the picked file's
+    // real path (`window.clerum.gfs.getPathForFile`) and an in-memory File has
+    // none ("Could not resolve the selected local file"). Pick a real file. The
+    // row appears only after the awaited upload mutation succeeds and refreshes
+    // the listing (FilesPage upload handler, useGfsBrowserController
+    // createFileFromPathMutation), so the file is no longer read once it shows.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-home-upload-'))
+    const filePath = path.join(dir, name)
+    fs.writeFileSync(filePath, bytes)
+    try {
+      await this.page.getByLabel('Upload file', { exact: true }).setInputFiles(filePath)
+      await expect(this.page.getByRole('button', { name: `Open ${name}` })).toBeVisible()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   }
 
   async openShare(name: string): Promise<void> {
