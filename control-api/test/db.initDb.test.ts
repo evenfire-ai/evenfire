@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -66,6 +67,8 @@ describe('db.initDb', () => {
 
   it('applies the triggered_at audit index migration on top of an already-migrated baseline', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return { rows: [{ version: '0001_control_api_baseline' }], rowCount: 1 }
       }
@@ -94,6 +97,8 @@ describe('db.initDb', () => {
 
   it('applies the workflow approval medium schema migration on already-migrated clusters', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -154,6 +159,8 @@ describe('db.initDb', () => {
 
   it('applies the channel-bound medium account index on clusters migrated through provider events', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -211,6 +218,8 @@ describe('db.initDb', () => {
 
   it('applies the usage-tracking baseline on top of all earlier migrations', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -259,6 +268,8 @@ describe('db.initDb', () => {
 
   it('applies workflow usage attribution schema on already usage-migrated clusters', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -309,6 +320,8 @@ describe('db.initDb', () => {
 
   it('applies workflow admin usage attribution schema without creating parallel identities', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -352,6 +365,8 @@ describe('db.initDb', () => {
 
   it('applies workflow run retention columns on already migrated clusters', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -394,6 +409,8 @@ describe('db.initDb', () => {
 
   it('skips workflow run retention migration when already recorded', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -433,6 +450,8 @@ describe('db.initDb', () => {
 
   it('applies workflow trigger shared foundation schema on already retention-migrated clusters', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -497,6 +516,8 @@ describe('db.initDb', () => {
 
   it('adds approval-target team audit schema on already allowed-team-FK migrated clusters', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -576,6 +597,8 @@ describe('db.initDb', () => {
       '0031_control_admin_session_version',
     ]
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: appliedVersions.map(version => ({ version })),
@@ -639,6 +662,8 @@ describe('db.initDb', () => {
       '0032_user_delete_audit_set_null',
     ]
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: appliedVersions.map(version => ({ version })),
@@ -669,6 +694,8 @@ describe('db.initDb', () => {
 
   it('rolls back workflow trigger shared foundation migration when live trigger-bound approvals are malformed', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -720,6 +747,8 @@ describe('db.initDb', () => {
 
   it('drops team workflow grant audit actor FK on already phase-0-migrated clusters', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -765,6 +794,8 @@ describe('db.initDb', () => {
 
   it('enforces workflow approval allowed-team FK on already phase-0-migrated clusters', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -831,6 +862,8 @@ describe('db.initDb', () => {
 
   it('skips migration 0006 when already recorded in schema_migrations', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -870,6 +903,8 @@ describe('db.initDb', () => {
 
   it('applies remaining additive migrations when 0001-0005 are already recorded', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
@@ -930,11 +965,13 @@ describe('db.initDb', () => {
 
     expect(sqls[0]).toContain('SELECT pg_advisory_lock')
     expect(sqls[1]).toBe('BEGIN')
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(1)
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2)
     expect(sqls).toContainEqual(
       expect.stringContaining('CREATE TABLE IF NOT EXISTS schema_migrations')
     )
     expect(sqls).toContain('ROLLBACK')
-    expect(sqls).not.toContain('COMMIT')
+    expect(sqls.indexOf('COMMIT')).toBeLessThan(sqls.indexOf('ROLLBACK'))
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)
   })
@@ -946,6 +983,8 @@ describe('db.initDb', () => {
     ).map(migration => ({ version: migration.version }))
 
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return { rows: priorVersions, rowCount: priorVersions.length }
       }
@@ -961,8 +1000,9 @@ describe('db.initDb', () => {
     expect(sqls).toContainEqual(
       expect.stringContaining('CREATE TABLE IF NOT EXISTS desktop_user_retirement_operations')
     )
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(1)
     expect(sqls).toContain('ROLLBACK')
-    expect(sqls).not.toContain('COMMIT')
+    expect(sqls.indexOf('COMMIT')).toBeLessThan(sqls.indexOf('ROLLBACK'))
     const retirementRecord = clientQuery.mock.calls.find(
       ([, params]) =>
         Array.isArray(params) && params[0] === '0094_desktop_user_retirement_lifecycle'
@@ -972,6 +1012,8 @@ describe('db.initDb', () => {
 
   it('deduplicates pending control-admin invitations before creating the opened-status unique index', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: [
