@@ -140,6 +140,12 @@ beforeEach(() => {
   mocks.query.mockImplementation(async (sql: string) => {
     if (sql.includes('FROM team_members')) return { rows: [] }
     if (sql.includes('FROM gfs_user_homes h')) return { rows: home ? [home] : [] }
+    if (sql.includes('pg_advisory_xact_lock')) return { rows: [] }
+    if (sql.includes('FROM gfs_user_homes WHERE resource_id'))
+      return {
+        rows: home ? [{ user_id: USER, state: home.state, conflict_code: home.conflict_code }] : [],
+      }
+    if (sql.includes('AS protected')) return { rows: [{ protected: false }] }
     if (sql.includes('authority_grants AS'))
       return {
         rows: [

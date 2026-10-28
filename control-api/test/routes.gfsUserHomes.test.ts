@@ -66,8 +66,10 @@ function allowed() {
 }
 
 let restored = false
+let ownerGrantWritten = false
 beforeEach(() => {
   restored = false
+  ownerGrantWritten = false
   mocks.query.mockReset()
   mocks.limiter.mockReset().mockResolvedValue(allowed())
   mocks.query.mockImplementation(async (sql: string) => {
@@ -76,11 +78,17 @@ beforeEach(() => {
     if (sql.includes('FROM gfs_resources') && sql.includes('FOR SHARE'))
       return { rows: [{ resource_id: RESOURCE }] }
     if (sql.includes('SELECT permissions, inherit FROM gfs_grants'))
-      return { rows: [{ permissions: ['read'], inherit: false }] }
-    if (sql.includes('INSERT INTO gfs_grants'))
       return {
-        rows: [{ permissions: ['read', 'write', 'delete', 'share', 'manage_acl'], inherit: true }],
+        rows: [
+          ownerGrantWritten
+            ? { permissions: ['read', 'write', 'delete', 'share', 'manage_acl'], inherit: true }
+            : { permissions: ['read'], inherit: false },
+        ],
       }
+    if (sql.includes('INSERT INTO gfs_grants')) {
+      ownerGrantWritten = true
+      return { rows: [] }
+    }
     if (sql.includes('INSERT INTO gfs_audit')) return { rows: [{ id: '1' }] }
     if (sql.includes('UPDATE gfs_user_homes')) {
       restored = true
@@ -476,14 +484,25 @@ describe('operator user-home routes', () => {
       .expect(200)
     const queries = mocks.query.mock.calls.map(call => String(call[0]))
     expect(queries[0]).toContain('pg_advisory_xact_lock')
+    expect(queries[0]).toContain('gfs:user-home:')
+    expect(queries[1]).toContain('FROM gfs_user_homes')
     expect(queries[1]).toContain('FOR UPDATE')
     expect(queries[3]).toContain('ON CONFLICT (drive, resource_id, subject_type, subject_id)')
     expect(queries[3]).toContain('DO UPDATE SET')
-    expect(queries[4]).toContain('INSERT INTO gfs_audit')
-    expect(queries[5]).toContain("state = 'ready'")
-    expect(queries[6]).toContain('INSERT INTO gfs_audit')
-    expect(mocks.query.mock.calls[4][1][2]).toBe('user_home.conflict_cleared.ownership_conflict')
-    expect(mocks.query.mock.calls[6][1][2]).toBe('user_home.restore_owner')
+    expect(queries[3]).toContain('inherit = true')
+    expect(mocks.query.mock.calls[3][1]).toEqual([
+      'archive',
+      RESOURCE,
+      USER,
+      ['read', 'write', 'delete', 'share', 'manage_acl'],
+    ])
+    expect(queries[4]).toContain('SELECT permissions, inherit FROM gfs_grants')
+    expect(queries[4]).toContain('FOR UPDATE')
+    expect(queries[5]).toContain('INSERT INTO gfs_audit')
+    expect(queries[6]).toContain("state = 'ready'")
+    expect(queries[7]).toContain('INSERT INTO gfs_audit')
+    expect(mocks.query.mock.calls[5][1][2]).toBe('user_home.conflict_cleared.ownership_conflict')
+    expect(mocks.query.mock.calls[7][1][2]).toBe('user_home.restore_owner')
     expect(log).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: USER,

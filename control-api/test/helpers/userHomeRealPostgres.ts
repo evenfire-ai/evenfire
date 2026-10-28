@@ -3,29 +3,37 @@ import { Pool } from 'pg'
 import { initDb } from '../../src/db.js'
 import { endPoolAndWaitForClients } from './realPostgresTeardown.js'
 
-export async function createUserHomeDatabase(adminUrl: string) {
+export async function createUserHomeDatabase(adminUrl: string, admin: Pool) {
   const database = `gfs_home_s2_${randomBytes(6).toString('hex')}`
-  const admin = new Pool({ connectionString: adminUrl })
   await admin.query(`CREATE DATABASE "${database}"`)
-  const url = new URL(adminUrl)
-  url.pathname = `/${database}`
-  const pool = new Pool({ connectionString: url.toString(), max: 8, statement_timeout: 10_000 })
-  await initDb({ connect: () => pool.connect() })
+  let pool: Pool | undefined
+  try {
+    const url = new URL(adminUrl)
+    url.pathname = `/${database}`
+    pool = new Pool({ connectionString: url.toString(), max: 8, statement_timeout: 10_000 })
+    await initDb({ connect: () => pool!.connect() })
+  } catch (error) {
+    try {
+      await endPoolAndWaitForClients(pool)
+      await admin.query(
+        'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+        [database]
+      )
+      await admin.query(`DROP DATABASE "${database}"`)
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'User-home database setup and cleanup failed')
+    }
+    throw error
+  }
   return {
-    admin,
     pool,
     database,
-    async close() {
-      try {
-        await endPoolAndWaitForClients(pool)
-        await admin.query(
-          'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
-          [database]
-        )
-        await admin.query(`DROP DATABASE "${database}"`)
-      } finally {
-        await endPoolAndWaitForClients(admin)
-      }
+    async closeConnections() {
+      await endPoolAndWaitForClients(pool)
+      await admin.query(
+        'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+        [database]
+      )
     },
   }
 }

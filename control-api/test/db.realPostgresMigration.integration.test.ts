@@ -2491,11 +2491,14 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       },
     ]
     const createResource = async (drive: string): Promise<string> => {
+      const rootId = randomUUID()
       const resourceId = randomUUID()
+      // D32 permits inheritable shares below the drive root, not on the root itself.
       await dbPool.query(
-        `INSERT INTO gfs_resources (resource_id, drive, name, kind, path_cache)
-         VALUES ($1, $2, '/', 'directory', '/')`,
-        [resourceId, drive]
+        `INSERT INTO gfs_resources (resource_id, drive, parent_resource_id, name, kind, path_cache)
+         VALUES ($1, $3, NULL, '', 'directory', '/'),
+                ($2, $3, $1, 'batch', 'directory', '/batch')`,
+        [rootId, resourceId, drive]
       )
       return resourceId
     }

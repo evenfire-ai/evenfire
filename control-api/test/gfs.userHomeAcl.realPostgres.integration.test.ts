@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { randomUUID } from 'node:crypto'
-import { Client, type Pool } from 'pg'
+import { Client, Pool } from 'pg'
 import request from 'supertest'
 import { withTransaction } from '../src/db.js'
 import { lockUserHome, restoreUserHomeOwnerGrant } from '../src/gfs/userHomeOwnerRestore.js'
@@ -40,6 +40,7 @@ const describeRealPostgres = adminUrl ? describe : describe.skip
 const ALL = ['read', 'write', 'delete', 'manage_acl', 'share']
 
 describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
+  let adminPool: Pool
   let database: Awaited<ReturnType<typeof createUserHomeDatabase>>
   let drive: string
   let root: string
@@ -49,7 +50,8 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
   let app: express.Express
 
   beforeAll(async () => {
-    database = await createUserHomeDatabase(adminUrl!)
+    adminPool = new Pool({ connectionString: adminUrl! })
+    database = await createUserHomeDatabase(adminUrl!, adminPool)
     holder.pool = database.pool
     admin = randomUUID()
     await database.pool.query(
@@ -72,8 +74,15 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    holder.pool = undefined
-    await database?.close()
+    try {
+      holder.pool = undefined
+      if (database) {
+        await database.closeConnections()
+        await adminPool.query(`DROP DATABASE "${database.database}"`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   }, 60_000)
 
   beforeEach(async () => {

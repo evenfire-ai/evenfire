@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { writeFile } from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
-import { Client } from 'pg'
+import { Client, Pool } from 'pg'
 import {
   GfsUserHomeReconciler,
   STARTUP_OWNER_SQL,
@@ -13,12 +13,21 @@ const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('startup user-home repair cost on PostgreSQL', () => {
+  let adminPool: Pool
   let database: Awaited<ReturnType<typeof createUserHomeDatabase>>
   beforeAll(async () => {
-    database = await createUserHomeDatabase(adminUrl!)
+    adminPool = new Pool({ connectionString: adminUrl! })
+    database = await createUserHomeDatabase(adminUrl!, adminPool)
   }, 60_000)
   afterAll(async () => {
-    await database?.close()
+    try {
+      if (database) {
+        await database.closeConnections()
+        await adminPool.query(`DROP DATABASE "${database.database}"`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   }, 60_000)
 
   it('scans 10000 healthy homes in under five seconds using indexes', async () => {

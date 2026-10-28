@@ -103,7 +103,7 @@ describeRealPostgres('GFS governed roots on real PostgreSQL', () => {
       }
       for (const role of createdRoles) await adminPool.query(`DROP ROLE ${quoteIdent(role)}`)
     } finally {
-      await endPoolAndWaitForClients(adminPool)
+      await adminPool?.end()
     }
   }, 60_000)
 

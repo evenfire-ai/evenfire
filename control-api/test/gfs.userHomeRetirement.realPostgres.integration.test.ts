@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { randomUUID } from 'node:crypto'
-import type { Pool } from 'pg'
+import { Pool } from 'pg'
 import pino from 'pino'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -45,13 +45,15 @@ const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('user-home retirement on PostgreSQL', () => {
+  let adminPool: Pool
   let database: Awaited<ReturnType<typeof createUserHomeDatabase>>
   let admin: string
   let app: express.Express
   const actor = () => ({ kind: 'control_admin' as const, controlAdminId: admin })
 
   beforeAll(async () => {
-    database = await createUserHomeDatabase(adminUrl!)
+    adminPool = new Pool({ connectionString: adminUrl! })
+    database = await createUserHomeDatabase(adminUrl!, adminPool)
     holder.pool = database.pool
     admin = randomUUID()
     await database.pool.query(
@@ -71,8 +73,15 @@ describeRealPostgres('user-home retirement on PostgreSQL', () => {
     app.use(createAdminUsersRouter({} as K8sGateway))
   }, 60_000)
   afterAll(async () => {
-    holder.pool = undefined
-    await database?.close()
+    try {
+      holder.pool = undefined
+      if (database) {
+        await database.closeConnections()
+        await adminPool.query(`DROP DATABASE "${database.database}"`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   }, 60_000)
 
   async function fixture() {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { hashSync } from 'bcryptjs'
 import { randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
@@ -8,6 +8,7 @@ import { provisionUserHome } from '../src/gfs/userHomeProvisioner.js'
 import { rootLogger } from '../src/observability/logger.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
 import { GfsUserHomeReconciler } from '../src/services/gfsUserHomeReconciler.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import {
   createDrive,
   createUser,
@@ -19,18 +20,41 @@ const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('automatic user-home backfill on PostgreSQL', () => {
+  let adminPool: Pool
   let database: Awaited<ReturnType<typeof createUserHomeDatabase>>
+  let databaseOpen = false
   let drive: string
+
+  async function closeDatabase() {
+    if (!databaseOpen) return
+    databaseOpen = false
+    await database.closeConnections()
+    await adminPool.query(`DROP DATABASE "${database.database}"`)
+  }
+
+  beforeAll(async () => {
+    if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
+    adminPool = new Pool({ connectionString: adminUrl })
+  })
 
   beforeEach(async () => {
     if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
-    database = await createUserHomeDatabase(adminUrl)
+    database = await createUserHomeDatabase(adminUrl, adminPool)
+    databaseOpen = true
     drive = `homes-${randomUUID()}`
     await createDrive(database.pool, drive)
   }, 60_000)
 
   afterEach(async () => {
-    await database?.close()
+    await closeDatabase()
+  }, 60_000)
+
+  afterAll(async () => {
+    try {
+      await closeDatabase()
+    } finally {
+      await adminPool?.end()
+    }
   }, 60_000)
 
   it('backfills 250 active users across ticks, insertion and restart without enrolling a retired user', async () => {
@@ -202,7 +226,7 @@ describeRealPostgres('automatic user-home backfill on PostgreSQL', () => {
       held?.release()
       rootLogger.level = oldLevel
       logger[streamSymbol] = oldStream
-      await limitedPool.end()
+      await endPoolAndWaitForClients(limitedPool)
     }
   }, 60_000)
 
@@ -262,7 +286,7 @@ describeRealPostgres('automatic user-home backfill on PostgreSQL', () => {
       await worker.tick()
       expect(await homeState(database.pool, user)).toMatchObject({ state: 'ready', drive })
     } finally {
-      await constrainedPool.end()
+      await endPoolAndWaitForClients(constrainedPool)
     }
   })
 })
