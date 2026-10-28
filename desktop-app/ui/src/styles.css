@@ -13697,16 +13697,27 @@ pre {
   flex: 1 1 auto;
   min-height: 0;
   /* min-width:0 establishes a 0 width-floor so the embedded chat's min-content
-     can't inflate this fixed rail wider than the drawer; overflow-x:hidden clips
-     any residual. Per CSS spec `overflow-y:auto` with a `visible` overflow-x
-     would compute overflow-x to `auto` and surface a horizontal scrollbar — this
-     pins it to `hidden`. The full-screen route gets the same floor/clip from
-     `.chat-view-surface`, which the drawer's <ChatPage> renders outside of. */
+     can't inflate this fixed rail wider than the drawer. Keep this wrapper
+     clipped; the active conversation thread below owns its vertical scroll. The
+     full-screen route gets the same floor/clip from `.chat-view-surface`, which
+     the drawer's <ChatPage> renders outside of. */
   min-width: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+/* Ant Design's Drawer section and body both default to overflow:auto. In this
+   inline chat rail that creates nested scrollbars around the conversation.
+   Keep the structural containers clipped so `.chat-thread` is the sole scroll
+   owner for a session; the workspace's own non-chat panels retain their local
+   scrolling behavior. The extra ancestor selector gives this scoped override
+   higher specificity than Ant Design's generated Drawer defaults. */
+.chat-drawer .ant-drawer .ant-drawer-section,
+.chat-drawer .ant-drawer .ant-drawer-body {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* Open-chats selector in the drawer header — a thin dropdown over chatViewTabs.

@@ -33,12 +33,27 @@ function ruleBody(selector: string): string {
 }
 
 describe('chat drawer — no horizontal overflow', () => {
-  it('gives the drawer scroll host a 0 width-floor and clips overflow-x', () => {
+  it('clips the drawer surface so it cannot create a second scrollbar', () => {
     const body = ruleBody('.chat-drawer__surface')
     expect(body).toMatch(/min-width:\s*0/)
-    expect(body).toMatch(/overflow-x:\s*hidden/)
-    // overflow-y stays scrollable — only the horizontal axis is clipped.
-    expect(body).toMatch(/overflow-y:\s*auto/)
+    expect(body).toMatch(/overflow:\s*hidden/)
+    expect(body).not.toMatch(/overflow-[xy]:\s*(auto|scroll)/)
+  })
+
+  it('leaves the active conversation as the drawer’s only scroll owner', () => {
+    const drawerBody = ruleBody(
+      '.chat-drawer .ant-drawer .ant-drawer-section,\n.chat-drawer .ant-drawer .ant-drawer-body'
+    )
+    expect(drawerBody).toMatch(/min-width:\s*0/)
+    expect(drawerBody).toMatch(/min-height:\s*0/)
+    expect(drawerBody).toMatch(/overflow:\s*hidden/)
+
+    const sessionSlot = ruleBody('.agent-workspace-body-slot--session')
+    expect(sessionSlot).toMatch(/overflow:\s*hidden/)
+
+    const thread = ruleBody('.agent-workspace-shell .chat-thread')
+    expect(thread).toMatch(/overflow-y:\s*auto/)
+    expect(thread).toMatch(/overflow-x:\s*hidden/)
   })
 
   it('propagates the width-floor down the drawer chat body chain', () => {

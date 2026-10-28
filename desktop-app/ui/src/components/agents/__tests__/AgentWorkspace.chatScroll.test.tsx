@@ -133,10 +133,12 @@ function WorkspaceHarness({
   activeChatId,
   messages = baseMessages,
   chatMessagesLoading = false,
+  scrollContainer = null,
 }: {
   activeChatId: string
   messages?: AgentChatMessage[]
   chatMessagesLoading?: boolean
+  scrollContainer?: HTMLElement | null
 }) {
   const groupedMessages = messages.reduce<
     Array<{ role: 'user' | 'assistant' | 'system'; items: AgentChatMessage[] }>
@@ -233,7 +235,7 @@ function WorkspaceHarness({
                 messages={messages}
                 chatMessagesLoading={chatMessagesLoading}
               >
-                <AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />
+                <AgentWorkspace mode="chat" scrollContainerRef={{ current: scrollContainer }} />
               </ChatActionsProvider>
             </ChatThreadStateProvider>
           </ChatListProvider>
@@ -284,6 +286,28 @@ beforeEach(() => {
 })
 
 describe('AgentWorkspace chat scroll control', () => {
+  it('hides and restores the chat navigation from the active thread scroll', () => {
+    const container = document.createElement('div')
+    document.body.append(container)
+    const view = render(<WorkspaceHarness activeChatId="chat-a" scrollContainer={container} />, {
+      container,
+    })
+    const { thread, setScrollTop } = setScrollableThread()
+    const workspace = container.querySelector('.agent-page')
+    expect(workspace?.classList.contains('chat-scroll-nav-visible')).toBe(true)
+
+    setScrollTop(50)
+    fireEvent.scroll(thread, { bubbles: false })
+    expect(workspace?.classList.contains('chat-scroll-nav-visible')).toBe(false)
+
+    setScrollTop(35)
+    fireEvent.scroll(thread, { bubbles: false })
+    expect(workspace?.classList.contains('chat-scroll-nav-visible')).toBe(true)
+
+    view.unmount()
+    container.remove()
+  })
+
   it('delays the control for each chat and never carries A visibility into B', async () => {
     vi.useFakeTimers()
     const container = document.createElement('div')

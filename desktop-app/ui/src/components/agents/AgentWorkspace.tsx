@@ -398,10 +398,15 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
 
     const contentPanel = scrollContainerRef.current
     if (!contentPanel) return
+    // The conversation thread owns vertical scrolling in both the full-screen
+    // chat and the chat drawer. The supplied container remains the fallback for
+    // layouts that do not render a thread yet.
+    const scrollTarget =
+      contentPanel.querySelector<HTMLElement>('.agent-workspace-shell .chat-thread') ?? contentPanel
 
-    let lastScrollTop = contentPanel.scrollTop
+    let lastScrollTop = scrollTarget.scrollTop
     const onScroll = () => {
-      const nextScrollTop = contentPanel.scrollTop
+      const nextScrollTop = scrollTarget.scrollTop
       const scrollDelta = nextScrollTop - lastScrollTop
       const nearTop = nextScrollTop <= 24
 
@@ -416,9 +421,9 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
       lastScrollTop = nextScrollTop
     }
 
-    contentPanel.addEventListener('scroll', onScroll, { passive: true })
-    return () => contentPanel.removeEventListener('scroll', onScroll)
-  }, [isChatScrollNavMode, scrollContainerRef])
+    scrollTarget.addEventListener('scroll', onScroll, { passive: true })
+    return () => scrollTarget.removeEventListener('scroll', onScroll)
+  }, [activeChatId, isChatScrollNavMode, scrollContainerRef])
 
   return (
     <section
