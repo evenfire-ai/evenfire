@@ -76,9 +76,22 @@ export function GfsDelegationPanel({
   )
   const roleOptions = canOfferEditor ? ROLE_OPTIONS : ROLE_OPTIONS.slice(0, 1)
 
+  const permissionDenied =
+    !affordances.canDelegate && !permissionCheckPending && !permissionCheckFailed
+
   useEffect(() => {
+    if (permissionDenied) {
+      if (subjectKeys.length > 0) {
+        setSubjectKeys([])
+      }
+      setRole('read')
+      setInherit(true)
+      setError(null)
+      onDetailViewChange?.(false)
+      return
+    }
     onDetailViewChange?.(subjectKeys.length > 0)
-  }, [onDetailViewChange, subjectKeys.length])
+  }, [onDetailViewChange, permissionDenied, subjectKeys.length])
 
   function changeSubjects(nextKeys: string[]) {
     setSubjectKeys(nextKeys)

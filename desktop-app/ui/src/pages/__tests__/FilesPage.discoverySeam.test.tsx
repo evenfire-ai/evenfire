@@ -1109,5 +1109,66 @@ describe('FilesPage against the real GFS browser controller', () => {
     expect(shareButtonAgain.disabled).toBe(true)
     fireEvent.click(shareButtonAgain)
     expect(grant).toHaveBeenCalledTimes(2)
+
+    const freshDenied = delegationAffordances(new Set(['read']), false)
+    const denialRefresh = deferred<typeof freshPositive>()
+    nextPermissionRefresh = denialRefresh.promise
+    act(() => {
+      void queryClient.invalidateQueries({ exact: true, queryKey: affordancesKey })
+    })
+    await waitFor(() => {
+      expect(queryClient.getQueryState(affordancesKey)?.fetchStatus).toBe('fetching')
+    })
+    expect(subjectInput.isConnected).toBe(true)
+    expect(selectedAgain.isConnected).toBe(true)
+    expect(roleSelect.textContent).toContain('Editor')
+    expect(inheritanceCheckbox.checked).toBe(false)
+    expect(within(dialog).getByText(/share attempt failed/)).toBeTruthy()
+    expect(shareButtonAgain.disabled).toBe(true)
+
+    await act(async () => denialRefresh.resolve(freshDenied))
+
+    expect(await within(dialog).findByText('Read-only access')).toBeTruthy()
+    expect(await within(dialog).findByText('People with access')).toBeTruthy()
+    expect(within(dialog).queryByRole('button', { name: 'Share' })).toBeNull()
+    expect(subjectInput.isConnected).toBe(false)
+    expect(selectedAgain.isConnected).toBe(false)
+    expect(grant).toHaveBeenCalledTimes(2)
+    expect(emptyState.isConnected).toBe(true)
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+
+    const restoredPermission = deferred<typeof freshPositive>()
+    nextPermissionRefresh = restoredPermission.promise
+    act(() => {
+      void queryClient.invalidateQueries({ exact: true, queryKey: affordancesKey })
+    })
+    await waitFor(() => {
+      expect(queryClient.getQueryState(affordancesKey)?.fetchStatus).toBe('fetching')
+    })
+
+    await act(async () => restoredPermission.resolve(freshPositive))
+
+    const restoredInput = await within(dialog).findByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
+    expect(restoredInput.isConnected).toBe(true)
+    expect(within(dialog).queryByText('chatllm')).toBeNull()
+    expect(within(dialog).queryByText(/share attempt failed/)).toBeNull()
+    expect(await within(dialog).findByText('People with access')).toBeTruthy()
+    await selectAgent(restoredInput)
+    const restoredRole = within(dialog).getByRole('button', {
+      name: 'Access role for selected recipients',
+    })
+    expect(restoredRole.textContent).toContain('Read')
+    expect(
+      (
+        within(dialog).getByRole('checkbox', {
+          name: 'Include contents of this folder',
+        }) as HTMLInputElement
+      ).checked
+    ).toBe(true)
+    expect(within(dialog).queryByText(/share attempt failed/)).toBeNull()
+    expect(emptyState.isConnected).toBe(true)
+    expect(browser.getAttribute('aria-busy')).toBe('false')
   })
 })
