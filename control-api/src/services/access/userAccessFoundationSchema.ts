@@ -333,53 +333,51 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
     AS $$
-    DECLARE
-      row_value RECORD;
-      revision RECORD;
+    DECLARE revision RECORD;
     BEGIN
-      FOR row_value IN
-        SELECT triggerer_actor_type, triggerer_user_id::TEXT,
-               triggerer_team_id::TEXT, usage_team_id
-          FROM (VALUES (
-            NEW.triggerer_actor_type, NEW.triggerer_user_id,
-            NEW.triggerer_team_id, NEW.usage_team_id
-          )) AS current_row(
-            triggerer_actor_type, triggerer_user_id,
-            triggerer_team_id, usage_team_id
-          )
-         WHERE TG_OP <> 'DELETE'
-        UNION ALL
-        SELECT triggerer_actor_type, triggerer_user_id::TEXT,
-               triggerer_team_id::TEXT, usage_team_id
-          FROM (VALUES (
-            OLD.triggerer_actor_type, OLD.triggerer_user_id,
-            OLD.triggerer_team_id, OLD.usage_team_id
-          )) AS prior_row(
-            triggerer_actor_type, triggerer_user_id,
-            triggerer_team_id, usage_team_id
-          )
-         WHERE TG_OP <> 'INSERT'
+      -- Order current and prior attribution together, as for live runs.
+      FOR revision IN
+        SELECT subject_type, subject_id
+          FROM (
+            SELECT triggerer_actor_type, triggerer_user_id::TEXT,
+                   triggerer_team_id::TEXT, usage_team_id
+              FROM (VALUES (
+                NEW.triggerer_actor_type, NEW.triggerer_user_id,
+                NEW.triggerer_team_id, NEW.usage_team_id
+              )) AS current_row(
+                triggerer_actor_type, triggerer_user_id,
+                triggerer_team_id, usage_team_id
+              )
+             WHERE TG_OP <> 'DELETE'
+            UNION ALL
+            SELECT triggerer_actor_type, triggerer_user_id::TEXT,
+                   triggerer_team_id::TEXT, usage_team_id
+              FROM (VALUES (
+                OLD.triggerer_actor_type, OLD.triggerer_user_id,
+                OLD.triggerer_team_id, OLD.usage_team_id
+              )) AS prior_row(
+                triggerer_actor_type, triggerer_user_id,
+                triggerer_team_id, usage_team_id
+              )
+             WHERE TG_OP <> 'INSERT'
+          ) AS row_value
+          CROSS JOIN LATERAL (VALUES
+            ('team', row_value.triggerer_team_id),
+            ('team', CASE
+               WHEN row_value.usage_team_id = 'control-plane-admin-ui' THEN NULL
+               ELSE row_value.usage_team_id
+             END),
+            ('user', CASE
+               WHEN row_value.triggerer_actor_type = 'user'
+                 THEN row_value.triggerer_user_id
+             END)
+          ) AS revision_subjects(subject_type, subject_id)
+         WHERE subject_id IS NOT NULL AND subject_id <> ''
+         ORDER BY subject_type, subject_id
       LOOP
-        FOR revision IN
-          SELECT subject_type, subject_id
-            FROM (VALUES
-              ('team', row_value.triggerer_team_id),
-              ('team', CASE
-                 WHEN row_value.usage_team_id = 'control-plane-admin-ui' THEN NULL
-                 ELSE row_value.usage_team_id
-               END),
-              ('user', CASE
-                 WHEN row_value.triggerer_actor_type = 'user'
-                   THEN row_value.triggerer_user_id
-               END)
-            ) AS revision_subjects(subject_type, subject_id)
-           WHERE subject_id IS NOT NULL AND subject_id <> ''
-           ORDER BY subject_type, subject_id
-        LOOP
-          PERFORM authorization_bump_subject_revision(
-            revision.subject_type, revision.subject_id
-          );
-        END LOOP;
+        PERFORM authorization_bump_subject_revision(
+          revision.subject_type, revision.subject_id
+        );
       END LOOP;
       RETURN COALESCE(NEW, OLD);
     END;
@@ -643,10 +641,12 @@ async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> 
     REVOKE ALL ON FUNCTION authorization_bump_user_revision(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_revision(UUID) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_resource_revision(TEXT, TEXT, TEXT) FROM PUBLIC;
-    GRANT EXECUTE ON FUNCTION authorization_bump_user_revision(UUID) TO control_api_runtime;
-    GRANT EXECUTE ON FUNCTION authorization_bump_team_revision(UUID) TO control_api_runtime;
-    GRANT EXECUTE ON FUNCTION authorization_bump_resource_revision(TEXT, TEXT, TEXT)
-      TO control_api_runtime;
+    -- Triggers call these as their definer; the runtime only reads revisions.
+    -- Explicit revocation also repairs grants retained by CREATE OR REPLACE.
+    REVOKE ALL ON FUNCTION authorization_bump_user_revision(UUID) FROM control_api_runtime;
+    REVOKE ALL ON FUNCTION authorization_bump_team_revision(UUID) FROM control_api_runtime;
+    REVOKE ALL ON FUNCTION authorization_bump_resource_revision(TEXT, TEXT, TEXT)
+      FROM control_api_runtime;
   `)
 }
 

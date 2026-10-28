@@ -399,6 +399,67 @@ describeRealPostgres('revision writers share one lock order on real PostgreSQL',
     }
   )
 
+  it.each(['removal', 'change'] as const)(
+    'orders OLD and NEW audit subjects together for a team %s',
+    async operation => {
+      const {
+        users: [user],
+        teams,
+        resources: [resource],
+        drive,
+      } = await fixture()
+      const affectedTeams = operation === 'removal' ? teams.slice(0, 1) : teams
+      for (const team of affectedTeams) await grant(drive, resource!, 'team', team)
+      await grant(drive, resource!, 'user', user!)
+      const runId = randomUUID()
+      await databasePool.query(
+        `INSERT INTO workflow_runs_audit(
+           run_id, run_namespace, run_name, recipe_namespace, recipe_name,
+           triggerer_team_id, triggerer_user_id, triggerer_actor_type,
+           trigger_source, idempotency_key, triggered_at, completed_at,
+           final_phase, step_count, snapshot_sha
+         ) VALUES (
+           $1, 'revision', $1::uuid::text, 'revision', 'audit-order',
+           $2, $3, 'user', 'onDemand', $1::uuid::text, NOW(), NOW(),
+           'Succeeded', 0, 'audit-order-witness'
+         )`,
+        [runId, teams[0], user]
+      )
+      const beforeTeams = await Promise.all(affectedTeams.map(team => revision('team', team)))
+      const beforeUser = await revision('user', user!)
+      const beforeResource = await revision('resource', resource!)
+      const nextTeam = operation === 'removal' ? null : teams[1]
+      await barrier('revision-first', 'team', teams[0]!, 1)
+      await stagedWriters(
+        client =>
+          client.query('UPDATE gfs_resources SET name = name || $2 WHERE resource_id = $1', [
+            resource,
+            '-audit-order',
+          ]),
+        // NULL is also the row image produced by the audit team's FK
+        // ON DELETE SET NULL action. Both images must share one sort.
+        client =>
+          client.query('UPDATE workflow_runs_audit SET triggerer_team_id = $2 WHERE run_id = $1', [
+            runId,
+            nextTeam,
+          ])
+      )
+      for (const [index, team] of affectedTeams.entries()) {
+        expect(await revision('team', team)).toBe(beforeTeams[index]! + 2)
+      }
+      expect(await revision('user', user!)).toBe(beforeUser + 3)
+      expect(await revision('resource', resource!)).toBe(beforeResource + 1)
+      expect(
+        (
+          await databasePool.query(
+            'SELECT triggerer_team_id FROM workflow_runs_audit WHERE run_id = $1',
+            [runId]
+          )
+        ).rows
+      ).toEqual([{ triggerer_team_id: nextTeam }])
+    }
+  )
+
   for (const kind of ['grant', 'share'] as const) {
     it.each(['user IDs', 'subject types'] as const)(
       `orders ${kind} batch %s with opposite overlapping request orders`,

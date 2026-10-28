@@ -871,6 +871,30 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         })
         await runtimeClient.query('ROLLBACK TO SAVEPOINT direct_revision_write')
       }
+      const directBumpResults: Array<string | undefined> = []
+      for (const statement of [
+        'SELECT authorization_bump_user_revision($1::uuid)',
+        'SELECT authorization_bump_team_revision($1::uuid)',
+        "SELECT authorization_bump_resource_revision('synthetic-od6', 'gfs_resource', $1::text)",
+      ]) {
+        await runtimeClient.query('SAVEPOINT direct_revision_bump')
+        try {
+          await runtimeClient.query(statement, [teamId])
+          directBumpResults.push('allowed')
+        } catch (error) {
+          directBumpResults.push((error as { code?: string }).code)
+        }
+        await runtimeClient.query('ROLLBACK TO SAVEPOINT direct_revision_bump')
+      }
+      expect(directBumpResults).toEqual(['42501', '42501', '42501'])
+      expect(
+        (
+          await runtimeClient.query(
+            'SELECT revision::text FROM authorization_team_revisions WHERE team_id = $1',
+            [teamId]
+          )
+        ).rows
+      ).toEqual(bumped.rows)
     } finally {
       await runtimeClient.query('ROLLBACK')
       runtimeClient.release()
