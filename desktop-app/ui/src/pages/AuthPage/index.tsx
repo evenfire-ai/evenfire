@@ -163,9 +163,9 @@ export function AuthPage() {
                     disabled={busy || forgotPasswordBusy}
                     htmlType="button"
                     onClick={() => void handleForgotPasswordClick()}
-                    type="link"
+                    type="text"
                   >
-                    Forgot password
+                    <Typography.Text type="secondary">Forgot password</Typography.Text>
                   </Button>
                   {backendSwitchHint ? (
                     <Alert

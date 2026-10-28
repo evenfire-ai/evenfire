@@ -511,7 +511,11 @@ describe('AuthPage', () => {
     const setStatus = vi.fn()
     renderAuthPage({ email: ' Person@Example.COM ', setStatus })
 
-    await user.click(screen.getByRole('button', { name: 'Forgot password' }))
+    const forgotPasswordButton = screen.getByRole('button', { name: 'Forgot password' })
+    expect(forgotPasswordButton.classList.contains('ant-btn-variant-text')).toBe(true)
+    expect(forgotPasswordButton.querySelector('.ant-typography-secondary')).not.toBeNull()
+
+    await user.click(forgotPasswordButton)
     expect(openForgotPassword).toHaveBeenCalledWith('person@example.com')
     expect(
       (screen.getByRole('button', { name: 'Forgot password' }) as HTMLButtonElement).disabled
