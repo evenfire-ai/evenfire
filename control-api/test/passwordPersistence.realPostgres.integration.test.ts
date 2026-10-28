@@ -1,22 +1,30 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
 import { spawn } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
-import { applyPasswordAdmissionSchema } from '../src/services/auth/passwordAdmissionSchema.js'
+import {
+  applyPasswordAdmissionSchema,
+  applyPasswordSuccessAdmissionSchema,
+} from '../src/services/auth/passwordAdmissionSchema.js'
 import {
   passwordIdentifierKey,
   PASSWORD_ADMISSION_POLICY as policy,
 } from '../src/services/auth/passwordAdmissionState.js'
 import {
+  cancelUnstartedPasswordEvaluation,
   capturePasswordEvaluation,
   cleanupPasswordIdentifierState,
   completePasswordEvaluation,
+  markPasswordEvaluationRunning,
   reservePasswordPace,
   verifyMemberPassword,
 } from '../src/services/auth/passwordCredentialVerification.js'
-import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
+import {
+  acquirePasswordWork,
+  releasePasswordWork,
+} from '../src/services/auth/passwordWorkOwnership.js'
 import {
   acceptInvitationForEmail,
   createSilentInvitationForTeams,
@@ -30,6 +38,7 @@ import {
   createPasswordResetInvitation,
   createSilentPasswordResetInvitation,
 } from '../src/services/directory/passwordResetInvitations.js'
+import { createPostgresCommitReplyBlackhole } from './helpers/realPostgresCancellation.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({
@@ -88,9 +97,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     vi.restoreAllMocks()
     invitationFlow.registerAndSendInvitation.mockReset().mockResolvedValue(undefined)
     await holder.pool.query('DELETE FROM users')
-    await holder.pool.query('UPDATE password_identifier_state SET retained_until_ms=0')
-    await holder.pool.query('DELETE FROM password_identifier_state')
-    await holder.pool.query('DELETE FROM password_verification_pace')
+    await holder.pool.query('TRUNCATE password_identifier_state, password_verification_pace')
     userId = (
       await holder.pool.query(
         'INSERT INTO users(email,password_hash) VALUES ($1,$2) RETURNING id',
@@ -127,41 +134,541 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   async function completedFailures(n = 5) {
     for (let i = 0; i < n; i++) {
       const c = await capturePasswordEvaluation(email, false)
-      expect(await completePasswordEvaluation(c, false)).toBe(true)
+      expect(await finishCapture(c, false)).toBe(true)
     }
+  }
+  async function finishCapture(
+    capture: Awaited<ReturnType<typeof capturePasswordEvaluation>>,
+    success: boolean
+  ) {
+    if (!capture) throw new Error('expected an admitted password evaluation')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected available password work owner')
+    const running = await markPasswordEvaluationRunning(capture, lease)
+    if (!running) {
+      await releasePasswordWork(lease)
+      return false
+    }
+    await releasePasswordWork(lease)
+    return completePasswordEvaluation(capture, success, lease)
+  }
+  async function reconcileRunningOperation(
+    capture: NonNullable<Awaited<ReturnType<typeof capturePasswordEvaluation>>>,
+    disposition: unknown
+  ) {
+    const current = (
+      await holder.pool.query(
+        `SELECT revision,provisional_epoch,provisional_owner_instance,
+                provisional_owner_host,provisional_owner_pid
+           FROM password_identifier_state WHERE identifier_key=$1`,
+        [capture.key]
+      )
+    ).rows[0]
+    return holder.pool.query(
+      `SELECT * FROM password_reconcile_running_admission($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        capture.key,
+        capture.instance,
+        current.revision,
+        capture.operation,
+        current.provisional_epoch,
+        current.provisional_owner_instance,
+        current.provisional_owner_host,
+        current.provisional_owner_pid,
+        disposition,
+      ]
+    )
   }
 
   it('forward migration is idempotent and grants runtime access', async () => {
     await applyPasswordAdmissionSchema(holder.pool)
+    await applyPasswordSuccessAdmissionSchema(holder.pool)
+    await applyPasswordSuccessAdmissionSchema(holder.pool)
     const permissions = (
       await holder.pool.query(
-        "SELECT has_table_privilege('control_api_runtime','password_identifier_state','SELECT,INSERT,UPDATE,DELETE') AS state, has_table_privilege('control_api_runtime','password_verification_pace','SELECT,INSERT,UPDATE,DELETE') AS pace"
+        `SELECT has_table_privilege('control_api_runtime','password_identifier_state','SELECT,INSERT,UPDATE,DELETE') AS state,
+                has_table_privilege('control_api_runtime','password_verification_pace','SELECT,INSERT,UPDATE,DELETE') AS pace,
+                has_function_privilege('control_api_runtime',
+                  'public.password_reconcile_running_admission(text,uuid,bigint,uuid,bigint,uuid,text,integer,text)',
+                  'EXECUTE') AS recovery`
       )
     ).rows[0]
-    expect(permissions).toEqual({ state: true, pace: true })
+    expect(permissions).toEqual({ state: true, pace: true, recovery: false })
     const migrations = (
       await holder.pool.query(
         "SELECT version FROM schema_migrations WHERE version='0126_bug192_password_admission'"
       )
     ).rows
     expect(migrations).toHaveLength(1)
+    expect(
+      (
+        await holder.pool.query(
+          "SELECT version FROM schema_migrations WHERE version='0130_password_login_success_admission'"
+        )
+      ).rows
+    ).toHaveLength(1)
+
+    const legacyKey = passwordIdentifierKey('legacy@example.invalid')
+    const legacyAttempt = await now()
+    await holder.pool.query(
+      'INSERT INTO password_identifier_state(identifier_key,attempts) VALUES ($1,$2)',
+      [legacyKey, [legacyAttempt]]
+    )
+    await applyPasswordSuccessAdmissionSchema(holder.pool)
+    const legacy = (
+      await holder.pool.query(
+        'SELECT legacy_hold_until_ms,successes,uncertain FROM password_identifier_state WHERE identifier_key=$1',
+        [legacyKey]
+      )
+    ).rows[0]
+    expect(Number(legacy.legacy_hold_until_ms)).toBe(legacyAttempt + policy.windowMs)
+    expect(legacy.successes).toEqual([])
+    expect(legacy.uncertain).toEqual([])
+
+    const client = await holder.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('SET LOCAL ROLE control_api_runtime')
+      await expect(
+        client.query('INSERT INTO password_identifier_state(identifier_key) VALUES ($1)', [
+          passwordIdentifierKey('old-runtime@example.invalid'),
+        ])
+      ).rejects.toMatchObject({ code: '55000' })
+      await client.query('ROLLBACK')
+      await client.query('BEGIN')
+      await client.query('SET LOCAL ROLE control_api_runtime')
+      await client.query("SET LOCAL app.password_admission_protocol = 'v2'")
+      await client.query('INSERT INTO password_identifier_state(identifier_key) VALUES ($1)', [
+        passwordIdentifierKey('new-runtime@example.invalid'),
+      ])
+      await client.query('COMMIT')
+    } finally {
+      client.release()
+    }
+    await expect(
+      holder.pool.query(
+        `UPDATE password_identifier_state
+            SET terminal_operation=$2, terminal_disposition=NULL,
+                terminal_at_ms=$3, terminal_epoch=revision
+          WHERE identifier_key=$1`,
+        [legacyKey, randomUUID(), legacyAttempt]
+      )
+    ).rejects.toMatchObject({ code: '23514' })
   })
-  it('serializes competing identifier attempts to exactly five admissions', async () => {
+  it('rejects NULL provisional shape and fails closed without reclaiming malformed running state', async () => {
+    const capture = await capturePasswordEvaluation(email, false)
+    if (!capture) throw new Error('expected public reservation')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected durable work owner')
+    expect(await markPasswordEvaluationRunning(capture, lease)).toBe(true)
+    await releasePasswordWork(lease)
+
+    await expect(
+      holder.pool.query(
+        'UPDATE password_identifier_state SET provisional_phase = NULL WHERE identifier_key = $1',
+        [capture.key]
+      )
+    ).rejects.toMatchObject({ code: '23514' })
+    await expect(
+      holder.pool.query(
+        'UPDATE password_identifier_state SET provisional_scope = NULL WHERE identifier_key = $1',
+        [capture.key]
+      )
+    ).rejects.toMatchObject({ code: '23514' })
+    expect(await row()).toMatchObject({
+      provisional_operation: capture.operation,
+      provisional_phase: 'running',
+      provisional_scope: 'public_login',
+    })
+
+    await holder.pool.query(
+      'ALTER TABLE password_identifier_state DROP CONSTRAINT password_identifier_provisional_shape'
+    )
+    await holder.pool.query(`
+      ALTER TABLE password_identifier_state
+        ADD CONSTRAINT password_identifier_provisional_shape
+        CHECK (provisional_operation IS NULL OR
+          (provisional_phase IN ('reserved', 'running') AND
+           provisional_scope IN ('public_login', 'authenticated_reverification')))
+    `)
+    await applyPasswordSuccessAdmissionSchema(holder.pool)
+    await expect(
+      holder.pool.query(
+        'UPDATE password_identifier_state SET provisional_phase = NULL WHERE identifier_key = $1',
+        [capture.key]
+      )
+    ).rejects.toMatchObject({ code: '23514' })
+    await expect(
+      holder.pool.query(
+        'UPDATE password_identifier_state SET provisional_scope = NULL WHERE identifier_key = $1',
+        [capture.key]
+      )
+    ).rejects.toMatchObject({ code: '23514' })
+
+    await holder.pool.query(
+      'ALTER TABLE password_identifier_state DROP CONSTRAINT password_identifier_provisional_shape'
+    )
+    try {
+      await holder.pool.query(
+        'UPDATE password_identifier_state SET provisional_phase = NULL WHERE identifier_key = $1',
+        [capture.key]
+      )
+      await expect(capturePasswordEvaluation(email, false)).rejects.toThrow(
+        'password admission provisional state is malformed'
+      )
+      expect(await row()).toMatchObject({
+        provisional_operation: capture.operation,
+        provisional_phase: null,
+        provisional_scope: 'public_login',
+        terminal_operation: null,
+      })
+    } finally {
+      await holder.pool.query(
+        "UPDATE password_identifier_state SET provisional_phase = 'running' WHERE identifier_key = $1",
+        [capture.key]
+      )
+      await applyPasswordSuccessAdmissionSchema(holder.pool)
+    }
+  })
+  it('recovers an ambiguous public operation with conservative failure and success debits once', async () => {
+    const capture = await capturePasswordEvaluation(email, false)
+    if (!capture) throw new Error('expected public reservation')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected durable work owner')
+    expect(await markPasswordEvaluationRunning(capture, lease)).toBe(true)
+    await releasePasswordWork(lease)
+
+    const recovered = await reconcileRunningOperation(capture, 'uncertain')
+    expect(recovered.rows).toEqual([
+      { reconciliation: 'uncertain', operation_id: capture.operation },
+    ])
+    const state = await row()
+    expect(state).toMatchObject({
+      failures: [],
+      successes: expect.any(Array),
+      uncertain: expect.any(Array),
+      provisional_operation: null,
+      terminal_operation: capture.operation,
+      terminal_disposition: 'uncertain',
+    })
+    expect(state.successes).toHaveLength(1)
+    expect(state.uncertain).toHaveLength(1)
+    expect((await reconcileRunningOperation(capture, 'uncertain')).rows).toEqual([
+      { reconciliation: 'already_terminal', operation_id: capture.operation },
+    ])
+    expect((await row()).successes).toHaveLength(1)
+    expect((await row()).uncertain).toHaveLength(1)
+  })
+  it('rejects NULL, invalid, stale, and competing recovery identities without freeing work', async () => {
+    const capture = await capturePasswordEvaluation(email, false)
+    if (!capture) throw new Error('expected public reservation')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected durable work owner')
+    expect(await markPasswordEvaluationRunning(capture, lease)).toBe(true)
+    await releasePasswordWork(lease)
+    const current = await row()
+    const reconcileAs = (
+      disposition: unknown,
+      overrides: Partial<{
+        revision: string
+        operation: string
+        epoch: string
+        ownerInstance: string
+        ownerHost: string
+        ownerPid: number
+      }> = {}
+    ) =>
+      holder.pool.query(
+        `SELECT * FROM password_reconcile_running_admission($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          capture.key,
+          capture.instance,
+          overrides.revision ?? String(current.revision),
+          overrides.operation ?? capture.operation,
+          overrides.epoch ?? String(current.provisional_epoch),
+          overrides.ownerInstance ?? current.provisional_owner_instance,
+          overrides.ownerHost ?? current.provisional_owner_host,
+          overrides.ownerPid ?? Number(current.provisional_owner_pid),
+          disposition,
+        ]
+      )
+
+    await expect(reconcileAs(null)).rejects.toMatchObject({ code: '22023' })
+    await expect(reconcileAs('invalid')).rejects.toMatchObject({
+      code: '22023',
+    })
+    await expect(
+      reconcileAs('prestart', {
+        revision: String(Number(current.revision) + 1),
+      })
+    ).rejects.toMatchObject({ code: '55000' })
+    await expect(reconcileAs('prestart', { operation: randomUUID() })).rejects.toMatchObject({
+      code: '55000',
+    })
+    await expect(
+      reconcileAs('prestart', {
+        ownerPid: Number(current.provisional_owner_pid) + 1,
+      })
+    ).rejects.toMatchObject({ code: '55000' })
+    await expect(capturePasswordEvaluation(email, false)).rejects.toMatchObject({ status: 429 })
+    expect(await row()).toMatchObject({
+      failures: [],
+      successes: [],
+      uncertain: [],
+      provisional_operation: capture.operation,
+      provisional_phase: 'running',
+      terminal_operation: null,
+    })
+
+    const client = await holder.pool.connect()
+    let competingRecovery: Promise<{ rows: unknown[] }> | undefined
+    try {
+      await client.query('BEGIN')
+      await client.query("SET LOCAL synchronous_commit = 'off'")
+      const first = await client.query(
+        `SELECT * FROM password_reconcile_running_admission($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          capture.key,
+          capture.instance,
+          current.revision,
+          capture.operation,
+          current.provisional_epoch,
+          current.provisional_owner_instance,
+          current.provisional_owner_host,
+          current.provisional_owner_pid,
+          'failure',
+        ]
+      )
+      expect(first.rows).toEqual([{ reconciliation: 'failure', operation_id: capture.operation }])
+      expect(
+        (await client.query("SELECT current_setting('synchronous_commit') AS mode")).rows[0]
+      ).toEqual({ mode: 'on' })
+      competingRecovery = holder.pool.query(
+        `SELECT * FROM password_reconcile_running_admission($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          capture.key,
+          capture.instance,
+          current.revision,
+          capture.operation,
+          current.provisional_epoch,
+          current.provisional_owner_instance,
+          current.provisional_owner_host,
+          current.provisional_owner_pid,
+          'success',
+        ]
+      ) as Promise<{ rows: unknown[] }>
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+    if (!competingRecovery) throw new Error('expected competing recovery query')
+    expect((await competingRecovery).rows).toEqual([
+      { reconciliation: 'already_terminal', operation_id: capture.operation },
+    ])
+    expect(await row()).toMatchObject({
+      failures: expect.any(Array),
+      successes: [],
+      uncertain: [],
+      provisional_operation: null,
+      terminal_operation: capture.operation,
+      terminal_disposition: 'failure',
+    })
+    expect((await row()).failures).toHaveLength(1)
+  })
+  it('recovery of a confirmed fifth failure starts the fixed cooldown once', async () => {
+    await completedFailures(4)
+    const capture = await capturePasswordEvaluation(email, false)
+    if (!capture) throw new Error('expected public reservation')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected durable work owner')
+    expect(await markPasswordEvaluationRunning(capture, lease)).toBe(true)
+    await releasePasswordWork(lease)
+    const before = await now()
+    expect((await reconcileRunningOperation(capture, 'failure')).rows).toEqual([
+      { reconciliation: 'failure', operation_id: capture.operation },
+    ])
+    const after = await now()
+    const state = await row()
+    expect(state.failures).toHaveLength(5)
+    expect(Number(state.locked_until_ms)).toBeGreaterThanOrEqual(before + policy.cooldownMs)
+    expect(Number(state.locked_until_ms)).toBeLessThanOrEqual(after + policy.cooldownMs)
+  })
+  it('charges no password outcome after an exactly proven pre-start cancellation', async () => {
+    const capture = await capturePasswordEvaluation(email, false)
+    if (!capture) throw new Error('expected public reservation')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected durable work owner')
+    expect(await markPasswordEvaluationRunning(capture, lease)).toBe(true)
+    await releasePasswordWork(lease)
+    expect((await reconcileRunningOperation(capture, 'prestart')).rows).toEqual([
+      { reconciliation: 'cancelled', operation_id: capture.operation },
+    ])
+    expect(await row()).toMatchObject({
+      failures: [],
+      successes: [],
+      uncertain: [],
+      provisional_operation: null,
+      terminal_disposition: 'cancelled',
+    })
+  })
+  it('recovers quota-masked uncertainty without charging public success history', async () => {
+    const key = passwordIdentifierKey(email)
+    const nowMs = await now()
+    await holder.pool.query(
+      'INSERT INTO password_identifier_state(identifier_key) VALUES ($1) ON CONFLICT DO NOTHING',
+      [key]
+    )
+    await holder.pool.query(
+      'UPDATE password_identifier_state SET successes=$2 WHERE identifier_key=$1',
+      [key, Array.from({ length: 40 }, (_, index) => nowMs - 100 - index)]
+    )
+    const capture = await capturePasswordEvaluation(email, false)
+    if (!capture) throw new Error('expected quota-masked reservation')
+    expect(capture.quotaMasked).toBe(true)
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected durable work owner')
+    expect(await markPasswordEvaluationRunning(capture, lease)).toBe(true)
+    await releasePasswordWork(lease)
+    await reconcileRunningOperation(capture, 'uncertain')
+    expect(await row()).toMatchObject({
+      successes: expect.any(Array),
+      failures: [],
+      uncertain: expect.any(Array),
+      provisional_operation: null,
+      terminal_disposition: 'uncertain',
+    })
+    expect((await row()).successes).toHaveLength(40)
+    expect((await row()).uncertain).toHaveLength(1)
+  })
+  it('discards a running operation made stale by the real password-change producer', async () => {
+    const capture = await capturePasswordEvaluation(email, false)
+    if (!capture) throw new Error('expected public reservation')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected durable work owner')
+    expect(await markPasswordEvaluationRunning(capture, lease)).toBe(true)
+    await releasePasswordWork(lease)
+    await updateUserPassword(userId, email, password, 'Synthetic-recovery-fence-password')
+    expect((await reconcileRunningOperation(capture, 'uncertain')).rows).toEqual([
+      { reconciliation: 'stale', operation_id: capture.operation },
+    ])
+    expect(await row()).toMatchObject({
+      failures: [],
+      successes: [],
+      uncertain: [],
+      provisional_operation: null,
+      terminal_disposition: 'stale',
+    })
+  })
+  it('upgrades the actual pre-0130 schema and conservatively holds live legacy attempts', async () => {
+    const upgradeDatabase = `password_upgrade_${randomBytes(6).toString('hex')}`
+    await admin.query(`CREATE DATABASE "${upgradeDatabase}"`)
+    const upgradeUrl = new URL(adminUrl!)
+    upgradeUrl.pathname = `/${upgradeDatabase}`
+    const upgradePool = new Pool({ connectionString: upgradeUrl.toString() })
+    try {
+      const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+      await upgradePool.query(`CREATE TABLE schema_migrations (
+        version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`)
+      await upgradePool.query('BEGIN')
+      await upgradePool.query('SET LOCAL synchronous_commit = on')
+      try {
+        for (const migration of CONTROL_API_MIGRATIONS) {
+          if (migration.version === '0130_password_login_success_admission') break
+          await migration.apply(upgradePool)
+          await upgradePool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+            migration.version,
+          ])
+        }
+        await upgradePool.query('COMMIT')
+      } catch (error) {
+        await upgradePool.query('ROLLBACK')
+        throw error
+      }
+
+      const nowMs = Number(
+        (
+          await upgradePool.query(
+            'SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::text AS ms'
+          )
+        ).rows[0].ms
+      )
+      const legacyKey = passwordIdentifierKey('pre-upgrade@example.invalid')
+      const newestLegacyAttempt = nowMs - 1_000
+      await upgradePool.query(
+        'INSERT INTO password_identifier_state(identifier_key,attempts) VALUES ($1,$2)',
+        [legacyKey, [nowMs - policy.windowMs - 1, newestLegacyAttempt]]
+      )
+      await upgradePool.query(
+        "DELETE FROM schema_migrations WHERE version='0130_password_login_success_admission'"
+      )
+
+      // Re-enter the actual migration runner against the actual predecessor schema.
+      await initDb(upgradePool)
+      const legacy = (
+        await upgradePool.query(
+          `SELECT attempts,failures,successes,uncertain,legacy_hold_until_ms
+             FROM password_identifier_state WHERE identifier_key=$1`,
+          [legacyKey]
+        )
+      ).rows[0]
+      expect(legacy).toMatchObject({
+        attempts: [String(nowMs - policy.windowMs - 1), String(newestLegacyAttempt)],
+        failures: [],
+        successes: [],
+        uncertain: [],
+      })
+      const fenceAt = Number(
+        (
+          await upgradePool.query(
+            'SELECT fenced_at_ms::text FROM password_admission_rollout_state WHERE singleton'
+          )
+        ).rows[0].fenced_at_ms
+      )
+      expect(Number(legacy.legacy_hold_until_ms)).toBeGreaterThanOrEqual(
+        newestLegacyAttempt + policy.windowMs
+      )
+      expect(Number(legacy.legacy_hold_until_ms)).toBeGreaterThanOrEqual(fenceAt + policy.windowMs)
+      expect(
+        (
+          await upgradePool.query(
+            "SELECT version FROM schema_migrations WHERE version='0130_password_login_success_admission'"
+          )
+        ).rows
+      ).toHaveLength(1)
+      await initDb(upgradePool)
+    } finally {
+      await endPoolAndWaitForClients(upgradePool)
+      await admin.query(`DROP DATABASE IF EXISTS "${upgradeDatabase}"`)
+    }
+  })
+  it('serializes one provisional identifier operation and rejects all competitors', async () => {
     const results = await Promise.allSettled(
       Array.from({ length: 12 }, () => capturePasswordEvaluation(email, true))
     )
-    expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(5)
-    expect((await row()).attempts).toHaveLength(5)
-    const before = await row()
-    for (let i = 0; i < 3; i++)
-      await expect(capturePasswordEvaluation(email, true)).rejects.toMatchObject({ status: 429 })
-    expect(await row()).toEqual(before)
+    const admitted = results.filter(
+      (
+        result
+      ): result is PromiseFulfilledResult<Awaited<ReturnType<typeof capturePasswordEvaluation>>> =>
+        result.status === 'fulfilled'
+    )
+    expect(admitted).toHaveLength(1)
+    expect(admitted[0].value).not.toBeNull()
+    expect((await row()).attempts).toHaveLength(0)
+    expect((await row()).provisional_phase).toBe('reserved')
+    expect(results.filter(result => result.status === 'rejected')).toHaveLength(11)
+    const capture = admitted[0].value!
+    expect(await cancelUnstartedPasswordEvaluation(capture)).toBe(true)
+    expect((await row()).provisional_operation).toBeNull()
   })
   it('fifth failure sets one cooldown from DB completion time without extension', async () => {
     await completedFailures(4)
     const before = await now()
     const c = await capturePasswordEvaluation(email, false)
-    await completePasswordEvaluation(c, false)
+    await finishCapture(c, false)
     const after = await now()
     const state = await row()
     expect(Number(state.locked_until_ms)).toBeGreaterThanOrEqual(before + policy.cooldownMs)
@@ -195,18 +702,18 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     expect(outcomes[0]).toEqual(outcomes[1])
     expect(outcomes[0]).toMatchObject({ status: 429 })
   })
-  it('attempt budget exhaustion ends naturally despite repeated denied requests', async () => {
-    for (let i = 0; i < 5; i++) await capturePasswordEvaluation(email, true)
+  it('five completed failures exhaust risk until expiry without denied-request extension', async () => {
+    await completedFailures()
     const state = await row()
     await expect(capturePasswordEvaluation(email, true)).rejects.toMatchObject({ status: 429 })
     expect(await row()).toEqual(state)
     const t = await now()
     await holder.pool.query(
-      'UPDATE password_identifier_state SET attempts=$2 WHERE identifier_key=$1',
+      'UPDATE password_identifier_state SET failures=$2,locked_until_ms=0 WHERE identifier_key=$1',
       [passwordIdentifierKey(email), [t - policy.windowMs - 1]]
     )
     await expect(capturePasswordEvaluation(email, true)).resolves.toBeDefined()
-    expect((await row()).attempts).toHaveLength(1)
+    expect((await row()).failures).toHaveLength(0)
   })
   it('natural cooldown expiry removes stale failures without extending attempts', async () => {
     await completedFailures()
@@ -218,33 +725,44 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     await capturePasswordEvaluation(email, false)
     expect(await row()).toMatchObject({ locked_until_ms: '0', failures: [] })
   })
-  it('successful authentication/reverification clears failures but retains public attempt history', async () => {
+  it('successful authentication/reverification preserves earlier failures', async () => {
     const failed = await capturePasswordEvaluation(email, true)
-    await completePasswordEvaluation(failed, false)
+    await finishCapture(failed, false)
     expect(
-      await verifyMemberPassword(email, password, { publicLogin: false, userId })
+      await verifyMemberPassword(email, password, {
+        publicLogin: false,
+        userId,
+      })
     ).toMatchObject({ id: userId })
     const state = await row()
-    expect(state.failures).toEqual([])
+    expect(state.failures).toHaveLength(1)
     expect(state.locked_until_ms).toBe('0')
-    expect(state.attempts).toHaveLength(1)
+    expect(state.successes).toHaveLength(0)
   })
-  it('successful completion fences an older failure completion on the same credential', async () => {
-    const older = await capturePasswordEvaluation(email, false),
-      successful = await capturePasswordEvaluation(email, false)
-    expect(await completePasswordEvaluation(successful, true)).toBe(true)
-    expect(await completePasswordEvaluation(older, false)).toBe(false)
-    expect((await row()).failures).toEqual([])
+  it('serializes same-identity completion and terminal receipts prevent duplicate success', async () => {
+    const first = await capturePasswordEvaluation(email, true)
+    await expect(capturePasswordEvaluation(email, true)).rejects.toMatchObject({ status: 429 })
+    if (!first) throw new Error('expected capture')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected password work owner')
+    expect(await markPasswordEvaluationRunning(first, lease)).toBe(true)
+    await releasePasswordWork(lease)
+    expect(await completePasswordEvaluation(first, true, lease)).toBe(true)
+    expect(await completePasswordEvaluation(first, true, lease)).toBe(false)
+    expect((await row()).successes).toHaveLength(1)
   })
   it('real password-change producer fences stale failure and success results', async () => {
-    const failure = await capturePasswordEvaluation(email, false),
-      success = await capturePasswordEvaluation(email, false)
+    const stale = await capturePasswordEvaluation(email, false)
     expect(
       await updateUserPassword(userId, email, password, 'Synthetic-BUG192-new-password')
     ).toEqual({ updated: true })
-    expect(await completePasswordEvaluation(failure, false)).toBe(false)
-    expect(await completePasswordEvaluation(success, true)).toBe(false)
+    if (!stale) throw new Error('expected capture')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected password work owner')
+    expect(await markPasswordEvaluationRunning(stale, lease)).toBe(false)
+    await releasePasswordWork(lease)
     expect((await row()).failures).toEqual([])
+    expect((await row()).provisional_operation).toBeNull()
   })
   it('serializes authenticated password change and recovery through one durable owner', async () => {
     const invitation = await createSilentPasswordResetInvitation({
@@ -290,7 +808,10 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     const recovery = await setInvitationPasswordForEmail(email, invitation.id, recoveryPassword)
     expect(recovery).not.toHaveProperty('error')
     await expect(
-      verifyMemberPassword(email, recoveryPassword, { publicLogin: false, userId })
+      verifyMemberPassword(email, recoveryPassword, {
+        publicLogin: false,
+        userId,
+      })
     ).resolves.toMatchObject({ id: userId })
     const finalHash = (
       await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])
@@ -300,8 +821,8 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     )
   })
   it('real reset/establishment producer clears cooldown and fences old work', async () => {
+    await completedFailures(4)
     const stale = await capturePasswordEvaluation(email, false)
-    await completedFailures()
     // Database producer for a pending reset; the real reset function owns the
     // credential write/acceptance and its generation trigger in one transaction.
     const invitation = (
@@ -316,7 +837,11 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       'Synthetic-BUG192-reset-password'
     )
     expect(result).not.toHaveProperty('error')
-    expect(await completePasswordEvaluation(stale, false)).toBe(false)
+    if (!stale) throw new Error('expected capture')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected password work owner')
+    expect(await markPasswordEvaluationRunning(stale, lease)).toBe(false)
+    await releasePasswordWork(lease)
     expect(await row()).toMatchObject({ failures: [], locked_until_ms: '0' })
     const credential = (
       await holder.pool.query('SELECT password_hash FROM users WHERE id=$1', [userId])
@@ -447,7 +972,10 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   })
   it('revokes every other pending password-reset link for the same account only', async () => {
     const makeReset = (address: string) =>
-      createSilentPasswordResetInvitation({ inviteeName: 'Synthetic member', email: address })
+      createSilentPasswordResetInvitation({
+        inviteeName: 'Synthetic member',
+        email: address,
+      })
     const redeemed = await makeReset(email)
     const sibling = await makeReset(email)
     await expect(getInvitationByToken(redeemed.token)).resolves.toMatchObject({
@@ -558,7 +1086,10 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
 
   it('allows at most one credential mutation when sibling reset links race', async () => {
     const makeReset = () =>
-      createSilentPasswordResetInvitation({ inviteeName: 'Synthetic member', email })
+      createSilentPasswordResetInvitation({
+        inviteeName: 'Synthetic member',
+        email,
+      })
     const first = await makeReset()
     const second = await makeReset()
     const hash = vi.spyOn(bcrypt, 'hash')
@@ -602,7 +1133,10 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   it('rejects expired, revoked, wrong-purpose and wrong-account recovery credentials', async () => {
     const makeInvitation = (purpose: 'password_reset' | 'member_invitation') =>
       purpose === 'password_reset'
-        ? createSilentPasswordResetInvitation({ inviteeName: 'Synthetic member', email })
+        ? createSilentPasswordResetInvitation({
+            inviteeName: 'Synthetic member',
+            email,
+          })
         : createSilentInvitationForTeams({
             inviteeName: 'Synthetic member',
             email,
@@ -697,7 +1231,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     for (const update of ['password_hash = NULL', 'lifecycle_version = lifecycle_version + 1']) {
       const stale = await capturePasswordEvaluation(email, false)
       await holder.pool.query(`UPDATE users SET ${update} WHERE id=$1`, [userId])
-      expect(await completePasswordEvaluation(stale, false)).toBe(false)
+      expect(await finishCapture(stale, false)).toBe(false)
     }
   })
   it('new identity creation fences an old shadow evaluation', async () => {
@@ -706,13 +1240,15 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       "INSERT INTO users(email,password_hash) VALUES ('new@example.invalid',$1)",
       [hash]
     )
-    expect(await completePasswordEvaluation(stale, false)).toBe(false)
+    expect(await finishCapture(stale, false)).toBe(false)
   })
   it('two aggregate reservations cannot both win, and denials do not advance pace', async () => {
     const results = await Promise.allSettled([reservePasswordPace(), reservePasswordPace()])
     expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1)
     const before = (await holder.pool.query('SELECT * FROM password_verification_pace')).rows
-    await expect(reservePasswordPace()).rejects.toMatchObject({ status: 429 })
+    await expect(reservePasswordPace()).rejects.toMatchObject({
+      status: 429,
+    })
     expect((await holder.pool.query('SELECT * FROM password_verification_pace')).rows).toEqual(
       before
     )
@@ -720,7 +1256,60 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       "UPDATE password_verification_pace SET next_permit=clock_timestamp()-interval '1 minute'"
     )
     await reservePasswordPace()
-    await expect(reservePasswordPace()).rejects.toMatchObject({ status: 429 })
+    await expect(reservePasswordPace()).rejects.toMatchObject({
+      status: 429,
+    })
+  })
+  it('fails closed when a global denial cannot cancel its exact provisional operation', async () => {
+    const replacementOperation = randomUUID()
+    await holder.pool.query(
+      `INSERT INTO password_verification_pace(singleton,next_permit)
+       VALUES (TRUE,clock_timestamp()+interval '1 minute')`
+    )
+    let replaced = false
+    const query = holder.pool.query.bind(holder.pool)
+    const querySpy = vi.spyOn(holder.pool, 'query')
+    querySpy.mockImplementation((async (...args: unknown[]) => {
+      const result = await (
+        query as (...queryArgs: unknown[]) => Promise<{
+          rows: Array<Record<string, unknown>>
+        }>
+      )(...args)
+      const statement =
+        typeof args[0] === 'string'
+          ? args[0]
+          : String((args[0] as { text?: string } | undefined)?.text ?? '')
+      if (!replaced && statement.includes('SELECT greatest(1, ceil')) {
+        replaced = true
+        const active = await query(
+          'SELECT provisional_operation FROM password_identifier_state WHERE identifier_key=$1',
+          [passwordIdentifierKey(email)]
+        )
+        expect(active.rows).toHaveLength(1)
+        const originalOperation = active.rows[0].provisional_operation
+        await query('BEGIN')
+        await query("SET LOCAL app.password_admission_protocol = 'v2'")
+        await query(
+          `UPDATE password_identifier_state SET provisional_operation=$2
+              WHERE identifier_key=$1 AND provisional_operation=$3`,
+          [passwordIdentifierKey(email), replacementOperation, originalOperation]
+        )
+        await query('COMMIT')
+      }
+      return result as never
+    }) as typeof holder.pool.query)
+    const compare = vi.spyOn(bcrypt, 'compare')
+    try {
+      await expect(
+        verifyMemberPassword(email, password, { publicLogin: true })
+      ).rejects.toMatchObject({ status: 503 })
+      expect(compare).not.toHaveBeenCalled()
+      expect(replaced).toBe(true)
+      expect((await row()).provisional_operation).toBe(replacementOperation)
+    } finally {
+      querySpy.mockRestore()
+      compare.mockRestore()
+    }
   })
   it('persisted aggregate pacing works across independent Node processes', async () => {
     // The required hosted PostgreSQL lane runs source tests without building Control API.
@@ -730,7 +1319,10 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       new Promise<string>((resolve, reject) => {
         const child = spawn(process.execPath, ['-e', script], {
           cwd: process.cwd(),
-          env: { ...process.env, CONTROL_API_PG_CONNECTION_STRING: connectionString },
+          env: {
+            ...process.env,
+            CONTROL_API_PG_CONNECTION_STRING: connectionString,
+          },
           stdio: ['ignore', 'pipe', 'pipe'],
         })
         let out = '',
@@ -750,6 +1342,114 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     const results = await Promise.all([run(), run()])
     expect(results.sort()).toEqual(['ALLOWED', 'DENIED:429'])
   })
+  it('serializes an identifier reservation across independent Node processes', async () => {
+    const script = `require('ts-node').register({project:'./tsconfig.json',experimentalResolver:true,transpileOnly:true});const {capturePasswordEvaluation}=require('./src/services/auth/passwordCredentialVerification.ts');capturePasswordEvaluation(process.argv[1],{scope:'public_login'}).then(c=>{console.log(JSON.stringify({operation:c.operation}));process.stdin.resume();process.stdin.once('data',()=>process.exit(0))},e=>{console.error('capture failed:'+e.status);process.exit(1)})`
+    const child = spawn(process.execPath, ['-e', script, email], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CONTROL_API_PG_CONNECTION_STRING: connectionString,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let output = ''
+    let errorOutput = ''
+    let readyResolve!: (value: { operation: string }) => void
+    let readyReject!: (error: Error) => void
+    const ready = new Promise<{ operation: string }>((resolve, reject) => {
+      readyResolve = resolve
+      readyReject = reject
+    })
+    child.stdout.on('data', chunk => {
+      output += String(chunk)
+      const newline = output.indexOf('\n')
+      if (newline >= 0) {
+        try {
+          readyResolve(JSON.parse(output.slice(0, newline)))
+        } catch {
+          readyReject(new Error('child emitted an invalid reservation receipt'))
+        }
+      }
+    })
+    child.stderr.on('data', chunk => (errorOutput += String(chunk)))
+    const startupTimeout = setTimeout(
+      () => readyReject(new Error('child capture timed out')),
+      10_000
+    )
+    let childOperation: string
+    try {
+      childOperation = (await ready).operation
+    } catch (error) {
+      child.kill('SIGTERM')
+      throw new Error(`${String(error)} ${errorOutput}`)
+    } finally {
+      clearTimeout(startupTimeout)
+    }
+    try {
+      await expect(capturePasswordEvaluation(email, true)).rejects.toMatchObject({ status: 429 })
+      expect((await row()).provisional_operation).toBe(childOperation)
+    } finally {
+      child.stdin.end('release\n')
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          child.kill('SIGTERM')
+          reject(new Error('child process did not stop'))
+        }, 10_000)
+        child.once('exit', code => {
+          clearTimeout(timeout)
+          if (code === 0) resolve()
+          else reject(new Error(`child exited ${code}: ${errorOutput}`))
+        })
+      })
+    }
+    await holder.pool.query(
+      `UPDATE password_identifier_state
+          SET provisional_expires_at_ms = floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 1
+        WHERE identifier_key=$1 AND provisional_operation=$2`,
+      [passwordIdentifierKey(email), childOperation]
+    )
+    const recoveredReservation = await capturePasswordEvaluation(email, false)
+    expect(recoveredReservation).not.toBeNull()
+    expect(await cancelUnstartedPasswordEvaluation(recoveredReservation!)).toBe(true)
+  })
+  it('does not repeat an ambiguous successful terminal commit after a lost acknowledgement', async () => {
+    const capture = await capturePasswordEvaluation(email, true)
+    if (!capture) throw new Error('expected public reservation')
+    const lease = await acquirePasswordWork()
+    if (!lease) throw new Error('expected durable work owner')
+    expect(await markPasswordEvaluationRunning(capture, lease)).toBe(true)
+    await releasePasswordWork(lease)
+
+    const originalPool = holder.pool
+    const blackhole = await createPostgresCommitReplyBlackhole(connectionString)
+    const proxyPool = new Pool({
+      connectionString: blackhole.connectionString,
+      max: 1,
+    })
+    holder.pool = proxyPool
+    let outcome: unknown
+    try {
+      const completion = completePasswordEvaluation(capture, true, lease)
+      await blackhole.commitForwarded
+      blackhole.failClientAfterCommitForwarded()
+      outcome = await completion.then(
+        () => new Error('completion unexpectedly acknowledged a withheld COMMIT reply'),
+        error => error
+      )
+    } finally {
+      holder.pool = originalPool
+      await endPoolAndWaitForClients(proxyPool)
+      await blackhole.close()
+    }
+    expect(outcome).toBeInstanceOf(Error)
+    const committed = await row()
+    expect(committed.successes).toHaveLength(1)
+    expect(committed.failures).toHaveLength(0)
+    expect(committed.provisional_operation).toBeNull()
+    expect(committed.terminal_operation).toBe(capture.operation)
+    expect(await completePasswordEvaluation(capture, true, lease)).toBe(false)
+    expect((await row()).successes).toHaveLength(1)
+  })
   it('busy bcrypt is rejected without queue and the reserved pace is not refunded', async () => {
     let started!: () => void, finish!: (value: boolean) => void
     const entered = new Promise<void>(r => (started = r)),
@@ -758,17 +1458,24 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       started()
       return held
     })
-    const first = verifyMemberPassword(email, 'wrong', { publicLogin: false, userId })
+    const first = verifyMemberPassword(email, 'wrong', {
+      publicLogin: false,
+      userId,
+    })
     await entered
     try {
       await holder.pool.query(
         "UPDATE password_verification_pace SET next_permit=clock_timestamp()-interval '1 second'"
       )
       await expect(
-        verifyMemberPassword('shadow@example.invalid', 'wrong', { publicLogin: true })
+        verifyMemberPassword('shadow@example.invalid', 'wrong', {
+          publicLogin: true,
+        })
       ).rejects.toMatchObject({ status: 429 })
       expect(spy).toHaveBeenCalledTimes(1)
-      await expect(reservePasswordPace()).rejects.toMatchObject({ status: 429 })
+      await expect(reservePasswordPace()).rejects.toMatchObject({
+        status: 429,
+      })
     } finally {
       finish(false)
       await first
@@ -778,7 +1485,10 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     const t = await now()
     for (const kind of ['attempt', 'failure', 'cooldown']) {
       const identity = `${kind}@example.invalid`
-      await capturePasswordEvaluation(identity, false)
+      await holder.pool.query(
+        'INSERT INTO password_identifier_state(identifier_key) VALUES ($1) ON CONFLICT DO NOTHING',
+        [passwordIdentifierKey(identity)]
+      )
       await holder.pool.query(
         'UPDATE password_identifier_state SET attempts=$2,failures=$3,locked_until_ms=$4 WHERE identifier_key=$1',
         [
@@ -791,6 +1501,15 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     }
     const old = await capturePasswordEvaluation('expired@example.invalid', false)
     await holder.pool.query(
+      `UPDATE password_identifier_state
+          SET provisional_expires_at_ms = floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint - 1,
+              retained_until_ms=0 WHERE identifier_key=$1`,
+      [passwordIdentifierKey('expired@example.invalid')]
+    )
+    const replacement = await capturePasswordEvaluation('expired@example.invalid', false)
+    if (!replacement) throw new Error('expected replacement capture')
+    expect(await cancelUnstartedPasswordEvaluation(replacement)).toBe(true)
+    await holder.pool.query(
       'UPDATE password_identifier_state SET retained_until_ms=0 WHERE identifier_key=$1',
       [passwordIdentifierKey('expired@example.invalid')]
     )
@@ -799,7 +1518,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       3
     )
     await capturePasswordEvaluation('expired@example.invalid', false)
-    expect(await completePasswordEvaluation(old, false)).toBe(false)
+    expect(await finishCapture(old, false)).toBe(false)
     expect(
       (await holder.pool.query('SELECT password_auth_generation FROM users WHERE id=$1', [userId]))
         .rows[0]
