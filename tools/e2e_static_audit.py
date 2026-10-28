@@ -21,12 +21,13 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("fragile text/class CSS selector", re.compile(r"locator\(\s*['\"](?:[^'\"]*has-text|[^'\"]*class=)")),
     ("core-route success mock", re.compile(r"(?:route|fulfill)\s*\([^\n]*(?:uploads|gfs|complete|parts)[^\n]*(?:status\s*:\s*2|status\s*:\s*20)")),
 )
+STORAGE_GET_ITEM = re.compile(r"\s*\.\s*getItem\s*\(\s*(['\"])[^'\"\\\r\n]*\1\s*\)")
 
 EMAIL_RESET_ENTRY_PATH = re.compile(r"/invitations/[A-Za-z0-9_-]+")
 SAFE_STATIC_APP_PATH = re.compile(r"/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?")
 NAVIGATION_ANNOTATION = re.compile(
     r"\s*//\s*E2E_GUARDIAN_NAVIGATION:\s*"
-    r"(negative-route-guard|root-entry|email-reset-entry|fixture-agent-route-guard)\s+—\s+(\S.*)"
+    r"(negative-route-guard|root-entry|email-reset-entry|fixture-agent-route-guard|user-detail-entry)\s+—\s+(\S.*)"
 )
 STATIC_GOTO_ARGUMENT = re.compile(r"\s*(['\"])([^'\"\\\r\n]*)\1\s*(?=[,)])")
 FIXTURE_AGENT_GOTO_ARGUMENT = re.compile(
@@ -36,6 +37,13 @@ FIXTURE_AGENT_GUARD_SPEC = Path(
     "tests/e2e/playwright/desktop/codex-subscription-approved-tools.spec.ts"
 )
 FIXTURE_AGENT_GUARD_TITLE = "unauthenticated agent route guard prevents connector use"
+USER_DETAIL_GOTO_ARGUMENT = re.compile(
+    r"\s*`/users-and-teams/users/\$\{\s*"
+    r"/\^\[0-9a-f\]\{8\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-"
+    r"\[0-9a-f\]\{4\}-\[0-9a-f\]\{12\}\$/i\.exec\(userId\)\?\.\[0\]"
+    r"\s*\?\?\s*\(\(\)\s*=>\s*\{\s*throw new Error\(['\"]Invalid user ID['\"]\)\s*\}\)\(\)"
+    r"\s*\}`\s*(?=[,)])"
+)
 
 
 def _fixture_agent_sources_are_safe() -> bool:
@@ -152,6 +160,14 @@ def audit_text(text: str, path: Path = Path("<source>")) -> list[str]:
     findings: list[str] = []
     for label, pattern in RULES:
         for match in pattern.finditer(text):
+            # A literal-key read is useful for asserting that a credential was
+            # not stored. It does not create or alter a browser session.
+            if (
+                label == "browser storage/session mutation"
+                and match.group() in {"localStorage", "sessionStorage"}
+                and STORAGE_GET_ITEM.match(text, match.end())
+            ):
+                continue
             line = text.count("\n", 0, match.start()) + 1
             findings.append(f"{path}:{line}: {label}")
 
@@ -159,7 +175,17 @@ def audit_text(text: str, path: Path = Path("<source>")) -> list[str]:
     # bridge, so there is no renderer HTTP request to await. Such specs must
     # opt in with an explicit, explanatory marker rather than adding a fake
     # network wait that can hide a broken user transition.
+    # Configuration files describe a runner; they do not perform a browser
+    # transition. Do not extend this exemption to a file that defines a test
+    # or invokes the page API.
+    config_only = (
+        path.name == "playwright.config.ts"
+        and re.search(r"\bexport\s+default\s+defineConfig\s*\(", text) is not None
+        and re.search(r"\b(?:test\s*\(|it\s*\(|test\.(?:describe|only|skip|fixme|step)(?:\.[A-Za-z_$][\w$]*)*\s*\(|page\.)", text) is None
+    )
     if (
+        not config_only
+        and
         "waitForResponse" not in text
         and "waitForRequest" not in text
         and "E2E_GUARDIAN_IPC_FLOW" not in text
@@ -177,7 +203,7 @@ def audit_text(text: str, path: Path = Path("<source>")) -> list[str]:
 
     for match in navigation_matches:
         adjacent = _adjacent_line(text, match.start())
-        after = text[match.end() : match.end() + 160]
+        after = text[match.end() : match.end() + 300]
         root_argument = STATIC_GOTO_ARGUMENT.match(after)
         line = text.count("\n", 0, match.start()) + 1
         if navigation_counts_by_line.get(line) != 1:
@@ -191,6 +217,12 @@ def audit_text(text: str, path: Path = Path("<source>")) -> list[str]:
             and annotation.group(1) == "fixture-agent-route-guard"
             and FIXTURE_AGENT_GOTO_ARGUMENT.match(after)
             and _is_fixture_agent_guard(text, path, match)
+        ):
+            continue
+        if (
+            annotation
+            and annotation.group(1) in {"negative-route-guard", "user-detail-entry"}
+            and USER_DETAIL_GOTO_ARGUMENT.match(after)
         ):
             continue
         if destination in {"", "/"}:

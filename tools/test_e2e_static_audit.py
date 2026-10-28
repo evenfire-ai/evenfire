@@ -60,6 +60,57 @@ class E2EStaticAuditNavigationTests(unittest.TestCase):
         source = "// GUARDIAN documentation describes reset links\npage.goto('/admin/secret')"
         self.assertTrue(any("direct page.goto" in finding for finding in self.findings(source)))
 
+    def test_storage_read_does_not_permit_session_mutations(self) -> None:
+        self.assertEqual(self.findings("const value = localStorage.getItem('credential')"), [])
+        for action in [
+            "localStorage.setItem('credential', 'value')",
+            "localStorage.removeItem('credential')",
+            "localStorage.clear()",
+            "localStorage.getItem = replacement",
+            "localStorage[key] = 'value'",
+            "sessionStorage.setItem('credential', 'value')",
+            "storageState({ path: 'session.json' })",
+        ]:
+            with self.subTest(action=action):
+                self.assertTrue(
+                    any("browser storage/session mutation" in item for item in self.findings(action))
+                )
+
+    def test_runner_configuration_does_not_exempt_test_actions(self) -> None:
+        config = "export default defineConfig({ retries: 0 })"
+        self.assertEqual(audit_text(config, Path('playwright.config.ts')), [])
+        for action in ["test('case', () => {})", "test.describe.serial('suite', () => {})", "page.goto('/admin/secret')"]:
+            with self.subTest(action=action):
+                findings = audit_text(f"{config}\n{action}", Path('playwright.config.ts'))
+                self.assertTrue(any("missing critical" in finding for finding in findings))
+
+    def test_user_detail_navigation_requires_a_validated_uuid(self) -> None:
+        annotation = "// E2E_GUARDIAN_NAVIGATION: user-detail-entry — operator opens member"
+        destination = (
+            "page.goto(`/users-and-teams/users/${/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            "[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(userId)?.[0] ?? "
+            "(() => { throw new Error('Invalid user ID') })()}`)"
+        )
+        valid = f"{annotation}\n{destination}"
+        self.assertEqual(self.findings(valid), [])
+        formatted = destination.replace('${/', '${\n  /').replace('})()}`)', '})()\n}`)')
+        self.assertEqual(self.findings(f"{annotation}\n{formatted}"), [])
+
+        for altered in [
+            f"{annotation}\npage.goto(`/users-and-teams/users/${{userId}}`)",
+            valid.replace("{8}", "+", 1),
+            valid.replace(".exec(userId)", ".exec(otherId)"),
+            valid.replace("/users-and-teams/users/", "/users-and-teams/teams/"),
+            valid.replace("user-detail-entry", "root-entry"),
+            valid.replace("})()}", "})()}/access"),
+            valid.replace("throw new Error('Invalid user ID')", "return userId"),
+        ]:
+            with self.subTest(source=altered):
+                self.assertTrue(any("direct page.goto" in finding for finding in self.findings(altered)))
+
+        guard_annotation = annotation.replace("user-detail-entry", "negative-route-guard")
+        self.assertEqual(self.findings(f"{guard_annotation}\n{destination}"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

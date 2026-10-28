@@ -28,14 +28,12 @@ function localAdminCredentials(): { password: string; username: string } {
 
 export async function loginControlUi(page: Page): Promise<void> {
   const credentials = localAdminCredentials()
-  await page.goto(CONTROL_UI_BASE_URL)
-  const signIn = page.getByRole('button', { name: 'Sign in' })
+  // E2E_GUARDIAN_NAVIGATION: root-entry — operator signs in at the application entry
+  await page.goto('/')
+  const signIn = page.getByRole('button', { name: 'Sign in', exact: true })
   const navigation = page.getByRole('navigation', { name: 'Main sections' })
   const entryState = await Promise.race([
-    signIn
-      .last()
-      .waitFor({ state: 'visible', timeout: 60_000 })
-      .then(() => 'login' as const),
+    signIn.waitFor({ state: 'visible', timeout: 60_000 }).then(() => 'login' as const),
     navigation.waitFor({ state: 'visible', timeout: 60_000 }).then(() => 'authenticated' as const),
   ])
   if (entryState === 'login') {
@@ -43,8 +41,13 @@ export async function loginControlUi(page: Page): Promise<void> {
     await page.getByLabel('Username or email').fill(credentials.username)
     await expect(page.getByLabel('Password')).toBeVisible()
     await page.getByLabel('Password').fill(credentials.password)
-    await expect(signIn.last()).toBeEnabled({ timeout: 10_000 })
-    await signIn.last().click()
+    await expect(signIn).toBeEnabled({ timeout: 10_000 })
+    const loginResponse = page.waitForResponse(
+      response =>
+        response.request().method() === 'POST' && response.url().includes('/admin/auth/login')
+    )
+    await signIn.click()
+    expect((await loginResponse).ok()).toBe(true)
   }
   await expect(navigation).toBeVisible({ timeout: 20_000 })
   const sessionCookie = (await page.context().cookies()).find(
@@ -78,7 +81,9 @@ export async function loginControlUi(page: Page): Promise<void> {
 export async function openGlobalFileSystemFromSidebar(page: Page): Promise<void> {
   const directoriesSection = page.getByRole('button', { name: 'Files', exact: true })
   await expect(directoriesSection).toBeVisible()
-  await directoriesSection.click()
+  if ((await directoriesSection.getAttribute('aria-expanded')) !== 'true') {
+    await directoriesSection.click()
+  }
   const globalFileSystem = page.getByRole('link', {
     name: 'EvenDrive',
     exact: true,

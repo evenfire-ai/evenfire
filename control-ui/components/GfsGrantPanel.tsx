@@ -61,6 +61,12 @@ import { isEditorPermissions } from './gfsInheritedAccessMerge'
 
 const OPERATOR_VALUE = 'operator'
 const DRIVE = 'main'
+const ANCESTOR_HOME_EXPOSURE_MESSAGE =
+  'Access that includes contents cannot be set on the drive root or /Users, because it would reach every user home. Turn off "Include contents of this folder" or choose a sub-folder.'
+
+function isAncestorHomeExposure(error: unknown): boolean {
+  return (error as GfsGrantError | null)?.code === 'ancestor_home_exposure'
+}
 type AccessRole = 'read' | 'editor'
 type AccessSubjectKind = 'agent' | 'context' | 'operator' | 'team' | 'user' | 'workflow'
 
@@ -506,13 +512,15 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       setIncludeDescendants(resource.kind === 'directory')
     } catch (e) {
       const grantError = e as GfsGrantError
-      const verdict = grantError.code
-        ? grantError.serverMessage && grantError.serverMessage !== grantError.code
-          ? `${grantError.code}: ${grantError.serverMessage}`
-          : grantError.code
-        : e instanceof Error
-          ? e.message
-          : String(e)
+      const verdict = isAncestorHomeExposure(e)
+        ? ANCESTOR_HOME_EXPOSURE_MESSAGE
+        : grantError.code
+          ? grantError.serverMessage && grantError.serverMessage !== grantError.code
+            ? `${grantError.code}: ${grantError.serverMessage}`
+            : grantError.code
+          : e instanceof Error
+            ? e.message
+            : String(e)
       const invalidIndexes = grantError.invalidIndexes
       setError(
         invalidIndexes && invalidIndexes.length > 0
@@ -735,7 +743,13 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       }
       await loadExistingAccess()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to update access')
+      setError(
+        isAncestorHomeExposure(caught)
+          ? ANCESTOR_HOME_EXPOSURE_MESSAGE
+          : caught instanceof Error
+            ? caught.message
+            : 'Failed to update access'
+      )
     } finally {
       setBusy(false)
     }

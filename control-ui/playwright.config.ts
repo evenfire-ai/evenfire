@@ -93,7 +93,8 @@ export default defineConfig({
       process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || 'http://localhost:3000',
     headless: true,
     screenshot: 'only-on-failure',
-    trace: 'on-first-retry',
+    trace: 'retain-on-failure',
+    video: 'retain-on-failure',
   },
   retries: 0,
   projects: [
