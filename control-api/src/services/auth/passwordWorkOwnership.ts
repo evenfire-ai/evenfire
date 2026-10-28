@@ -20,7 +20,45 @@ export type MemberPasswordWorkLease = PasswordMutationLease
 
 const logger = rootLogger.child({ module: 'password-admission' })
 let ownerInstance: string | undefined
+let loggedOwnerInstance = false
 const reservations = new WeakMap<object, PasswordMutationLease>()
+const verificationLeases = new WeakMap<object, ReturnType<typeof passwordWorkOwnerIdentity>>()
+const releasedVerificationLeases = new WeakSet<object>()
+
+/** Stable process incarnation recorded beside running admission operations. */
+export function passwordWorkOwnerIdentity() {
+  const identity = {
+    instance: (ownerInstance ??= randomUUID()),
+    host: hostname(),
+    pid: process.pid,
+  }
+  if (!loggedOwnerInstance) {
+    logger.info(
+      {
+        event: 'password_work_process_incarnation',
+        ownerInstance: identity.instance,
+        ownerHost: identity.host,
+        ownerPid: identity.pid,
+      },
+      'password work process incarnation established'
+    )
+    loggedOwnerInstance = true
+  }
+  return identity
+}
+
+export function passwordWorkLeaseIdentity(lease: PasswordWorkLease) {
+  return verificationLeases.get(lease as object) ?? null
+}
+
+export async function releasePasswordWork(lease: PasswordWorkLease): Promise<void> {
+  await lease.release()
+  releasedVerificationLeases.add(lease as object)
+}
+
+export function passwordWorkReleaseConfirmed(lease: PasswordWorkLease): boolean {
+  return releasedVerificationLeases.has(lease as object)
+}
 
 function authorityFailure() {
   return new PasswordAdmissionError(503, 2, 'authority_failure')
@@ -37,10 +75,11 @@ function sanitize(error: unknown): never {
 }
 
 async function reservePasswordWork() {
-  const owner = (ownerInstance ??= randomUUID())
+  const owner = passwordWorkOwnerIdentity().instance
   const operation = randomUUID()
   const admitted = await withTransaction(async db => {
     await db.query('SET LOCAL synchronous_commit = on')
+    await db.query("SELECT set_config('app.password_admission_protocol', 'v2', true)")
     const result = await db.query(
       `INSERT INTO password_verification_work
         (singleton, operation_id, owner_instance, owner_host, owner_pid)
@@ -54,6 +93,7 @@ async function reservePasswordWork() {
 
   const releaseOwned = async (db: Pick<DbTransactionClient, 'query'>) => {
     await db.query('SET LOCAL synchronous_commit = on')
+    await db.query("SELECT set_config('app.password_admission_protocol', 'v2', true)")
     const result = await db.query(
       `DELETE FROM password_verification_work
        WHERE singleton AND operation_id = $1 AND owner_instance = $2 RETURNING singleton`,
@@ -88,6 +128,10 @@ async function reservePasswordWork() {
         try {
           return await withTransaction(
             async db => {
+              // The owner reservation and its terminal state are acknowledged as durable.
+              // Keep any credential/lifecycle mutation in this transaction under the same
+              // durability contract before invoking its producer callback.
+              await db.query('SET LOCAL synchronous_commit = on')
               const queryFailures = new Set<unknown>()
               const mutationDb: DbTransactionClient = {
                 ...db,
@@ -195,7 +239,10 @@ async function reservePasswordWork() {
 
 /** Raw verifier view: release after bcrypt, before credential-state completion. */
 export async function acquirePasswordWork(): Promise<PasswordWorkLease | null> {
-  return (await reservePasswordWork())?.raw ?? null
+  const reservation = await reservePasswordWork()
+  if (!reservation) return null
+  verificationLeases.set(reservation.raw as object, passwordWorkOwnerIdentity())
+  return reservation.raw
 }
 
 async function acquireMutationReservation() {
