@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
-import { type ReactElement, type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
+import {
+  type InputHTMLAttributes,
+  type ReactElement,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useReducer,
+} from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
@@ -130,6 +137,10 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     localSearchRequestId?: number
   },
 }))
+const authSurfaceHarness = vi.hoisted(() => ({
+  renderActualAuthPage: false,
+  renderNativeButtons: false,
+}))
 const SLOT_BOUNDS = { x: 16, y: 12, width: 400, height: 300, dpr: 1 }
 
 vi.mock('@hooks/useAppController', () => ({
@@ -160,9 +171,25 @@ vi.mock('@components/CommandPalette', () => ({
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({
-  Button: () => null,
+  Button: ({ children }: { children?: ReactNode }) =>
+    authSurfaceHarness.renderNativeButtons ? <button>{children}</button> : null,
+  Field: ({
+    label,
+    htmlFor,
+    children,
+  }: {
+    label: string
+    htmlFor: string
+    children: ReactNode
+  }) => (
+    <label htmlFor={htmlFor}>
+      {label}
+      {children}
+    </label>
+  ),
   StatusBanner: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   IconButton: () => null,
+  TextInput: (props: InputHTMLAttributes<HTMLInputElement>) => <input {...props} />,
   ToastStack: () => null,
 }))
 vi.mock('@components/ConfirmDialog', () => ({
@@ -190,7 +217,12 @@ vi.mock('@components/SidebarNav', () => ({
   },
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
-vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
+vi.mock('@pages/AuthPage', async importOriginal => {
+  const actual = await importOriginal<typeof import('@pages/AuthPage')>()
+  return {
+    AuthPage: () => (authSurfaceHarness.renderActualAuthPage ? <actual.AuthPage /> : null),
+  }
+})
 vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
@@ -429,6 +461,31 @@ describe('App deep-link orchestration', () => {
     )
   })
 
+  it('routes the App workspace tab out and renders the real login page after sign-out', () => {
+    authSurfaceHarness.renderActualAuthPage = true
+    authSurfaceHarness.renderNativeButtons = true
+    currentController = makeController({
+      initialExperienceLoading: false,
+      isAuthenticated: true,
+      email: 'user@example.test',
+      password: 'fixture-password',
+      runtimeConfigSetupName: '',
+      runtimeConfigSetupExternalRestApiBaseUrl: '',
+    })
+
+    const rendered = renderApp(<App />)
+
+    expect(within(rendered.container).getByRole('button', { name: 'New chat' })).toBeTruthy()
+    act(() => {
+      currentController.isAuthenticated = false
+      forceControllerRender()
+    })
+
+    expect(within(rendered.container).queryByRole('button', { name: 'New chat' })).toBeNull()
+    expect(within(rendered.container).getByLabelText('Email')).toBeTruthy()
+    expect(within(rendered.container).getByLabelText('Password')).toBeTruthy()
+  })
+
   it('prompts to add an environment when a Profile Portal handoff has no saved match', () => {
     const linkProvidedName = 'Tenant from profile link '.repeat(5)
     currentController = makeController({
@@ -457,6 +514,8 @@ describe('App deep-link orchestration', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    authSurfaceHarness.renderActualAuthPage = false
+    authSurfaceHarness.renderNativeButtons = false
     confirmDialogHarness.props = null
     confirmDialogHarness.mountedCount = 0
     appHeaderHarness.props = null
