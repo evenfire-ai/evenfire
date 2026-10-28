@@ -560,6 +560,7 @@ jobs:
             gfs.userHomeAcl.realPostgres.integration.test.ts \
             gfs.userHomeBackfill.realPostgres.integration.test.ts \
             gfs.userHomeProvisioning.realPostgres.integration.test.ts \
+            gfs.userHomeRecovery.realPostgres.integration.test.ts \
             gfs.userHomeRetirement.realPostgres.integration.test.ts \
             gfs.userHomeStartupCost.realPostgres.integration.test.ts \
             routes.mcp-host.renewal.realPostgres.integration.test.ts \

@@ -232,6 +232,8 @@ type Config = {
   adminGfsGrantsPerMin: number
   adminGfsSharesPerMin: number
   adminGfsLegacyGrantReportPerMin: number
+  adminGfsUserHomesReadPerMin: number
+  adminGfsUserHomesWritePerMin: number
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
   approvalRlExternalEdgePerMin: number
@@ -1099,6 +1101,14 @@ export const config: Config = {
   adminGfsSharesPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_GFS_SHARES_PER_MIN', 150),
   adminGfsLegacyGrantReportPerMin: positiveIntegerFromEnv(
     'CONTROL_API_ADMIN_GFS_LEGACY_GRANT_REPORT_PER_MIN',
+    150
+  ),
+  adminGfsUserHomesReadPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_GFS_USER_HOMES_READ_PER_MIN',
+    150
+  ),
+  adminGfsUserHomesWritePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_GFS_USER_HOMES_WRITE_PER_MIN',
     150
   ),
   approvalRlRequestPerMin: positiveIntegerFromEnv('APPROVAL_RL_REQUEST_PER_MIN', 600),

@@ -14,6 +14,7 @@ import {
   type RequestWithExternalGfsAuthority,
   attachExternalGfsAuthority,
   attachExternalGfsUserLifecycle,
+  validateExternalGfsAuthoritySelector,
 } from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId, makeHostSubjectId } from '../../gfs/hostSubject.js'
 import { DbResolveStore } from '../../gfs/resolve.js'
@@ -476,6 +477,7 @@ export function createExternalGfsRouter(): Router {
   // Every gfs user route is on the Session-JWT plane: the user session token
   // (x-user-session-token, forwarded by external-rest-api) is required.
   router.use('/external/gfs', requireValidExternalSessionToken)
+  router.use('/external/gfs', validateExternalGfsAuthoritySelector)
   router.use('/external/gfs', attachExternalGfsRequestId)
   // This boundary deliberately precedes attachExternalGfsAuthority. A rate
   // rejection therefore performs no operator-link lookup or route-specific
@@ -693,6 +695,46 @@ export function createExternalGfsRouter(): Router {
   // authority is resolved only for the internal broker routes below.
   router.use('/external/gfs', asyncHandler(attachExternalGfsAuthority))
   router.use('/external/gfs', externalGfsResolvedOperationRateLimit)
+
+  router.get(
+    '/external/gfs/home',
+    externalGfsResourceRouteRateLimit,
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const result = await pool.query(
+        `SELECT h.state, h.drive, h.resource_id, h.conflict_code, r.path_cache
+           FROM gfs_user_homes h
+           LEFT JOIN gfs_resources r ON r.resource_id = h.resource_id AND r.drive = h.drive
+          WHERE h.user_id = $1`,
+        [req.externalAuth!.userId]
+      )
+      const home = result.rows[0] as
+        | {
+            state: string
+            drive: string | null
+            resource_id: string | null
+            conflict_code: string | null
+            path_cache: string | null
+          }
+        | undefined
+      if (!home) {
+        res.status(404).json({ error: 'home_not_found' })
+        return
+      }
+      const held =
+        home.drive && home.resource_id
+          ? await heldPermissions(pool, resolveCaller(req), home.drive, home.resource_id)
+          : []
+      res.status(200).json({
+        state: home.state,
+        drive: home.drive,
+        path: home.path_cache,
+        resourceId: home.resource_id,
+        ...(home.conflict_code ? { conflictCode: home.conflict_code } : {}),
+        heldPermissions: held,
+      })
+    })
+  )
 
   // ── delegation: reuse the EXISTING grant/share handlers (caller-agnostic) ──
   // resolveCaller(req) reads req.externalAuth → user:<id> plus all active team
@@ -1100,12 +1142,11 @@ async function proxyReadToGfsc(
     clearTimeout(readTimer)
   }
   if (upstream.status >= 400) {
-    // Error envelopes are small JSON: buffer, LOG, forward verbatim (a gfsc 5xx on a
-    // read was invisible at this hop before). Success bodies keep streaming below.
+    // Buffer and forward the error envelope; log its status without its body.
     const errorBody = await upstream.text()
     if (upstream.status >= 500) {
       rootLogger.error(
-        { gfscPath, status: upstream.status, body: errorBody.slice(0, 2048) },
+        { gfscPath, status: upstream.status },
         'gfs external read proxy: gfsc upstream error'
       )
     }
@@ -1224,12 +1265,12 @@ async function proxyMutationToGfsc(
   // invisible here before) while forwarding the body verbatim.
   if (upstream.status >= 500) {
     rootLogger.error(
-      { gfscPath, method, status: upstream.status, body: text.slice(0, 2048) },
+      { gfscPath, method, status: upstream.status },
       'gfs external mutation proxy: gfsc upstream error'
     )
   } else if (upstream.status >= 400) {
     rootLogger.warn(
-      { gfscPath, method, status: upstream.status, body: text.slice(0, 2048) },
+      { gfscPath, method, status: upstream.status },
       'gfs external mutation proxy: gfsc upstream client error'
     )
   }
@@ -1336,7 +1377,7 @@ async function proxyUploadToGfsc(
     const body = await upstream.text()
     if (upstream.status >= 500)
       rootLogger.error(
-        { gfscPath, method, status: upstream.status, body: body.slice(0, 2048) },
+        { gfscPath, method, status: upstream.status },
         'gfs external upload upstream error'
       )
     res.status(upstream.status)

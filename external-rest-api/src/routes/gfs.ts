@@ -119,12 +119,14 @@ function withGfsRequestId(req: GfsAuthedRequest, options: GfsRequestOptions): Gf
   // policy) is propagated across the authenticated service boundary.
   const clientIp = req.ip?.trim()
   const forwardedClientIp = clientIp && isIP(clientIp) !== 0 ? clientIp : undefined
+  const authority = req.header('x-evenfire-gfs-authority')
   return {
     ...options,
     extraHeaders: {
       ...options.extraHeaders,
       'x-request-id': req.gfsRequestId!,
       ...(forwardedClientIp ? { 'x-forwarded-for': forwardedClientIp } : {}),
+      ...(authority === undefined ? {} : { 'x-evenfire-gfs-authority': authority }),
     },
   }
 }
@@ -317,6 +319,17 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
       const data = await gfsControlApiRequest(req, 'POST', '/external/gfs/token', {
         userSessionToken: extractAuthToken(req),
         body: req.body ?? {},
+      })
+      res.status(200).json(data)
+    } catch (error) {
+      forwardControlApiError(error, res, next)
+    }
+  })
+
+  router.get('/me/gfs/home', async (req: AuthedRequest, res, next) => {
+    try {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/home', {
+        userSessionToken: extractAuthToken(req),
       })
       res.status(200).json(data)
     } catch (error) {
@@ -597,6 +610,7 @@ async function proxyUploadStream(
       'upload-offset',
       'upload-chunk-length',
       'upload-checksum',
+      'x-evenfire-gfs-authority',
     ]) {
       const value = req.headers[name]
       if (typeof value === 'string') extraHeaders[name] = value
