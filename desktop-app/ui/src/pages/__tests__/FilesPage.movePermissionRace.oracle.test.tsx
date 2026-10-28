@@ -247,7 +247,7 @@ describe('FilesPage Move permission generation fencing', () => {
             'Moving a folder changes who can access its contents — access now follows the new location.'
           )
         ).toHaveLength(1)
-        const invalidatedKeys = invalidateQueries.mock.calls.map(([filters]) => filters.queryKey)
+        const invalidatedKeys = invalidateQueries.mock.calls.map(([filters]) => filters?.queryKey)
         const sourceChildrenKey = invalidatedKeys.find(
           key => key?.[3] === 'children' && key[5] === 'source-parent'
         )
