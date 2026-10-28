@@ -514,6 +514,23 @@ describe('operator user-home routes', () => {
     log.mockRestore()
   })
 
+  it('canonicalizes an uppercase owner id before restoring the grant', async () => {
+    const userId = 'abcdefab-cdef-4abc-8abc-abcdefabcdef'
+    const application = await app()
+    const response = await request(application)
+      .post(`/gfs/user-homes/${userId.toUpperCase()}/restore-owner`)
+      .set('x-test-operator', 'yes')
+    expect(response.status).toBe(200)
+    const lock = mocks.query.mock.calls.find(call =>
+      String(call[0]).includes('pg_advisory_xact_lock')
+    )
+    const grant = mocks.query.mock.calls.find(call =>
+      String(call[0]).includes('INSERT INTO gfs_grants')
+    )
+    expect(lock?.[1]).toEqual([userId])
+    expect(grant?.[1]?.[2]).toBe(userId)
+  })
+
   it('rejects an unrelated conflict and a broken binding while restoring a valid conflict', async () => {
     const application = await app()
     await request(application)

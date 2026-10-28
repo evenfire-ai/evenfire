@@ -357,7 +357,7 @@ export async function restoreUserHomeOwnerInTransaction(
 }
 
 async function handleRestoreOwner(req: Request, res: Response): Promise<void> {
-  const userId = String(req.params.userId)
+  const userId = String(req.params.userId).toLowerCase()
   if (!UUID_RE.test(userId)) {
     res.status(400).json({ error: 'invalid_user_id' })
     return
