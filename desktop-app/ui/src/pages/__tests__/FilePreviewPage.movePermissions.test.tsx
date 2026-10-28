@@ -1104,9 +1104,11 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
 
       const failure = await screen.findByRole('alert')
+      expect(failure.textContent).toContain('diagram.png → Archive:')
       expect(failure.textContent).toContain(
         'The server rejected this destination. Refresh and choose a different folder.'
       )
+      expect(failure.className).toBe('toast tone-error')
       expect(screen.getAllByRole('alert')).toHaveLength(1)
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
@@ -1121,23 +1123,26 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       'precondition_failed',
       'stale file version',
       'This item changed while you were moving it. Review its current location and try again.',
+      'error',
     ],
     [
       403,
       'forbidden',
       'move permission denied',
       'EvenDrive could not confirm permission for this move. Refresh and try again.',
+      'warn',
     ],
-    [429, 'rate_limited', 'too many requests', 'Too many file requests — try again in 7s.'],
+    [429, 'rate_limited', 'too many requests', 'Too many file requests — try again in 7s.', 'warn'],
     [
       409,
       'name_conflict',
       'a destination item already exists',
       'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.',
+      'error',
     ],
   ] as const)(
     'uses the shared safe Move verdict for a real GFS %i after close',
-    async (status, code, serverMessage, expectedMessage) => {
+    async (status, code, serverMessage, expectedMessage, expectedTone) => {
       const failureMessage = await gfsRouteFailureMessage(
         client =>
           client.moveResource(
@@ -1172,7 +1177,13 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
 
         await act(async () => rejectMove(new Error(failureMessage)))
 
-        expect(await screen.findByText(expectedMessage)).toBeTruthy()
+        expect(await screen.findByText(`diagram.png → Archive: ${expectedMessage}`)).toBeTruthy()
+        expect(screen.getAllByRole(expectedTone === 'error' ? 'alert' : 'status')).toHaveLength(1)
+        expect(
+          screen
+            .getByRole(expectedTone === 'error' ? 'alert' : 'status')
+            .className.endsWith(`tone-${expectedTone}`)
+        ).toBe(true)
         expect(screen.queryByText(failureMessage)).toBeNull()
         expect(moveResource).toHaveBeenCalledTimes(1)
       } finally {
@@ -1236,8 +1247,11 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
 
         expect(
-          await screen.findByText('Couldn’t confirm the move. Refresh before trying again.')
+          await screen.findByText(
+            'diagram.png → Archive: Couldn’t confirm the move. Refresh before trying again.'
+          )
         ).toBeTruthy()
+        expect(screen.getByRole('status').className).toBe('toast tone-warn')
         expect(screen.queryByText(capturedTransportError.message)).toBeNull()
         expect(moveResource).toHaveBeenCalledTimes(1)
       } finally {
@@ -1845,6 +1859,15 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   })
 
   it('identifies the captured destination for overlapping post-close Move failures', async () => {
+    const failureMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          'fixture-session-token'
+        ),
+      400,
+      { code: 'invalid_destination', message: 'invalid parent' }
+    )
     let rejectArchive!: (error: Error) => void
     let rejectWork!: (error: Error) => void
     const archiveMove = new Promise<MoveReceipt>((_resolve, reject) => {
@@ -1868,6 +1891,9 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     })
     installController(sessionScope)
     const { queryClient } = renderPreviewWithToastStack()
+    const sourceChildrenKey = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main')
+    queryClient.setQueryDefaults(sourceChildrenKey, { gcTime: 60_000 })
+    queryClient.setQueryData(sourceChildrenKey, { items: [], nextCursor: null })
     try {
       await screen.findByAltText('Preview of diagram.png')
       const archiveMenu = await openPreviewActions()
@@ -1890,24 +1916,47 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(moveResource.mock.calls[1]).toEqual([resourceId, 'destination-2', 'main', 7])
       fireEvent.click(within(workDialog).getByRole('button', { name: 'Close move dialog' }))
 
+      const newerMenu = await openPreviewActions()
+      fireEvent.click(within(newerMenu).getByRole('menuitem', { name: 'Move to' }))
+      const newerDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
       expect(screen.queryByRole('alert')).toBeNull()
-      await act(async () => rejectArchive(new Error('Move rejected httpStatus=400')))
-      const archiveFailure = await screen.findByText(
+      expect(queryClient.getQueryState(sourceChildrenKey)?.isInvalidated).toBe(false)
+      await act(async () => rejectArchive(new Error(failureMessage)))
+      const archiveFailure = await screen.findByRole('alert')
+      expect(archiveFailure.className).toBe('toast tone-error')
+      expect(archiveFailure.textContent).toContain('diagram.png')
+      expect(archiveFailure.textContent).toContain('Archive')
+      expect(archiveFailure.textContent).toContain(
         'The server rejected this destination. Refresh and choose a different folder.'
       )
-      expect(archiveFailure).toBeTruthy()
-      await act(async () => rejectWork(new Error('Move rejected httpStatus=400')))
+      expect(screen.getAllByRole('alert')).toHaveLength(1)
+      expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBe(newerDialog)
+      expect(queryClient.getQueryState(sourceChildrenKey)?.isInvalidated).toBe(false)
+
+      await act(async () => rejectWork(new Error(failureMessage)))
+      await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(2))
+      const failures = screen.getAllByRole('alert')
+      expect(failures.map(alert => alert.textContent)).toEqual([
+        expect.stringContaining('Archive'),
+        expect.stringContaining('Work'),
+      ])
+      expect(failures.every(alert => alert.className === 'toast tone-error')).toBe(true)
+      expect(failures.every(alert => alert.textContent?.includes('diagram.png'))).toBe(true)
       expect(
-        await screen.findAllByText(
-          'The server rejected this destination. Refresh and choose a different folder.'
+        failures.every(alert =>
+          alert.textContent?.includes(
+            'The server rejected this destination. Refresh and choose a different folder.'
+          )
         )
-      ).toBeTruthy()
-      expect(screen.getAllByRole('alert')).toHaveLength(2)
+      ).toBe(true)
+      expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBe(newerDialog)
+      expect(screen.queryByText(failureMessage)).toBeNull()
+      expect(queryClient.getQueryState(sourceChildrenKey)?.isInvalidated).toBe(false)
       expect(moveResource).toHaveBeenCalledTimes(2)
     } finally {
       await act(async () => {
-        rejectArchive(new Error('Move rejected httpStatus=400'))
-        rejectWork(new Error('Move rejected httpStatus=400'))
+        rejectArchive(new Error(failureMessage))
+        rejectWork(new Error(failureMessage))
       })
       queryClient.clear()
     }
