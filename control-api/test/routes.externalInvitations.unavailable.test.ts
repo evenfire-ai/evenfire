@@ -171,28 +171,34 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(2)
   })
 
-  it('maps a genuine not_pending acceptance to 400 without starting a session', async () => {
-    flow.validateInvitationFlowToken.mockResolvedValue({
-      email: 'a@b.c',
-      invitationUuid: 'database-capability',
-    })
-    directory.acceptInvitationForEmailInTransaction.mockReset()
-    directory.acceptInvitationForEmailInTransaction.mockResolvedValue({ error: 'not_pending' })
+  it.each([
+    ['not_pending', 400, 'not_pending'],
+    ['user_retired', 401, 'Unauthorized'],
+  ])(
+    'maps %s acceptance without starting a session',
+    async (error, expectedStatus, responseError) => {
+      flow.validateInvitationFlowToken.mockResolvedValue({
+        email: 'a@b.c',
+        invitationUuid: 'database-capability',
+      })
+      directory.acceptInvitationForEmailInTransaction.mockReset()
+      directory.acceptInvitationForEmailInTransaction.mockResolvedValue({ error })
 
-    const res = await request(app())
-      .post('/external/invitations/accept')
-      .send({ email: 'a@b.c', token: 'synthetic-not-pending-flow' })
+      const res = await request(app())
+        .post('/external/invitations/accept')
+        .send({ email: 'a@b.c', token: 'synthetic-not-pending-flow' })
 
-    expect(res.status).toBe(400)
-    expect(res.body).toEqual({ error: 'not_pending' })
-    expect(tokenSigner.sign).not.toHaveBeenCalled()
-    expect(database.query).not.toHaveBeenCalled()
-    expect(directory.acceptInvitationForEmailInTransaction).toHaveBeenCalledWith(
-      expect.anything(),
-      'a@b.c',
-      'database-capability'
-    )
-  })
+      expect(res.status).toBe(expectedStatus)
+      expect(res.body).toEqual({ error: responseError })
+      expect(tokenSigner.sign).not.toHaveBeenCalled()
+      expect(database.query).not.toHaveBeenCalled()
+      expect(directory.acceptInvitationForEmailInTransaction).toHaveBeenCalledWith(
+        expect.anything(),
+        'a@b.c',
+        'database-capability'
+      )
+    }
+  )
 
   it('binds the secret capability to the public id and never issues on password setup', async () => {
     flow.validateInvitationFlowToken.mockResolvedValue({

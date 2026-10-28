@@ -179,6 +179,9 @@ export function createExternalMembersRouter(): Router {
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!role) return res.status(400).json({ error: 'invalid_role' })
+        if (managerUserId.trim() === req.params.userId.trim()) {
+          return res.status(400).json({ error: 'invalid_target' })
+        }
         const result = await updateManagedMemberRoleForUser(
           managerUserId,
           req.params.userId,
@@ -189,9 +192,6 @@ export function createExternalMembersRouter(): Router {
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
           if (result.error === 'not_found') return res.status(404).json({ error: 'not_found' })
-          if (result.error === 'invalid_target') {
-            return res.status(400).json({ error: 'invalid_target' })
-          }
           return res.status(400).json({ error: 'invalid_role' })
         }
         return res.status(200).json(result.membership)
@@ -249,6 +249,9 @@ export function createExternalMembersRouter(): Router {
       try {
         const managerUserId = currentUserId(req)
         if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
+        if (managerUserId.trim() === req.params.userId.trim()) {
+          return res.status(400).json({ error: 'invalid_target' })
+        }
         const result = await deleteManagedMemberForUser(
           managerUserId,
           req.params.userId,
@@ -257,9 +260,6 @@ export function createExternalMembersRouter(): Router {
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
-          if (result.error === 'invalid_target') {
-            return res.status(400).json({ error: 'invalid_target' })
-          }
           return res.status(404).json({ error: 'not_found' })
         }
         return res.status(200).json(result.deleted)

@@ -371,6 +371,9 @@ export function createExternalInvitationsRouter(): Router {
           if (accepted.error === 'expired') {
             return res.status(410).json({ error: 'expired' })
           }
+          if (accepted.error === 'user_retired') {
+            return res.status(401).json({ error: 'Unauthorized' })
+          }
           return res.status(400).json({ error: 'not_pending' })
         }
         if ('replay' in accepted) {

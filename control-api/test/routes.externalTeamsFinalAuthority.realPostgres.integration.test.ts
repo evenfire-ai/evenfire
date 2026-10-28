@@ -474,6 +474,44 @@ describeRealPostgres('external team mutations final source authority on real Pos
     })
   })
 
+  it('allows a legacy admin to change their own team role', async () => {
+    await resetPrincipal('legacy-self-role')
+    await request(app())
+      .patch(`/external/teams/${teamId}/members/${adminUserId}/role`)
+      .set('x-user-session-token', token)
+      .send({ role: 'inviter' })
+      .expect(200)
+    const result = await databasePool.query<{ role: string }>(
+      `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, adminUserId]
+    )
+    expect(result.rows[0]?.role).toBe('inviter')
+  })
+
+  it('allows a legacy admin to leave their own team', async () => {
+    await resetPrincipal('legacy-self-delete')
+    await request(app())
+      .delete(`/external/teams/${teamId}/members/${adminUserId}`)
+      .set('x-user-session-token', token)
+      .expect(200)
+    const result = await databasePool.query<{ status: string }>(
+      `SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, adminUserId]
+    )
+    expect(result.rows[0]?.status).toBe('deleted')
+  })
+
+  it('activates a managed invitation after delivery', async () => {
+    await resetPrincipal('managed-invitation-activation')
+    await prepareInvitation()
+    const result = await databasePool.query<{ status: string }>(
+      `SELECT status FROM invitations WHERE id = $1`,
+      [invitationId]
+    )
+    expect(invitationDelivery.registerAndSendInvitation).toHaveBeenCalledTimes(1)
+    expect(result.rows[0]?.status).toBe('pending')
+  })
+
   it('denies managed invitation activation when source-session invalidation wins during delivery', async () => {
     await resetPrincipal('managed-invitation-post-delivery-revoke')
 

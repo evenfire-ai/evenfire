@@ -278,9 +278,6 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
-          if (result.error === 'invalid_target') {
-            return res.status(400).json({ error: 'invalid_target' })
-          }
           return res.status(404).json({ error: 'not_found' })
         }
         return res.status(200).json(result.deleted)

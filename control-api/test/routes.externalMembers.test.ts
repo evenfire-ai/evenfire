@@ -192,6 +192,19 @@ describe('external members routes', () => {
     expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
+  it('rejects managed self-role changes and self-removal before directory work', async () => {
+    await request(makeApp())
+      .patch('/external/members/manager-1/teams/team-1/role')
+      .send({ role: 'member' })
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.updateManagedMemberRoleForUser).not.toHaveBeenCalled()
+
+    await request(makeApp())
+      .delete('/external/members/manager-1/teams/team-1')
+      .expect(400, { error: 'invalid_target' })
+    expect(directoryMock.deleteManagedMemberForUser).not.toHaveBeenCalled()
+  })
+
   it('creates invitations without an added user quota', async () => {
     directoryMock.createManagedInvitationForUser.mockResolvedValue({
       invitation: { id: 'inv-parity' },
