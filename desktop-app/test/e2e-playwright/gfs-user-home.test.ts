@@ -272,37 +272,6 @@ function auditRowsAfter(sequenceNo: number, desktopUserId: string): GfsAuditRow[
     .map(line => JSON.parse(line) as GfsAuditRow)
 }
 
-async function openControlTeams(page: Page): Promise<void> {
-  await page.getByRole('link', { name: 'Users & Teams', exact: true }).click()
-  await page.getByRole('tab', { name: 'Teams', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Create team', exact: true })).toBeEnabled()
-}
-
-/** Remove the test-only team's members and the team through Control UI. */
-async function removeVisibleTeam(page: Page, name: string, emails: string[]): Promise<void> {
-  await page.keyboard.press('Escape')
-  await openControlTeams(page)
-  const team = page.getByRole('button', { name, exact: true })
-  await expect(team).toBeVisible()
-  await team.click()
-  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
-  for (const email of emails) {
-    const actions = page.getByRole('button', { name: `Actions for ${email}`, exact: true })
-    if (!(await actions.isVisible())) continue
-    await actions.click()
-    await page.getByRole('menuitem', { name: 'Remove member', exact: true }).click()
-    const confirmation = page.getByRole('alertdialog', { name: 'Remove member?' })
-    await confirmation.getByRole('button', { name: 'Remove member', exact: true }).click()
-    await expect(actions).toHaveCount(0)
-  }
-  await page.getByRole('button', { name: 'Team actions' }).click()
-  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
-  const confirmation = page.getByRole('alertdialog', { name: 'Delete team permanently?' })
-  await confirmation.getByRole('button', { name: 'Delete team', exact: true }).click()
-  await expect(confirmation).toBeHidden()
-  await expect(team).toHaveCount(0)
-}
-
 test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
   test.beforeAll(() => {
     assertGfsInfraHealthy()
@@ -716,12 +685,10 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
   }, testInfo) => {
     test.setTimeout(15 * 60_000)
     const adminLogin = requiredEnv('ADMIN_USER')
-    const adminPassword = process.env.ADMIN_PASS
-    if (!adminPassword) throw new Error('[USER-HOME-E2E] ADMIN_PASS is required')
-    const initial = readInitialAdmin(adminLogin, process.env.E2E_USER_PASSWORD || adminPassword)
-    expect(initial.user.id).not.toBe(initial.controlAdminId)
+    // Initial setup seeds the linked Desktop user with the admin's own password.
+    const adminPassword = requiredEnv('ADMIN_PASS')
+    const initial = readInitialAdmin(adminLogin, adminPassword)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
-    const teamName = `e2e-home-j5-${fx.runTag}`
     const adminFile = `j5-admin-${fx.runTag}.txt`
     const guestFile = `j5-private-${fx.runTag}.txt`
     const sentinel = `J5 private file ${fx.runTag}`
@@ -730,7 +697,6 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
     let control: Awaited<ReturnType<typeof browser.newContext>> | null = null
     let adminSession: DesktopSession | null = null
     let adminHome: Awaited<ReturnType<UserHomeFixtures['waitForHomeState']>> | null = null
-    let teamSubmissionStarted = false
     let adminFileCreated = false
     let adminFileId: string | null = null
     let guest: HomeTestUser | null = null
@@ -741,35 +707,8 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
       const operatorPanel = new ControlUiAccessPanel(controlPage)
       await operatorPanel.login(adminLogin, adminPassword)
 
-      await test.step('precondition: the users share a test-only team', async () => {
-        const page = controlPage!
-        await openControlTeams(page)
-        await page.getByRole('button', { name: 'Create team', exact: true }).click()
-        await page.getByPlaceholder('Team name').fill(teamName)
-        await page.getByRole('button', { name: 'Continue', exact: true }).click()
-        await expect(page.getByText('Choose initial team members and roles.')).toBeVisible()
-        await page.getByRole('button', { name: 'Continue', exact: true }).click()
-        teamSubmissionStarted = true
-        await page.getByRole('button', { name: 'Create team', exact: true }).click()
-        const team = page.getByRole('button', { name: teamName, exact: true })
-        await expect(team).toBeVisible()
-        await team.click()
-        await expect(page.getByRole('heading', { name: teamName, exact: true })).toBeVisible()
-        await page.getByRole('button', { name: 'Add member', exact: true }).click()
-        const dialog = page.getByRole('dialog', { name: 'Add member', exact: true })
-        const search = dialog.getByPlaceholder('Search members...')
-        for (const email of [initial.user.email, guest!.email]) {
-          await search.fill(email)
-          const option = dialog.getByRole('option').filter({ hasText: email })
-          await expect(option).toBeVisible()
-          await option.click()
-          await expect(option).toHaveAttribute('aria-selected', 'true')
-        }
-        await dialog.getByRole('button', { name: 'Add members', exact: true }).click()
-        await expect(dialog).toBeHidden()
-        await expect(page.getByRole('row').filter({ hasText: initial.user.email })).toBeVisible()
-        await expect(page.getByRole('row').filter({ hasText: guest!.email })).toBeVisible()
-      })
+      // Named precondition, as in J1b–J6: share targets are team members (D4).
+      fx.createTeam('j5', [initial.user, guest])
 
       const guestSession = await launchDesktopAs(testInfo, guest)
       sessions.push(guestSession)
@@ -917,11 +856,6 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
             0
           )
         })
-      }
-      if (controlPage && teamSubmissionStarted && guest) {
-        const page = controlPage
-        const emails = [initial.user.email, guest.email]
-        await attempt(() => removeVisibleTeam(page, teamName, emails))
       }
       if (control) await attempt(() => control!.close())
       for (const session of sessions.reverse()) await attempt(() => session.close())
