@@ -2665,7 +2665,6 @@ export class AppService {
       releaseUrl: policy.releaseUrl,
       releaseId: policy.releaseId,
       releaseTag: policy.releaseTag,
-      updateFeedUrl: policy.updateFeedUrl,
       externalRestApiVersion: policy.externalRestApiVersion,
       rpcProxyVersion: policy.rpcProxyVersion,
     }

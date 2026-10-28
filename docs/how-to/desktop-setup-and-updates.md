@@ -127,18 +127,25 @@ If the installed version is in the compatible set, the app remains usable and
 does not prompt at startup, even if the backend recommends a newer build. If it
 is outside the set, a dismissible notice offers **Update and restart**. Choosing
 that action downloads the backend's selected compatible build with visible
-progress and restarts when ready. Dismissing the notice does not block app use.
+progress and offers restart when ready. Dismissing the notice does not block
+app use. Before installing a release that predates the updater, the app warns
+that it will remove in-app update support until a later updater-capable build
+is installed.
 
 Choose **Evenfire → Check for Updates** on macOS, **Help → Check for Updates**
 on Windows/Linux, or **Settings → Information → Check for updates** to check
-manually. If a different compatible build is available, Desktop downloads it
-with progress and then asks whether to restart now or later. A deferred update
-is checked against the selected backend again before installation.
+manually. If a different compatible build is available, Desktop downloads the
+exact ZIP for the backend-selected version and current OS/architecture, checks
+the SHA-256 digest published in GitHub release metadata, and then asks whether
+to restart now or later. A deferred update is checked against the selected
+backend and environment again before installation. The minimum supported
+target is v0.8.0.
 
 If the compatibility check fails, Desktop reports that it could not verify the
 build and leaves the app available. Try again from Settings or close and reopen
-the app. An update is installed only through the app's updater; users do not
-select another build on GitHub during the normal flow.
+the app. An update is installed only from the verified asset chosen by the app;
+users do not select another build on GitHub during the normal flow. The existing
+Forge release process remains unchanged.
 
 Existing releases without the integrated updater cannot acquire it remotely.
 The first updater-capable version must be installed through the normal

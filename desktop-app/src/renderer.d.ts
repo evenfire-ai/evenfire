@@ -20,6 +20,8 @@ import {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
+  DesktopUpdateDownloadResult,
+  DesktopUpdateDownloadedEvent,
   DesktopUpdateProgress,
   EntityChangeStreamEvent,
   ExternalChannelsSummary,
@@ -116,11 +118,14 @@ declare global {
         downloadDesktopUpdate: (
           expectedVersion: string,
           restartAfterDownload?: boolean
-        ) => Promise<{ downloaded: true; version: string }>
+        ) => Promise<DesktopUpdateDownloadResult>
+        cancelDesktopUpdate: () => Promise<void>
         installDesktopUpdate: (expectedVersion: string) => Promise<{ installed: true }>
         onDesktopUpdateCheckRequested: (callback: () => void) => () => void
         onDesktopUpdateProgress: (callback: (progress: DesktopUpdateProgress) => void) => () => void
-        onDesktopUpdateDownloaded: (callback: (version: string) => void) => () => void
+        onDesktopUpdateDownloaded: (
+          callback: (payload: DesktopUpdateDownloadedEvent) => void
+        ) => () => void
         onDesktopUpdateError: (callback: (message: string) => void) => () => void
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>

@@ -133,25 +133,20 @@ an npm install with lifecycle scripts enabled (never `--ignore-scripts` or
 
 `npm ci` and `npm run build` are used to prepare the local app.
 
-The `make:*` scripts still invoke electron-forge for local platform packaging.
-Published updater releases are built by
-`.github/workflows/release-desktop.yml` with electron-builder. The workflow
-covers macOS and Windows x64/arm64 plus Linux AppImage, DEB, and RPM x64/arm64.
-It attaches update metadata and all target assets to the exact GitHub release
-tag returned by the selected backend.
+The `make:*` scripts invoke Electron Forge for the same macOS, Windows, and
+Linux release artifacts used by the existing publishing process. Each release
+contains platform/architecture ZIPs; the updater selects the exact ZIP from the
+GitHub release tag chosen by the active backend and verifies its GitHub
+SHA-256 digest before reading it. It does not use electron-builder feed files
+or GitHub's global latest release.
 
-Release publication requires these repository secrets:
-
-- `DESKTOP_MACOS_CSC_LINK` and `DESKTOP_MACOS_CSC_KEY_PASSWORD`
-- `DESKTOP_APPLE_API_KEY_P8`, `DESKTOP_APPLE_API_KEY_ID`, and
-  `DESKTOP_APPLE_API_ISSUER`
-- `DESKTOP_WINDOWS_CSC_LINK` and `DESKTOP_WINDOWS_CSC_KEY_PASSWORD`
-
-Mac builds are signed and notarized; Windows builds are signed. Linux uses the
-electron-updater package-manager/AppImage update path. The updater uses a feed
-URL for the backend's exact target tag, not a GitHub latest-release query.
-Those native release paths still require signed installation testing on every
-supported OS/architecture combination.
+Updates support macOS and Windows x64/arm64 and Linux x64/arm64. Installation
+uses the detected app bundle, Squirrel, native Linux package, or user-owned ZIP
+install. The app leaves the current installation intact when it cannot prove a
+safe install path or obtain required OS authorization. Releases before the
+updater was introduced (currently v0.8.0 through v0.12.0) do not contain the
+updater; installing one displays a warning that future in-app updates will not
+be available until a later updater-capable build is installed.
 
 The backend policy and user flows are documented in
 [Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users)

@@ -49,6 +49,39 @@ vi.mock('electron', () => ({
 }))
 
 describe('AppService.getDesktopReleaseStatus', () => {
+  it.each([
+    { installed: '0.12.0', compatible: true, updateAvailable: false, updateRequired: false },
+    { installed: '0.11.9', compatible: false, updateAvailable: true, updateRequired: true },
+    { installed: '0.12.1', compatible: false, updateAvailable: true, updateRequired: true },
+  ])(
+    'uses backend compatibility membership for installed version $installed',
+    async ({ installed, compatible, updateAvailable, updateRequired }) => {
+      const oldPackaged = app.isPackaged
+      ;(app as unknown as { isPackaged: boolean }).isPackaged = true
+      vi.mocked(app.getVersion).mockReturnValue(installed)
+      const { service } = createServiceWithPolicy(
+        makeReleasePolicy({
+          desktopVersion: '0.12.0',
+          compatibleDesktopVersions: ['0.12.0'],
+          minimumDesktopVersion: '0.8.0',
+        })
+      )
+
+      try {
+        await expect(service.getDesktopReleaseStatus()).resolves.toMatchObject({
+          currentVersion: installed,
+          latestVersion: '0.12.0',
+          compatibleVersions: ['0.12.0'],
+          compatible,
+          updateAvailable,
+          updateRequired,
+        })
+      } finally {
+        ;(app as unknown as { isPackaged: boolean }).isPackaged = oldPackaged
+      }
+    }
+  )
+
   it('uses the desktop package version in local Electron runs', async () => {
     vi.mocked(app.getVersion).mockReturnValue('41.3.0')
     const previousPackageVersion = process.env.npm_package_version
@@ -67,7 +100,6 @@ describe('AppService.getDesktopReleaseStatus', () => {
         minimumVersion: '0.1.250',
         updateRequired: true,
         releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/v0.1.250',
-        updateFeedUrl: 'https://github.com/your-org/evenfire/releases/download/v0.1.250/',
         releaseId: 'master-abc123',
         releaseTag: 'v0.1.250',
         externalRestApiVersion: '0.1.50',

@@ -8,10 +8,6 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "npm run build:main && npm run build:renderer",
-    "build:updates": "npm run build && electron-builder --config electron-builder.config.cjs",
-    "build:updates:mac": "npm run build && electron-builder --config electron-builder.config.cjs --mac --x64 --arm64 --publish never",
-    "build:updates:windows": "npm run build && electron-builder --config electron-builder.config.cjs --win --x64 --arm64 --publish never",
-    "build:updates:linux": "npm run build && electron-builder --config electron-builder.config.cjs --linux --x64 --arm64 --publish never",
     "build:main": "tsc -p tsconfig.json",
     "build:renderer": "vite build --config ui/vite.config.ts",
     "verify:electron": "node ./scripts/verify-electron-runtime.mjs",
@@ -54,8 +50,8 @@
   "dependencies": {
     "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
     "@clerum/gfs-interaction-policy": "file:../packages/gfs-interaction-policy",
+    "@electron/asar": "3.4.1",
     "@tanstack/react-query": "5.100.10",
-    "electron-updater": "6.8.9",
     "hast-util-to-jsx-runtime": "^2.3.6",
     "js-yaml": "^4.3.2",
     "keytar": "^7.9.0",
@@ -65,7 +61,8 @@
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
-    "unified": "^11.0.5"
+    "unified": "^11.0.5",
+    "yauzl": "3.4.0"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
@@ -85,11 +82,11 @@
     "@types/node": "^24.3.0",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
+    "@types/yauzl": "3.4.0",
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
     "cross-env": "^10.0.0",
     "electron": "^41.10.7",
-    "electron-builder": "26.18.0",
     "fast-check": "^4.9.0",
     "jsdom": "^29.0.2",
     "typescript": "^5.9.2",

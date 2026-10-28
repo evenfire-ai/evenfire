@@ -3,6 +3,8 @@ import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.j
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DesktopRuntimeConfigHandoffSelection,
+  DesktopUpdateDownloadResult,
+  DesktopUpdateDownloadedEvent,
   DesktopUpdateProgress,
   EntityChangeStreamEvent,
   HostMessageRequest,
@@ -162,6 +164,7 @@ const clerum = Object.freeze({
     getPendingDesktopUpdate: () => ipcRenderer.invoke('auth:getPendingDesktopUpdate'),
     downloadDesktopUpdate: (expectedVersion: string, restartAfterDownload = false) =>
       ipcRenderer.invoke('auth:downloadDesktopUpdate', { expectedVersion, restartAfterDownload }),
+    cancelDesktopUpdate: () => ipcRenderer.invoke('auth:cancelDesktopUpdate'),
     installDesktopUpdate: (expectedVersion: string) =>
       ipcRenderer.invoke('auth:installDesktopUpdate', { expectedVersion }),
     onDesktopUpdateCheckRequested: (callback: () => void) => {
@@ -177,9 +180,9 @@ const clerum = Object.freeze({
       ipcRenderer.on('desktopUpdate:progress', listener)
       return () => ipcRenderer.off('desktopUpdate:progress', listener)
     },
-    onDesktopUpdateDownloaded: (callback: (version: string) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: { version: string }) =>
-        callback(payload.version)
+    onDesktopUpdateDownloaded: (callback: (payload: DesktopUpdateDownloadedEvent) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: DesktopUpdateDownloadedEvent) =>
+        callback(payload)
       ipcRenderer.on('desktopUpdate:downloaded', listener)
       return () => ipcRenderer.off('desktopUpdate:downloaded', listener)
     },

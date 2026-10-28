@@ -79,7 +79,6 @@ describe('routes/desktop', () => {
       minimumDesktopVersion: releaseManifest.minimumDesktopVersion,
       releaseTag: `v${releaseManifest.desktopVersion}`,
       releaseUrl: `https://github.com/example/evenfire/releases/tag/v${releaseManifest.desktopVersion}`,
-      updateFeedUrl: `https://github.com/example/evenfire/releases/download/v${releaseManifest.desktopVersion}/`,
     })
   })
 

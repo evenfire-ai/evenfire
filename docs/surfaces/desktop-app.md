@@ -1,8 +1,7 @@
 # Desktop App
 
 Desktop App is an Electron client with a React renderer (built with Vite),
-packaged as **Evenfire**. Local development uses electron-forge; updater
-releases use electron-builder. It is the end-user surface: how
+packaged as **Evenfire** with Electron Forge. It is the end-user surface: how
 a person who is not the platform admin actually drives an agent, with no
 Telegram bot and no curl in sight. It authenticates through
 `external-rest-api`, obtains short-lived scoped RPC tokens, and does
@@ -173,8 +172,8 @@ the frontend process, and tear every port-forward down together on exit.
 
 ## Ship it to your users
 
-Local development packaging still uses electron-forge (`desktop-app/forge.config.js`).
-The maker outputs below are not updater releases; published updater builds use electron-builder.
+Release packaging uses electron-forge (`desktop-app/forge.config.js`). The
+updater consumes the same ZIPs and native packages produced by this process.
 
 - **zip** — macOS, Windows, and Linux
 - **dmg** — macOS
@@ -248,13 +247,11 @@ macOS variables (names only — keep the values in your keychain or CI secrets):
 With `ENABLE_APPLE_CODESIGN=1`, the build fails at config load unless one of the
 two notarization credential sets is present.
 
-The updater release workflow is `.github/workflows/release-desktop.yml`. It
-runs when a GitHub release is published, builds macOS and Windows x64/arm64
-packages plus Linux x64/arm64 AppImage, DEB, and RPM packages, then uploads
-them and electron-updater metadata to that exact release tag. macOS signing and
-notarization plus Windows signing credentials are required. Configure the
-secrets documented in the workflow before publishing an updater release. This
-workflow has not yet produced a verified release from this branch.
+The updater reads the selected backend's exact compatible version, resolves
+the matching `evenfire-desktop-v<VERSION>-<PLATFORM>-<ARCH>.zip` asset from
+that GitHub release, and verifies the SHA-256 digest in the GitHub Release API
+before inspecting the archive. The Forge release process remains the publisher;
+the updater does not require electron-builder metadata or a separate pipeline.
 
 ### Versions and updates
 
@@ -263,7 +260,9 @@ The Desktop version is the version in `desktop-app/package.json`.
 manifest. The release writer sets the compatible-version list to the new
 version by default; repeated `--compatible-desktop-version` flags retain other
 builds certified for that backend. The historic minimum is frozen because the
-new client checks exact compatible-set membership.
+new client checks exact compatible-set membership. Automatic update targets
+start at v0.8.0; older release tags are outside the supported update range and
+receive no compatibility adapters or backports.
 
 At startup, a packaged Desktop app checks the selected External REST API
 deployment, before sign-in when an environment is configured. A compatible
@@ -281,7 +280,7 @@ exact release tag returned by that backend, never GitHub's global latest.
 The release response is public and contains only non-secret version/release
 metadata. Each External REST API deployment selects its own target and
 compatible list in its compiled manifest. Do not deploy a target before its
-exact-tag updater metadata and required platform assets have been published.
+exact-tag release ZIPs and GitHub SHA-256 asset metadata have been published.
 See the how-to guide for the user flow and the compatibility roadmap for
 native validation still required.
 

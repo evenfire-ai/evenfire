@@ -17,6 +17,5 @@ export function buildDesktopReleasePolicy(
     minimumDesktopVersion: manifest.minimumDesktopVersion,
     releaseTag: tag,
     releaseUrl: `${releaseBaseUrl}/tag/${encodedTag}`,
-    updateFeedUrl: `${releaseBaseUrl}/download/${encodedTag}/`,
   }
 }

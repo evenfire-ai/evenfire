@@ -559,6 +559,11 @@ export function registerIpcHandlers(
       )
     }
   )
+  ipcMain.handle('auth:cancelDesktopUpdate', async event => {
+    assertTrustedSender(event)
+    if (!desktopUpdates) throw new Error('Desktop updates are unavailable.')
+    await desktopUpdates.cancelDesktopUpdate()
+  })
   ipcMain.handle(
     'auth:installDesktopUpdate',
     async (event, payload: { expectedVersion?: unknown }) => {
