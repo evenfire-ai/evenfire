@@ -1,21 +1,21 @@
 // E2E_GUARDIAN_IPC_FLOW: Desktop Files, home and share transitions are brokered through Electron IPC; every step asserts the persisted signal.
 /**
- * E2E — per-user GFS homes (#1168), Desktop journeys J1, J1b, J2, J3, J4, J6
+ * E2E — per-user GFS homes (#1168), Desktop journeys J1, J1b, J2–J6
  * and the Desktop access guards, following the plan's §5.5 contract table.
- * J5 (linked operator) needs the one-shot operator bootstrap and therefore
- * belongs to the operator-parity lane; it is not part of this file.
+ * J5 uses the seeded initial admin's active operator link as a precondition;
+ * its Desktop Files actions still use user-session authority.
  *
  * Contract (e2e-test-guardian):
- *  - Entry is always a visible Desktop login of a per-test user created by a
- *    named precondition; homes and owner grants are never seeded — each
+ *  - Entry is a visible Desktop login of a per-test user, or the seeded
+ *    initial admin in J5; homes and owner grants are never seeded — each
  *    journey consumes automatic provisioning.
  *  - Every grant/share under test is created, changed and removed through the
  *    Share dialog; SQL is used only for named preconditions and for reading
- *    business signals (gfs_user_homes, gfs_grants, gfs_shares).
+ *    business signals (gfs_user_homes, gfs_grants, gfs_shares, gfs_audit).
  *  - Each negative has a same-test positive on the same resource.
  *  - Agent denials are observed authorization refusals (no successful
  *    gfs_read, no sentinel leak), never timeouts.
- *  - Credentials are generated at runtime and kept in memory only.
+ *  - Test-user credentials are generated at runtime; all credentials stay in memory.
  */
 import {
   type ElectronApplication,
@@ -26,7 +26,14 @@ import {
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { ridOf, runControlPostgresSql, sqlLiteral } from '../../../tests/e2e/gfsFixtureCore'
+import {
+  GFS_E2E_DRIVE,
+  UUID_RE,
+  firstDataLine,
+  ridOf,
+  runControlPostgresSql,
+  sqlLiteral,
+} from '../../../tests/e2e/gfsFixtureCore'
 import {
   cleanupGfsFixture,
   seedGfsFileFixture,
@@ -44,6 +51,7 @@ import {
   sendAgentTurn,
 } from './helpers/gfsAgentChat'
 import { type ManagedGfsAgent, getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
+import type { GfsAuditRow } from './helpers/gfsDesktopOperatorParityFixtures'
 import { assertGfsInfraHealthy, discoverManagedGfsAgents } from './helpers/gfsFixtures'
 import { type HomeTestUser, UserHomeFixtures } from './helpers/gfsUserHomeFixtures'
 import { ControlUiAccessPanel } from './pages/ControlUiAccessPanel'
@@ -192,6 +200,107 @@ async function openEvenDriveLink(page: Page, uri: string): Promise<void> {
   await expect(dialog).toBeVisible()
   await dialog.getByLabel('EvenDrive link').fill(uri)
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
+}
+
+/** Read the seeded initial admin and its active link without creating either. */
+function readInitialAdmin(
+  login: string,
+  password: string
+): {
+  user: HomeTestUser
+  controlAdminId: string
+} {
+  const row = firstDataLine(
+    runControlPostgresSql(`
+      SELECT jsonb_build_object('id', u.id, 'email', u.email, 'name', u.name,
+                                'controlAdminId', a.id)::text
+        FROM gfs_desktop_operator_links l
+        JOIN users u ON u.id = l.user_id
+        JOIN control_admin_users a ON a.id = l.control_admin_id
+       WHERE l.state = 'active' AND l.source = 'initial_setup'
+         AND u.lifecycle_state = 'active' AND a.status = 'active'
+         AND (lower(a.username) = lower(${sqlLiteral(login)})
+              OR lower(a.email) = lower(${sqlLiteral(login)}));
+    `)
+  )
+  if (!row) throw new Error('[USER-HOME-E2E] active initial-admin operator link is required')
+  const identity = JSON.parse(row) as Record<string, unknown>
+  if (
+    typeof identity.id !== 'string' ||
+    !UUID_RE.test(identity.id) ||
+    typeof identity.controlAdminId !== 'string' ||
+    !UUID_RE.test(identity.controlAdminId) ||
+    typeof identity.email !== 'string' ||
+    !identity.email ||
+    typeof identity.name !== 'string' ||
+    !identity.name
+  ) {
+    throw new Error('[USER-HOME-E2E] malformed initial-admin identity')
+  }
+  return {
+    user: { id: identity.id, email: identity.email, name: identity.name, password },
+    controlAdminId: identity.controlAdminId,
+  }
+}
+
+/** Use the parity lane's gfs_audit reader and sequence floor for both audit producers. */
+function auditFloor(): number {
+  return Number(
+    firstDataLine(
+      runControlPostgresSql('SELECT coalesce(max(sequence_no), 0)::text FROM gfs_audit;')
+    )
+  )
+}
+
+function auditRowsAfter(sequenceNo: number, desktopUserId: string): GfsAuditRow[] {
+  const output = runControlPostgresSql(`
+    SELECT jsonb_build_object(
+      'sequenceNo', sequence_no, 'subject', subject, 'actorOnBehalfOf', actor_on_behalf_of,
+      'desktopUserId', desktop_user_id, 'authoritySource', authority_source,
+      'op', op, 'outcome', outcome, 'recordType', record_type,
+      'mutationOutcome', mutation_outcome, 'requestId', request_id, 'gfsUri', gfs_uri
+    )::text
+      FROM gfs_audit
+     WHERE sequence_no > ${Number(sequenceNo)}
+       AND desktop_user_id = ${sqlLiteral(desktopUserId)}::uuid
+     ORDER BY sequence_no ASC;
+  `)
+  return output
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.startsWith('{') && line.endsWith('}'))
+    .map(line => JSON.parse(line) as GfsAuditRow)
+}
+
+async function openControlTeams(page: Page): Promise<void> {
+  await page.getByRole('link', { name: 'Users & Teams', exact: true }).click()
+  await page.getByRole('tab', { name: 'Teams', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Create team', exact: true })).toBeEnabled()
+}
+
+/** Remove the test-only team's members and the team through Control UI. */
+async function removeVisibleTeam(page: Page, name: string, emails: string[]): Promise<void> {
+  await page.keyboard.press('Escape')
+  await openControlTeams(page)
+  const team = page.getByRole('button', { name, exact: true })
+  await expect(team).toBeVisible()
+  await team.click()
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+  for (const email of emails) {
+    const actions = page.getByRole('button', { name: `Actions for ${email}`, exact: true })
+    if (!(await actions.isVisible())) continue
+    await actions.click()
+    await page.getByRole('menuitem', { name: 'Remove member', exact: true }).click()
+    const confirmation = page.getByRole('alertdialog', { name: 'Remove member?' })
+    await confirmation.getByRole('button', { name: 'Remove member', exact: true }).click()
+    await expect(actions).toHaveCount(0)
+  }
+  await page.getByRole('button', { name: 'Team actions' }).click()
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
+  const confirmation = page.getByRole('alertdialog', { name: 'Delete team permanently?' })
+  await confirmation.getByRole('button', { name: 'Delete team', exact: true }).click()
+  await expect(confirmation).toBeHidden()
+  await expect(team).toHaveCount(0)
 }
 
 test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
@@ -599,6 +708,225 @@ test.describe.serial('GFS per-user homes — Desktop (#1168)', () => {
     } finally {
       for (const s of sessions.reverse()) await s.close()
       fx.cleanup()
+    }
+  })
+
+  test('J5 a linked initial admin uses only user authority in Desktop Files', async ({
+    browser,
+  }, testInfo) => {
+    test.setTimeout(15 * 60_000)
+    const adminLogin = requiredEnv('ADMIN_USER')
+    const adminPassword = process.env.ADMIN_PASS
+    if (!adminPassword) throw new Error('[USER-HOME-E2E] ADMIN_PASS is required')
+    const initial = readInitialAdmin(adminLogin, process.env.E2E_USER_PASSWORD || adminPassword)
+    expect(initial.user.id).not.toBe(initial.controlAdminId)
+    const fx = new UserHomeFixtures(runTagFor(testInfo))
+    const teamName = `e2e-home-j5-${fx.runTag}`
+    const adminFile = `j5-admin-${fx.runTag}.txt`
+    const guestFile = `j5-private-${fx.runTag}.txt`
+    const sentinel = `J5 private file ${fx.runTag}`
+    const sessions: DesktopSession[] = []
+    let controlPage: Page | null = null
+    let control: Awaited<ReturnType<typeof browser.newContext>> | null = null
+    let adminSession: DesktopSession | null = null
+    let adminHome: Awaited<ReturnType<UserHomeFixtures['waitForHomeState']>> | null = null
+    let teamSubmissionStarted = false
+    let adminFileCreated = false
+    let adminFileId: string | null = null
+    let guest: HomeTestUser | null = null
+    try {
+      guest = fx.createUser('j5-guest')
+      control = await browser.newContext({ baseURL: requiredEnv('CONTROL_UI_BASE_URL') })
+      controlPage = await control.newPage()
+      const operatorPanel = new ControlUiAccessPanel(controlPage)
+      await operatorPanel.login(adminLogin, adminPassword)
+
+      await test.step('precondition: the users share a test-only team', async () => {
+        const page = controlPage!
+        await openControlTeams(page)
+        await page.getByRole('button', { name: 'Create team', exact: true }).click()
+        await page.getByPlaceholder('Team name').fill(teamName)
+        await page.getByRole('button', { name: 'Continue', exact: true }).click()
+        await expect(page.getByText('Choose initial team members and roles.')).toBeVisible()
+        await page.getByRole('button', { name: 'Continue', exact: true }).click()
+        teamSubmissionStarted = true
+        await page.getByRole('button', { name: 'Create team', exact: true }).click()
+        const team = page.getByRole('button', { name: teamName, exact: true })
+        await expect(team).toBeVisible()
+        await team.click()
+        await expect(page.getByRole('heading', { name: teamName, exact: true })).toBeVisible()
+        await page.getByRole('button', { name: 'Add member', exact: true }).click()
+        const dialog = page.getByRole('dialog', { name: 'Add member', exact: true })
+        const search = dialog.getByPlaceholder('Search members...')
+        for (const email of [initial.user.email, guest!.email]) {
+          await search.fill(email)
+          const option = dialog.getByRole('option').filter({ hasText: email })
+          await expect(option).toBeVisible()
+          await option.click()
+          await expect(option).toHaveAttribute('aria-selected', 'true')
+        }
+        await dialog.getByRole('button', { name: 'Add members', exact: true }).click()
+        await expect(dialog).toBeHidden()
+        await expect(page.getByRole('row').filter({ hasText: initial.user.email })).toBeVisible()
+        await expect(page.getByRole('row').filter({ hasText: guest!.email })).toBeVisible()
+      })
+
+      const guestSession = await launchDesktopAs(testInfo, guest)
+      sessions.push(guestSession)
+      const guestHome = await fx.waitForHomeState(guest.id, 'ready')
+      expect(guestHome.drive).toBe(GFS_E2E_DRIVE)
+      await test.step('precondition: V creates G in the automatically provisioned home', async () => {
+        await openHomeFolder(guestSession.page, guestHome)
+        await new DesktopResourceView(guestSession.page).uploadFile(
+          guestFile,
+          Buffer.from(sentinel)
+        )
+      })
+      const guestFileId = fx.childId(guestHome.resourceId!, guestFile)
+      const guestFilePath = `/Users/${guestHome.storageUsername}/${guestFile}`
+
+      adminSession = await launchDesktopAs(testInfo, initial.user)
+      sessions.push(adminSession)
+      const adminPage = adminSession.page
+      adminHome = await fx.waitForHomeState(initial.user.id, 'ready')
+      const home = adminHome
+      await test.step('My home is the linked user’s own provisioned home', async () => {
+        expect(home).toMatchObject({ state: 'ready', drive: expect.any(String) })
+        expect(home.storageUsername).toBeTruthy()
+        expect(home.resourceId).toMatch(UUID_RE)
+        const path = firstDataLine(
+          runControlPostgresSql(`
+            SELECT path_cache FROM gfs_resources
+             WHERE resource_id = ${sqlLiteral(home.resourceId!)}::uuid
+               AND drive = ${sqlLiteral(home.drive!)} AND deleted_at IS NULL;
+          `)
+        )
+        expect(path).toBe(`/Users/${home.storageUsername}`)
+        await openHomeFolder(adminPage, home)
+        await expect(
+          adminPage
+            .getByRole('navigation', { name: 'File location' })
+            .getByRole('button', { name: home.storageUsername!, exact: true })
+        ).toHaveAttribute('aria-current', 'page')
+        await new DesktopResourceView(adminPage).expectYourAccess(OWNER_BITS)
+      })
+
+      await new DesktopResourceView(adminPage).uploadFile(
+        adminFile,
+        Buffer.from(`J5 shared ${fx.runTag}`)
+      )
+      adminFileCreated = true
+      adminFileId = fx.childId(home.resourceId!, adminFile)
+      const sharedFileId = adminFileId
+      await test.step('U shares a file with V as a user session', async () => {
+        const floor = auditFloor()
+        await new DesktopResourceView(adminPage).openShare(adminFile)
+        await new DesktopShareDialog(adminPage).grant(guest!.name, 'Read', {
+          includeContents: false,
+        })
+        expect(fx.accessFor(sharedFileId, 'user', guest!.id)).toMatchObject({
+          relation: 'grant',
+          permissions: ['read', 'share'],
+          inherit: false,
+        })
+        await expect
+          .poll(() =>
+            auditRowsAfter(floor, initial.user.id).some(
+              row =>
+                row.subject === `user:${guest!.id}` &&
+                row.desktopUserId === initial.user.id &&
+                row.authoritySource === 'user-session' &&
+                row.op === 'grant.put[read,share]' &&
+                row.outcome === 'allowed' &&
+                row.gfsUri === `gfs://${home.drive}/${sharedFileId}`
+            )
+          )
+          .toBe(true)
+        await adminPage.keyboard.press('Escape')
+      })
+
+      await test.step('U is refused on G and the deny records the user token subject', async () => {
+        const floor = auditFloor()
+        // Link opening resolves metadata before bytes; the byte-proxy refusal is
+        // covered by control-api/test/routes.externalGfsAuthority.test.ts.
+        await openEvenDriveLink(adminPage, `gfs://${guestHome.drive}/${ridOf(guestFileId)}`)
+        await expect(
+          adminPage.getByRole('dialog', { name: 'Open EvenDrive link' }).getByRole('alert')
+        ).toHaveText('403 Forbidden: forbidden: not authorized to read this resource')
+        await expect
+          .poll(() =>
+            auditRowsAfter(floor, initial.user.id).some(
+              row =>
+                row.subject === initial.user.id &&
+                row.desktopUserId === initial.user.id &&
+                row.authoritySource === 'user-session' &&
+                row.op === 'read' &&
+                row.outcome === 'deny' &&
+                row.recordType === 'authorization_decision' &&
+                row.gfsUri === `gfs://${guestHome.drive}/${ridOf(guestFileId)}`
+            )
+          )
+          .toBe(true)
+      })
+
+      await test.step('an independent Control UI operator reads G', async () => {
+        const page = controlPage!
+        await operatorPanel.openResource(guestFilePath)
+        await page.getByRole('button', { name: 'Close share dialog', exact: true }).click()
+        await page
+          .getByRole('list', { name: 'Current folder resources' })
+          .getByRole('button', { name: guestFile, exact: true })
+          .click()
+        await expect(
+          page.getByRole('article', { name: `Text preview of ${guestFile}` })
+        ).toContainText(sentinel)
+        await page
+          .getByRole('dialog', { name: guestFile })
+          .getByRole('button', { name: 'Close preview' })
+          .click()
+      })
+    } finally {
+      const errors: unknown[] = []
+      const attempt = async (action: () => void | Promise<void>) => {
+        try {
+          await action()
+        } catch (error) {
+          errors.push(error)
+        }
+      }
+      if (adminSession && adminHome && adminFileCreated) {
+        const session = adminSession
+        const home = adminHome
+        await attempt(async () => {
+          await session.page.keyboard.press('Escape')
+          await openHomeFolder(session.page, home)
+          if (guest && adminFileId && fx.accessFor(adminFileId, 'user', guest.id)) {
+            await new DesktopResourceView(session.page).openShare(adminFile)
+            await new DesktopShareDialog(session.page).revoke(guest.name)
+            await session.page
+              .getByRole('dialog', { name: `Share file ${adminFile}` })
+              .getByRole('button', { name: 'Close share dialog', exact: true })
+              .click()
+          }
+          await session.page.getByRole('button', { name: `Options for ${adminFile}` }).click()
+          await session.page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
+          const confirmation = session.page.getByRole('dialog', { name: `Delete ${adminFile}?` })
+          await confirmation.getByRole('button', { name: 'Delete', exact: true }).click()
+          await expect(confirmation).toBeHidden()
+          await expect(session.page.getByRole('button', { name: `Open ${adminFile}` })).toHaveCount(
+            0
+          )
+        })
+      }
+      if (controlPage && teamSubmissionStarted && guest) {
+        const page = controlPage
+        const emails = [initial.user.email, guest.email]
+        await attempt(() => removeVisibleTeam(page, teamName, emails))
+      }
+      if (control) await attempt(() => control!.close())
+      for (const session of sessions.reverse()) await attempt(() => session.close())
+      await attempt(() => fx.cleanup())
+      if (errors.length) throw new AggregateError(errors, 'J5 fixture cleanup failed')
     }
   })
 
