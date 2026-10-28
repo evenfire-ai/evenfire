@@ -51,8 +51,15 @@ export type DnsResolver = (hostname: string) => Promise<string[]>
 
 export type OAuthEndpointResolutionClassification = 'trust_rejected' | 'transient_dns'
 
-function isTransientDnsFailure(message: string): boolean {
-  return /\b(?:EAI_AGAIN|ETIMEDOUT|ESERVFAIL|SERVFAIL)\b/i.test(message)
+const TRANSIENT_DNS_ERROR_CODES = new Set(['EAI_AGAIN', 'ETIMEDOUT', 'ESERVFAIL', 'SERVFAIL'])
+
+function isTransientDnsFailure(error: unknown): boolean {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code?: unknown }).code
+    return typeof code === 'string' && TRANSIENT_DNS_ERROR_CODES.has(code.toUpperCase())
+  }
+  const message = error instanceof Error ? error.message : String(error)
+  return /(?:^|[\s:])(?:EAI_AGAIN|ETIMEDOUT|ESERVFAIL|SERVFAIL)(?=$|[\s:])/i.test(message)
 }
 
 const FORBIDDEN_ENV = new Set([
@@ -534,16 +541,13 @@ async function validateAndResolveOAuthEndpoint(
       }
     }
   } catch (error) {
-    const resolutionMessage = `host "${host}" could not be resolved: ${
-      error instanceof Error ? error.message : String(error)
-    }`
     classification =
-      errors.length === 0 && isTransientDnsFailure(resolutionMessage)
-        ? 'transient_dns'
-        : 'trust_rejected'
+      errors.length === 0 && isTransientDnsFailure(error) ? 'transient_dns' : 'trust_rejected'
     errors.push({
       field,
-      message: resolutionMessage,
+      message: `host "${host}" could not be resolved: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     })
   }
 

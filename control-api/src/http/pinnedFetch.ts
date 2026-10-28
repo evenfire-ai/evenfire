@@ -254,6 +254,12 @@ export async function pinnedFetch(
     if (abortListener) signal.removeEventListener('abort', abortListener)
   }
   if (!resolved.ok) {
+    if (resolved.classification === 'transient_dns') {
+      return {
+        ok: false,
+        error: { kind: 'transport_failed', detail: 'endpoint resolution temporarily failed' },
+      }
+    }
     return { ok: false, error: { kind: 'kernel_rejected', field, errors: resolved.errors } }
   }
 
