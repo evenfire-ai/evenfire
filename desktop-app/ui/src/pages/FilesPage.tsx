@@ -774,17 +774,24 @@ export function FilesPage({
   // partial-success outcome. People, teams, and agents share a single picker;
   // agents are capped to read/write inside the panel. Inherit is honored for
   // directories (default ON) and forced false for files.
-  const handleGrant = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
+  const handleGrant = async (
+    subjectKeys: string[],
+    bits: string[],
+    inherit: boolean,
+    isDraftCurrent: () => boolean
+  ) => {
     try {
       await ctrl.grant(subjectKeys, bits, inherit)
     } catch (grantError) {
       if (failClosedOnAuthorizationError(grantError)) return
       throw grantError
     }
-    pushToast?.(
-      `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
-      'success'
-    )
+    if (isDraftCurrent()) {
+      pushToast?.(
+        `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
+        'success'
+      )
+    }
     // The grant PUT returns no ids — list-after-write is the revoke-id source.
     await ctrl.refreshGrants()
   }

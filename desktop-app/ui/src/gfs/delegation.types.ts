@@ -26,7 +26,12 @@ export interface GfsDelegationPanelProps {
   permissionCheckFailed?: boolean
   /** Directories offer the "Include contents" toggle (default ON); files always send inherit=false. */
   isDirectory: boolean
-  onGrant: (subjectKeys: string[], bits: string[], inherit: boolean) => Promise<void>
+  onGrant: (
+    subjectKeys: string[],
+    bits: string[],
+    inherit: boolean,
+    isDraftCurrent: () => boolean
+  ) => Promise<void>
   onDetailViewChange?: (open: boolean) => void
 }
 

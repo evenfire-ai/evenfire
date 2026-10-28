@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, DropdownSelect, StatusBanner } from '@components/Common'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { GfsSubjectPicker } from '@/gfs/GfsSubjectPicker'
@@ -78,6 +78,22 @@ export function GfsDelegationPanel({
 
   const permissionDenied =
     !affordances.canDelegate && !permissionCheckPending && !permissionCheckFailed
+  const draftGenerationRef = useRef(0)
+  const wasPermissionDeniedRef = useRef(permissionDenied)
+
+  useLayoutEffect(() => {
+    if (permissionDenied && !wasPermissionDeniedRef.current) {
+      draftGenerationRef.current += 1
+    }
+    wasPermissionDeniedRef.current = permissionDenied
+  }, [permissionDenied])
+
+  useLayoutEffect(
+    () => () => {
+      draftGenerationRef.current += 1
+    },
+    []
+  )
 
   useEffect(() => {
     if (permissionDenied) {
@@ -97,20 +113,28 @@ export function GfsDelegationPanel({
     setSubjectKeys(nextKeys)
   }
 
-  async function run(action: () => Promise<void>) {
+  async function run(action: (isDraftCurrent: () => boolean) => Promise<void>) {
+    const generation = draftGenerationRef.current
+    const isDraftCurrent = () => draftGenerationRef.current === generation
     setError(null)
     setBusy(true)
     try {
-      await action()
-      setSubjectKeys([])
-      setRole('read')
+      await action(isDraftCurrent)
+      if (isDraftCurrent()) {
+        setSubjectKeys([])
+        setRole('read')
+      }
     } catch (e) {
       // The bulk grant is atomic — a failure means NONE of the subjects landed,
       // so keep the whole selection for a retry. Surface the server's
       // verdict (escalation_rejected, subjects_invalid with 1-based positions, a
       // rate-limit retry, …) via the shared presentation map — never swallow it.
-      setError(describeGfsGrantError(e).message)
+      // A settled authority denial retires this draft, so its old failure cannot
+      // overwrite the read-only state or a later fresh form.
+      if (isDraftCurrent()) setError(describeGfsGrantError(e).message)
     } finally {
+      // Busy belongs to the real request, not the draft. Keep duplicate-submit
+      // protection until this operation settles even if authority retired it.
       setBusy(false)
     }
   }
@@ -198,7 +222,11 @@ export function GfsDelegationPanel({
               disabled={
                 busy || permissionCheckPending || permissionCheckFailed || bits.length === 0
               }
-              onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
+              onClick={() =>
+                run(isDraftCurrent =>
+                  onGrant(subjectKeys, bits, isDirectory ? inherit : false, isDraftCurrent)
+                )
+              }
             >
               Share
             </Button>

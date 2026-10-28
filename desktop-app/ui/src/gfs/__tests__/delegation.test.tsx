@@ -57,7 +57,12 @@ describe('GfsDelegationPanel', () => {
 
     // Files never send inherit.
     await waitFor(() =>
-      expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read', 'manage_acl'], false)
+      expect(onGrant).toHaveBeenCalledWith(
+        ['user:u2'],
+        ['read', 'manage_acl'],
+        false,
+        expect.any(Function)
+      )
     )
   })
 
@@ -144,7 +149,12 @@ describe('GfsDelegationPanel', () => {
 
     await screen.findByText('Some selected subjects are invalid and were rejected.')
     expect(onGrant).toHaveBeenCalledTimes(1)
-    expect(onGrant).toHaveBeenCalledWith(['user:successful', 'team:blocked'], ['read'], false)
+    expect(onGrant).toHaveBeenCalledWith(
+      ['user:successful', 'team:blocked'],
+      ['read'],
+      false,
+      expect.any(Function)
+    )
     expect(screen.getByRole('button', { name: 'Remove Successful User' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Remove Blocked Team' })).toBeTruthy()
   })
@@ -176,7 +186,12 @@ describe('GfsDelegationPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
     await waitFor(() =>
-      expect(onGrant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read', 'write'], false)
+      expect(onGrant).toHaveBeenCalledWith(
+        ['host:1st:mcp-host/chatllm'],
+        ['read', 'write'],
+        false,
+        expect.any(Function)
+      )
     )
   })
 
@@ -197,7 +212,9 @@ describe('GfsDelegationPanel', () => {
     const toggle = screen.getByRole('checkbox', { name: 'Include contents of this folder' })
     expect(toggle).toHaveProperty('checked', true)
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
-    await waitFor(() => expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read'], true))
+    await waitFor(() =>
+      expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read'], true, expect.any(Function))
+    )
 
     // The panel clears the selection after a successful grant, so re-pick before
     // proving the unchecked toggle sends inherit=false.
@@ -207,7 +224,9 @@ describe('GfsDelegationPanel', () => {
     fireEvent.click(secondToggle)
     expect(secondToggle).toHaveProperty('checked', false)
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
-    await waitFor(() => expect(onGrant).toHaveBeenNthCalledWith(2, ['user:u2'], ['read'], false))
+    await waitFor(() =>
+      expect(onGrant).toHaveBeenNthCalledWith(2, ['user:u2'], ['read'], false, expect.any(Function))
+    )
   })
 
   it('never shows the Include contents toggle for files', () => {
