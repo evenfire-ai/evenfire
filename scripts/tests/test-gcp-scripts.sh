@@ -314,7 +314,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   manifest="$(cat)"
   printf '%s' "$manifest" >"$JOB_CAPTURE"
   printf '%s\n' "$manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -638,7 +642,11 @@ fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   cat >"$JOB_CAPTURE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -785,7 +793,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   job_manifest="$(cat)"
   printf '%s' "$job_manifest" >"$JOB_CAPTURE"
   printf 'JOB_MANIFEST %s\n' "$job_manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -843,7 +855,8 @@ STUB
      grep -q "relation.relkind IN ('r', 'p', 'v', 'm')" "$log_file" && \
      grep -q 'JOB_MANIFEST.*DATABASE_URL' "$log_file" && \
      grep -q 'JOB_MANIFEST.*control-api-config' "$log_file" && \
-     grep -q 'JOB_MANIFEST.*CONTROL_API_PG_CONNECTION_STRING.*"value":""' "$log_file" && \
+     grep -q 'JOB_MANIFEST.*{"name":"CONTROL_API_PG_CONNECTION_STRING"}' "$log_file" && \
+     ! grep -q 'JOB_MANIFEST.*{"name":"CONTROL_API_PG_CONNECTION_STRING","value"' "$log_file" && \
      grep -q 'JOB_MANIFEST.*CONTROL_API_MIGRATION_PG_HOST' "$log_file" && \
      grep -q 'JOB_MANIFEST.*control-postgres.*POSTGRES_PASSWORD' "$log_file" && \
      grep -q -- '--context=fake-context get secret control-postgres -n control-plane' "$log_file" && \
@@ -965,7 +978,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
     echo "unexpected pvc create" >&2
     exit 98
   fi
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -1110,7 +1127,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
     exit 0
   fi
   printf 'JOB_CREATE\n%s\n' "$manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 

@@ -966,6 +966,12 @@ jobs:
       - name: Test single-writer validator fails loud on an absent local deploy
         run: bash scripts/tests/test-postgres-single-writer-strategy.sh
 
+      - name: Test control-api migration bounds and Job ownership contract
+        run: bash scripts/tests/test-control-api-migration-bounds.sh
+
+      - name: Test GCP deploy scripts (migration and runtime access contracts)
+        run: bash scripts/tests/test-gcp-scripts.sh
+
       - name: Test post-reset convergence isolates DB-dependent controllers
         run: bash scripts/tests/test-converge-control-db-after-reset.sh
 
