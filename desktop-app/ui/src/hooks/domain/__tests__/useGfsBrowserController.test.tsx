@@ -11,6 +11,7 @@ import {
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
+  accessibleResource,
   affordancesResult,
   childView,
   grantsListPage,
@@ -122,6 +123,8 @@ function Probe() {
       <div data-testid="access-state">{ctrl.accessState}</div>
       <div data-testid="authority-pending">{ctrl.authorityPending ? 'pending' : 'ready'}</div>
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
+      <div data-testid="home-state">{ctrl.home?.state ?? 'none'}</div>
+      <div data-testid="home-error">{ctrl.homeError ?? 'none'}</div>
       <div data-testid="items-count">{ctrl.items.length}</div>
       <div data-testid="children-error">{ctrl.error ?? 'none'}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
@@ -265,6 +268,9 @@ function Probe() {
       <button type="button" onClick={() => ctrl.retryAccess()}>
         retry access
       </button>
+      <button type="button" onClick={() => swallow(ctrl.retryDiscovery())}>
+        retry discovery
+      </button>
     </>
   )
 }
@@ -304,6 +310,135 @@ function ProductionHarness({ children }: { children: ReactNode }) {
 }
 
 describe('useGfsBrowserController', () => {
+  it('lists shared resources while the home request is still in flight', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    const listAccessible = vi.fn(async () => page)
+    const getHome = vi.fn(() => new Promise<Awaited<ReturnType<typeof homeView>>>(() => {}))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getHome, listAccessible } },
+    })
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(getHome).toHaveBeenCalledOnce()
+    expect(listAccessible).toHaveBeenCalledWith(undefined, undefined)
+    expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+  })
+
+  it('lists shared resources while a pending home has no drive', async () => {
+    const home = await homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    const listAccessible = vi.fn(async () => page)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getHome: vi.fn(async () => home), listAccessible } },
+    })
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(listAccessible).toHaveBeenCalledWith(undefined, undefined)
+    expect(screen.getByTestId('home-state').textContent).toBe('pending')
+    expect(screen.getByTestId('loading-accessible').textContent).toBe('idle')
+    expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+  })
+
+  it('lists shared resources independently of a home 404 and retries the failed home', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    const home = await homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+    const getHome = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('404 Not Found: home_not_found'))
+      .mockResolvedValue(home)
+    const listAccessible = vi.fn(async () => page)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getHome, listAccessible } },
+    })
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-error').textContent).not.toBe('none'))
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(listAccessible).toHaveBeenCalledWith(undefined, undefined)
+    expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('none')
+    expect(screen.getByTestId('accessible-notice').textContent).toBe('none')
+    expect(screen.getByTestId('accessible-error').textContent).toBe('none')
+    expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+
+    await act(async () => screen.getByRole('button', { name: 'retry discovery' }).click())
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('pending'))
+    expect(getHome).toHaveBeenCalledTimes(2)
+    expect(listAccessible).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a known home drive on discovery requests', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    const listAccessible = vi.fn(async () => page)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getHome: vi.fn(async () => homeView()), listAccessible } },
+    })
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('ready'))
+    await act(async () => screen.getByRole('button', { name: 'retry discovery' }).click())
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledWith('main', undefined))
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(screen.getByRole('button', { name: 'open Shared folder' })).toBeTruthy()
+  })
+
+  it('withholds discovery until authority is revalidated without a home drive', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('shared', 'Shared folder', 'directory'),
+    ])
+    let resolveDiscovery!: (value: typeof page) => void
+    const listAccessible = vi.fn(
+      () =>
+        new Promise<typeof page>(resolve => {
+          resolveDiscovery = resolve
+        })
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () =>
+            homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+          ),
+          listAccessible,
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    client.setQueryData(
+      desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main'),
+      { pages: [page], pageParams: [undefined] },
+      { updatedAt: Date.now() - 1_000 }
+    )
+    render(
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>
+          <Probe />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledWith(undefined, undefined))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+    await act(async () => resolveDiscovery(page))
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('ready')
+  })
+
   it('carries a non-main home drive through discovery, children, affordances, uploads and grants', async () => {
     const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
     const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))

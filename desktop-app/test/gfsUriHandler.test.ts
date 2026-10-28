@@ -161,6 +161,23 @@ describe('GfsClient.listChildren', () => {
 })
 
 describe('GfsClient.listAccessible', () => {
+  it('omits the drive query when none is provided and retains the cursor', async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { items: [{ ...CHILD, sources: ['grant'] }], nextCursor: null },
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
+
+    const page = await client.listAccessible('tok', { cursor: 'next-page' })
+
+    expect(page.items).toHaveLength(1)
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      'https://api.example/api/v1/me/gfs/resources?cursor=next-page',
+      { token: 'tok' }
+    )
+  })
+
   it('lists readable GFS resources for the current ordinary user session', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,

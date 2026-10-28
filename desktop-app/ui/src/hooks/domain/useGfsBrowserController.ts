@@ -8,7 +8,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query'
-import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
+import { GFS_BREADCRUMB_MAX_DEPTH, GFS_DEFAULT_DISCOVERY_DRIVE } from '@constants/gfsBrowser'
 import { applyMoveConvergence } from '@lib/gfsEntityChangeState'
 import {
   describeGfsReadError,
@@ -355,6 +355,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       ? null
       : (homeQuery.data ?? null)
   const homeDrive = home?.drive ?? ''
+  // The server's omitted-drive request and an explicit main request name the
+  // same drive. Share their cache so home resolution cannot spend the read
+  // budget twice or discard a rate-limit verdict.
+  const discoveryCacheDrive = homeDrive || GFS_DEFAULT_DISCOVERY_DRIVE
   // A selected resource can belong to a different drive than the home.
   const DRIVE = current ? (current.gfsUri.slice('gfs://'.length).split('/')[0] ?? '') : homeDrive
   const setAccessState = useCallback(
@@ -443,16 +447,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   )
 
   const accessibleQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', homeDrive),
+    queryKey: desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', discoveryCacheDrive),
     queryFn: async ({ pageParam }): Promise<GfsAccessibleWirePage> => {
       const listAccessible = window.clerum?.gfs?.listAccessible
       if (typeof listAccessible !== 'function') {
         return { items: [], nextCursor: null }
       }
-      return listAccessible(homeDrive, pageParam)
+      return listAccessible(homeDrive || undefined, pageParam)
     },
-    enabled:
-      Boolean(sessionScope && homeDrive) && canListAccessibleResources && accessState === 'active',
+    enabled: Boolean(sessionScope) && canListAccessibleResources && accessState === 'active',
     // The drive arrives asynchronously from the home endpoint. A cached query
     // switched in at that point must re-prove authority before its data renders.
     staleTime: 0,
@@ -480,7 +483,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // per-resource operations still fail closed through handleAuthorityFailure.
   const authorityPending =
     Boolean(sessionScope) &&
-    Boolean(homeDrive) &&
     canListAccessibleResources &&
     accessState === 'active' &&
     accessibleQuery.dataUpdatedAt < authorityEpochRef.current
@@ -940,10 +942,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         ? []
         : suppressNavigableShares(
             (accessibleQuery.data?.pages ?? []).flatMap(page =>
-              page.items.map(item => normalizeAccessibleResource(item, homeDrive))
+              page.items.map(item => normalizeAccessibleResource(item, discoveryCacheDrive))
             )
           ),
-    [accessibleQuery.data, authorityPending, homeDrive]
+    [accessibleQuery.data, authorityPending, discoveryCacheDrive]
   )
   const grants = useMemo<GfsGrantListItem[]>(
     () => (authorityPending ? [] : (grantsQuery.data ?? [])),
@@ -1018,8 +1020,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // folder listing the same budget is still refusing.
   const retryDiscovery = useCallback(async () => {
     pausedUntilRef.current = childrenRateLimitedUntil ?? 0
-    await accessibleQuery.refetch()
-  }, [accessibleQuery, childrenRateLimitedUntil])
+    await Promise.all([
+      accessibleQuery.refetch(),
+      ...(homeQuery.isError ? [homeQuery.refetch()] : []),
+    ])
+  }, [accessibleQuery, childrenRateLimitedUntil, homeQuery])
   // The same contract for the children query. Nothing to clear here: `refetch`
   // is not gated by the focus predicate, and the pause is shared with
   // discovery — clearing it on a folder retry would hand the next window focus
@@ -1456,11 +1461,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // children query, and gating it on a discovery error hid the spinner while
     // a folder was genuinely loading, flashing "this folder is empty".
     loadingAccessible:
-      !homeQuery.isError &&
       !accessibleQuery.isError &&
-      (homeQuery.isPending ||
-        (home?.state === 'pending' && !homeDrive) ||
-        (authorityPending && canListAccessibleResources) ||
+      ((authorityPending && canListAccessibleResources) ||
         (canListAccessibleResources &&
           accessibleQuery.isFetching &&
           accessibleResources.length === 0)),
@@ -1469,11 +1471,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // the server refused, and only the query knows it; deriving it from render
     // time would restart the wait on every re-render.
     errorUpdatedAt: childrenErrorUpdatedAt,
-    accessibleError: homeQuery.error
-      ? toPresentedMessage(homeQuery.error)
-      : accessibleNotice
-        ? null
-        : accessibleErrorMessage,
+    accessibleError: accessibleNotice ? null : accessibleErrorMessage,
     accessibleNotice,
     discoveryFailure,
     retryDiscovery,

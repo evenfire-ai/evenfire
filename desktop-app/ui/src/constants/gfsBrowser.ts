@@ -1,6 +1,7 @@
 export const GFS_BREADCRUMB_MAX_DEPTH = 64
 
-/** Drive the desktop Files page browses (single-drive user plane today). */
+/** Cache identity for discovery requests that use the server's default drive. */
+export const GFS_DEFAULT_DISCOVERY_DRIVE = 'main'
 
 /** Internal EvenDrive drag payload type, shared by the Files page and the
  * sidebar file explorer. Carries the resourceId as an identity POINTER only:

@@ -2512,6 +2512,7 @@ describe('GET /external/gfs/resources', () => {
       if (lifecycle) return lifecycle
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T1 }] }
       if (text.includes('FROM gfs_grants') && text.includes('JOIN requested_subjects')) {
+        expect(values?.[0]).toBe('main')
         expect(values?.[1]).toEqual(['user', 'team'])
         expect(values?.[2]).toEqual([U1, T1])
         return {

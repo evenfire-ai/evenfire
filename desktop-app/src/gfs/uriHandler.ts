@@ -589,12 +589,13 @@ export class GfsClient {
     opts?: { drive?: string; cursor?: string }
   ): Promise<GfsAccessibleResourcesPage> {
     const q = new URLSearchParams()
-    q.set('drive', requireDrive(opts?.drive))
+    if (opts?.drive !== undefined) q.set('drive', requireDrive(opts.drive))
     if (opts?.cursor) q.set('cursor', opts.cursor)
+    const query = q.toString()
     try {
       const payload = await this.transport.requestJson<GfsEnvelope<GfsAccessibleResourcesPage>>(
         'GET',
-        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources?' + q.toString()),
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources' + (query ? `?${query}` : '')),
         { ['token']: session }
       )
       return unwrap(payload)
