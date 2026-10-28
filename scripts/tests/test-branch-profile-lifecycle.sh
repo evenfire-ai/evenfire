@@ -816,8 +816,20 @@ for name in control-ui control-api external-rest-api rpc-proxy; do
 done
 assert_dead "${control_ui_pid}" 'stop-pf terminates the verified control-ui forward'
 
-# pre-gate-sync (pf-all-stack.sh) records the approval reader forward as
-# workflow-approval-request-reader.pid; stop-pf must verify and clear it.
+# Every forward pf-all-stack.sh (pre-gate-sync) starts uses a record name that
+# stop-pf verifies, so the two tools clear each other's record for one port.
+pf_stack_names="$(sed -nE 's/^[[:space:]]*start_(optional_(deployment_)?)?pf[[:space:]]+([a-z][a-z-]*).*/\3/p' \
+  "${ROOT}/scripts/minikube/pf-all-stack.sh" | sort -u)"
+[[ -n "${pf_stack_names}" ]] || fail 'no forward names found in pf-all-stack.sh'
+while IFS= read -r name; do
+  grep -Eq "^[[:space:]]+(${name}|[a-z-]+ \| ${name}|${name} \| [a-z-]+)\)$" \
+    "${ROOT}/scripts/minikube-profiles/branch-profile.sh" ||
+    fail "pf-all-stack.sh records '${name}', which branch-profile stop-pf does not verify"
+  ok
+done <<<"${pf_stack_names}"
+
+# Records written by earlier pre-gate-sync runs under the service name
+# workflow-approval-request-reader.pid stay on disk; stop-pf must clear them.
 reset_state
 printf '%s\n' control-plane/control-ui control-plane/control-api profiles/external-rest-api \
   rpc-proxy/rpc-proxy channels/workflow-approval-request-reader >"${state}/services"

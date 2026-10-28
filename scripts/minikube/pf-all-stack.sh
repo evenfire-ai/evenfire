@@ -416,7 +416,9 @@ start_pf control-api control-plane control-api "${CONTROL_API_PORT}:8090" "http:
 start_pf external-rest-api profiles external-rest-api "${EXTERNAL_REST_API_PORT}:8091" "http://127.0.0.1:${EXTERNAL_REST_API_PORT}/health"
 start_pf rpc-proxy rpc-proxy rpc-proxy "${RPC_PROXY_PORT}:8094" "http://127.0.0.1:${RPC_PROXY_PORT}/health"
 start_optional_pf registry-api registry registry-api "${REGISTRY_API_PORT}:8085" "http://127.0.0.1:${REGISTRY_API_PORT}/health"
-start_optional_deployment_pf workflow-approval-request-reader channels clerum-workflow-approval-request-reader workflow-approval-request-reader "${WORKFLOW_APPROVAL_READER_PORT}:8098" "http://127.0.0.1:${WORKFLOW_APPROVAL_READER_PORT}/health"
+# Record names match branch-profile.sh so each tool clears the other's record
+# for the same port (scripts/tests/test-branch-profile-lifecycle.sh checks it).
+start_optional_deployment_pf workflow-approval-reader channels clerum-workflow-approval-request-reader workflow-approval-request-reader "${WORKFLOW_APPROVAL_READER_PORT}:8098" "http://127.0.0.1:${WORKFLOW_APPROVAL_READER_PORT}/health"
 start_optional_mcp_host_pf
 
 STARTUP_COMPLETE=true

@@ -1304,8 +1304,8 @@ resolve_stop_pf_binding() {
       STOP_PF_LOCAL_PORT="${REGISTRY_API_PORT}"
       STOP_PF_REMOTE_PORT=8085
       ;;
-    # scripts/minikube/pf-all-stack.sh (run by pre-gate-sync) records this same
-    # forward under the service name.
+    # Earlier pre-gate-sync runs (scripts/minikube/pf-all-stack.sh) recorded
+    # this same forward under the service name; those records stay on disk.
     workflow-approval-reader | workflow-approval-request-reader)
       STOP_PF_NAMESPACE=channels
       STOP_PF_SERVICE=workflow-approval-request-reader
