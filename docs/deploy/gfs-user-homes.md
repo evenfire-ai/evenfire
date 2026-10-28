@@ -25,8 +25,11 @@ entries created by another manager. In that tree, user entries include the
 person's email and, when available, name; team entries include the team name,
 even when the subject is outside the owner's team directory. Outside the
 owner's home, the existing directory visibility rules remain in effect. Grant
-rows keep their existing role-change and remove actions; share rows keep their
-remove action.
+rows keep their existing role-change and remove actions. Share rows keep their
+remove action, and an Editor share can be lowered to Read in Desktop; lowering
+never adds a permission the share did not have, and a share is never raised.
+The home owner's own grant is shown as **Owner** without role or remove
+controls to every viewer; only an operator can change it.
 
 The `/Users` directory and bound home roots cannot be moved, renamed, or
 deleted; the guard is in `control-api/src/db.ts:3251`. Contents inside a home
@@ -123,6 +126,11 @@ reserved path in the Control UI GFS browser is allowed.
 | `path_conflict`, home already bound   | The bound home is no longer at `/Users/<name>`. This happens only through a manual database change.                               | A bound home root cannot be moved or renamed, even by an operator. An administrator with cluster access corrects the path in the database; move any item occupying the reserved path first, then select **Retry**. |
 | `ancestor_grant_conflict`             | A user, team, agent, or context grant or share on the drive root or `/Users` is inheritable (created before this release, or by a direct database change). | Remove the entry or make it non-inheritable with operator authority, then select **Retry**.                                                                                                                   |
 | `ownership_conflict`                  | A bound home's owner grant is missing, narrowed, or no longer inheritable.                                                         | Select **Restore owner access**, or re-grant the owner all five permissions with inheritance in the grant panel. Retry cannot restore this grant.                                                             |
+
+A `ready` home is not re-checked against its path. Whoever changes a bound
+home's resource or path by hand in the database must also set its
+`gfs_user_homes` row to `pending`, or select **Retry** afterwards, so the next
+provisioning pass records `path_conflict` and the user card shows it.
 
 Retry accepts an optional storage name. For a home that was never bound
 (`path_conflict` or `ancestor_grant_conflict`), a new valid name is reserved;
