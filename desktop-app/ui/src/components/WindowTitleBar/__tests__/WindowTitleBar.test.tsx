@@ -70,6 +70,18 @@ describe('WindowTitleBar', () => {
       'Minimize window',
       'Maximize window',
     ])
+    expect(buttons.every(button => button.querySelector('.ant-btn-icon'))).toBe(true)
+    expect(
+      buttons.map(button =>
+        Array.from(button.classList).find(className =>
+          className.startsWith('window-control-button--')
+        )
+      )
+    ).toEqual([
+      'window-control-button--close',
+      'window-control-button--minimize',
+      'window-control-button--toggleMaximize',
+    ])
 
     fireEvent.click(screen.getByRole('button', { name: 'Close window' }))
     fireEvent.click(screen.getByRole('button', { name: 'Minimize window' }))
@@ -90,10 +102,22 @@ describe('WindowTitleBar', () => {
     render(<WindowTitleBar />)
 
     await screen.findByRole('button', { name: 'Restore window' })
-    expect(screen.getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual([
+    const buttons = screen.getAllByRole('button')
+    expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual([
       'Minimize window',
       'Restore window',
       'Close window',
+    ])
+    expect(
+      buttons.map(button =>
+        Array.from(button.classList).find(className =>
+          className.startsWith('window-control-button--')
+        )
+      )
+    ).toEqual([
+      'window-control-button--minimize',
+      'window-control-button--toggleMaximize',
+      'window-control-button--close',
     ])
 
     emitControlsState({ fullscreen: false, maximized: false })

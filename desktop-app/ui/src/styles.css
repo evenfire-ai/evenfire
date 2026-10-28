@@ -369,14 +369,39 @@ h3 {
   border-color: var(--window-control-mac-border);
 }
 
+.window-titlebar.window-titlebar--platform-mac .window-control-button--close:hover:enabled {
+  background: var(--window-control-mac-close);
+}
+
+.window-titlebar.window-titlebar--platform-mac .window-control-button--minimize:hover:enabled {
+  background: var(--window-control-mac-minimize);
+}
+
+.window-titlebar.window-titlebar--platform-mac
+  .window-control-button--toggleMaximize:hover:enabled {
+  background: var(--window-control-mac-expand);
+}
+
 .window-titlebar--platform-mac .window-control-icon {
   opacity: 0;
   transform: scale(0.72);
   color: rgba(var(--overlay-rgb), 0.72);
 }
 
+.window-titlebar--platform-mac .window-control-button .ant-btn-icon {
+  opacity: 0;
+}
+
 .window-titlebar--platform-mac .window-titlebar__controls:hover .window-control-icon,
 .window-titlebar--platform-mac .window-control-button:focus-visible .window-control-icon {
+  opacity: 1;
+}
+
+.window-titlebar--platform-mac
+  .window-titlebar__controls:hover
+  .window-control-button
+  .ant-btn-icon,
+.window-titlebar--platform-mac .window-control-button:focus-visible .ant-btn-icon {
   opacity: 1;
 }
 

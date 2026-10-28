@@ -136,6 +136,7 @@ export function WindowTitleBar({ actions, actionsRef, leadingRef }: WindowTitleB
           <Button
             key={action}
             aria-label={controlLabel(action, controlsState)}
+            className={`window-control-button window-control-button--${action}`}
             htmlType="button"
             icon={controlIcon(action, controlsState)}
             onClick={() => runControl(action)}
