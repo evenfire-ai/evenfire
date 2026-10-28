@@ -128,8 +128,10 @@ npm run start
 ## Package and Sign
 
 Desktop builds need Node 24.22.1 or later in the Node 24 line, an `npm ci` with lifecycle scripts enabled (never
-`--ignore-scripts`, never `ELECTRON_SKIP_BINARY_DOWNLOAD`), and a passing
-`npm run verify:electron` before any build or test result counts.
+`--ignore-scripts`), and a passing `npm run verify:electron` before any build or
+test result counts. Electron 42 and later download the runtime on first use
+instead of in `postinstall`; `verify:electron` triggers that download and checks
+the result.
 
 ```bash
 npm ci

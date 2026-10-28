@@ -184,8 +184,7 @@ makers:
 
 Packaging uses the same guard as every other Desktop build. Use Node 24.22.1 or later in the Node 24 line
 (`engines.node` is `^24.22.1`), install with `npm ci` **without**
-`--ignore-scripts` so Electron's `postinstall` downloads the runtime, then run
-the check:
+`--ignore-scripts`, then run the check:
 
 ```bash
 cd desktop-app
@@ -193,9 +192,11 @@ npm ci
 npm run verify:electron   # fails unless Node is 24.x >=24.22.1 and `electron` resolves to a runtime
 ```
 
-A skipped `postinstall` still lets `npm ci` exit 0; `verify:electron` is what
-catches it. If it reports that Electron is not installed, switch to Node 24 and
-rerun `npm ci`. Do not set `ELECTRON_SKIP_BINARY_DOWNLOAD`.
+Electron 42 and later download the runtime the first time `electron` is
+resolved, not in `postinstall`, so `npm ci` alone leaves it absent.
+`verify:electron` downloads it and fails if the download or the executable is
+missing. If it reports `Electron failed to install correctly`, switch to Node 24,
+delete `node_modules/electron`, and rerun `npm ci` and the check.
 
 ### Build installers
 
