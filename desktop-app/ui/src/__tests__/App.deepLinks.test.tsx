@@ -514,14 +514,19 @@ describe('App deep-link orchestration', () => {
     })
     const view = renderApp(<App />)
 
-    expect(view.getByRole('region', { name: 'Desktop update available' })).toBeTruthy()
+    expect(
+      view.container.querySelector('[role="region"][aria-label="Desktop update notice"]')
+    ).not.toBeNull()
 
     act(() => {
       currentController.desktopReleaseStatus = null
-      forceControllerRender()
+      view.rerender(<App />)
     })
 
-    expect(view.queryByRole('region', { name: 'Desktop update available' })).toBeNull()
+    expect(
+      view.container.querySelector('[role="region"][aria-label="Desktop update notice"]')
+    ).toBeNull()
+    view.unmount()
   })
 
   beforeEach(() => {
