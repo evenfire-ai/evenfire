@@ -10,38 +10,9 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0134_legacy_password_security_epoch_backfill',
 ] as const)
 
-export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
-  '0107_llm_provider_attempts_sdk_link',
-  '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
-  '0109_grok_subscription_connections',
-  '0110_grok_subscription_oauth_states',
-  '0111_grok_catalog_models',
-  '0112_llm_provider_attempts_grok_broker',
-  '0113_grok_subscription_terminal_connection_key',
-  '0114_llm_provider_attempts_connection_integrity',
-  '0115_llm_allowed_models_image_input',
-  '0116_mcp_secret_rollback_permits',
-  '0117_control_admin_invitation_replace_inviter',
-  '0118_control_admin_replace_inviter_accept_guard',
-  '0119_dynamic_clients_table',
-  '0120_dynamic_clients_runtime_access',
-  '0121_oauth_install_identity',
-  '0122_durable_entity_change_feed',
-  '0123_entity_change_checkpoint_cursor_convergence',
-  '0124_entity_change_definer_search_path',
-  '0125_admin_subscription_rate_limit_namespace',
-  '0126_bug192_password_admission',
-  '0127_password_evaluation_retention',
-  '0128_password_work_ownership',
-  '0129_workflow_schedules_concurrency_policy',
-] as const)
-
-const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)
-
-const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
-  ...DEV_POST_0106_MIGRATION_VERSIONS,
-  ...PR1_MIGRATION_VERSIONS,
-] as const)
+// Every migration up to and including dev's last migration runs in initDb's
+// single dev batch; this runner owns only the PR1 versions that follow it.
+const LAST_DEV_MIGRATION_VERSION = '0130_password_login_success_admission'
 
 export type MigrationDescriptor = {
   version: string
@@ -101,20 +72,17 @@ export async function applyPendingPr1Migrations({
   }
   const expected = new Set<string>(PR1_MIGRATION_VERSIONS)
   const unclassified = migrations.filter(
-    migration =>
-      migration.version > '0106_oauth_grants_owner_generalization' &&
-      !expected.has(migration.version) &&
-      !NON_PR1_POST_0106_MIGRATION_VERSIONS.has(migration.version)
+    migration => migration.version > LAST_DEV_MIGRATION_VERSION && !expected.has(migration.version)
   )
   if (unclassified.length > 0) {
     throw new Error(
-      `Unclassified post-0106 migrations: ${unclassified.map(item => item.version).join(', ')}`
+      `Unclassified post-dev migrations: ${unclassified.map(item => item.version).join(', ')}`
     )
   }
 
-  for (const version of CLASSIFIED_POST_0106_MIGRATION_VERSIONS) {
+  for (const version of PR1_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)
-    if (!migration) throw new Error(`Missing registered post-0106 migration: ${version}`)
+    if (!migration) throw new Error(`Missing registered PR1 migration: ${version}`)
     if (appliedVersions.has(version)) continue
     const acceptedLegacyVersion = migration.legacyVersions?.find(alias =>
       appliedVersions.has(alias)
@@ -125,7 +93,7 @@ export async function applyPendingPr1Migrations({
       continue
     }
 
-    if (expected.has(version)) await preparePr1Migration(db, version)
+    await preparePr1Migration(db, version)
     await runBoundedTransaction(db, async () => {
       await migration.apply(db)
       await recordMigration(db, version)

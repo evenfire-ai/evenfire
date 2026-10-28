@@ -1204,7 +1204,7 @@ describe('routes/profile', () => {
 
     await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
       .send({ email: 'active@example.com', password: 'synthetic-wrong-password' })
-      .expect(401, { error: 'Unauthorized' })
+      .expect(401, { error: 'invalid_credentials' })
   })
 
   // dev has no per-IP or per-user limiter on these routes; a denying PG limiter

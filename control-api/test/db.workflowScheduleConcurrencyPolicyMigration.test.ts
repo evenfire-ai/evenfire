@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
+import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 // Mock pg exactly like the other db.*.test.ts specs so importing ../src/db.js
 // does not spin up a real Pool as a module side effect.
@@ -13,15 +15,16 @@ const VERSION = '0129_workflow_schedules_concurrency_policy'
 type QueryResult = { rows: unknown[]; rowCount: number }
 
 function recordingQuery(appliedVersions: string[]) {
-  return vi.fn(
-    async (sql: string): Promise<QueryResult> =>
-      sql.includes('SELECT version FROM schema_migrations')
-        ? {
-            rows: appliedVersions.map(version => ({ version })),
-            rowCount: appliedVersions.length,
-          }
-        : { rows: [], rowCount: 0 }
-  )
+  return vi.fn(async (sql: string): Promise<QueryResult> => {
+    const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+    if (admissionFixtureResult) return admissionFixtureResult
+    return sql.includes('SELECT version FROM schema_migrations')
+      ? {
+          rows: appliedVersions.map(version => ({ version })),
+          rowCount: appliedVersions.length,
+        }
+      : { rows: [], rowCount: 0 }
+  })
 }
 
 describe('0129_workflow_schedules_concurrency_policy migration', () => {
@@ -82,12 +85,14 @@ describe('0129_workflow_schedules_concurrency_policy migration', () => {
   it('initDb applies it exactly once on a cluster that recorded every earlier migration', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const earlier = CONTROL_API_MIGRATIONS.map(migration => migration.version).filter(
-      version => version !== VERSION
+      version => version < VERSION
     )
     const query = recordingQuery(earlier)
     const release = vi.fn()
 
-    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+    await initDb({
+      connect: vi.fn().mockResolvedValue({ query: onlineIndexAwareQuery(query), release }),
+    } as never)
 
     const sqls = query.mock.calls.map(([sql]) => String(sql))
     expect(sqls.filter(sql => sql.includes('concurrency_policy'))).toHaveLength(1)

@@ -204,7 +204,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           policy,
         })
         if (!login) {
-          return res.status(401).json({ error: 'Unauthorized' })
+          return res.status(401).json({ error: 'invalid_credentials' })
         }
         if ('error' in login) {
           return sendExternalLoginError(res, login.error)

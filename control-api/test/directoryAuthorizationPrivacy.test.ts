@@ -50,6 +50,9 @@ async function queryWithPasswordWorkLease(sql: string, values?: unknown[]) {
   if (sql.includes('SET LOCAL synchronous_commit = on')) {
     return { rows: [], rowCount: 0 }
   }
+  if (sql.includes("set_config('app.password_admission_protocol', 'v2', true)")) {
+    return { rows: [{ set_config: 'v2' }], rowCount: 1 }
+  }
   if (sql.includes('INSERT INTO password_verification_work')) {
     return { rows: [{ singleton: true }], rowCount: 1 }
   }
