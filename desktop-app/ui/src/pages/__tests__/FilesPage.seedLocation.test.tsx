@@ -1657,7 +1657,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       name: 'Add people, teams, or agents',
     })
     fireEvent.focus(picker)
-    fireEvent.click(within(dialog).getByRole('option', { name: /Team Two/ }))
+    fireEvent.click(await within(dialog).findByRole('option', { name: /Team Two/ }))
     fireEvent.click(
       within(dialog).getByRole('button', { name: 'Access role for selected recipients' })
     )
