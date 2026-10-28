@@ -313,6 +313,67 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
     }
   })
 
+  it('S3 C12 refills duplicate direct GFS grants and shares before ending a page', async () => {
+    for (const mode of ['grant', 'share'] as const) {
+      const actor = await principal(`s3-gfs-${mode}`)
+      const outsider = await principal(`s3-gfs-outsider-${mode}`)
+      const first =
+        mode === 'grant'
+          ? '30000000-0000-4000-8000-000000000001'
+          : '40000000-0000-4000-8000-000000000001'
+      const second =
+        mode === 'grant'
+          ? '30000000-0000-4000-8000-000000000002'
+          : '40000000-0000-4000-8000-000000000002'
+      const drive = `s3-${mode}-drive`
+      await databasePool.query(
+        `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+         VALUES ($1, $3, '/', 'directory'), ($2, $4, '/', 'directory')`,
+        [first, second, drive, `${drive}-second`]
+      )
+      const table = mode === 'grant' ? 'gfs_grants' : 'gfs_shares'
+      await databasePool.query(
+        `INSERT INTO ${table}(drive, resource_id, subject_type, subject_id, permissions)
+         VALUES ($3, $1, 'user', $4, ARRAY['read']::text[]),
+                ($5, $1, 'user', $4, ARRAY['read']::text[]),
+                ($3, $2, 'user', $4, ARRAY['read']::text[])`,
+        [first, second, drive, actor.userId, `${drive}-other`]
+      )
+      const session = (userId: string): ExternalSessionAuthorityContext => ({
+        contract: 'v1',
+        userId,
+        tokenHash: randomBytes(32).toString('hex'),
+        issuedAt: Math.floor(Date.now() / 1_000),
+        authGeneration: 1,
+      })
+      const currentSession = session(actor.userId)
+      const page1 = await buildAccessCatalog(
+        { session: currentSession, families: ['gfs_resource'], limit: 1 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(page1.complete).toBe(true)
+      expect(page1.items.map(item => item.resource.logicalId)).toEqual([first])
+      expect(page1.nextCursor).toBeTruthy()
+      const page2 = await buildAccessCatalog(
+        {
+          session: currentSession,
+          families: ['gfs_resource'],
+          limit: 1,
+          cursor: page1.nextCursor!,
+        },
+        { transaction: transaction(databasePool) }
+      )
+      expect(page2.complete).toBe(true)
+      expect(page2.items.map(item => item.resource.logicalId)).toEqual([second])
+      const otherPage = await buildAccessCatalog(
+        { session: session(outsider.userId), families: ['gfs_resource'], limit: 1 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(otherPage.complete).toBe(true)
+      expect(otherPage.items).toEqual([])
+    }
+  })
+
   it('refills bounded duplicate team host paths without hiding later canonical IDs', async () => {
     await databasePool.query(
       `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, 'x'), ($1, 'y'), ($1, 'z')`,

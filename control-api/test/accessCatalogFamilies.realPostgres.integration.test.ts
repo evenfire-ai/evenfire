@@ -261,6 +261,11 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       [teamId, config.sandboxNamespace]
     )
     await databasePool.query(
+      `INSERT INTO workflow_recipe_allowed_teams(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, 'catalog-recipe')`,
+      [teamId, config.sandboxNamespace]
+    )
+    await databasePool.query(
       `INSERT INTO workflow_runs(
          run_id, recipe_namespace, recipe_name, phase, actor_type, actor_id,
          team_id, trigger_source

@@ -109,6 +109,8 @@ export async function loadDatabaseCandidates(input: {
           AND twt.recipe_namespace = wr.recipe_namespace
           AND twt.recipe_name = wr.recipe_name
         WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
+          AND (wr.actor_type IN ('scheduled', 'autonomous')
+            OR (wr.actor_type = 'user' AND (wr.actor_id = $1 OR wr.actor_id IS NULL)))
        UNION ALL
        SELECT 'direct', 'workflow_approvals:user:' || war.id, NULL, NULL, NULL,
               war.recipe_namespace, war.recipe_name, war.expires_at, NULL, NULL, NULL, NULL
@@ -126,10 +128,10 @@ export async function loadDatabaseCandidates(input: {
          FROM workflow_approval_requests war
          JOIN team_members tm
            ON tm.team_id = war.target_team_id AND tm.user_id = $1 AND tm.status = 'active'
-         JOIN team_workflow_triggers twt
-           ON twt.team_id = tm.team_id
-          AND twt.recipe_namespace = war.recipe_namespace
-          AND twt.recipe_name = war.recipe_name
+         JOIN workflow_recipe_allowed_teams wat
+           ON wat.team_id = tm.team_id
+          AND wat.recipe_namespace = war.recipe_namespace
+          AND wat.recipe_name = war.recipe_name
         WHERE $2::text = 'workflow_approval' AND war.id::text = $3
           AND war.status = 'pending' AND war.expires_at > NOW()
        UNION ALL

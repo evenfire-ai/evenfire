@@ -516,6 +516,8 @@ export const WORKFLOW_RUN_HYDRATION_SQL = `
           ON access_grant.team_id = membership.team_id
          AND access_grant.recipe_namespace = run.recipe_namespace
          AND access_grant.recipe_name = run.recipe_name
+       WHERE run.actor_type IN ('scheduled', 'autonomous')
+          OR (run.actor_type = 'user' AND (run.actor_id = $1 OR run.actor_id IS NULL))
     ) all_paths
     ORDER BY logical_id, kind, team_id NULLS FIRST, grant_id
     LIMIT $4
@@ -567,7 +569,7 @@ export const WORKFLOW_APPROVAL_HYDRATION_SQL = `
         JOIN team_members membership
           ON membership.team_id = approval.target_team_id
          AND membership.user_id = $1::uuid AND membership.status = 'active'
-        JOIN team_workflow_triggers access_grant
+        JOIN workflow_recipe_allowed_teams access_grant
           ON access_grant.team_id = membership.team_id
          AND access_grant.recipe_namespace = approval.recipe_namespace
          AND access_grant.recipe_name = approval.recipe_name

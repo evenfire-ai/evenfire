@@ -253,7 +253,9 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
          ON twt.team_id = tm.team_id
         AND twt.recipe_namespace = wr.recipe_namespace
         AND twt.recipe_name = wr.recipe_name
-      WHERE wr.run_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
+      WHERE (wr.actor_type IN ('scheduled', 'autonomous')
+          OR (wr.actor_type = 'user' AND (wr.actor_id = $1 OR wr.actor_id IS NULL)))
+        AND wr.run_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
       orderBy: 'cursor_id',
     },
     {
@@ -267,6 +269,8 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND twt.recipe_namespace = wr.recipe_namespace
         AND twt.recipe_name = wr.recipe_name
       WHERE wr.usage_team_id IS NOT NULL
+        AND (wr.actor_type IN ('scheduled', 'autonomous')
+          OR (wr.actor_type = 'user' AND (wr.actor_id = $1 OR wr.actor_id IS NULL)))
         AND wr.run_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
       orderBy: 'cursor_id',
     },
@@ -295,10 +299,10 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND EXISTS (
           SELECT 1
             FROM team_members tm
-            JOIN team_workflow_triggers twt
-              ON twt.team_id = tm.team_id
-             AND twt.recipe_namespace = war.recipe_namespace
-             AND twt.recipe_name = war.recipe_name
+            JOIN workflow_recipe_allowed_teams wat
+              ON wat.team_id = tm.team_id
+             AND wat.recipe_namespace = war.recipe_namespace
+             AND wat.recipe_name = war.recipe_name
            WHERE tm.team_id = war.target_team_id
              AND tm.user_id = $1 AND tm.status = 'active'
         )`,
@@ -339,6 +343,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       WHERE g.subject_type = 'user' AND g.subject_id = $1::text
         AND g.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
       orderBy: 'cursor_id',
+      duplicateCapable: true,
     },
     {
       sql: `SELECT share.resource_id::text AS logical_id, share.resource_id AS cursor_id
@@ -348,6 +353,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
       WHERE share.subject_type = 'user' AND share.subject_id = $1::text
         AND share.resource_id > COALESCE(NULLIF($2, '')::uuid, '00000000-0000-0000-0000-000000000000')`,
       orderBy: 'cursor_id',
+      duplicateCapable: true,
     },
   ]),
   shared_filesystem: boundedKeyUnionSql([
