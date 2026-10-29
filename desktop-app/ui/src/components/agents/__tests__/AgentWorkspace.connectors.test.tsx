@@ -122,7 +122,7 @@ const CONNECTORS: RpcConnectorsResult = {
 }
 
 function renderTab() {
-  return render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
+  return render(<AgentWorkspace />)
 }
 
 const healthRow = (name: string) => screen.getByTestId(`mcp-health-row-${name}`)

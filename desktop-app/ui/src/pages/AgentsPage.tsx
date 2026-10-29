@@ -1,21 +1,16 @@
-import type { RefObject } from 'react'
 import { Alert, Card, Empty, Flex, Spin, Typography } from 'antd'
 import { AgentWorkspace } from '../components/agents/AgentWorkspace'
 import { FleetBoard } from '../components/agents/FleetBoard'
 import { useNavigationContext } from '../contexts/NavigationContext'
 import { useAgentsDataController } from '../hooks/domain/useAgentsDataController'
 
-type AgentsPageProps = {
-  scrollContainerRef: RefObject<HTMLElement | null>
-}
-
-export function AgentsPage({ scrollContainerRef }: AgentsPageProps) {
+export function AgentsPage() {
   const { agentNames, loading, error } = useAgentsDataController()
   const { selectedAgent } = useNavigationContext()
 
   return agentNames.length ? (
     selectedAgent ? (
-      <AgentWorkspace scrollContainerRef={scrollContainerRef} />
+      <AgentWorkspace />
     ) : (
       <FleetBoard />
     )

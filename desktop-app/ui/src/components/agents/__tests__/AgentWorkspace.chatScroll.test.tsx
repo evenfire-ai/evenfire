@@ -133,12 +133,10 @@ function WorkspaceHarness({
   activeChatId,
   messages = baseMessages,
   chatMessagesLoading = false,
-  scrollContainer = null,
 }: {
   activeChatId: string
   messages?: AgentChatMessage[]
   chatMessagesLoading?: boolean
-  scrollContainer?: HTMLElement | null
 }) {
   const groupedMessages = messages.reduce<
     Array<{ role: 'user' | 'assistant' | 'system'; items: AgentChatMessage[] }>
@@ -235,7 +233,7 @@ function WorkspaceHarness({
                 messages={messages}
                 chatMessagesLoading={chatMessagesLoading}
               >
-                <AgentWorkspace mode="chat" scrollContainerRef={{ current: scrollContainer }} />
+                <AgentWorkspace mode="chat" />
               </ChatActionsProvider>
             </ChatThreadStateProvider>
           </ChatListProvider>
@@ -285,24 +283,22 @@ beforeEach(() => {
   })
 })
 
-describe('AgentWorkspace chat scroll control', () => {
-  it('hides and restores the chat navigation from the active thread scroll', () => {
+describe('AgentWorkspace chat header scroll behavior', () => {
+  it('keeps the chat header visible while the active thread scrolls', () => {
     const container = document.createElement('div')
     document.body.append(container)
-    const view = render(<WorkspaceHarness activeChatId="chat-a" scrollContainer={container} />, {
-      container,
-    })
+    const view = render(<WorkspaceHarness activeChatId="chat-a" />, { container })
     const { thread, setScrollTop } = setScrollableThread()
     const workspace = container.querySelector('.agent-page')
-    expect(workspace?.classList.contains('chat-scroll-nav-visible')).toBe(true)
+    expect(workspace?.classList.contains('agent-page--chat-header-sticky')).toBe(true)
 
     setScrollTop(50)
     fireEvent.scroll(thread, { bubbles: false })
-    expect(workspace?.classList.contains('chat-scroll-nav-visible')).toBe(false)
+    expect(workspace?.classList.contains('agent-page--chat-header-sticky')).toBe(true)
 
     setScrollTop(35)
     fireEvent.scroll(thread, { bubbles: false })
-    expect(workspace?.classList.contains('chat-scroll-nav-visible')).toBe(true)
+    expect(workspace?.classList.contains('agent-page--chat-header-sticky')).toBe(true)
 
     view.unmount()
     container.remove()

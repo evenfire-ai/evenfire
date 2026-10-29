@@ -116,7 +116,7 @@ describe('AgentWorkspace hero + breadcrumb — visible agent name (R1-M3)', () =
     navMock.selectedAgentRoute = 'members'
     mcpMock.agentDisplayByName = { alpha: 'Alpha Host' }
 
-    render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
+    render(<AgentWorkspace />)
 
     // Hero title uses .agent-details-name; it must carry the display, not the id.
     const hero = document.querySelector('.agent-details-name')
@@ -135,7 +135,7 @@ describe('AgentWorkspace hero + breadcrumb — visible agent name (R1-M3)', () =
     navMock.selectedAgentRoute = 'members'
     mcpMock.agentDisplayByName = {}
 
-    render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
+    render(<AgentWorkspace />)
 
     const hero = document.querySelector('.agent-details-name')
     expect(hero?.textContent).toBe('alpha')
@@ -161,7 +161,7 @@ describe('AgentWorkspace title selector — visible agent name (R1-M3)', () => {
     navMock.selectedAgent = 'alpha'
     agentsMock.agentNames = ['alpha']
 
-    render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
+    render(<AgentWorkspace mode="chat" />)
 
     expect(document.querySelector('.agent-workspace-new-chat')).toBeTruthy()
     expect(document.querySelector('.agent-workspace-greeting-row')).toBeTruthy()
@@ -174,7 +174,7 @@ describe('AgentWorkspace title selector — visible agent name (R1-M3)', () => {
     mcpMock.agentDisplayByName = { alpha: 'Alpha Host' }
 
     // Chat mode with no active chat renders the new-chat landing selector.
-    render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
+    render(<AgentWorkspace mode="chat" />)
 
     // Collapsed trigger label = the display.
     const trigger = screen.getByRole('button', { name: 'Switch chat agent' })
@@ -192,7 +192,7 @@ describe('AgentWorkspace title selector — visible agent name (R1-M3)', () => {
     agentsMock.agentNames = ['alpha']
     mcpMock.agentDisplayByName = {}
 
-    render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
+    render(<AgentWorkspace mode="chat" />)
 
     const trigger = screen.getByRole('button', { name: 'Switch chat agent' })
     expect(trigger.textContent).toContain('alpha')

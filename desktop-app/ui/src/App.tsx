@@ -3045,12 +3045,10 @@ export function App() {
                                         }
                                         surfaceId="chat-view-panel"
                                       >
-                                        <ChatPage scrollContainerRef={contentPanelRef} />
+                                        <ChatPage />
                                       </ChatViewWorkspace>
                                     ))}
-                                  {vm.navItem === DESKTOP_ROUTES.agents && (
-                                    <AgentsPage scrollContainerRef={contentPanelRef} />
-                                  )}
+                                  {vm.navItem === DESKTOP_ROUTES.agents && <AgentsPage />}
                                   {vm.navItem === DESKTOP_ROUTES.files && (
                                     <FilesPage
                                       key={activeFilesTabId ?? 'files'}
@@ -3171,7 +3169,7 @@ export function App() {
                                       width={chatDrawerResize.width}
                                       resizing={chatDrawerResize.isResizing}
                                     >
-                                      <ChatPage scrollContainerRef={chatDrawerRef} />
+                                      <ChatPage />
                                     </ChatDrawer>
                                   </RightRailShell>
                                 )}

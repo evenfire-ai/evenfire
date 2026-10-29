@@ -86,7 +86,7 @@ vi.mock('../ComposerPanel', () => ({ ComposerPanel: () => null }))
 vi.mock('../ChatThread', () => ({ ChatThread: () => null }))
 
 function renderWorkspace() {
-  return render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
+  return render(<AgentWorkspace />)
 }
 
 describe('AgentWorkspace — Members tab loading/error (M2)', () => {

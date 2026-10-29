@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react'
-import type { RefObject } from 'react'
 import { useAgentActivityContext } from '@contexts/AgentActivityContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { Alert, Card, Empty, Flex, Skeleton, Spin, Typography } from 'antd'
@@ -7,11 +6,7 @@ import { AgentWorkspace } from '@components/agents/AgentWorkspace'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { pickLatestAgent } from '@lib/agents'
 
-type ChatPageProps = {
-  scrollContainerRef: RefObject<HTMLElement | null>
-}
-
-export function ChatPage({ scrollContainerRef }: ChatPageProps) {
+export function ChatPage() {
   const { agentNames, loading, error } = useAgentsDataController()
   const { selectedAgent, handleSelectChatAgent: onSelectAgent } = useNavigationContext()
   const { agentLastActiveByAgent } = useAgentActivityContext()
@@ -55,7 +50,7 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
     )
   }
 
-  return <AgentWorkspace mode="chat" scrollContainerRef={scrollContainerRef} />
+  return <AgentWorkspace mode="chat" />
 }
 
 function ChatPageSkeleton() {

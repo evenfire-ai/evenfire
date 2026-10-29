@@ -4649,7 +4649,7 @@ h3 {
   background: inherit;
 }
 
-.agent-page--chat-scroll-nav .agent-chat-nav-stack {
+.agent-page--chat-header-sticky .agent-chat-nav-stack {
   position: sticky;
   top: -16px;
   z-index: calc(var(--layer-header) - 1);
@@ -4657,18 +4657,6 @@ h3 {
   max-height: none;
   background: var(--panel);
   padding-bottom: var(--space-1);
-  transform: translateY(0);
-  opacity: 1;
-  pointer-events: auto;
-  transition:
-    transform 220ms ease,
-    opacity 180ms ease;
-}
-
-.agent-page--chat-scroll-nav:not(.chat-scroll-nav-visible) .agent-chat-nav-stack {
-  opacity: 0;
-  transform: translateY(-100%);
-  pointer-events: none;
 }
 
 .agent-workspace-body-slot {

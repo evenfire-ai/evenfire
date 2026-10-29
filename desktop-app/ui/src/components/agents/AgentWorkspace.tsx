@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { RefObject } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
@@ -41,7 +40,6 @@ type AgentWorkspaceMode = 'agents' | 'chat'
 
 type AgentWorkspaceProps = {
   mode?: AgentWorkspaceMode
-  scrollContainerRef: RefObject<HTMLElement | null>
 }
 
 function AgentHero({
@@ -72,7 +70,7 @@ function AgentHero({
   )
 }
 
-export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWorkspaceProps) {
+export function AgentWorkspace({ mode = 'agents' }: AgentWorkspaceProps) {
   const {
     selectedAgent,
     selectedAgentRoute,
@@ -116,7 +114,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     disconnect: disconnectConnector,
   } = useConnectorsController()
 
-  const [chatScrollNavVisible, setChatScrollNavVisible] = useState(true)
   const [scrollToBottomChatId, setScrollToBottomChatId] = useState<string | null>(null)
   const [delayedScrollToBottomChatId, setDelayedScrollToBottomChatId] = useState<string | null>(
     null
@@ -252,7 +249,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   )
 
   const isChatMode = mode === 'chat'
-  const isChatScrollNavMode = isChatMode && Boolean(activeChatId)
+  const shouldKeepChatHeaderVisible = isChatMode && Boolean(activeChatId)
   const rootBreadcrumbLabel = mode === 'chat' ? 'Chat' : 'Agents'
   const rootBreadcrumbItem: PageBreadcrumbItem =
     mode === 'chat' && selectedAgent
@@ -391,7 +388,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
         }
 
   useEffect(() => {
-    setChatScrollNavVisible(true)
     setChatAgentRouteMenuOpen(false)
   }, [selectedAgent])
 
@@ -404,45 +400,10 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     }
   }, [ensureTeamsHydrated, isChatMode, selectedAgentRoute])
 
-  useEffect(() => {
-    if (!isChatScrollNavMode) {
-      setChatScrollNavVisible(true)
-      return
-    }
-
-    const contentPanel = scrollContainerRef.current
-    if (!contentPanel) return
-    // The conversation thread owns vertical scrolling in both the full-screen
-    // chat and the chat drawer. The supplied container remains the fallback for
-    // layouts that do not render a thread yet.
-    const scrollTarget =
-      contentPanel.querySelector<HTMLElement>('.agent-workspace-shell .chat-thread') ?? contentPanel
-
-    let lastScrollTop = scrollTarget.scrollTop
-    const onScroll = () => {
-      const nextScrollTop = scrollTarget.scrollTop
-      const scrollDelta = nextScrollTop - lastScrollTop
-      const nearTop = nextScrollTop <= 24
-
-      if (nearTop) {
-        setChatScrollNavVisible(true)
-      } else if (scrollDelta > 4) {
-        setChatScrollNavVisible(false)
-      } else if (scrollDelta < -2) {
-        setChatScrollNavVisible(true)
-      }
-
-      lastScrollTop = nextScrollTop
-    }
-
-    scrollTarget.addEventListener('scroll', onScroll, { passive: true })
-    return () => scrollTarget.removeEventListener('scroll', onScroll)
-  }, [activeChatId, isChatScrollNavMode, scrollContainerRef])
-
   return (
     <section
-      className={`agent-page${isChatScrollNavMode ? ' agent-page--chat-scroll-nav' : ''}${
-        chatScrollNavVisible ? ' chat-scroll-nav-visible' : ''
+      className={`agent-page${
+        shouldKeepChatHeaderVisible ? ' agent-page--chat-header-sticky' : ''
       }`}
     >
       <div className="agent-workspace-shell page-card">
