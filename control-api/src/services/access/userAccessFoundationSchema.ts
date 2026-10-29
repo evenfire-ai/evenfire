@@ -309,9 +309,13 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
-    -- Approval batches delete rows whose FK cascade also updates every live run
-    -- that references them, so the subject set covers both the approval targets
-    -- and those runs' attribution. Both phases mirror the run prelock.
+    -- Approval batches delete rows whose FK cascade also rewrites every live run
+    -- that references them. Those run rows take their subjects in this
+    -- transaction too, so the subject set covers both the approval targets and
+    -- the referencing runs' attribution, which keeps one global order against
+    -- run writers. The cascade's attribution change no longer bumps a revision
+    -- on its own; the batch holds these subjects anyway. Both phases mirror the
+    -- run prelock.
     CREATE OR REPLACE FUNCTION authorization_prelock_workflow_approval_revisions(
       target_request_ids UUID[]
     )
@@ -527,6 +531,21 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     AS $$
     DECLARE revision RECORD;
     BEGIN
+      -- Catalog producers, hydration and the live resolver read only these
+      -- columns (catalogProducerSql.ts:236-274, catalogHydrationSql.ts:491-535,
+      -- databaseAuthorityCandidates.ts:85-113); heartbeats and phase writes
+      -- change none of them. This is the same idiom as the guards below, an
+      -- in-function TG_OP test, because this trigger handles INSERT and DELETE
+      -- too and a WHEN clause cannot compare OLD and NEW there.
+      IF TG_OP = 'UPDATE' AND (
+        OLD.run_id, OLD.recipe_namespace, OLD.recipe_name, OLD.actor_type,
+        OLD.actor_id, OLD.team_id, OLD.usage_team_id
+      ) IS NOT DISTINCT FROM (
+        NEW.run_id, NEW.recipe_namespace, NEW.recipe_name, NEW.actor_type,
+        NEW.actor_id, NEW.team_id, NEW.usage_team_id
+      ) THEN
+        RETURN NEW;
+      END IF;
       -- Order all affected subjects together, including prior attribution.
       FOR revision IN
         SELECT subject_type, subject_id

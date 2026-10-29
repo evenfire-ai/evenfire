@@ -8,7 +8,7 @@ import {
   expirePendingRequests,
   recordDecision,
 } from '../src/services/userApprovalRequestService.js'
-import { createApprovedRun, createRun, updateRunPhase } from '../src/services/workflowRunService.js'
+import { createApprovedRun, createRun } from '../src/services/workflowRunService.js'
 import { archiveTerminalRuns } from '../src/services/workflowRunsArchiveService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -170,6 +170,10 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
     return (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
   }
 
+  function byId(rows: Array<{ id: string; revision: number }>): Record<string, number> {
+    return Object.fromEntries(rows.map(row => [row.id, row.revision]))
+  }
+
   // Bind the real archive/expiry service to one configured session for its
   // first transaction; later drain batches get ordinary pooled connections.
   function bindFirstSession(session: PoolClient) {
@@ -309,59 +313,79 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
     return { userApprovalId, teamApprovalId, user, team, live }
   }
 
-  it('archives two rows and advances revisions with a phase-update liveness witness', async () => {
+  it('archives two rows and advances revisions with a run-insert liveness witness', async () => {
     const ids = await fixture()
     const before = await revisions(ids)
     const connect = vi.spyOn(pool, 'connect').mockImplementation(() => databasePool.connect())
     try {
       expect(await archiveTerminalRuns(gateway, { batchSize: 500, maxBatches: 1 })).toBe(2)
       await archivedWitness(ids)
-      expect((await updateRunPhase(ids.live[0]!, 'Running', databasePool))?.phase).toBe('Running')
+      // A phase-only UPDATE no longer bumps revisions, so the witness is a run
+      // INSERT of the same user and the other live run's team.
+      const created = await createRun(
+        {
+          recipe_namespace: 'revision',
+          recipe_name: 'archive-order-witness',
+          actor_type: 'user',
+          team_id: ids.teams[1],
+          usage_team_id: ids.teams[1],
+          actor_id: ids.users[0],
+          idempotency_key: null,
+          trigger_source: 'onDemand',
+          ttl_seconds_after_finished: 2_592_000,
+        },
+        databasePool
+      )
+      expect(created.created).toBe(true)
       const after = await revisions(ids)
-      for (const kind of ['user', 'team'] as const) {
-        expect(after[kind]).toHaveLength(2)
-        for (const [index, row] of after[kind].entries()) {
-          const updated = kind === 'user' ? ids.users[0] : ids.teams[1]
-          expect(row.revision).toBe(before[kind][index].revision + (row.id === updated ? 5 : 3))
-        }
-      }
+      // Archive: prelock + live DELETE + audit INSERT, one bump each per
+      // subject. The INSERT adds one bump for the user and, because team and
+      // usage team are the same subject, two for that team.
+      expect(byId(after.user)).toEqual({
+        [ids.users[0]!]: byId(before.user)[ids.users[0]!]! + 4,
+        [ids.users[1]!]: byId(before.user)[ids.users[1]!]! + 3,
+      })
+      expect(byId(after.team)).toEqual({
+        [ids.teams[0]!]: byId(before.team)[ids.teams[0]!]! + 3,
+        [ids.teams[1]!]: byId(before.team)[ids.teams[1]!]! + 5,
+      })
     } finally {
       connect.mockRestore()
     }
   })
 
-  it('commits an archive batch beside updateRunPhase without reversing subject locks', async () => {
+  it('commits an archive batch beside a run INSERT without reversing subject locks', async () => {
     const ids = await fixture()
     const before = await revisions(ids)
     const archiveGate = await databasePool.connect()
-    const updateGate = await databasePool.connect()
+    const competitorGate = await databasePool.connect()
     const archive = await databasePool.connect()
-    const update = await databasePool.connect()
+    const competitor = await databasePool.connect()
     const archivePid = await pid(archive)
-    const updatePid = await pid(update)
+    const competitorPid = await pid(competitor)
     const archiveGatePid = await pid(archiveGate)
-    const updateGatePid = await pid(updateGate)
+    const competitorGatePid = await pid(competitorGate)
     let archiveOutcome: Promise<Outcome> | undefined
-    let updateOutcome: Promise<Outcome> | undefined
+    let competitorOutcome: Promise<Outcome> | undefined
     let archiveStarted = false
     let firstIndex = -1
     let outcomes: Outcome[] = []
     // The connection boundary binds the actual archive service to this real
-    // database. Neither archiveOneBatch nor updateRunPhase SQL is replaced.
+    // database. Neither archiveOneBatch nor the INSERT SQL is replaced.
     const connect = vi.spyOn(pool, 'connect').mockResolvedValue(archive)
     try {
       await configure(archive, 'archive-order-archive')
-      await configure(update, 'archive-order-phase')
+      await configure(competitor, 'archive-order-insert')
       await archiveGate.query('SELECT pg_advisory_lock($1, 1), pg_advisory_lock($1, 2)', [
         barrierClass,
       ])
-      await updateGate.query('SELECT pg_advisory_lock($1, 3)', [barrierClass])
+      await competitorGate.query('SELECT pg_advisory_lock($1, 3)', [barrierClass])
       await databasePool.query(
         `
         INSERT INTO archive_order_barriers VALUES
           ('archive-order-archive', 'authorization_user_revisions', $1, 1),
           ('archive-order-archive', 'authorization_user_revisions', $2, 2),
-          ('archive-order-phase', 'authorization_team_revisions', '', 3)
+          ('archive-order-insert', 'authorization_team_revisions', '', 3)
       `,
         ids.users
       )
@@ -383,25 +407,42 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         user: ids.users[firstIndex],
         team: ids.teams[firstIndex],
       })
-      await update.query('BEGIN')
-      updateOutcome = observe(updateRunPhase(ids.live[firstIndex]!, 'Running', update))
-      const phaseBlocker = await waitForBlock(updatePid, [updateGatePid, archivePid])
-      if (phaseBlocker === updateGatePid) {
-        // Without the prelock, the phase writer holds the other team's
-        // revision before waiting on the archive's first user: a cycle.
-        await updateGate.query('SELECT pg_advisory_unlock_all()')
-        await waitForBlock(updatePid, [archivePid])
+      await competitor.query('BEGIN')
+      // A phase-only UPDATE no longer bumps revisions, so the competitor is a
+      // run INSERT of the user the archive holds and the other live team.
+      competitorOutcome = observe(
+        createRun(
+          {
+            recipe_namespace: 'revision',
+            recipe_name: 'archive-order-competitor',
+            actor_type: 'user',
+            team_id: ids.teams[1 - firstIndex],
+            usage_team_id: ids.teams[1 - firstIndex],
+            actor_id: ids.users[firstIndex],
+            idempotency_key: null,
+            trigger_source: 'onDemand',
+            ttl_seconds_after_finished: 2_592_000,
+          },
+          competitor
+        )
+      )
+      const competitorBlocker = await waitForBlock(competitorPid, [competitorGatePid, archivePid])
+      if (competitorBlocker === competitorGatePid) {
+        // Without the prelock, the INSERT holds the other team's revision
+        // before waiting on the archive's first user: a cycle.
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+        await waitForBlock(competitorPid, [archivePid])
         await archiveGate.query('SELECT pg_advisory_unlock_all()')
       } else {
         // With the prelock, the archive already holds both teams before
-        // reaching its first user. The phase writer waits at its first team.
+        // reaching its first user. The INSERT waits at its first team.
         await archiveGate.query('SELECT pg_advisory_unlock_all()')
-        await waitForBlock(updatePid, [updateGatePid])
-        await updateGate.query('SELECT pg_advisory_unlock_all()')
+        await waitForBlock(competitorPid, [competitorGatePid])
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
       }
-      const phaseResult = await updateOutcome
-      await update.query(phaseResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
-      outcomes = [await archiveOutcome, phaseResult]
+      const competitorResult = await competitorOutcome
+      await competitor.query(competitorResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      outcomes = [await archiveOutcome, competitorResult]
       console.info(
         'ARCHIVE_ORDER_OUTCOMES',
         outcomes.map(result => ({
@@ -411,12 +452,12 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       )
     } finally {
       await archiveGate.query('SELECT pg_advisory_unlock_all()')
-      await updateGate.query('SELECT pg_advisory_unlock_all()')
-      await updateOutcome
-      await update.query('ROLLBACK')
+      await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      await competitorOutcome
+      await competitor.query('ROLLBACK')
       await archiveOutcome
       connect.mockRestore()
-      for (const client of [archiveGate, updateGate, update]) client.release()
+      for (const client of [archiveGate, competitorGate, competitor]) client.release()
       if (!archiveStarted) archive.release()
       await databasePool.query('TRUNCATE archive_order_barriers')
     }
@@ -424,19 +465,26 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
     expect(outcomes[0]).toEqual({ status: 'fulfilled', value: 2 })
     await archivedWitness(ids)
     const after = await revisions(ids)
-    for (const kind of ['user', 'team'] as const) {
-      for (const [index, row] of after[kind].entries()) {
-        const updated = kind === 'user' ? ids.users[firstIndex] : ids.teams[1 - firstIndex]
-        expect(row.revision).toBe(before[kind][index].revision + (row.id === updated ? 5 : 3))
-      }
-    }
+    // Archive: prelock + live DELETE + audit INSERT, one bump each per subject.
+    // The INSERT adds one bump for the user it names and, because team and
+    // usage team are one subject, two for that team.
+    expect(byId(after.user)).toEqual({
+      [ids.users[firstIndex]!]: byId(before.user)[ids.users[firstIndex]!]! + 4,
+      [ids.users[1 - firstIndex]!]: byId(before.user)[ids.users[1 - firstIndex]!]! + 3,
+    })
+    expect(byId(after.team)).toEqual({
+      [ids.teams[1 - firstIndex]!]: byId(before.team)[ids.teams[1 - firstIndex]!]! + 5,
+      [ids.teams[firstIndex]!]: byId(before.team)[ids.teams[firstIndex]!]! + 3,
+    })
     expect(
       (
-        await databasePool.query('SELECT phase FROM workflow_runs WHERE run_id = $1', [
-          ids.live[firstIndex],
-        ])
+        await databasePool.query(
+          `SELECT phase FROM workflow_runs WHERE actor_id = $1 AND team_id = $2
+            AND recipe_name = 'archive-order-competitor'`,
+          [ids.users[firstIndex], ids.teams[1 - firstIndex]]
+        )
       ).rows
-    ).toEqual([{ phase: 'Running' }])
+    ).toEqual([{ phase: 'Pending' }])
   })
 
   it.each(['user', 'team'] as const)(
@@ -799,21 +847,21 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
     }
   })
 
-  it('commits an approval archive batch beside a run phase write without reversing subject locks', async () => {
+  it('commits an approval archive batch beside a run INSERT without reversing subject locks', async () => {
     const ids = await approvalFixture()
     const before = await revisions({ users: [ids.user], teams: [ids.team] })
     const archiveGate = await databasePool.connect()
     const archive = await databasePool.connect()
-    const update = await databasePool.connect()
+    const competitor = await databasePool.connect()
     const archivePid = await pid(archive)
-    const updatePid = await pid(update)
+    const competitorPid = await pid(competitor)
     const gatePid = await pid(archiveGate)
     let archiveOutcome: Promise<Outcome> | undefined
-    let updateOutcome: Promise<Outcome> | undefined
+    let competitorOutcome: Promise<Outcome> | undefined
     const connect = bindFirstSession(archive)
     try {
       await configure(archive, 'approval-archive-order')
-      await configure(update, 'approval-phase-order')
+      await configure(competitor, 'approval-insert-order')
       await archiveGate.query('SELECT pg_advisory_lock($1, 21)', [barrierClass])
       await databasePool.query('INSERT INTO archive_order_barriers VALUES ($1, $2, $3, 21)', [
         'approval-archive-order',
@@ -823,25 +871,47 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       archiveOutcome = observe(archiveTerminalApprovals(180, 500))
       // The prelock pauses on the user only after taking the batch's team.
       await waitForBlock(archivePid, [gatePid])
-      await update.query('BEGIN')
-      updateOutcome = observe(updateRunPhase(ids.live, 'Running', update))
-      // The phase writer takes its team first and waits there, so it can never
-      // hold the team this batch already prelocked while asking for its user.
-      await waitForBlock(updatePid, [archivePid])
+      await competitor.query('BEGIN')
+      // A phase-only UPDATE no longer bumps revisions, so the competitor is a
+      // run INSERT of the same user and team.
+      competitorOutcome = observe(
+        createRun(
+          {
+            recipe_namespace: 'revision',
+            recipe_name: 'approval-insert-competitor',
+            actor_type: 'user',
+            team_id: ids.team,
+            usage_team_id: ids.team,
+            actor_id: ids.user,
+            idempotency_key: null,
+            trigger_source: 'onDemand',
+            ttl_seconds_after_finished: 2_592_000,
+          },
+          competitor
+        )
+      )
+      // The INSERT takes its team first and waits there, so it can never hold
+      // the team this batch already prelocked while asking for its user.
+      await waitForBlock(competitorPid, [archivePid])
       await archiveGate.query('SELECT pg_advisory_unlock_all()')
-      const phaseResult = await updateOutcome
-      await update.query(phaseResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      const competitorResult = await competitorOutcome
+      await competitor.query(competitorResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
       const archiveResult = await archiveOutcome
       console.info('APPROVAL_ORDER_OUTCOMES', {
         archive: archiveResult,
-        phase: phaseResult,
+        competitor: competitorResult,
       })
-      expect([archiveResult.status, phaseResult.status]).toEqual(['fulfilled', 'fulfilled'])
+      expect([archiveResult.status, competitorResult.status]).toEqual(['fulfilled', 'fulfilled'])
       expect(archiveResult).toEqual({ status: 'fulfilled', value: 2 })
       expect(
-        (await databasePool.query('SELECT phase FROM workflow_runs WHERE run_id = $1', [ids.live]))
-          .rows
-      ).toEqual([{ phase: 'Running' }])
+        (
+          await databasePool.query(
+            `SELECT phase FROM workflow_runs WHERE actor_id = $1 AND team_id = $2
+              AND recipe_name = 'approval-insert-competitor'`,
+            [ids.user, ids.team]
+          )
+        ).rows
+      ).toEqual([{ phase: 'Pending' }])
       expect(
         (
           await databasePool.query(
@@ -851,9 +921,10 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         ).rows
       ).toHaveLength(0)
       // The prelock and the DELETE's row trigger bump each subject once; the
-      // phase UPDATE adds a NEW and an OLD attribution pair.
+      // INSERT adds one user bump and two team bumps (team and usage team are
+      // the same subject).
       const after = await revisions({ users: [ids.user], teams: [ids.team] })
-      expect(after.user).toEqual([{ id: ids.user, revision: before.user[0]!.revision + 4 }])
+      expect(after.user).toEqual([{ id: ids.user, revision: before.user[0]!.revision + 3 }])
       expect(after.team).toEqual([{ id: ids.team, revision: before.team[0]!.revision + 4 }])
       // The prelock takes the team first; the DELETE then meets the
       // user-targeted row first, as the fixture intends.
@@ -873,15 +944,19 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       ])
     } finally {
       await archiveGate.query('SELECT pg_advisory_unlock_all()')
-      await Promise.all([archiveOutcome, updateOutcome])
-      await update.query('ROLLBACK')
+      await Promise.all([archiveOutcome, competitorOutcome])
+      await competitor.query('ROLLBACK')
       connect.mockRestore()
-      for (const client of [archiveGate, update]) client.release()
+      for (const client of [archiveGate, competitor]) client.release()
       if (!archiveOutcome) archive.release()
       await databasePool.query('TRUNCATE archive_order_barriers')
       await databasePool.query(
         'DELETE FROM workflow_approval_requests WHERE id = ANY($1::uuid[])',
         [[ids.userApprovalId, ids.teamApprovalId]]
+      )
+      await databasePool.query(
+        'DELETE FROM workflow_runs WHERE recipe_name = $1 AND actor_id = $2',
+        ['approval-insert-competitor', ids.user]
       )
       await databasePool.query('DELETE FROM workflow_runs WHERE run_id = $1', [ids.live])
       await databasePool.query('DELETE FROM users WHERE id = $1', [ids.user])
@@ -889,21 +964,21 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
     }
   })
 
-  it('expires pending approvals beside a run phase write without reversing subject locks', async () => {
+  it('expires pending approvals beside a run INSERT without reversing subject locks', async () => {
     const ids = await expiryFixture()
     const before = await revisions({ users: [ids.user], teams: [ids.team] })
     const sweepGate = await databasePool.connect()
     const sweep = await databasePool.connect()
-    const update = await databasePool.connect()
+    const competitor = await databasePool.connect()
     const sweepPid = await pid(sweep)
-    const updatePid = await pid(update)
+    const competitorPid = await pid(competitor)
     const gatePid = await pid(sweepGate)
     let sweepOutcome: Promise<Outcome> | undefined
-    let updateOutcome: Promise<Outcome> | undefined
+    let competitorOutcome: Promise<Outcome> | undefined
     const connect = bindFirstSession(sweep)
     try {
       await configure(sweep, 'approval-expiry-sweep')
-      await configure(update, 'approval-phase-order')
+      await configure(competitor, 'approval-insert-order')
       // The sweep pauses on the user revision, after taking its team.
       await sweepGate.query('SELECT pg_advisory_lock($1, 22)', [barrierClass])
       await databasePool.query('INSERT INTO archive_order_barriers VALUES ($1, $2, $3, 22)', [
@@ -913,17 +988,34 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       ])
       sweepOutcome = observe(expirePendingRequests())
       await waitForBlock(sweepPid, [gatePid])
-      await update.query('BEGIN')
-      updateOutcome = observe(updateRunPhase(ids.live, 'Running', update))
-      // The phase writer takes its team first and waits there, so the sweep
-      // never has to wait for the user it already holds.
-      await waitForBlock(updatePid, [sweepPid])
+      await competitor.query('BEGIN')
+      // A phase-only UPDATE no longer bumps revisions, so the competitor is a
+      // run INSERT of the same user and team.
+      competitorOutcome = observe(
+        createRun(
+          {
+            recipe_namespace: 'revision',
+            recipe_name: 'approval-expiry-competitor',
+            actor_type: 'user',
+            team_id: ids.team,
+            usage_team_id: ids.team,
+            actor_id: ids.user,
+            idempotency_key: null,
+            trigger_source: 'onDemand',
+            ttl_seconds_after_finished: 2_592_000,
+          },
+          competitor
+        )
+      )
+      // The INSERT takes its team first and waits there, so the sweep never has
+      // to wait for the user it already holds.
+      await waitForBlock(competitorPid, [sweepPid])
       await sweepGate.query('SELECT pg_advisory_unlock_all()')
-      const phaseResult = await updateOutcome
-      await update.query(phaseResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      const competitorResult = await competitorOutcome
+      await competitor.query(competitorResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
       const sweepResult = await sweepOutcome
-      console.info('APPROVAL_EXPIRY_OUTCOMES', { sweep: sweepResult, phase: phaseResult })
-      expect([sweepResult.status, phaseResult.status]).toEqual(['fulfilled', 'fulfilled'])
+      console.info('APPROVAL_EXPIRY_OUTCOMES', { sweep: sweepResult, competitor: competitorResult })
+      expect([sweepResult.status, competitorResult.status]).toEqual(['fulfilled', 'fulfilled'])
       expect(sweepResult).toEqual({ status: 'fulfilled', value: 2 })
       expect(
         (
@@ -938,9 +1030,14 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         { id: ids.teamApprovalId, status: 'expired' },
       ])
       expect(
-        (await databasePool.query('SELECT phase FROM workflow_runs WHERE run_id = $1', [ids.live]))
-          .rows
-      ).toEqual([{ phase: 'Running' }])
+        (
+          await databasePool.query(
+            `SELECT phase FROM workflow_runs WHERE actor_id = $1 AND team_id = $2
+              AND recipe_name = 'approval-expiry-competitor'`,
+            [ids.user, ids.team]
+          )
+        ).rows
+      ).toEqual([{ phase: 'Pending' }])
       // The prelock takes the team first; the UPDATE then meets the
       // user-targeted row first and bumps both sides of its attribution.
       expect(
@@ -960,16 +1057,17 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         { revision_table: 'authorization_team_revisions', subject_id: ids.team },
       ])
       // Prelock plus the UPDATE's NEW and OLD attribution pairs, plus the
-      // phase UPDATE's own NEW and OLD pair.
+      // INSERT's one user bump and two team bumps (team and usage team are the
+      // same subject).
       const after = await revisions({ users: [ids.user], teams: [ids.team] })
-      expect(after.user).toEqual([{ id: ids.user, revision: before.user[0]!.revision + 5 }])
+      expect(after.user).toEqual([{ id: ids.user, revision: before.user[0]!.revision + 4 }])
       expect(after.team).toEqual([{ id: ids.team, revision: before.team[0]!.revision + 5 }])
     } finally {
       await sweepGate.query('SELECT pg_advisory_unlock_all()')
-      await Promise.all([sweepOutcome, updateOutcome])
-      await update.query('ROLLBACK')
+      await Promise.all([sweepOutcome, competitorOutcome])
+      await competitor.query('ROLLBACK')
       connect.mockRestore()
-      for (const client of [sweepGate, update]) client.release()
+      for (const client of [sweepGate, competitor]) client.release()
       if (!sweepOutcome) sweep.release()
       await databasePool.query('TRUNCATE archive_order_barriers')
       await databasePool.query(
@@ -977,6 +1075,10 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         [[ids.userApprovalId, ids.teamApprovalId]]
       )
       await databasePool.query('DELETE FROM workflow_runs WHERE run_id = $1', [ids.live])
+      await databasePool.query(
+        'DELETE FROM workflow_runs WHERE recipe_name = $1 AND actor_id = $2',
+        ['approval-expiry-competitor', ids.user]
+      )
       await databasePool.query('DELETE FROM users WHERE id = $1', [ids.user])
       await databasePool.query('DELETE FROM teams WHERE id = $1', [ids.team])
     }

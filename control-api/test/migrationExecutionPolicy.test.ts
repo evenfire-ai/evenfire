@@ -103,11 +103,13 @@ describe('D34 migration execution policy', () => {
     // covers the runs its DELETE cascade rewrites; RP-12 narrowed the
     // session-revocation ledger to SELECT and INSERT. O1 added the
     // approval-trigger pre-lock that both decision call sites take before they
-    // bump the approval target.
+    // bump the approval target. The run revision trigger now returns early on
+    // an UPDATE that changes none of the columns catalog consumers read, so
+    // reconciler heartbeats stop bumping team and user revisions.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        '90e72c677c32dbe68326885f54cca09e43350fcc1ef0b3df2ab30fc675701503',
+        'ba1f0dd29f325759a1a32650b1140afdfcde1e60a14807651b04a1ac735ffb19',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',

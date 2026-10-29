@@ -313,6 +313,110 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     expect(await userRevision(userIds[1])).toBeGreaterThan(revision)
   })
 
+  it('leaves run subject revisions unchanged on heartbeats and bumps them on a subject change', async () => {
+    const team = teamIds[0]
+    const nextTeam = teamIds[1]
+    const user = userIds[0]
+    const run = randomUUID()
+    await databasePool.query(
+      `INSERT INTO workflow_runs(run_id, recipe_namespace, recipe_name, phase, actor_type,
+         actor_id, team_id, usage_team_id, trigger_source)
+       VALUES ($1, 'sandbox-recipes', 'revision-heartbeat', 'Pending', 'user', $2, $3, $4,
+         'onDemand')`,
+      [run, user, team, team]
+    )
+    const beforeUser = await userRevision(user)
+    const beforeTeam = await teamRevision(team)
+    const beforeNextTeam = await teamRevision(nextTeam)
+
+    // The workflow-recipes reconciler SQL, run as its runtime role. None of
+    // these statements changes a column a catalog consumer reads.
+    const client = await databasePool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('SET LOCAL ROLE workflow_recipes_runtime')
+      const progress = await client.query(
+        `UPDATE workflow_runs
+     SET last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $1
+     AND phase IN ('Pending', 'Running')`,
+        [run]
+      )
+      expect(progress.rowCount).toBe(1)
+      const claim = await client.query(
+        `UPDATE workflow_runs
+     SET phase = 'Running',
+         owner_instance_id = $1,
+         child_recipe_name = $2,
+         child_recipe_namespace = $3,
+         started_at = now(),
+         last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $4
+     AND phase = 'Pending'
+     AND (owner_instance_id IS NULL OR owner_instance_id = $1)`,
+        ['owner-heartbeat', null, null, run]
+      )
+      expect(claim.rowCount).toBe(1)
+      const terminal = await client.query(
+        `UPDATE workflow_runs
+     SET phase = $1,
+         completed_at = COALESCE($2::timestamptz, now()),
+         last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $3
+     AND (
+       phase IN ('Pending', 'Running')
+       OR (phase = 'Failed' AND $1 = 'Succeeded')
+     )`,
+        ['Succeeded', null, run]
+      )
+      expect(terminal.rowCount).toBe(1)
+      await client.query('COMMIT')
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+
+    // Write witness: the heartbeat rows really changed.
+    expect(
+      (
+        await databasePool.query(
+          `SELECT phase, last_reconciled_at IS NOT NULL AS reconciled,
+                  started_at IS NOT NULL AS started, completed_at IS NOT NULL AS completed,
+                  owner_instance_id
+             FROM workflow_runs WHERE run_id = $1`,
+          [run]
+        )
+      ).rows
+    ).toEqual([
+      {
+        phase: 'Succeeded',
+        reconciled: true,
+        started: true,
+        completed: true,
+        owner_instance_id: 'owner-heartbeat',
+      },
+    ])
+    // Negative witness: no subject revision moved.
+    expect(await userRevision(user)).toBe(beforeUser)
+    expect(await teamRevision(team)).toBe(beforeTeam)
+    expect(await teamRevision(nextTeam)).toBe(beforeNextTeam)
+
+    // Liveness witness in the same test: a subject change still bumps. The
+    // team moves to nextTeam while the usage team stays on the old team, so the
+    // NEW image bumps nextTeam and the old usage team, and the OLD image bumps
+    // the old team and the old usage team: the old team moves three times.
+    await databasePool.query('UPDATE workflow_runs SET team_id = $2 WHERE run_id = $1', [
+      run,
+      nextTeam,
+    ])
+    expect(await userRevision(user)).toBe(beforeUser + 2)
+    expect(await teamRevision(team)).toBe(beforeTeam + 3)
+    expect(await teamRevision(nextTeam)).toBe(beforeNextTeam + 1)
+  })
+
   it('bumps ordered audit-run subjects and permits the Admin UI sentinel', async () => {
     const runId = randomUUID()
     let userBefore = await userRevision(userIds[0])

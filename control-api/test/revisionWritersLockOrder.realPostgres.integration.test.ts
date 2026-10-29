@@ -7,6 +7,7 @@ import { initDb, pool } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
 import { type GfsSubject, writeGfsGrantBatchInTransaction } from '../src/routes/gfs/grants.js'
 import { writeGfsShareBatchInTransaction } from '../src/routes/gfs/shares.js'
+import { createRun } from '../src/services/workflowRunService.js'
 import { triggerWorkflow } from '../src/services/workflows/workflowTriggerService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -293,17 +294,7 @@ describeRealPostgres('revision writers share one lock order on real PostgreSQL',
       } = await fixture()
       await grant(drive, resource!, 'team', team!)
       await grant(drive, resource!, 'user', user!)
-      let runId: string | undefined
-      if (writer === 'workflow') {
-        runId = (
-          await databasePool.query<{ run_id: string }>(
-            `INSERT INTO workflow_runs(recipe_namespace, recipe_name, phase, actor_type, actor_id,
-             trigger_source, team_id) VALUES ('test', 'revision-order', 'Pending', 'user', $1,
-             'onDemand', $2) RETURNING run_id::text`,
-            [user, team]
-          )
-        ).rows[0]!.run_id
-      } else {
+      if (writer === 'membership') {
         await databasePool.query(
           "INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')",
           [team, user]
@@ -321,15 +312,31 @@ describeRealPostgres('revision writers share one lock order on real PostgreSQL',
           ]),
         client =>
           writer === 'workflow'
-            ? client.query("UPDATE workflow_runs SET phase = 'Running' WHERE run_id = $1", [runId])
+            ? // A phase-only UPDATE bumps no revision, so the workflow writer is
+              // a run INSERT of the same team and user: it takes the team first.
+              createRun(
+                {
+                  recipe_namespace: 'test',
+                  recipe_name: 'revision-order',
+                  actor_type: 'user',
+                  team_id: team,
+                  usage_team_id: team,
+                  actor_id: user,
+                  idempotency_key: null,
+                  trigger_source: 'onDemand',
+                  ttl_seconds_after_finished: 2_592_000,
+                },
+                client
+              )
             : client.query(
                 "UPDATE team_members SET role = 'admin' WHERE team_id = $1 AND user_id = $2",
                 [team, user]
               )
       )
-      const subjectDelta = writer === 'workflow' ? 3 : 2
-      expect(await revision('user', user!)).toBe(beforeUser + subjectDelta)
-      expect(await revision('team', team!)).toBe(beforeTeam + subjectDelta)
+      // The resource UPDATE bumps the resource and its two subjects once each;
+      // the run INSERT adds one user bump and two team bumps.
+      expect(await revision('user', user!)).toBe(beforeUser + 2)
+      expect(await revision('team', team!)).toBe(beforeTeam + (writer === 'workflow' ? 3 : 2))
       expect(await revision('resource', resource!)).toBe(beforeResource + 1)
     }
   )
@@ -346,21 +353,17 @@ describeRealPostgres('revision writers share one lock order on real PostgreSQL',
       for (const team of teams) await grant(drive, resource!, 'team', team)
       await grant(drive, resource!, 'user', user!)
       let runId: string | undefined
-      if (writer.startsWith('workflow')) {
+      if (writer === 'workflow attribution change') {
         runId = (
           await databasePool.query<{ run_id: string }>(
             `INSERT INTO workflow_runs(recipe_namespace, recipe_name, phase, actor_type, actor_id,
              trigger_source, team_id, usage_team_id)
            VALUES ('test', 'team-order', 'Pending', 'user', $1, 'onDemand', $2, $3)
            RETURNING run_id::text`,
-            [
-              user,
-              writer === 'workflow usage team' ? teams[1] : teams[0],
-              writer === 'workflow usage team' ? teams[0] : null,
-            ]
+            [user, teams[0], null]
           )
         ).rows[0]!.run_id
-      } else {
+      } else if (writer === 'membership team change') {
         await databasePool.query(
           "INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')",
           [teams[0], user]
@@ -378,7 +381,23 @@ describeRealPostgres('revision writers share one lock order on real PostgreSQL',
           ]),
         client =>
           writer === 'workflow usage team'
-            ? client.query("UPDATE workflow_runs SET phase = 'Running' WHERE run_id = $1", [runId])
+            ? // A phase-only UPDATE bumps no revision, so the two-team workflow
+              // writer is a run INSERT whose team and usage team are reversed
+              // against the sorted order the trigger must still follow.
+              createRun(
+                {
+                  recipe_namespace: 'test',
+                  recipe_name: 'team-order',
+                  actor_type: 'user',
+                  team_id: teams[1],
+                  usage_team_id: teams[0],
+                  actor_id: user,
+                  idempotency_key: null,
+                  trigger_source: 'onDemand',
+                  ttl_seconds_after_finished: 2_592_000,
+                },
+                client
+              )
             : writer === 'workflow attribution change'
               ? client.query(
                   "UPDATE workflow_runs SET team_id = $2, phase = 'Running' WHERE run_id = $1",
@@ -389,12 +408,15 @@ describeRealPostgres('revision writers share one lock order on real PostgreSQL',
                   [teams[0], user, teams[1]]
                 )
       )
+      // The resource UPDATE bumps both teams and the user once; the run INSERT
+      // adds one bump per team and one for the user. The two UPDATE writers
+      // bump a NEW and an OLD attribution pair.
       for (const [index, team] of teams.entries()) {
-        expect(await revision('team', team)).toBe(
-          beforeTeams[index]! + (writer === 'workflow usage team' ? 3 : 2)
-        )
+        expect(await revision('team', team)).toBe(beforeTeams[index]! + 2)
       }
-      expect(await revision('user', user!)).toBe(beforeUser + 3)
+      expect(await revision('user', user!)).toBe(
+        beforeUser + (writer === 'workflow usage team' ? 2 : 3)
+      )
       expect(await revision('resource', resource!)).toBe(beforeResource + 1)
     }
   )
@@ -565,8 +587,10 @@ describeRealPostgres('revision writers share one lock order on real PostgreSQL',
     expect(
       (
         await databasePool.query(
-          "UPDATE workflow_runs SET phase = 'Running' WHERE run_id = $1 RETURNING run_id",
-          [runId]
+          // A phase-only UPDATE skips the run revision trigger, so the sentinel
+          // is witnessed on UPDATE only when a guarded column changes too.
+          "UPDATE workflow_runs SET phase = 'Running', actor_id = $2 WHERE run_id = $1 RETURNING run_id",
+          [runId, randomUUID()]
         )
       ).rowCount
     ).toBe(1)

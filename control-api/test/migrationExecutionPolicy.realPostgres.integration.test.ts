@@ -700,8 +700,10 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       expect(
         (
           await isolatedPool.query(
-            "UPDATE workflow_runs SET phase = 'Running' WHERE run_id = $1 RETURNING run_id",
-            [legacyAdminRun.rows[0]!.run_id]
+            // Keep the Admin UI usage-team sentinel while changing a guarded
+            // column, so the UPDATE still runs the revision trigger.
+            "UPDATE workflow_runs SET phase = 'Running', actor_id = $2 WHERE run_id = $1 RETURNING run_id",
+            [legacyAdminRun.rows[0]!.run_id, randomUUID()]
           )
         ).rowCount
       ).toBe(1)
