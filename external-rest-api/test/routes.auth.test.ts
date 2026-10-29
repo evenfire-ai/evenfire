@@ -81,6 +81,37 @@ describe('routes/auth password-login', () => {
     expect(res.body).toEqual({ error: 'Unauthorized' })
   })
 
+  it('answers a Google identity refused by control-api like a retired account', async () => {
+    authServiceMock.loginWithGoogle.mockReset()
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'validly-shaped-test-token' })
+
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('keeps any other Google login 401 on the sanitized public envelope', async () => {
+    authServiceMock.loginWithGoogle.mockReset()
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'session_revoked' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'validly-shaped-test-token' })
+
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(401)
+    expect(res.body).not.toEqual({ error: 'Unauthorized' })
+    expect(res.body.error).toEqual(expect.objectContaining({ code: expect.any(String) }))
+  })
+
   it('keeps password setup state opaque on password-login', async () => {
     authServiceMock.loginWithPassword.mockRejectedValueOnce(
       new ControlApiError('control-api error (409)', 409, { error: 'password_not_set' })
