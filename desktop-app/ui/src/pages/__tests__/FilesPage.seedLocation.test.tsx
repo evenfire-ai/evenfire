@@ -16,6 +16,7 @@ import {
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import {
   accessibleResource,
+  affordancesFailureMessage,
   affordancesResult,
   childView,
   heldAffordances,
@@ -808,6 +809,10 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     const pendingRefresh = new Promise<ReturnType<typeof delegationAffordances>>((_, reject) => {
       rejectRefresh = reject
     })
+    const rateLimitMessage = await affordancesFailureMessage(429, {
+      code: 'rate_limited',
+      message: 'Too many file requests',
+    })
     const affordances = vi.fn(() => {
       permissionCalls += 1
       if (permissionCalls === 1) {
@@ -871,11 +876,11 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(screen.getByText('Checking permissions for Reports…')).toBeTruthy()
 
     await act(async () => {
-      rejectRefresh(new Error('429 Too Many Requests'))
+      rejectRefresh(new Error(rateLimitMessage))
       await Promise.resolve()
     })
     expect(
-      await screen.findByText(/Could not verify permissions for Reports.*Too many file requests/i)
+      await screen.findByText('Too many file requests. Wait before retrying permissions.')
     ).toBeTruthy()
     expect(folderActions.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
     expect(folderActions.getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
@@ -907,6 +912,10 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     let rejectRefresh!: (error: Error) => void
     const pendingRefresh = new Promise<ReturnType<typeof delegationAffordances>>((_, reject) => {
       rejectRefresh = reject
+    })
+    const rateLimitMessage = await affordancesFailureMessage(429, {
+      code: 'rate_limited',
+      message: 'Too many file requests',
     })
     const affordances = vi.fn(() => {
       permissionCalls += 1
@@ -980,12 +989,14 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(screen.getByText('Checking permissions for notes.bin…')).toBeTruthy()
 
     await act(async () => {
-      rejectRefresh(new Error('429 Too Many Requests'))
+      rejectRefresh(new Error(rateLimitMessage))
       await Promise.resolve()
     })
     expect(await screen.findByText(/Could not verify sharing permissions/i)).toBeTruthy()
     expect(screen.getByRole('combobox', { name: 'Add people, teams, or agents' })).toBe(manageInput)
-    expect(await screen.findByText(/Could not verify permissions for notes.bin/i)).toBeTruthy()
+    expect(
+      await screen.findByText('Too many file requests. Wait before retrying permissions.')
+    ).toBeTruthy()
     expect(renameResource).not.toHaveBeenCalled()
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
     client.clear()
