@@ -1,4 +1,3 @@
 bounded auth and ACL root-cause probes
-corrected CRLF anchor handling
-require exact selected assertions and safe verifier details
-select SYSTEM owner case exactly
+exact source and harness
+run native helper pretest before direct Vitest

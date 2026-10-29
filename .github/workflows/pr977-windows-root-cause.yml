@@ -67,6 +67,17 @@ jobs:
           npm --prefix source/desktop-app ci
           if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed' }
 
+      - name: Run the repository native-helper pretest
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          npm run prepare:windows-native
+          if ($LASTEXITCODE -ne 0) { throw 'Native helper preparation failed' }
+          $helper = 'resources/WindowsSessionAuthorityNative.dll'
+          if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'Native helper was not created' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant()
+          Write-Output "Native helper prepared from checked-out source; SHA256=$hash"
+
       - name: Instrument only the selected regression test
         shell: pwsh
         run: |
@@ -173,6 +184,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Host dependency installation failed' }
           npm --prefix source/desktop-app ci
           if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed' }
+
+      - name: Run the repository native-helper pretest
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          npm run prepare:windows-native
+          if ($LASTEXITCODE -ne 0) { throw 'Native helper preparation failed' }
+          $helper = 'resources/WindowsSessionAuthorityNative.dll'
+          if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'Native helper was not created' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant()
+          Write-Output "Native helper prepared from checked-out source; SHA256=$hash"
 
       - name: Instrument only the SYSTEM-owner fixture
         shell: pwsh
