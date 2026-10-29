@@ -19,7 +19,7 @@ const specFile = 'codex-subscription-approved-tools.spec.ts'
 const modelStepSpecFile = 'model-step-retry-codex.spec.ts'
 const hybridSpecFile = 'model-step-retry-codex-hybrid.spec.ts'
 export const hybridRetryTitles = [
-  'real hybrid R1: a confirmed fixture read survives one injected 503 and Retry completes',
+  'real hybrid R1: a confirmed fixture read survives two injected 503s and Retry completes',
   'real hybrid R2: approval inside the continuation executes the receipt once',
 ]
 export const toolCallLimitTitle =
@@ -39,14 +39,18 @@ export const modelStepRetryTitles = [
   'model step retry C9: denying an approval inside a continuation releases the session',
   'model step retry C10: cancelling an approval inside a continuation releases the session',
   'model step retry C8: the checkpoint survives a Host restart between the 503 and the retry',
+  'model step retry C11: one 503 after a confirmed search is absorbed by the automatic retry',
 ]
-// Aggregate business signals from the ten deterministic Desktop journeys.
+// Aggregate business signals from the eleven deterministic Desktop journeys.
+// Every journey that ends on the resumable notice fails its model step twice
+// (the Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=1 absorbs the first 503):
+// C5 four times, C2 once before any tool, and C11's single outage is absorbed.
 export const modelStepRetryExpectedDelta = Object.freeze({
-  turns: 10,
-  markerSearches: 9,
-  unavailableResponses: 11,
+  turns: 11,
+  markerSearches: 10,
+  unavailableResponses: 22,
   zeroToolUnavailable: 1,
-  continuationUnavailable: 1,
+  continuationUnavailable: 2,
   continuations: 5,
   toolResults: 5,
   resends: 2,
@@ -54,6 +58,7 @@ export const modelStepRetryExpectedDelta = Object.freeze({
   unexpectedRetries: 0,
   approvalRequests: 3,
   approvalFinals: 1,
+  absorbed: 1,
 })
 
 // The tool-call limit cases exist only in deterministic mode: only the
@@ -102,9 +107,11 @@ export function validateHybridEvidence(before, after) {
       throw new Error(`Real-hybrid evidence missing or reset: ${field}`)
   }
   for (const [field, expected] of Object.entries({
-    injected503: 2,
-    r1: 1,
-    r2: 1,
+    // Three journeys fail one model step each; the counters move per injected
+    // response, so R1 and R2 move by two.
+    injected503: 4,
+    r1: 2,
+    r2: 2,
     // R1: search, describe, physical read. R2 also discovers and calls a new receipt.
     r1DistinctToolResults: 3,
     r2DistinctToolResults: 6,
@@ -114,7 +121,7 @@ export function validateHybridEvidence(before, after) {
   }
   if (after.forwarded <= before.forwarded)
     throw new Error('Real-hybrid mode did not forward real provider requests')
-  return { forwarded: after.forwarded - before.forwarded, injected503: 2 }
+  return { forwarded: after.forwarded - before.forwarded, injected503: 4 }
 }
 
 /**

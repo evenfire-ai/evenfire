@@ -26,15 +26,27 @@ const LIMIT_BOUNDARY_CALLS = 256
 // - `receipt`: like `probe`, with a real fixture receipt before the 503.
 // - `approval`: after the kept search and 503, discovery leads to a real
 //   fixture receipt call that requires the user's decision.
+// - `absorbed`: one 503 for the step after the search, which the Host's own
+//   automatic retry outlasts: that step then answers, with no checkpoint to
+//   resume and no notice for the user.
+// A step that must end on the resumable notice fails MODEL_STEP_OUTAGES times:
+// the Host retries a failed model step once by itself when the failure would
+// leave a resumable checkpoint, so the automatic retry absorbs the first 503 and
+// the second one stands. `zero` keeps one outage: that turn has no confirmed
+// tool, so there is nothing to resume and the Host never retries it.
 // A turn left on its 503 can be sent again by the user (Resend): the history
 // then carries the marker's user message twice and no tool rows, and gets a
 // plain answer. A turn containing `model step retry followup <marker>` is a new
 // message sent instead of the retry; it gets a plain answer.
 const MODEL_STEP_TURN =
-  /\bmodel step retry (probe|twice|zero|approval|receipt) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
+  /\bmodel step retry (probe|twice|zero|approval|receipt|absorbed) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
 const MODEL_STEP_FOLLOWUP = /\bmodel step retry followup ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
 const MODEL_STEP_PREFIX = 'model step retry '
 const MODEL_STEP_MAX_TURNS = 64
+// The Host's default `CLERUM_MODEL_STEP_AUTO_RETRIES=1`: one automatic retry per
+// failed model step, so two outages are needed for one to stand. An `absorbed`
+// turn fails once, which is what that one retry outlasts.
+const MODEL_STEP_OUTAGES = 2
 
 function record(value: unknown): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -373,8 +385,9 @@ export function createApprovedToolsUpstream() {
     // given before any tool ran (`zero`), continuations that got a 503 again
     // (`twice`), continuations answered, results of the original search those
     // answered continuations carried, Resends answered, follow-up messages
-    // answered, and completions served for a stage that was already served (a
-    // retry the Host must never make).
+    // answered, completions served for a stage that was already served (a retry
+    // the Host must never make), and steps whose single 503 the Host's own retry
+    // outlasted (`absorbed`).
     modelStepRetry: {
       turns: 0,
       markerSearches: 0,
@@ -388,6 +401,7 @@ export function createApprovedToolsUpstream() {
       unexpectedRetries: 0,
       approvalRequests: 0,
       approvalFinals: 0,
+      absorbed: 0,
     },
     // Only bounded measurements, never request or result contents.
     requests: [] as Array<{
@@ -581,7 +595,13 @@ export function createApprovedToolsUpstream() {
         }
         const opened = MODEL_STEP_TURN.exec(text)
         if (!opened) throw new Error('invalid_model_step_marker')
-        const kind = opened[1] as 'probe' | 'twice' | 'zero' | 'approval' | 'receipt'
+        const kind = opened[1] as
+          | 'probe'
+          | 'twice'
+          | 'zero'
+          | 'approval'
+          | 'receipt'
+          | 'absorbed'
         const marker = opened[2]!
         const turn = modelStepTurns.get(marker)
         // How many user messages of the history open this same turn: one for
@@ -656,6 +676,15 @@ export function createApprovedToolsUpstream() {
           evidence.modelStepRetry.unexpectedRetries++
           throw new Error('unexpected_retry')
         }
+        // A `twice` turn fails two steps: the one after the search and its first
+        // continuation. Every other kind fails one step; `absorbed` fails once, so
+        // the automatic retry alone outlasts it.
+        const stepOutages =
+          turn.kind === 'absorbed'
+            ? 1
+            : turn.kind === 'twice'
+              ? MODEL_STEP_OUTAGES * 2
+              : MODEL_STEP_OUTAGES
         const originalRows =
           turn.stage === 'approving' || turn.kind === 'receipt' ? rows.slice(0, 2) : rows
         const received = modelStepToolResults(originalRows, turn.callId, marker)
@@ -683,7 +712,7 @@ export function createApprovedToolsUpstream() {
               },
             })
           }
-          if (turn.stage !== 'unavailable') {
+          if (turn.unavailable < MODEL_STEP_OUTAGES) {
             turn.stage = 'unavailable'
             turn.unavailable++
             return unavailable('model_step_unavailable')
@@ -697,12 +726,28 @@ export function createApprovedToolsUpstream() {
           turn.unavailable++
           return unavailable('model_step_unavailable')
         }
-        if (turn.kind === 'twice' && turn.unavailable === 1) {
-          // The first continuation of a `twice` turn meets the provider down
-          // again; the checkpoint must stay resumable for a second retry.
+        if (turn.stage === 'unavailable' && turn.unavailable < stepOutages) {
+          // The Host's automatic retry of that same step meets the outage again.
+          // A `twice` turn's continuation fails its own outages the same way.
+          const continuation = turn.kind === 'twice' && turn.unavailable >= MODEL_STEP_OUTAGES
           turn.unavailable++
-          evidence.modelStepRetry.continuationUnavailable++
-          return unavailable('model_step_continuation_unavailable')
+          if (continuation) evidence.modelStepRetry.continuationUnavailable++
+          return unavailable(
+            continuation ? 'model_step_continuation_unavailable' : 'model_step_unavailable'
+          )
+        }
+        if (turn.kind === 'absorbed') {
+          // The step that failed once is retried by the Host itself and answers
+          // here: no checkpoint, no continuation and no Retry model step.
+          if (received !== 1) throw new Error('incomplete_model_step_batch')
+          turn.stage = 'continued'
+          evidence.modelStepRetry.absorbed++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_absorbed_final'))
+          return stream({
+            type: 'response.output_text.delta',
+            delta: `absorbed ${marker} toolResults=${received}`,
+          })
         }
         if (turn.kind === 'approval') {
           const decision = receiptDecision(exchanges(rows.slice(2)))

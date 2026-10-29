@@ -47,7 +47,12 @@ import { AgentListPage, ControlUiShell } from '../pages/codex-subscription'
 function scenario(): Scenario {
   return scenarios()[0]!
 }
-const FAILURE_LABEL = 'Model Overloaded · CODEX-SUBSCRIPTION'
+const FAILURE_LABEL = 'Provider Unavailable · CODEX-SUBSCRIPTION'
+// Every journey that ends on the resumable notice fails its model step twice:
+// the Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=1 retries that step once by
+// itself, so the first 503 is absorbed and the second one stands. C2 injects a
+// single outage before any tool: with no confirmed tool there is nothing to
+// resume, so the Host never retries it and Resend is the only action.
 const RESEND_LABEL = 'Retry last send'
 const KEPT_TOOL_NOTICE = '1 tool call already completed and will not run again.'
 const TURN_TIMEOUT = 120_000
@@ -300,12 +305,13 @@ test('model step retry C1: a 503 after a confirmed tool continues once without r
     expect(kept.modelStepCheckpoint?.version).toBeGreaterThan(0)
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1 },
+      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
       [
         'model_step_search',
         'model_step_receipt_tool',
         'model_step_receipt_tool',
         'model_step_receipt_tool',
+        'model_step_unavailable',
         'model_step_unavailable',
       ]
     )
@@ -367,8 +373,8 @@ test('model step retry C3: a new message instead of the retry abandons the check
     await expectResumable(desktop)
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1 },
-      ['model_step_search', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
     )
     await test.step('The follow-up is answered and Retry model step is gone', async () => {
       const responses = await newAgentResponses(desktop)
@@ -395,8 +401,8 @@ test('model step retry C4: a double click on Retry model step runs one continuat
     const retry = await expectResumable(desktop)
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1 },
-      ['model_step_search', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
     )
     await test.step('Both clicks land; only one continuation runs', async () => {
       const responses = await newAgentResponses(desktop)
@@ -425,8 +431,8 @@ test('model step retry C5: a continuation that meets a 503 again is offered for 
     expect(first.modelStepCheckpoint?.checkpointId).toBeTruthy()
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1 },
-      ['model_step_search', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
     )
     const failedAgain = await test.step('The first continuation meets a 503 too', async () => {
       const responses = await newAgentResponses(desktop)
@@ -437,7 +443,8 @@ test('model step retry C5: a continuation that meets a 503 again is offered for 
         timeout: TURN_TIMEOUT,
       })
       await expectResumable(desktop)
-      return expectDelta(failed, { unavailableResponses: 1, continuationUnavailable: 1 }, [
+      return expectDelta(failed, { unavailableResponses: 2, continuationUnavailable: 2 }, [
+        'model_step_continuation_unavailable',
         'model_step_continuation_unavailable',
       ])
     })
@@ -469,8 +476,8 @@ test('model step retry C6: sending the same prompt starts a new turn instead of 
     await expectResumable(desktop)
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1 },
-      ['model_step_search', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
     )
     await test.step('The user sends the same text as a new message', async () => {
       const responses = await newAgentResponses(desktop)
@@ -501,8 +508,8 @@ test('model step retry C7: approval inside a continuation executes the receipt o
     })
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1 },
-      ['model_step_search', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
     )
     await test.step('Retry discovers the receipt and waits for the user decision', async () => {
       await notice(desktop).getByTestId('model-step-retry-btn').click()
@@ -576,8 +583,8 @@ async function decisionJourney(decision: 'deny' | 'cancel') {
     })
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1 },
-      ['model_step_search', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
     )
     await notice(desktop).getByTestId('model-step-retry-btn').click()
     const pending = desktop.getByTestId('progress-stepper').filter({
@@ -657,8 +664,8 @@ test('model step retry C8: the checkpoint survives a Host restart between the 50
     expect(beforeRestart.modelStepCheckpoint?.checkpointId).toBeTruthy()
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1 },
-      ['model_step_search', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
     )
     await test.step('The Host pod is replaced while the turn waits for its retry', async () => {
       await restartAgentPod(scenario().agentName)
@@ -686,5 +693,38 @@ test('model step retry C8: the checkpoint survives a Host restart between the 50
     expect(completed.modelStepCheckpoint).toBeUndefined()
     expect(completed.turns.some(turn => turn.response?.includes(`continued ${value}`))).toBe(true)
     await expectDelta(failed, { continuations: 1, toolResults: 1 }, ['model_step_continued'])
+  })
+})
+
+test('model step retry C11: one 503 after a confirmed search is absorbed by the automatic retry', async () => {
+  await withDesktopChat(async desktop => {
+    const value = marker('c11')
+    const prompt = `model step retry absorbed ${value}`
+    const start = await snapshot()
+    const responses = await newAgentResponses(desktop)
+    await send(desktop, prompt)
+    // The Host retried that step by itself; its answer is the witness that the
+    // single outage never reached the user as a failure to recover from.
+    await expect(responses.filter({ hasText: `absorbed ${value} toolResults=1` })).toHaveCount(1, {
+      timeout: TURN_TIMEOUT,
+    })
+    await expect(responses.filter({ hasText: FAILURE_LABEL })).toHaveCount(0)
+    await expect(notice(desktop)).toHaveCount(0)
+    // Neither recovery action is offered: the turn never stopped.
+    await expect(resendButton(desktop)).toHaveCount(0)
+    await expectIdle(desktop)
+    const completed = await expectSessionState(desktop, prompt, 'idle')
+    expect(completed.modelStepCheckpoint).toBeUndefined()
+    expect(completed.turns.some(turn => turn.response?.includes(`absorbed ${value}`))).toBe(true)
+    // The turn ran its one search before the outage and the answer carried its one
+    // result back, so the absorbed step neither re-ran the tool nor kept the turn
+    // resumable. This kind's only tool is the search bridge, so the "called once"
+    // witness is `markerSearches: 1`; a physical connector call would be a
+    // different turn kind.
+    await expectDelta(
+      start,
+      { turns: 1, markerSearches: 1, unavailableResponses: 1, absorbed: 1 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_absorbed_final']
+    )
   })
 })

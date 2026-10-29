@@ -569,7 +569,7 @@ if (mode === 'deterministic') {
         await expect(responses.locator('.error-bubble-label')).toHaveText(
           'Too Many Tool Calls · CODEX-SUBSCRIPTION'
         )
-        await expect(responses.getByText('Model Overloaded')).toHaveCount(0)
+        await expect(responses.getByText('Provider Unavailable')).toHaveCount(0)
       })
       await test.step('One upstream completion, no retry, no connector call', async () => {
         const upstreamAfter = await readUpstreamEvidence(scenario)

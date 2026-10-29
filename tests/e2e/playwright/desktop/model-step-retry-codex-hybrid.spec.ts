@@ -1,5 +1,8 @@
 /**
- * Real Codex subscription with one test-image 503 after a confirmed tool.
+ * Real Codex subscription with injected test-image 503s after a confirmed tool.
+ * The Host's default `CLERUM_MODEL_STEP_AUTO_RETRIES=1` retries a failed model
+ * step once by itself, so R1 and R2 fail the step that must end on the
+ * resumable notice twice: the retry absorbs the first outage.
  * E2E_GUARDIAN_STRICT_NETWORK: no browser request is intercepted or fulfilled.
  * E2E_GUARDIAN_IPC_FLOW: Desktop login and chat use the real main-process IPC;
  * read-only IPC and external fixture counters observe the resulting business state.
@@ -42,6 +45,7 @@ type Session = {
 type HybridEvidence = {
   forwarded: number
   injected503: number
+  // Counted per injected response: the journey fails one step twice.
   r1: number
   r2: number
   r1DistinctToolResults: number
@@ -133,7 +137,7 @@ async function unavailable(desktop: Page, prompt: string) {
   await expect(pending).toContainText('workitem_read_000', { timeout: TIMEOUT })
   await expect(pending).toContainText('requires approval')
   await pending.getByTestId('approval-approve-btn').click()
-  await expect(responses.filter({ hasText: /Model Overloaded/ })).toHaveCount(1, {
+  await expect(responses.filter({ hasText: /Provider Unavailable/ })).toHaveCount(1, {
     timeout: TIMEOUT,
   })
   const notice = desktop.getByTestId('model-step-retry-notice')
@@ -143,7 +147,7 @@ async function unavailable(desktop: Page, prompt: string) {
   return notice
 }
 
-test('real hybrid R1: a confirmed fixture read survives one injected 503 and Retry completes', async () => {
+test('real hybrid R1: a confirmed fixture read survives two injected 503s and Retry completes', async () => {
   await withDesktopChat(async desktop => {
     const prompt = `model step retry hybrid r1 r1-${randomUUID()}. Use clerum__tool_search once to find workitem_read_000, clerum__tool_describe once for its schema, then clerum__tool_call once with empty arguments. Wait for my approval. After that read completes, answer without calling another tool.`
     const before = await evidence()
@@ -167,7 +171,7 @@ test('real hybrid R1: a confirmed fixture read survives one injected 503 and Ret
     })
     expect(kept.modelStepCheckpoint?.checkpointId).toBeTruthy()
     expect(kept.modelStepCheckpoint?.version).toBeGreaterThan(0)
-    await expect.poll(async () => (await evidence()).r1, { timeout: TIMEOUT }).toBe(before.r1 + 1)
+    await expect.poll(async () => (await evidence()).r1, { timeout: TIMEOUT }).toBe(before.r1 + 2)
     await test.step('Retry produces a real model answer from the kept result', async () => {
       const responses = await newAgentResponses(desktop)
       await desktop.getByTestId('model-step-retry-btn').click()
@@ -183,7 +187,7 @@ test('real hybrid R1: a confirmed fixture read survives one injected 503 and Ret
       )
       await expect(responses).toHaveCount(1, { timeout: TIMEOUT })
       await expect(responses).toContainText(/\S/)
-      await expect(responses).not.toContainText(/Model Overloaded/)
+      await expect(responses).not.toContainText(/Provider Unavailable/)
       await expect(desktop.getByTestId('model-step-retry-notice')).toHaveCount(0)
     })
     const done = await settled(desktop, prompt)
@@ -200,12 +204,14 @@ test('real hybrid R1: a confirmed fixture read survives one injected 503 and Ret
         turn =>
           turn.user_input === prompt &&
           Boolean(turn.response?.trim()) &&
-          !turn.response?.includes('Model Overloaded')
+          !turn.response?.includes('proxy stream failed')
       )
     ).toBe(true)
     const after = await evidence()
-    expect(after.r1).toBe(before.r1 + 1)
-    expect(after.injected503).toBe(before.injected503 + 1)
+    // Two injected responses for the one step: the automatic retry met the first
+    // and Retry model step met the second.
+    expect(after.r1).toBe(before.r1 + 2)
+    expect(after.injected503).toBe(before.injected503 + 2)
     expect(after.r1DistinctToolResults).toBe(before.r1DistinctToolResults + 3)
     expect(after.forwarded).toBeGreaterThan(before.forwarded)
     assertConfirmedToolNotReexecuted(
@@ -268,12 +274,12 @@ test('real hybrid R2: approval inside the continuation executes the receipt once
         turn =>
           turn.user_input === prompt &&
           Boolean(turn.response?.trim()) &&
-          !turn.response?.includes('Model Overloaded')
+          !turn.response?.includes('proxy stream failed')
       )
     ).toBe(true)
     await expect(responses).toHaveCount(1, { timeout: TIMEOUT })
     await expect(responses).toContainText(/\S/)
-    await expect(responses).not.toContainText(/Model Overloaded/)
+    await expect(responses).not.toContainText(/Provider Unavailable/)
     await expect(desktop.getByTestId('model-step-retry-notice')).toHaveCount(0)
     expect((await readEvidence(scenario())).calls).toHaveLength(physicalKept.calls.length + 1)
     const after = await evidence()
@@ -284,8 +290,8 @@ test('real hybrid R2: approval inside the continuation executes the receipt once
       'workitem_read_000'
     )
     expect(after.r2DistinctToolResults).toBe(before.r2DistinctToolResults + 6)
-    expect(after.r2).toBe(before.r2 + 1)
-    expect(after.injected503).toBe(before.injected503 + 1)
+    expect(after.r2).toBe(before.r2 + 2)
+    expect(after.injected503).toBe(before.injected503 + 2)
     expect(after.forwarded).toBeGreaterThan(before.forwarded)
   })
 })

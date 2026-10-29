@@ -53,10 +53,10 @@ for (const mode of ['deterministic', 'real', 'real-hybrid']) {
   })
 }
 test('the tool-call limit and model-step retry cases are mandatory only in deterministic mode', () => {
-  assert.equal(expectedTitles('deterministic').length, 18)
+  assert.equal(expectedTitles('deterministic').length, 19)
   assert.equal(expectedTitles('real').length, 6)
   assert.deepEqual(expectedTitles('real-hybrid'), hybridRetryTitles)
-  assert.equal(modelStepRetryTitles.length, 10)
+  assert.equal(modelStepRetryTitles.length, 11)
   for (const title of [toolCallLimitTitle, toolCallLimitBoundaryTitle, ...modelStepRetryTitles]) {
     assert.ok(expectedTitles('deterministic').includes(title))
     assert.ok(!expectedTitles('real').includes(title))
@@ -66,17 +66,17 @@ test('the tool-call limit and model-step retry cases are mandatory only in deter
     /Select deterministic, real or real-hybrid upstream mode explicitly/
   )
 })
-test('real-hybrid evidence requires exactly one R1 and R2 injection plus real forwarding', () => {
+test('real-hybrid evidence requires two R1 and R2 injections plus real forwarding', () => {
   const before = {
     forwarded: 10, injected503: 0, r1: 0, r2: 0, r1DistinctToolResults: 0, r2DistinctToolResults: 0,
   }
   const after = {
-    forwarded: 14, injected503: 2, r1: 1, r2: 1, r1DistinctToolResults: 3, r2DistinctToolResults: 6,
+    forwarded: 14, injected503: 4, r1: 2, r2: 2, r1DistinctToolResults: 3, r2DistinctToolResults: 6,
   }
-  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 2 })
+  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 4 })
   assert.throws(
-    () => validateHybridEvidence(before, { ...after, injected503: 0 }),
-    /injected503 did not move by 2/
+    () => validateHybridEvidence(before, { ...after, injected503: 2 }),
+    /injected503 did not move by 4/
   )
   assert.throws(
     () => validateHybridEvidence(before, { ...after, forwarded: 10 }),
@@ -195,7 +195,11 @@ test('rejects model-step evidence that is missing, reset or not reported', () =>
   const after = modelStepEvidence(modelStepRetryExpectedDelta)
   assert.throws(() => validateModelStepEvidence({}, after), /missing or reset: turns/)
   assert.throws(
-    () => validateModelStepEvidence(modelStepEvidence({ ...zeroCounts, turns: 11 }), after),
+    () =>
+      validateModelStepEvidence(
+        modelStepEvidence({ ...zeroCounts, turns: modelStepRetryExpectedDelta.turns + 1 }),
+        after
+      ),
     /missing or reset: turns/
   )
   const partial = modelStepEvidence(modelStepRetryExpectedDelta)
@@ -280,13 +284,13 @@ test('R2 evidence rejects missing, reset and unexpected distinct tool result del
   }
   const after = {
     forwarded: 14,
-    injected503: 2,
-    r1: 1,
-    r2: 1,
+    injected503: 4,
+    r1: 2,
+    r2: 2,
     r1DistinctToolResults: 4,
     r2DistinctToolResults: 8,
   }
-  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 2 })
+  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 4 })
   for (const value of [undefined, 1, 2, 7, 9]) {
     assert.throws(
       () => validateHybridEvidence(before, { ...after, r2DistinctToolResults: value }),

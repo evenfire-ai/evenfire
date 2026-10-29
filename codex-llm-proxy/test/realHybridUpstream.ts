@@ -1,6 +1,11 @@
-/** One provider outage in the isolated E2E proxy image; all other requests use Codex. */
+/** Provider outages in the isolated E2E proxy image; all other requests use Codex. */
 const COMPLETIONS = 'https://chatgpt.com/backend-api/codex/responses'
 const HYBRID_TURN = /\bmodel step retry hybrid (r1|r2) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/i
+// The Host retries one failed model step by itself when that failure would leave
+// a resumable checkpoint (`CLERUM_MODEL_STEP_AUTO_RETRIES` defaults to 1). R1 and
+// R2 must end on the resumable notice, so each fails the step after the fixture
+// read twice: the automatic retry absorbs the first outage and the second stands.
+const HYBRID_OUTAGES = 2
 
 type Row = Record<string, unknown>
 
@@ -92,7 +97,8 @@ function confirmedFixtureRead(rows: Row[]): boolean {
 }
 
 export function createRealHybridUpstream(forward: typeof fetch) {
-  const injected = new Set<string>()
+  // Outages served per turn, so a replayed request cannot widen the outage.
+  const injected = new Map<string, number>()
   const observedTools = new Map<string, Set<string>>()
   const counts = {
     forwarded: 0,
@@ -120,21 +126,23 @@ export function createRealHybridUpstream(forward: typeof fetch) {
         const prompt = history[lastUser]?.content
         const match = typeof prompt === 'string' ? HYBRID_TURN.exec(prompt) : null
         if (match) {
-          const key = `${match[1]!.toLowerCase()}:${match[2]}`
+          const kind = match[1]!.toLowerCase() as 'r1' | 'r2'
+          const key = `${kind}:${match[2]}`
           const ids = observedTools.get(key) ?? new Set<string>()
           for (const id of completedToolResults(history.slice(lastUser + 1))) ids.add(id)
           observedTools.set(key, ids)
           counts[
-            `${match[1]!.toLowerCase()}DistinctToolResults` as
-              | 'r1DistinctToolResults'
-              | 'r2DistinctToolResults'
+            `${kind}DistinctToolResults` as 'r1DistinctToolResults' | 'r2DistinctToolResults'
           ] = [...observedTools]
-            .filter(([name]) => name.startsWith(`${match[1]!.toLowerCase()}:`))
+            .filter(([name]) => name.startsWith(`${kind}:`))
             .reduce((total, [, results]) => total + results.size, 0)
-          if (confirmedFixtureRead(history.slice(lastUser + 1)) && !injected.has(key)) {
-            injected.add(key)
+          const served = injected.get(key) ?? 0
+          if (confirmedFixtureRead(history.slice(lastUser + 1)) && served < HYBRID_OUTAGES) {
+            injected.set(key, served + 1)
+            // Both counters move per injected response: the journey measured two
+            // outages, however many attempts the Host needed to outlast them.
             counts.injected503++
-            counts[match[1]!.toLowerCase() as 'r1' | 'r2']++
+            counts[kind]++
             return Response.json(
               { error: { code: 'server_is_overloaded', message: 'fixture provider unavailable' } },
               { status: 503 }
