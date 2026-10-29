@@ -1807,6 +1807,200 @@ describe('App deep-link orchestration', () => {
     )
   }, 120_000)
 
+  it('keeps a successor blocked while a dismissed terminal link rollback is held', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actualControllerModule.useAppController()
+      return realController
+    })
+    const appBridge = window.clerum
+    const { handle } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+
+    let activeTeamId = 'team-a'
+    let rollbackStarted = false
+    let releaseOriginRollback!: () => void
+    const originRollback = new Promise<void>(resolve => {
+      releaseOriginRollback = resolve
+    })
+    const switchTeamProducer = handle.switchTeam.getMockImplementation() as
+      | ((teamId: string) => Promise<unknown>)
+      | undefined
+    if (!switchTeamProducer) throw new Error('the real team-switch producer was not installed')
+    handle.teamDirectory.mockImplementation(async () => ({
+      items: [],
+      currentTeamId: activeTeamId,
+    }))
+    const refreshCatalogProducer = handle.refreshCatalog.getMockImplementation() as
+      | (() => Promise<Record<string, unknown>>)
+      | undefined
+    if (!refreshCatalogProducer) throw new Error('the real catalog producer was not installed')
+    handle.refreshCatalog.mockImplementation(async () => ({
+      ...(await refreshCatalogProducer()),
+      teamId: activeTeamId,
+    }))
+    handle.switchTeam.mockImplementation(async teamId => {
+      if (teamId === 'team-a' && activeTeamId === 'team-b') {
+        rollbackStarted = true
+        await originRollback
+      }
+      activeTeamId = teamId
+      return switchTeamProducer(teamId)
+    })
+
+    listApps.mockImplementation(async () => ({
+      apps:
+        activeTeamId === 'team-b'
+          ? [
+              {
+                appRef: 'ns/slow-team-b-app',
+                title: 'Slow Team B app',
+                defaultPath: '/',
+                ready: false,
+                phase: 'deploying',
+              },
+              {
+                appRef: 'ns/ready-team-b-app',
+                title: 'Ready Team B app',
+                defaultPath: '/',
+                ready: true,
+                phase: 'active',
+              },
+            ]
+          : [
+              {
+                appRef: 'ns/team-a',
+                title: 'App team-a',
+                defaultPath: '/',
+                ready: true,
+                phase: 'active',
+              },
+            ],
+    }))
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await launchAppFromSidebar('ns/team-a')
+    await waitForMounted()
+    main.navigate('/origin-a')
+
+    const firstTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'slow-team-b-app',
+        path: '/failed-first-link',
+        teamId: 'team-b',
+      })
+    )
+    if (!firstTarget) throw new Error('the production parser rejected the first Team B link')
+    const first = queue.enqueue(firstTarget)
+    act(() => emitDeepLink?.(first))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps).toHaveBeenCalled())
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-b'))
+    for (let attempt = 0; attempt < 8 && !rollbackStarted; attempt += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(30_000)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+    }
+    await waitFor(() => expect(rollbackStarted).toBe(true))
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(getController().getCurrentTeamId()).toBe('team-b')
+    expect(main.live()).toBeNull()
+    const listCallsBeforeSecond = listApps.mock.calls.length
+    const opensBeforeSecond = openSandboxUi().mock.calls.length
+    const switchesBeforeSecond = handle.switchTeam.mock.calls.length
+
+    // Dismiss only hides the terminal failure. It cannot acknowledge the
+    // transaction or release its slot while the team rollback is unresolved.
+    await act(async () => {
+      confirmDialogHarness.props?.onCancel()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(confirmDialogHarness.mountedCount).toBe(0))
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+
+    const secondTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'ready-team-b-app',
+        path: '/second-link',
+        teamId: 'team-b',
+      })
+    )
+    if (!secondTarget) throw new Error('the production parser rejected the second Team B link')
+    const second = queue.enqueue(secondTarget)
+    act(() => emitDeepLink?.(second))
+    await confirmPendingAppLink()
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    })
+
+    expect(getController().getCurrentTeamId()).toBe('team-b')
+    expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSecond)
+    expect(listApps.mock.calls.length).toBe(listCallsBeforeSecond)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second.id)
+    expect(main.live()).toBeNull()
+
+    await act(async () => {
+      releaseOriginRollback()
+      await Promise.resolve()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-b'))
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond + 1))
+    await waitForMounted()
+
+    expect(main.live()).toMatchObject({
+      appRef: 'ns/ready-team-b-app',
+      routePath: '/second-link',
+    })
+    expect(embedState().owner).toBe(main.live()?.launchId)
+    expect(activeWorkspaceTab(getController().workspaceTabs)).toMatchObject({
+      kind: 'app',
+      app: { appRef: 'ns/ready-team-b-app' },
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(second.id))
+    expect(acknowledgeDeepLink.mock.calls.map(([id]) => id)).toEqual([first.id, second.id])
+    expect(getController().getCurrentTeamId()).toBe('team-b')
+    queryClient.clear()
+  })
+
   it('acknowledges a dismissed terminal link after rollback when no successor is queued', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const actualControllerModule =
