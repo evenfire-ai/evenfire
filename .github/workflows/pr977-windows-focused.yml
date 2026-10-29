@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 95d67a364ec23924ea5647988e94e39af8e04080
+  PR977_SOURCE_SHA: 0651f380e2fd88487063480b0cabf0b902e43019
 
 jobs:
   focused-windows-test:
@@ -27,7 +27,7 @@ jobs:
       - name: Check out exact application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 95d67a364ec23924ea5647988e94e39af8e04080
+          ref: 0651f380e2fd88487063480b0cabf0b902e43019
           path: source
           persist-credentials: false
           fetch-depth: 1
