@@ -118,9 +118,10 @@ jobs:
           EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
           EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
         run: |
+          node (Join-Path $env:GITHUB_WORKSPACE 'validation/.validation/windows/windowsRealpathProbe.mjs')
           $cases = @(
             @{ name = 'authority-directory-provision-and-verify'; file = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'; pattern = 'provisions a protected authority directory and verifies every existing child' },
-            @{ name = 'system-owned-child-fixture'; file = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'; pattern = 'accepts a child owned by the allowlisted SYSTEM principal with current-user access intact' },
+            @{ name = 'system-owned-child-fixture'; file = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'; pattern = 'accepts a child owned by the allowlisted .SYSTEM. principal with current-user access intact' },
             @{ name = 'logout-keytar-representative'; file = 'src/__tests__/appService.pendingExternalLogoutKeytarUnavailable.test.ts'; pattern = 'keeps a durably signed-out V1 session denied when exact cleanup fails' },
             @{ name = 'persistence-mutation-representative'; file = 'src/__tests__/appService.persistenceMutation.contract.test.ts'; pattern = 'keeps exact logout cleanup from deleting a fresh source accepted during prior-source cleanup' },
             @{ name = 'password-rollback-representative'; file = 'src/__tests__/appService.passwordLoginRollback.regression.test.ts'; pattern = 'restores the accepted prior source when candidate preparation fails after publication' },
