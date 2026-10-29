@@ -159,7 +159,7 @@ if (kind === 'acl') {
   result = replaceOnce(
     result,
     "import { createWindowsSessionAuthorityPowerShellEnvironment } from '../windowsSessionAuthorityPowerShellEnvironment.js'\n",
-    "import { createWindowsSessionAuthorityPowerShellEnvironment } from '../windowsSessionAuthorityPowerShellEnvironment.js'\nimport { appendFileSync as diagnosticAppendFileSync } from 'node:fs'\n\nconst diagnosticPhases = new Set([\n  'owner-test-start', 'owner-provision-start', 'owner-provision-complete',\n  'owner-child-created', 'owner-fixture-start', 'owner-fixture-complete',\n  'production-verifier-start', 'production-verifier-accepted', 'production-verifier-rejected'\n])\nfunction diagnosticPhase(name: string): void {\n  const phaseFile = process.env.PR977_DIAGNOSTIC_PHASE_FILE\n  if (!phaseFile) return\n  if (!diagnosticPhases.has(name)) throw new Error('Diagnostic phase is not allowlisted')\n  diagnosticAppendFileSync(phaseFile, name + '\\n', 'utf8')\n}\n",
+    "import { createWindowsSessionAuthorityPowerShellEnvironment } from '../windowsSessionAuthorityPowerShellEnvironment.js'\nimport { appendFileSync as diagnosticAppendFileSync } from 'node:fs'\n\nconst diagnosticPhases = new Set([\n  'owner-test-start', 'owner-provision-start', 'owner-provision-complete',\n  'owner-child-created', 'owner-fixture-start', 'owner-fixture-complete',\n  'production-verifier-start', 'production-verifier-accepted', 'production-verifier-rejected',\n  'owner-assertion-complete', 'owner-teardown-start', 'owner-teardown-remove-start',\n  'owner-teardown-remove-complete', 'owner-teardown-remove-failed', 'owner-teardown-complete'\n])\nfunction diagnosticPhase(name: string): void {\n  const phaseFile = process.env.PR977_DIAGNOSTIC_PHASE_FILE\n  if (!phaseFile) return\n  if (!diagnosticPhases.has(name)) throw new Error('Diagnostic phase is not allowlisted')\n  diagnosticAppendFileSync(phaseFile, name + '\\n', 'utf8')\n}\nfunction diagnosticObjectCount(value: number): void {\n  if (!Number.isSafeInteger(value) || value < 0 || value > 999) throw new Error('Diagnostic object count is invalid')\n  const phaseFile = process.env.PR977_DIAGNOSTIC_PHASE_FILE\n  if (phaseFile) diagnosticAppendFileSync(phaseFile, `production-verifier-object-count=${value}\\n`, 'utf8')\n}\n",
     'ACL selected-test phase helper'
   )
   result = replaceOnce(
@@ -236,8 +236,14 @@ if (kind === 'acl') {
   result = replaceOnce(
     result,
     '      await fs.mkdir(child)\n      setAllowedChildOwner(child, sid)\n\n      expect(verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath).objectCount).toBe(\n        2\n      )',
-    "      await fs.mkdir(child)\n      diagnosticPhase('owner-child-created')\n      diagnosticPhase('owner-fixture-start')\n      setAllowedChildOwner(child, sid)\n      diagnosticPhase('owner-fixture-complete')\n\n      diagnosticPhase('production-verifier-start')\n      let verified\n      try {\n        verified = verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath)\n        diagnosticPhase('production-verifier-accepted')\n      } catch (error) {\n        diagnosticPhase('production-verifier-rejected')\n        throw error\n      }\n      expect(verified.objectCount).toBe(2)",
+    "      await fs.mkdir(child)\n      diagnosticPhase('owner-child-created')\n      diagnosticPhase('owner-fixture-start')\n      setAllowedChildOwner(child, sid)\n      diagnosticPhase('owner-fixture-complete')\n\n      diagnosticPhase('production-verifier-start')\n      let verified\n      try {\n        verified = verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath)\n        diagnosticPhase('production-verifier-accepted')\n        diagnosticObjectCount(verified.objectCount)\n      } catch (error) {\n        diagnosticPhase('production-verifier-rejected')\n        throw error\n      }\n      expect(verified.objectCount).toBe(2)\n      diagnosticPhase('owner-assertion-complete')",
     'SYSTEM owner fixture and production verifier boundaries'
+  )
+  result = replaceOnce(
+    result,
+    "  afterEach(async () => {\n    if (temporaryRoot) await fs.rm(temporaryRoot, { recursive: true, force: true })\n    temporaryRoot = ''\n  })",
+    "  afterEach(async () => {\n    diagnosticPhase('owner-teardown-start')\n    if (temporaryRoot) {\n      diagnosticPhase('owner-teardown-remove-start')\n      try {\n        await fs.rm(temporaryRoot, { recursive: true, force: true })\n        diagnosticPhase('owner-teardown-remove-complete')\n      } catch (error) {\n        diagnosticPhase('owner-teardown-remove-failed')\n        throw error\n      }\n    }\n    temporaryRoot = ''\n    diagnosticPhase('owner-teardown-complete')\n  })",
+    'SYSTEM owner teardown boundaries'
   )
 }
 

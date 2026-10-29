@@ -121,12 +121,21 @@ const phaseAllowlist = new Set([
   'production-verifier-start',
   'production-verifier-accepted',
   'production-verifier-rejected',
+  'owner-assertion-complete',
+  'owner-teardown-start',
+  'owner-teardown-remove-start',
+  'owner-teardown-remove-complete',
+  'owner-teardown-remove-failed',
+  'owner-teardown-complete',
 ])
-const phases = existsSync(phasePath)
-  ? readFileSync(phasePath, 'utf8')
-      .split(/\r?\n/)
-      .filter(value => phaseAllowlist.has(value))
-  : []
+const rawPhases = existsSync(phasePath) ? readFileSync(phasePath, 'utf8').split(/\r?\n/) : []
+const objectCountMatch = rawPhases.find(value =>
+  /^production-verifier-object-count=\d{1,3}$/.test(value)
+)
+const productionVerifierObjectCount = objectCountMatch
+  ? Number(objectCountMatch.slice('production-verifier-object-count='.length))
+  : null
+const phases = rawPhases.filter(value => phaseAllowlist.has(value))
 const timingLines = existsSync(timingPath)
   ? readFileSync(timingPath, 'utf8').split(/\r?\n/).filter(Boolean)
   : []
@@ -300,6 +309,7 @@ const safe = {
   failureType: type,
   failureCategory: category,
   fixturePhase: kind === 'acl' ? fixturePhase : null,
+  productionVerifierObjectCount: kind === 'acl' ? productionVerifierObjectCount : null,
   fixturePrivileges: kind === 'acl' ? fixturePrivileges : null,
   aclVerifierDiagnostic,
   hresults,
