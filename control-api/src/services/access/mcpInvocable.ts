@@ -451,7 +451,8 @@ async function computeGrantPresenceByContext(
     if (checked.has(memo)) continue
     checked.add(memo)
 
-    // Same key derivation (D4) as the mint, the callback and the broker.
+    // The one key derivation the callback, the broker and the disconnect also use,
+    // so presence always looks up the row they write and read.
     const key = buildMcpServerGrantKey(resolved, {
       mcpServerName: name,
       mcpServersNamespace,
@@ -660,7 +661,7 @@ function deriveNonOauthAuthKind(server: McpServerCR): 'static' | undefined {
 /**
  * Classify ONE server into the tri-state, given the authoritative grant-presence
  * set of the agent's Context (`grantPresent`, from `computeGrantPresenceByContext`
- * — the SAME flavored key construction the rpc-proxy gate uses, D4). FAIL-CLOSED: a server that is
+ * — the SAME flavored key construction the rpc-proxy gate uses). FAIL-CLOSED: a server that is
  * not an OAuth connector (not `auth.type==='oauth'`, or no usable oauth id) is
  * `no_oauth`, never `authorized`; an OAuth server absent from `grantPresent`
  * (no grant OR a grant-read error, both swallowed fail-closed upstream) is

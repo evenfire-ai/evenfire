@@ -200,7 +200,7 @@ export type OwnerDeclReader = RecipeReader
  *     never imports config.
  *   - `grantScope` — `'user'` → per-user grant `(server, userId)`;
  *     `'context'` → shared grant `(server, Context)`, the Context being the one
- *     signed into the state at mint time (U6 governance).
+ *     signed into the state at mint time, so one consent serves that Context only.
  */
 export interface McpServerOAuthSubject {
   namespace: string
@@ -589,7 +589,8 @@ export async function handleOAuthCallback(
  *   - `grantScope='user'`    → `upsertOAuthGrant` `(mcpserver, ns, name, userId)`.
  *   - `grantScope='context'` → `bootstrapSharedOAuthGrant` keyed by
  *     `buildMcpServerGrantKey` with the signed Context, bootstrapper = the signed
- *     `userId` (first-consent wins; U6 governance).
+ *     `userId` (the first consent wins, keeping the Context's credential and
+ *     its audit trail stable while other members consent again).
  */
 async function handleMcpOAuthCallback(
   claims: OAuthMcpStateClaims,

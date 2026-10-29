@@ -13,7 +13,7 @@ import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import { signOAuthState } from '../src/oauth/state.js'
 
 /**
- * U5 — the mcp-subject OAuth callback, per-user flavor and dispatch. The
+ * The mcp-subject OAuth callback, per-user flavor and dispatch. The
  * context flavor runs through the production deps in
  * src/oauth/__tests__/callbackMcpMembership.test.ts. Fixtures are derived from the REAL
  * `signOAuthState` (T1: no hand-forged state) and the observable outcome asserted

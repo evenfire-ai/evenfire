@@ -442,9 +442,9 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   //
   // End-user "Disconnect <server>". rpc-proxy fronts this and forwards the
   // session `userId` (auth.sub) over the mutually-authenticated seam
-  // (requireInternalService('rpc-proxy')) — NEVER a client-controlled param
-  // (invariant §1.4). `oauthClientId` + `grantScope` are derived from the
-  // McpServer CR, never the body. For a context-identity server the Context is
+  // (requireInternalService('rpc-proxy')) — NEVER a client-controlled param.
+  // `oauthClientId` + `grantScope` are derived from the McpServer CR, never the
+  // body. For a context-identity server the Context is
   // the body `contextId`, used only after the gate below has validated it
   // against the caller's own access.
   //

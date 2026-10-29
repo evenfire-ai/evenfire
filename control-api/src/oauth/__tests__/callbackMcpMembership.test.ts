@@ -16,7 +16,7 @@ const { membership, seedAgentHost, seedAllowlistedContext } =
 type CallbackInput = import('../callback.js').CallbackInput
 
 /**
- * Guards-before-exchange ordering for the mcp callback (R3-L1), through the
+ * Guards-before-exchange ordering for the mcp callback, through the
  * production dependency wiring (`buildOAuthCallbackDeps`): the subject is
  * resolved from the McpServer CR by the real reader, access by the same rules
  * the mint applies, and only the provider fetch is replaced.
@@ -99,7 +99,7 @@ function grantWrites(): Array<[string, unknown[]]> {
   ) as Array<[string, unknown[]]>
 }
 
-describe('handleOAuthCallback — mcp access guards before the exchange (R3-L1)', () => {
+describe('handleOAuthCallback — mcp access guards before the exchange', () => {
   let gateway: InstanceType<typeof MockGateway>
   let fetchFn: typeof fetch
 
