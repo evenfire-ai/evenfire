@@ -14,7 +14,6 @@ import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
 import { ComposerGlobalFilesModal } from '../ComposerGlobalFilesModal'
 
 const SESSION_SCOPE = ':user-a:team-a'
-const SESSION_TOKEN = 'fixture-session-token'
 const ACCESSIBLE_KEY = desktopQueryKeys.gfsAccessible(SESSION_SCOPE, 'main')
 const authValue = {
   isAuthenticated: true,
