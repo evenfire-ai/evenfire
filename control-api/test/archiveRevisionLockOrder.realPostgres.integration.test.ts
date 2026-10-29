@@ -269,6 +269,41 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
     return { userApprovalId, teamApprovalId, user, team, live }
   }
 
+  // Two pending approvals that the expiry sweep already considers expired: the
+  // user-targeted row is first in heap order and lower in id order.
+  async function expiryFixture() {
+    const [userApprovalId, teamApprovalId] = [randomUUID(), randomUUID()].sort()
+    const user = randomUUID()
+    const team = randomUUID()
+    const live = randomUUID()
+    await databasePool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+      user,
+      `approval-expiry-${user}@example.test`,
+    ])
+    await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Approval expiry')", [team])
+    const targets = [
+      [userApprovalId, 'target_user_id', user],
+      [teamApprovalId, 'target_team_id', team],
+    ] as const
+    for (const [id, column, target] of targets) {
+      await databasePool.query(
+        `INSERT INTO workflow_approval_requests(
+           id, recipe_namespace, recipe_name, expires_at, status, ${column},
+           payload, idempotency_key, requested_at
+         ) VALUES ($1, 'revision', 'approval-expiry', NOW() - INTERVAL '1 hour',
+           'pending', $2, '{}'::jsonb, $3, NOW() - INTERVAL '2 hours')`,
+        [id, target, `approval-expiry-${id}`]
+      )
+    }
+    await databasePool.query(
+      `INSERT INTO workflow_runs(run_id, recipe_namespace, recipe_name, phase, actor_type,
+         actor_id, team_id, trigger_source)
+       VALUES ($1, 'revision', 'approval-expiry', 'Pending', 'user', $2, $3, 'onDemand')`,
+      [live, user, team]
+    )
+    return { userApprovalId, teamApprovalId, user, team, live }
+  }
+
   it('archives two rows and advances revisions with a phase-update liveness witness', async () => {
     const ids = await fixture()
     const before = await revisions(ids)
@@ -838,6 +873,99 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       connect.mockRestore()
       for (const client of [archiveGate, update]) client.release()
       if (!archiveOutcome) archive.release()
+      await databasePool.query('TRUNCATE archive_order_barriers')
+      await databasePool.query(
+        'DELETE FROM workflow_approval_requests WHERE id = ANY($1::uuid[])',
+        [[ids.userApprovalId, ids.teamApprovalId]]
+      )
+      await databasePool.query('DELETE FROM workflow_runs WHERE run_id = $1', [ids.live])
+      await databasePool.query('DELETE FROM users WHERE id = $1', [ids.user])
+      await databasePool.query('DELETE FROM teams WHERE id = $1', [ids.team])
+    }
+  })
+
+  it('expires pending approvals beside a run phase write without reversing subject locks', async () => {
+    const ids = await expiryFixture()
+    const before = await revisions({ users: [ids.user], teams: [ids.team] })
+    const sweepGate = await databasePool.connect()
+    const sweep = await databasePool.connect()
+    const update = await databasePool.connect()
+    const sweepPid = await pid(sweep)
+    const updatePid = await pid(update)
+    const gatePid = await pid(sweepGate)
+    let sweepOutcome: Promise<Outcome> | undefined
+    let updateOutcome: Promise<Outcome> | undefined
+    const connect = bindFirstSession(sweep)
+    try {
+      await configure(sweep, 'approval-expiry-sweep')
+      await configure(update, 'approval-phase-order')
+      // The sweep pauses on the user revision, after taking its team.
+      await sweepGate.query('SELECT pg_advisory_lock($1, 22)', [barrierClass])
+      await databasePool.query('INSERT INTO archive_order_barriers VALUES ($1, $2, $3, 22)', [
+        'approval-expiry-sweep',
+        'authorization_user_revisions',
+        ids.user,
+      ])
+      sweepOutcome = observe(expirePendingRequests())
+      await waitForBlock(sweepPid, [gatePid])
+      await update.query('BEGIN')
+      updateOutcome = observe(updateRunPhase(ids.live, 'Running', update))
+      // The phase writer takes its team first and waits there, so the sweep
+      // never has to wait for the user it already holds.
+      await waitForBlock(updatePid, [sweepPid])
+      await sweepGate.query('SELECT pg_advisory_unlock_all()')
+      const phaseResult = await updateOutcome
+      await update.query(phaseResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      const sweepResult = await sweepOutcome
+      console.info('APPROVAL_EXPIRY_OUTCOMES', { sweep: sweepResult, phase: phaseResult })
+      expect([sweepResult.status, phaseResult.status]).toEqual(['fulfilled', 'fulfilled'])
+      expect(sweepResult).toEqual({ status: 'fulfilled', value: 2 })
+      expect(
+        (
+          await databasePool.query(
+            `SELECT id::text AS id, status FROM workflow_approval_requests
+              WHERE id = ANY($1::uuid[]) ORDER BY id`,
+            [[ids.userApprovalId, ids.teamApprovalId]]
+          )
+        ).rows
+      ).toEqual([
+        { id: ids.userApprovalId, status: 'expired' },
+        { id: ids.teamApprovalId, status: 'expired' },
+      ])
+      expect(
+        (await databasePool.query('SELECT phase FROM workflow_runs WHERE run_id = $1', [ids.live]))
+          .rows
+      ).toEqual([{ phase: 'Running' }])
+      // The prelock takes the team first; the UPDATE then meets the
+      // user-targeted row first and bumps both sides of its attribution.
+      expect(
+        (
+          await databasePool.query(
+            `SELECT revision_table, subject_id FROM archive_delete_revision_observations
+              WHERE application_name = $1 ORDER BY position`,
+            ['approval-expiry-sweep']
+          )
+        ).rows
+      ).toEqual([
+        { revision_table: 'authorization_team_revisions', subject_id: ids.team },
+        { revision_table: 'authorization_user_revisions', subject_id: ids.user },
+        { revision_table: 'authorization_user_revisions', subject_id: ids.user },
+        { revision_table: 'authorization_user_revisions', subject_id: ids.user },
+        { revision_table: 'authorization_team_revisions', subject_id: ids.team },
+        { revision_table: 'authorization_team_revisions', subject_id: ids.team },
+      ])
+      // Prelock plus the UPDATE's NEW and OLD attribution pairs, plus the
+      // phase UPDATE's own NEW and OLD pair.
+      const after = await revisions({ users: [ids.user], teams: [ids.team] })
+      expect(after.user).toEqual([{ id: ids.user, revision: before.user[0]!.revision + 5 }])
+      expect(after.team).toEqual([{ id: ids.team, revision: before.team[0]!.revision + 5 }])
+    } finally {
+      await sweepGate.query('SELECT pg_advisory_unlock_all()')
+      await Promise.all([sweepOutcome, updateOutcome])
+      await update.query('ROLLBACK')
+      connect.mockRestore()
+      for (const client of [sweepGate, update]) client.release()
+      if (!sweepOutcome) sweep.release()
       await databasePool.query('TRUNCATE archive_order_barriers')
       await databasePool.query(
         'DELETE FROM workflow_approval_requests WHERE id = ANY($1::uuid[])',

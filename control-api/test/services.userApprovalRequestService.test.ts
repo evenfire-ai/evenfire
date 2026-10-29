@@ -1441,13 +1441,46 @@ describe('userApprovalRequestService', () => {
   })
 
   describe('expirePendingRequests', () => {
-    it('returns count of expired requests', async () => {
-      mockedQuery.mockResolvedValueOnce({
-        rows: [{ id: 'id-1' }, { id: 'id-2' }],
-        rowCount: 2,
-      } as any)
+    it('expires the selected rows in SELECT, prelock and UPDATE order', async () => {
+      mockedQuery
+        .mockResolvedValueOnce({ rows: [{ id: 'id-1' }, { id: 'id-2' }], rowCount: 2 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [{ id: 'id-1' }, { id: 'id-2' }], rowCount: 2 } as any)
+
       const count = await expirePendingRequests()
+
       expect(count).toBe(2)
+      expect(mockedWithTransaction).toHaveBeenCalledTimes(1)
+      const statements = mockedQuery.mock.calls.map(([sql]) => String(sql))
+      expect(statements).toHaveLength(3)
+
+      // The sweep must not re-evaluate its predicate in the UPDATE.
+      expect(statements[0]).toContain('FROM workflow_approval_requests')
+      expect(statements[0]).toContain("status = 'pending'")
+      expect(statements[0]).toContain('expires_at < NOW()')
+      expect(statements[0]).toContain('FOR UPDATE SKIP LOCKED')
+      expect(statements[0]).not.toMatch(/\bLIMIT\b/)
+
+      expect(statements[1]).toBe(
+        'SELECT authorization_prelock_workflow_approval_revisions($1::uuid[])'
+      )
+      expect(mockedQuery.mock.calls[1]?.[1]).toEqual([['id-1', 'id-2']])
+
+      expect(statements[2]).toContain('UPDATE workflow_approval_requests')
+      expect(statements[2]).toContain("SET status = 'expired'")
+      expect(statements[2]).toContain('WHERE id = ANY($1::uuid[])')
+      expect(statements[2]).not.toContain("status = 'pending'")
+      expect(mockedQuery.mock.calls[2]?.[1]).toEqual([['id-1', 'id-2']])
+    })
+
+    it('returns zero without prelock or UPDATE when nothing is expiring', async () => {
+      mockedQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
+
+      await expect(expirePendingRequests()).resolves.toBe(0)
+
+      expect(mockedWithTransaction).toHaveBeenCalledTimes(1)
+      expect(mockedQuery).toHaveBeenCalledTimes(1)
+      expect(String(mockedQuery.mock.calls[0]?.[0])).toContain('FOR UPDATE SKIP LOCKED')
     })
   })
 })
