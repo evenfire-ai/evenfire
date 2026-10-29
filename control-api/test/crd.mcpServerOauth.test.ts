@@ -238,20 +238,23 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     }
   })
 
-  it('makes spec.contextRef immutable for oauth servers via oldSelf-guarded transition rule (M1)', () => {
-    // M1 (@alfredolopez80, PR #317): contextRef is the authoritative
-    // shared-identity coordinate for a grantScope:'context' oauth server, so
-    // it must be pinned once oauth exists. oauth-guarded (!has(oldSelf.oauth)
-    // short-circuit) so non-oauth servers can still be re-parented by WRC.
-    // Presence-only assertion — CEL semantics are enforced by the apiserver
-    // at admission (verify with `kubectl --dry-run=server`), not here.
-    const rule = specRules.find(
-      r =>
-        r.rule.includes('self.contextRef == oldSelf.contextRef') &&
-        r.rule.includes('!has(oldSelf.oauth)')
-    )
-    expect(rule, 'contextRef immutability rule present and oauth/oldSelf-guarded').toBeDefined()
-    expect(rule?.message).toMatch(/contextRef is immutable/)
+  it('does not model Context membership on the McpServer (no spec.contextRef anywhere)', () => {
+    // Which Contexts expose a server is decided solely by Context.spec.mcpServers.
+    // A contextRef on the McpServer would be a second source of truth that can
+    // diverge from the allowlist, so the schema must not declare it at all.
+    expect(specSchema.properties).not.toHaveProperty('contextRef')
+    expect(specSchema.required ?? []).not.toContain('contextRef')
+    const offending = specRules.filter(r => r.rule.includes('contextRef'))
+    expect(offending, 'no CEL rule may reference contextRef').toEqual([])
+    const columns: Array<{ jsonPath: string }> = doc.spec.versions[0].additionalPrinterColumns ?? []
+    expect(columns.map(c => c.jsonPath)).not.toContain('.spec.contextRef')
+  })
+
+  it('requires only transport for WRC-owned servers (managed: false)', () => {
+    const rule = specRules.find(r => r.rule.startsWith('self.managed == true ||'))
+    expect(rule, 'managed:false transport rule present').toBeDefined()
+    expect(rule?.rule).toBe('self.managed == true || has(self.transport)')
+    expect(rule?.message).not.toMatch(/contextRef/)
   })
 
   // ---------------------------------------------------------------------------
