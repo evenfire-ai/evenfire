@@ -148,6 +148,12 @@ export async function commitGfsMove(
         message: 'EvenDrive cannot verify this item’s current location. Refresh and try again.',
       }
     }
+    if (status === 403) {
+      return {
+        status: 'unconfirmed',
+        message: 'EvenDrive could not confirm permission for this move. Refresh and try again.',
+      }
+    }
     return { status: 'unconfirmed', message: describeGfsReadError(error).message }
   }
 

@@ -110,6 +110,37 @@ describe('real move producer verdicts (R1-M3)', () => {
     expect(moveResource).not.toHaveBeenCalled()
   })
 
+  it('keeps pre-dispatch source 403 details out of Move feedback', async () => {
+    const failure = await resolveDeniedMessage(
+      plan.source.gfsUri,
+      { code: 'forbidden', message: 'private upstream diagnostic' },
+      403
+    )
+    const moveResource = vi.fn(async () => ({ resourceId: sourceId, version: 8 }))
+    const outcome = await commitGfsMove(
+      {
+        resolveSource: vi.fn(async () => {
+          throw new Error(failure)
+        }),
+        moveResource,
+        isSessionAuthorityFailure: error =>
+          isGfsSessionAuthorityFailure(String(error), 'operation'),
+      },
+      plan
+    )
+
+    expect(outcome.status).toBe('unconfirmed')
+    if (outcome.status === 'unconfirmed') {
+      expect(outcome.message).toBe(
+        'EvenDrive could not confirm permission for this move. Refresh and try again.'
+      )
+      expect(outcome.message).not.toContain('private upstream diagnostic')
+      expect(outcome.message).not.toContain('httpStatus=403')
+      expect(outcome).not.toHaveProperty('retryPermissionCheck')
+    }
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
   it.each([
     [400, 'destination-rejected'],
     [401, 'session-lost'],
