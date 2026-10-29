@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { parse } from 'yaml'
 import {
   type MockAppsApi,
   asAppsApi,
@@ -183,6 +186,33 @@ describe('McpServer ensureDeployment no-op gate', () => {
       appsApi.replaceNamespacedDeployment.mock.calls[0][0] as { body: k8s.V1Deployment }
     ).body
     expect(body.spec?.template?.spec?.containers?.[0]?.image).toBe('my-mcp-server:v2')
+  })
+
+  it('PLAYWRIGHT-IMAGE-1: the checked-in manifest reaches the hardened Deployment', () => {
+    const manifest = parse(
+      readFileSync(resolve(__dirname, '../../../mcp-servers/playwright/mcpserver.yaml'), 'utf8')
+    ) as { metadata: { name: string; namespace: string }; spec: McpServerCRD['spec'] }
+    const serverFromManifest: McpServerCRD = {
+      name: manifest.metadata.name,
+      namespace: manifest.metadata.namespace,
+      spec: manifest.spec,
+    }
+    const deployment = (reconciler as any).buildDeployment(serverFromManifest) as k8s.V1Deployment
+    const pod = deployment.spec?.template?.spec
+    const container = pod?.containers?.find(item => item.name === 'mcp-server')
+
+    expect(container).toBeDefined()
+    expect(container?.image).toBe(
+      'ghcr.io/evenfire-ai/playwright-server@sha256:fc603bbc05d216ca9394940463e5e216d0a48732c24555fb9b67d20775fccf73'
+    )
+    expect(container?.command).toEqual(['node'])
+    expect(container?.args).toEqual(manifest.spec.args)
+    expect(container?.args?.[0]).toBe('cli.js')
+    expect(container?.imagePullPolicy).toBe('IfNotPresent')
+    expect(container?.securityContext?.allowPrivilegeEscalation).toBe(false)
+    expect(container?.securityContext?.capabilities?.drop).toContain('ALL')
+    expect(pod?.securityContext?.runAsUser).toBe(1000)
+    expect(pod?.automountServiceAccountToken).toBe(false)
   })
 
   it('GATE-MCPDEP-1: drift plus isCurrent false skips replace after the gate', async () => {

@@ -191,6 +191,13 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      - name: Test Playwright MCP cluster probe (hermetic)
+        if: matrix.service == 'host-context-controller'
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/e2e/playwright-mcp-cluster-probe.test.mjs
+          scripts/e2e/test/playwright-mcp-cluster-runtime.test.mjs
+
       # The mcp-host images ship these faces, and the tests that set Arabic,
       # Hebrew and Han text in a PDF fail in CI instead of skipping without them.
       - name: Install the mcp-host image fonts
