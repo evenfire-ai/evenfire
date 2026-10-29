@@ -40,6 +40,7 @@ type FilePreviewResourceActionsProps = {
   gfsUri: string
   fileName: string
   sessionScope: string
+  principalScope: string | null
   canResolve: boolean
   onAuthorityFailure: (message: string) => boolean
   onDeleted: () => void
@@ -120,6 +121,7 @@ export function useFilePreviewResourceActions({
   gfsUri,
   fileName,
   sessionScope,
+  principalScope,
   canResolve,
   onAuthorityFailure,
   onDeleted,
@@ -176,6 +178,7 @@ export function useFilePreviewResourceActions({
   const moveContextRef = useRef({
     gfsUri,
     sessionScope,
+    principalScope,
     resourceId: resource?.resourceId ?? null,
     parentResourceId: sourceParentId,
     drive: resource?.drive ?? GFS_DRIVE_MAIN,
@@ -184,6 +187,7 @@ export function useFilePreviewResourceActions({
   moveContextRef.current = {
     gfsUri,
     sessionScope,
+    principalScope,
     resourceId: resource?.resourceId ?? null,
     parentResourceId: sourceParentId,
     drive: resource?.drive ?? GFS_DRIVE_MAIN,
@@ -624,6 +628,7 @@ export function useFilePreviewResourceActions({
     const moveContext = {
       gfsUri,
       sessionScope,
+      principalScope,
       resourceId: resource.resourceId,
       parentResourceId: sourceParentId,
       drive: resource.drive,
@@ -761,7 +766,10 @@ export function useFilePreviewResourceActions({
       )
 
       if (outcome.status === 'committed') {
-        if (moveContextRef.current.sessionScope === moveContext.sessionScope) {
+        if (
+          moveContext.principalScope !== null &&
+          moveContextRef.current.principalScope === moveContext.principalScope
+        ) {
           try {
             await invalidateResourceForSession(moveContext.sessionScope)
           } catch {

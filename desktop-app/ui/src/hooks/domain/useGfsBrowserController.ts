@@ -326,6 +326,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // pair addresses different resources across clusters, so an env switch must
   // reset the browser + drop the gfs query subtree.
   const envKey = runtimeConfigState?.envKey ?? ''
+  const principalScope = useMemo(
+    () => (isAuthenticated && me ? `${envKey}:${me.id}` : null),
+    [envKey, isAuthenticated, me]
+  )
   const sessionScope = useMemo(
     () => (isAuthenticated && me ? `${envKey}:${me.id}:${me.teamId ?? ''}` : null),
     [envKey, isAuthenticated, me]
@@ -1547,6 +1551,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   return {
     crumbs,
     current,
+    /** Cache-owner scope without team identity, used only to fence captured Move convergence. */
+    principalScope,
     /** Cache-scope key (env + user + team) so the move dialog's queries share
      *  the controller's cache and are dropped together on scope change. */
     sessionScope: sessionScope ?? 'anonymous',

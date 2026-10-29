@@ -86,6 +86,7 @@ export function FilePreviewPage({
     gfsUri,
     fileName,
     sessionScope: ctrl.sessionScope,
+    principalScope: ctrl.principalScope,
     canResolve: !denied && !unavailable && !accessRevoked && !ctrl.authorityPending,
     onAuthorityFailure: handlePreviewAuthorityFailure,
     onDeleted: () => setDenied('The file was deleted.'),

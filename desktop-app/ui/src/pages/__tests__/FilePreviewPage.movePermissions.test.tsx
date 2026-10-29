@@ -154,11 +154,12 @@ function renderPreviewWithToastStack(props: { gfsUri?: string; fileName?: string
   return { ...view, queryClient }
 }
 
-function installController(sessionScope = 'preview-test-user:main') {
+function installController(sessionScope = 'preview-test-user:main', principalScope = sessionScope) {
   const handleAuthorityFailure = vi.fn(() => false)
   hookMock.useGfsBrowserController.mockReturnValue({
     accessState: 'active',
     sessionScope,
+    principalScope,
     authorityPending: false,
     handleAuthorityFailure,
   })
@@ -1025,6 +1026,7 @@ describe('FilePreviewPage move permission contract', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       accessState: 'active',
       sessionScope: 'preview-test-user-b:main',
+      principalScope: 'preview-test-user-b',
       authorityPending: false,
       handleAuthorityFailure: vi.fn(() => false),
     })
@@ -1627,6 +1629,53 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     }
   )
 
+  it('converges only the captured team cache after a same-principal team switch', async () => {
+    let settleMove!: (receipt: MoveReceipt) => void
+    const pendingMove = new Promise<MoveReceipt>(resolve => {
+      settleMove = resolve
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      destination: async () => fullAccess,
+      listAccessible: async () => destinationPage,
+      move: () => pendingMove,
+    })
+    const capturedScope = 'preview-test-user:team-a'
+    const newTeamScope = 'preview-test-user:team-b'
+    installController(capturedScope, 'preview-test-user')
+    const { queryClient, rerender } = renderPreviewWithToastStack()
+    const capturedTeamCache = desktopQueryKeys.gfsChildren(capturedScope, parentId, 'main')
+    const newTeamCache = desktopQueryKeys.gfsChildren(newTeamScope, parentId, 'main')
+    for (const key of [capturedTeamCache, newTeamCache]) {
+      queryClient.setQueryDefaults(key, { gcTime: 60_000 })
+      queryClient.setQueryData(key, { items: [], nextCursor: null })
+    }
+    try {
+      await dispatchArchiveMove()
+      installController(newTeamScope, 'preview-test-user')
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <ToastingPreview />
+        </QueryClientProvider>
+      )
+      expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+
+      await act(async () => settleMove(successfulMoveReceipt))
+
+      expect(screen.queryByText(moveMessage)).toBeNull()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(queryClient.getQueryState(capturedTeamCache)?.isInvalidated).toBe(true)
+      expect(queryClient.getQueryState(newTeamCache)?.isInvalidated).toBe(false)
+    } finally {
+      await act(async () => settleMove(successfulMoveReceipt))
+      queryClient.clear()
+    }
+  })
+
   it.each(['session', 'resource'] as const)(
     'does not present a dispatched Move failure in a different Preview %s context',
     async contextChange => {
@@ -1739,6 +1788,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       hookMock.useGfsBrowserController.mockReturnValue({
         accessState: 'active',
         sessionScope: newScope,
+        principalScope: newScope,
         authorityPending: false,
         handleAuthorityFailure: newSessionAuthorityFailure,
       })
