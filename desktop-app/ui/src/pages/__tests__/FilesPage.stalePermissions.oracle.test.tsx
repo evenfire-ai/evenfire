@@ -881,6 +881,58 @@ describe('FilesPage stale permission action oracle', () => {
     client.clear()
   })
 
+  it('keeps an idle current-folder 503 out of the page alert surface (R8-L5)', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const children = await listChildrenPage([
+      childView('child-report', 'report.txt', 'file', {
+        parentResourceId: 'folder-active',
+      }),
+    ])
+    const serviceFailure = await affordancesFailureMessage(
+      503,
+      { code: 'upstream_unavailable', message: 'private permission upstream detail' },
+      'folder-active'
+    )
+    const produceAffordances = appServiceAffordanceProducer(resourceId => {
+      if (resourceId === 'folder-active') return Promise.reject(new Error(serviceFailure))
+      return Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
+    })
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for report.txt' })
+      const currentKey = desktopQueryKeys.gfsAffordances(
+        'test-environment:user-1:team-1',
+        'folder-active',
+        'main'
+      )
+      await waitFor(() => expect(client.getQueryState(currentKey)?.status).toBe('error'))
+
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.queryByText(/private permission upstream detail/)).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+      const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
+      expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+    } finally {
+      client.clear()
+    }
+  })
+
   it.each([403, 404])(
     'withholds current-folder permission actions after HTTP %i and preserves identity actions',
     async status => {
@@ -948,6 +1000,7 @@ describe('FilesPage stale permission action oracle', () => {
       await waitFor(() => expect(currentPermissionReads).toBe(2))
       expect(String(client.getQueryState(currentKey)?.error)).toContain(`httpStatus=${status}`)
       expect(screen.getByText(/Could not verify permissions for Reports:/)).toBeTruthy()
+      expect(screen.queryByText(/resource_access_denied|resource_not_found/)).toBeNull()
 
       const currentMenu = screen.getByRole('menu', { name: 'Actions for Reports' })
       const actionsAfterDenial = within(currentMenu)

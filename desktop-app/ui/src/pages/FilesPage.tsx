@@ -3165,11 +3165,21 @@ export function FilesPage({
               <StatusBanner tone="info" text={`Checking permissions for ${current.name}…`} />
             </div>
           ) : null}
-          {current && affordancesError ? (
+          {current &&
+          affordancesError &&
+          (ctrl.affordancesHttpStatus === 429 ||
+            ctrl.affordancesHttpStatus === 403 ||
+            ctrl.affordancesHttpStatus === 404) ? (
             <div role="alert">
               <StatusBanner
                 tone="error"
-                text={`Could not verify permissions for ${current.name}: ${affordancesError}`}
+                text={
+                  ctrl.affordancesHttpStatus === 429
+                    ? 'Too many file requests. Wait before retrying permissions.'
+                    : 'Could not verify permissions for ' +
+                      current.name +
+                      ': access could not be confirmed.'
+                }
               />
               {ctrl.affordancesHttpStatus === 429 ? (
                 <Button
