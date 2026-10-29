@@ -165,7 +165,7 @@ jobs:
             $overlayText = node validation/scripts/pr977/instrument-windows-password-test.mjs $sourceTestPath
             if ($LASTEXITCODE -ne 0) { throw 'Password test diagnostic instrumentation failed' }
             $overlay = $overlayText | ConvertFrom-Json
-            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 35) {
+            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 40) {
               throw 'Password test instrumentation did not match its reviewed contract'
             }
             $testOverlay = $overlay.mode
@@ -179,6 +179,11 @@ jobs:
             ('--outputFile.json=' + $report), $sourceTestPath
           )) {
             [void]$startInfo.ArgumentList.Add($argument)
+          }
+          if ($target -eq 'appService.passwordLoginRollback.regression.test.ts') {
+            [void]$startInfo.ArgumentList.Add(
+              '--testNamePattern=restores the accepted prior source when candidate preparation fails after publication'
+            )
           }
           $process = [System.Diagnostics.Process]::new()
           $process.StartInfo = $startInfo
@@ -208,6 +213,8 @@ jobs:
             'afterEach-directory-remove-start', 'afterEach-directory-remove-complete',
             'afterEach-env-restore-complete', 'afterEach-fixture-clear-complete',
             'afterEach-modules-reset-complete', 'afterEach-complete',
+            'fetch-request-start', 'password-login-http-start',
+            'password-login-http-response', 'me-http-start', 'me-http-response',
             'test-1-start', 'test-2-start',
             'test-3-start', 'test-4-start', 'test-5-start', 'test-1-complete',
             'test-2-complete', 'test-3-complete', 'test-4-complete', 'test-5-complete',
@@ -253,6 +260,9 @@ jobs:
               $phaseLines.Count
             } else { 0 }
             phaseMarkers = @($phaseLines)
+            diagnosticScope = if ($target -eq 'appService.passwordLoginRollback.regression.test.ts') {
+              'password-login-test-1-only'
+            } else { 'full-file' }
             completedTestCount = $completedTestCount
             testOverlay = $testOverlay
             sourceTestSha256 = $sourceTestSha256

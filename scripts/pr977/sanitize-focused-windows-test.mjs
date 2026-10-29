@@ -163,6 +163,11 @@ const allowedProgressMarkers = new Set([
   'afterEach-fixture-clear-complete',
   'afterEach-modules-reset-complete',
   'afterEach-complete',
+  'fetch-request-start',
+  'password-login-http-start',
+  'password-login-http-response',
+  'me-http-start',
+  'me-http-response',
   'test-1-start',
   'test-2-start',
   'test-3-start',
@@ -206,7 +211,9 @@ const progressValid =
     phaseMarkersValid &&
     meta.phaseMarkers.length === meta.phaseMarkerCount &&
     meta.phaseMarkers.at(-1) === progressMarker &&
-    meta.completedTestCount === 5 &&
+    (meta.diagnosticScope === 'password-login-test-1-only'
+      ? meta.completedTestCount === 1
+      : meta.completedTestCount === 5) &&
     progressMarker === 'afterEach-complete')
 const success = Boolean(
   meta.exitCode === 0 &&
@@ -242,6 +249,9 @@ const safe = {
   completedTestCount: Number.isInteger(meta.completedTestCount) ? meta.completedTestCount : null,
   lastProgressMarker: progressMarker,
   phaseMarkers: phaseMarkersValid ? meta.phaseMarkers : [],
+  diagnosticScope: meta.diagnosticScope === 'password-login-test-1-only'
+    ? 'password-login-test-1-only'
+    : 'full-file',
   testFile: target,
   reportedSuiteCount: suites.length,
   reportedTotalTests: report?.numTotalTests ?? null,

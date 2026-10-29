@@ -30,6 +30,11 @@ const markers = [
   'afterEach-fixture-clear-complete',
   'afterEach-modules-reset-complete',
   'afterEach-complete',
+  'fetch-request-start',
+  'password-login-http-start',
+  'password-login-http-response',
+  'me-http-start',
+  'me-http-response',
   'test-1-start',
   'test-2-start',
   'test-3-start',
@@ -120,6 +125,34 @@ replaceOnce(
   "  it('restores the accepted prior source when candidate preparation fails after publication', async () => {\n",
   "  it('restores the accepted prior source when candidate preparation fails after publication', async () => {\n" +
     "    pr977Mark('test-1-start')\n"
+)
+replaceFirst(
+  '    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {\n' +
+    '      const url = String(input)\n',
+  '    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {\n' +
+    "      pr977Mark('fetch-request-start')\n" +
+    '      const url = String(input)\n'
+)
+replaceFirst(
+  "      if (url.endsWith('/api/v1/auth/v2/password-login')) {\n",
+  "      if (url.endsWith('/api/v1/auth/v2/password-login')) {\n" +
+    "        pr977Mark('password-login-http-start')\n"
+)
+replaceFirst(
+  "        return new Response(JSON.stringify(result), {\n          status: 200,\n          headers: { 'content-type': 'application/json' },\n        })\n",
+  "        const response = new Response(JSON.stringify(result), {\n" +
+    "          status: 200,\n          headers: { 'content-type': 'application/json' },\n" +
+    "        })\n        pr977Mark('password-login-http-response')\n        return response\n"
+)
+replaceFirst(
+  "      if (url.endsWith('/api/v1/me')) {\n",
+  "      if (url.endsWith('/api/v1/me')) {\n        pr977Mark('me-http-start')\n"
+)
+replaceFirst(
+  "        return new Response(JSON.stringify(me), {\n          status: me ? 200 : 401,\n          headers: { 'content-type': 'application/json' },\n        })\n",
+  "        const response = new Response(JSON.stringify(me), {\n" +
+    "          status: me ? 200 : 401,\n          headers: { 'content-type': 'application/json' },\n" +
+    "        })\n        pr977Mark('me-http-response')\n        return response\n"
 )
 for (const [testNumber, title] of [
   [2, 'never persists a rejected password replacement over a prior memory-only bearer'],
