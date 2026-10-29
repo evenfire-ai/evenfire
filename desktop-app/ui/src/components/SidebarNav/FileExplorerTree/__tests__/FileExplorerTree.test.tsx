@@ -1731,8 +1731,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       resolve,
       moveResource,
     })
-    const pushToast = vi.fn<NonNullable<Parameters<typeof FileExplorerTree>[0]['pushToast']>>()
-    renderTreeWithSession({ pushToast })
+    const { pushToast } = renderTreeWithSession()
 
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
@@ -2305,7 +2304,8 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       affordances: vi.fn(async () => ({ held: ['read', 'write', 'delete'] })),
       moveResource,
     })
-    const { pushToast } = renderTreeWithSession()
+    const pushToast = vi.fn<NonNullable<Parameters<typeof FileExplorerTree>[0]['pushToast']>>()
+    renderTreeWithSession({ pushToast })
 
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: 'A' }))
@@ -3030,7 +3030,8 @@ describe('FileExplorerTree — sanitizes GFS names in Move outcome toasts', () =
       resolve,
       moveResource,
     })
-    const { pushToast } = renderTreeWithSession()
+    const pushToast = vi.fn<NonNullable<Parameters<typeof FileExplorerTree>[0]['pushToast']>>()
+    renderTreeWithSession({ pushToast })
 
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
