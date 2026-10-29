@@ -958,7 +958,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     canListAccessibleResources &&
     !accessibleQuery.isError &&
     (authorityWait || accessibleInitialRequestPending)
-  const loading = childrenInitialRequestPending || (authorityWait && items.length === 0)
+  const withheldChildrenRefetchPending =
+    childrenQueryEnabled &&
+    !childrenQuery.isError &&
+    childrenQuery.data !== undefined &&
+    authorityPending &&
+    !childrenFetchedThisEpoch &&
+    childrenQuery.isFetching
+  const loading =
+    childrenInitialRequestPending ||
+    withheldChildrenRefetchPending ||
+    (authorityWait && items.length === 0)
   const loadingCurrentView =
     authorityWait || (currentIsDirectory ? loading : !current ? loadingAccessible : false)
   // The folder plane's own rate-limit deadline. `listAccessible` and
