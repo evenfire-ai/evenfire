@@ -165,7 +165,7 @@ jobs:
             $overlayText = node validation/scripts/pr977/instrument-windows-password-test.mjs $sourceTestPath
             if ($LASTEXITCODE -ne 0) { throw 'Password test diagnostic instrumentation failed' }
             $overlay = $overlayText | ConvertFrom-Json
-            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 28) {
+            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 35) {
               throw 'Password test instrumentation did not match its reviewed contract'
             }
             $testOverlay = $overlay.mode
@@ -204,7 +204,11 @@ jobs:
           $allowedProgressMarkers = @(
             'beforeEach-start', 'module-reset-complete', 'temp-directory-ready',
             'app-service-import-start', 'app-service-import-complete', 'beforeEach-complete',
-            'afterEach-start', 'afterEach-complete', 'test-1-start', 'test-2-start',
+            'afterEach-start', 'afterEach-unstub-complete', 'afterEach-mocks-complete',
+            'afterEach-directory-remove-start', 'afterEach-directory-remove-complete',
+            'afterEach-env-restore-complete', 'afterEach-fixture-clear-complete',
+            'afterEach-modules-reset-complete', 'afterEach-complete',
+            'test-1-start', 'test-2-start',
             'test-3-start', 'test-4-start', 'test-5-start', 'test-1-complete',
             'test-2-complete', 'test-3-complete', 'test-4-complete', 'test-5-complete',
             'password-a-start',
@@ -248,6 +252,7 @@ jobs:
             phaseMarkerCount = if (Test-Path -LiteralPath $phaseFile -PathType Leaf) {
               $phaseLines.Count
             } else { 0 }
+            phaseMarkers = @($phaseLines)
             completedTestCount = $completedTestCount
             testOverlay = $testOverlay
             sourceTestSha256 = $sourceTestSha256

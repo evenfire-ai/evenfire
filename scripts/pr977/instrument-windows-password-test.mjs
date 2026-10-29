@@ -22,6 +22,13 @@ const markers = [
   'app-service-import-complete',
   'beforeEach-complete',
   'afterEach-start',
+  'afterEach-unstub-complete',
+  'afterEach-mocks-complete',
+  'afterEach-directory-remove-start',
+  'afterEach-directory-remove-complete',
+  'afterEach-env-restore-complete',
+  'afterEach-fixture-clear-complete',
+  'afterEach-modules-reset-complete',
   'afterEach-complete',
   'test-1-start',
   'test-2-start',
@@ -91,13 +98,23 @@ replaceOnce(
     "    pr977Mark('beforeEach-complete')\n  })\n\n  afterEach"
 )
 replaceOnce(
-  '  afterEach(async () => {\n',
-  "  afterEach(async () => {\n    pr977Mark('afterEach-start')\n"
+  '  afterEach(async () => {\n    vi.unstubAllGlobals()\n    vi.restoreAllMocks()\n' +
+    '    if (directory) await fs.rm(directory, { recursive: true, force: true })\n',
+  "  afterEach(async () => {\n    pr977Mark('afterEach-start')\n" +
+    "    vi.unstubAllGlobals()\n    pr977Mark('afterEach-unstub-complete')\n" +
+    "    vi.restoreAllMocks()\n    pr977Mark('afterEach-mocks-complete')\n" +
+    "    pr977Mark('afterEach-directory-remove-start')\n" +
+    '    if (directory) await fs.rm(directory, { recursive: true, force: true })\n' +
+    "    pr977Mark('afterEach-directory-remove-complete')\n"
 )
 replaceOnce(
   "    fixture.directory = ''\n    fixture.keychain.clear()\n    vi.resetModules()\n  })\n\n  function createService",
-  "    fixture.directory = ''\n    fixture.keychain.clear()\n    vi.resetModules()\n" +
-    "    pr977Mark('afterEach-complete')\n  })\n\n  function createService"
+  "    fixture.directory = ''\n    fixture.keychain.clear()\n" +
+    "    pr977Mark('afterEach-env-restore-complete')\n" +
+    "    pr977Mark('afterEach-fixture-clear-complete')\n" +
+    '    vi.resetModules()\n' +
+    "    pr977Mark('afterEach-modules-reset-complete')\n" +
+    "  })\n\n  function createService"
 )
 replaceOnce(
   "  it('restores the accepted prior source when candidate preparation fails after publication', async () => {\n",

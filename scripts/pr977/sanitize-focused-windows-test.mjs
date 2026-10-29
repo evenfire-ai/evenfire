@@ -155,6 +155,13 @@ const allowedProgressMarkers = new Set([
   'app-service-import-complete',
   'beforeEach-complete',
   'afterEach-start',
+  'afterEach-unstub-complete',
+  'afterEach-mocks-complete',
+  'afterEach-directory-remove-start',
+  'afterEach-directory-remove-complete',
+  'afterEach-env-restore-complete',
+  'afterEach-fixture-clear-complete',
+  'afterEach-modules-reset-complete',
   'afterEach-complete',
   'test-1-start',
   'test-2-start',
@@ -186,12 +193,19 @@ const overlayValid =
 const progressMarker = allowedProgressMarkers.has(meta.lastProgressMarker)
   ? meta.lastProgressMarker
   : 'invalid-marker'
+const phaseMarkersValid =
+  Array.isArray(meta.phaseMarkers) &&
+  meta.phaseMarkers.length <= 64 &&
+  meta.phaseMarkers.every((marker) => allowedProgressMarkers.has(marker))
 const progressValid =
   target !== 'appService.passwordLoginRollback.regression.test.ts' ||
   (meta.sourceTestBlobMatchesPin === true &&
     /^[a-f0-9]{40}$/.test(meta.sourceTestGitBlob ?? '') &&
     Number.isInteger(meta.phaseMarkerCount) &&
     meta.phaseMarkerCount > 0 &&
+    phaseMarkersValid &&
+    meta.phaseMarkers.length === meta.phaseMarkerCount &&
+    meta.phaseMarkers.at(-1) === progressMarker &&
     meta.completedTestCount === 5 &&
     progressMarker === 'afterEach-complete')
 const success = Boolean(
@@ -227,6 +241,7 @@ const safe = {
   phaseMarkerCount: Number.isInteger(meta.phaseMarkerCount) ? meta.phaseMarkerCount : null,
   completedTestCount: Number.isInteger(meta.completedTestCount) ? meta.completedTestCount : null,
   lastProgressMarker: progressMarker,
+  phaseMarkers: phaseMarkersValid ? meta.phaseMarkers : [],
   testFile: target,
   reportedSuiteCount: suites.length,
   reportedTotalTests: report?.numTotalTests ?? null,
