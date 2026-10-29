@@ -12,6 +12,7 @@ const validEvidence = {
   rootIdentity: '00000001:00000001',
   authorityIdentity: '00000001:00000002',
   objectCount: 1,
+  authorityOwnerSid: 'S-1-5-21-1000',
 }
 
 function processResult(overrides: Record<string, unknown> = {}) {
@@ -60,7 +61,7 @@ describe('Windows session authority PowerShell launcher', () => {
     vi.clearAllMocks()
   })
 
-  it('keeps the oversized fixed verifier off the Windows process command line', () => {
+  it('loads the fixed native helper and keeps verifier data off the process command line', () => {
     expect(runVerifier()).toEqual(validEvidence)
 
     const [executable, args, options] = spawnSyncMock.mock.calls[0]!
@@ -73,12 +74,15 @@ describe('Windows session authority PowerShell launcher', () => {
         args[4].includes('[scriptblock]::Create($sourceText)')
     ).toBe(true)
     expect(typeof options.input).toBe('string')
-    expect(options.input.length).toBeGreaterThan(16_384)
+    expect(options.input).toContain('Add-Type -Path $nativeAssemblyPath')
+    expect(options.input).not.toContain('Add-Type -TypeDefinition')
+    expect(options.input.length).toBeGreaterThan(8_192)
     expect(options.timeout).toBe(30_000)
     expect(options.env.EVENFIRE_TEST_SECRET).toBeUndefined()
     expect(Object.keys(options.env).sort()).toEqual([
       'COMSPEC',
       'EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST',
+      'EVENFIRE_SESSION_AUTHORITY_NATIVE_ASSEMBLY',
       'PATH',
       'PATHEXT',
       'SystemDrive',
@@ -87,17 +91,13 @@ describe('Windows session authority PowerShell launcher', () => {
       'TMP',
       'WINDIR',
     ])
+    expect(options.env.EVENFIRE_SESSION_AUTHORITY_NATIVE_ASSEMBLY).toContain(
+      'WindowsSessionAuthorityNative.dll'
+    )
 
     const commandLineLength =
       executable.length + args.reduce((length: number, arg: string) => length + arg.length + 1, 0)
-    const encodedVerifierLength = Buffer.from(options.input, 'utf16le').toString('base64').length
-    const previousCommandLineLength =
-      executable.length +
-      '-NoLogo -NoProfile -NonInteractive -EncodedCommand '.length +
-      encodedVerifierLength
-
     expect(commandLineLength).toBeLessThan(32_767)
-    expect(previousCommandLineLength).toBeGreaterThan(32_767)
     expect(executable).toBe(
       path.win32.join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
     )
@@ -144,26 +144,26 @@ describe('Windows session authority PowerShell launcher', () => {
     expect(message).not.toContain('command contents')
   })
 
-  it('distinguishes script compilation errors from verifier ACL rejection', () => {
+  it('distinguishes native helper load failures from verifier ACL rejection', () => {
     spawnSyncMock.mockReturnValue(
       processResult({
         status: 2,
         stdout: JSON.stringify({
           ok: false,
-          phase: 'compile-script',
-          errorType: 'CompilationException',
+          phase: 'load-native-helper',
+          errorType: 'FileNotFoundException',
           hresult: '0x80131500',
-          detail: 'csharp-compile-failed',
+          detail: 'native-helper-path-missing',
         }),
-        stderr: 'compiler output is intentionally not surfaced',
+        stderr: 'PowerShell loader output is intentionally not surfaced',
       })
     )
 
-    const compilationFailure = captureError(runVerifier)
-    expect(compilationFailure).toMatch(
-      /"phase":"powershell-compilation-failed".*"verifierPhase":"compile-script"/
+    const helperLoadFailure = captureError(runVerifier)
+    expect(helperLoadFailure).toMatch(
+      /"phase":"powershell-native-helper-load-failed".*"verifierPhase":"load-native-helper"/
     )
-    expect(compilationFailure).not.toContain('compiler output')
+    expect(helperLoadFailure).not.toContain('loader output')
 
     spawnSyncMock.mockReturnValue(
       processResult({

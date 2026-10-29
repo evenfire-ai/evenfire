@@ -71,6 +71,7 @@ desktop-app/out/
 desktop-app/release/
 desktop-app/.vite/
 desktop-app/*.tsbuildinfo
+desktop-app/resources/WindowsSessionAuthorityNative.dll
 
 # understand-anything — generated knowledge graph (local only, not committed)
 .understand-anything/

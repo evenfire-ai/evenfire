@@ -1,5 +1,9 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process'
 import path from 'node:path'
+import {
+  WINDOWS_SESSION_AUTHORITY_NATIVE_ASSEMBLY_ENV,
+  windowsSessionAuthorityNativeAssemblyPath,
+} from './windowsSessionAuthorityNativeAssembly.js'
 import { createWindowsSessionAuthorityPowerShellEnvironment } from './windowsSessionAuthorityPowerShellEnvironment.js'
 
 const REQUEST_ENV = 'EVENFIRE_SESSION_AUTHORITY_FILE_OPS'
@@ -8,22 +12,11 @@ const ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', LAUNCHER] 
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$phase = 'compile-native-move'
-$code = @'
-using System;
-using System.Runtime.InteropServices;
-public static class EvenfireSessionAuthorityMove {
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-    EntryPoint = "MoveFileExW")]
-  static extern bool MoveFileEx(string source, string destination, uint flags);
-  public static int Move(string source, string destination, uint flags) {
-    return MoveFileEx(source, destination, flags) ? 0 : Marshal.GetLastWin32Error();
-  }
-}
-'@
+$phase = 'load-native-helper'
 try {
-  Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-  $phase = 'validate-request'
+  $assemblyPath = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_NATIVE_ASSEMBLY')
+  if (-not $assemblyPath) { throw 'native-helper-path-missing' }
+  Add-Type -Path $assemblyPath -ErrorAction Stop
   $payload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_FILE_OPS')
   if (-not $payload) { throw 'request-missing' }
   $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) |
@@ -62,6 +55,7 @@ export class SessionAuthorityFileMutationError extends Error {
         | 'process-launch'
         | 'process-interrupted'
         | 'powershell-compilation-failed'
+        | 'powershell-native-helper-load-failed'
         | 'powershell-execution-failed'
         | 'native-operation-rejected'
         | 'retired-file-cleanup-failed'
@@ -174,8 +168,8 @@ function diagnostic(
     }
     if (response.ok === false && typeof response.errorType === 'string') {
       const phase =
-        verifierPhase === 'compile-native-move'
-          ? 'powershell-compilation-failed'
+        verifierPhase === 'load-native-helper'
+          ? 'powershell-native-helper-load-failed'
           : 'powershell-execution-failed'
       return new SessionAuthorityFileMutationError(codeForError, 'rejected', {
         ...diagnosticFields,
@@ -229,11 +223,11 @@ export function moveSessionAuthorityFileDurablySync(
     env: {
       ...createWindowsSessionAuthorityPowerShellEnvironment(systemRoot, temporaryDirectory),
       [REQUEST_ENV]: request,
+      [WINDOWS_SESSION_AUTHORITY_NATIVE_ASSEMBLY_ENV]: windowsSessionAuthorityNativeAssemblyPath(),
     },
     input: SCRIPT,
     maxBuffer: 4096,
-    // Add-Type compiles the fixed native wrapper per invocation; timeout remains bounded and
-    // a started operation that exceeds it stays indeterminate.
+    // A started operation that exceeds the helper's finite bound stays indeterminate.
     timeout: 30_000,
     windowsHide: true,
   })

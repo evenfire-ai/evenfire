@@ -47,6 +47,8 @@ const user = {
   role: 'member' as const,
 }
 
+const linuxBasicTextTest = process.platform === 'win32' ? it.skip : it
+
 function validSessionToken(expSeconds = Math.floor(Date.now() / 1000) + 3600): string {
   const payload = Buffer.from(JSON.stringify({ exp: expSeconds })).toString('base64url')
   return `header.${payload}.signature`
@@ -330,45 +332,51 @@ describe('AppService logout when Keytar is unavailable', () => {
     )
   })
 
-  it('uses memory-only mode when Linux safeStorage selects the basic_text backend', async () => {
-    const hostPlatform = process.platform
-    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
-    try {
-      testRuntime.safeStorageBackend = 'basic_text'
-      const { safeStorage } = await import('electron')
-      vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
-      const token = validSessionToken()
-      const tokenStore = createIsolatedTokenStore()
-      const service = new AppServiceClass({
-        tokenStore,
-        getUserDataDirectory: () => userDataDirectory,
-      })
-      const state = service as unknown as {
-        installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
-        sessionToken: string | null
-      }
+  linuxBasicTextTest(
+    'uses memory-only mode when Linux safeStorage selects the basic_text backend',
+    async () => {
+      const hostPlatform = process.platform
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+      try {
+        testRuntime.safeStorageBackend = 'basic_text'
+        const { safeStorage } = await import('electron')
+        vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+        const token = validSessionToken()
+        const tokenStore = createIsolatedTokenStore()
+        const service = new AppServiceClass({
+          tokenStore,
+          getUserDataDirectory: () => userDataDirectory,
+        })
+        const state = service as unknown as {
+          installAuthenticatedLogin: (result: {
+            token: string
+            me: typeof user
+          }) => Promise<unknown>
+          sessionToken: string | null
+        }
 
-      await expect(state.installAuthenticatedLogin({ token, me: user })).resolves.toMatchObject({
-        authenticated: true,
-        sessionMode: 'temporary',
-      })
+        await expect(state.installAuthenticatedLogin({ token, me: user })).resolves.toMatchObject({
+          authenticated: true,
+          sessionMode: 'temporary',
+        })
 
-      expect(state.sessionToken).toBe(token)
-      expect(
-        markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
-      ).toMatchObject({ intent: 'acceptance-pending' })
-      await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBeNull()
-      for (const entry of await readdir(userDataDirectory, { withFileTypes: true })) {
-        if (!entry.isFile()) continue
+        expect(state.sessionToken).toBe(token)
         expect(
-          (await readFile(path.join(userDataDirectory, entry.name))).includes(Buffer.from(token))
-        ).toBe(false)
+          markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+        ).toMatchObject({ intent: 'acceptance-pending' })
+        await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBeNull()
+        for (const entry of await readdir(userDataDirectory, { withFileTypes: true })) {
+          if (!entry.isFile()) continue
+          expect(
+            (await readFile(path.join(userDataDirectory, entry.name))).includes(Buffer.from(token))
+          ).toBe(false)
+        }
+        await expectMemoryOnlyRestartFence()
+      } finally {
+        Object.defineProperty(process, 'platform', { value: hostPlatform, configurable: true })
       }
-      await expectMemoryOnlyRestartFence()
-    } finally {
-      Object.defineProperty(process, 'platform', { value: hostPlatform, configurable: true })
     }
-  })
+  )
 
   it('ignores an unreadable legacy V0 fallback during fresh memory-only authentication', async () => {
     const config = await import('../config.js')

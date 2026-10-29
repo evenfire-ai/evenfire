@@ -283,6 +283,24 @@ function sameStorageRootIdentity(left: StorageRootIdentity, right: StorageRootId
   return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid
 }
 
+/** Windows realpath APIs may return distinct long-name aliases for the same directory. */
+function sameStorageRootPath(left: string, right: string): boolean {
+  if (process.platform !== 'win32') return left === right
+  try {
+    const leftStat = fsSync.lstatSync(left)
+    const rightStat = fsSync.lstatSync(right)
+    return (
+      leftStat.isDirectory() &&
+      !leftStat.isSymbolicLink() &&
+      rightStat.isDirectory() &&
+      !rightStat.isSymbolicLink() &&
+      sameStorageRootIdentity(storageRootIdentity(leftStat), storageRootIdentity(rightStat))
+    )
+  } catch {
+    return false
+  }
+}
+
 /** Resolve only proofs issued by TokenStore after its exact native/file operation completed. */
 function resolveSessionTokenAbsenceProof(
   proof: unknown,
@@ -1737,7 +1755,7 @@ export class TokenStore {
     expectedRoot: string
   ): void {
     this.assertSessionAuthorityStorageScopeCurrentSync(scope)
-    if (fsSync.realpathSync(userDataDirectory) !== expectedRoot)
+    if (!sameStorageRootPath(fsSync.realpathSync(userDataDirectory), expectedRoot))
       throw new Error('Session authority marker root changed after its scope was captured')
   }
 
@@ -1750,10 +1768,11 @@ export class TokenStore {
       if (app.isPackaged) throw new Error('Isolated token storage requires an unpackaged process')
       const actual = fsSync.realpathSync(configuredRoot)
       const declared = fsSync.realpathSync(this.isolatedUserDataPath)
-      if (actual !== declared) throw new Error('Isolated token storage directory mismatch')
+      if (!sameStorageRootPath(actual, declared))
+        throw new Error('Isolated token storage directory mismatch')
     }
     const currentRoot = fsSync.realpathSync(configuredRoot)
-    if (currentRoot !== issued.storageRoot)
+    if (!sameStorageRootPath(currentRoot, issued.storageRoot))
       throw new Error('Session authority storage root changed after it was captured')
     const currentStat = fsSync.lstatSync(currentRoot)
     if (
@@ -2486,7 +2505,8 @@ export class TokenStore {
     if (!app?.isReady()) throw new Error('Isolated token storage requires Electron readiness')
     const actual = await realPath(app.getPath('userData'))
     const declared = await realPath(this.isolatedUserDataPath)
-    if (actual !== declared) throw new Error('Isolated token storage directory mismatch')
+    if (!sameStorageRootPath(actual, declared))
+      throw new Error('Isolated token storage directory mismatch')
     await fs.mkdir(actual, { recursive: true })
     return actual
   }

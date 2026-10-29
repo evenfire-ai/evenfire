@@ -63,14 +63,10 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(args[4]).toContain('[Console]::In.ReadToEnd()')
     expect(args[4]).toContain('[scriptblock]::Create($sourceText)')
     expect(args[4].length).toBeLessThan(256)
-    expect(options.input).toContain('[DllImport("kernel32.dll"')
-    expect(options.input).toContain('EntryPoint = "MoveFileExW"')
-    expect(options.input).toContain('MoveFileExW')
-    expect(options.input).toContain('MoveFileEx')
-    expect(options.input).toContain('Marshal.GetLastWin32Error()')
+    expect(options.input).toContain('Add-Type -Path $assemblyPath')
+    expect(options.input).not.toContain('Add-Type -TypeDefinition')
+    expect(options.input).toContain('[EvenfireSessionAuthorityMove]::Move(')
     expect(options.input).not.toContain('nativeErrorCode')
-    expect(options.input).toContain('Add-Type -TypeDefinition $code')
-    expect(options.input).not.toContain('CodeDOM')
     expect(options.input).toContain('$flags = [uint32]8')
     expect(options.input).toContain('$flags = [uint32]9')
     expect(options.input).toContain("$phase = 'native-move'")
@@ -79,6 +75,7 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(Object.keys(options.env).sort()).toEqual([
       'COMSPEC',
       'EVENFIRE_SESSION_AUTHORITY_FILE_OPS',
+      'EVENFIRE_SESSION_AUTHORITY_NATIVE_ASSEMBLY',
       'PATH',
       'PATHEXT',
       'SystemDrive',
@@ -99,6 +96,9 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(options.env.COMSPEC).toBe('C:\\Windows\\System32\\cmd.exe')
     expect(options.env.SystemDrive).toBe('C:')
     expect(options.env.EVENFIRE_SESSION_AUTHORITY_FILE_OPS).toBeTruthy()
+    expect(options.env.EVENFIRE_SESSION_AUTHORITY_NATIVE_ASSEMBLY).toContain(
+      'WindowsSessionAuthorityNative.dll'
+    )
     expect(options.timeout).toBe(30_000)
 
     const request = JSON.parse(
@@ -134,11 +134,11 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(error.message).not.toContain('C:\\Users')
   })
 
-  it('classifies fixed native-binding setup errors without exposing PowerShell details', () => {
+  it('classifies native helper load errors without exposing PowerShell details', () => {
     spawnSyncMock.mockReturnValue(
       processResult({
         status: 2,
-        stdout: '{"ok":false,"phase":"prepare-native-move","errorType":"MethodAccessException"}',
+        stdout: '{"ok":false,"phase":"load-native-helper","errorType":"FileNotFoundException"}',
       })
     )
 
@@ -151,10 +151,10 @@ describe('Windows session-authority native file-operation launcher', () => {
 
     expect(error).toMatchObject({ code: 'EIO', outcome: 'rejected' })
     expect(error.diagnostic).toMatchObject({
-      phase: 'powershell-execution-failed',
-      verifierPhase: 'prepare-native-move',
+      phase: 'powershell-native-helper-load-failed',
+      verifierPhase: 'load-native-helper',
     })
-    expect(error.message).not.toContain('MethodAccessException')
+    expect(error.message).not.toContain('FileNotFoundException')
   })
 
   it('classifies process-start failure as rejected and post-start timeout as indeterminate', () => {
