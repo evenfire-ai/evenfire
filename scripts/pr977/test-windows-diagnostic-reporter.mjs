@@ -1,0 +1,133 @@
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const [dependencyRoot, applicationRoot] = process.argv.slice(2)
+const scratchRoot = process.env.CODEX_SCRATCH_ROOT
+if (
+  ![dependencyRoot, applicationRoot, scratchRoot].every(value => value && path.isAbsolute(value))
+) {
+  throw new Error('Expected absolute dependency, application Desktop and scratch roots')
+}
+const here = path.dirname(fileURLToPath(import.meta.url))
+const directory = mkdtempSync(path.join(scratchRoot, 'evenfire/pr977-reporter-proof-'))
+try {
+  symlinkSync(path.join(dependencyRoot, 'node_modules'), path.join(directory, 'node_modules'))
+  writeFileSync(
+    path.join(directory, 'vitest.config.mjs'),
+    `export default { test: { include: ['*.test.ts'], fileParallelism: false } }\n`
+  )
+  writeFileSync(
+    path.join(directory, 'boundary.test.ts'),
+    `
+import { describe, it, beforeEach, afterEach, expect, vi } from 'vitest'
+import { verifyWindowsSessionAuthorityDirectory } from ${JSON.stringify(path.join(applicationRoot, 'src/windowsSessionAuthorityAcl.ts'))}
+const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }))
+vi.mock('node:child_process', () => ({ spawnSync: spawn }))
+vi.mock('electron', () => ({ app: { isPackaged: false } }))
+const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+afterEach(() => { Object.defineProperty(process, 'platform', descriptor); vi.unstubAllEnvs() })
+describe('producer-backed diagnostics', () => {
+  it('verifier rejection', () => {
+    Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+    vi.stubEnv('SystemRoot', 'C:\\\\Windows'); vi.stubEnv('TEMP', 'C:\\\\fixture')
+    spawn.mockReturnValue({ pid: 123, status: 1, signal: null, stdout: JSON.stringify({ ok: false, phase: 'validate-authority-tree', errorType: 'UnauthorizedAccessException', hresult: '0x80070005', detail: 'unsafe-ace' }), stderr: 'EVENFIRE_ACL_PHASE=validate-authority-tree\\n' })
+    verifyWindowsSessionAuthorityDirectory('C:\\\\fixture', 'C:\\\\fixture\\\\sessions')
+  })
+  it('assertion mismatch', () => { expect('synthetic-private-value').toBe('expected-value') })
+  it('test timeout', async () => { await new Promise(() => {}) }, 20)
+  describe('setup', () => {
+    beforeEach(() => { throw new Error('Native Windows ACL fixture failed: {"operation":"add-everyone-modify","exitStatus":1,"powershellFailureCategory":"access-denied"}') })
+    it('fixture setup', () => {})
+  })
+  describe('teardown', () => {
+    afterEach(() => { throw new Error('private teardown details') })
+    it('fixture teardown', () => {})
+  })
+})
+`
+  )
+  writeFileSync(
+    path.join(directory, 'passing.test.ts'),
+    `
+import { describe, it, expect } from 'vitest'
+describe('outer', () => { describe('inner', () => { it('passes', () => expect(1).toBe(1)) }) })
+`
+  )
+  const vitest = path.join(dependencyRoot, 'node_modules/vitest/vitest.mjs')
+  const outputs = {}
+  for (const [name, reporter] of [
+    ['standard', 'json'],
+    ['enriched', path.join(here, 'windows-diagnostic-reporter.mjs')],
+  ]) {
+    const output = path.join(directory, `${name}.json`)
+    const processResult = spawnSync(
+      process.execPath,
+      [vitest, 'run', '--root', directory, `--reporter=${reporter}`, `--outputFile=${output}`],
+      {
+        encoding: 'utf8',
+        timeout: 30000,
+        env: { ...process.env, PR977_DESKTOP_ROOT: dependencyRoot },
+      }
+    )
+    assert.equal(processResult.status, 1, 'Controlled failed assertions must keep Vitest red')
+    outputs[name] = JSON.parse(readFileSync(output, 'utf8'))
+  }
+  assert.ok(outputs.enriched.numTotalTestSuites > outputs.enriched.testResults.length)
+  for (const field of [
+    'numTotalTestSuites',
+    'numPassedTestSuites',
+    'numFailedTestSuites',
+    'numPendingTestSuites',
+    'numTotalTests',
+    'numPassedTests',
+    'numFailedTests',
+    'numPendingTests',
+  ]) {
+    assert.equal(outputs.enriched[field], outputs.standard[field], `Reporter changed ${field}`)
+  }
+  const standardCases = outputs.standard.testResults.flatMap(file => file.assertionResults)
+  const timeout = standardCases.find(test => test.title === 'test timeout')
+  assert.match(timeout.failureMessages[0], /STACK_TRACE_ERROR/)
+  assert.doesNotMatch(timeout.failureMessages[0], /Test timed out/)
+  // Normalize only generated fixture filenames to a permitted Desktop-relative namespace.
+  outputs.enriched.testResults.forEach(file => {
+    file.name = `src/__tests__/${path.basename(file.name)}`
+  })
+  const raw = path.join(directory, 'enriched-normalized.json')
+  const safe = path.join(directory, 'safe.json')
+  writeFileSync(raw, JSON.stringify(outputs.enriched))
+  const sanitized = spawnSync(
+    process.execPath,
+    [
+      process.env.PR977_SANITIZER_PATH ?? path.join(here, 'sanitize-windows-vitest-report.mjs'),
+      raw,
+      safe,
+    ],
+    { encoding: 'utf8' }
+  )
+  assert.equal(sanitized.status, 0)
+  const report = JSON.parse(readFileSync(safe, 'utf8'))
+  assert.equal(report.success, false)
+  assert.equal(report.counterConsistency.valid, true)
+  assert.equal(report.numTestFiles, 2)
+  const cases = new Map(
+    report.testResults.flatMap(file => file.assertionResults).map(test => [test.title, test])
+  )
+  assert.equal(cases.get('verifier rejection').failure.category, 'native-verifier')
+  assert.equal(cases.get('verifier rejection').failure.diagnostic.verifierHresult, '0x80070005')
+  assert.equal(cases.get('test timeout').failure.category, 'timeout')
+  assert.equal(cases.get('fixture setup').failure.phase, 'setup')
+  assert.equal(cases.get('fixture setup').failure.category, 'native-fixture')
+  assert.equal(cases.get('fixture teardown').failure.phase, 'test-or-teardown')
+  assert.deepEqual(cases.get('fixture teardown').failure.failedHooks, ['afterEach'])
+  assert.equal(cases.get('assertion mismatch').failure.category, 'assertion')
+  assert.doesNotMatch(JSON.stringify(report), /private-value|teardown details|Users|C:\\\\/)
+  process.stdout.write(
+    'Actual Vitest nested-suite, original-message, verifier, timeout, setup, teardown and assertion proofs passed.\n'
+  )
+} finally {
+  rmSync(directory, { recursive: true, force: true })
+}

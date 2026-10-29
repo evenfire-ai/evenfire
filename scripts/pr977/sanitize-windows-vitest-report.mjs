@@ -79,7 +79,7 @@ const errorTypes = [
   'ReferenceError',
   'RangeError',
 ]
-const classifyFailure = message => {
+const classifyFailure = (message, reportedPhase) => {
   const structured = extractStructuredDiagnostic(message)
   const errorType =
     errorTypes.find(type => new RegExp(`\\b${type}\\b`).test(message)) ?? 'unclassified'
@@ -91,26 +91,44 @@ const classifyFailure = message => {
       ? 'native-fixture'
       : structured?.source === 'verifier'
         ? 'native-verifier'
-        : /expected \[Function\] to throw(?: an error)?/i.test(message)
-          ? 'expected-rejection-not-observed'
-          : /expected .*to throw/i.test(message)
-            ? 'expected-rejection-mismatch'
-            : errorType === 'PrivilegeNotHeldException'
-              ? 'privilege-not-held'
-              : errorType === 'PlatformNotSupportedException'
-                ? 'platform-api-unavailable'
-                : code === 'EACCES' ||
-                    code === 'EPERM' ||
-                    errorType === 'UnauthorizedAccessException'
-                  ? 'access-denied'
-                  : code === 'ETIMEDOUT' || errorType === 'TimeoutError'
-                    ? 'timeout'
-                    : errorType === 'AssertionError'
-                      ? 'assertion'
-                      : 'unclassified'
+        : /(?:test|hook) timed out|timeout of .* exceeded|ETIMEDOUT/i.test(message)
+          ? 'timeout'
+          : /STACK_TRACE_ERROR/.test(message) && !/timed out/i.test(message)
+            ? 'reporter-message-unavailable'
+            : /expected \[Function\] to throw(?: an error)?/i.test(message)
+              ? 'expected-rejection-not-observed'
+              : /expected .*to throw/i.test(message)
+                ? 'expected-rejection-mismatch'
+                : errorType === 'PrivilegeNotHeldException'
+                  ? 'privilege-not-held'
+                  : errorType === 'PlatformNotSupportedException'
+                    ? 'platform-api-unavailable'
+                    : code === 'EACCES' ||
+                        code === 'EPERM' ||
+                        errorType === 'UnauthorizedAccessException'
+                      ? 'access-denied'
+                      : code === 'ETIMEDOUT' || errorType === 'TimeoutError'
+                        ? 'timeout'
+                        : errorType === 'AssertionError'
+                          ? 'assertion'
+                          : 'unclassified'
   const match = message.match(/([^\\/\s()]+\.test\.[cm]?[jt]sx?):(\d+):(\d+)/)
   return {
     category,
+    phase: [
+      'setup',
+      'teardown',
+      'setup-or-teardown',
+      'test-or-teardown',
+      'collection',
+      'test',
+    ].includes(reportedPhase)
+      ? reportedPhase
+      : structured?.source === 'native-fixture'
+        ? 'fixture'
+        : structured?.source === 'verifier'
+          ? 'verifier'
+          : 'unknown',
     errorType,
     ...(code ? { code } : {}),
     location: match ? `${match[1]}:${match[2]}` : 'unavailable',
@@ -287,15 +305,71 @@ function extractStructuredDiagnostic(message) {
     const jsonStart = message.indexOf('{', markerIndex + marker.text.length)
     if (jsonStart < 0) continue
     let value
-    try {
-      value = JSON.parse(message.slice(jsonStart, message.indexOf('}', jsonStart) + 1))
-    } catch {
-      continue
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let end = jsonStart; end < Math.min(message.length, jsonStart + 16384); end++) {
+      const char = message[end]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+      } else if (char === '"') quoted = true
+      else if (char === '{') depth++
+      else if (char === '}' && --depth === 0) {
+        try {
+          value = JSON.parse(message.slice(jsonStart, end + 1))
+        } catch {
+          /* fail closed */
+        }
+        break
+      }
     }
+    if (!value) continue
     const fields = sanitizeDiagnosticFields(value)
     if (fields) return { source: marker.source, fields }
   }
   return undefined
+}
+
+function failuresFor(entry) {
+  if (entry.diagnosticErrors !== undefined) {
+    if (
+      !Array.isArray(entry.diagnosticErrors) ||
+      entry.diagnosticErrors.some(
+        error =>
+          !error ||
+          typeof error.message !== 'string' ||
+          (error.stack !== undefined && typeof error.stack !== 'string') ||
+          ![
+            'setup',
+            'teardown',
+            'setup-or-teardown',
+            'test-or-teardown',
+            'collection',
+            'test',
+          ].includes(error.phase)
+      )
+    )
+      throw new Error('Malformed diagnostic errors')
+    if (entry.diagnosticErrors.length > 0)
+      return entry.diagnosticErrors.map(error => ({
+        ...classifyFailure(`${error.message}\n${error.stack ?? ''}`, error.phase),
+        failedHooks: Array.isArray(error.failedHooks)
+          ? error.failedHooks.filter(name =>
+              ['beforeAll', 'beforeEach', 'afterEach', 'afterAll'].includes(name)
+            )
+          : [],
+      }))
+  }
+  if (
+    entry.failureMessages !== undefined &&
+    (!Array.isArray(entry.failureMessages) ||
+      entry.failureMessages.some(message => typeof message !== 'string'))
+  ) {
+    throw new Error('Malformed failure messages')
+  }
+  return (entry.failureMessages ?? []).map(message => classifyFailure(message))
 }
 
 const testResults = report.testResults.map(suite => {
@@ -318,22 +392,26 @@ const testResults = report.testResults.map(suite => {
           : safeTitle(assertion.title ?? `case-${index + 1}`),
     }
     if (assertion.status === 'failed') {
-      safeAssertion.failure = classifyFailure((assertion.failureMessages ?? []).join('\n'))
+      const failures = failuresFor(assertion)
+      safeAssertion.failures = failures
+      safeAssertion.failure = failures[0] ?? classifyFailure('')
     }
     return safeAssertion
   })
   if (!['passed', 'failed', 'pending', 'skipped'].includes(suite.status)) {
     throw new Error('Vitest report contains an invalid suite status')
   }
+  const suiteFailures = failuresFor(suite)
   const suiteFailure =
-    typeof suite.message === 'string' && suite.message.length > 0
+    suiteFailures[0] ??
+    (typeof suite.message === 'string' && suite.message.length > 0
       ? classifyFailure(suite.message)
-      : undefined
+      : undefined)
   return {
     name: safeTestPath(suite.name),
     status: suite.status,
     assertionResults,
-    ...(suiteFailure ? { failure: suiteFailure } : {}),
+    ...(suiteFailure ? { failure: suiteFailure, failures: suiteFailures } : {}),
   }
 })
 
@@ -361,33 +439,49 @@ const assertionCounts = testResults.reduce(
   { total: 0, passed: 0, failed: 0, pending: 0, todo: 0 }
 )
 const derivedSummary = {
-  numTotalTestSuites: suiteCounts.total,
-  numPassedTestSuites: suiteCounts.passed,
-  numFailedTestSuites: suiteCounts.failed,
-  numPendingTestSuites: suiteCounts.pending,
   numTotalTests: assertionCounts.total,
   numPassedTests: assertionCounts.passed,
   numFailedTests: assertionCounts.failed,
   numPendingTests: assertionCounts.pending,
   numTodoTests: assertionCounts.todo,
 }
-const counterDiscrepancies = summaryFields.flatMap(field =>
+const counterDiscrepancies = Object.keys(derivedSummary).flatMap(field =>
   report[field] === derivedSummary[field]
     ? []
     : [{ field, reported: report[field], derived: derivedSummary[field] }]
 )
+// Vitest getSuites includes file + nested describe tasks; JSON exposes only file results.
+// Empty/nested describe tasks cannot be reconstructed from assertion ancestorTitles.
+if (
+  report.numTotalTestSuites !==
+  report.numPassedTestSuites + report.numFailedTestSuites + report.numPendingTestSuites
+) {
+  counterDiscrepancies.push({
+    field: 'suiteCounterSum',
+    reported: report.numTotalTestSuites,
+    derived: report.numPassedTestSuites + report.numFailedTestSuites + report.numPendingTestSuites,
+  })
+}
+if (report.numTotalTestSuites < suiteCounts.total) {
+  counterDiscrepancies.push({
+    field: 'suiteCounterMinimum',
+    reported: report.numTotalTestSuites,
+    derived: suiteCounts.total,
+  })
+}
 const countersConsistent = counterDiscrepancies.length === 0
 const hasFailures = suiteCounts.failed > 0 || assertionCounts.failed > 0
 
 const safeReport = {
-  success: report.success && countersConsistent && !hasFailures,
+  success: report.success && countersConsistent && !hasFailures && report.numFailedTestSuites === 0,
+  numTestFiles: testResults.length,
   ...Object.fromEntries(summaryFields.map(key => [key, report[key]])),
   counterConsistency: { valid: countersConsistent, discrepancies: counterDiscrepancies },
   testResults,
 }
 writeFileSync(outputPath, `${JSON.stringify(safeReport)}\n`)
 process.stdout.write(
-  `Sanitized Windows report: files=${safeReport.numTotalTestSuites} ` +
+  `Sanitized Windows report: files=${safeReport.numTestFiles} ` +
     `tests=${safeReport.numTotalTests} passed=${safeReport.numPassedTests} ` +
     `failed=${safeReport.numFailedTests} skipped=${safeReport.numPendingTests}\n`
 )

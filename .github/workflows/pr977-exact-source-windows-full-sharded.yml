@@ -153,11 +153,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows suite report could not be sanitized.' }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           $nativeNames = @($report.testResults | ForEach-Object { [System.IO.Path]::GetFileName($_.name) })
-          Write-Output "Native Windows suites: files=$($report.numTotalTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          Write-Output "Native Windows suites: files=$($report.numTestFiles) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
           $requiredNativeNames = @('windowsSessionAuthorityAcl.native.test.ts', 'windowsSessionAuthorityDurableFileOps.native.test.ts')
           $missingNativeNames = @($requiredNativeNames | Where-Object { $nativeNames -notcontains $_ })
           $nativeNamesMatch = $nativeNames.Count -eq 2 -and $missingNativeNames.Count -eq 0
-          if ($testExit -ne 0 -or -not $report.success -or $report.numTotalTestSuites -ne 2 -or $report.testResults.Count -ne 2 -or -not $nativeNamesMatch -or $report.numTotalTests -le 0 -or $report.numFailedTests -ne 0 -or $report.numPendingTests -ne 0) {
+          if ($testExit -ne 0 -or -not $report.success -or $report.numTestFiles -ne 2 -or $report.testResults.Count -ne 2 -or -not $nativeNamesMatch -or $report.numTotalTests -le 0 -or $report.numFailedTests -ne 0 -or $report.numPendingTests -ne 0) {
             throw 'Native Windows ACL or durability validation failed.'
           }
           Remove-Item -LiteralPath $rawReportPath, $logPath -ErrorAction SilentlyContinue
@@ -257,8 +257,8 @@ jobs:
           node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $rawReportPath $reportPath
           if ($LASTEXITCODE -ne 0) { throw "Full Desktop shard report could not be sanitized: $shard" }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-          Write-Output "Shard ${shard}: files=$($report.numTotalTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
-          if ($testExit -ne 0 -or -not $report.success -or $report.numTotalTestSuites -le 0 -or $report.numTotalTests -le 0) {
+          Write-Output "Shard ${shard}: files=$($report.numTestFiles) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          if ($testExit -ne 0 -or -not $report.success -or $report.numTestFiles -le 0 -or $report.numTotalTests -le 0) {
             throw "Full Desktop shard failed or executed no tests: $shard"
           }
           Remove-Item -LiteralPath $rawReportPath, $logPath -ErrorAction SilentlyContinue

@@ -105,7 +105,7 @@ const nativeReport = JSON.parse(readFileSync(nativeReportPath, 'utf8'))
 if (
   !Array.isArray(nativeReport.testResults) ||
   nativeReport.testResults.length !== 2 ||
-  nativeReport.numTotalTestSuites !== 2
+  nativeReport.numTestFiles !== 2
 ) {
   throw new Error('Native Windows report is missing one or both required suites')
 }
@@ -141,13 +141,13 @@ for (const { label, file, report } of reports) {
   if (
     report.counterConsistency?.valid !== true ||
     !report.success ||
-    report.numTotalTestSuites <= 0 ||
+    report.numTestFiles <= 0 ||
     report.numTotalTests <= 0
   ) {
     throw new Error(`${file} failed or executed no test suites/cases`)
   }
   if (!Array.isArray(report.testResults)) throw new Error(`${file} has no test result list`)
-  totalSuites += report.numTotalTestSuites
+  totalSuites += report.numTestFiles
   totalTests += report.numTotalTests
   totalPassed += report.numPassedTests
   totalFailed += report.numFailedTests

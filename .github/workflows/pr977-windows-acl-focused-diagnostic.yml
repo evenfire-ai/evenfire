@@ -74,15 +74,17 @@ jobs:
         env:
           EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
         run: |
+          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
           $rawReport = Join-Path $env:RUNNER_TEMP 'acl-focused-raw.json'
           $safeReport = Join-Path $env:RUNNER_TEMP 'acl-focused-safe.json'
           $stdout = Join-Path $env:RUNNER_TEMP 'acl-focused-stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'acl-focused-stderr.log'
           $node = (Get-Command node).Source
           $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
+          $reporter = Join-Path $env:GITHUB_WORKSPACE 'validation/scripts/pr977/windows-diagnostic-reporter.mjs'
           $filter = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
           $pattern = 'provisions a protected authority directory and verifies every existing child|rejects an unsafe ACL on an existing child instead of repairing or trusting it'
-          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '--reporter=json', '"--outputFile.json=' + $rawReport + '"', '"' + $filter + '"', '--testNamePattern', '"' + $pattern + '"') -join ' '
+          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '"--reporter=' + $reporter + '"', '"--outputFile.json=' + $rawReport + '"', '"' + $filter + '"', '--testNamePattern', '"' + $pattern + '"') -join ' '
           $started = [DateTime]::UtcNow
           $process = Start-Process -FilePath $node -ArgumentList $argumentLine -WorkingDirectory (Get-Location).Path -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           $watchdogExpired = $false

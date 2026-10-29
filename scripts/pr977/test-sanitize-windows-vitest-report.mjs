@@ -143,7 +143,7 @@ const inconsistent = runCase(
   report({
     success: false,
     suites: ['failed'],
-    totals: { suites: 2, passedSuites: 1, failedSuites: 1, tests: 1, passed: 0, failed: 1 },
+    totals: { suites: 2, passedSuites: 1, failedSuites: 1, tests: 2, passed: 0, failed: 1 },
     assertions: [
       [
         {
