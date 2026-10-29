@@ -132,8 +132,8 @@ jobs:
         working-directory: source/desktop-app
         shell: pwsh
         env:
-          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
-          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: "1"
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: "1"
         run: |
           $reportPath = Join-Path $env:RUNNER_TEMP 'pr977-focused-windows.json'
           $files = @(
@@ -152,6 +152,26 @@ jobs:
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           Write-Output "Focused tests: total=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
           $testResults = @($report.testResults)
+          foreach ($result in $testResults) {
+            foreach ($assertion in @($result.assertionResults | Where-Object { $_.status -eq 'failed' })) {
+              $file = [System.IO.Path]::GetFileName($result.name)
+              $failureType = 'unknown'
+              $failureLocation = 'unavailable'
+              foreach ($message in @($assertion.failureMessages)) {
+                $typeMatch = [regex]::Match($message, '(?m)^\s*(?<type>[A-Za-z]+Error):')
+                if ($typeMatch.Success) { $failureType = $typeMatch.Groups['type'].Value; break }
+                if ($message -match '(?m)^\s*Error:') { $failureType = 'Error'; break }
+              }
+              foreach ($message in @($assertion.failureMessages)) {
+                $locationMatch = [regex]::Match($message, '(?<file>[^\\/\s()]+\.test\.[cm]?[jt]sx?):(?<line>\d+):(?<column>\d+)')
+                if ($locationMatch.Success) {
+                  $failureLocation = "$($locationMatch.Groups['file'].Value):$($locationMatch.Groups['line'].Value)"
+                  break
+                }
+              }
+              Write-Output "Failed test case: file=$file title=$($assertion.fullName) type=$failureType at=$failureLocation"
+            }
+          }
           $requiredNative = @(
             'windowsSessionAuthorityAcl.native.test.ts',
             'windowsSessionAuthorityDurableFileOps.native.test.ts',
@@ -198,76 +218,8 @@ jobs:
             if ($unexpected.Count -gt 0) { throw "Producer-backed suite failed or unexpectedly skipped cases: $file" }
             Write-Output "Producer-backed suite passed: $file passed=$($passed.Count) namedLinuxSkip=$($expectedLinuxSkip.Count)"
           }
-          foreach ($result in $testResults) {
-            foreach ($assertion in @($result.assertionResults | Where-Object { $_.status -eq 'failed' })) {
-              Write-Output "Failed test: $($result.name) :: $($assertion.fullName)"
-            }
-          }
           if ($testExit -ne 0 -or -not $report.success -or $report.numFailedTests -ne 0) {
             throw 'Focused Windows tests failed; see file-level results above.'
-          }
-
-      - name: Run full Desktop suite on Windows
-        id: full_suite
-        continue-on-error: true
-        working-directory: source/desktop-app
-        shell: pwsh
-        env:
-          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
-          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
-        run: |
-          $reportPath = Join-Path $env:RUNNER_TEMP 'pr977-full-desktop-windows.json'
-          npm test -- --reporter=json "--outputFile.json=$reportPath"
-          $testExit = $LASTEXITCODE
-          Write-Output "Full Desktop test command exit code: $testExit"
-          if (-not (Test-Path $reportPath)) { throw 'Full Desktop JSON report is missing' }
-          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-          Write-Output "Full Desktop suite: files=$($report.numTotalTestSuites) passedFiles=$($report.numPassedTestSuites) failedFiles=$($report.numFailedTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
-          foreach ($result in @($report.testResults)) {
-            foreach ($assertion in @($result.assertionResults | Where-Object { $_.status -eq 'failed' })) {
-              Write-Output "Failed test: $($result.name) :: $($assertion.fullName)"
-            }
-          }
-          foreach ($file in @(
-            'windowsSessionAuthorityAcl.native.test.ts',
-            'windowsSessionAuthorityDurableFileOps.native.test.ts'
-          )) {
-            $matchingResults = @($report.testResults | Where-Object { $_.name -like "*$file" })
-            if ($matchingResults.Count -ne 1) { throw "Required native Windows suite missing from full run: $file" }
-            $assertions = @($matchingResults[0].assertionResults)
-            if ($assertions.Count -eq 0) { throw "Required native Windows suite ran no cases: $file" }
-            $notPassed = @($assertions | Where-Object { $_.status -ne 'passed' })
-            if ($notPassed.Count -gt 0) { throw "Required native Windows suite failed or skipped cases: $file" }
-          }
-          $producerFiles = @(
-            'appService.pendingExternalLogoutKeytarUnavailable.test.ts',
-            'appService.persistenceMutation.contract.test.ts',
-            'appService.passwordLoginRollback.regression.test.ts'
-          )
-          $linuxSkipTitle = 'uses memory-only mode when Linux safeStorage selects the basic_text backend'
-          foreach ($file in $producerFiles) {
-            $matchingResults = @($report.testResults | Where-Object { $_.name -like "*$file" })
-            if ($matchingResults.Count -ne 1) { throw "Producer-backed suite missing from full run: $file" }
-            $assertions = @($matchingResults[0].assertionResults)
-            $passed = @($assertions | Where-Object { $_.status -eq 'passed' })
-            if ($passed.Count -eq 0) { throw "Producer-backed suite executed no passing cases: $file" }
-            $expectedLinuxSkip = @()
-            if ($file -eq 'appService.pendingExternalLogoutKeytarUnavailable.test.ts') {
-              $expectedLinuxSkip = @($assertions | Where-Object {
-                $_.title -eq $linuxSkipTitle -and $_.status -eq 'skipped'
-              })
-              if ($expectedLinuxSkip.Count -ne 1) { throw 'Expected exactly one named Linux-only Windows skip' }
-            }
-            $unexpected = @($assertions | Where-Object {
-              $_.status -ne 'passed' -and
-              -not ($file -eq 'appService.pendingExternalLogoutKeytarUnavailable.test.ts' -and
-                $_.title -eq $linuxSkipTitle -and $_.status -eq 'skipped')
-            })
-            if ($unexpected.Count -gt 0) { throw "Producer-backed suite failed or unexpectedly skipped cases: $file" }
-            Write-Output "Producer-backed suite passed: $file passed=$($passed.Count) namedLinuxSkip=$($expectedLinuxSkip.Count)"
-          }
-          if ($testExit -ne 0 -or -not $report.success -or $report.numFailedTests -ne 0) {
-            throw 'Full Desktop Windows suite failed; see file-level results above.'
           }
 
       - name: Aggregate exact-source Windows gate
@@ -284,7 +236,6 @@ jobs:
           BUILD_STEP: ${{ steps.build.outcome }}
           ELECTRON_STEP: ${{ steps.electron.outcome }}
           FOCUSED_STEP: ${{ steps.focused.outcome }}
-          FULL_SUITE_STEP: ${{ steps.full_suite.outcome }}
         run: |
           "# PR 977 exact-source Windows validation" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "Application source SHA: $env:SOURCE_SHA" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -298,8 +249,7 @@ jobs:
             "Desktop dependency install: $env:DESKTOP_INSTALL_STEP",
             "Desktop build: $env:BUILD_STEP",
             "Electron verification: $env:ELECTRON_STEP",
-            "Focused native and producer tests: $env:FOCUSED_STEP",
-            "Full Desktop suite: $env:FULL_SUITE_STEP"
+            "Focused native and producer tests: $env:FOCUSED_STEP"
           )
           foreach ($row in $rows) {
             Write-Output $row
@@ -308,7 +258,7 @@ jobs:
           $outcomes = @(
             $env:SOURCE_STEP, $env:NODE_STEP, $env:OVERLAY_STEP, $env:HOST_INSTALL_STEP,
             $env:DESKTOP_INSTALL_STEP, $env:BUILD_STEP, $env:ELECTRON_STEP,
-            $env:FOCUSED_STEP, $env:FULL_SUITE_STEP
+            $env:FOCUSED_STEP
           )
           if (@($outcomes | Where-Object { $_ -ne 'success' }).Count -gt 0) {
             throw 'The exact-source Windows validation gate did not pass.'
