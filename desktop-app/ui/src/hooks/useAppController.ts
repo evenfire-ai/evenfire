@@ -231,12 +231,10 @@ export function useAppController() {
   // here (see refreshAuthenticatedData / handleLogout / switchTeamForWorkspace).
   const connectorsData = useConnectorsController()
   const teamsData = useTeamsDataController()
-  // The authenticated principal's own team: the ONE place `me.teamId` is read.
-  // The chat-list cache scope (`currentTeamId`) may fall back to the display
-  // directory when it is empty; the delete fence (`chatAuthorityTeamId`) never
-  // does, because a directory team was never proven to be the session's.
-  const principalTeamId = auth.me?.teamId ?? ''
-  const currentTeamId = principalTeamId || teamsData.currentTeamId || ''
+  // The authenticated session is the authority for the active team. Directory
+  // state may list available teams, but it cannot assign one when /me has none.
+  const principalTeamId = String(auth.me?.teamId ?? '').trim()
+  const currentTeamId = principalTeamId
   const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
   const authenticatedPrincipalIdentity =
     auth.isAuthenticated && auth.me
@@ -745,19 +743,20 @@ export function useAppController() {
         auth.setIsAuthenticated(true)
         auth.setMe(sessionState.me)
         auth.setEmail(sessionState.me.email || '')
-        currentTeamIdRef.current = sessionState.me.teamId || teamId
-        const switchedIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        const activeTeamId = String(sessionState.me.teamId ?? '').trim()
+        currentTeamIdRef.current = activeTeamId
+        const switchedIdentity = `${sessionState.me.id}:${sessionState.me.email}:${activeTeamId}`
         activeAuthenticatedSessionIdentityRef.current = switchedIdentity
         authenticatedSessionIdentityRef.current = switchedIdentity
         // Team switching owns a complete foreground refresh. If it invalidated
         // the login-time post-paint callback, re-enable deferred menu data here.
         setPostPaintDataReady(true)
         await refreshAuthenticatedData()
-        if (announce) {
+        if (announce && activeTeamId) {
           const teamName =
-            teamsData.teams.find(team => team.id === teamId)?.name ||
+            teamsData.teams.find(team => team.id === activeTeamId)?.name ||
             sessionState.me.teamName ||
-            teamId
+            activeTeamId
           fullSetStatus(`Switched team to ${teamName}.`, 'success')
         }
       } finally {
@@ -881,6 +880,7 @@ export function useAppController() {
         }
         auth.setIsAuthenticated(authenticated)
         auth.setMe(sessionState.me)
+        currentTeamIdRef.current = authenticated ? String(sessionState.me?.teamId ?? '').trim() : ''
 
         if (!authenticated || !sessionState.me) {
           setPostPaintDataReady(false)

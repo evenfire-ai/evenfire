@@ -139,9 +139,9 @@ describe('useAppController team context', () => {
 
     await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
     await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
-    // Witness: the directory team is visible to the rest of the app, so a
-    // fallback to it would have a value to use.
-    expect(app.result.current.currentTeamId).toBe(meTeamId || 'team-dir')
+    // The directory still contains a team, but it is not authority to assign
+    // this authenticated session to one when /me has no active team.
+    expect(app.result.current.currentTeamId).toBe(expectedTeamId || '')
 
     await act(async () => {
       await app.result.current.captureChatDeleteFence('agent-x')
@@ -153,6 +153,30 @@ describe('useAppController team context', () => {
       userId: HARNESS_ME.id,
       teamId: expectedTeamId,
     })
+  })
+
+  it('keeps the principal signed in and clears the active team when /me revokes it', async () => {
+    const { handle } = installAppControllerClerum({
+      teamDirectory: { items: [], currentTeamId: 'team-dir' },
+    })
+    const app = renderAppController()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    handle.getSessionState.mockResolvedValueOnce({
+      authenticated: true,
+      me: { ...HARNESS_ME, teamId: null, teamName: null },
+    })
+    await act(async () => {
+      await app.result.current.loadSession({ preserveNav: true })
+    })
+
+    expect(app.result.current.isAuthenticated).toBe(true)
+    expect(app.result.current.me?.id).toBe(HARNESS_ME.id)
+    expect(app.result.current.me?.teamId).toBeNull()
+    expect(app.result.current.currentTeamId).toBe('')
   })
 
   // The cache scope (`currentTeamId`) and the delete fence read `me.teamId`

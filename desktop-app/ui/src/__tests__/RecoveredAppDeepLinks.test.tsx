@@ -404,6 +404,11 @@ vi.mock('@components/ChatDrawer', () => ({
   ChatDrawer: ({ children }: { children: ReactNode }) => <>{children}</>,
 }))
 vi.mock('@components/Common', () => ({
+  StatusBanner: (props: { tone: string; text?: string; children?: ReactNode }) => (
+    <div role="status" data-tone={props.tone}>
+      {props.text ?? props.children}
+    </div>
+  ),
   Button: (props: Record<string, unknown>) => (
     <button
       aria-controls={props['aria-controls'] as string | undefined}
@@ -1042,6 +1047,29 @@ describe('App deep-link orchestration', () => {
     expect(cancelSwitch).toHaveBeenCalledOnce()
     act(() => confirmDialogHarness.props?.onConfirm())
     expect(confirmSwitch).toHaveBeenCalledOnce()
+  })
+
+  it('shows an explicit no-team state without signing out the principal', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      isAuthenticated: true,
+      me: {
+        id: 'user-a',
+        email: 'user-a@example.com',
+        name: 'User A',
+        picture: null,
+        teamId: null,
+        teamName: null,
+        role: null,
+      },
+      currentTeamId: '',
+    } as Partial<AppController>)
+
+    render(<App />)
+
+    expect(screen.getByRole('status').textContent).toContain(
+      'You’re signed in, but this session has no active team.'
+    )
   })
 
   beforeEach(() => {
