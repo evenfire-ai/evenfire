@@ -1349,6 +1349,7 @@ describe('FilesPage Move permission generation fencing', () => {
           undefined
         )
         expect(pushToast).not.toHaveBeenCalled()
+        invalidateQueries.mockClear()
 
         view.unmount()
         await act(async () => finishMove(moveReceipt))
