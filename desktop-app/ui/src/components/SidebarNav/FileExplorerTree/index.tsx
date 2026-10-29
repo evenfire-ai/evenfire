@@ -31,7 +31,6 @@ import {
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
-import { suggestNumberedMoveName } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
@@ -497,8 +496,6 @@ export function FileExplorerTree({
     gestureGeneration: number
     sessionGeneration: number | null
     destination: { resourceId: string; name: string }
-    allowNumberedRename: boolean
-    suggestedName?: string
   } | null>(null)
   const [moveDialogTarget, setMoveDialogTarget] = useState<{
     node: GfsBrowserChild
@@ -876,23 +873,16 @@ export function FileExplorerTree({
           return
         }
         if (source.kind === 'directory') {
-          const occupied = cachedDestinationNames(node.resourceId)
-          const suggested = suggestNumberedMoveName(source.name, occupied)
           setPendingFolderMove({
             source,
             gestureGeneration: epoch,
             sessionGeneration,
             destination: { resourceId: node.resourceId, name: node.name },
-            allowNumberedRename: decision.allowNumberedRename,
-            ...(suggested !== undefined ? { suggestedName: suggested } : {}),
           })
           return
         }
-        await commitMove(
-          source,
-          { resourceId: node.resourceId, name: node.name },
-          decision.allowNumberedRename,
-          () => ownsDrop(source, epoch, sessionGeneration)
+        await commitMove(source, { resourceId: node.resourceId, name: node.name }, false, () =>
+          ownsDrop(source, epoch, sessionGeneration)
         )
       } finally {
         finishNodeDropCleanup(source, epoch, sessionGeneration)
@@ -1163,20 +1153,16 @@ export function FileExplorerTree({
           request={{
             sourceName: displayName(pendingFolderMove.source.name),
             destinationName: displayName(pendingFolderMove.destination.name),
-            canRename: pendingFolderMove.allowNumberedRename,
-            ...(pendingFolderMove.suggestedName !== undefined
-              ? { suggestedName: pendingFolderMove.suggestedName }
-              : {}),
           }}
           onCancel={() => setPendingFolderMove(null)}
-          onConfirm={({ allowNumberedRename }) => {
+          onConfirm={() => {
             const pending = pendingFolderMove
             setPendingFolderMove(null)
             if (
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void commitMove(pending.source, pending.destination, allowNumberedRename, () =>
+              void commitMove(pending.source, pending.destination, false, () =>
                 ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
               )
             }
@@ -1192,7 +1178,6 @@ export function FileExplorerTree({
           onMove={async (destinationId, destinationName) => {
             setMovePermissionStatus(null)
             const target = moveDialogTarget
-            const allowNumberedRename = await adjudication.probeSourceWrite(target.node.resourceId)
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,
@@ -1212,7 +1197,7 @@ export function FileExplorerTree({
             const outcome = await commitMove(
               source,
               { resourceId: destinationId, name: destinationName },
-              allowNumberedRename
+              false
             )
             if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
               setMoveDialogTarget(null)
