@@ -137,7 +137,11 @@ async function requireLegacyRpcSessionRateLimitContext(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const sessionToken = String(req.body?.sessionToken || '').trim()
+  const body = (req.body ?? {}) as { sessionToken?: unknown }
+  // A non-string value is an invalid token, never a value to coerce: String()
+  // on a hostile object throws inside an async middleware, which Express 4 does
+  // not catch.
+  const sessionToken = typeof body.sessionToken === 'string' ? body.sessionToken.trim() : ''
   if (!sessionToken || sessionToken.length > 4096) {
     res.status(401).json({ error: 'Unauthorized' })
     return

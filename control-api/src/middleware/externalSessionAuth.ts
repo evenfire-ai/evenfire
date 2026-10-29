@@ -69,7 +69,11 @@ function extractUserSessionToken(req: Request): string {
 
 function extractRouteSessionToken(req: Request): string {
   const body = (req.body ?? {}) as { token?: unknown; sessionToken?: unknown }
-  return String(req.header('x-user-session-token') || body.token || body.sessionToken || '').trim()
+  const selected = req.header('x-user-session-token') || body.token || body.sessionToken || ''
+  // A non-string body value is an invalid token, never a value to coerce:
+  // String() on a hostile object throws before this request reaches its 401
+  // boundary, and an async rejection is not caught by Express 4.
+  return typeof selected === 'string' ? selected.trim() : ''
 }
 
 function sendSessionAuthenticationError(
