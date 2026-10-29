@@ -1,7 +1,8 @@
 import { type DbClient, pool } from '../../db.js'
 import { type InviteRole, normalizeTeamRoleInput } from './types.js'
 
-export const INVITATION_TTL_HOURS = 48
+export const INVITATION_TTL_HOURS = 7 * 24
+const PASSWORD_RESET_INVITATION_TTL_HOURS = 48
 
 export type InvitationRow = {
   id: string
@@ -320,6 +321,8 @@ export async function insertInvitationForTeams(
   const fallbackRole =
     normalizeTeamRoleInput(input.fallbackRole) || primaryAssignment?.role || 'member'
   const purpose = normalizeInvitationPurpose(input.purpose)
+  const ttlHours =
+    purpose === 'password_reset' ? PASSWORD_RESET_INVITATION_TTL_HOURS : INVITATION_TTL_HOURS
   const invited = await db.query(
     `WITH inserted AS (
        INSERT INTO invitations(team_id, invitee_name, email, role, token, status, purpose, expires_at)
@@ -348,7 +351,7 @@ export async function insertInvitationForTeams(
       primaryAssignment?.role || fallbackRole,
       input.status,
       purpose,
-      String(INVITATION_TTL_HOURS),
+      String(ttlHours),
     ]
   )
   const invitation = invited.rows[0] as InvitationRow

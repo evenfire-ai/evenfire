@@ -10,7 +10,7 @@ export type GfsDriveResource = GfsBrowserChild & {
 
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */
-  pushToast?: (message: string, tone: Tone) => void
+  pushToast?: (message: string, tone: Tone, options?: { durationMs?: number }) => void
   /**
    * A `gfs://` link handed over from elsewhere in the app — today, a plugin
    * asking to open a resource this page can show better than an overlay can

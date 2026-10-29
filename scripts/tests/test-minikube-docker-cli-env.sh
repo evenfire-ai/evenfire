@@ -295,6 +295,10 @@ STUB
   export T2_PROFILE=fixture-profile
   export T2_CONTEXT=fixture-profile
   export MINIKUBE_PROFILE=fixture-profile
+  # Image-reuse scenarios must not inherit the caller's Playwright build options.
+  export MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE=true
+  export MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY=private
+  export MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE=us-central1-docker.pkg.dev/fixture-project/fixture-registry/playwright-server:test
 }
 
 assert_endpoint_resolution_and_context_precedence() {
@@ -635,14 +639,14 @@ assert_local_image_operations_preserve_status() {
   : >"$DOCKER_LOG"
   status=0
   DOCKER_CONFIG="$AMBIENT_CONFIG" \
-    FAKE_DOCKER_MODE=exit FAKE_DOCKER_MATCH='images -q node:24-alpine' \
+    FAKE_DOCKER_MODE=exit FAKE_DOCKER_MATCH='images -q node:24.22.1-alpine' \
     FAKE_DOCKER_EXIT_CODE=42 \
     bash "$fixture/scripts/minikube/build-images.sh" --only=control-api \
       >"$output" 2>&1 || status=$?
   if [[ "$status" -eq 42 ]] \
     && grep -Fq 'label=docker-images-query event=exit' "$output" \
     && grep -Fq 'exitCode=42' "$output" \
-    && ! grep -Fq '|pull node:24-alpine' "$DOCKER_LOG"; then
+    && ! grep -Fq '|pull node:24.22.1-alpine' "$DOCKER_LOG"; then
     pass "bounded base-image inventory preserves status and never falls through to pull"
   else
     fail "base-image inventory status/fallback contract failed (status=$status)"

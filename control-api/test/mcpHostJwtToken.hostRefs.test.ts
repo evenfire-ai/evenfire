@@ -11,6 +11,7 @@ import {
   getMcpHostCallerKey,
   getMcpHostExpiredRefreshRateLimitKey,
   getMcpHostRefreshRateLimitKey,
+  isHccControlLineage,
   isHostRefAuthorized,
   issueMcpHostAccessJwt,
   issueMcpHostControlJwt,
@@ -278,6 +279,104 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
       expect(() => issueMcpHostControlJwt('ns', 'recipe', [hostRef])).toThrow(
         'invalid mcp-host hostRefs'
       )
+    })
+
+    it('F2a: signs host_uid, never mcpCapabilities, and keeps oauth:user-token for an HCC credential', () => {
+      const out = issueMcpHostControlJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+        scopes: ['workflow:list', 'oauth:user-token'],
+        hccCredential: { hostUid: 'uid-chatllm-1' },
+      })
+      const decoded = jwt.decode(out.token) as Record<string, unknown>
+      expect(decoded.host_uid).toBe('uid-chatllm-1')
+      expect(decoded.mcpCapabilities).toBeUndefined()
+      expect(decoded.scopes).toEqual(['workflow:list', 'oauth:user-token'])
+      expect(out.scopeStripped).toBe(false)
+    })
+
+    it('E1: strips oauth:user-token without an HCC credential and reports it', () => {
+      const out = issueMcpHostControlJwt('sandbox-recipes', 'crm', undefined, {
+        scopes: ['workflow:list', 'oauth:user-token'],
+      })
+      const decoded = jwt.decode(out.token) as Record<string, unknown>
+      expect(decoded.scopes).toEqual(['workflow:list'])
+      expect(decoded.host_uid).toBeUndefined()
+      expect(out.scopeStripped).toBe(true)
+      expect(out.expiresInSeconds).toBe(config.mcpHostJwtControlTtlSec)
+    })
+
+    it('reports no strip when the broker scope was never requested', () => {
+      const out = issueMcpHostControlJwt('sandbox-recipes', 'crm', undefined, {
+        scopes: ['workflow:list'],
+      })
+      expect(out.scopeStripped).toBe(false)
+    })
+
+    it.each([
+      {
+        label: 'non-hosts namespace',
+        ns: 'sandbox-recipes',
+        name: 'standalone',
+        refs: ['chatllm'],
+      },
+      { label: 'non-standalone recipe', ns: 'HOSTS', name: 'crm', refs: ['chatllm'] },
+      { label: 'namespaced hostRef', ns: 'HOSTS', name: 'standalone', refs: ['mcp-host/chatllm'] },
+      { label: 'two hostRefs', ns: 'HOSTS', name: 'standalone', refs: ['a', 'b'] },
+    ])('refuses to sign an HCC credential on a non-HCC lineage ($label)', ({ ns, name, refs }) => {
+      const namespace = ns === 'HOSTS' ? config.hostsNamespace : ns
+      expect(() =>
+        issueMcpHostControlJwt(namespace, name, refs, {
+          scopes: ['oauth:user-token'],
+          hccCredential: { hostUid: 'uid-1' },
+        })
+      ).toThrow('invalid HCC mcp-host credential lineage')
+    })
+
+    it('refuses to sign a malformed HCC host uid', () => {
+      expect(() =>
+        issueMcpHostControlJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+          hccCredential: { hostUid: 'bad uid' },
+        })
+      ).toThrow('invalid HCC mcp-host credential lineage')
+    })
+  })
+
+  describe('isHccControlLineage', () => {
+    const base = { recipeNamespace: config.hostsNamespace, recipeName: 'standalone' }
+
+    it('accepts a single bare Host name in the hosts namespace standalone lineage', () => {
+      expect(isHccControlLineage({ ...base, hostRefs: ['chatllm'] }, config.hostsNamespace)).toBe(
+        true
+      )
+      expect(
+        isHccControlLineage({ ...base, hostRefs: ['a'.repeat(63)] }, config.hostsNamespace)
+      ).toBe(true)
+    })
+
+    it.each([
+      {
+        label: 'wrc recipe binding',
+        claims: {
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'crm',
+          hostRefs: ['sandbox-recipes/crm'],
+        },
+      },
+      { label: 'legacy namespaced ref', claims: { ...base, hostRefs: ['mcp-host/standalone'] } },
+      { label: 'reserved standalone', claims: { ...base, hostRefs: ['standalone'] } },
+      { label: 'two hostRefs', claims: { ...base, hostRefs: ['a', 'b'] } },
+      {
+        label: 'non-standalone recipe',
+        claims: { ...base, recipeName: 'other', hostRefs: ['chatllm'] },
+      },
+      {
+        label: 'other namespace',
+        claims: { ...base, recipeNamespace: 'elsewhere', hostRefs: ['chatllm'] },
+      },
+      { label: 'uppercase', claims: { ...base, hostRefs: ['ChatLLM'] } },
+      { label: 'over 63 chars', claims: { ...base, hostRefs: ['a'.repeat(64)] } },
+      { label: 'empty hostRefs', claims: { ...base, hostRefs: [] as string[] } },
+    ])('rejects $label', ({ claims }) => {
+      expect(isHccControlLineage(claims, config.hostsNamespace)).toBe(false)
     })
   })
 
@@ -641,9 +740,69 @@ describe('mcpHostJwtToken — hostRefs JWT claim', () => {
       const claims = verifyMcpHostControlJwt(token)
       expect(claims).not.toBeNull()
       expect(claims!.typ).toBe('service')
-      expect(claims!.scopes).toEqual(ALL_MCP_HOST_CONTROL_SCOPES)
+      // Without an HCC credential the broker scope never reaches the control token.
+      expect(claims!.scopes).toEqual(
+        ALL_MCP_HOST_CONTROL_SCOPES.filter(scope => scope !== 'oauth:user-token')
+      )
       expect(claims!.aud).toBe('mcp-host')
       expect(claims!.hostRefs).toEqual(['ns1/recipe1', 'ns2/recipe2'])
+      expect(claims!.host_uid).toBeUndefined()
+    })
+
+    it('F2f: exposes the host_uid of an HCC control token', () => {
+      const { token } = issueMcpHostControlJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+        scopes: ['oauth:user-token'],
+        hccCredential: { hostUid: 'uid-chatllm-1' },
+      })
+      const claims = verifyMcpHostControlJwt(token)
+      expect(claims?.host_uid).toBe('uid-chatllm-1')
+      expect(claims?.scopes).toEqual(['oauth:user-token'])
+    })
+
+    it.each([
+      { label: 'empty', hostUid: '' },
+      { label: 'padded', hostUid: ' uid-1 ' },
+      { label: 'illegal characters', hostUid: 'uid/1' },
+      { label: 'too long', hostUid: 'u'.repeat(129) },
+      { label: 'non-string', hostUid: 42 },
+    ])('F2f: rejects a control token whose host_uid is malformed ($label)', ({ hostUid }) => {
+      // Forged on purpose: the issuer refuses to sign a malformed uid.
+      const token = jwt.sign(
+        {
+          sub: `${config.hostsNamespace}/standalone`,
+          recipeNamespace: config.hostsNamespace,
+          recipeName: 'standalone',
+          hostRefs: ['chatllm'],
+          typ: 'service',
+          scopes: ['oauth:user-token'],
+          host_uid: hostUid,
+        },
+        config.adminJwtPrivateKey,
+        {
+          algorithm: 'RS256',
+          issuer: config.adminJwtIssuer,
+          audience: 'mcp-host',
+          expiresIn: 300,
+          jwtid: `malformed-host-uid-${hostUid}`,
+        }
+      )
+      expect(verifyMcpHostControlJwt(token)).toBeNull()
+    })
+
+    it('F2f: keeps a control token for a Host named standalone valid (only the broker rejects that lineage)', () => {
+      const { token } = issueMcpHostControlJwt(
+        config.hostsNamespace,
+        'standalone',
+        ['standalone'],
+        {
+          scopes: ['workflow:read'],
+          hccCredential: { hostUid: 'uid-standalone-host' },
+        }
+      )
+      const claims = verifyMcpHostControlJwt(token)
+      expect(claims).not.toBeNull()
+      expect(claims!.host_uid).toBe('uid-standalone-host')
+      expect(isHccControlLineage(claims!, config.hostsNamespace)).toBe(false)
     })
 
     it('rejects a new-format control token with a non-service type', () => {

@@ -169,7 +169,7 @@ describe('Workflow Reconciler Bifurcation', () => {
       kind: 'WorkflowRecipe',
       metadata: { name: 'normal-recipe', namespace: 'sandbox-recipes', uid: 'uid-normal' },
       spec: {
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
       status: { phase: 'approved' },
     }
@@ -199,7 +199,7 @@ describe('Workflow Reconciler Bifurcation', () => {
       metadata: { name: 'normal-recipe', namespace: 'sandbox-recipes', uid: 'uid-normal' },
       spec: {
         resources: [{ id: 'data', type: 'pvc', size: '1Gi' }],
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
       status: { phase: 'approved' },
     }
@@ -234,7 +234,7 @@ describe('Workflow Reconciler Bifurcation', () => {
       metadata: { name: 'normal-recipe', namespace: 'sandbox-recipes', uid: 'uid-normal' },
       spec: {
         resources: [{ id: 'data', type: 'pvc', size: '1Gi' }],
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
       status: { phase: 'approved' },
     }
@@ -266,7 +266,7 @@ describe('Workflow Reconciler Bifurcation', () => {
       metadata: { name: 'normal-recipe', namespace: 'sandbox-recipes', uid: 'uid-normal' },
       spec: {
         resources: [{ id: 'data', type: 'pvc', size: '1Gi' }],
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
       status: { phase: 'approved' },
     }
@@ -290,7 +290,7 @@ describe('Workflow Reconciler Bifurcation', () => {
       metadata: { name: 'normal-recipe', namespace: 'sandbox-recipes', uid: 'uid-normal' },
       spec: {
         resources: [{ id: 'data', type: 'pvc', size: '1Gi' }],
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
       status: { phase: 'active' }, // legacy phase → adoption eligible
     }
@@ -315,7 +315,7 @@ describe('Workflow Reconciler Bifurcation', () => {
       metadata: { name: 'normal-recipe', namespace: 'sandbox-recipes', uid: 'uid-normal' },
       spec: {
         resources: [{ id: 'data', type: 'pvc', size: '1Gi' }],
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
       status: { phase: 'active' },
     }
@@ -349,7 +349,7 @@ describe('Workflow Reconciler Bifurcation', () => {
       metadata: { name: 'normal-recipe', namespace: 'sandbox-recipes', uid: 'uid-normal' },
       spec: {
         resources: [{ id: 'creds', type: 'secret', data: { k: 'v' } }],
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
       status: { phase: 'approved' },
     }
@@ -389,7 +389,7 @@ describe('Workflow Reconciler Bifurcation', () => {
       metadata: { name: 'normal-recipe', namespace: 'sandbox-recipes', uid: 'uid-normal' },
       spec: {
         resources: [{ id: 'gen-creds', type: 'secret', generateKeys: ['token'] }],
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
       status: { phase: 'approved' },
     }

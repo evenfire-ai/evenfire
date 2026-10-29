@@ -62,7 +62,7 @@ spec:
   workloads:
     - id: evil
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
 YAML
 
 cat > "$TMP_POS" <<YAML

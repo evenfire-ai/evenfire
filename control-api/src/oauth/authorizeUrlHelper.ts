@@ -172,7 +172,8 @@ async function mintAuthorizeUrl(
   // Remote lane (`source:'remote'`): the authorize URL is built from the pinned
   // discovery-derived `authorizationEndpoint` with a PUBLIC client_id (`decl.id`,
   // backfilled for every mode — DEC-23), mandatory PKCE S256, and RFC 8707
-  // `resource`. No secret material rides the URL and no K8s Secret is read.
+  // `resource` unless the authorization-server profile omits it. No secret material
+  // rides the URL and no K8s Secret is read.
   if (decl.remote) {
     const state = signOAuthState(deps.stateSecret, stateInput)
     const codeChallenge = computeCodeChallengeS256(deriveCodeVerifier(deps.stateSecret, state))

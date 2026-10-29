@@ -10,11 +10,17 @@ import {
 } from '@testing-library/react'
 import {
   apiSend,
+  deleteMcpSecret,
   deleteRecipeSecret,
   getMcpServers,
   getRecipeSecrets,
   getRecipes,
+  listMcpSecrets,
 } from '../../lib/api'
+import {
+  buildDirectCrdMcpServerReference,
+  buildRegistryMcpServerReference,
+} from '../../test/fixtures/mcpServer'
 import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { SecretsTable } from '../SecretsTable'
 import { ToastProvider } from '../Toast'
@@ -31,26 +37,36 @@ vi.mock('../../lib/api', async () => {
   return {
     ...actual,
     apiSend: vi.fn(),
+    deleteMcpSecret: vi.fn(),
     deleteRecipeSecret: vi.fn(),
     getMcpServers: vi.fn(),
     getRecipeSecrets: vi.fn(),
     getRecipes: vi.fn(),
+    listMcpSecrets: vi.fn(),
   }
 })
 
 const apiSendMock = vi.mocked(apiSend)
+const deleteMcpSecretMock = vi.mocked(deleteMcpSecret)
 const deleteRecipeSecretMock = vi.mocked(deleteRecipeSecret)
 const getMcpServersMock = vi.mocked(getMcpServers)
 const getRecipeSecretsMock = vi.mocked(getRecipeSecrets)
 const getRecipesMock = vi.mocked(getRecipes)
+const listMcpSecretsMock = vi.mocked(listMcpSecrets)
 
 // apiSend is the shared write path for every scope in this table, so its state
 // is reset for the whole file rather than per describe.
 beforeEach(() => {
   apiSendMock.mockReset()
   apiSendMock.mockResolvedValue(undefined as never)
+  deleteMcpSecretMock.mockReset()
+  deleteMcpSecretMock.mockResolvedValue(undefined as never)
   deleteRecipeSecretMock.mockReset()
   deleteRecipeSecretMock.mockResolvedValue(undefined as never)
+  // The provisioned listing defaults to empty; connector tests that care
+  // about unreferenced secrets or delete identity override it explicitly.
+  listMcpSecretsMock.mockReset()
+  listMcpSecretsMock.mockResolvedValue({ items: [] })
 })
 
 function renderTable(
@@ -139,23 +155,15 @@ describe('SecretsTable — connector marketplace source', () => {
   })
 
   it('derives registryEntries from catalog-id/version ANNOTATIONS (org-scoped install)', async () => {
+    const connector = buildRegistryMcpServerReference({
+      name: 'newtenantwf-conn',
+      catalogId: '@newtenantwf/conn',
+      catalogVersion: '1.0.0',
+    })
+    expect(connector.spec?.managed).toBe(true)
+    expect(connector.spec?.envSecret?.keys).toEqual([{ secretKey: 'api-key', envVar: 'api-key' }])
     getMcpServersMock.mockResolvedValue({
-      items: [
-        {
-          metadata: {
-            name: 'newtenantwf-conn',
-            annotations: {
-              'clerum.io/catalog-id': '@newtenantwf/conn',
-              'clerum.io/catalog-version': '1.0.0',
-            },
-            labels: {
-              'clerum.io/managed-by': 'control-api',
-              'clerum.io/server-mode': 'local',
-            },
-          },
-          spec: { envSecret: { name: 'newtenantwf-conn-credentials' } },
-        },
-      ],
+      items: [connector],
     })
 
     renderTable()
@@ -163,22 +171,22 @@ describe('SecretsTable — connector marketplace source', () => {
     await waitFor(() => {
       expect(screen.getByText(/@newtenantwf\/conn@1\.0\.0/)).toBeTruthy()
     })
+    const row = screen.getByText('newtenantwf-conn-credentials').closest('tr')!
+    expect(within(row).getByText('1 server(s): newtenantwf-conn')).toBeInTheDocument()
   })
 
   it('still derives registryEntries from LABELS for legacy (pre-annotation) installs', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: {
-            name: 'legacy-conn',
-            labels: {
-              'clerum.io/catalog-id': 'mcp-filesystem',
-              'clerum.io/catalog-version': '2.3.0',
-              'clerum.io/managed-by': 'control-api',
-            },
+        buildDirectCrdMcpServerReference({
+          name: 'legacy-conn',
+          secretName: 'legacy-conn-credentials',
+          labels: {
+            'clerum.io/catalog-id': 'mcp-filesystem',
+            'clerum.io/catalog-version': '2.3.0',
+            'clerum.io/managed-by': 'control-api',
           },
-          spec: { envSecret: { name: 'legacy-conn-credentials' } },
-        },
+        }),
       ],
     })
 
@@ -192,21 +200,19 @@ describe('SecretsTable — connector marketplace source', () => {
   it('prefers ANNOTATIONS over LABELS when both are present', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: {
-            name: 'both-conn',
-            annotations: {
-              'clerum.io/catalog-id': '@org/new',
-              'clerum.io/catalog-version': '9.9.9',
-            },
-            labels: {
-              'clerum.io/catalog-id': 'stale',
-              'clerum.io/catalog-version': '0.0.1',
-              'clerum.io/managed-by': 'control-api',
-            },
+        buildDirectCrdMcpServerReference({
+          name: 'both-conn',
+          secretName: 'both-conn-credentials',
+          annotations: {
+            'clerum.io/catalog-id': '@org/new',
+            'clerum.io/catalog-version': '9.9.9',
           },
-          spec: { envSecret: { name: 'both-conn-credentials' } },
-        },
+          labels: {
+            'clerum.io/catalog-id': 'stale',
+            'clerum.io/catalog-version': '0.0.1',
+            'clerum.io/managed-by': 'control-api',
+          },
+        }),
       ],
     })
 
@@ -216,6 +222,35 @@ describe('SecretsTable — connector marketplace source', () => {
       expect(screen.getByText(/@org\/new@9\.9\.9/)).toBeTruthy()
     })
     expect(screen.queryByText(/stale@0\.0\.1/)).toBeNull()
+  })
+
+  it('lists a newly created connector secret that no server references yet', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({
+          name: 'attached-conn',
+          secretName: 'attached-conn-credentials',
+        }),
+      ],
+    })
+    listMcpSecretsMock.mockResolvedValue({
+      items: [
+        { name: 'attached-conn-credentials', keys: ['api-key'] },
+        { name: 'brand-new-conn-credentials', keys: ['api-key'] },
+      ],
+    })
+
+    renderTable()
+
+    const freshRow = await waitFor(() => {
+      const row = screen.getByText('brand-new-conn-credentials').closest('tr')!
+      expect(row).toBeTruthy()
+      return row
+    })
+    expect(within(freshRow).getByText('Not yet attached to a connector.')).toBeInTheDocument()
+    expect(within(freshRow).getByText('Created manually or source unknown.')).toBeInTheDocument()
+    const attachedRow = screen.getByText('attached-conn-credentials').closest('tr')!
+    expect(within(attachedRow).getByText('1 server(s): attached-conn')).toBeInTheDocument()
   })
 })
 
@@ -436,6 +471,253 @@ describe('SecretsTable — recipe pending refs', () => {
   })
 })
 
+describe('SecretsTable — connector row actions', () => {
+  beforeEach(() => {
+    getMcpServersMock.mockReset()
+    getRecipeSecretsMock.mockReset()
+    getRecipesMock.mockReset()
+    mockReplace.mockClear()
+    mockPush.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  function mockConnectorRow(identity?: { uid?: string; resourceVersion?: string }) {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({
+          name: 'linear-conn',
+          secretName: 'linear-credentials',
+          annotations: {
+            'clerum.io/catalog-id': 'mcp-linear',
+            'clerum.io/catalog-version': '1.4.0',
+          },
+        }),
+      ],
+    })
+    if (identity) {
+      listMcpSecretsMock.mockResolvedValue({
+        items: [{ name: 'linear-credentials', keys: ['api-key'], ...identity }],
+      })
+    }
+  }
+
+  async function openRowMenu() {
+    const trigger = await screen.findByRole('button', {
+      name: 'Actions for connector secret linear-credentials',
+    })
+    fireEvent.click(trigger)
+  }
+
+  it('offers Update and enabled Delete, and no create-flow Add, on an existing secret', async () => {
+    mockConnectorRow({
+      uid: 'uid-linear-1',
+      resourceVersion: '42',
+    })
+    renderTable()
+    await openRowMenu()
+
+    expect(screen.getByRole('menuitem', { name: 'Update' })).toBeEnabled()
+    expect(screen.getByRole('menuitem', { name: /^Delete/ })).toBeEnabled()
+    // The Secret exists (the listing returned it); the create flow would 409.
+    expect(screen.queryByRole('menuitem', { name: 'Add' })).toBeNull()
+  })
+
+  it('routes Add to the create flow only for a referenced but missing secret', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({
+          name: 'ghost-conn',
+          secretName: 'ghost-credentials',
+        }),
+      ],
+    })
+    renderTable()
+
+    const trigger = await screen.findByRole('button', {
+      name: 'Actions for connector secret ghost-credentials',
+    })
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add' }))
+
+    expect(mockPush).toHaveBeenCalledWith('/secrets/new?scope=mcp&name=ghost-credentials')
+  })
+
+  it('deletes a connector secret through its live identity after confirmation', async () => {
+    mockConnectorRow({
+      uid: 'uid-linear-1',
+      resourceVersion: '42',
+    })
+    deleteMcpSecretMock.mockResolvedValue({ name: 'linear-credentials', namespace: 'mcp-servers' })
+    renderTable()
+    await openRowMenu()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Delete/ }))
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(deleteMcpSecretMock).toHaveBeenCalledWith('linear-credentials', {
+        uid: 'uid-linear-1',
+        resourceVersion: '42',
+      })
+    })
+  })
+
+  it('keeps Delete disabled without a listing-provided identity', async () => {
+    mockConnectorRow()
+    renderTable()
+    await openRowMenu()
+
+    const deleteAction = screen.getByRole('menuitem', { name: /^Delete/ })
+    expect(deleteAction).toHaveAttribute('aria-disabled', 'true')
+    expect(
+      screen.getByText('Refresh to load this Secret identity before deleting it.')
+    ).toBeInTheDocument()
+
+    fireEvent.click(deleteAction)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(apiSendMock).not.toHaveBeenCalled()
+  })
+
+  it('navigates Update to the connector secret edit page for its attached connector', async () => {
+    mockConnectorRow()
+    renderTable()
+    await openRowMenu()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+
+    expect(mockPush).toHaveBeenCalledWith(
+      '/secrets/connector/linear-credentials/edit?server=linear-conn'
+    )
+  })
+
+  it('navigates Update without a server filter when several connectors share the secret', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({ name: 'conn-a', secretName: 'shared-credentials' }),
+        buildDirectCrdMcpServerReference({ name: 'conn-b', secretName: 'shared-credentials' }),
+      ],
+    })
+    renderTable()
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for connector secret shared-credentials' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+
+    expect(mockPush).toHaveBeenCalledWith('/secrets/connector/shared-credentials/edit')
+  })
+
+  it('keeps a non-canonical Secret reference distinct from its trimmed name', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({
+          name: 'canonical-conn',
+          secretName: 'linear-credentials',
+        }),
+        buildDirectCrdMcpServerReference({
+          name: 'stale-conn',
+          secretName: '  linear-credentials  ',
+        }),
+      ],
+    })
+    renderTable()
+
+    const malformedIdentity = await screen.findByText(
+      (_, element) =>
+        element?.tagName === 'CODE' && element.textContent === '"  linear-credentials  "'
+    )
+    const malformedRow = malformedIdentity.closest('tr')!
+    const canonicalRow = screen.getByText('linear-credentials').closest('tr')!
+    expect(within(malformedRow).getByText('1 server(s): stale-conn')).toBeInTheDocument()
+    expect(within(canonicalRow).getByText('1 server(s): canonical-conn')).toBeInTheDocument()
+    expect(within(canonicalRow).queryByText(/stale-conn/)).not.toBeInTheDocument()
+
+    fireEvent.click(within(malformedRow).getByRole('button'))
+    expect(screen.getByRole('menuitem', { name: /^Add/ })).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    expect(mockPush).toHaveBeenCalledWith(
+      '/secrets/connector/%20%20linear-credentials%20%20/edit?server=stale-conn'
+    )
+    expect(apiSendMock).not.toHaveBeenCalled()
+  })
+
+  it('still prefills the create flow from the row Add action', async () => {
+    mockConnectorRow()
+    renderTable()
+    await openRowMenu()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add' }))
+
+    expect(mockPush).toHaveBeenCalledWith(
+      '/secrets/new?scope=mcp&name=linear-credentials&registryEntry=mcp-linear&registryVersion=1.4.0'
+    )
+  })
+
+  it('does not leak the internal connector lifecycle note', async () => {
+    getMcpServersMock.mockResolvedValue({ items: [] })
+    renderTable()
+
+    await screen.findByText('No connector secrets found.')
+    expect(screen.queryByText(/Connector secret lifecycle/i)).toBeNull()
+    expect(screen.queryByText(/requires backend API support/i)).toBeNull()
+  })
+})
+
+describe('SecretsTable — recipe missing-secret hint copy', () => {
+  beforeEach(() => {
+    getMcpServersMock.mockReset()
+    getRecipeSecretsMock.mockReset()
+    getRecipesMock.mockReset()
+    mockReplace.mockClear()
+    mockPush.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('separates "Add" and "on" in the missing-secret hint (BUG-26)', async () => {
+    getRecipeSecretsMock.mockResolvedValue({ items: [] })
+    getRecipesMock.mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'hint-recipe' },
+          spec: {
+            steps: [
+              {
+                id: 'snippet',
+                run: {
+                  type: 'snippet',
+                  capabilities: {
+                    secrets: [{ secretRef: { name: 'hint-creds', key: 'apiKey' } }],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      ],
+    })
+
+    renderTable('recipe')
+
+    const hint = await waitFor(() => {
+      const match = screen
+        .getAllByText((_, element) => element?.classList.contains('cu-banner') ?? false)
+        .find(element =>
+          (element.textContent ?? '').replace(/\s+/g, ' ').includes('Click Add on a Missing row')
+        )
+      if (!match) throw new Error('missing-secret hint banner not rendered yet')
+      return match
+    })
+    expect(hint.textContent?.replace(/\s+/g, ' ')).not.toMatch(/Addon/)
+  })
+})
+
 describe('SecretsTable — LLM empty state', () => {
   it('shows LLM API Keys and LLM Subscriptions as sibling top-level scopes', async () => {
     rtlRender(
@@ -463,5 +745,36 @@ describe('SecretsTable — LLM empty state', () => {
     expect(screen.getByRole('tab', { name: 'Connector' })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: 'Recipe' })).toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: 'API-KEY' })).not.toBeInTheDocument()
+  })
+})
+
+// ─── Connector Secret management guidance ───────────────────────────────────
+//
+// Reusable connector Secrets are assigned from a connector's Credentials tab
+// (Change assigned Secret) or during connector creation. The Connectors scope
+// header is where operators look first, so it carries that pointer instead of
+// the generic one-liner.
+describe('SecretsTable — connector Secret management guidance', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('points at assignment from creation and the Credentials tab in the Connectors scope', () => {
+    renderTable('mcp')
+
+    expect(
+      screen.getByText(
+        /Create reusable connector Secrets here\. Assign them when creating a connector or from its Credentials tab using Change assigned Secret\./
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('keeps the generic subtitle outside the Connectors scope', () => {
+    renderTable('recipe')
+
+    expect(
+      screen.getByText('Manage LLM, connector, and recipe credentials in one place.')
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Change assigned Secret/)).not.toBeInTheDocument()
   })
 })

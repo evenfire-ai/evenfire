@@ -1,4 +1,5 @@
 import React from 'react'
+import { flushSync } from 'react-dom'
 import {
   AgentActivityProvider,
   AgentChatProviders,
@@ -36,9 +37,14 @@ import {
   CHAT_DRAWER_EMBED_FLOOR,
   useChatDrawerResize,
 } from '@hooks/useChatDrawerResize'
+import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
+import type { Launch, LaunchId, LaunchOutcome } from '@lib/embedOwnership.types'
+import { createEmbedOwnershipMachine } from '@lib/embedOwnershipMachine'
+import type { EmbedRefreshErrorEvent } from '@lib/embedOwnershipMachine.types'
+import { embedFailureMessage, embedViewState } from '@lib/embedOwnershipView'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import {
   authoritativeGfsStatus,
@@ -84,11 +90,9 @@ import {
   selectLastWorkspaceTab,
   selectWorkspaceTab,
   selectWorkspaceTabAt,
-  setAppTabSavedRoutePath,
-  setAppTabTitle,
   setFilesTabPath,
 } from '@lib/workspaceTabs'
-import type { WorkspaceTab } from '@lib/workspaceTabs.types'
+import type { WorkspaceTab, WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
 import { AuthPage } from '@pages/AuthPage'
 import { ChatPage } from '@pages/ChatPage'
@@ -97,15 +101,16 @@ import { FilesPage } from '@pages/FilesPage'
 import { McpServersPage } from '@pages/McpServersPage'
 import { OnboardingPage } from '@pages/OnboardingPage'
 import { SandboxUiPage } from '@pages/SandboxUiPage'
-import type {
-  SandboxUiConversationOrigin,
-  SandboxUiPageAction,
-  SandboxUiShortcutOpenResult,
-} from '@pages/SandboxUiPage.types'
+import type { SandboxUiConversationOrigin } from '@pages/SandboxUiPage.types'
 import { SettingsPage } from '@pages/SettingsPage'
 import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
-import type { PendingSandboxUiDeepLink, SandboxUiDeepLinkEnvelope } from '@/App.types'
+import type {
+  EmbedLaunchPlan,
+  PendingSandboxUiDeepLink,
+  SandboxUiDeepLinkEnvelope,
+} from '@/App.types'
+import { GfsDragSessionProvider } from '@/gfs/dragSession'
 import type { ActiveSandboxUiApp, NavItem, ThemeMode } from '@/uiTypes'
 import {
   type DesktopCommandId,
@@ -116,7 +121,6 @@ import {
 
 type PendingSandboxUiDeepLinkLaunch = {
   linkId: number
-  requestId: number
   generation: number
   originalTeamId: string
   linkTeamId?: string
@@ -144,29 +148,11 @@ const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
 const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
   'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
 
-// §3 (mini-spec 08): what a `getLocation()` read means for the OUTGOING app
-// tab's saved route. `set`/`clear` come only from the tab's OWN app; `preserve`
-// (foreign read within one activation generation, or a failed read) leaves the
-// stored route untouched — the caller must NOT invoke the setter, because
-// passing `undefined` to it would erase A's previously-saved route.
-type OutgoingRouteDecision =
-  | { action: 'set'; routePath: string }
-  | { action: 'clear' }
-  | { action: 'preserve' }
-
-async function readOutgoingRouteDecision(
-  outgoingAppRef: string | undefined
-): Promise<OutgoingRouteDecision> {
-  try {
-    const location = await window.clerum.sandboxUi.getLocation()
-    if (!location || location.appRef !== outgoingAppRef) return { action: 'preserve' }
-    return location.routePath
-      ? { action: 'set', routePath: location.routePath }
-      : { action: 'clear' }
-  } catch {
-    return { action: 'preserve' }
-  }
-}
+// Every reveal gesture launches whatever app tab its commit leaves active.
+const ACTIVE_TAB_LAUNCH: EmbedLaunchPlan = { kind: 'activeTab' }
+// Closing a tab launches the app tab its commit activated, never one that was
+// already active (a failed one must wait for an explicit gesture).
+const ACTIVATED_TAB_LAUNCH: EmbedLaunchPlan = { kind: 'activeTab', onlyIfActivated: true }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || 'Unknown error')
@@ -307,10 +293,6 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
-  const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
-    null
-  )
-  const [sandboxUiMounted, setSandboxUiMounted] = React.useState(false)
   const [sandboxUiConversationOrigin, setSandboxUiConversationOrigin] =
     React.useState<SandboxUiConversationOrigin | null>(null)
   const [sidebarSettingsMenuOpen, setSidebarSettingsMenuOpen] = React.useState(false)
@@ -332,7 +314,6 @@ export function App() {
   const [availableSandboxUiApps, setAvailableSandboxUiApps] = React.useState<ActiveSandboxUiApp[]>(
     []
   )
-  const [sandboxUiShortcutOpenRequestId, setSandboxUiShortcutOpenRequestId] = React.useState(0)
   const [pendingSandboxUiDeepLinks, setPendingSandboxUiDeepLinks] = React.useState<
     PendingSandboxUiDeepLink[]
   >([])
@@ -384,10 +365,6 @@ export function App() {
     currentMatch: ChatLocalMatch | null
   }>({ query: '', currentMatch: null })
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
-  const [sandboxActionRequest, setSandboxActionRequest] = React.useState<{
-    id: number
-    action: SandboxUiPageAction
-  } | null>(null)
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
   const [settingsShortcutsRequestId, setSettingsShortcutsRequestId] = React.useState(0)
@@ -395,86 +372,279 @@ export function App() {
   const contentPanelRef = React.useRef<HTMLElement | null>(null)
   const activeConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
-  const launchingSandboxUiDeepLinkRef = React.useRef<PendingSandboxUiDeepLinkLaunch | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
   const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
-  const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
-  // Relaunches a backgrounded app tab through the live-app machinery. A ref so
-  // `revealWorkspaceTab` (defined above `launchSandboxUiApp`) can call it without
-  // a TDZ on the launch callback.
-  const relaunchSandboxUiAppRef = React.useRef<
-    ((app: ActiveSandboxUiApp, tabId: string) => void) | null
-  >(null)
-  // Id of the app tab whose native embed is currently live in the main process
-  // (mini-spec 05 §3). The store governs the embed lifecycle: when the active
-  // app tab changes, this ref tells the deactivation effect which OUTGOING tab
-  // to persist the route onto. `null` = no embed is live (also the reconciled
-  // state after an UNsolicited close — crash/quit/GC — so a later tab switch
-  // does not persist or re-close a dead embed). A FAILED open does not reset it:
-  // the tab keeps owning whatever main may still hold (see
-  // `handleSandboxUiOpenFailed`).
-  const liveSandboxUiTabIdRef = React.useRef<string | null>(null)
-  // Id of the most recent open request (minted by SandboxUiPage, echoed by main
-  // on per-view events). A relaunch of the same app keeps the appRef, so title
-  // events are matched on this id, not on the appRef.
-  const currentSandboxUiLaunchIdRef = React.useRef<string | null>(null)
-  // Monotonic generation bumped on EVERY transition of the active embed (the
-  // deactivation effect and the deep-link handoff are the only emitters). Each
-  // read-then-close continuation captures this at dispatch; anything reopened or
-  // switched-to while its `getLocation()` IPC is in flight bumps the generation,
-  // so the stale continuation can tell it no longer owns the active view and
-  // must abort — it must neither close the newer embed nor persist the newer
-  // tab's route with a value read from a view that is already gone.
-  const sandboxUiActivationGenRef = React.useRef(0)
-  // Tab the latest `launchSandboxUiApp` targeted. Activating an app tab hands the
-  // embed over (app→app) only when a launch is about to `open()` into it: a tab
-  // whose app App cannot resolve gets no launch, and leaving the outgoing view
-  // up would paint it inside that tab.
-  const launchTargetTabIdRef = React.useRef<string | null>(null)
   workspaceTabsRef.current = workspaceTabs
+  const availableSandboxUiAppsRef = React.useRef(availableSandboxUiApps)
+  availableSandboxUiAppsRef.current = availableSandboxUiApps
+  const setWorkspaceTabsRef = React.useRef(setWorkspaceTabs)
+  setWorkspaceTabsRef.current = setWorkspaceTabs
 
-  const leaveSandboxForChat = React.useCallback(() => {
-    setActiveSandboxUiApp(null)
-    setSandboxUiMounted(false)
+  // The app chrome tied to a live embed: what it was opened from and the shell
+  // overlays raised over it.
+  const resetEmbedChrome = React.useCallback(() => {
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
   }, [])
+  const leaveSandboxForChat = resetEmbedChrome
+
+  // Which launch owns the native embed (one machine per App). The machine is
+  // not recreated when the tab store is reset for a new principal: views the
+  // previous store owned must still be closed by it, and the routes it
+  // remembers are keyed by tab ids that are never reused.
+  const [embedRefreshError, setEmbedRefreshError] = React.useState<EmbedRefreshErrorEvent | null>(
+    null
+  )
+  const handoffWaitersRef = React.useRef(new Map<number, () => void>())
+  const [embed] = React.useState(() =>
+    createEmbedOwnershipMachine({
+      bridge: {
+        open: request => window.clerum.sandboxUi.open(request),
+        close: request => window.clerum.sandboxUi.close(request),
+      },
+      updateTabs: updater => setWorkspaceTabsRef.current(updater),
+      onHandoffReady: requestId => {
+        const resolve = handoffWaitersRef.current.get(requestId)
+        handoffWaitersRef.current.delete(requestId)
+        resolve?.()
+      },
+      onOwnerRefreshError: event =>
+        setEmbedRefreshError({ launchId: event.launchId, message: event.message }),
+      // The machine already drops recoveries of a launch that lost the embed;
+      // matching the launch here keeps one from ever clearing another's error.
+      onOwnerRefreshRecovered: event =>
+        setEmbedRefreshError(prev => (prev?.launchId === event.launchId ? null : prev)),
+      onTransition: ({ previous, next }) => {
+        // The tab stays but its embed is gone (back to apps, team handoff, a
+        // failed open, a crash, a session end): drop the chrome that belonged
+        // to it, as the picker it falls back to has none. Leaving the tab is
+        // handled by whatever gesture left it.
+        if (
+          previous.owner !== null &&
+          next.owner === null &&
+          previous.activeAppTabId === next.activeAppTabId
+        ) {
+          resetEmbedChrome()
+        }
+      },
+    })
+  )
+  const embedState = useEmbedOwnership(embed)
+  const embedView = embedViewState(embedState)
+  const embedOwner =
+    embedView.kind === 'minting' || embedView.kind === 'mounted' ? embedView.launch : null
+  const sandboxUiMounted = embedView.kind === 'mounted'
+  // The app the embed is showing, named from the trusted catalog when it has it.
+  const activeSandboxUiApp = React.useMemo<ActiveSandboxUiApp | null>(() => {
+    if (!embedOwner) return null
+    return (
+      availableSandboxUiApps.find(app => app.appRef === embedOwner.appRef) ?? {
+        appRef: embedOwner.appRef,
+        label: embedOwner.app.label ?? embedOwner.appRef,
+        defaultPath: embedOwner.app.defaultPath ?? '/',
+      }
+    )
+  }, [availableSandboxUiApps, embedOwner])
+
+  const activeTabAppRef =
+    vm.activeWorkspaceTab?.kind === 'app' ? (vm.activeWorkspaceTab.app?.appRef ?? null) : null
+
+  // StrictMode replays effects (cleanup, then setup) on the same instance, so
+  // only a cleanup that no setup follows is the real unmount that disposes the
+  // machine. Continuations awaiting a launch or a handoff race this, so none is
+  // left hanging, and none acts after it.
+  const embedLifetimeRef = React.useRef<{
+    mounts: number
+    disposed: boolean
+    unmounted: Promise<void>
+    resolveUnmounted: () => void
+  } | null>(null)
+  if (embedLifetimeRef.current === null) {
+    let resolveUnmounted: () => void = () => {}
+    const unmounted = new Promise<void>(resolve => (resolveUnmounted = resolve))
+    embedLifetimeRef.current = { mounts: 0, disposed: false, unmounted, resolveUnmounted }
+  }
+  React.useEffect(() => {
+    const lifetime = embedLifetimeRef.current!
+    lifetime.mounts += 1
+    const sandboxUi = window.clerum.sandboxUi
+    const offReleased = sandboxUi.onReleased?.(event => embed.onReleased(event))
+    const offTitle = sandboxUi.onTitleChanged?.(event => embed.onTitleChanged(event))
+    const offRefreshError = sandboxUi.onRefreshError?.(event => embed.onRefreshError(event))
+    const offRefreshRecovered = sandboxUi.onRefreshRecovered?.(event =>
+      embed.onRefreshRecovered(event)
+    )
+    return () => {
+      offReleased?.()
+      offTitle?.()
+      offRefreshError?.()
+      offRefreshRecovered?.()
+      lifetime.mounts -= 1
+      queueMicrotask(() => {
+        if (lifetime.mounts > 0 || lifetime.disposed) return
+        lifetime.disposed = true
+        embed.dispose()
+        lifetime.resolveUnmounted()
+      })
+    }
+  }, [embed])
+
+  // Resolves with the launch's single outcome, or `null` once App is gone.
+  const awaitLaunchOutcome = React.useCallback(
+    async (launchId: LaunchId): Promise<LaunchOutcome | null> => {
+      const lifetime = embedLifetimeRef.current!
+      const settled = embed.whenSettled(launchId)
+      if (!settled || lifetime.disposed) return null
+      const outcome = await Promise.race([settled, lifetime.unmounted.then(() => null)])
+      return lifetime.disposed ? null : outcome
+    },
+    [embed]
+  )
+
+  // Main is the only one that knows when a view is gone; the tab store is the
+  // only one that knows which tab is active. The machine learns the latter
+  // here, in the commit that changes it, before any gesture launches into it.
+  const activeSandboxUiTabId =
+    !vm.appsPickerActive && vm.activeWorkspaceTab?.kind === 'app' ? vm.activeWorkspaceTab.id : null
+  React.useLayoutEffect(() => {
+    embed.dispatch({ type: 'projected', activeAppTabId: activeSandboxUiTabId })
+  }, [activeSandboxUiTabId, embed])
+
+  // The launch of the app tab the last commit left active, or none when that
+  // tab is not an app or its app cannot be resolved right now (registry
+  // reconciling, list refreshing): the tab is left intact. The list coming back
+  // does not relaunch it; the next gesture that launches into the tab does.
+  const launchForActiveAppTab = React.useCallback((): Launch | null => {
+    const state = embed.getSnapshot()
+    const tabId = state.activeAppTabId
+    if (tabId === null) return null
+    const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === tabId)
+    const appRef = tab?.kind === 'app' ? tab.app?.appRef : undefined
+    if (!tab || !appRef) return null
+    // The label names the app in consent prompts: always the catalog's, never
+    // the tab title, which the embedded app itself controls. A view still live
+    // on the tab already carries the catalog's, so relaunching it does not
+    // depend on the list being loaded right now.
+    const catalogApp = availableSandboxUiAppsRef.current.find(
+      candidate => candidate.appRef === appRef
+    )
+    const liveOwner = state.owner === null ? undefined : state.views.get(state.owner)
+    const app = catalogApp
+      ? { label: catalogApp.label, defaultPath: catalogApp.defaultPath }
+      : liveOwner?.tabId === tabId
+        ? liveOwner.app
+        : null
+    if (!app) return null
+    const savedRoutePath = tab.app?.savedRoutePath
+    return {
+      launchId: crypto.randomUUID(),
+      tabId,
+      appRef,
+      route: {
+        kind: 'tab',
+        ...(savedRoutePath !== undefined ? { routePath: savedRoutePath } : {}),
+      },
+      app,
+    }
+  }, [embed])
+
+  // The single seam through which a gesture activates a tab and launches an app
+  // into it. The store commits under `flushSync`, which also delivers the
+  // commit's projection to the machine, and only then is the launch built and
+  // dispatched: the machine judges it against the tab that is really active
+  // (a launch whose tab the commit did not leave active is dropped). `update`
+  // must be an updater, never a value derived from `workspaceTabsRef`:
+  // `flushSync` also commits any pending store update, and a stale value applied
+  // after it would silently undo it. `reveal` loads the content of the tab the
+  // gesture targets (a chat, the drawer of an app launch) in the same commit.
+  // Must only run from an event or async continuation — inside a render or
+  // effect `flushSync` does not flush.
+  const activateAndLaunch = React.useCallback(
+    (
+      update: (state: WorkspaceTabsState) => WorkspaceTabsState,
+      reveal?: () => void,
+      plan?: EmbedLaunchPlan
+    ): LaunchId | null => {
+      const activeAppTabBefore = embed.getSnapshot().activeAppTabId
+      flushSync(() => {
+        vm.clearAppsPicker()
+        setWorkspaceTabs(update)
+        reveal?.()
+      })
+      if (!plan) return null
+      if (
+        plan.kind === 'activeTab' &&
+        plan.onlyIfActivated &&
+        embed.getSnapshot().activeAppTabId === activeAppTabBefore
+      ) {
+        return null
+      }
+      const launch: Launch | null =
+        plan.kind === 'activeTab'
+          ? launchForActiveAppTab()
+          : {
+              launchId: crypto.randomUUID(),
+              tabId: plan.tabId,
+              appRef: plan.app.appRef,
+              route:
+                plan.app.routePath !== undefined
+                  ? { kind: 'explicit', routePath: plan.app.routePath }
+                  : { kind: 'tab' },
+              app: { label: plan.app.label, defaultPath: plan.app.defaultPath },
+            }
+      if (!launch) return null
+      embed.registerWhenSettled(launch.launchId)
+      embed.dispatch(
+        plan.kind === 'activeTab' && plan.replace
+          ? { type: 'relaunch', launch }
+          : { type: 'intent', launch }
+      )
+      return launch.launchId
+    },
+    [embed, launchForActiveAppTab, setWorkspaceTabs, vm.clearAppsPicker]
+  )
+
+  // Reopen after a crash and Retry after a session failure: tear the active
+  // tab's view down, healthy or not, and open a fresh one (new view, new
+  // session) where the old one stood. It never comes from a re-click, which
+  // leaves a live view alone.
+  const relaunchActiveApp = React.useCallback(() => {
+    activateAndLaunch(state => state, undefined, { kind: 'activeTab', replace: true })
+  }, [activateAndLaunch])
+
+  // Refresh reloads a mounted view in place, so the app keeps its session
+  // storage, history and full URL and nothing is minted. Read from the machine,
+  // not the last render: the view may have ended, or a relaunch may have taken
+  // the tab, since Refresh was offered. Without a mounted view there is nothing
+  // to reload, so the tab is relaunched instead.
+  const refreshActiveApp = React.useCallback(() => {
+    const state = embed.getSnapshot()
+    const owner = state.owner === null ? undefined : state.views.get(state.owner)
+    if (owner?.phase !== 'mounted') {
+      relaunchActiveApp()
+      return
+    }
+    void window.clerum.sandboxUi.reload({ launchId: owner.launchId }).catch(error => {
+      console.warn('[SandboxUI] Could not reload the app:', error)
+    })
+  }, [embed, relaunchActiveApp])
 
   // Load the CONTENT of a workspace tab once it is (about to be) active — the
   // universal reveal seam. It never selects the tab itself (the store already
   // owns identity/active). Chat tabs delegate to `handleSelectChatAgent` (the
-  // pending-selection machine, §4 — never reimplemented); app tabs relaunch
-  // through the existing embed machinery (store→embed, closes as today on the
-  // next deactivation via the SandboxUiPage unmount cleanup — the single close
-  // path, §9); DOM tabs (files/settings) render from the derived `navItem`, so
-  // this only tears down any lingering app embed.
+  // pending-selection machine, §4 — never reimplemented); app tabs are launched
+  // by the seam from the committed store, not here; DOM tabs (files/settings)
+  // render from the derived `navItem`, so this only drops the app chrome.
   const revealWorkspaceTab = React.useCallback(
     (tab: WorkspaceTab | undefined, inDrawer = chatDrawerVisibleRef.current) => {
       if (!tab || tab.kind === 'files' || tab.kind === 'settings' || tab.kind === 'preview') {
         if (!inDrawer) leaveSandboxForChat()
         return
       }
-      if (tab.kind === 'app') {
-        const app = availableSandboxUiApps.find(candidate => candidate.appRef === tab.app?.appRef)
-        // Transient-empty survivability (mini-spec 05): when the app can't be
-        // resolved (registry reconciling / periodic refresh emptied the list),
-        // leave the tab intact and do nothing destructive — it recovers when the
-        // list repopulates (the picker / no-embed state, never a tab destroy).
-        if (app) {
-          // Restore the route persisted on deactivation (§3). `savedRoutePath`
-          // lives on the tab, not the app; thread it onto the launch so the
-          // embed re-mounts where the user left off (undefined → default path).
-          const savedRoutePath = tab.app?.savedRoutePath
-          relaunchSandboxUiAppRef.current?.(
-            savedRoutePath !== undefined ? { ...app, routePath: savedRoutePath } : app,
-            tab.id
-          )
-        }
-        return
-      }
+      if (tab.kind === 'app') return
       const agentRef = tab.chat?.agentRef ?? null
       const chatId = tab.chat?.chatId ?? null
       if (inDrawer) {
@@ -508,7 +678,7 @@ export function App() {
         vm.handleNavSelect(DESKTOP_ROUTES.chat)
       }
     },
-    [availableSandboxUiApps, leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
+    [leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
   )
 
   // Global strip selection: activate the tab (so `navItem` derives this commit),
@@ -517,11 +687,15 @@ export function App() {
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
-      vm.clearAppsPicker()
-      setWorkspaceTabs(state => selectWorkspaceTab(state, id))
-      revealWorkspaceTab(tab, false)
+      // Re-clicking the active app tab relaunches it only when its view is gone;
+      // a live view is left as it is (Refresh is the explicit reload).
+      activateAndLaunch(
+        state => selectWorkspaceTab(state, id),
+        () => revealWorkspaceTab(tab, false),
+        ACTIVE_TAB_LAUNCH
+      )
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [activateAndLaunch, revealWorkspaceTab]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -540,15 +714,19 @@ export function App() {
     (id: string) => {
       const current = workspaceTabsRef.current
       const wasActive = current.activeTabId === id
-      const next = closeWorkspaceTab(current, id)
-      if (next === current) return
-      vm.clearAppsPicker()
-      setWorkspaceTabs(next)
+      const projected = closeWorkspaceTab(current, id)
+      if (projected === current) return
       // Closing the active tab activates a neighbor (or empties the workspace,
-      // §5). Reveal it so its content follows the strip.
-      if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
+      // §5). Reveal it so its content follows the strip. Whether an app is
+      // launched is decided on the commit, not on App's last render: a pending
+      // update may have made the closed tab the active one.
+      activateAndLaunch(
+        state => closeWorkspaceTab(state, id),
+        wasActive ? () => revealWorkspaceTab(activeWorkspaceTab(projected), false) : undefined,
+        ACTIVATED_TAB_LAUNCH
+      )
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [activateAndLaunch, revealWorkspaceTab]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -1264,7 +1442,6 @@ export function App() {
   React.useEffect(() => {
     if (!vm.isAuthenticated) {
       setAvailableSandboxUiApps([])
-      setActiveSandboxUiApp(null)
       setSandboxUiConversationOrigin(null)
       return
     }
@@ -1301,63 +1478,12 @@ export function App() {
     pendingSandboxUiDeepLinksRef.current = []
     setPendingSandboxUiDeepLinks([])
     processingSandboxUiDeepLinkIdRef.current = null
-    launchingSandboxUiDeepLinkRef.current = null
     sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
     sandboxUiDeepLinkGenerationRef.current += 1
     void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
       console.warn('[Desktop] Could not clear stale app deep links:', error)
     })
   }, [vm.authenticatedPrincipalIdentity])
-
-  const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp, launchId: string) => {
-    currentSandboxUiLaunchIdRef.current = launchId
-    setSandboxUiMounted(false)
-    setActiveSandboxUiApp(app)
-    // Arm the store's embed-liveness ref on EVERY open, however it was launched
-    // (store launch from the sidebar or the picker grid, deep link, or relaunch).
-    // The deactivation effect otherwise only arms it on an active-tab CHANGE, so
-    // an embed re-mounted WITHIN the still-active app tab — a strip relaunch
-    // after a back-to-apps / unsolicited onClosed cleared the ref — would never
-    // be tracked and would leak (the native view paints over the next tab).
-    // Guard on `null` so this never clobbers the OUTGOING id the effect still
-    // needs on an app→app switch (ref stays the old tab; the effect reads it,
-    // then re-points to the new one).
-    if (liveSandboxUiTabIdRef.current === null) {
-      const active = activeWorkspaceTab(workspaceTabsRef.current)
-      if (active?.kind === 'app') liveSandboxUiTabIdRef.current = active.id
-    }
-  }, [])
-
-  const handleSandboxUiMounted = React.useCallback(() => {
-    setSandboxUiMounted(true)
-  }, [])
-
-  const handleSandboxUiClosed = React.useCallback(() => {
-    // Unsolicited close (crash / quit / partition GC) or an explicit back-to-apps
-    // teardown from SandboxUiPage: the embed is already gone, so reconcile the
-    // store's view of the live embed to "not mounted" (§3). The app TAB stays in
-    // the store and recovers on reactivation; only the liveness bookkeeping is
-    // cleared so the deactivation effect won't re-close a dead embed.
-    liveSandboxUiTabIdRef.current = null
-    setActiveSandboxUiApp(null)
-    setSandboxUiMounted(false)
-    setSandboxUiConversationOrigin(null)
-    setHeaderShellOverlayOpen(false)
-    setSidebarSettingsMenuOpen(false)
-  }, [])
-
-  // A failed open (rejected by main, or failed before reaching it) clears only
-  // the React state. The active tab stays the embed's owner: a failure before
-  // the open IPC leaves the previous view live in main, and only an owner makes
-  // the deactivation effect `close()` it when the user leaves the tab. When main
-  // already tore the view down, that `close()` is a harmless no-op.
-  const handleSandboxUiOpenFailed = React.useCallback(() => {
-    setActiveSandboxUiApp(null)
-    setSandboxUiMounted(false)
-    setSandboxUiConversationOrigin(null)
-    setHeaderShellOverlayOpen(false)
-    setSidebarSettingsMenuOpen(false)
-  }, [])
 
   React.useEffect(() => {
     setNotificationDrawerReady(false)
@@ -1412,142 +1538,46 @@ export function App() {
     if (chatDrawerVisible) setChatDrawerReady(true)
   }, [appNotificationDrawerOpen, chatDrawerVisible])
 
+  // The conversation an app launch was opened from comes along into the drawer,
+  // committed with the launch's own tab so the drawer opens over it.
+  const seedLaunchConversation = React.useCallback(
+    (conversationOrigin: SandboxUiConversationOrigin | null) => {
+      setSandboxUiConversationOrigin(conversationOrigin)
+      if (!conversationOrigin) return
+      // Opened from a chat: bring that conversation straight into the drawer
+      // instead of the destroy-and-reconstitute round-trip. `keepNavItem`
+      // records a pending selection that survives the `apps` route change and
+      // loads the chat. The reconcile effect adds the chat tab to the switcher.
+      setChatDrawerOpen(true)
+      vm.handleSelectChatAgent(conversationOrigin.agentName, {
+        chatId: conversationOrigin.chatId,
+        title: conversationOrigin.title,
+        selectLatest: false,
+        keepNavItem: true,
+      })
+    },
+    [vm.handleSelectChatAgent]
+  )
+  // Grid and deep-link launches: always a new app tab (apps never dedupe by
+  // appRef). Its `kind:'app'` derives `navItem` to the Apps route this commit.
   const launchSandboxUiApp = React.useCallback(
     (
       app: ActiveSandboxUiApp,
-      conversationOrigin: SandboxUiConversationOrigin | null,
-      existingTabId?: string
-    ) => {
-      const requestId = sandboxUiShortcutOpenRequestIdRef.current + 1
-      sandboxUiShortcutOpenRequestIdRef.current = requestId
-      setSandboxUiMounted(false)
-      setSandboxUiConversationOrigin(conversationOrigin)
-      setActiveSandboxUiApp(app)
-      // Store→embed: activate the app tab (a new one, or the backgrounded one on
-      // relaunch). Its `kind:'app'` derives `navItem` to the Apps route this
-      // commit and clears the instance-less picker residual.
-      vm.clearAppsPicker()
-      // Compute the id only on the open-new branch so the sequence counter
-      // advances exactly as before: relaunch of an existing tab must not burn one.
-      const newAppTabId = existingTabId ? null : nextChatTabId()
-      launchTargetTabIdRef.current = existingTabId ?? newAppTabId
-      setWorkspaceTabs(state =>
-        existingTabId
-          ? selectWorkspaceTab(state, existingTabId)
-          : openAppTab(state, { id: newAppTabId!, appRef: app.appRef, title: app.label })
+      conversationOrigin: SandboxUiConversationOrigin | null
+    ): LaunchId | null => {
+      const tabId = nextChatTabId()
+      return activateAndLaunch(
+        state => openAppTab(state, { id: tabId, appRef: app.appRef, title: app.label }),
+        () => seedLaunchConversation(conversationOrigin),
+        { kind: 'newTab', tabId, app }
       )
-      setSandboxUiShortcutOpenRequestId(requestId)
-      if (conversationOrigin) {
-        // Opened from a chat: bring that conversation straight into the drawer
-        // instead of the destroy-and-reconstitute round-trip. The embed stays
-        // live; `keepNavItem` records a pending selection that survives the
-        // `apps` route change and loads the chat. The reconcile effect adds the
-        // chat tab to the switcher.
-        setChatDrawerOpen(true)
-        vm.handleSelectChatAgent(conversationOrigin.agentName, {
-          chatId: conversationOrigin.chatId,
-          title: conversationOrigin.title,
-          selectLatest: false,
-          keepNavItem: true,
-        })
-      }
-      return requestId
     },
-    [nextChatTabId, setWorkspaceTabs, vm.clearAppsPicker, vm.handleSelectChatAgent]
+    [activateAndLaunch, nextChatTabId, seedLaunchConversation]
   )
-  relaunchSandboxUiAppRef.current = (app, tabId) => {
-    launchSandboxUiApp(app, null, tabId)
-  }
 
-  // Store-governed embed lifecycle (mini-spec 05 §3, replaces the old
-  // SandboxUiPage unmount-cleanup close). The live embed belongs to whichever
-  // app tab is active; when that changes, the OUTGOING app's route is persisted
-  // and the embed is closed — UNLESS another app tab is taking over, in which
-  // case the incoming `open()` replaces the embed in the driver (one-at-a-time,
-  // guarded by `mountGeneration`), so a redundant `close()` here would risk
-  // closing the freshly-opened view. This effect is the single SOLICITED
-  // `close()` emitter for deactivation.
-  const activeSandboxUiTabId =
-    !vm.appsPickerActive && vm.activeWorkspaceTab?.kind === 'app' ? vm.activeWorkspaceTab.id : null
-  React.useEffect(() => {
-    const launchTargetTabId = launchTargetTabIdRef.current
-    launchTargetTabIdRef.current = null
-    const outgoingTabId = liveSandboxUiTabIdRef.current
-    if (outgoingTabId === activeSandboxUiTabId) return
-    const replacedByAnotherApp =
-      activeSandboxUiTabId !== null && launchTargetTabId === activeSandboxUiTabId
-    // An app tab activated without a launch hosts no embed: it stays unowned
-    // until a relaunch arms it (`handleSandboxUiOpening`).
-    liveSandboxUiTabIdRef.current = replacedByAnotherApp ? activeSandboxUiTabId : null
-    // This is the single point where the active embed transitions; bump the
-    // generation so any older in-flight continuation knows it no longer owns
-    // the active view.
-    sandboxUiActivationGenRef.current += 1
-    if (outgoingTabId === null) return
-    // The Apps route stays mounted when the incoming app tab gets no launch:
-    // drop the page's launch state too, or it keeps the outgoing app's chrome
-    // over an empty slot. The close below stays the only solicited one.
-    if (activeSandboxUiTabId !== null && !replacedByAnotherApp) {
-      setSandboxActionRequest(previous => ({ id: (previous?.id ?? 0) + 1, action: 'release' }))
-    }
-    if (!replacedByAnotherApp) {
-      // Deactivating to a non-app surface (chat/files/settings via strip, sidebar
-      // nav, or closing the tab): drop the embed's React state now so anything
-      // gated on a live app (drawer-with-embed) reacts in this commit. On an
-      // app→app switch the incoming launch already owns this
-      // state, so leave it. This restores the reset the removed unmount cleanup
-      // used to do for paths that never call `leaveSandboxForChat` (sidebar nav).
-      setActiveSandboxUiApp(null)
-      setSandboxUiMounted(false)
-    }
-    // Read optimistically, persist, then close in a microtask — the visual tab
-    // switch (already committed above) must not block on the IPC (§4). A read
-    // failure (out-of-prefix throw, destroyed webContents → null) falls back to
-    // the default route rather than blocking the switch.
-    //
-    // app→app ordering: the incoming `open()` is dispatched by SandboxUiPage's
-    // child effect (the shortcut-open effect), which runs BEFORE this parent
-    // effect AND gates its `open()` IPC behind `waitForEmbedSlotRect` (an rAF
-    // loop). This parent effect's `getLocation()` invoke below is dispatched
-    // synchronously here — after `open()` STARTED but before its rAF resolves —
-    // so `getLocation` reaches main (and reads the still-live outgoing view)
-    // strictly before `open()` tears it down. i.e. the read is captured before
-    // the incoming open, not merely "usually first".
-    const gen = sandboxUiActivationGenRef.current
-    // The app the outgoing tab hosts. Its appRef is immutable for the tab's
-    // lifetime, so capturing it now (before the read) is safe.
-    const outgoingAppRef = workspaceTabsRef.current.tabs.find(
-      tab => tab.id === outgoingTabId && tab.kind === 'app'
-    )?.app?.appRef
-    void (async () => {
-      // §3 (mini-spec 08): only the outgoing tab's OWN app decides its saved
-      // route. On an app→app switch the incoming `open()` can reach main before
-      // this `getLocation()` resolves, so the read may surface the INCOMING app's
-      // location; a foreign or failed read must PRESERVE tab A's route (leave the
-      // store untouched), NOT clear it — passing `undefined` to the setter would
-      // erase A's previously-saved route. Persist only when the read is A's own:
-      // its routePath (set), or clear when A is back on its default path.
-      const decision = await readOutgoingRouteDecision(outgoingAppRef)
-      // A newer activation took over while the read was in flight (the same app
-      // reopened, or another app/surface became active): the read value belongs
-      // to a view that is no longer the active one, so abort BOTH the persist
-      // (it would clobber the live tab's route with a stale one) and the close
-      // (it would tear down the embed the user is now looking at).
-      if (gen !== sandboxUiActivationGenRef.current) return
-      // A foreign/unknown read owns no route on this tab — leave it as it was.
-      if (decision.action !== 'preserve') {
-        const nextRoutePath = decision.action === 'set' ? decision.routePath : undefined
-        // No-op when the outgoing tab was closed (§3: closing a tab does not save).
-        setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, nextRoutePath))
-      }
-      if (replacedByAnotherApp) return
-      try {
-        await window.clerum.sandboxUi.close()
-      } catch {
-        // Idempotent: an unsolicited close may have torn it down already.
-      }
-    })()
-  }, [activeSandboxUiTabId, setWorkspaceTabs])
+  const handleBackToApps = React.useCallback(() => {
+    embed.dispatch({ type: 'backToApps' })
+  }, [embed])
 
   const handleSidebarNavSelect = React.useCallback(
     (item: NavItem) => {
@@ -1583,9 +1613,6 @@ export function App() {
   const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId?: number) => {
     if (linkId === undefined || processingSandboxUiDeepLinkIdRef.current === linkId) {
       processingSandboxUiDeepLinkIdRef.current = null
-    }
-    if (linkId === undefined || launchingSandboxUiDeepLinkRef.current?.linkId === linkId) {
-      launchingSandboxUiDeepLinkRef.current = null
     }
   }, [])
 
@@ -1677,42 +1704,65 @@ export function App() {
     [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
   )
 
-  const closeActiveSandboxUiEmbedForHandoff = React.useCallback(async () => {
-    if (!activeSandboxUiApp) return
-    // §3 consistency: persist the outgoing app tab's route before tearing the
-    // embed down for a deep-link handoff, so returning to that tab restores
-    // where the user was rather than the default/stale route. Same read-then-
-    // close as the deactivation effect (try/catch → undefined on failure); read
-    // BEFORE `close()` destroys the webContents. `handleSandboxUiClosed` clears
-    // the ref, so snapshot the outgoing tab id first.
-    const outgoingTabId = liveSandboxUiTabIdRef.current
-    // The handoff itself transitions the active embed; bump the generation (so an
-    // older in-flight deactivation continuation aborts) and own the new one by
-    // capturing AFTER the bump. If a newer activation supersedes this handoff
-    // while the read below is in flight, gen no longer matches and both the
-    // persist and the close are aborted.
-    sandboxUiActivationGenRef.current += 1
-    const gen = sandboxUiActivationGenRef.current
-    if (outgoingTabId !== null) {
-      // §3 (mini-spec 08), identical to the deactivation effect: only the
-      // outgoing tab's OWN app may set/clear its saved route. A foreign or failed
-      // read PRESERVES it (the setter is not called) rather than clobbering it
-      // with another app's route or erasing it with `undefined`. appRef is
-      // immutable for the tab, so capturing it before the read is safe.
-      const outgoingAppRef = workspaceTabsRef.current.tabs.find(
-        tab => tab.id === outgoingTabId && tab.kind === 'app'
-      )?.app?.appRef
-      const decision = await readOutgoingRouteDecision(outgoingAppRef)
-      if (gen !== sandboxUiActivationGenRef.current) return
-      if (decision.action !== 'preserve') {
-        const nextRoutePath = decision.action === 'set' ? decision.routePath : undefined
-        setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, nextRoutePath))
+  // A cross-team link switches teams, which does not end the embed session, so
+  // the live view is handed off first: ownership drops and the switch waits
+  // until main has released every view this renderer still had, each leaving
+  // its route on its tab. Resolves `false` when App went away meanwhile.
+  const handoffSeqRef = React.useRef(0)
+  const handOffEmbedBeforeTeamSwitch = React.useCallback(async (): Promise<boolean> => {
+    const lifetime = embedLifetimeRef.current!
+    if (lifetime.disposed) return false
+    const requestId = ++handoffSeqRef.current
+    const ready = new Promise<void>(resolve => handoffWaitersRef.current.set(requestId, resolve))
+    embed.dispatch({ type: 'handoff', requestId })
+    await Promise.race([ready, lifetime.unmounted])
+    handoffWaitersRef.current.delete(requestId)
+    return !lifetime.disposed
+  }, [embed])
+
+  // What a deep link does once its launch settled. Mounted: done. Failed: retried
+  // with the failure's message until the retry budget runs out. Abandoned (the
+  // user moved off its tab before it mounted, or the session or window holding
+  // it went away): dropped as is. A retry would reopen an app the user walked
+  // away from, and giving back the team or the originating chat would pull the
+  // user out of wherever they just went; their navigation wins.
+  const finishSandboxUiDeepLinkLaunch = React.useCallback(
+    async (context: PendingSandboxUiDeepLinkLaunch, launchId: LaunchId, outcome: LaunchOutcome) => {
+      if (context.generation !== sandboxUiDeepLinkGenerationRef.current) {
+        clearSandboxUiDeepLinkProcessing(context.linkId)
+        return
       }
-    }
-    if (gen !== sandboxUiActivationGenRef.current) return
-    await window.clerum.sandboxUi.close()
-    handleSandboxUiClosed()
-  }, [activeSandboxUiApp, handleSandboxUiClosed, setWorkspaceTabs])
+      const pending = pendingSandboxUiDeepLinksRef.current.find(
+        item => item.link.id === context.linkId
+      )
+      if (!pending) {
+        clearSandboxUiDeepLinkProcessing(context.linkId)
+        return
+      }
+      if (outcome === 'mounted') {
+        await acknowledgeSandboxUiDeepLink(context.linkId)
+        return
+      }
+      if (outcome === 'abandoned') {
+        await acknowledgeSandboxUiDeepLink(context.linkId)
+        return
+      }
+      const failure = embed.getSnapshot().failure
+      await deferSandboxUiDeepLinkUntilTerminal(
+        pending,
+        failure?.launchId === launchId
+          ? embedFailureMessage(failure)
+          : 'The native app view did not mount',
+        context
+      )
+    },
+    [
+      acknowledgeSandboxUiDeepLink,
+      clearSandboxUiDeepLinkProcessing,
+      deferSandboxUiDeepLinkUntilTerminal,
+      embed,
+    ]
+  )
 
   React.useEffect(() => {
     const enqueue = (link: SandboxUiDeepLinkEnvelope) => {
@@ -1735,27 +1785,6 @@ export function App() {
       .catch(() => undefined)
     return unsubscribe
   }, [setPendingSandboxUiDeepLinkState])
-
-  // Name the live app tab after the embed's `document.title` (mini-spec 06 §2).
-  // Only the tab whose embed is live (`liveSandboxUiTabIdRef`) is renamed, and
-  // only when the event comes from the current launch, so a late title event
-  // from a torn-down embed (even one of the same app being relaunched) can't
-  // relabel whichever view is live now. The launchId alone is enough: main tags
-  // each event with the appRef/launchId pair of the open that created the view,
-  // and every open goes through `launchSandboxUiApp`, which activates a tab of
-  // that same app in the commit that publishes the launchId — so whenever the
-  // launchId is current, the live tab (if any) holds the event's app. The store
-  // ignores empty titles, so the tab keeps its `app.label` until a real title
-  // arrives.
-  React.useEffect(() => {
-    const off = window.clerum.sandboxUi.onTitleChanged?.(({ launchId, title }) => {
-      if (launchId !== currentSandboxUiLaunchIdRef.current) return
-      const tabId = liveSandboxUiTabIdRef.current
-      if (!tabId) return
-      setWorkspaceTabs(state => setAppTabTitle(state, tabId, title))
-    })
-    return () => off?.()
-  }, [setWorkspaceTabs])
 
   React.useEffect(() => {
     if (
@@ -1826,7 +1855,7 @@ export function App() {
           return
         }
         if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
-          await closeActiveSandboxUiEmbedForHandoff()
+          if (!(await handOffEmbedBeforeTeamSwitch())) return
           try {
             const didSwitchTeam = await vm.handleEnsureTeamContext({
               teamId: pending.link.teamId,
@@ -1847,7 +1876,6 @@ export function App() {
             if (isTransientSandboxUiTeamContextError(error)) {
               const launchContext: PendingSandboxUiDeepLinkLaunch = {
                 linkId: pending.link.id,
-                requestId: 0,
                 generation: processingGeneration,
                 originalTeamId,
                 linkTeamId: pending.link.teamId,
@@ -1879,7 +1907,6 @@ export function App() {
         if (resolution.status === 'starting') {
           const launchContext: PendingSandboxUiDeepLinkLaunch = {
             linkId: pending.link.id,
-            requestId: 0,
             generation: processingGeneration,
             originalTeamId,
             linkTeamId: pending.link.teamId,
@@ -1894,22 +1921,33 @@ export function App() {
           )
           return
         }
-        const requestId = launchSandboxUiApp(
+        const launchId = launchSandboxUiApp(
           {
             ...resolution.app,
             ...(pending.link.path ? { routePath: pending.link.path } : {}),
           },
           pending.conversationOrigin ?? sandboxUiConversationOrigin
         )
-        launchingSandboxUiDeepLinkRef.current = {
-          linkId: pending.link.id,
-          requestId,
-          generation: processingGeneration,
-          originalTeamId,
-          linkTeamId: pending.link.teamId,
-          switchedTeam,
-          conversationOrigin: pending.conversationOrigin,
+        if (launchId === null) {
+          clearSandboxUiDeepLinkProcessing(pending.link.id)
+          return
         }
+        // The link stays the one being processed until its launch settles, so
+        // the queue moves on only after it mounted, failed or was left.
+        const outcome = await awaitLaunchOutcome(launchId)
+        if (outcome === null) return
+        await finishSandboxUiDeepLinkLaunch(
+          {
+            linkId: pending.link.id,
+            generation: processingGeneration,
+            originalTeamId,
+            linkTeamId: pending.link.teamId,
+            switchedTeam,
+            conversationOrigin: pending.conversationOrigin,
+          },
+          launchId,
+          outcome
+        )
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         vm.pushToast(`Could not open app link: ${message}`, 'error')
@@ -1921,7 +1959,6 @@ export function App() {
         }
         await restoreSandboxUiDeepLinkTeam({
           linkId: pending.link.id,
-          requestId: 0,
           generation: processingGeneration,
           originalTeamId,
           linkTeamId: pending.link.teamId,
@@ -1933,11 +1970,12 @@ export function App() {
     })()
   }, [
     acknowledgeSandboxUiDeepLink,
-    activeSandboxUiApp,
+    awaitLaunchOutcome,
     bootSplashLoading,
-    closeActiveSandboxUiEmbedForHandoff,
     clearSandboxUiDeepLinkProcessing,
     deferSandboxUiDeepLinkUntilTerminal,
+    finishSandboxUiDeepLinkLaunch,
+    handOffEmbedBeforeTeamSwitch,
     launchSandboxUiApp,
     pendingSandboxUiDeepLinks,
     restoreSandboxUiDeepLinkTeam,
@@ -1963,38 +2001,6 @@ export function App() {
     }, retryAt - now)
     return () => window.clearTimeout(timeoutId)
   }, [pendingSandboxUiDeepLinks, sandboxUiDeepLinkRetryTick])
-
-  const handleSandboxUiShortcutOpenResult = React.useCallback(
-    async (requestId: number, result: SandboxUiShortcutOpenResult) => {
-      const launch = launchingSandboxUiDeepLinkRef.current
-      if (!launch || launch.requestId !== requestId) return
-      if (launch.generation !== sandboxUiDeepLinkGenerationRef.current) {
-        clearSandboxUiDeepLinkProcessing(launch.linkId)
-        return
-      }
-      const pending = pendingSandboxUiDeepLinksRef.current.find(
-        item => item.link.id === launch.linkId
-      )
-      if (!pending) {
-        clearSandboxUiDeepLinkProcessing(launch.linkId)
-        return
-      }
-      if (result.status === 'mounted') {
-        await acknowledgeSandboxUiDeepLink(launch.linkId)
-        return
-      }
-      await deferSandboxUiDeepLinkUntilTerminal(
-        pending,
-        result.message || 'The native app view did not mount',
-        launch
-      )
-    },
-    [
-      acknowledgeSandboxUiDeepLink,
-      clearSandboxUiDeepLinkProcessing,
-      deferSandboxUiDeepLinkUntilTerminal,
-    ]
-  )
 
   // Reconcile the chat sub-slice of the universal store from the vm's displayed
   // chat. Runs for the full-screen chat route AND whenever the drawer is visible,
@@ -2064,8 +2070,6 @@ export function App() {
     setSidebarToggleRequestId(0)
     setChatLocalSearchOpen(false)
     setSandboxLocalSearchRequestId(0)
-    setSandboxActionRequest(null)
-    setSandboxUiMounted(false)
     setCommandPaletteOpen(false)
     setCommandPaletteReturnToSandbox(false)
     setSettingsShortcutsRequestId(0)
@@ -2143,11 +2147,14 @@ export function App() {
       // Universal tab commands: activate a tab then reveal its content (chat load
       // / app relaunch / DOM route). `tabs.*` cycle over ALL tabs; `chat.*` are
       // chat-specific.
-      const selectAndReveal = (next: typeof state) => {
-        if (next === state) return
-        vm.clearAppsPicker()
-        setWorkspaceTabs(next)
-        revealWorkspaceTab(activeWorkspaceTab(next), false)
+      const selectAndReveal = (update: (current: WorkspaceTabsState) => WorkspaceTabsState) => {
+        const projected = update(state)
+        if (projected === state) return
+        activateAndLaunch(
+          update,
+          () => revealWorkspaceTab(activeWorkspaceTab(projected), false),
+          ACTIVE_TAB_LAUNCH
+        )
       }
       if (commandId === 'commands.open') {
         closeChatLocalSearch(false)
@@ -2215,9 +2222,12 @@ export function App() {
         setSidebarToggleRequestId(value => value + 1)
         return
       }
-      if (commandId === 'app.refresh' || commandId === 'app.backToApps') {
-        const action = commandId === 'app.refresh' ? 'refresh' : 'back-to-apps'
-        setSandboxActionRequest(previous => ({ id: (previous?.id ?? 0) + 1, action }))
+      if (commandId === 'app.refresh') {
+        refreshActiveApp()
+        return
+      }
+      if (commandId === 'app.backToApps') {
+        handleBackToApps()
         return
       }
       if (commandId === 'chat.newTab') {
@@ -2243,16 +2253,18 @@ export function App() {
         return
       }
       if (command.eligibility === 'tab-index' && command.tabIndex !== undefined) {
-        selectAndReveal(selectWorkspaceTabAt(state, command.tabIndex))
+        const tabIndex = command.tabIndex
+        selectAndReveal(current => selectWorkspaceTabAt(current, tabIndex))
         return
       }
       if (commandId === 'tabs.selectLast') {
-        selectAndReveal(selectLastWorkspaceTab(state))
+        selectAndReveal(selectLastWorkspaceTab)
         return
       }
       if (commandId === 'tabs.next' || commandId === 'tabs.previous') {
         if (state.tabs.length < 2) return
-        selectAndReveal(cycleWorkspaceTab(state, commandId === 'tabs.next' ? 'next' : 'previous'))
+        const direction = commandId === 'tabs.next' ? 'next' : 'previous'
+        selectAndReveal(current => cycleWorkspaceTab(current, direction))
         return
       }
       if (commandId === 'composer.focus') {
@@ -2269,7 +2281,11 @@ export function App() {
             })
           }
         } else {
-          revealWorkspaceTab(activeWorkspaceTab(state), false)
+          activateAndLaunch(
+            current => current,
+            () => revealWorkspaceTab(activeWorkspaceTab(state), false),
+            ACTIVE_TAB_LAUNCH
+          )
         }
         setComposerFocusRequestId(value => value + 1)
         return
@@ -2290,20 +2306,21 @@ export function App() {
       }
     },
     [
+      activateAndLaunch,
       activeSandboxUiApp,
       closeChatLocalSearch,
       closeCommandPalette,
       commandPaletteOpen,
       desktopCommandContext,
+      handleBackToApps,
       handleCloseWorkspaceTab,
       handleNewWorkspaceChatTab,
       handleSidebarNavSelect,
       openChatDrawer,
+      refreshActiveApp,
       revealWorkspaceTab,
       sandboxUiMounted,
-      setWorkspaceTabs,
       vm.activeChatId,
-      vm.clearAppsPicker,
       vm.handleNavSelect,
       vm.handleLogout,
       vm.handleSelectChatAgent,
@@ -2880,198 +2897,203 @@ export function App() {
                     >
                       <McpRuntimeProvider value={mcpRuntimeValue}>
                         <DesktopStateProvider value={desktopStateValue}>
-                          <main className="app-shell">
-                            <SidebarNav
-                              navItem={vm.navItem}
-                              activeSandboxUiApp={activeSandboxUiApp}
-                              availableSandboxUiApps={availableSandboxUiApps}
-                              collapsed={sidebarCollapsed}
-                              onCollapsedChange={handleSidebarCollapsedChange}
-                              onNewChat={handleNewWorkspaceChatTab}
-                              onOpenSandboxUiApp={handleOpenSandboxUiApp}
-                              onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
-                              onSelect={handleSidebarNavSelect}
-                              onOpenFilesSection={vm.openFilesSection}
-                              onOpenPreviewSection={vm.openPreviewSection}
-                              pushToast={vm.pushToast}
-                              toggleRequestId={sidebarToggleRequestId}
-                            />
-                            <section className="workspace-layout">
-                              <section
-                                ref={contentPanelRef}
-                                className={`content-panel glass-card${
-                                  isAgentChatView ? ' content-panel--agent-chat' : ''
-                                }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''} content-panel--titlebar-actions${
-                                  appNotificationDrawerOpen
-                                    ? ' content-panel--app-notification-drawer-open'
-                                    : ''
-                                }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
-                                style={
-                                  chatDrawerVisible
-                                    ? // Only `--chat-drawer-width` lives here now: it feeds the
-                                      // universal tab-area gutter (`--app-header-utilities-width`).
-                                      // The rail's top/width are published by the RightRailShell
-                                      // itself (`--rail-*`), not inherited from the panel.
-                                      { '--chat-drawer-width': `${chatDrawerResize.width}px` }
-                                    : undefined
-                                }
-                              >
-                                {/* Every route mounts the command-center header in the
+                          <GfsDragSessionProvider>
+                            <main className="app-shell">
+                              <SidebarNav
+                                navItem={vm.navItem}
+                                activeSandboxUiApp={activeSandboxUiApp}
+                                availableSandboxUiApps={availableSandboxUiApps}
+                                collapsed={sidebarCollapsed}
+                                onCollapsedChange={handleSidebarCollapsedChange}
+                                onNewChat={handleNewWorkspaceChatTab}
+                                onOpenSandboxUiApp={handleOpenSandboxUiApp}
+                                onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
+                                onSelect={handleSidebarNavSelect}
+                                onOpenFilesSection={vm.openFilesSection}
+                                onOpenPreviewSection={vm.openPreviewSection}
+                                pushToast={vm.pushToast}
+                                toggleRequestId={sidebarToggleRequestId}
+                              />
+                              <section className="workspace-layout">
+                                <section
+                                  ref={contentPanelRef}
+                                  className={`content-panel glass-card${
+                                    isAgentChatView ? ' content-panel--agent-chat' : ''
+                                  }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''} content-panel--titlebar-actions${
+                                    appNotificationDrawerOpen
+                                      ? ' content-panel--app-notification-drawer-open'
+                                      : ''
+                                  }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
+                                  style={
+                                    chatDrawerVisible
+                                      ? // Only `--chat-drawer-width` lives here now: it feeds the
+                                        // universal tab-area gutter (`--app-header-utilities-width`).
+                                        // The rail's top/width are published by the RightRailShell
+                                        // itself (`--rail-*`), not inherited from the panel.
+                                        { '--chat-drawer-width': `${chatDrawerResize.width}px` }
+                                      : undefined
+                                  }
+                                >
+                                  {/* Every route mounts the command-center header in the
                                     window title bar via the same portal — the search
                                     pill and notification bell live in the title bar on
                                     all routes, never floating inline over the panel. */}
-                                <TitlebarActionsPortal container={titlebarActionsRoot}>
-                                  <AppHeader
-                                    placement="titlebar"
-                                    searchFocusRequestId={globalSearchFocusRequestId}
-                                    notificationOpenRequestId={notificationOpenRequestId}
-                                    notificationTrayMode={
-                                      notificationTrayUsesDrawer ? 'drawer' : 'overlay'
-                                    }
-                                    notificationTrayReady={notificationDrawerReady}
-                                    notificationTrayLeft={
-                                      notificationTrayUsesDrawer ? notificationTrayLeft : null
-                                    }
-                                    onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
-                                    onShellOverlayOpenChange={setHeaderShellOverlayOpen}
-                                    drawerAvailable={drawerAvailable}
-                                    chatDrawerOpen={chatDrawerVisible}
-                                    onToggleChatDrawer={toggleChatDrawer}
-                                  />
-                                </TitlebarActionsPortal>
-                                <ToastStack items={vm.toasts} />
-                                {/* Single global strip: driven by the universal
+                                  <TitlebarActionsPortal container={titlebarActionsRoot}>
+                                    <AppHeader
+                                      placement="titlebar"
+                                      searchFocusRequestId={globalSearchFocusRequestId}
+                                      notificationOpenRequestId={notificationOpenRequestId}
+                                      notificationTrayMode={
+                                        notificationTrayUsesDrawer ? 'drawer' : 'overlay'
+                                      }
+                                      notificationTrayReady={notificationDrawerReady}
+                                      notificationTrayLeft={
+                                        notificationTrayUsesDrawer ? notificationTrayLeft : null
+                                      }
+                                      onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
+                                      onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+                                      drawerAvailable={drawerAvailable}
+                                      chatDrawerOpen={chatDrawerVisible}
+                                      onToggleChatDrawer={toggleChatDrawer}
+                                    />
+                                  </TitlebarActionsPortal>
+                                  <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
+                                  {/* Single global strip: driven by the universal
                                     store, visible on every route above the
                                     per-kind seam so any tab is reachable from any
                                     tab. Hidden only when the workspace is empty. */}
-                                {workspaceTabs.tabs.length > 0 && (
-                                  <WorkspaceTabStrip
-                                    tabs={visibleWorkspaceTabs}
-                                    activeTabId={
-                                      vm.appsPickerActive ? null : workspaceTabs.activeTabId
-                                    }
-                                    onClose={handleCloseWorkspaceTab}
-                                    onReorder={handleReorderWorkspaceTab}
-                                    onSelect={handleSelectWorkspaceTab}
-                                    panelId={
-                                      vm.navItem === DESKTOP_ROUTES.chat
-                                        ? 'chat-view-panel'
-                                        : undefined
-                                    }
-                                  />
-                                )}
-                                {vm.navItem === DESKTOP_ROUTES.chat &&
-                                  (workspaceTabs.tabs.length === 0 ? (
-                                    <section className="chat-view-workspace" aria-label="Home">
-                                      <div className="chat-view-surface">
-                                        <div className="workspace-home-empty">
-                                          <h2>Nothing open</h2>
-                                          <Button onClick={handleNewWorkspaceChatTab}>
-                                            New chat
-                                          </Button>
-                                          <p className="muted">
-                                            or open something from the sidebar
-                                          </p>
-                                        </div>
-                                      </div>
-                                    </section>
-                                  ) : (
-                                    <ChatViewWorkspace
-                                      localSearch={
-                                        chatLocalSearchOpen ? (
-                                          <ChatLocalSearch
-                                            models={chatSemanticModels}
-                                            onClose={closeChatLocalSearch}
-                                            onSearchStateChange={handleChatLocalSearchStateChange}
-                                          />
-                                        ) : null
+                                  {workspaceTabs.tabs.length > 0 && (
+                                    <WorkspaceTabStrip
+                                      tabs={visibleWorkspaceTabs}
+                                      activeTabId={
+                                        vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                       }
-                                      surfaceId="chat-view-panel"
-                                    >
-                                      <ChatPage scrollContainerRef={contentPanelRef} />
-                                    </ChatViewWorkspace>
-                                  ))}
-                                {vm.navItem === DESKTOP_ROUTES.agents && (
-                                  <AgentsPage scrollContainerRef={contentPanelRef} />
-                                )}
-                                {vm.navItem === DESKTOP_ROUTES.files && (
-                                  <FilesPage
-                                    key={activeFilesTabId ?? 'files'}
-                                    pushToast={vm.pushToast}
-                                    pendingGfsUri={filesSeedPath}
-                                    remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-                                    onLocationChange={handleFilesLocationChange}
-                                    onOpenPreview={vm.openPreviewSection}
-                                  />
-                                )}
-                                {vm.navItem === DESKTOP_ROUTES.preview && activePreviewPayload && (
-                                  <FilePreviewPage
-                                    key={activePreviewTabId ?? 'preview'}
-                                    gfsUri={activePreviewPayload.gfsUri}
-                                    fileName={activePreviewTab?.title ?? 'Preview'}
-                                    fileKind={activePreviewPayload.fileKind}
-                                    mimeType={activePreviewPayload.mimeType}
-                                    byteLength={activePreviewPayload.byteLength}
-                                    reloadVersion={activePreviewPayload.reloadVersion}
-                                    unavailable={activePreviewPayload.unavailable}
-                                  />
-                                )}
-                                {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
-                                {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
-                                {vm.navItem === DESKTOP_ROUTES.apps && (
-                                  <SandboxUiPage
-                                    boundsRefreshKey={sandboxUiBoundsRefreshKey}
-                                    actionRequest={sandboxActionRequest}
-                                    currentTeamId={vm.currentTeamId}
-                                    headerShellOverlayOpen={
-                                      headerShellOverlayOpen || commandPaletteOpen
-                                    }
-                                    sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
-                                    toastShellOverlayOpen={vm.toasts.length > 0}
-                                    deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
-                                    shortcutApp={activeSandboxUiApp}
-                                    shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
-                                    localSearchRequestId={sandboxLocalSearchRequestId}
-                                    titlebarLeadingContainer={titlebarLeadingRoot}
-                                    onLaunchApp={handleOpenSandboxUiApp}
-                                    onEmbeddedAppOpening={handleSandboxUiOpening}
-                                    onEmbeddedAppMounted={handleSandboxUiMounted}
-                                    onEmbeddedAppBack={handleSandboxUiClosed}
-                                    onEmbeddedAppOpenFailed={handleSandboxUiOpenFailed}
-                                    onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
-                                    onEmbedSlotTopChange={setChatDrawerEmbedTop}
-                                    onEmbedSlotRightChange={setNotificationTrayLeft}
-                                    onNotify={vm.pushToast}
-                                    onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
-                                  />
-                                )}
-                                {vm.navItem === DESKTOP_ROUTES.settings && (
-                                  <SettingsPage
-                                    shortcutsFocusRequestId={settingsShortcutsRequestId}
-                                    notificationSettings={vm.notificationSettings}
-                                    desktopNotificationPermission={vm.desktopNotificationPermission}
-                                    themeMode={themeMode}
-                                    onNotify={vm.pushToast}
-                                    onThemeModeChange={setThemeMode}
-                                    onNotificationSoundVolumeChange={vm.setNotificationSoundVolume}
-                                    onPlayNotificationSoundPreview={vm.playNotificationSoundPreview}
-                                    onSaveNotificationSettings={vm.saveNotificationSettings}
-                                    channelNotificationPreferences={
-                                      vm.channelNotificationPreferences
-                                    }
-                                    channelNotificationPreferencesLoading={
-                                      vm.channelNotificationPreferencesLoading
-                                    }
-                                    channelNotificationPreferencesSaving={
-                                      vm.channelNotificationPreferencesSaving
-                                    }
-                                    onSaveChannelNotificationPreferences={
-                                      vm.saveChannelNotificationPreferences
-                                    }
-                                  />
-                                )}
-                              </section>
-                              {/* Universal chat drawer (mini-spec 04a §B/§D):
+                                      onClose={handleCloseWorkspaceTab}
+                                      onReorder={handleReorderWorkspaceTab}
+                                      onSelect={handleSelectWorkspaceTab}
+                                      panelId={
+                                        vm.navItem === DESKTOP_ROUTES.chat
+                                          ? 'chat-view-panel'
+                                          : undefined
+                                      }
+                                    />
+                                  )}
+                                  {vm.navItem === DESKTOP_ROUTES.chat &&
+                                    (workspaceTabs.tabs.length === 0 ? (
+                                      <section className="chat-view-workspace" aria-label="Home">
+                                        <div className="chat-view-surface">
+                                          <div className="workspace-home-empty">
+                                            <h2>Nothing open</h2>
+                                            <Button onClick={handleNewWorkspaceChatTab}>
+                                              New chat
+                                            </Button>
+                                            <p className="muted">
+                                              or open something from the sidebar
+                                            </p>
+                                          </div>
+                                        </div>
+                                      </section>
+                                    ) : (
+                                      <ChatViewWorkspace
+                                        localSearch={
+                                          chatLocalSearchOpen ? (
+                                            <ChatLocalSearch
+                                              models={chatSemanticModels}
+                                              onClose={closeChatLocalSearch}
+                                              onSearchStateChange={handleChatLocalSearchStateChange}
+                                            />
+                                          ) : null
+                                        }
+                                        surfaceId="chat-view-panel"
+                                      >
+                                        <ChatPage scrollContainerRef={contentPanelRef} />
+                                      </ChatViewWorkspace>
+                                    ))}
+                                  {vm.navItem === DESKTOP_ROUTES.agents && (
+                                    <AgentsPage scrollContainerRef={contentPanelRef} />
+                                  )}
+                                  {vm.navItem === DESKTOP_ROUTES.files && (
+                                    <FilesPage
+                                      key={activeFilesTabId ?? 'files'}
+                                      pushToast={vm.pushToast}
+                                      pendingGfsUri={filesSeedPath}
+                                      remoteGfsChangeEpoch={remoteGfsChangeEpoch}
+                                      onLocationChange={handleFilesLocationChange}
+                                      onOpenPreview={vm.openPreviewSection}
+                                    />
+                                  )}
+                                  {vm.navItem === DESKTOP_ROUTES.preview &&
+                                    activePreviewPayload && (
+                                      <FilePreviewPage
+                                        key={activePreviewTabId ?? 'preview'}
+                                        gfsUri={activePreviewPayload.gfsUri}
+                                        fileName={activePreviewTab?.title ?? 'Preview'}
+                                        fileKind={activePreviewPayload.fileKind}
+                                        mimeType={activePreviewPayload.mimeType}
+                                        byteLength={activePreviewPayload.byteLength}
+                                        reloadVersion={activePreviewPayload.reloadVersion}
+                                        unavailable={activePreviewPayload.unavailable}
+                                      />
+                                    )}
+                                  {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
+                                  {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
+                                  {vm.navItem === DESKTOP_ROUTES.apps && (
+                                    <SandboxUiPage
+                                      embed={embed}
+                                      activeAppRef={activeTabAppRef}
+                                      refreshError={embedRefreshError}
+                                      boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                      currentTeamId={vm.currentTeamId}
+                                      headerShellOverlayOpen={
+                                        headerShellOverlayOpen || commandPaletteOpen
+                                      }
+                                      sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                                      toastShellOverlayOpen={vm.toasts.length > 0}
+                                      deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
+                                      localSearchRequestId={sandboxLocalSearchRequestId}
+                                      titlebarLeadingContainer={titlebarLeadingRoot}
+                                      onLaunchApp={handleOpenSandboxUiApp}
+                                      onRefresh={refreshActiveApp}
+                                      onRelaunch={relaunchActiveApp}
+                                      onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
+                                      onEmbedSlotTopChange={setChatDrawerEmbedTop}
+                                      onEmbedSlotRightChange={setNotificationTrayLeft}
+                                      onNotify={vm.pushToast}
+                                    />
+                                  )}
+                                  {vm.navItem === DESKTOP_ROUTES.settings && (
+                                    <SettingsPage
+                                      shortcutsFocusRequestId={settingsShortcutsRequestId}
+                                      notificationSettings={vm.notificationSettings}
+                                      desktopNotificationPermission={
+                                        vm.desktopNotificationPermission
+                                      }
+                                      themeMode={themeMode}
+                                      onNotify={vm.pushToast}
+                                      onThemeModeChange={setThemeMode}
+                                      onNotificationSoundVolumeChange={
+                                        vm.setNotificationSoundVolume
+                                      }
+                                      onPlayNotificationSoundPreview={
+                                        vm.playNotificationSoundPreview
+                                      }
+                                      onSaveNotificationSettings={vm.saveNotificationSettings}
+                                      channelNotificationPreferences={
+                                        vm.channelNotificationPreferences
+                                      }
+                                      channelNotificationPreferencesLoading={
+                                        vm.channelNotificationPreferencesLoading
+                                      }
+                                      channelNotificationPreferencesSaving={
+                                        vm.channelNotificationPreferencesSaving
+                                      }
+                                      onSaveChannelNotificationPreferences={
+                                        vm.saveChannelNotificationPreferences
+                                      }
+                                    />
+                                  )}
+                                </section>
+                                {/* Universal chat drawer (mini-spec 04a §B/§D):
                                   mounted at the workspace-layout level (a sibling
                                   of the content panel), not inside the apps block,
                                   so it persists across ANY non-chat tab (R5). It
@@ -3080,71 +3102,72 @@ export function App() {
                                   universal gutter. Single global <ChatPage>/
                                   ChatSwitcher — no duplicated tab state or
                                   streams. */}
-                              {chatDrawerVisible && (
-                                <RightRailShell
-                                  occupant="chat-drawer"
-                                  width={chatDrawerResize.width}
-                                  top={drawerRailTop}
-                                >
-                                  <ChatDrawer
-                                    header={
-                                      <ChatSwitcher
-                                        tabs={chatWorkspaceTabs}
-                                        activeTabId={drawerActiveChatTabId}
-                                        onSelect={handleSelectDrawerChatTab}
-                                        onNewChat={handleNewWorkspaceChatTab}
-                                        focusRequestId={chatSwitcherFocusRequestId}
-                                      />
-                                    }
-                                    onNewChat={handleNewWorkspaceChatTab}
-                                    onExpandFullScreen={expandChatDrawerToFullScreen}
-                                    onToggle={toggleChatDrawer}
-                                    containerRef={chatDrawerRef}
-                                    ready={drawerReady}
-                                    onResizeHandleMouseDown={
-                                      chatDrawerResize.onResizeHandleMouseDown
-                                    }
-                                    onResizeHandleKeyDown={chatDrawerResize.onResizeHandleKeyDown}
+                                {chatDrawerVisible && (
+                                  <RightRailShell
+                                    occupant="chat-drawer"
                                     width={chatDrawerResize.width}
-                                    resizing={chatDrawerResize.isResizing}
+                                    top={drawerRailTop}
                                   >
-                                    <ChatPage scrollContainerRef={chatDrawerRef} />
-                                  </ChatDrawer>
-                                </RightRailShell>
-                              )}
-                            </section>
-                          </main>
-                          {commandPaletteOpen ? (
-                            <CommandPalette
-                              platform={platformFromNavigator(navigator.platform)}
-                              isEligible={isCommandEligible}
-                              onClose={closeCommandPalette}
-                              onExecute={commandId => executeDesktopCommand(commandId, 'palette')}
-                              restorePreviousFocus={!commandPaletteReturnToSandbox}
-                            />
-                          ) : null}
-                          {desktopUpdateRequiredDialog}
-                          {environmentSetupConfirmationDialog}
-                          {environmentSwitchConfirmationDialog}
-                          {environmentSetupSuccessDialog}
-                          {sandboxUiDeepLinkDialog}
-                          {pluginConsentPrompt ? (
-                            <PluginConsentModal
-                              request={pluginConsentPrompt}
-                              onResolve={resolvePluginConsent}
-                            />
-                          ) : null}
-                          {pluginGfsPreview ? (
-                            <GfsImagePreview
-                              key={`${pluginGfsPreview.gfsUri}:${pluginGfsPreview.reloadVersion}`}
-                              byteLength={pluginGfsPreview.bytes}
-                              fileName={pluginGfsPreview.name}
-                              gfsUri={pluginGfsPreview.gfsUri}
-                              mimeType={pluginGfsPreview.mimeType}
-                              unavailable={pluginGfsPreview.unavailable}
-                              onClose={closePluginGfsPreview}
-                            />
-                          ) : null}
+                                    <ChatDrawer
+                                      header={
+                                        <ChatSwitcher
+                                          tabs={chatWorkspaceTabs}
+                                          activeTabId={drawerActiveChatTabId}
+                                          onSelect={handleSelectDrawerChatTab}
+                                          onNewChat={handleNewWorkspaceChatTab}
+                                          focusRequestId={chatSwitcherFocusRequestId}
+                                        />
+                                      }
+                                      onNewChat={handleNewWorkspaceChatTab}
+                                      onExpandFullScreen={expandChatDrawerToFullScreen}
+                                      onToggle={toggleChatDrawer}
+                                      containerRef={chatDrawerRef}
+                                      ready={drawerReady}
+                                      onResizeHandleMouseDown={
+                                        chatDrawerResize.onResizeHandleMouseDown
+                                      }
+                                      onResizeHandleKeyDown={chatDrawerResize.onResizeHandleKeyDown}
+                                      width={chatDrawerResize.width}
+                                      resizing={chatDrawerResize.isResizing}
+                                    >
+                                      <ChatPage scrollContainerRef={chatDrawerRef} />
+                                    </ChatDrawer>
+                                  </RightRailShell>
+                                )}
+                              </section>
+                            </main>
+                            {commandPaletteOpen ? (
+                              <CommandPalette
+                                platform={platformFromNavigator(navigator.platform)}
+                                isEligible={isCommandEligible}
+                                onClose={closeCommandPalette}
+                                onExecute={commandId => executeDesktopCommand(commandId, 'palette')}
+                                restorePreviousFocus={!commandPaletteReturnToSandbox}
+                              />
+                            ) : null}
+                            {desktopUpdateRequiredDialog}
+                            {environmentSetupConfirmationDialog}
+                            {environmentSwitchConfirmationDialog}
+                            {environmentSetupSuccessDialog}
+                            {sandboxUiDeepLinkDialog}
+                            {pluginConsentPrompt ? (
+                              <PluginConsentModal
+                                request={pluginConsentPrompt}
+                                onResolve={resolvePluginConsent}
+                              />
+                            ) : null}
+                            {pluginGfsPreview ? (
+                              <GfsImagePreview
+                                key={`${pluginGfsPreview.gfsUri}:${pluginGfsPreview.reloadVersion}`}
+                                byteLength={pluginGfsPreview.bytes}
+                                fileName={pluginGfsPreview.name}
+                                gfsUri={pluginGfsPreview.gfsUri}
+                                mimeType={pluginGfsPreview.mimeType}
+                                unavailable={pluginGfsPreview.unavailable}
+                                onClose={closePluginGfsPreview}
+                              />
+                            ) : null}
+                          </GfsDragSessionProvider>
                         </DesktopStateProvider>
                       </McpRuntimeProvider>
                     </AgentChatProviders>
@@ -3164,7 +3187,7 @@ export function App() {
               {environmentSetupConfirmationDialog}
               {environmentSwitchConfirmationDialog}
               {environmentSetupSuccessDialog}
-              <ToastStack items={vm.toasts} />
+              <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
             </>
           )}
         </div>

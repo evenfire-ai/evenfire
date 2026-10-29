@@ -67,7 +67,7 @@ spec:
     spec:
       containers:
       - name: ${app}
-        image: node:24-alpine
+        image: node:24.22.1-alpine
         command: ["node", "/app/server.js"]
         ports:
         - containerPort: 8099

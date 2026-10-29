@@ -15,6 +15,12 @@ test('formatRemaining reports expired invitations', () => {
   assert.equal(formatRemaining('2026-04-20T11:59:59.000Z', now), 'expired')
 })
 
+test('formatRemaining does not invent an expiry for an invalid timestamp', () => {
+  const now = Date.parse('2026-04-20T12:00:00.000Z')
+
+  assert.equal(formatRemaining('not-a-date', now), '')
+})
+
 test('buildInvitationHeading includes the team name', () => {
   assert.equal(buildInvitationHeading('marketing'), 'Join marketing team')
   assert.equal(buildInvitationHeading(undefined), 'Join Evenfire')

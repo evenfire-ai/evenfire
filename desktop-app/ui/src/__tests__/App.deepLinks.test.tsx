@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
-import { type ReactNode, useEffect, useReducer } from 'react'
+import { type ReactElement, type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -12,12 +15,46 @@ import {
   openChatTab,
   openFilesTab,
   openSettingsTab,
-  setAppTabSavedRoutePath,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
+import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
+
+// The sandbox-ui main fake runs the real main process; these are the
+// layers under it that the suite does not stand up.
+vi.mock(
+  'electron',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')).electronModule
+)
+vi.mock(
+  '../../../src/config',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).configModule
+)
+vi.mock(
+  '../../../src/sandboxUiPartitionGc',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).partitionGcModule
+)
+vi.mock(
+  '../../../src/rpcTokenManager',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .rpcTokenManagerModule
+)
+vi.mock(
+  '../../../src/authClient',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).authClientModule
+)
+vi.mock(
+  '../../../src/tokenStore',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).tokenStoreModule
+)
 
 // The universal tab store lives inside the controller; the mock reproduces that
 // contract — `navItem` is DERIVED from the store, the store is reactive, and nav
@@ -60,6 +97,7 @@ const appHeaderHarness = vi.hoisted(() => ({
     placement?: 'default' | 'titlebar'
     searchFocusRequestId?: number
     notificationOpenRequestId?: number
+    onShellOverlayOpenChange?: (open: boolean) => void
   },
 }))
 
@@ -86,36 +124,13 @@ const sidebarHarness = vi.hoisted(() => ({
 
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
+    embed: EmbedOwnershipMachine
     headerShellOverlayOpen?: boolean
     deepLinkShellOverlayOpen?: boolean
-    shortcutApp?: {
-      appRef: string
-      label?: string
-      defaultPath?: string
-      routePath?: string
-    } | null
-    shortcutOpenRequestId?: number
     localSearchRequestId?: number
-    actionRequest?: {
-      id: number
-      action: 'refresh' | 'back-to-apps'
-    } | null
-    onEmbeddedAppOpening?: (app: {
-      appRef: string
-      label: string
-      icon?: string | null
-      defaultPath: string
-      routePath?: string
-    }) => void
-    onEmbeddedAppMounted?: () => void
-    onEmbeddedAppBack?: () => void
-    onEmbeddedAppOpenFailed?: () => void
-    onShortcutOpenResult?: (
-      requestId: number,
-      result: { status: 'mounted' } | { status: 'failed'; message: string }
-    ) => void | Promise<void>
   },
 }))
+const SLOT_BOUNDS = { x: 16, y: 12, width: 400, height: 300, dpr: 1 }
 
 vi.mock('@hooks/useAppController', () => ({
   useAppController: vi.fn(),
@@ -144,7 +159,11 @@ vi.mock('@components/CommandPalette', () => ({
   },
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
-vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
+vi.mock('@components/Common', () => ({
+  Button: () => null,
+  IconButton: () => null,
+  ToastStack: () => null,
+}))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
     title: string
@@ -174,9 +193,13 @@ vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
+// The page is stubbed, but like the real one it measures the slot for every
+// launch while it is mounted, so launches reach main.
 vi.mock('@pages/SandboxUiPage', () => ({
   SandboxUiPage: (props: NonNullable<typeof sandboxUiPageHarness.props>) => {
     sandboxUiPageHarness.props = props
+    const { embed } = props
+    useLayoutEffect(() => embed.registerMeasurer(async () => SLOT_BOUNDS), [embed])
     return null
   },
 }))
@@ -367,6 +390,18 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   return controller
 }
 
+// App mounts GfsDragSessionProvider, which reads Query state: every bare
+// App render needs a real QueryClient (fresh per render, production cache
+// defaults) instead of the app-level singleton provider it gets in prod.
+function renderApp(ui: ReactElement) {
+  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+  return render(ui, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  })
+}
+
 describe('App deep-link orchestration', () => {
   let currentController: AppController
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
@@ -375,11 +410,9 @@ describe('App deep-link orchestration', () => {
   const acknowledgeDeepLink = vi.fn().mockResolvedValue(undefined)
   const listApps = vi.fn().mockResolvedValue({ apps: [] })
   const listPendingDeepLinks = vi.fn().mockResolvedValue({ links: [] })
-  const closeSandboxUi = vi.fn().mockResolvedValue(undefined)
-  // Route-persistence read (mini-spec 05). Defaults to "on the default route"
-  // (null) so unrelated launch/deactivation tests behave exactly as before;
-  // the persistence tests override the resolved value per case.
-  const getSandboxUiLocation = vi.fn().mockResolvedValue(null)
+  let main: SandboxUiMainFake
+  const closeSandboxUi = () => main.bridge.close
+  const openSandboxUi = () => main.bridge.open
 
   it('prompts to add an environment when a Profile Portal handoff has no saved match', () => {
     const linkProvidedName = 'Tenant from profile link '.repeat(5)
@@ -392,7 +425,7 @@ describe('App deep-link orchestration', () => {
       },
     } as Partial<AppController>)
 
-    render(<App />)
+    renderApp(<App />)
 
     expect(confirmDialogHarness.props?.title).toBe('Add desktop environment?')
     const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
@@ -423,7 +456,7 @@ describe('App deep-link orchestration', () => {
       handleConfirmDesktopEnvironmentSwitchConfirmation: confirmSwitch,
     } as Partial<AppController>)
 
-    render(<App />)
+    renderApp(<App />)
 
     expect(confirmDialogHarness.props?.title).toBe('Switch desktop environment?')
     expect(confirmDialogHarness.props?.confirmLabel).toBe('Sign out and switch')
@@ -452,8 +485,7 @@ describe('App deep-link orchestration', () => {
     acknowledgeDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
     listPendingDeepLinks.mockResolvedValue({ links: [] })
-    closeSandboxUi.mockResolvedValue(undefined)
-    getSandboxUiLocation.mockResolvedValue(null)
+    main = createSandboxUiMainFake()
     emitDeepLink = null
     emitCommand = null
     currentController = makeController()
@@ -474,12 +506,11 @@ describe('App deep-link orchestration', () => {
           rendererReady: vi.fn().mockResolvedValue(undefined),
         },
         sandboxUi: {
+          ...main.bridge,
           listApps,
           listPendingDeepLinks,
           clearPendingDeepLinks,
           acknowledgeDeepLink,
-          close: closeSandboxUi,
-          getLocation: getSandboxUiLocation,
           focusActive: vi.fn().mockResolvedValue(true),
           onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
             emitDeepLink = callback
@@ -490,52 +521,68 @@ describe('App deep-link orchestration', () => {
     })
   })
 
+  // An app launched the way the sidebar does, into a new app tab. The stubbed
+  // page measures for it, and main mounts it unless told otherwise.
+  const LIVE_APP = { appRef: 'ns/app', label: 'App', defaultPath: '/' }
+
+  function embedState() {
+    const embed = sandboxUiPageHarness.props?.embed
+    if (!embed) throw new Error('the Apps page is not mounted')
+    return embed.getSnapshot()
+  }
+
+  function embedPhase(): string | undefined {
+    const state = embedState()
+    return state.owner === null ? undefined : state.views.get(state.owner)?.phase
+  }
+
+  async function launchLiveApp(
+    app: { appRef: string; label: string; defaultPath: string } = LIVE_APP
+  ) {
+    await act(async () => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.(app)
+      await Promise.resolve()
+    })
+  }
+
+  async function waitForMounted() {
+    await waitFor(() => expect(embedPhase()).toBe('mounted'))
+  }
+
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so
   // opening/closing an app no longer auto-collapses or restores the sidebar. The
   // manual toggle and its persistence are the only things that move the sidebar.
-  it('does not collapse or restore the sidebar when an app opens and closes', () => {
+  it('does not collapse or restore the sidebar when an app opens and closes', async () => {
     window.localStorage.clear()
     currentController = makeController({
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     expect(sidebarHarness.props?.collapsed).toBe(false)
 
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
-      })
-    })
-    // Guard against a vacuous assertion: the app must actually be active for
-    // "the sidebar didn't move" to mean anything.
-    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
+    await launchLiveApp()
+    await waitForMounted()
     // Opening an app leaves the sidebar exactly as it was, and touches nothing in
     // the saved preference.
     expect(sidebarHarness.props?.collapsed).toBe(false)
     expect(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBeNull()
 
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppBack?.())
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
     expect(sidebarHarness.props?.collapsed).toBe(false)
   })
 
-  it('keeps the manual sidebar toggle and its persistence intact while an app is open', () => {
+  it('keeps the manual sidebar toggle and its persistence intact while an app is open', async () => {
     window.localStorage.clear()
     currentController = makeController({
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
-      })
-    })
+    await launchLiveApp()
+    await waitForMounted()
     expect(sidebarHarness.props?.collapsed).toBe(false)
 
     // The user collapses the sidebar manually while the app is open: it collapses
@@ -550,33 +597,42 @@ describe('App deep-link orchestration', () => {
     expect(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('0')
 
     // Closing the app leaves the user's manual state untouched.
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppBack?.())
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
     expect(sidebarHarness.props?.collapsed).toBe(false)
   })
 
-  it('respects a saved collapsed preference regardless of app open/close', () => {
+  it('respects a saved collapsed preference regardless of app open/close', async () => {
     window.localStorage.clear()
     window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, '1')
     currentController = makeController({
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     expect(sidebarHarness.props?.collapsed).toBe(true)
 
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
-      })
-    })
-    // Guard against a vacuous assertion: the app must actually be active here.
-    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
+    main.failNextOpen(new Error('open rejected'))
+    await launchLiveApp()
+    await waitFor(() => expect(embedState().failure?.kind).toBe('open'))
     expect(sidebarHarness.props?.collapsed).toBe(true)
+  })
 
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppOpenFailed?.())
-    expect(sidebarHarness.props?.collapsed).toBe(true)
+  it('drops the shell overlays raised over an app whose view is gone while its tab stays', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    } as Partial<AppController>)
+    renderApp(<App />)
+    await launchLiveApp()
+    await waitForMounted()
+    act(() => appHeaderHarness.props?.onShellOverlayOpenChange?.(true))
+    expect(sandboxUiPageHarness.props?.headerShellOverlayOpen).toBe(true)
+
+    await act(() => main.crash())
+
+    await waitFor(() => expect(embedState().failure?.kind).toBe('crashed'))
+    expect(sandboxUiPageHarness.props?.headerShellOverlayOpen).toBe(false)
   })
 
   it('uses the shared titlebar header on every authenticated route', () => {
@@ -587,7 +643,7 @@ describe('App deep-link orchestration', () => {
         initialExperienceLoading: false,
         navItem,
       } as Partial<AppController>)
-      const view = render(<App />)
+      const view = renderApp(<App />)
 
       expect(appHeaderHarness.props?.placement).toBe('titlebar')
 
@@ -600,7 +656,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       selectedAgent: 'alpha',
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     act(() => emitCommand?.('chat.newTab'))
     expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
@@ -619,7 +675,7 @@ describe('App deep-link orchestration', () => {
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     act(() => emitCommand?.('search.open'))
     expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
@@ -632,7 +688,7 @@ describe('App deep-link orchestration', () => {
 
   it('suppresses application commands while plugin consent owns the app surface', () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     const consent = document.createElement('div')
     consent.className = 'da-plugin-consent'
     consent.setAttribute('role', 'dialog')
@@ -644,55 +700,42 @@ describe('App deep-link orchestration', () => {
     consent.remove()
   })
 
-  it('routes contextual search to the current sandbox app without opening global search', () => {
+  it('routes contextual search to the current sandbox app without opening global search', async () => {
     currentController = makeController({
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
       selectedAgent: 'alpha',
     } as Partial<AppController>)
-    render(<App />)
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
-      })
-    })
+    renderApp(<App />)
+    const held = main.holdNextOpen()
+    await launchLiveApp()
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(1))
 
+    // Still opening: nothing to search yet.
     act(() => emitCommand?.('search.current'))
     expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(0)
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    await act(async () => held().resolve())
+    await waitForMounted()
     act(() => emitCommand?.('search.current'))
     expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(1)
     expect(appHeaderHarness.props?.searchFocusRequestId).toBe(0)
 
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/replacement',
-        label: 'Replacement app',
-        defaultPath: '/',
-      })
-      sandboxUiPageHarness.props?.onEmbeddedAppMounted?.()
-    })
+    await launchLiveApp({ appRef: 'ns/replacement', label: 'Replacement app', defaultPath: '/' })
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+    await waitForMounted()
     act(() => emitCommand?.('search.current'))
     expect(sandboxUiPageHarness.props?.localSearchRequestId).toBe(2)
   })
 
-  it('opens the palette, executes eligible registry actions, and captures the sandbox view', () => {
+  it('opens the palette, executes eligible registry actions, and captures the sandbox view', async () => {
     currentController = makeController({
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
       selectedAgent: 'alpha',
     } as Partial<AppController>)
-    render(<App />)
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
-      })
-      emitCommand?.('commands.open', 'sandbox')
-    })
+    renderApp(<App />)
+    await launchLiveApp()
+    act(() => emitCommand?.('commands.open', 'sandbox'))
 
     expect(commandPaletteHarness.props).not.toBeNull()
     expect(sandboxUiPageHarness.props?.headerShellOverlayOpen).toBe(true)
@@ -708,7 +751,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     act(() => emitCommand?.('commands.open', 'sandbox'))
     act(() => commandPaletteHarness.props?.onClose())
 
@@ -717,7 +760,7 @@ describe('App deep-link orchestration', () => {
 
   it('opens Settings Shortcuts through the registered palette action', () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     act(() => emitCommand?.('commands.open'))
     act(() => commandPaletteHarness.props?.onExecute('settings.shortcuts'))
 
@@ -727,7 +770,7 @@ describe('App deep-link orchestration', () => {
 
   it('routes approved core palette actions through their existing owners', () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     act(() => emitCommand?.('commands.open'))
 
     act(() => commandPaletteHarness.props?.onExecute('settings.open'))
@@ -746,9 +789,9 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleLogout).toHaveBeenCalledOnce()
   })
 
-  it('routes approved contextual palette actions through shell and app owners', () => {
+  it('routes approved contextual palette actions through shell and app owners', async () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     act(() => emitCommand?.('commands.open'))
 
     for (const [commandId, route] of [
@@ -763,32 +806,33 @@ describe('App deep-link orchestration', () => {
     act(() => commandPaletteHarness.props?.onExecute('sidebar.toggle'))
     expect(sidebarHarness.props?.toggleRequestId).toBe(1)
 
-    // `navItem` is derived from the store; the instance-less Apps picker residual
-    // puts the shell on the Apps route so the contextual app commands apply.
-    act(() => {
-      currentController.appsPickerActive = true
-      forceControllerRender()
-    })
+    const held = main.holdNextOpen()
+    await launchLiveApp()
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(1))
     act(() => emitCommand?.('commands.open'))
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
-      })
-    })
     expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(false)
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    await act(async () => held().resolve())
+    await waitForMounted()
     expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(true)
-    act(() => commandPaletteHarness.props?.onExecute('app.refresh'))
-    expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 1, action: 'refresh' })
-    act(() => commandPaletteHarness.props?.onExecute('app.backToApps'))
-    expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 2, action: 'back-to-apps' })
+
+    // Refresh reloads the live view in place: no close, no new view.
+    const first = main.openCall(0).launchId
+    await act(async () => commandPaletteHarness.props?.onExecute('app.refresh'))
+    await act(() => main.settle())
+    expect(main.liveReloads()).toBe(1)
+    expect(main.live()?.launchId).toBe(first)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(1)
+    expect(closeSandboxUi()).not.toHaveBeenCalled()
+
+    act(() => emitCommand?.('commands.open'))
+    await act(async () => commandPaletteHarness.props?.onExecute('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    expect(closeSandboxUi()).toHaveBeenLastCalledWith({ launchId: first })
   })
 
   it('resets controlled command requests with the authenticated shell lifetime', async () => {
     currentController = makeController({ initialExperienceLoading: false })
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     act(() => emitCommand?.('commands.open'))
     act(() => commandPaletteHarness.props?.onExecute('notifications.open'))
@@ -807,32 +851,19 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(0)
       expect(sidebarHarness.props?.toggleRequestId).toBe(0)
-      expect(sandboxUiPageHarness.props?.actionRequest).toBeNull()
       expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(false)
     })
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers()
+    await main.dispose()
   })
 
-  async function reportShortcutOpenResult(
-    result: { status: 'mounted' } | { status: 'failed'; message: string } = {
-      status: 'mounted',
-    }
-  ): Promise<void> {
-    await waitFor(() => {
-      expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(0)
-    })
-    const props = sandboxUiPageHarness.props
-    // Bound to its own const: TypeScript discards the narrowing of a property
-    // inside a callback, because the object could be mutated in between.
-    const requestId = props?.shortcutOpenRequestId
-    if (!props || !requestId) throw new Error('Sandbox UI shortcut was not requested')
-    await act(async () => {
-      await props.onShortcutOpenResult?.(requestId, result)
-      await Promise.resolve()
-    })
+  // The deep link's launch reached main (`times` opens so far). Main mounts it
+  // unless the test told the fake to hold or fail that open.
+  async function waitForAppOpen(times = 1): Promise<void> {
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(times))
   }
 
   async function confirmPendingAppLink(): Promise<void> {
@@ -862,7 +893,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -887,7 +918,7 @@ describe('App deep-link orchestration', () => {
       confirmDialogHarness.props?.onConfirm()
       await Promise.resolve()
     })
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
@@ -905,7 +936,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -917,7 +948,7 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
     await confirmPendingAppLink()
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     // The launch drives the store (an app tab), so `navItem` derives to the Apps
@@ -927,7 +958,7 @@ describe('App deep-link orchestration', () => {
 
   it('acknowledges an authenticated app link when confirmation is cancelled', async () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -942,7 +973,7 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeUndefined()
+    expect(openSandboxUi()).not.toHaveBeenCalled()
   })
 
   it('signals a deep-link overlay to the sandbox page while the confirm dialog is open', async () => {
@@ -961,7 +992,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
     // The native WebContentsView paints above renderer DOM, so the overlay
     // signal must stay off until a deep-link dialog actually needs to show.
@@ -976,7 +1007,7 @@ describe('App deep-link orchestration', () => {
     expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
 
     await confirmPendingAppLink()
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
   })
@@ -991,7 +1022,7 @@ describe('App deep-link orchestration', () => {
       navItem: DESKTOP_ROUTES.apps,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1038,7 +1069,7 @@ describe('App deep-link orchestration', () => {
       navItem: DESKTOP_ROUTES.apps,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1096,7 +1127,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1105,7 +1136,7 @@ describe('App deep-link orchestration', () => {
     })
 
     await confirmPendingAppLink()
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
@@ -1115,7 +1146,7 @@ describe('App deep-link orchestration', () => {
   })
 
   it('never presents a user A link after user B becomes authenticated', async () => {
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1162,7 +1193,7 @@ describe('App deep-link orchestration', () => {
           resolveColdList = resolve
         })
     )
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     currentController = makeController({
       initialExperienceLoading: false,
@@ -1192,7 +1223,7 @@ describe('App deep-link orchestration', () => {
 
   it('restores the previous team when the linked app is unavailable', async () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1226,7 +1257,7 @@ describe('App deep-link orchestration', () => {
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1248,22 +1279,21 @@ describe('App deep-link orchestration', () => {
   })
 
   it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
-    const ensureTeamContext = vi.fn(async (): Promise<boolean> => true)
+    let viewLiveAtSwitch: unknown = 'not switched'
+    const ensureTeamContext = vi.fn(async (): Promise<boolean> => {
+      if (viewLiveAtSwitch === 'not switched') viewLiveAtSwitch = main.live()
+      return true
+    })
     currentController = makeController({
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
 
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/current',
-        label: 'Current App',
-        defaultPath: '/',
-      })
-    })
+    await launchLiveApp({ appRef: 'ns/current', label: 'Current App', defaultPath: '/' })
+    await waitForMounted()
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1272,8 +1302,11 @@ describe('App deep-link orchestration', () => {
     await confirmPendingAppLink()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
-    expect(closeSandboxUi).toHaveBeenCalledOnce()
-    expect(closeSandboxUi.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(closeSandboxUi()).toHaveBeenCalledOnce()
+    expect(closeSandboxUi()).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
+    // The team switch waited for main to release the view, not just for the close.
+    expect(viewLiveAtSwitch).toBeNull()
+    expect(closeSandboxUi().mock.invocationCallOrder[0]).toBeLessThan(
       ensureTeamContext.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY
     )
   })
@@ -1296,7 +1329,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1304,7 +1337,7 @@ describe('App deep-link orchestration', () => {
     })
     await confirmPendingAppLink()
 
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
@@ -1335,7 +1368,7 @@ describe('App deep-link orchestration', () => {
       handleEnsureTeamContext: ensureTeamContext,
       getCurrentTeamId: () => liveTeamId,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1370,7 +1403,7 @@ describe('App deep-link orchestration', () => {
     acknowledgeDeepLink.mockImplementationOnce(() => {
       throw new Error('bridge unavailable')
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1378,7 +1411,7 @@ describe('App deep-link orchestration', () => {
     })
     await confirmPendingAppLink()
 
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('bridge unavailable'),
@@ -1404,20 +1437,22 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    const held = main.holdNextOpen()
     await confirmPendingAppLink()
 
-    await waitFor(() => {
-      expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(0)
+    await waitForAppOpen()
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
     })
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
-    await reportShortcutOpenResult()
+    await act(async () => held().resolve())
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
@@ -1437,7 +1472,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     }))
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1458,7 +1493,7 @@ describe('App deep-link orchestration', () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
@@ -1488,7 +1523,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     }))
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1522,9 +1557,57 @@ describe('App deep-link orchestration', () => {
       vi.advanceTimersByTime(2_000)
       await Promise.resolve()
     })
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+  })
+
+  it('defers a cross-team link whose open mounts and then fails, with its error', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    renderApp(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    main.failNextOpenAfterMount(new Error('attach failed'))
+    await confirmPendingAppLink()
+    await waitForAppOpen()
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith('attach failed', 'error')
+    })
+    await act(async () => {
+      await main.settle()
+    })
+    expect(main.reported('sandboxUi:released')).toEqual([
+      expect.objectContaining({ reason: 'open_failed' }),
+    ])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     expect(liveTeamId).toBe('team-b')
     expect(ensureTeamContext).toHaveBeenCalledTimes(1)
   })
@@ -1553,14 +1636,15 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
+    main.failNextOpen(new Error('native mount failed'))
     await confirmPendingAppLink()
-    await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
+    await waitForAppOpen()
 
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
@@ -1572,7 +1656,7 @@ describe('App deep-link orchestration', () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
-    await reportShortcutOpenResult()
+    await waitForAppOpen(2)
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
@@ -1608,14 +1692,15 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
+    main.failNextOpen(new Error('native mount failed'))
     await confirmPendingAppLink()
-    await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
+    await waitForAppOpen()
 
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
@@ -1644,7 +1729,7 @@ describe('App deep-link orchestration', () => {
     // The launch put the shell on the Apps route via the store (observable that
     // replaced the retired single `handleNavSelect(apps)` call).
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(1)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(1)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
     await act(async () => {
@@ -1684,7 +1769,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1704,7 +1789,7 @@ describe('App deep-link orchestration', () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
-    await reportShortcutOpenResult()
+    await waitForAppOpen()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
@@ -1723,7 +1808,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1762,7 +1847,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1795,14 +1880,15 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app' })
     })
+    main.failNextOpen(new Error('native mount failed'))
     await confirmPendingAppLink()
-    await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
+    await waitForAppOpen()
 
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(1)
 
@@ -1810,16 +1896,13 @@ describe('App deep-link orchestration', () => {
       emitDeepLink?.({ id: 2, appRef: 'ns/next' })
     })
     await confirmPendingAppLink()
-    await waitFor(() => {
-      expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(1)
-    })
-    await reportShortcutOpenResult()
+    await waitForAppOpen(2)
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(2))
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(1)
   })
 
-  // ── mini-spec 05: Phase-1 app persistence by URL restoration ────────────────
+  // ── the route an app tab is left on, and deep links left before mounting ──
 
   const READY_APP = {
     appRef: 'ns/app',
@@ -1829,182 +1912,103 @@ describe('App deep-link orchestration', () => {
     phase: 'active',
   }
 
-  // A genuinely distinct app: a different appRef, so cross-app lifecycle
-  // isolation tests exercise App A → App B rather than a second tab of App A.
-  const READY_APP_B = {
-    appRef: 'ns/app-b',
-    title: 'Linked App B',
-    defaultPath: '/',
-    ready: true,
-    phase: 'active',
-  }
-
   const appTabs = () => currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'app')
 
   // Launch an app straight through the sidebar (`onOpenSandboxUiApp`), the same
-  // path the real app-picker uses — no deep-link confirm ceremony. Defaults to
-  // `ns/app`; pass a distinct appRef to launch another app the sidebar offers.
+  // path the real app-picker uses — no deep-link confirm ceremony.
   async function launchAppFromSidebar(appRef = 'ns/app'): Promise<void> {
     const app = await waitFor(() => {
       const available = sidebarHarness.props?.availableSandboxUiApps?.find(a => a.appRef === appRef)
       if (!available) throw new Error(`${appRef} was not available to the sidebar`)
       return available
     })
+    const opens = openSandboxUi().mock.calls.length
     await act(async () => {
       sidebarHarness.props?.onOpenSandboxUiApp?.(app)
       await Promise.resolve()
     })
-    await waitFor(() => expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe(appRef), {
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opens + 1), {
       timeout: 5_000,
     })
+    await waitFor(() => expect(embedPhase()).toBe('mounted'), { timeout: 5_000 })
   }
 
   async function selectTab(index: 0 | 1 | 2): Promise<void> {
     await waitFor(() => expect(emitCommand).not.toBeNull())
     await act(async () => {
       emitCommand?.(`tabs.select${index + 1}` as DesktopCommandId)
-      await Promise.resolve()
+      await new Promise(resolve => window.setTimeout(resolve, 0))
     })
   }
 
-  it('restores the saved route when an app tab is reactivated (mini-spec 05 §3, T3)', async () => {
+  it('restores the route an app tab was left on when it is reactivated', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar()
-    // Launched at the default route — nothing persisted yet.
-    expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBeUndefined()
+    // Launched at the default route.
+    expect(main.openCall(0).routePath).toBeUndefined()
 
-    // The embed navigated to a non-default route. This is the shape the real
-    // producer emits (sandboxUiDriver.test.ts proves '/tickets/42' for a nested
-    // view URL; appService.getSandboxUiLocation reshapes it to { appRef, routePath }).
-    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/tickets/42' })
-
-    // Deactivate → the store reads the route and persists it on the app tab.
+    main.navigate('/tickets/42')
     await selectTab(0)
     await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/42'))
+    expect(closeSandboxUi()).toHaveBeenCalledTimes(1)
 
-    // Reactivate → the embed re-mounts at the saved route, not the default path.
     await selectTab(1)
-    await waitFor(() =>
-      expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/42')
-    )
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+    expect(main.openCall(1).routePath).toBe('/tickets/42')
   })
 
-  it('keeps two tabs of the same app on their own routes when alternating (§5)', async () => {
+  it('keeps two tabs of the same app on their own routes when alternating', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
 
     // Two tabs of the same app: [chat, A, B].
     await launchAppFromSidebar()
-    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/tickets/A' })
-    await launchAppFromSidebar() // deactivates A (persists /tickets/A), activates B
+    main.navigate('/tickets/A')
+    await launchAppFromSidebar() // leaves A (its view reports /tickets/A), opens B
     await waitFor(() => expect(appTabs()).toHaveLength(2))
     await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/A'))
 
-    // B navigates to its own route, then we switch back to A.
-    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/tickets/B' })
+    main.navigate('/tickets/B')
     await selectTab(1) // index 1 = A
-    await waitFor(() => expect(appTabs()[1]?.app?.savedRoutePath).toBe('/tickets/B'))
-    await waitFor(() =>
-      expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/A')
-    )
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(3))
+    expect(appTabs()[1]?.app?.savedRoutePath).toBe('/tickets/B')
+    expect(main.openCall(2).routePath).toBe('/tickets/A')
 
-    // Back to B restores B's own route.
+    await waitForMounted()
     await selectTab(2) // index 2 = B
-    await waitFor(() =>
-      expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/B')
-    )
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(4))
+    expect(main.openCall(3).routePath).toBe('/tickets/B')
   })
 
-  it('closes the embed exactly once on deactivation — the store is the single emitter (§3)', async () => {
+  it('does not close a view main already tore down when its tab is left', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar()
 
-    closeSandboxUi.mockClear()
-    getSandboxUiLocation.mockClear()
+    await act(() => main.crash())
+    await waitFor(() => expect(embedState().failure?.kind).toBe('crashed'))
 
-    await selectTab(0) // deactivate to the seeded chat tab
-    await waitFor(() => expect(closeSandboxUi).toHaveBeenCalledTimes(1))
-    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
-  })
-
-  it('does not re-close after an UNsolicited close reconciles the tab as not mounted (§3)', async () => {
-    currentController = makeController({ initialExperienceLoading: false })
-    listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
-    await launchAppFromSidebar()
-
-    // Unsolicited teardown (crash / quit / partition GC) arrives while the app
-    // tab is still active: the store reconciles its liveness to "not mounted".
-    await act(async () => {
-      sandboxUiPageHarness.props?.onEmbeddedAppBack?.()
-      await Promise.resolve()
-    })
-
-    closeSandboxUi.mockClear()
-    getSandboxUiLocation.mockClear()
-
-    // A later deactivation must not persist/close a dead embed.
     await selectTab(0)
-    await act(async () => {
-      await Promise.resolve()
-    })
-    expect(closeSandboxUi).not.toHaveBeenCalled()
-    expect(getSandboxUiLocation).not.toHaveBeenCalled()
+    expect(closeSandboxUi()).not.toHaveBeenCalled()
+    // A crash leaves no route behind: reopening must not land on a crashing page.
+    expect(appTabs()[0]?.app?.savedRoutePath).toBeUndefined()
   })
 
-  it('closes an embed re-mounted within the still-active app tab (Blocker — arm-on-open)', async () => {
-    currentController = makeController({ initialExperienceLoading: false })
-    listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
-    await launchAppFromSidebar()
-
-    // Back-to-apps / unsolicited onClosed clears the liveness ref but leaves the
-    // app tab active (the in-page Apps grid is shown, no tab change).
-    await act(async () => {
-      sandboxUiPageHarness.props?.onEmbeddedAppBack?.()
-      await Promise.resolve()
-    })
-
-    // Re-mount the embed DIRECTLY from the in-page grid: this only fires
-    // onEmbeddedAppOpening — it does NOT create or select a store tab. Before the
-    // arm-on-open fix the liveness ref stays null here, so the deactivation
-    // effect early-returns on the next switch and the native view leaks; with the
-    // fix, onEmbeddedAppOpening arms the ref to the active app tab.
-    await act(async () => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app',
-        label: 'Linked App',
-        defaultPath: '/',
-      })
-      await Promise.resolve()
-    })
-
-    closeSandboxUi.mockClear()
-
-    // Switching to a chat tab must close the re-mounted embed exactly once.
-    await selectTab(0)
-    await waitFor(() => expect(closeSandboxUi).toHaveBeenCalledTimes(1))
-  })
-
-  it('persists the outgoing app route on a deep-link handoff (§3, Should-fix)', async () => {
+  it('persists the outgoing app route on a deep-link team handoff', async () => {
     const ensureTeamContext = vi.fn(async (): Promise<boolean> => true)
     currentController = makeController({
       initialExperienceLoading: false,
       handleEnsureTeamContext: ensureTeamContext,
     })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar()
     const outgoingId = appTabs()[0]?.id
-
-    // The outgoing embed is on a non-default route when a cross-team deep link
-    // hands off — the handoff must persist it, same as the deactivation effect.
-    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/handoff/route' })
+    main.navigate('/handoff/route')
 
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
     act(() => {
@@ -2017,285 +2021,110 @@ describe('App deep-link orchestration', () => {
         currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)?.app?.savedRoutePath
       ).toBe('/handoff/route')
     )
-    expect(getSandboxUiLocation).toHaveBeenCalled()
-    expect(closeSandboxUi).toHaveBeenCalled()
+    expect(closeSandboxUi()).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
   })
 
-  // R1-H1 (mini-spec 07): the deactivation continuation reads the outgoing
-  // route over IPC and then closes the singleton embed. If the user reactivates
-  // the SAME app tab before that read resolves, the stale continuation must not
-  // tear down the just-reopened embed nor overwrite the live tab's route with
-  // the value it read from the view that is already gone. The read is deferred
-  // here so the reactivation lands while it is in flight. The resolved value uses
-  // the same `{ appRef, routePath }` contract shape the rest of the suite uses
-  // (pinned by sandboxUiDriver.test.ts); the gate aborts before routePath is read
-  // on the raced path, so its exact value does not matter to this test.
-  function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-    let resolve!: (value: T) => void
-    const promise = new Promise<T>(res => {
-      resolve = res
+  it('acks a cross-team link left before it mounted without retrying it or switching teams back', async () => {
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
     })
-    return { promise, resolve }
-  }
-
-  it('does not close or overwrite an app tab reactivated before the stale getLocation resolves (R1-H1, T3)', async () => {
-    currentController = makeController({ initialExperienceLoading: false })
-    listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
-    await launchAppFromSidebar() // tabs: [chat, A]; A is live
-
-    closeSandboxUi.mockClear()
-    getSandboxUiLocation.mockClear()
-
-    // Defer the deactivation read so App A can be reactivated while it is still
-    // in flight. Only the deactivation continuation calls getLocation here
-    // (reactivation early-returns before any read), so one deferred call is exact.
-    const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
-    getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
-
-    // Deactivate A → seeded chat tab: dispatches the read-then-close continuation.
-    await selectTab(0)
-    // Reactivate A before the old read resolves: a newer activation now owns the
-    // active view and the embed is re-mounted for A.
-    await selectTab(1)
-
-    // The stale read finally resolves with A's earlier route.
-    await act(async () => {
-      pendingLocation.resolve({ appRef: 'ns/app', routePath: '/stale/route' })
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-
-    // Liveness witnesses (M4): the negative assertions below pass vacuously if the
-    // deactivation never reads/closes at all, so pin that the read-then-close DID
-    // run (exactly the deferred call) and that A is genuinely re-mounted and live.
-    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
-    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
-
-    // Observable result: the reopened embed was NOT torn down, and the live tab's
-    // route was NOT clobbered by the stale value. (At the pre-fix head the stale
-    // continuation closes the reopened embed and persists '/stale/route' onto A.)
-    expect(closeSandboxUi).not.toHaveBeenCalled()
-    expect(appTabs()[0]?.app?.savedRoutePath).not.toBe('/stale/route')
-  })
-
-  it('does not close a different app opened before the stale getLocation resolves (R1-H1, T3)', async () => {
-    currentController = makeController({ initialExperienceLoading: false })
-    // Two genuinely distinct apps: A's stale continuation must not tear down B.
-    listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
-    render(<App />)
-    await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A is live
-
-    closeSandboxUi.mockClear()
-    getSandboxUiLocation.mockClear()
-
-    const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
-    getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
-
-    // Deactivate A → seeded chat tab (A's read in flight).
-    await selectTab(0)
-    // Open a DIFFERENT app (B, distinct appRef) before A's read resolves; B is live.
-    await launchAppFromSidebar('ns/app-b')
-    await waitFor(() => expect(appTabs()).toHaveLength(2))
-
-    // The stale read resolves with A's route, while B owns the active view.
-    await act(async () => {
-      pendingLocation.resolve({ appRef: 'ns/app', routePath: '/stale/route' })
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-
-    // Liveness witness (M4): A's deactivation read-then-close DID run (exactly the
-    // deferred call — launching B early-returns before any read), so the negative
-    // assertions below are not vacuously green.
-    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
-    // Observable result: B stays the live view and its embed survives (no close).
-    // (At the pre-fix head the stale continuation closes the newly-opened B embed.)
-    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app-b')
-    expect(closeSandboxUi).not.toHaveBeenCalled()
-    expect(appTabs()[1]?.app?.appRef).toBe('ns/app-b')
-    // Cross-app persist isolation: the stale read carried A's appRef, so the pre-fix
-    // continuation would clobber A's own route with '/stale/route'. The gate aborts
-    // that persist once B owns the active view, so A's route stays untouched.
-    expect(appTabs()[0]?.app?.appRef).toBe('ns/app')
-    expect(appTabs()[0]?.app?.savedRoutePath).not.toBe('/stale/route')
-    expect(appTabs()[1]?.app?.savedRoutePath).toBeUndefined()
-  })
-
-  // R3-H1: closeActiveSandboxUiEmbedForHandoff re-checks the activation generation
-  // after its `getLocation()` read, so a handoff superseded mid-read never clobbers
-  // the live tab's route nor tears down the embed that now owns the active view. That
-  // post-read check is the reachable guard: it aborts before both the persist AND the
-  // close, since no `await` separates them (the second gen check right before close is
-  // a defensive re-check for a future edit that would add one — it cannot fire on its
-  // own with today's control flow). No test exercised the reachable guard: removing it
-  // left the suite green. This defers the handoff's read, supersedes it with a plain
-  // deactivation (which bumps the generation and closes the embed itself), then
-  // resolves the stale read and asserts the handoff added neither a stale persist
-  // nor a second close.
-  it('does not persist or close for a superseded deep-link handoff (R3-H1, T3)', async () => {
-    const ensureTeamContext = vi.fn(async (): Promise<boolean> => true)
     currentController = makeController({
       initialExperienceLoading: false,
       handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
     })
-    // The deep link targets an UNAVAILABLE app (ns/missing) so the post-handoff
-    // open fails cleanly instead of relaunching an app and muddying the assertions.
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
-    await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live, liveRef = A
-    const outgoingId = appTabs()[0]?.id
-
-    closeSandboxUi.mockClear()
-    getSandboxUiLocation.mockClear()
-
-    // Defer the HANDOFF's read so a newer activation can bump the generation while
-    // it is in flight (only the handoff reads before the supersede below).
-    const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
-    getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
-
-    // A cross-team deep link drives closeActiveSandboxUiEmbedForHandoff, which reads
-    // the outgoing route (deferred here) before it would persist + close.
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    main.holdNextOpen()
     act(() => {
-      emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
     await confirmPendingAppLink()
-    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalledTimes(1), { timeout: 5000 })
+    await waitForAppOpen()
+    expect(liveTeamId).toBe('team-b')
 
-    // Supersede the handoff: switch to the seeded chat tab. The deactivation effect
-    // bumps the activation generation AND closes A's embed itself, all while the
-    // handoff's read is still pending.
+    // The user leaves the link's tab while its view is still opening.
     await selectTab(0)
-    await waitFor(() => expect(closeSandboxUi).toHaveBeenCalledTimes(1))
 
-    // The superseded handoff read finally resolves with A's earlier route.
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-b')
+    expect(confirmDialogHarness.props?.title).not.toBe('App link could not be opened')
+    expect(currentController.pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not open app link'),
+      'error'
+    )
+    // No retry: the link is gone and nothing reopens the app later.
     await act(async () => {
-      pendingLocation.resolve({ appRef: 'ns/app', routePath: '/stale/handoff' })
-      await Promise.resolve()
-      await Promise.resolve()
+      await new Promise(resolve => window.setTimeout(resolve, 50))
     })
-
-    // The post-read gen check aborts the superseded continuation: A is NOT persisted
-    // with the stale route, and the handoff emits NO second close on top of the
-    // deactivation's. With that guard removed the handoff clobbers A with
-    // '/stale/handoff' AND closes a second time.
-    const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
-    expect(appA?.app?.savedRoutePath).not.toBe('/stale/handoff')
-    expect(closeSandboxUi).toHaveBeenCalledTimes(1)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(1)
   })
 
-  // R3-M1 (the missing half of R1-H1): the deactivation continuation must validate
-  // that the route it read belongs to the OUTGOING tab's app before persisting it.
-  // On an app→app switch the incoming `open()` can reach main before this read
-  // resolves, so `getLocation` can surface the INCOMING app's location within a
-  // single activation generation — the generation gate does not catch that. Without
-  // the appRef guard, App B's route lands on App A's tab.
-  it('does not persist the incoming app route onto the outgoing tab (R3-M1, T3)', async () => {
-    currentController = makeController({ initialExperienceLoading: false })
-    // Two genuinely distinct apps so the read can carry the WRONG app's location.
-    listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
-    render(<App />)
-    await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live
-    const outgoingId = appTabs()[0]?.id
-
-    // The deactivation read returns the INCOMING app's location (B), not A's.
-    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app-b', routePath: '/b/route' })
-
-    await launchAppFromSidebar('ns/app-b') // deactivates A (reads B's location), activates B
-    await waitFor(() => expect(appTabs()).toHaveLength(2))
-    // Let A's deactivation continuation run to completion.
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
+  it('keeps the user where they navigated when a cross-team link is abandoned', async () => {
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
     })
-
-    // Observable result: A keeps its own identity and is NOT saved with B's route.
-    // The read's appRef ('ns/app-b') did not match A's ('ns/app'), so the persist
-    // fell back to undefined. (At the pre-guard head A.savedRoutePath === '/b/route'.)
-    const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
-    expect(appA?.app?.appRef).toBe('ns/app')
-    expect(appA?.app?.savedRoutePath).not.toBe('/b/route')
-    expect(appA?.app?.savedRoutePath).toBeUndefined()
-  })
-
-  // R4-M1 (regression of R3-M1's fix 8a9c45f5d): the appRef guard fell back to
-  // `undefined` on a foreign read, and setAppTabSavedRoutePath treats `undefined`
-  // as an authoritative CLEAR — so a foreign/stale read did not merely "skip
-  // saving B", it ERASED A's own previously-saved route. §3 Option A: a foreign
-  // or failed read must PRESERVE (never call the setter). Both seam sites.
-  it('preserves the outgoing tab route when the deactivation read surfaces a foreign app (R4-M1, §3, T3)', async () => {
-    currentController = makeController({ initialExperienceLoading: false })
-    listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
-    render(<App />)
-    await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live & active
-    const outgoingId = appTabs()[0]!.id
-
-    // Seed A's OWN saved route through the real store producer.
-    act(() => {
-      currentController.setWorkspaceTabs(state =>
-        setAppTabSavedRoutePath(state, outgoingId, '/a/own')
-      )
-    })
-    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/a/own')
-
-    // app→app switch whose deactivation read resolves the INCOMING app's location
-    // within one activation generation (deferred so it lands after B is active).
-    getSandboxUiLocation.mockClear()
-    const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
-    getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
-    await launchAppFromSidebar('ns/app-b') // deactivates A, reads (deferred)
-    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalled())
-    await act(async () => {
-      pendingLocation.resolve({ appRef: 'ns/app-b', routePath: '/b/route' })
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-
-    // Liveness witness (M4): A's deactivation read genuinely ran. A later
-    // read may also occur while the incoming app activates.
-    expect(getSandboxUiLocation).toHaveBeenCalled()
-    // Observable: A keeps its OWN route — the foreign read must not clear it.
-    // (Pre-fix, the mismatch fell back to undefined → setter CLEARED '/a/own'.)
-    const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
-    expect(appA?.app?.savedRoutePath).toBe('/a/own')
-  })
-
-  it('preserves the outgoing tab route when the handoff read surfaces a foreign app (R4-M1, §3, T3)', async () => {
-    const ensureTeamContext = vi.fn(async (): Promise<boolean> => true)
     currentController = makeController({
       initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.chat,
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
       handleEnsureTeamContext: ensureTeamContext,
-    })
+      getCurrentTeamId: () => liveTeamId,
+    } as Partial<AppController>)
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
-    await launchAppFromSidebar('ns/app') // A live & active
-    const outgoingId = appTabs()[0]!.id
-
-    act(() => {
-      currentController.setWorkspaceTabs(state =>
-        setAppTabSavedRoutePath(state, outgoingId, '/a/own')
-      )
-    })
-    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/a/own')
-
-    // A cross-team deep link drives closeActiveSandboxUiEmbedForHandoff; its read
-    // of the outgoing embed surfaces a FOREIGN app's location.
-    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app-b', routePath: '/b/route' })
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    main.holdNextOpen()
     act(() => {
-      emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
     await confirmPendingAppLink()
-    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalled())
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
+    await waitForAppOpen()
+    expect(liveTeamId).toBe('team-b')
+
+    // The user goes to Files while the linked app is still opening.
+    act(() => {
+      currentController.handleNavSelect(DESKTOP_ROUTES.files)
     })
 
-    // Observable: the handoff must not erase A's own route on a foreign read.
-    // (Pre-fix, the mismatch fell back to undefined → setter CLEARED '/a/own'.)
-    const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
-    expect(appA?.app?.savedRoutePath).toBe('/a/own')
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 50))
+    })
+    expect(liveTeamId).toBe('team-b')
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('files')
+    expect(openSandboxUi()).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops a deep link waiting on its launch when App unmounts, without acting on it', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    const view = renderApp(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    main.holdNextOpen()
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+    await confirmPendingAppLink()
+    await waitForAppOpen()
+
+    view.unmount()
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+    // The pending link stays with main for the next renderer to pick up.
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
   })
 })

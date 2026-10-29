@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import { childView, listChildrenPage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { Tone } from '@/uiTypes'
 import { FilesPage } from '../FilesPage'
 
@@ -57,6 +58,7 @@ function baseController() {
     loadingGrants: false,
     refreshGrants: vi.fn(),
     inheritedAccess: [],
+    inheritedCoverage: 'complete',
     loadingInheritedAccess: false,
     refreshInheritedAccess: vi.fn(),
     revokeGrant: vi.fn(),
@@ -78,6 +80,7 @@ function baseController() {
     replaceFileFromPath: vi.fn(),
     renameResource: vi.fn(),
     moveResource: vi.fn(),
+    convergeCommittedMove: vi.fn(),
     deleteResource: vi.fn(),
     mutating: false,
     reset: vi.fn(),
@@ -1793,6 +1796,9 @@ describe('FilesPage', () => {
               permissions: ['read', 'write'],
               grantId: 'parent-grant-1',
               shareIds: [],
+              grantPermissions: ['read', 'write'],
+              grantInherit: true,
+              shareEntries: [],
             },
           ],
         },
@@ -1858,6 +1864,183 @@ describe('FilesPage', () => {
     expect(
       within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
     ).toContain('Editor')
+  })
+
+  it('shows inherited members in a FOLDER manage dialog too', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        current: {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Team folder',
+          kind: 'directory' as const,
+          version: 2,
+        },
+        grants: [],
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read', 'write'],
+            inheritedFrom: ['main'],
+            sources: [
+              {
+                resourceId: 'root-1',
+                name: 'main',
+                permissions: ['read', 'write'],
+                grantId: 'root-grant-1',
+                shareIds: [],
+                grantPermissions: ['read', 'write'],
+                grantInherit: true,
+                shareEntries: [],
+              },
+            ],
+          },
+        ],
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('Team folder')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share folder Team folder' })
+    // The inherited member granted by the drive root renders as a normal
+    // toggleable row — the reported "no one has access" folder bug.
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
+    expect(within(row).getByText('Test Two')).toBeTruthy()
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
+  })
+
+  // R1-H3: a visibility boundary keeps the known rows AND shows the accurate
+  // boundary notice — not the load-failure copy — on the existing banner.
+  it('renders retained inherited rows alongside the read-boundary notice', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedCoverage: 'read-boundary',
+        inheritedAccessError: null,
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
+    expect(within(row).getByText('Test Two')).toBeTruthy()
+    expect(
+      within(manageDialog).getByText('There may be access from parent folders you cannot see.')
+    ).toBeTruthy()
+    // Hovering the banner (info icon or text) explains the notice in plain language.
+    const boundaryBanner = within(manageDialog)
+      .getByText('There may be access from parent folders you cannot see.')
+      .closest('.status-banner')
+    expect(boundaryBanner?.getAttribute('title')).toBe(
+      'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
+    )
+    // A boundary is not a load failure — the failure copy must not appear.
+    expect(within(manageDialog).queryByText(/could not be loaded/)).toBeNull()
+    // Known authorized sources stay editable (no blanket partial read-only).
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
+  })
+
+  it('renders the acl-limited notice without hiding known rows', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedCoverage: 'acl-limited',
+        inheritedAccessError: null,
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    expect(within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')).toBeTruthy()
+    expect(
+      within(manageDialog).getByText(
+        'Sharing details on some parent folders are not visible to you.'
+      )
+    ).toBeTruthy()
+  })
+
+  it('renders the load-failure notice for unavailable coverage', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedCoverage: 'unavailable',
+        inheritedAccessError: null,
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    expect(within(manageDialog).getByText(/Inherited access could not be loaded/)).toBeTruthy()
+    expect(within(manageDialog).queryByText(/cannot see\./)).toBeNull()
+  })
+
+  it('discloses the surviving Editor share in the confirmation before anything is applied', async () => {
+    // R1-M5: a role change rewrites the folder's GRANT row only; the folder's
+    // SHARE row survives it, so the member keeps Editor through it. The
+    // confirmation shows the effective role it is about to promise — it must
+    // also say what survives, BEFORE the operator approves.
+    installInheritedDirectoryMocks()
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read', 'write'],
+            inheritedFrom: ['Team folder'],
+            sources: [
+              {
+                resourceId: 'folder-1',
+                name: 'Team folder',
+                permissions: ['read', 'write'],
+                grantId: 'parent-grant-1',
+                shareIds: ['parent-share-1'],
+                grantPermissions: ['read', 'write'],
+                grantInherit: true,
+                shareEntries: [
+                  {
+                    rowId: 'parent-share-1',
+                    permissions: ['read', 'write'],
+                    includeDescendants: true,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(
+      within(confirmDialog).getByText(
+        'Sharing entries on Team folder still grant Editor access. This change does not remove them.'
+      )
+    ).toBeTruthy()
   })
 
   it('confirms an inherited role change against the parent folder and applies it there', async () => {
@@ -1930,7 +2113,11 @@ describe('FilesPage', () => {
   // R1-H2 — a stale direct file share must not survive a confirmed parent
   // role change: the editor share would keep masking the confirmed downgrade
   // while the toast claims Read-only.
-  it('revokes the file’s direct shares when a confirmed parent role change downgrades the member', async () => {
+  // R1-M5 — a confirmed parent downgrade rewrites only the folder's grant;
+  // the file's direct share rows SURVIVE the role change as residual access,
+  // and the outcome copy discloses the surviving Editor instead of claiming
+  // an effective downgrade.
+  it('keeps the file’s direct shares on a confirmed parent downgrade and discloses the residual Editor', async () => {
     installInheritedDirectoryMocks()
     const parentGrant = (window.clerum.gfs as unknown as { grant: ReturnType<typeof vi.fn> }).grant
     const directShare = {
@@ -1952,32 +2139,28 @@ describe('FilesPage', () => {
           permissions: ['read', 'write'],
           grantId: 'parent-grant-1',
           shareIds: [],
+          grantPermissions: ['read', 'write'],
+          grantInherit: true,
+          shareEntries: [],
         },
       ],
     }
     const inheritedSource = inheritedEditor.sources[0]!
-    let refreshShareQuery: (() => void) | undefined
     let completeShareRefresh: (() => void) | undefined
     let downgradeInherited: (() => void) | undefined
     parentGrant.mockImplementation(async () => {
       downgradeInherited?.()
     })
-    const fileGrant = vi.fn(async () => undefined)
     const revokeShare = vi.fn(async () => undefined)
     const refreshShares = vi.fn(
       () =>
         new Promise<void>(resolve => {
-          completeShareRefresh = () => {
-            refreshShareQuery?.()
-            resolve()
-          }
+          completeShareRefresh = () => resolve()
         })
     )
     const pushToast = vi.fn()
     hookMock.useGfsBrowserController.mockImplementation(() => {
-      const [shares, setShares] = useState([directShare])
       const [inheritedAccess, setInheritedAccess] = useState([inheritedEditor])
-      refreshShareQuery = () => setShares([])
       downgradeInherited = () =>
         setInheritedAccess([
           {
@@ -1988,9 +2171,8 @@ describe('FilesPage', () => {
         ])
       return inheritedFileController({
         grants: [],
-        shares,
+        shares: [directShare],
         inheritedAccess,
-        grant: fileGrant,
         revokeShare,
         refreshShares,
       })
@@ -2017,57 +2199,40 @@ describe('FilesPage', () => {
       fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
     })
 
-    // The revoke mutation does not alter rendered/query state by itself.
-    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('file-share-1'))
-    expect(
-      within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
-        name: 'Access role for Test Two',
-      }).textContent
-    ).toContain('Editor')
-    // …after the replacement grant expresses the confirmed role.
+    // Only the parent folder's grant is rewritten, with its own scope flag…
     await waitFor(() =>
-      expect(fileGrant).toHaveBeenCalledWith(['user:user-2'], ['read', 'share'], false)
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-1',
+        ['user:user-2'],
+        ['read', 'share'],
+        'main',
+        true
+      )
     )
+    // …and the role change NEVER revokes share rows.
+    expect(revokeShare).not.toHaveBeenCalled()
     await waitFor(() => expect(refreshShares).toHaveBeenCalledTimes(1))
-    expect(
-      within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
-        name: 'Access role for Test Two',
-      }).textContent
-    ).toContain('Editor')
     await act(async () => {
       completeShareRefresh?.()
     })
-    await waitFor(() =>
-      expect(
-        within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
-          name: 'Access role for Test Two',
-        }).textContent
-      ).toContain('Read')
-    )
+    // The merged row truthfully stays Editor: the surviving direct share
+    // still grants it.
+    expect(
+      within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
+        name: 'Access role for Test Two',
+      }).textContent
+    ).toContain('Editor')
     expect(pushToast).toHaveBeenCalledWith(
-      'Test Two is now Read-only on Team folder and everything inside it',
-      'success'
+      'Changed grant access to Read-only on Team folder. Sharing entries on report.txt still grant Editor access.',
+      'info'
     )
   })
 
-  // R1-H2 — a partial revoke also waits for refreshed server-backed shares
-  // before showing the effective role.
-  it('refreshes shares after a partial inherited-access mutation failure', async () => {
+  // R1-H2/R1-M5 — a partial parent-grant failure refreshes the server-backed
+  // lists before the effective role settles, and never touches shares.
+  it('refreshes lists after a partial inherited-access mutation failure without touching shares', async () => {
     installInheritedDirectoryMocks()
     const parentGrant = (window.clerum.gfs as unknown as { grant: ReturnType<typeof vi.fn> }).grant
-    const editorShare = {
-      id: 'file-editor-share',
-      drive: 'main',
-      resourceId: 'file-1',
-      subject: { type: 'user', id: 'user-2' },
-      permissions: ['read', 'write'],
-      includeDescendants: false,
-    }
-    const readShare = {
-      ...editorShare,
-      id: 'file-read-share',
-      permissions: ['read'],
-    }
     const inheritedEditor = {
       subject: { type: 'user', id: 'user-2' },
       permissions: ['read', 'write'],
@@ -2079,57 +2244,34 @@ describe('FilesPage', () => {
           permissions: ['read', 'write'],
           grantId: 'parent-grant-1',
           shareIds: [],
+          grantPermissions: ['read', 'write'],
+          grantInherit: true,
+          shareEntries: [],
         },
       ],
     }
-    const inheritedSource = inheritedEditor.sources[0]!
-    let refreshShareQuery: (() => void) | undefined
-    let completeShareRefresh: (() => void) | undefined
-    let downgradeInherited: (() => void) | undefined
-    parentGrant.mockImplementation(async () => downgradeInherited?.())
-    const revokeShare = vi
-      .fn<(shareId: string) => Promise<void>>()
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('share revoke failed'))
-    const refreshShares = vi.fn(
-      () =>
-        new Promise<void>(resolve => {
-          completeShareRefresh = () => {
-            refreshShareQuery?.()
-            resolve()
-          }
-        })
-    )
+    const revokeShare = vi.fn(async () => undefined)
+    const refreshGrants = vi.fn(async () => undefined)
+    const refreshInheritedAccess = vi.fn(async () => undefined)
+    const refreshShares = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockImplementation(() => {
-      const [shares, setShares] = useState([editorShare, readShare])
-      const [inheritedAccess, setInheritedAccess] = useState([inheritedEditor])
-      refreshShareQuery = () => setShares([readShare])
-      downgradeInherited = () =>
-        setInheritedAccess([
-          {
-            ...inheritedEditor,
-            permissions: ['read'],
-            sources: [{ ...inheritedSource, permissions: ['read'] }],
-          },
-        ])
-      return inheritedFileController({
+    parentGrant.mockRejectedValueOnce(new Error('403 Forbidden: escalation_rejected'))
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
         grants: [],
-        shares,
-        inheritedAccess,
+        inheritedAccess: [inheritedEditor],
         revokeShare,
+        refreshGrants,
+        refreshInheritedAccess,
         refreshShares,
       })
-    })
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('report.txt')
     const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
     const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
-    expect(
-      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
-    ).toContain('Editor')
     await act(async () => {
       fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
@@ -2141,29 +2283,24 @@ describe('FilesPage', () => {
       fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
     })
 
-    await waitFor(() => expect(revokeShare).toHaveBeenCalledTimes(2))
-    expect(revokeShare).toHaveBeenNthCalledWith(1, 'file-editor-share')
-    expect(revokeShare).toHaveBeenNthCalledWith(2, 'file-read-share')
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.stringContaining('Updated 0 of 1 folders — Team folder still grants access'),
+        'error'
+      )
+    )
+    // The partial failure refreshes every server-backed list…
+    await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(refreshInheritedAccess).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(refreshShares).toHaveBeenCalledTimes(1))
+    // …and a failed role change never revokes shares.
+    expect(revokeShare).not.toHaveBeenCalled()
+    // The merged row truthfully stays Editor.
     expect(
       within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
         name: 'Access role for Test Two',
       }).textContent
     ).toContain('Editor')
-    await act(async () => {
-      completeShareRefresh?.()
-    })
-    await waitFor(() =>
-      expect(
-        within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
-          name: 'Access role for Test Two',
-        }).textContent
-      ).toContain('Read')
-    )
-    expect(pushToast).toHaveBeenCalledWith(
-      expect.stringContaining('direct access on report.txt could not be fully aligned'),
-      'error'
-    )
   })
 
   // R1-M1 — the parent grant's bits are judged by the PARENT folder's
@@ -2218,8 +2355,69 @@ describe('FilesPage', () => {
       )
     )
     expect(pushToast).toHaveBeenCalledWith(
-      'Test Two is now Read-only on Team folder and everything inside it',
-      'success'
+      'Updated 1 of 1 folders — direct access on report.txt could not be fully aligned',
+      'error'
+    )
+    expect(pushToast.mock.calls.some(([, tone]) => tone === 'success')).toBe(false)
+  })
+
+  // R1-M5 — a share-only ancestor is never converted into a grant: nothing
+  // is written, no confirmation opens, and the user is told why nothing
+  // changed — never a silent no-op.
+  it('refuses a share-only ancestor role change without creating a grant', async () => {
+    installInheritedDirectoryMocks()
+    const parentGrant = (window.clerum.gfs as unknown as { grant: ReturnType<typeof vi.fn> }).grant
+    const inheritedEditor = {
+      subject: { type: 'user', id: 'user-2' },
+      permissions: ['read', 'write'],
+      inheritedFrom: ['Team folder'],
+      sources: [
+        {
+          resourceId: 'folder-1',
+          name: 'Team folder',
+          permissions: ['read', 'write'],
+          grantId: null,
+          shareIds: ['folder-share-1'],
+          grantPermissions: null,
+          grantInherit: null,
+          shareEntries: [
+            {
+              rowId: 'folder-share-1',
+              permissions: ['read', 'write'],
+              includeDescendants: true,
+            },
+          ],
+        },
+      ],
+    }
+    const revokeShare = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        grants: [],
+        inheritedAccess: [inheritedEditor],
+        revokeShare,
+      })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(parentGrant).not.toHaveBeenCalled()
+    expect(revokeShare).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith(
+      "Test Two still has Editor access from sharing entries that can't be edited here.",
+      'info'
     )
   })
 
@@ -2251,6 +2449,9 @@ describe('FilesPage', () => {
                 permissions: ['read'],
                 grantId: 'parent-grant-1',
                 shareIds: [],
+                grantPermissions: ['read'],
+                grantInherit: true,
+                shareEntries: [],
               },
             ],
           },
@@ -2346,6 +2547,9 @@ describe('FilesPage', () => {
       permissions: ['read', 'write'],
       grantId: 'cmp-grant-1',
       shareIds: [],
+      grantPermissions: ['read', 'write'],
+      grantInherit: true,
+      shareEntries: [],
     }
     const MARKETING = {
       resourceId: 'folder-mkt',
@@ -2353,6 +2557,9 @@ describe('FilesPage', () => {
       permissions: ['read', 'share'],
       grantId: 'mkt-grant-1',
       shareIds: [],
+      grantPermissions: ['read', 'share'],
+      grantInherit: true,
+      shareEntries: [],
     }
     const EDITOR_PERMISSIONS = ['read', 'write', 'delete', 'manage_acl', 'share']
 
@@ -2554,6 +2761,9 @@ describe('FilesPage', () => {
                   permissions: ['read'],
                   grantId: 'parent-grant-1',
                   shareIds: [],
+                  grantPermissions: ['read'],
+                  grantInherit: true,
+                  shareEntries: [],
                 },
               ],
             },
@@ -2589,10 +2799,11 @@ describe('FilesPage', () => {
       )
     })
 
-    // N2 — when the file's affordances are unavailable (empty grantable
-    // bits), the old direct grant must be revoked so it cannot keep masking
-    // the parent update.
-    it('revokes an unexpressible direct grant and renders the effective role after refresh', async () => {
+    // N2 (R1-M5) — when the file's affordances are unavailable (empty
+    // grantable bits), the direct grant AND its shares are KEPT: rights are
+    // never removed on an authority guess, and the partial outcome is stated
+    // through the existing honest copy.
+    it('keeps an unexpressible direct grant and states the partial alignment honestly', async () => {
       installInheritedDirectoryMocks()
       const parentGrant = (window.clerum.gfs as unknown as { grant: ReturnType<typeof vi.fn> })
         .grant
@@ -2615,25 +2826,24 @@ describe('FilesPage', () => {
             permissions: ['read', 'write'],
             grantId: 'parent-grant-1',
             shareIds: [],
+            grantPermissions: ['read', 'write'],
+            grantInherit: true,
+            shareEntries: [],
           },
         ],
       }
-      let removeEditorGrant: (() => void) | undefined
       let downgradeInherited: (() => void) | undefined
       parentGrant.mockImplementation(async () => {
         downgradeInherited?.()
       })
-      const revokeGrant = vi.fn(async () => {
-        removeEditorGrant?.()
-      })
+      const revokeGrant = vi.fn(async () => undefined)
+      const fileGrant = vi.fn(async () => undefined)
       const refreshGrants = vi.fn(async () => undefined)
       const refreshInheritedAccess = vi.fn(async () => undefined)
       const refreshShares = vi.fn(async () => undefined)
       const pushToast = vi.fn()
       hookMock.useGfsBrowserController.mockImplementation(() => {
-        const [grants, setGrants] = useState([editorGrant])
         const [inheritedAccess, setInheritedAccess] = useState([inheritedEditor])
-        removeEditorGrant = () => setGrants([])
         downgradeInherited = () =>
           setInheritedAccess([
             {
@@ -2643,7 +2853,7 @@ describe('FilesPage', () => {
             },
           ])
         return inheritedFileController({
-          grants,
+          grants: [editorGrant],
           inheritedAccess,
           affordances: {
             held: ['read', 'manage_acl'],
@@ -2651,6 +2861,7 @@ describe('FilesPage', () => {
             grantableBits: [],
             canCreateShare: false,
           },
+          grant: fileGrant,
           revokeGrant,
           refreshGrants,
           refreshInheritedAccess,
@@ -2674,7 +2885,8 @@ describe('FilesPage', () => {
         fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
       })
 
-      // The parent update succeeded with its pre-validated folder bits…
+      // The parent update succeeded with its pre-validated folder bits and
+      // the folder grant's OWN scope flag.
       await waitFor(() =>
         expect(parentGrant).toHaveBeenCalledWith(
           'folder-1',
@@ -2684,27 +2896,25 @@ describe('FilesPage', () => {
           true
         )
       )
-      // The stale direct Editor grant is revoked instead of being left to
-      // mask the parent result.
-      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('file-editor-grant'))
-      // The observable merged row now reflects the effective Read role after
-      // both the parent and direct surfaces refresh.
-      await waitFor(() =>
-        expect(
-          within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
-            name: 'Access role for Test Two',
-          }).textContent
-        ).toContain('Read')
-      )
+      // The direct grant is NEVER revoked on the unknown authority — and no
+      // replacement grant is invented either.
+      await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
+      expect(revokeGrant).not.toHaveBeenCalled()
+      expect(fileGrant).not.toHaveBeenCalled()
+      // The observable merged row truthfully stays Editor: the kept direct
+      // grant still grants it.
+      expect(
+        within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
+          name: 'Access role for Test Two',
+        }).textContent
+      ).toContain('Editor')
       await waitFor(() =>
         expect(pushToast).toHaveBeenCalledWith(
-          'Test Two is now Read-only on Team folder and everything inside it',
-          'success'
+          'Updated 1 of 1 folders — direct access on report.txt could not be fully aligned',
+          'error'
         )
       )
-      pushToast.mock.calls.forEach(([message, tone]) => {
-        expect(tone).not.toBe('error')
-      })
+      expect(pushToast.mock.calls.some(([, tone]) => tone === 'success')).toBe(false)
     })
 
     it('states the true partial outcome when a folder removal fails mid-run', async () => {
@@ -3005,12 +3215,88 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('chatllm is now an Editor', 'success')
   })
 
+  // A role promise is only as good as the coverage it was made under: an
+  // ancestor the user cannot see may still grant Editor, so the success copy
+  // must say what was NOT verified instead of promising an effective role.
+  it('qualifies the role-change toast when the inherited coverage is incomplete', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: {
+          listMine: vi.fn(async () => [
+            {
+              name: 'chatllm',
+              contextRef: 'ctx-1',
+              mcpServers: [],
+              gfsSubject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            },
+          ]),
+        },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const grant = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'write', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'write'],
+        canCreateShare: false,
+      },
+      grants: [
+        {
+          id: 'grant-1',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+      // The inherited walk stopped at a privacy boundary: an ancestor the
+      // user cannot see may still grant Editor.
+      inheritedCoverage: 'read-boundary',
+      grant,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Team folder')
+    fireEvent.click(await screen.findByRole('button', { name: 'Access role for chatllm' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'chatllm is now an Editor. Access through parent folders you cannot see was not verified.',
+        'success'
+      )
+    )
+  })
+
   it('lists direct shares in the who-has-access list and revokes them', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
         agents: { listMine: vi.fn(async () => []) },
-        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team' },
+                role: 'admin',
+                members: [{ id: 'user-9', name: 'Shared Member', email: 'shared@clerum.io' }],
+              },
+            ],
+          })),
+        },
       },
     })
     const revokeShare = vi.fn(async () => undefined)
@@ -3048,13 +3334,64 @@ describe('FilesPage', () => {
 
     const shareRow = await screen.findByTestId('gfs-access-row-share-share-1')
     expect(shareRow.textContent).not.toContain('Includes contents')
-    fireEvent.click(screen.getByRole('button', { name: 'Actions for user-9' }))
+    // A share whose subject resolves through the team directory lists the name.
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Shared Member' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
 
     await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-1'))
     await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith('Shared access revoked for user-9', 'success')
+      expect(pushToast).toHaveBeenCalledWith('Shared access revoked for Shared Member', 'success')
     )
+  })
+
+  it('filters a directory-less share from the who-has-access list and explains why', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const revokeShare = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read'],
+        canCreateShare: true,
+      },
+      grants: [],
+      shares: [
+        {
+          id: 'share-1',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'user', id: 'user-outside' },
+          permissions: ['read'],
+          includeDescendants: true,
+        },
+      ],
+      revokeShare,
+    })
+
+    renderFilesPage()
+    await openManageDialog('Team folder')
+
+    // The directory-less member never renders — the muted line explains why
+    // and the empty state never claims the folder has no access.
+    await screen.findByText(
+      'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
+    )
+    expect(screen.queryByTestId('gfs-access-row-share-share-1')).toBeNull()
+    expect(screen.queryByText('user-outside')).toBeNull()
+    expect(screen.getByText('Only members outside your teams have access here.')).toBeTruthy()
   })
 
   it('renders the fail-closed state when GFS access is revoked and retries on demand', async () => {
@@ -3293,6 +3630,530 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
   })
 
+  it('downloads a folder recursively as one zip with progress and a skip notice (BUG-175)', async () => {
+    vi.useFakeTimers()
+    // Producer-truthful wire fixtures: the children flow through the real
+    // GfsClient + structuredClone, not a hand-rolled .d.ts mirror (R1-M6).
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('doc-1', 'plan.md', 'file', {
+          parentResourceId: 'folder-1',
+          path: '/Assets/plan.md',
+        }),
+        childView('hidden-1', 'secret.txt', 'file', {
+          parentResourceId: 'folder-1',
+          path: '/Assets/secret.txt',
+          readable: false,
+        }),
+      ])
+    )
+    const pushToast = vi.fn()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const appendedNames: string[] = []
+    const zipStream = {
+      start: vi.fn(async () => ({ jobId: 'job-1' })),
+      // The renderer hands over a NAME and a URI: the main process fetches
+      // the payload and writes it into the archive (R1-H2).
+      appendFromUri: vi.fn(
+        async (_jobId: string, name: string, _uri: string, _options?: { maxBytes?: number }) => {
+          appendedNames.push(name)
+          return { name, bytes: 4 }
+        }
+      ),
+      finish: vi.fn(async (_jobId: string, suggestedName: string) => ({
+        saved: true,
+        filePath: `/saved/${suggestedName}`,
+        entryCount: appendedNames.length,
+      })),
+      abort: vi.fn(async () => ({ aborted: true })),
+    }
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, zipStream } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Assets',
+          kind: 'directory',
+          path: '/Assets',
+          version: 0,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+
+    // The job is in flight with a visible status strip before anything saved.
+    expect(screen.getByTestId('gfs-zip-progress').getAttribute('role')).toBe('status')
+    // Walk the throttled listing + download (500 ms of spacing per request).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
+
+    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
+      signal: expect.any(AbortSignal),
+    })
+    // The payload never reaches the renderer: the walk hands the main
+    // process a name and a URI, and the main process does the transfer.
+    expect(zipStream.appendFromUri).toHaveBeenCalledWith(
+      'job-1',
+      'Assets/plan.md',
+      'gfs://main/doc-1',
+      {
+        maxBytes: 512 * 1024 * 1024,
+        signal: expect.any(AbortSignal),
+      }
+    )
+    // The streamed save path: the entry reached the main-process writer and
+    // finish saved the archive — no renderer anchor download for zips.
+    expect(appendedNames).toEqual(['Assets/plan.md'])
+    expect(zipStream.finish).toHaveBeenCalledWith('job-1', 'Assets.zip')
+    expect(zipStream.abort).not.toHaveBeenCalled()
+    expect(click).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith('Downloaded Assets.zip (1 file)', 'success')
+    expect(pushToast).toHaveBeenCalledWith(
+      'Skipped 1 entry: Assets/secret.txt (No access)',
+      'warn',
+      expect.anything()
+    )
+  })
+
+  it('refuses a folder zip over the size limit with a clear message and saves nothing', async () => {
+    vi.useFakeTimers()
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('huge-1', 'huge.bin', 'file', {
+          parentResourceId: 'folder-1',
+          path: '/Assets/huge.bin',
+          bytes: 1024 * 1024 * 1024 + 1,
+        }),
+      ])
+    )
+    const appendFromUri = vi.fn(async () => ({ name: 'x', bytes: 0 }))
+    const pushToast = vi.fn()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, zipStream: { appendFromUri } } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Assets',
+          kind: 'directory',
+          path: '/Assets',
+          version: 0,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
+
+    expect(appendFromUri).not.toHaveBeenCalled()
+    expect(click).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.stringContaining('exceeds the 512 MiB folder-zip limit'),
+      'error'
+    )
+  })
+
+  it('tells the user an empty folder has nothing to zip instead of saving an empty archive', async () => {
+    vi.useFakeTimers()
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const appendFromUri = vi.fn(async () => ({ name: 'x', bytes: 0 }))
+    const pushToast = vi.fn()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, zipStream: { appendFromUri } } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Empty',
+          kind: 'directory',
+          path: '/Empty',
+          version: 0,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Empty' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
+
+    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
+      signal: expect.any(AbortSignal),
+    })
+    expect(appendFromUri).not.toHaveBeenCalled()
+    expect(click).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith('"Empty" has no downloadable files.', 'info')
+  })
+
+  it('stops a running folder zip from the progress strip without saving (M3)', async () => {
+    vi.useFakeTimers()
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('doc-1', 'plan.md', 'file', {
+          parentResourceId: 'folder-1',
+          path: '/Assets/plan.md',
+        }),
+      ])
+    )
+    const pushToast = vi.fn()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const zipStream = {
+      start: vi.fn(async () => ({ jobId: 'job-1' })),
+      appendFromUri: vi.fn(async () => ({ name: 'x', bytes: 4 })),
+      finish: vi.fn(async () => ({ saved: true, filePath: '/saved/x.zip', entryCount: 1 })),
+      abort: vi.fn(async () => ({ aborted: true })),
+    }
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, zipStream } },
+    })
+    const folderRow = {
+      resourceId: 'folder-1',
+      rid: 'folder-1',
+      gfsUri: 'gfs://main/folder-1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Assets',
+      kind: 'directory' as const,
+      path: '/Assets',
+      version: 0,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: false,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [folderRow],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+
+    // The job is live with a visible stop affordance; use it before the
+    // throttled download slot frees, so nothing reaches the save path.
+    expect(screen.getByTestId('gfs-zip-progress')).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Stop preparing zip' }))
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
+    expect(pushToast).toHaveBeenCalledWith('Stopped preparing Assets.zip.', 'info')
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Downloaded'), 'success')
+    expect(click).not.toHaveBeenCalled()
+    // Stopping also tells the main process to drop the temp archive.
+    expect(zipStream.abort).toHaveBeenCalledWith('job-1')
+    expect(zipStream.finish).not.toHaveBeenCalled()
+
+    // A replacement walk starts cleanly once the stopped one has settled —
+    // one job at a time, no overlap (R1-M1).
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+    expect(screen.getByTestId('gfs-zip-progress')).toBeTruthy()
+    expect(listChildren).toHaveBeenCalledTimes(2)
+  })
+
+  it('aborts a running zip walk when the page unmounts, so a remount cannot double-walk (M2)', async () => {
+    // Real timers: the first walk parks on the in-flight listing itself, so
+    // only the abort race can end it; the second walk's first request is
+    // immediate on its own fresh throttle.
+    let settleFirst!: (value: Awaited<ReturnType<typeof listChildrenPage>>) => void
+    const listChildren = vi.fn(() => {
+      if (listChildren.mock.calls.length === 1)
+        return new Promise(resolve => {
+          settleFirst = resolve
+        })
+      return listChildrenPage([])
+    })
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, download: vi.fn() } },
+    })
+    const assetsRow = {
+      resourceId: 'folder-1',
+      rid: 'folder-1',
+      gfsUri: 'gfs://main/folder-1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Assets',
+      kind: 'directory' as const,
+      path: '/Assets',
+      version: 0,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: false,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [assetsRow],
+    })
+
+    const first = renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+    expect(screen.getByTestId('gfs-zip-progress')).toBeTruthy()
+    expect(listChildren).toHaveBeenCalledTimes(1)
+
+    // Navigating away: the unmount cleanup must stop the walk.
+    first.unmount()
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(pushToast).toHaveBeenCalledWith('Stopped preparing Assets.zip.', 'info')
+
+    // A fresh mount must be able to start a fresh walk — with the previous
+    // one terminated, never alongside a zombie spending the same budget.
+    const second = renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    expect(listChildren).toHaveBeenCalledTimes(2)
+    expect(pushToast).toHaveBeenCalledWith('"Assets" has no downloadable files.', 'info')
+    second.unmount()
+    void settleFirst
+  })
+
+  it('tells the user a zip is already being prepared instead of ignoring the click (L7)', async () => {
+    vi.useFakeTimers()
+    // The listing never settles, so the first job stays in flight.
+    const listChildren = vi.fn(() => new Promise(() => undefined))
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, download: vi.fn() } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Assets',
+          kind: 'directory',
+          path: '/Assets',
+          version: 0,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+
+    expect(pushToast).toHaveBeenCalledWith('Already preparing Assets.zip', 'info')
+    // One walk, not two: the second click never reached the listing plane.
+    expect(listChildren).toHaveBeenCalledTimes(1)
+  })
+
+  it('holds the folder prefetch while a folder zip is walking (L9)', async () => {
+    vi.useFakeTimers()
+    const listChildren = vi.fn((resourceId: string) => {
+      if (resourceId === 'folder-1') return new Promise(() => undefined) // walk parks in listing
+      throw new Error(`unexpected prefetch listing for ${resourceId}`)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren } },
+    })
+    const row = (id: string, name: string) => ({
+      resourceId: id,
+      rid: id,
+      gfsUri: `gfs://main/${id}`,
+      drive: 'main',
+      parentResourceId: null,
+      name,
+      kind: 'directory' as const,
+      path: `/${name}`,
+      version: 0,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: false,
+    })
+    const controllerState = {
+      ...baseController(),
+      // Root view with a fresh (empty) folder listing: nothing to warm yet.
+      accessibleResources: [row('folder-1', 'Assets'), row('folder-p', 'PrefetchMe')],
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const makeElement = () => (
+      <QueryClientProvider client={queryClient}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
+    const { rerender } = render(makeElement())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+      await Promise.resolve()
+    })
+    expect(screen.getByTestId('gfs-zip-progress')).toBeTruthy()
+
+    // A folder's children land while the walk is still running: the prefetch
+    // effect re-runs, but must not spend the shared budget the walk holds.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controllerState,
+      items: [row('folder-p', 'PrefetchMe')],
+    })
+    await act(async () => {
+      rerender(makeElement())
+    })
+
+    expect(listChildren).toHaveBeenCalledTimes(1)
+    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
+      signal: expect.any(AbortSignal),
+    })
+    expect(listChildren).not.toHaveBeenCalledWith('folder-p', 'main', undefined)
+  })
+
+  it('omits Download as zip for a folder the session cannot read', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-9',
+          rid: 'folder-9',
+          gfsUri: 'gfs://main/folder-9',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Locked',
+          kind: 'directory',
+          path: '/Locked',
+          version: 0,
+          bytes: 0,
+          readable: false,
+          sources: ['grant'],
+          permissions: [],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Locked' }))
+    })
+
+    expect(screen.queryByRole('menuitem', { name: 'Download as zip' })).toBeNull()
+  })
+
   it('shows the document icon for txt, md, pdf, doc and docx files instead of the clip', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -3451,9 +4312,30 @@ describe('FilesPage', () => {
       ],
       nextCursor: null,
     }))
+    // rev-2 shared dispatch: the dialog commit re-resolves the source before
+    // the PATCH (fresh ifMatch) and probes source-resource write for the
+    // numbered-name policy.
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'child-1',
+      parentResourceId: 'folder-1',
+      rid: 'child-1',
+      gfsUri: 'gfs://main/child-1',
+      name: 'notes.txt',
+      kind: 'file',
+      pathCache: '/Product/notes.txt',
+      version: 3,
+      bytes: 12,
+    }))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren } },
+      value: { gfs: { listChildren, resolve, affordances } },
     })
     const child = {
       resourceId: 'child-1',
@@ -3525,7 +4407,7 @@ describe('FilesPage', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Subfolder)' }))
     })
 
-    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 3)
+    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 3, undefined, 'folder-1')
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
   })
@@ -3533,15 +4415,39 @@ describe('FilesPage', () => {
   it('moves a dragged file onto a folder only after confirming destination write access', async () => {
     const pushToast = vi.fn()
     const moveResource = vi.fn(async () => ({}))
-    const affordances = vi.fn(async () => ({
-      held: ['read', 'write'],
-      canDelegate: false,
-      grantableBits: [],
-      canCreateShare: false,
+    // rev-2 exact-bit authority: the source parent needs write+delete, the
+    // destination write, and the source resource write unlocks numbered names.
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return {
+          held: ['read', 'write', 'delete'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        }
+      }
+      return {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'file-1',
+      parentResourceId: 'folder-1',
+      rid: 'file-1',
+      gfsUri: 'gfs://main/file-1',
+      name: 'notes.txt',
+      kind: 'file',
+      pathCache: '/Product/notes.txt',
+      version: 3,
+      bytes: 12,
     }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { affordances } },
+      value: { gfs: { affordances, resolve } },
     })
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -3605,7 +4511,7 @@ describe('FilesPage', () => {
     fireEvent.drop(destinationRow, { dataTransfer })
 
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('file-1', 'archive-1', 3)
+      expect(moveResource).toHaveBeenCalledWith('file-1', 'archive-1', 3, undefined, 'folder-1')
       expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Archive', 'success')
     })
   })
@@ -3613,12 +4519,22 @@ describe('FilesPage', () => {
   it('rejects a file drop when the destination folder lacks write access', async () => {
     const pushToast = vi.fn()
     const moveResource = vi.fn(async () => ({}))
-    const affordances = vi.fn(async () => ({
-      held: ['read'],
-      canDelegate: false,
-      grantableBits: [],
-      canCreateShare: false,
-    }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return {
+          held: ['read', 'write', 'delete'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        }
+      }
+      return {
+        held: ['read'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      }
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: { gfs: { affordances } },
@@ -3677,16 +4593,279 @@ describe('FilesPage', () => {
     await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
 
     expect(destinationRow.getAttribute('data-drop-target')).toBeNull()
-    expect(dataTransfer.dropEffect).toBe('none')
+    // The initial hover stays landable while authority is unresolved (the
+    // drop-time priority check must be reachable); once the cold check
+    // observes the missing write, a further hover paints the denied verdict
+    // with its reason. The denied hover stays DELIVERABLE (UX matrix §5.3) —
+    // the tint, not the cursor, carries the denial.
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    expect(dataTransfer.dropEffect).toBe('move')
+    expect(destinationRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(destinationRow.getAttribute('data-drop-reason')).toBe('destination-write')
     fireEvent.drop(destinationRow, { dataTransfer })
 
     await waitFor(() => {
       expect(moveResource).not.toHaveBeenCalled()
       expect(pushToast).toHaveBeenCalledWith(
-        'You can’t move files to Private because you don’t have write permission for this folder.',
+        'You don’t have permission to move items into Private. You need edit access to the destination folder.',
         'error'
       )
     })
+    // The refused drop announces its full reason to the screen reader.
+    expect(
+      screen.getByText(
+        'You don’t have permission to move items into Private. You need edit access to the destination folder.'
+      )
+    ).toBeTruthy()
+  })
+
+  it('commits a file drop whose adjudication resolves after the gesture’s dragend', async () => {
+    // Regression: the browser fires dragend ~immediately after drop.
+    // clearResourceDrag used to bump the gesture counter on that dragend, so
+    // the drop's own commit — resuming after its async affordances probes —
+    // saw a stale generation and returned silently. Cache-cold drops lost
+    // that race every time: no move, no dialog, no toast.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async (_resourceId: string, _destinationId: string) => ({}))
+    const affordances = vi.fn(
+      () =>
+        new Promise(resolve =>
+          setTimeout(
+            () =>
+              resolve({
+                held: ['read', 'write', 'delete'],
+                canDelegate: false,
+                grantableBits: [],
+                canCreateShare: false,
+              }),
+            25
+          )
+        )
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          affordances,
+          resolve: vi.fn(async () => ({
+            resourceId: 'file-1',
+            gfsUri: 'gfs://main/file-1',
+            kind: 'file',
+            name: 'notes.txt',
+            version: 3,
+            parentResourceId: 'folder-1',
+          })),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'dest-1',
+          rid: 'dest-1',
+          gfsUri: 'gfs://main/dest-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Dest',
+          kind: 'directory',
+          path: '/Product/Dest',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Dest' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+    // The browser ends the gesture right after the drop — before the delayed
+    // probes resolve. This used to invalidate the drop's own commit.
+    fireEvent.dragEnd(sourceRow, { dataTransfer })
+
+    await waitFor(() => expect(moveResource).toHaveBeenCalled())
+    expect(moveResource.mock.calls[0]![0]).toBe('file-1')
+    expect(moveResource.mock.calls[0]![1]).toBe('dest-1')
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Dest', 'success')
+    )
+  })
+
+  it('a stale drop’s cleanup does not clear a newer gesture', async () => {
+    // R1-M4: gesture A’s drop adjudication is still pending when gesture B
+    // starts on the same surface. A’s late resolution must return without
+    // cleaning up B: B’s hover state stays, and B’s drop still commits B.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async (_resourceId: string, _destinationId: string) => ({}))
+    type Affordances = {
+      held: string[]
+      canDelegate: boolean
+      grantableBits: string[]
+      canCreateShare: boolean
+    }
+    let releaseA!: (value: Affordances) => void
+    const gatedA = new Promise<Affordances>(resolve => {
+      releaseA = resolve
+    })
+    let aProbePending = true
+    const affordances = vi.fn((): Promise<Affordances> => {
+      if (aProbePending) {
+        aProbePending = false
+        return gatedA
+      }
+      return Promise.resolve({
+        held: ['read', 'write', 'delete'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      })
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          affordances,
+          resolve: vi.fn(async (uri: string) => {
+            const id = uri.split('/').pop() ?? ''
+            return {
+              resourceId: id,
+              gfsUri: uri,
+              kind: 'file',
+              name: id === 'file-2' ? 'b.txt' : 'a.txt',
+              version: 3,
+              parentResourceId: 'folder-1',
+            }
+          }),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'a.txt',
+          kind: 'file',
+          path: '/Product/a.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'file-2',
+          rid: 'file-2',
+          gfsUri: 'gfs://main/file-2',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'b.txt',
+          kind: 'file',
+          path: '/Product/b.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'dest-1',
+          rid: 'dest-1',
+          gfsUri: 'gfs://main/dest-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Dest',
+          kind: 'directory',
+          path: '/Product/Dest',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const rowA = screen.getByRole('button', { name: 'Open a.txt' })
+    const rowB = screen.getByRole('button', { name: 'Open b.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Dest' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    // Gesture A: drop adjudication parks on the gated affordances probe.
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    // Gesture B starts before A’s adjudication resolves; its hover is live.
+    fireEvent.dragStart(rowB, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    await waitFor(() => expect(destinationRow.getAttribute('data-drop-state')).toBe('checking'))
+
+    // A resolves late: it must return (wrong generation) and clean up nothing.
+    await act(async () => {
+      releaseA({
+        held: ['read', 'write', 'delete'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      })
+    })
+    expect(moveResource).not.toHaveBeenCalledWith(
+      'file-1',
+      'dest-1',
+      expect.anything(),
+      expect.anything()
+    )
+    // B’s hover state survived A’s stale cleanup.
+    expect(destinationRow.getAttribute('data-drop-state')).toBe('checking')
+
+    // B’s drop is still operable and commits B.
+    fireEvent.drop(destinationRow, { dataTransfer })
+    await waitFor(() => expect(moveResource).toHaveBeenCalled())
+    expect(moveResource.mock.calls[0]![0]).toBe('file-2')
+    expect(moveResource.mock.calls[0]![1]).toBe('dest-1')
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Moved b.txt to Dest', 'success'))
   })
 
   it('presents a rate-limited drop check in the shared read-plane words', async () => {
@@ -3767,12 +4946,492 @@ describe('FilesPage', () => {
 
     await waitFor(() => {
       expect(moveResource).not.toHaveBeenCalled()
-      expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+      // A rate-limited check is unverifiable, not forbidden: warning tone.
+      expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'warn')
     })
     const toasted = pushToast.mock.calls.map(([text]) => String(text)).join('\n')
     expect(toasted).not.toContain('httpStatus=')
     expect(toasted).not.toContain('retryAfterSeconds=')
     expect(toasted).not.toContain('Error invoking remote method')
+  })
+
+  it('paints and explains a drop of a folder onto itself (A1)', async () => {
+    // Self-hover used to be skipped entirely, so dropping an item onto itself
+    // looked dead. The verdict now paints with its `self` reason, the denied
+    // hover stays deliverable, and the release explains itself while
+    // admission still refuses the mutation.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write', 'delete'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const archiveRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(archiveRow, { dataTransfer })
+    fireEvent.dragOver(archiveRow, { dataTransfer })
+    expect(archiveRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(archiveRow.getAttribute('data-drop-reason')).toBe('self')
+    // The denied hover stays deliverable so the refused drop can fire (§5.3).
+    expect(dataTransfer.dropEffect).toBe('move')
+    fireEvent.drop(archiveRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(pushToast).toHaveBeenCalledWith(
+        'You dropped Archive onto itself. Pick a destination folder.',
+        'error'
+      )
+    })
+    // The refused drop announces its full reason to the screen reader.
+    expect(
+      screen.getByText('You dropped Archive onto itself. Pick a destination folder.')
+    ).toBeTruthy()
+  })
+
+  it('updates the deny reason on a row when a newer gesture denies it differently', async () => {
+    // The stored verdict must not collapse to its state: gesture 1 denies a
+    // row as destination-write; its dragend is lost, and gesture 2 denies the
+    // SAME row as self. A state-only guard would skip the repaint and leave
+    // the stale reason on the row.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return {
+          held: ['read', 'write', 'delete'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        }
+      }
+      return {
+        held: ['read'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      }
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    // Gesture 1: the destination lacks write once the cold check answers.
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    expect(destinationRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(destinationRow.getAttribute('data-drop-reason')).toBe('destination-write')
+
+    // The browser lost gesture 1's dragend; gesture 2 drags the row onto
+    // itself and must repaint the reason, not skip the same state.
+    fireEvent.dragStart(destinationRow, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    expect(destinationRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(destinationRow.getAttribute('data-drop-reason')).toBe('self')
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('presents an unverifiable drop check as a warning, never as a refusal (A10)', async () => {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => {
+      throw new Error('500 Internal Server Error httpStatus=500')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(pushToast).toHaveBeenCalledWith('500 Internal Server Error', 'warn')
+    })
+  })
+
+  it('keeps a session-lost drop persistently visible after the probe revoked the session (A11)', async () => {
+    // The probe 401 refuses the drop AND revokes the session; the revocation
+    // invalidates the gesture's ownership before the drop continuation
+    // resumes. The refused drop must still explain itself — as a persistent
+    // banner, not a one-shot toast.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => {
+      throw new Error('401 Unauthorized httpStatus=401')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    // Both refusal surfaces carry it: the persistent banner AND the SR live
+    // region (the spoken refusal). A one-shot toast was NOT used.
+    const sessionLostSurfaces = await screen.findAllByText(
+      'Your session ended. Sign in again to continue moving files.'
+    )
+    expect(sessionLostSurfaces.some(element => element.closest('.status-banner') !== null)).toBe(
+      true
+    )
+    expect(pushToast).not.toHaveBeenCalled()
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('renders the session-ended sentence on the revoked surface with no gesture at all (A11)', async () => {
+    // The revoked surface owns the sentence unconditionally: it needs no
+    // drop callback, so nothing about gesture ownership can hide it.
+    const pushToast = vi.fn()
+    const controller = {
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controller)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+
+    expect(
+      screen.queryByText('Your session ended. Sign in again to continue moving files.')
+    ).toBeNull()
+
+    // Re-render with the controller reporting the revoked session.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller,
+      accessState: 'revoked',
+    })
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+
+    expect(
+      await screen.findByText('Your session ended. Sign in again to continue moving files.')
+    ).toBeTruthy()
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    expect(pushToast).not.toHaveBeenCalled()
+  })
+
+  it('a session-lost decision superseded by a new healthy scope paints nothing (A11)', async () => {
+    // The drop's adjudication parks on a gated probe; the session then
+    // changes to a NEW, healthy scope before the 401 resolves. The stale
+    // callback must not declare that new session ended — no banner, no
+    // announcement, no toast.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    let release401!: () => void
+    const gated = new Promise<void>(resolve => {
+      release401 = resolve
+    })
+    let parked = true
+    const affordances = vi.fn(() => {
+      if (parked) {
+        parked = false
+        return gated.then(() => {
+          throw new Error('401 Unauthorized httpStatus=401')
+        })
+      }
+      return Promise.resolve({
+        held: ['read', 'write', 'delete'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      })
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    const healthyController = {
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(healthyController)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    // The session switches to a new, healthy scope while the probe is parked.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...healthyController,
+      sessionScope: 'env-2:user-1:team-1',
+    })
+    await act(async () => {
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <FilesPage pushToast={pushToast} />
+        </QueryClientProvider>
+      )
+    })
+
+    // The stale 401 resolves against the new, healthy session.
+    await act(async () => {
+      release401()
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(
+      screen.queryByText('Your session ended. Sign in again to continue moving files.')
+    ).toBeNull()
+    expect(pushToast).not.toHaveBeenCalled()
+    expect(moveResource).not.toHaveBeenCalled()
   })
 
   it('renames a folder child from its row menu once write affordances resolve', async () => {
@@ -4155,6 +5814,7 @@ describe('FilesPage', () => {
       'Open EvenDrive link',
       'Rename',
       'Move to…',
+      'Download as zip',
       'Delete',
     ]
     // The active folder is already open, so its menu is the row menu minus the
@@ -5041,5 +6701,519 @@ describe('FilesPage', () => {
     expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
     // Still surfaced, as the banner — and presented, not as the IPC wrapper.
     expect(screen.getByText(/Too many file requests — try again in 7s\./)).toBeTruthy()
+  })
+})
+
+// ── folder drag moves + conflict parity (rev-2 D1) ───────────────────────────
+
+describe('FilesPage — folder drag-and-drop', () => {
+  // The file's shared afterEach(cleanup) lives inside the sibling
+  // describe('FilesPage') block; this block needs its own unmount.
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  function folderDragHarness(
+    options: {
+      destinationHeld?: string[]
+      sourceParentHeld?: string[]
+      sourceResourceHeld?: string[]
+      resolveParent?: string | null
+      resolveVersion?: number
+      moveResult?: () => Promise<{ resourceId: string; version: number }>
+      conflictOnce?: boolean
+    } = {}
+  ) {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(
+      options.moveResult ?? (async () => ({ resourceId: 'folder-src', version: 5 }))
+    )
+    if (options.conflictOnce) {
+      let conflicted = false
+      moveResource.mockImplementation(async () => {
+        if (!conflicted) {
+          conflicted = true
+          throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
+        }
+        return { resourceId: 'folder-src', version: 5 }
+      })
+    }
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return { held: options.sourceParentHeld ?? ['read', 'write', 'delete'] }
+      }
+      if (resourceId === 'folder-src') {
+        return { held: options.sourceResourceHeld ?? ['read', 'write'] }
+      }
+      return { held: options.destinationHeld ?? ['read', 'write'] }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'folder-src',
+      parentResourceId: options.resolveParent ?? 'folder-1',
+      rid: 'foldersrc',
+      gfsUri: 'gfs://main/foldersrc',
+      name: 'Projects',
+      kind: 'directory',
+      pathCache: '/Product/Projects',
+      version: options.resolveVersion ?? 4,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, resolve } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      items: [
+        {
+          resourceId: 'folder-src',
+          rid: 'folder-src',
+          gfsUri: 'gfs://main/folder-src',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Projects',
+          kind: 'directory',
+          path: '/Product/Projects',
+          version: 4,
+          bytes: 0,
+        },
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+    return { pushToast, moveResource }
+  }
+
+  it('stops a folder drop at the one confirmation and commits on Move', async () => {
+    const { pushToast, moveResource } = folderDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
+    expect(
+      within(dialog).getByText(
+        /Inherited access to this folder and its contents follows the new location/
+      )
+    ).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledWith('folder-src', 'archive-1', 4, undefined, 'folder-1')
+    })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved Projects to Archive', 'success')
+    )
+    expect(pushToast).toHaveBeenCalledWith(
+      'Moving a folder changes who can access its contents — access now follows the new location.',
+      'info'
+    )
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('cancelling the folder confirmation sends nothing and never claims a move', async () => {
+    const { pushToast, moveResource } = folderDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Moved'), expect.anything())
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a folder conflict without the numbered-name opt-in stops with alternatives', async () => {
+    const { pushToast, moveResource } = folderDragHarness({ conflictOnce: true })
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.stringContaining('An item with this name already exists'),
+        'error'
+      )
+    })
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  // Breadcrumb crumb drop targets (Control UI parity): the trail inside a
+  // nested folder — folder-0 "Product" is an enabled ancestor crumb, folder-1
+  // "Child" is the ACTIVE crumb (a live drop target: same-parent no-op for
+  // its own listing rows, a real move for items from other surfaces) and the
+  // rows' parent.
+  function crumbDragHarness(
+    options: {
+      destinationHeld?: string[]
+      sourceParentHeld?: string[]
+      sourceResourceHeld?: string[]
+    } = {}
+  ) {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({ resourceId: 'folder-src', version: 5 }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-0') {
+        return { held: options.destinationHeld ?? ['read', 'write', 'delete'] }
+      }
+      if (resourceId === 'folder-1') {
+        return { held: options.sourceParentHeld ?? ['read', 'write', 'delete'] }
+      }
+      return { held: options.sourceResourceHeld ?? ['read', 'write'] }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'folder-src',
+      parentResourceId: 'folder-1',
+      rid: 'foldersrc',
+      gfsUri: 'gfs://main/foldersrc',
+      name: 'Projects',
+      kind: 'directory',
+      pathCache: '/Product/Child/Projects',
+      version: 4,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, resolve } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Child',
+        kind: 'directory',
+        version: 1,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-0',
+          gfsUri: 'gfs://main/folder-0',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Child',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      items: [
+        {
+          resourceId: 'folder-src',
+          rid: 'folder-src',
+          gfsUri: 'gfs://main/folder-src',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Projects',
+          kind: 'directory',
+          path: '/Product/Child/Projects',
+          version: 4,
+          bytes: 0,
+        },
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Child/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+    return { pushToast, moveResource }
+  }
+
+  function crumbDragDataTransfer() {
+    return {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+  }
+
+  it('drops a dragged folder onto an ancestor crumb after the one confirmation', async () => {
+    const { pushToast, moveResource } = crumbDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const ancestorCrumb = screen.getByRole('button', { name: 'Product' })
+    const dataTransfer = crumbDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(ancestorCrumb, { dataTransfer })
+    fireEvent.dragOver(ancestorCrumb, { dataTransfer })
+    fireEvent.drop(ancestorCrumb, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Product' })
+    expect(
+      within(dialog).getByText(
+        /Inherited access to this folder and its contents follows the new location/
+      )
+    ).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledWith('folder-src', 'folder-0', 4, undefined, 'folder-1')
+    })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved Projects to Product', 'success')
+    )
+    expect(pushToast).toHaveBeenCalledWith(
+      'Moving a folder changes who can access its contents — access now follows the new location.',
+      'info'
+    )
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('cancelling a crumb-drop confirmation sends nothing', async () => {
+    const { pushToast, moveResource } = crumbDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const ancestorCrumb = screen.getByRole('button', { name: 'Product' })
+    const dataTransfer = crumbDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.drop(ancestorCrumb, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Product' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Moved'), expect.anything())
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a crumb drop without source-parent delete access refuses with the source-delete reason', async () => {
+    const { pushToast, moveResource } = crumbDragHarness({
+      sourceParentHeld: ['read', 'write'],
+    })
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const ancestorCrumb = screen.getByRole('button', { name: 'Product' })
+    const dataTransfer = crumbDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    // Hover paints the deny on the crumb itself once the cold check lands.
+    fireEvent.dragOver(ancestorCrumb, { dataTransfer })
+    await waitFor(() => {
+      expect(ancestorCrumb.getAttribute('data-drop-state')).toBe('denied')
+    })
+    expect(ancestorCrumb.getAttribute('data-drop-reason')).toBe('source-delete')
+
+    fireEvent.drop(ancestorCrumb, { dataTransfer })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'You can’t move Projects out of its current folder because you don’t have delete access to the folder that contains it.',
+        'error'
+      )
+    )
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('dropping a listing row onto the ACTIVE crumb explains it is already there', async () => {
+    const { pushToast, moveResource } = crumbDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const activeCrumb = screen.getByRole('button', { name: 'Child' })
+    expect(activeCrumb.getAttribute('aria-current')).toBe('page')
+    const dataTransfer = crumbDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragOver(activeCrumb, { dataTransfer })
+    await waitFor(() => {
+      expect(activeCrumb.getAttribute('data-drop-state')).toBe('denied')
+    })
+    expect(activeCrumb.getAttribute('data-drop-reason')).toBe('same-parent')
+
+    fireEvent.drop(activeCrumb, { dataTransfer })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Projects is already in Child.', 'info')
+    )
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a file conflict resolves with a numbered whole-resource rename (CU parity)', async () => {
+    const pushToast = vi.fn()
+    let conflicted = false
+    const moveResource = vi.fn(async (_id: string, _dest: string, _v: number, newName?: string) => {
+      if (newName === undefined && !conflicted) {
+        conflicted = true
+        throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
+      }
+      return { resourceId: 'file-1', version: 6 }
+    })
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') return { held: ['read', 'write', 'delete'] }
+      return { held: ['read', 'write'] }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'file-1',
+      parentResourceId: 'folder-1',
+      rid: 'file-1',
+      gfsUri: 'gfs://main/file-1',
+      name: 'notes.txt',
+      kind: 'file',
+      pathCache: '/Product/notes.txt',
+      version: 3,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, resolve } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        'Moved notes.txt to Archive as notes (1).txt',
+        'success'
+      )
+    })
+    expect(moveResource).toHaveBeenLastCalledWith(
+      'file-1',
+      'archive-1',
+      3,
+      'notes (1).txt',
+      'folder-1'
+    )
+  })
+
+  it('folder rows are draggable sources (title hint present)', () => {
+    folderDragHarness()
+    const folderRow = screen
+      .getByRole('button', { name: 'Open Projects' })
+      .closest('.da-grid__row') as HTMLElement
+    expect(folderRow.getAttribute('draggable')).toBe('true')
+    expect(folderRow.getAttribute('title')).toBe('Drag Projects into a folder to move it')
   })
 })

@@ -55,7 +55,7 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 | [Connect Microsoft Teams](how-to/connect-teams.md)                            | Teams CLI bot registration, endpoint, conversation verify                 |
 | [Use the Desktop App](how-to/use-the-desktop-app.md)                          | Daily use: chat, attachments, approvals, EvenDrive, shortcuts, deep links |
 | [Configure guardrails](how-to/configure-guardrails.md)                        | Tool-call rules, installed guardrail hooks, built-ins                     |
-| [Connect an OAuth connector](how-to/connect-oauth-connector.md)               | Remote and OAuth MCP servers, user authorization, connector credentials   |
+| [Connect an OAuth connector](how-to/connect-oauth-connector.md)               | Remote/OAuth MCP servers, Microsoft 365 (Entra ID), user auth, secrets    |
 | [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                                              |
 | [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON, CRD, or Control UI path                                    |
 | [Desktop setup & updates](how-to/desktop-setup-and-updates.md)                | Environments, invitation setup, updates                                   |

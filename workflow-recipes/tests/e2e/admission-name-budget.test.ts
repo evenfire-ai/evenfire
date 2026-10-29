@@ -67,7 +67,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          image: nginx:1.30.1-alpine
+          image: nginx:1.30.6-alpine
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -97,7 +97,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: app
-              image: nginx:1.30.1-alpine
+              image: nginx:1.30.6-alpine
 EOF`)
     ).toThrow(/52 characters|no more than 52|denied|invalid/i)
   })

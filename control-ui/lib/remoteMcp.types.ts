@@ -55,6 +55,13 @@ export interface RemoteDetectedQuirks {
   supportsRefresh: boolean
 }
 
+/**
+ * Closed authorization-server profile control-api recognised from the pinned issuer.
+ * `entra-v2` (a Microsoft Entra ID tenant): RFC 8707 `resource` is not sent and
+ * `offline_access` is always requested.
+ */
+export type RemoteAsProfile = 'entra-v2'
+
 /** The `detected` prefill returned by POST /discover (200). */
 export interface RemoteDetected {
   registrationMode: RemoteDiscoverRegistrationMode
@@ -63,6 +70,13 @@ export interface RemoteDetected {
   resource: string
   issuer: string
   issForCallback?: string
+  asProfile?: RemoteAsProfile
+  /** First advertised scope that would mint a token for another API (warning only). */
+  scopeAudienceViolation?: string
+  /** Advertised scopes whose API cannot be tied to the server; the install needs them confirmed. */
+  unverifiedScopes?: string[]
+  /** The advertised scopes name no resource of the server (sign-in scopes only). */
+  scopeAudienceMissing?: true
   asEndpointHosts?: RemoteAsEndpointHosts
   scopes: string[]
   quirks: RemoteDetectedQuirks
@@ -92,6 +106,8 @@ export interface RemoteCallbackPreview {
 
 export interface DiscoverRemoteRequest {
   baseUrl: string
+  /** A Microsoft Entra ID tenant authority, sent only after a `tenant_required` answer. */
+  authorizationServer?: string
 }
 
 /**
@@ -146,6 +162,12 @@ export interface InstallRemoteRequest {
   /** Pre-registered confidential only (sensitive). */
   clientSecret?: string
   grantScope?: RemoteGrantScope
+  /** The authorization server the detection used (the Entra tenant authority). */
+  authorizationServer?: string
+  /** Full override of the requested scopes; absent means the advertised ones. */
+  scopes?: string[]
+  /** The exact unverifiable scopes the operator confirmed as this server's API. */
+  confirmedUnverifiedScopes?: string[]
 }
 
 export interface InstallRemoteResponse {
@@ -201,3 +223,17 @@ export type RemoteDiscoveryErrorKind =
   | 'prm_resource_mismatch'
   | 'issuer_mismatch'
   | 'as_endpoints_cross_site'
+  | 'tenant_required'
+  | 'authorization_server_override_rejected'
+
+/**
+ * Detail of the `tenant_required` discovery error: the server signs in through Microsoft
+ * Entra ID's multi-tenant authority, so the operator must name the tenant.
+ * `tenantAuthorityTemplate` carries a literal `{tenantId}` placeholder.
+ */
+export interface RemoteTenantRequiredDetail {
+  kind: 'tenant_required'
+  authorizationServer: string
+  tenantAuthorityTemplate: string
+  detail: string
+}

@@ -62,6 +62,7 @@ done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
+CODEX_SCRATCH_ROOT="$TMP_ROOT" node --test "$ROOT/scripts/tests/password-recovery-suite-contract.test.mjs"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
@@ -654,7 +655,6 @@ for exit_code in 1 2 7 126 137; do
     PROJECT_DIR="$T1_EXIT_ROOT"
     T1_TMP_DIR="$(mktemp -d)"
     trap '\''rm -rf "$T1_TMP_DIR"'\'' EXIT
-    T1_PRIVATE_RECOVERY_SUITES=("$T1_EXIT_ROOT/private-a" "$T1_EXIT_ROOT/private-b")
     list_real_pg_files() {
       printf "%s\\n" "$T1_EXIT_ROOT/control-api/test/fake.realPostgres.test.ts"
     }
@@ -680,60 +680,6 @@ for exit_code in 1 2 7 126 137; do
   fi
   grep -Fq "Vitest process exited $exit_code" "$tmp/t1-exit-$exit_code.err"
 done
-
-# The private password-recovery suites need the Member Registration producer,
-# which T1 does not deploy. T1 must drop exactly the files the shared contract
-# lists (the same ones public CI excludes) and still select every other
-# control-api Real PostgreSQL suite of the real tree.
-t1_selection_args="$tmp/t1-selection.args"
-if T1_SELECTION_ROOT="$ROOT" T1_SELECTION_ARGS="$t1_selection_args" bash -c '
-  set -euo pipefail
-  source "$1"
-  PROJECT_DIR="$T1_SELECTION_ROOT"
-  T1_TMP_DIR="$(mktemp -d)"
-  trap '\''rm -rf "$T1_TMP_DIR"'\'' EXIT
-  npm() { printf "%s\n" "$@" >"$T1_SELECTION_ARGS"; return 1; }
-  load_private_recovery_suites
-  run_suite control-api isolated postgresql://isolated
-' bash "$T1" 2>"$tmp/t1-selection.err"; then
-  echo 'FAIL: T1 selection fixture reached a green verdict without a reporter' >&2
-  exit 1
-fi
-[ -s "$t1_selection_args" ] || {
-  echo 'FAIL: T1 never invoked Vitest for the control-api isolated lane' >&2
-  cat "$tmp/t1-selection.err" >&2
-  exit 1
-}
-grep -Fxq 'test/db.realPostgresMigration.integration.test.ts' "$t1_selection_args"
-for private_suite in $(node "$ROOT/scripts/ci/password-recovery-suite-contract.mjs" private all); do
-  if grep -Fxq "$private_suite" "$t1_selection_args"; then
-    echo "FAIL: T1 selected the private password-recovery suite $private_suite" >&2
-    exit 1
-  fi
-done
-t1_census="$(find "$ROOT/control-api" -path "$ROOT/control-api/node_modules" -prune -o \
-  -type f -name '*realPostgres*.test.ts' ! -name 'realPostgres.requirement.ts' -print | wc -l)"
-t1_selected="$(grep -c '\.test\.ts$' "$t1_selection_args")"
-[ "$t1_selected" -eq $((t1_census - 2)) ] || {
-  echo "FAIL: T1 selected $t1_selected control-api suites, expected $((t1_census - 2))" >&2
-  exit 1
-}
-if bash -c '
-  set -euo pipefail
-  source "$1"
-  T1_TMP_DIR="$(mktemp -d)"
-  trap '\''rm -rf "$T1_TMP_DIR"'\'' EXIT
-  npm() { echo "npm reached" >&2; return 0; }
-  run_suite control-api isolated postgresql://isolated
-' bash "$T1" 2>"$tmp/t1-selection-unloaded.err"; then
-  echo 'FAIL: T1 selected control-api suites without the private exclusions' >&2
-  exit 1
-fi
-grep -Fq 'private password-recovery exclusions were not loaded' "$tmp/t1-selection-unloaded.err"
-if grep -Fq 'npm reached' "$tmp/t1-selection-unloaded.err"; then
-  echo 'FAIL: T1 ran Vitest before loading the private exclusions' >&2
-  exit 1
-fi
 
 bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh"
 if T2_PUBLIC_BASE_REF=nonexistent-ref-for-contract \

@@ -196,7 +196,7 @@ with TypeScript only via `build:docker`.
 
 ```dockerfile
 # Build from the REPOSITORY ROOT: docker build -f coordinator.Dockerfile .
-FROM node:24-alpine AS sdk-builder
+FROM node:24.22.1-alpine AS sdk-builder
 WORKDIR /app
 
 # 1) Build runtime-core (the real implementations)
@@ -215,7 +215,7 @@ WORKDIR /app/packages/workflow-sdk
 RUN npm ci --ignore-scripts && npm run build:docker
 
 # 3) Assemble the runtime image with BOTH packages under node_modules
-FROM node:24-alpine AS base
+FROM node:24.22.1-alpine AS base
 WORKDIR /app
 COPY --from=sdk-builder /app/packages/workflow-runtime-core/dist/ ./node_modules/@clerum/workflow-runtime-core/dist/
 COPY packages/workflow-runtime-core/package.json ./node_modules/@clerum/workflow-runtime-core/package.json

@@ -79,7 +79,8 @@ const { createOAuthCallbackRouter } = await import('../src/routes/external/oauth
 const { resolveBatchGrantExistence } = await import('../src/routes/mcpOauth.js')
 const { getCredentialSchema, getDigest, getEntryVersion, reportInstall } =
   await import('../src/services/registryClient.js')
-const { seedActiveMember } = await import('./fixtures/contextAllowlist.js')
+const { seedActiveMember, seedAgentHost } = await import('./fixtures/contextAllowlist.js')
+const { resolveHccHostBinding } = await import('./fixtures/hccControlToken.js')
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -92,6 +93,7 @@ function databaseUrl(baseUrl: string, database: string): string {
 
 const NS = 'mcp-server'
 const SERVER = 'my-gmail'
+const HOST = 'agent-host'
 
 /** Baked-OAuth catalog entry, same shape as the registry OAuth install tests. */
 const GMAIL_ENTRY = {
@@ -263,9 +265,16 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
     return request(app).get(`/oauth-callback/${SERVER}`).query({ code: 'AUTH_CODE', state })
   }
 
-  const sweep = (gw: MockGateway) =>
+  // The binding is resolved per sweep, as the route does on every batch: the
+  // registry writes the Context allowlist on install and uninstall.
+  const sweep = async (gw: MockGateway) =>
     resolveBatchGrantExistence(
-      { db, gateway: gw as unknown as K8sGateway, mcpServersNamespace: NS },
+      {
+        db,
+        gateway: gw as unknown as K8sGateway,
+        binding: await resolveHccHostBinding(gw, HOST),
+        mcpServersNamespace: NS,
+      },
       [{ mcpServerName: SERVER, userId: user }]
     )
 
@@ -275,8 +284,9 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
       metadata: { name: 'default-context' },
       spec: { contextId: 'default-context', mcpServers: [] },
     })
+    await seedAgentHost(gw, HOST, 'default-context')
     const app = makeApp(gw)
-    user = await seedActiveMember(db, { contexts: ['default-context'] })
+    user = await seedActiveMember(db, { contexts: ['default-context'], agents: [HOST] })
 
     expect((await install(app)).status).toBe(201)
     expect((await consent(app, gw)).status).toBe(200)

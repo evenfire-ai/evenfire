@@ -169,6 +169,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     handleRemoveComposerFileAttachment: onRemoveComposerFileAttachment,
     handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment: onRemoveComposerReferenceAttachment,
+    handleClearComposerAttachments: onClearComposerAttachments,
     handleSendAgentMessage: onSend,
     handleRetryFailedAgentSend: onRetryFailedSend,
     handleRecoverFailedAgentSend: onRecoverFailedSend,
@@ -1092,6 +1093,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             </span>
             {hasComposerAttachments ? (
               <span className="composer-attachments-list composer-attachments-list--inline">
+                <span
+                  className="composer-attachments-count"
+                  data-testid="composer-attachments-count"
+                >
+                  {composerAttachmentItems.length}{' '}
+                  {composerAttachmentItems.length === 1 ? 'attachment' : 'attachments'}
+                </span>
                 {composerAttachmentItems.map(item => {
                   if (item.kind === 'reference') {
                     const attachment = item.attachment
@@ -1187,6 +1195,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     </span>
                   )
                 })}
+                <button
+                  type="button"
+                  className="composer-attachments-clear"
+                  onClick={onClearComposerAttachments}
+                  aria-label="Clear all attachments"
+                >
+                  Clear all
+                </button>
               </span>
             ) : null}
           </span>

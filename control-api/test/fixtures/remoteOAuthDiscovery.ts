@@ -92,6 +92,11 @@ export interface PilotFixture {
    */
   initialize?: Record<string, { status: number; headers: Record<string, string> }>
   as: { url: string; json: string }
+  /**
+   * Further authorization-server metadata URLs the AS serves, each with its real status
+   * (Entra: the multi-tenant `organizations` authority → 200, an unknown tenant → 400).
+   */
+  asExtra?: Array<{ url: string; status: number; json: string }>
 }
 
 /** The 4 CIMD-ready pilots, keyed by the real well-known URLs they serve. */
@@ -265,6 +270,140 @@ export const DROPBOX_PILOT: PilotFixture = {
     json: DROPBOX_AS_JSON,
   },
 }
+
+// ─── Microsoft Entra ID: Work IQ + Agent 365 (live probe 2026-10-21T14:16Z) ──
+//
+// The exact bytes these servers returned on 2026-10-21T14:16Z (tokenless GET, and
+// POST initialize for the 401 challenge). The tenant 72f988bf-… is Microsoft's own
+// public tenant; the tenant 00000000-…-000000000001 does not exist.
+//
+// PROVENANCE (curl, 2026-10-21T14:16Z):
+//   POST https://workiq.svc.cloud.microsoft/mcp (initialize) → 401  WWW-Authenticate below (same on GET)
+//   GET  https://workiq.svc.cloud.microsoft/.well-known/oauth-protected-resource/mcp → 200
+//   POST https://agent365.svc.cloud.microsoft/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools → 401
+//   GET  https://agent365.svc.cloud.microsoft/.well-known/oauth-protected-resource/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools → 200
+//   GET  https://login.microsoftonline.com/organizations/v2.0/.well-known/openid-configuration → 200
+//   GET  https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0/.well-known/openid-configuration → 200
+//   GET  https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0/.well-known/openid-configuration → 400 invalid_tenant
+//   GET  https://login.microsoftonline.com/.well-known/oauth-authorization-server/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0 → 404
+//
+// What these bytes show: Entra serves only OIDC discovery (RFC 8414 well-known → 404);
+// the multi-tenant `organizations` authority declares the literal templated issuer
+// `https://login.microsoftonline.com/{tenantid}/v2.0`, while a tenant authority
+// declares its concrete issuer; and neither advertises code_challenge_methods_supported,
+// grant_types_supported, RFC 9207 or a registration endpoint.
+
+export const WORKIQ_WWW_AUTHENTICATE =
+  'Bearer realm="", authorization_uri="https://login.microsoftonline.com/common/oauth2/authorize", client_id="fdcc1f02-fc51-4226-8753-f668596af7f7", resource_metadata="https://workiq.svc.cloud.microsoft/.well-known/oauth-protected-resource/mcp"'
+export const WORKIQ_PRM_JSON =
+  '{"resource":"https://workiq.svc.cloud.microsoft/mcp","authorization_servers":["https://login.microsoftonline.com/organizations/v2.0"],"scopes_supported":["fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask"],"bearer_methods_supported":["header"],"resource_name":"Work IQ","openai_apps_challenge":"IK2HLqUDHBbQHQfkX-WkPX2CgUAlr7mbybpWV1zBXZ0"}'
+
+export const AGENT365_MAIL_WWW_AUTHENTICATE =
+  'Bearer resource_metadata="https://agent365.svc.cloud.microsoft/.well-known/oauth-protected-resource/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools"'
+export const AGENT365_MAIL_PRM_JSON =
+  '{"resource_name":"mcp_MailTools","resource":"https://agent365.svc.cloud.microsoft/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools","authorization_servers":["https://login.microsoftonline.com/organizations/v2.0"],"scopes_supported":["https://agent365.svc.cloud.microsoft/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools/.default","openid","profile","offline_access"],"bearer_methods_supported":["header"]}'
+
+export const ENTRA_ORGANIZATIONS_OIDC_JSON =
+  '{"token_endpoint":"https://login.microsoftonline.com/organizations/oauth2/v2.0/token","token_endpoint_auth_methods_supported":["client_secret_post","private_key_jwt","client_secret_basic","self_signed_tls_client_auth"],"jwks_uri":"https://login.microsoftonline.com/organizations/discovery/v2.0/keys","response_modes_supported":["query","fragment","form_post"],"subject_types_supported":["pairwise"],"id_token_signing_alg_values_supported":["RS256"],"response_types_supported":["code","id_token","code id_token","id_token token"],"scopes_supported":["openid","profile","email","offline_access"],"issuer":"https://login.microsoftonline.com/{tenantid}/v2.0","request_uri_parameter_supported":false,"userinfo_endpoint":"https://graph.microsoft.com/oidc/userinfo","authorization_endpoint":"https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize","device_authorization_endpoint":"https://login.microsoftonline.com/organizations/oauth2/v2.0/devicecode","http_logout_supported":true,"frontchannel_logout_supported":true,"end_session_endpoint":"https://login.microsoftonline.com/organizations/oauth2/v2.0/logout","claims_supported":["sub","iss","cloud_instance_name","cloud_instance_host_name","cloud_graph_host_name","msgraph_host","aud","exp","iat","auth_time","acr","nonce","preferred_username","name","tid","ver","at_hash","c_hash","email"],"kerberos_endpoint":"https://login.microsoftonline.com/organizations/kerberos","mtls_endpoint_aliases":{"token_endpoint":"https://mtlsauth.microsoft.com/organizations/oauth2/v2.0/token"},"tls_client_certificate_bound_access_tokens":true,"tenant_region_scope":null,"cloud_instance_name":"microsoftonline.com","cloud_graph_host_name":"graph.windows.net","msgraph_host":"graph.microsoft.com","rbac_url":"https://pas.windows.net"}'
+export const ENTRA_TENANT_OIDC_JSON =
+  '{"token_endpoint":"https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token","token_endpoint_auth_methods_supported":["client_secret_post","private_key_jwt","client_secret_basic","self_signed_tls_client_auth"],"jwks_uri":"https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/discovery/v2.0/keys","response_modes_supported":["query","fragment","form_post"],"subject_types_supported":["pairwise"],"id_token_signing_alg_values_supported":["RS256"],"response_types_supported":["code","id_token","code id_token","id_token token"],"scopes_supported":["openid","profile","email","offline_access"],"issuer":"https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0","request_uri_parameter_supported":false,"userinfo_endpoint":"https://graph.microsoft.com/oidc/userinfo","authorization_endpoint":"https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/authorize","device_authorization_endpoint":"https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/devicecode","http_logout_supported":true,"frontchannel_logout_supported":true,"end_session_endpoint":"https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/logout","claims_supported":["sub","iss","cloud_instance_name","cloud_instance_host_name","cloud_graph_host_name","msgraph_host","aud","exp","iat","auth_time","acr","nonce","preferred_username","name","tid","ver","at_hash","c_hash","email"],"kerberos_endpoint":"https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/kerberos","mtls_endpoint_aliases":{"token_endpoint":"https://mtlsauth.microsoft.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token"},"tls_client_certificate_bound_access_tokens":true,"tenant_region_scope":"WW","cloud_instance_name":"microsoftonline.com","cloud_graph_host_name":"graph.windows.net","msgraph_host":"graph.microsoft.com","rbac_url":"https://pas.windows.net"}'
+export const ENTRA_UNKNOWN_TENANT_OIDC_400_JSON =
+  '{"error":"invalid_tenant","error_description":"AADSTS90002: Tenant \'00000000-0000-0000-0000-000000000001\' not found. Check to make sure you have the correct tenant ID and are signing into the correct cloud. Check with your subscription administrator, this may happen if there are no active subscriptions for the tenant. Trace ID: fd7c437e-5de4-418f-a92d-2542f3ff1e00 Correlation ID: f396dc2b-aa03-4985-b73a-a44d76d054af Timestamp: 2026-10-21 14:15:01Z","error_codes":[90002],"timestamp":"2026-10-21 14:15:01Z","trace_id":"fd7c437e-5de4-418f-a92d-2542f3ff1e00","correlation_id":"f396dc2b-aa03-4985-b73a-a44d76d054af","error_uri":"https://login.microsoftonline.com/error?code=90002"}'
+
+export const ENTRA_TENANT_AUTHORITY =
+  'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+
+/** OIDC metadata both Entra pilots serve: the real tenant, `organizations` and an unknown tenant. */
+const ENTRA_AS = {
+  url: `${ENTRA_TENANT_AUTHORITY}/.well-known/openid-configuration`,
+  json: ENTRA_TENANT_OIDC_JSON,
+}
+const ENTRA_AS_EXTRA = [
+  {
+    url: 'https://login.microsoftonline.com/organizations/v2.0/.well-known/openid-configuration',
+    status: 200,
+    json: ENTRA_ORGANIZATIONS_OIDC_JSON,
+  },
+  {
+    url: 'https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0/.well-known/openid-configuration',
+    status: 400,
+    json: ENTRA_UNKNOWN_TENANT_OIDC_400_JSON,
+  },
+]
+
+/** Work IQ: PRM advertises the multi-tenant `organizations` authority and a GUID-form scope. */
+export const ENTRA_WORKIQ_PILOT: PilotFixture = {
+  name: 'entra-workiq',
+  mcpUrl: 'https://workiq.svc.cloud.microsoft/mcp',
+  wwwAuthenticate: WORKIQ_WWW_AUTHENTICATE,
+  prm: {
+    url: 'https://workiq.svc.cloud.microsoft/.well-known/oauth-protected-resource/mcp',
+    json: WORKIQ_PRM_JSON,
+  },
+  as: ENTRA_AS,
+  asExtra: ENTRA_AS_EXTRA,
+}
+
+/** Agent 365 Mail (per-app server): same Entra authority, URL-form `.default` scope plus OIDC scopes. */
+export const ENTRA_AGENT365_MAIL_PILOT: PilotFixture = {
+  name: 'entra-agent365-mail',
+  mcpUrl:
+    'https://agent365.svc.cloud.microsoft/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools',
+  wwwAuthenticate: AGENT365_MAIL_WWW_AUTHENTICATE,
+  prm: {
+    url: 'https://agent365.svc.cloud.microsoft/.well-known/oauth-protected-resource/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools',
+    json: AGENT365_MAIL_PRM_JSON,
+  },
+  as: ENTRA_AS,
+  asExtra: ENTRA_AS_EXTRA,
+}
+
+// Synthetic Entra pilots: the real Work IQ pilot with ONE PRM field altered (parsed and
+// re-serialized, every other byte as captured). Each stands for a PRM the platform must
+// handle but no live server is known to emit — hostile or misconfigured scopes, a PRM
+// that already names the tenant — so the change is the only invented part.
+export function workIqPilotWithPrm(
+  name: string,
+  mutate: (prm: Record<string, unknown>) => void
+): PilotFixture {
+  const prm = JSON.parse(WORKIQ_PRM_JSON) as Record<string, unknown>
+  mutate(prm)
+  return {
+    ...ENTRA_WORKIQ_PILOT,
+    name,
+    prm: { ...ENTRA_WORKIQ_PILOT.prm, json: JSON.stringify(prm) },
+  }
+}
+
+/** `scopes_supported` → a Microsoft Graph URL scope: a PRM asking for a token for another API. */
+export const ENTRA_GRAPH_SCOPE_PILOT = workIqPilotWithPrm('entra-graph-scope', prm => {
+  prm.scopes_supported = ['https://graph.microsoft.com/Mail.ReadWrite']
+})
+
+/** `authorization_servers` → the tenant authority: a PRM that already names the tenant. */
+export const ENTRA_TENANT_PRM_PILOT = workIqPilotWithPrm('entra-tenant-prm', prm => {
+  prm.authorization_servers = [ENTRA_TENANT_AUTHORITY]
+})
+
+/** `scopes_supported` → a GUID-form scope of an app this platform does not know. */
+export const ENTRA_UNKNOWN_GUID_PILOT = workIqPilotWithPrm('entra-unknown-guid', prm => {
+  prm.scopes_supported = ['11111111-2222-3333-4444-555555555555/Tools.Read']
+})
+
+/** `scopes_supported` → a SharePoint Online GUID-form scope: a high-impact first-party API. */
+export const ENTRA_SHAREPOINT_SCOPE_PILOT = workIqPilotWithPrm('entra-sharepoint-scope', prm => {
+  prm.scopes_supported = ['00000003-0000-0ff1-ce00-000000000000/AllSites.Read']
+})
+
+/** `scopes_supported` → an empty scope beside Work IQ's own: the empty one alone breaks the audience rule. */
+export const ENTRA_EMPTY_SCOPE_PILOT = workIqPilotWithPrm('entra-empty-scope', prm => {
+  prm.scopes_supported = ['', 'fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask']
+})
+
+/** `scopes_supported` removed: the requested scopes fall back to the AS's OIDC-only list. */
+export const ENTRA_NO_SCOPES_PILOT = workIqPilotWithPrm('entra-no-scopes', prm => {
+  delete prm.scopes_supported
+})
 
 /**
  * Build a {@link PinnedTransport}-shaped mock from a pilot fixture: a 401 (with
@@ -691,6 +830,7 @@ export function makeDiscoveryTransport(pilot: PilotFixture): PinnedTransport {
     ...(pilot.prmRoot ? ([[pilot.prmRoot.url, pilot.prmRoot.json]] as [string, string][]) : []),
   ])
   const notFound = new Set(pilot.prmNotFound ?? [])
+  const extraByUrl = new Map((pilot.asExtra ?? []).map(entry => [entry.url, entry]))
   return async ({ url, method }) => {
     // POST → the transport probe (tokenless `initialize`). Per-URL `initialize` table
     // first (Vercel `/mcp`→404, `/`→200); otherwise the typed MCP URL defaults to the
@@ -719,7 +859,28 @@ export function makeDiscoveryTransport(pilot: PilotFixture): PinnedTransport {
     if (body !== undefined) {
       return { status: 200, headers: { 'content-type': 'application/json' }, bodyText: body }
     }
+    const extra = extraByUrl.get(url)
+    if (extra) {
+      return {
+        status: extra.status,
+        headers: { 'content-type': 'application/json' },
+        bodyText: extra.json,
+      }
+    }
     if (notFound.has(url)) return { status: 404, headers: {}, bodyText: 'not found' }
     return { status: 404, headers: {}, bodyText: 'unexpected url' }
   }
+}
+
+/** Wrap a transport so a test can assert which URLs discovery requested (and which it never did). */
+export function recordingTransport(inner: PinnedTransport): {
+  transport: PinnedTransport
+  requestedUrls: string[]
+} {
+  const requestedUrls: string[] = []
+  const transport: PinnedTransport = async request => {
+    requestedUrls.push(request.url)
+    return inner(request)
+  }
+  return { transport, requestedUrls }
 }

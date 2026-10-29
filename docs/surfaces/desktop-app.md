@@ -182,15 +182,15 @@ makers:
 
 ### Prepare the toolchain
 
-Packaging uses the same guard as every other Desktop build. Use Node 24
-(`engines.node` is `24.x`), install with `npm ci` **without**
+Packaging uses the same guard as every other Desktop build. Use Node 24.22.1 or later in the Node 24 line
+(`engines.node` is `^24.22.1`), install with `npm ci` **without**
 `--ignore-scripts` so Electron's `postinstall` downloads the runtime, then run
 the check:
 
 ```bash
 cd desktop-app
 npm ci
-npm run verify:electron   # fails unless Node is 24.x and `electron` resolves to a runtime
+npm run verify:electron   # fails unless Node is 24.x >=24.22.1 and `electron` resolves to a runtime
 ```
 
 A skipped `postinstall` still lets `npm ci` exit 0; `verify:electron` is what

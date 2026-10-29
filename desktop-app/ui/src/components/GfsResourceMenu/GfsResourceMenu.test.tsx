@@ -83,6 +83,24 @@ describe('GfsResourceMenu', () => {
     expect(screen.queryByRole('menu', { name: 'Actions for report.txt' })).toBeNull()
   })
 
+  it('offers Download as zip for folders when the caller provides the action', () => {
+    const onDownloadZip = vi.fn()
+    render(
+      <GfsResourceMenu resourceName="Assets" onDownload={undefined} onDownloadZip={onDownloadZip} />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    const menu = screen.getByRole('menu', { name: 'Actions for Assets' })
+    const zipItem = within(menu).getByRole('menuitem', { name: 'Download as zip' })
+    expect(zipItem.getAttribute('data-gfs-action')).toBe('download-zip')
+    // The plain single-file Download entry stays independent of the zip entry.
+    expect(within(menu).queryByRole('menuitem', { name: 'Download' })).toBeNull()
+
+    fireEvent.click(zipItem)
+    expect(onDownloadZip).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('menu', { name: 'Actions for Assets' })).toBeNull()
+  })
+
   it.each(['Shared with me', 'Marketing'])(
     'keeps the %s breadcrumb menu inside the Files surface as the sidebar resizes',
     resourceName => {

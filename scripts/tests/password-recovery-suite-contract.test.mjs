@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { reportViolations, verifySuiteManifest } from '../ci/password-recovery-suite-contract.mjs'
@@ -175,6 +175,112 @@ for (const [label, mutate] of [
   })
 test('unknown report lane rejects', () =>
   assert.notDeepEqual(reportViolations(root, manifest, 'unknown', green()), []))
+
+function withMinikubeSelectionFixture(run) {
+  const scratchRoot = process.env.CODEX_SCRATCH_ROOT
+  assert.ok(scratchRoot, 'CODEX_SCRATCH_ROOT is required for selection fixtures')
+  mkdirSync(scratchRoot, { recursive: true })
+  const fixture = mkdtempSync(join(scratchRoot, 'minikube-pg-selection-'))
+  try {
+    for (const directory of ['scripts/ci', 'tests/contracts', 'gfs-controller/test'])
+      mkdirSync(join(fixture, directory), { recursive: true })
+    for (const file of [
+      'scripts/ci/password-recovery-suite-contract.mjs',
+      'scripts/ci/assert-pinned-vitest-suites.mjs',
+      'tests/contracts/password-recovery-suites.json',
+    ])
+      copyFileSync(join(root, file), join(fixture, file))
+    // Only inventory discovery runs here; these synthetic files are never executed.
+    for (const file of [
+      ...manifest.publicPostgres,
+      ...Object.values(manifest.privatePostgres),
+      ...manifest.composedContract,
+      ...manifest.consumer,
+      'gfs-controller/test/public.realPostgres.test.ts',
+    ]) {
+      mkdirSync(dirname(join(fixture, file)), { recursive: true })
+      writeFileSync(join(fixture, file), '// synthetic suite inventory entry\n')
+    }
+    run(fixture)
+  } finally {
+    rmSync(fixture, { recursive: true, force: true })
+  }
+}
+
+function minikubeSelection(fixture, packageName = 'control-api', runSuite = false) {
+  return spawnSync(
+    '/bin/bash',
+    [
+      '-c',
+      `source "$TASK_T1_SOURCE"
+trap - EXIT INT TERM
+PROJECT_DIR="$TASK_SELECTION_ROOT"
+if [ "$TASK_RUN_SUITE" = true ]; then
+  t2_evidence_write() { :; }
+  npm() { printf launched > "$TASK_SELECTION_ROOT/npm-launched"; return 97; }
+  T1_TMP_DIR="$TASK_SELECTION_ROOT"
+  run_suite control-api isolated synthetic-inventory-only
+else
+  list_real_pg_files "$TASK_SELECTION_PACKAGE"
+fi`,
+    ],
+    {
+      encoding: 'utf8',
+      timeout: 5000,
+      env: {
+        ...process.env,
+        TASK_T1_SOURCE: join(root, 'scripts/e2e/minikube-real-postgres.sh'),
+        TASK_SELECTION_ROOT: fixture,
+        TASK_SELECTION_PACKAGE: packageName,
+        TASK_RUN_SUITE: String(runSuite),
+      },
+    }
+  )
+}
+
+test('Minikube T1 selects the exact public inventory and preserves GFS discovery', () => {
+  withMinikubeSelectionFixture(fixture => {
+    const control = minikubeSelection(fixture)
+    assert.equal(control.status, 0, control.stderr)
+    assert.deepEqual(
+      control.stdout.trim().split('\n').sort(),
+      manifest.publicPostgres.map(file => join(fixture, file)).sort()
+    )
+    const gfs = minikubeSelection(fixture, 'gfs-controller')
+    assert.equal(gfs.status, 0, gfs.stderr)
+    assert.equal(gfs.stdout.trim(), join(fixture, 'gfs-controller/test/public.realPostgres.test.ts'))
+  })
+})
+
+test('suite CLI validates the census through a symlinked entry point', () => {
+  withMinikubeSelectionFixture(fixture => {
+    const alias = join(fixture, 'suite-cli.mjs')
+    symlinkSync(join(fixture, 'scripts/ci/password-recovery-suite-contract.mjs'), alias)
+    const selected = spawnSync(process.execPath, [alias, 'public'], { encoding: 'utf8' })
+    assert.equal(selected.status, 0, selected.stderr)
+    assert.deepEqual(selected.stdout.trim().split('\n'), manifest.publicPostgres)
+
+    rmSync(join(fixture, manifest.privatePostgres.local))
+    const rejected = spawnSync(process.execPath, [alias, 'verify'], { encoding: 'utf8' })
+    assert.notEqual(rejected.status, 0, 'a symlinked CLI must still validate every declared suite')
+    assert.match(rejected.stderr, /ENOENT|Missing or empty recovery suite/)
+  })
+})
+
+for (const fault of ['missing-private-suite', 'unregistered-suite']) {
+  test(`Minikube T1 rejects ${fault} before launching npm`, () => {
+    withMinikubeSelectionFixture(fixture => {
+      if (fault === 'missing-private-suite') rmSync(join(fixture, manifest.privatePostgres.local))
+      else writeFileSync(join(fixture, 'control-api/test/unregistered.realPostgres.test.ts'), '// fixture\n')
+      const selection = minikubeSelection(fixture)
+      assert.notEqual(selection.status, 0, 'invalid census must fail selection')
+      const execution = minikubeSelection(fixture, 'control-api', true)
+      assert.notEqual(execution.status, 0)
+      assert.match(execution.stderr, /REAL_PG_REPORT_INCOMPLETE/)
+      assert.equal(fs.existsSync(join(fixture, 'npm-launched')), false)
+    })
+  })
+}
 
 // Exercise shell selection with fake node/npm only; never execute a private producer suite.
 for (const mode of ['local', 'configured']) {

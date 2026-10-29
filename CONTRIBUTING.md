@@ -5,8 +5,8 @@ Thanks for your interest! evenfire is **open source** under the
 
 ## Set up
 
-- **Node.js 24.** `.nvmrc` pins `24`, most services declare
-  `"node": ">=24"`, `desktop-app` declares `24.x`, and CI uses Node 24.
+- **Node.js 24.22.1 or a later Node 24 patch.** `.nvmrc` pins `24.22.1`, most services declare
+  `"node": ">=24.22.1"`, `desktop-app` declares `^24.22.1`, and CI reads `.nvmrc`.
 - Install dependencies across the repo:
 
   ```bash

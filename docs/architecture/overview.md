@@ -1425,11 +1425,11 @@ The chart contains:
 
 ### Docker Images
 
-All services use multi-stage builds with `node:24-alpine`:
+All services use multi-stage builds with `node:24.22.1-alpine`:
 
 ```dockerfile
 # Stage 1: Build
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -1437,7 +1437,7 @@ COPY tsconfig.json src/ ./
 RUN npm run build
 
 # Stage 2: Runtime
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY package*.json ./

@@ -16,7 +16,7 @@ From root `README.md` §Testing prerequisites:
 - **Docker Desktop** running
 - **minikube** installed (`brew install minikube`)
 - **kubectl** configured
-- **Node.js 24+** for unit tests
+- **Node.js 24.22.1 or later in the Node 24 line** for unit tests
 - `.env` file at repo root with LLM API keys:
 
   | Variable                | Required For                                     | How to Get                              |

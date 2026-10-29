@@ -45,6 +45,9 @@ export type UpdateConnectorCredentialsProps = {
   recipeOwned?: boolean
   /** Marketplace source used to resolve operator-friendly credential labels. */
   registryCredentialSource?: RegistryCredentialSource
+  /** Installed connector view: open a value editor from each mapped key's Rotate action. */
+  perKeyEditing?: boolean
+  onBusyChange?: (busy: boolean) => void
 }
 
 /**
@@ -59,9 +62,17 @@ export type UpdateConnectorCredentialsProps = {
  *             DeploymentReady condition (the connector restarting after a
  *             rotation, or starting for the first time after a create).
  * - success:  a fresh DeploymentReady=True was observed after the write.
- * - failed:   the write itself failed, OR a fresh DeploymentReady=False was
- *             observed after it.
+ * - failed:   the write failed, or the UI budget expired after an unresolved
+ *             RolloutIncomplete diagnostic (a fresh False alone is not final).
  * - timeout:  the bounded poll window elapsed without a fresh terminal
  *             condition. Never reported as success.
  */
 export type RotationPhase = 'idle' | 'saving' | 'rotating' | 'success' | 'failed' | 'timeout'
+
+export type RolloutWaitOptions = {
+  serverName: string
+  cutoff: string | null
+  /** Attach mutates spec; rotation callers retain timestamp-only correlation. */
+  expectedUid?: string
+  expectedGeneration?: number
+}

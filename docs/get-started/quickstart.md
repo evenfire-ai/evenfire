@@ -15,7 +15,7 @@ named `chatllm` you can message immediately.
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl**
 - **python3** (used by the JWT key sync)
-- **Node.js 24+** (service builds; desktop app)
+- **Node.js 24.22.1 or later** (use the Node 24 version pinned in `.nvmrc` for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration
   overlay; ships with macOS, `apt-get install ruby` on Debian/Ubuntu)
 - One LLM API key. Setup picks the agent's provider automatically from

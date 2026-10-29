@@ -524,9 +524,9 @@ run_build "$query_failure_output" valid \
   FAKE_DOCKER_QUERY_STATUS=1 \
   bash "$BUILD_SCRIPT" --only=control-api || query_failure_status=$?
 if [[ "$query_failure_status" -eq 1 ]] \
-  && grep -Fq 'images -q node:24-alpine' "$DOCKER_LOG" \
-  && ! grep -Fq 'pull node:24-alpine' "$DOCKER_LOG" \
-  && ! grep -Fq 'image inspect node:24-alpine' "$DOCKER_LOG" \
+  && grep -Fq 'images -q node:24.22.1-alpine' "$DOCKER_LOG" \
+  && ! grep -Fq 'pull node:24.22.1-alpine' "$DOCKER_LOG" \
+  && ! grep -Fq 'image inspect node:24.22.1-alpine' "$DOCKER_LOG" \
   && ! grep -Fq 'Manifest:' "$query_failure_output" \
   && [[ "$(<"$manifest")" == known-good-manifest ]]; then
   pass 'daemon inventory status 1 hard-fails without pull or manifest success'
@@ -565,8 +565,8 @@ run_build "$empty_query_output" valid \
   FAKE_DOCKER_PULL_STATUS=55 \
   bash "$BUILD_SCRIPT" --only=control-api || empty_query_status=$?
 if [[ "$empty_query_status" -eq 55 ]] \
-  && grep -Fq 'images -q node:24-alpine' "$DOCKER_LOG" \
-  && grep -Fq 'pull node:24-alpine' "$DOCKER_LOG" \
+  && grep -Fq 'images -q node:24.22.1-alpine' "$DOCKER_LOG" \
+  && grep -Fq 'pull node:24.22.1-alpine' "$DOCKER_LOG" \
   && ! grep -Fq 'Manifest:' "$empty_query_output" \
   && [[ "$(<"$manifest")" == known-good-manifest ]]; then
   pass 'only a successful empty daemon inventory is treated as image absence'

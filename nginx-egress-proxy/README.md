@@ -9,9 +9,13 @@ lives in [host-context-controller](../host-context-controller/) (`src/reconciler
 
 ## The image
 
-- Base: `nginx:1.30.1-alpine` — kept because its entrypoint runs `envsubst` on
-  `/etc/nginx/templates/*.template` at startup, which HCC relies on for
-  credential injection.
+- Base: the official `nginx:<x.y.z>-alpine` image named by the `FROM` line of
+  the [Dockerfile](./Dockerfile), pinned by multi-arch index digest. It is kept
+  because its entrypoint runs `envsubst` on `/etc/nginx/templates/*.template`
+  at startup, which HCC relies on for credential injection. The minimum NGINX
+  release per line, and the CVEs behind it, are in
+  [scripts/nginx-image-policy.sh](../scripts/nginx-image-policy.sh);
+  `scripts/validate-nginx-images.sh` rejects older platform references.
 - Hardened to run as non-root (`USER 101:101`): the `user` directive is removed
   from `nginx.conf`, the PID file moves to `/tmp/nginx.pid`, the shipped
   `default.conf` is removed, and nginx dirs plus `/tmp` temp dirs are chowned
@@ -77,6 +81,40 @@ comes from `spec.transport.port` (default 3000); `/health` answers on it.
 
 The generated config, sanitization rules, and deployment shape are asserted in
 [host-context-controller/src/\_\_tests\_\_/reconciler.remote.test.ts](../host-context-controller/src/__tests__/reconciler.remote.test.ts).
+
+[scripts/tests/test-nginx-egress-proxy-tls.sh](../scripts/tests/test-nginx-egress-proxy-tls.sh)
+builds this image, renders the template through the HCC reconciler, and runs it
+against a local TLS upstream: a trusted chain (direct and with two
+intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
+mismatch, and the test CA without the mounted trust store are rejected.
+
+## Updating NGINX
+
+A newer fixed release on an accepted line (for example 1.30.6 → 1.30.7):
+
+1. Resolve the index digest of the new tag:
+   `docker buildx imagetools inspect nginx:<x.y.z>-alpine` (the `Digest:` line).
+2. Replace the old tag in the platform images: `FIXED_NGINX_IMAGE` in
+   `scripts/validate-nginx-images.sh`, the Dockerfile `FROM` (tag and digest),
+   the four gateway manifests under `deploy/base`,
+   `scripts/minikube/build-images.sh` and `scripts/bootstrap-cluster.sh`.
+3. Find the remaining references of both images:
+   `git grep -nE '(nginx|nginx-unprivileged):<old>-alpine'`. These are the
+   `nginxinc/nginx-unprivileged` recipe samples, the recipe guides, E2E scripts
+   and specs, and unit tests. They stay valid at or above the floor, so moving
+   them to the new release is optional; the validator does not require it.
+4. Run `bash scripts/validate-nginx-images.sh`,
+   `bash scripts/tests/test-validate-nginx-images.sh`,
+   `bash scripts/tests/test-verify-nginx-image-digests.sh` and
+   `bash scripts/verify-nginx-image-digests.sh`.
+
+The guard tests and CI need no edits for such a bump: both tests read the
+release from the validator and the Dockerfile. When a new CVE raises the
+minimum, also edit `NGINX_RELEASE_FLOORS` and its CVE comment in
+`scripts/nginx-image-policy.sh`, the floor cases in
+`scripts/tests/test-validate-nginx-images.sh`, and every reference the
+validator then reports as below the new floor, including the
+`nginxinc/nginx-unprivileged` ones.
 
 ## Build & deploy
 

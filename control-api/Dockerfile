@@ -1,4 +1,4 @@
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 WORKDIR /app
 
 # Prebuilt policy and POSIX store: copy only the production exports and types.
@@ -40,7 +40,7 @@ RUN npm prune --production
 # TypeScript/Vitest toolchain was needed only until both package/service builds.
 RUN npm --prefix /app/packages/workflow-runtime-core prune --omit=dev
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 

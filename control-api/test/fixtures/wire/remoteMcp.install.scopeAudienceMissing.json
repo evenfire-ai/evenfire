@@ -1,0 +1,7 @@
+{
+  "status": 400,
+  "body": {
+    "error": "scope_audience_missing",
+    "message": "with Microsoft Entra ID, at least one scope must belong to this server; sign-in scopes alone mint a Microsoft Graph token"
+  }
+}

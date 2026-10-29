@@ -1978,6 +1978,57 @@ h3 {
   flex: 0 0 auto;
 }
 
+/* ── Drag-and-drop states (rev-2 D1; refusal UX matrix §5) ────────────────
+   Tone-keyed by REASON, existing tokens only, no motion. Only `allowed`
+   paints the accent (blue); `checking` is neutral; a deny paints the error
+   inset unless its reason re-maps the tone — `same-parent` is the no-op
+   (info, edge tokens) and the unknown family is a warning, never a deny
+   look. Labels stay readable: the tint + inset carry the verdict, not label
+   dimming (the old dim-only treatment was the invisible one). The Files
+   grid's own tone rules live with the grid block further down the sheet,
+   where they out-rank its row and hover backgrounds. */
+.da-file-explorer__row[data-drop-state='checking'] {
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-file-explorer__row[data-drop-state='allowed'] {
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.da-file-explorer__row[data-drop-state='allowed'] .da-file-explorer__label.ui-button {
+  background: transparent;
+}
+
+/* Deny = error inset + tint (UX matrix A1–A8). */
+.da-file-explorer__row[data-drop-state='denied'] {
+  background: rgba(var(--danger-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--danger-rgb), 0.72);
+}
+
+/* A4 no-op: informational, never error-red. */
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  background: rgba(var(--edge-rgb), 0.12);
+  box-shadow: inset 2px 0 0 rgba(var(--edge-rgb), 0.6);
+}
+
+/* A10 unknown/unverifiable: warning, must not look denied. */
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-file-explorer__row[data-drop-state='unavailable'] {
+  background: rgba(var(--warning-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--warning-rgb), 0.72);
+}
+
+/* Draggable tree labels and grid rows show the grab affordance. */
+.da-file-explorer__label.ui-button[draggable='true'] {
+  cursor: grab;
+}
+
+.da-grid__row--compact[draggable='true'] {
+  cursor: grab;
+}
+
 .da-file-explorer__icon {
   display: inline-flex;
   flex: 0 0 auto;
@@ -8023,6 +8074,42 @@ h3 {
   scrollbar-width: thin;
 }
 
+.composer-attachments-count {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.composer-attachments-clear {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: 0 var(--space-1);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.composer-attachments-clear:hover {
+  color: var(--danger);
+  background: rgba(var(--danger-rgb), 0.08);
+}
+
+.composer-attachments-clear:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
 .composer-attachment-chip {
   display: inline-flex;
   align-items: center;
@@ -10475,6 +10562,11 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   color: var(--text);
 }
 
+/* TASK-172 — an interactive pill acts as a button, so it must read as one. */
+.ui-pill--interactive {
+  cursor: pointer;
+}
+
 .ui-pill--interactive:hover {
   background: var(--surface-hover);
   border-color: rgba(var(--accent-rgb), 0.42);
@@ -10617,12 +10709,53 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   margin-top: 1px;
 }
 
+.toast-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toast-action {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toast-action:hover {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger);
+}
+
+.toast-action:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
 .toast.tone-success {
   border-color: rgba(var(--success-rgb), 0.5);
 }
 
+.toast.tone-warn {
+  border-color: rgba(var(--warning-rgb), 0.5);
+}
+
 .toast.tone-error {
   border-color: rgba(var(--danger-rgb), 0.52);
+}
+
+/* Unverifiable-but-not-forbidden outcomes (refusal UX matrix A10): the
+   warning border pairs with the warn toast tone. */
+.toast.tone-warn {
+  border-color: rgba(var(--warning-rgb), 0.52);
 }
 
 .auth-page {
@@ -13157,6 +13290,12 @@ pre {
   pointer-events: none;
 }
 
+/* Recovery action (Reopen / Retry) at the trailing end of an app status banner. */
+.sandbox-ui-status-action {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .sandbox-ui-loading {
   position: relative;
   z-index: 1;
@@ -15234,9 +15373,51 @@ pre {
   white-space: nowrap;
 }
 
-.da-gfs-drive__breadcrumb.ui-button:disabled {
+.da-gfs-drive__breadcrumb.ui-button[aria-current='page'] {
   color: var(--text);
   opacity: 1;
+  background: rgba(var(--accent-rgb), 0.1);
+  cursor: default;
+}
+
+/* Breadcrumb drop-move verdict tints (drop-move parity, refusal UX matrix):
+   identical treatment to Control UI's cu-gfs-breadcrumb verdicts — the
+   target gets a crisp 2px accent ring, checking dashes neutrally, ordinary
+   denials read as error, the unknown family warns, and the same-parent
+   no-op stays neutral. The active (disabled) crumb is never a target, so
+   these only ever render on ancestor crumbs. */
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--accent-rgb), 0.4);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='allowed'],
+.da-gfs-drive__breadcrumb.ui-button.da-gfs-drive__breadcrumb--allowed {
+  outline: 2px solid rgba(var(--accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'] {
+  outline: 2px solid rgba(var(--danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--danger-rgb), 0.12);
+}
+
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='unavailable'] {
+  outline: 2px solid rgba(var(--warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--warning-rgb), 0.12);
 }
 
 .da-gfs-drive__header-actions {
@@ -15299,6 +15480,66 @@ pre {
   gap: var(--space-2);
   color: var(--text-muted);
   font-size: var(--font-size-sm);
+}
+
+/* BUG-175 — folder-zip assembly progress strip. */
+.da-gfs-zip-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: var(--radius-control);
+  background: rgba(var(--panel-rgb), 0.72);
+  color: var(--text);
+  padding: var(--space-1-5) var(--space-2);
+  font-size: var(--font-size-sm);
+  line-height: 1.35;
+}
+
+.da-gfs-zip-progress__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.da-gfs-zip-progress__stop {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.da-gfs-zip-progress__stop:hover {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger);
+}
+
+.da-gfs-zip-progress__stop:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
+.da-gfs-zip-progress__label::before {
+  content: '';
+  flex: 0 0 auto;
+  width: var(--space-1);
+  height: var(--space-1);
+  border-radius: 999px;
+  background: var(--accent);
+  margin-right: var(--space-1-5);
+  display: inline-block;
+  animation: da-gfs-loading-dot 1.2s ease-in-out infinite;
 }
 
 .da-gfs-loading__dots {
@@ -15399,6 +15640,39 @@ pre {
 .da-gfs-drive__grid .da-grid__row--clickable:hover:enabled {
   background: var(--grid-card-bg-hover);
   border-color: var(--grid-card-border);
+}
+
+/* ── Files-grid drop-verdict tints (refusal UX matrix §5) ──────────────────
+   Grid- AND clickable-scoped so every tone out-ranks BOTH the base row
+   background above (`background: transparent`) and the clickable-hover
+   background: the verdict must stay readable on the hovered row too. Only
+   `allowed` stays blue — through the data-drop-target highlight above,
+   unchanged. Tone keys on the reason: deny=error, same-parent=info (the
+   no-op), unknown/unavailable=warning. */
+.da-gfs-drive__grid .da-grid__row--clickable.da-grid__row--compact[data-drop-state='checking'] {
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-drive__grid .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'] {
+  background: rgba(var(--danger-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--danger-rgb), 0.72);
+}
+
+.da-gfs-drive__grid
+  .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  background: rgba(var(--edge-rgb), 0.12);
+  box-shadow: inset 2px 0 0 rgba(var(--edge-rgb), 0.6);
+}
+
+.da-gfs-drive__grid
+  .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-gfs-drive__grid
+  .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-gfs-drive__grid
+  .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-gfs-drive__grid .da-grid__row--clickable.da-grid__row--compact[data-drop-state='unavailable'] {
+  background: rgba(var(--warning-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--warning-rgb), 0.72);
 }
 
 .da-gfs-current-file {
@@ -16068,6 +16342,60 @@ pre {
   gap: var(--space-3);
   overflow: visible;
   padding: 0 var(--space-5) var(--space-5);
+}
+
+/* GfsMoveConfirmDialog — the compact folder-move confirmation (rev-2 §1).
+   Scoped restyling of the share-dialog shell to match the Control UI
+   treatment: ~30rem panel, plain h3 header without icon chrome, muted
+   impact copy, tight right-aligned actions. */
+.da-gfs-move-confirm-dialog.da-gfs-manage-dialog {
+  width: min(30rem, 96vw);
+  max-height: none;
+  grid-template-rows: auto auto auto;
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__header {
+  grid-template-columns: minmax(0, 1fr);
+  padding: var(--space-5) var(--space-5) var(--space-2);
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__heading h3 {
+  font-size: var(--font-size-lg);
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__body {
+  padding: 0 var(--space-5);
+}
+
+.da-gfs-move-confirm-dialog__impact {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.da-gfs-move-confirm-dialog__rename-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  cursor: pointer;
+}
+
+.da-gfs-move-confirm-dialog__rename-toggle input[type='checkbox'] {
+  width: var(--space-3);
+  min-width: var(--space-3);
+  height: var(--space-3);
+  min-height: var(--space-3);
+  flex: 0 0 var(--space-3);
+  margin: 0;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  accent-color: var(--accent);
+}
+
+.da-gfs-move-confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-5) var(--space-5);
 }
 
 .da-gfs-manage-section {
@@ -16808,6 +17136,14 @@ pre {
 
 .da-gfs-parent-update-dialog__role--next {
   color: var(--text);
+}
+
+/* R1-M5: the confirmation states the surviving Editor shares BEFORE the
+   user approves, not only in the post-change toast. */
+.da-gfs-parent-update-dialog__residual {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
 }
 
 .da-gfs-parent-update-dialog__help {

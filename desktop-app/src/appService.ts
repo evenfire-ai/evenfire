@@ -22,7 +22,7 @@ import {
   canonicalizeDesktopRestEndpoint,
   sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
-import { fetchBoundedBytes } from './gfs/boundedDownload.js'
+import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
   DesktopGfsUploadJob,
@@ -891,6 +891,7 @@ export class AppService {
     },
     requestJson,
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
+    fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
   private readonly tokenStore: TokenStore
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -1591,7 +1592,7 @@ export class AppService {
     // The embed and its refresh loop run on the outgoing session. Queued rather
     // than awaited: callers must not wait on a pending open's mint; the serial
     // queue still tears down whatever that open mounts.
-    void this.closeSandboxUi().catch(error => {
+    void this.closeSandboxUi({ reason: 'session' }).catch(error => {
       console.error('[SandboxUI] Could not close the embed on session change:', error)
     })
   }
@@ -2716,17 +2717,43 @@ export class AppService {
    * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
    * reads the full body.
    */
-  async downloadGfsUri(uri: string, maxBytes?: number) {
+  async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
     return this.gfsClient.download(
       uri,
       this.requireSessionToken(),
-      maxBytes !== undefined ? { maxBytes } : undefined
+      maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
+    )
+  }
+
+  /**
+   * Resolve then STREAM a gfs:// resource's bytes into `onChunk` (R1-H2).
+   *
+   * The folder-zip walk uses this instead of `downloadGfsUri`: the payload is
+   * written straight into the ZIP temp file chunk by chunk, so neither the
+   * main process nor the renderer ever holds a whole file in memory. The
+   * ceiling is enforced producer-side, mid-stream.
+   */
+  async downloadGfsUriInto(
+    uri: string,
+    maxBytes: number,
+    signal: AbortSignal | undefined,
+    onChunk: (chunk: Uint8Array) => Promise<void>
+  ) {
+    return this.gfsClient.downloadInto(
+      uri,
+      this.requireSessionToken(),
+      signal ? { maxBytes, signal } : { maxBytes },
+      onChunk
     )
   }
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
-  async listGfsChildren(resourceId: string, drive?: string, cursor?: string) {
-    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), { drive, cursor })
+  async listGfsChildren(resourceId: string, drive?: string, cursor?: string, signal?: AbortSignal) {
+    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), {
+      drive,
+      cursor,
+      signal,
+    })
   }
 
   /** List explicit gfs resources the current user can read through grants or shares. */
@@ -3423,15 +3450,17 @@ export class AppService {
    * Move a resource into a destination folder (PATCH newParentId). Move
    * authority is parent-relative (write+delete on the old parent, write on the
    * destination) and is enforced server-side; ifMatch pins the resource version.
+   * An optional newName performs a combined rename+move in the same PATCH.
    */
   async moveGfsResource(
     resourceId: string,
     destinationId: string,
     drive?: string,
-    ifMatch?: number
+    ifMatch?: number,
+    newName?: string
   ) {
     return this.gfsClient.moveResource(
-      { resourceId, drive, destinationId, ifMatch },
+      { resourceId, drive, destinationId, ifMatch, ...(newName !== undefined ? { newName } : {}) },
       this.requireSessionToken()
     )
   }
@@ -5908,6 +5937,8 @@ export class AppService {
    * mixups.
    */
   openSandboxUi(args: {
+    /** Names the view this open mounts in every event about it. */
+    launchId: string
     recipeNs: string
     recipeName: string
     title?: string
@@ -5915,13 +5946,17 @@ export class AppService {
     routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
     parentWindow: import('electron').BrowserWindow
-    onClosed?: () => void
+    /** Exactly once per view this open mounts, even if the open then rejects. */
+    onReleased?: (event: import('./sandboxUiDriver.js').SandboxUiReleasedEvent) => void
     onRefreshError?: (message: string) => void
+    /** A refresh succeeded after `onRefreshError` reported that it had given up. */
+    onRefreshRecovered?: () => void
     onOauthError?: (message: string) => void
     onTitleChanged?: (title: string) => void
   }): Promise<void> {
     // Captured at request time, not when the queue reaches it: an open asked for
-    // under one session must not run under the next one.
+    // under one session must not run under the next one. Enqueued synchronously:
+    // a close for this launch sent right after it must find it ahead in the queue.
     const sessionEpoch = this.sandboxUiSessionEpoch
     return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args, sessionEpoch))
   }
@@ -5937,15 +5972,17 @@ export class AppService {
     // An open replaces the current view whatever its outcome, so the outgoing
     // view goes BEFORE the network mint: a failed mint must not leave it
     // painted (with its refresh loop still minting) after the renderer has been
-    // told the open failed. Deliberately silent — no `onClosed`: the renderer
-    // drops its owner of the embed on `sandboxUi:closed`, which here would
-    // orphan the view this open is about to mount. Failure is reported only by
-    // the rejection.
-    await this.teardownSandboxUiView()
+    // told the open failed. Failure is reported only by the rejection.
+    await this.teardownSandboxUiView('replaced')
     try {
       await this.mintAndMountSandboxUiView(args, recipeNs, recipeName, sessionEpoch)
     } catch (error) {
-      await this.teardownSandboxUiView()
+      // Only this open's own view, never one another launch owns; its release
+      // goes out before the rejection. `open_failed` tells the renderer that
+      // rejection is on its way, so it reports the failure instead of an
+      // abandoned launch; a session that ended meanwhile is the real cause.
+      const reason = this.sandboxUiSessionEpoch === sessionEpoch ? 'open_failed' : 'session'
+      await this.teardownSandboxUiView(reason, args.launchId)
       throw error
     }
   }
@@ -5960,6 +5997,7 @@ export class AppService {
     // the open itself must refuse to install the cleared session's cookie or
     // attach a view for it.
     this.assertSandboxUiSessionEpoch(sessionEpoch)
+    const mintedAt = Date.now()
     const { setCookie } = await this.mintSandboxUiSession(recipeNs, recipeName)
     this.assertSandboxUiSessionEpoch(sessionEpoch)
     const driver = await import('./sandboxUiDriver.js')
@@ -5974,6 +6012,10 @@ export class AppService {
       routePath: args.routePath,
       parentWindow: args.parentWindow,
       bounds: args.bounds,
+      launchId: args.launchId,
+      onReleased: args.onReleased,
+      // A teardown main did not ask for (crash, parent window closed) skips
+      // `teardownSandboxUiView`, so its cleanup runs here.
       onClosed: () => {
         // Cancel refresh first so the timer doesn't keep firing against a
         // partition we're about to evict on the next mount.
@@ -5982,7 +6024,6 @@ export class AppService {
         // per-mount SDK state (session denials, prompt budget, rate budget)
         // dies with the mount.
         tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
-        args.onClosed?.()
       },
       onGfsOpen: uri => {
         const active = tryGetPluginSdkRuntime()
@@ -5991,6 +6032,9 @@ export class AppService {
         void active.openGfsResourceFromNavigation(surface.webContentsId, uri)
       },
       onTitleChanged: args.onTitleChanged,
+      onUnauthorizedNavigation: webContentsId => {
+        refreshModule.handleSandboxUiUnauthorizedNavigation(webContentsId)
+      },
       onOauthAuthorize: (oauthClientId, background) => {
         void this.requestSandboxUiOauthAuthorize(
           recipeNs,
@@ -6007,11 +6051,11 @@ export class AppService {
     })
     this.assertSandboxUiSessionEpoch(sessionEpoch)
     const activeView = driver.getActiveSandboxUi()
-    if (!activeView || activeView.appRef !== `${recipeNs}/${recipeName}`) {
-      // A queued close or newer mount can invalidate this operation while an
-      // async cookie write is in flight. Do not cross-wire its refresh loop
-      // to whichever recipe is active now.
-      return
+    if (!activeView || activeView.launchId !== args.launchId) {
+      // The view died before the open finished (its renderer crashed, its
+      // window closed). An open resolves only when it leaves its view mounted,
+      // and its refresh loop must not attach to whatever is active now.
+      throw new Error('The app view closed before it finished opening')
     }
     // Pin the surface so the SDK broker can derive this plugin's identity from
     // `webContents.id` — the plugin never asserts who it is.
@@ -6026,49 +6070,89 @@ export class AppService {
       recipeName,
       webContentsId: activeView.webContentsId,
       parentWindow: args.parentWindow,
-      refresh: (ns, name) => this.mintSandboxUiSession(ns, name),
+      mintedAt,
       // A refresh minted before a session clear can land before the queued
-      // close cancels this loop. Rejecting stops the loop without writing the
-      // cleared session's cookie; the user has nothing to act on, so it is not
+      // close cancels this loop. Rejecting fails the attempt without writing
+      // the cleared session's cookie, and any retry before the close runs is
+      // refused before it reaches rpc-proxy, so the next session's token never
+      // mints for this view. The user has nothing to act on, so it is not
       // reported.
+      refresh: async (ns, name) => {
+        this.assertSandboxUiSessionEpoch(sessionEpoch)
+        return this.mintSandboxUiSession(ns, name)
+      },
       installCookie: async setCookieValue => {
         this.assertSandboxUiSessionEpoch(sessionEpoch)
         await driver.installSandboxUiCookie(setCookieValue)
+      },
+      reload: () => {
+        if (driver.getActiveSandboxUi()?.webContentsId !== activeView.webContentsId) return
+        driver.reloadActiveSandboxUiView()
       },
       onError: err => {
         if (this.sandboxUiSessionEpoch !== sessionEpoch) return
         args.onRefreshError?.(err instanceof Error ? err.message : String(err))
       },
+      onRecovered: () => {
+        if (this.sandboxUiSessionEpoch !== sessionEpoch) return
+        args.onRefreshRecovered?.()
+      },
     })
   }
 
-  closeSandboxUi(): Promise<void> {
-    return this.enqueueSandboxUiLifecycle(() => this.teardownSandboxUiView())
+  /**
+   * With a `launchId`, closes the view only if that launch still owns it: a
+   * close that arrives after its view was replaced must not take down the
+   * replacement. Without one, closes whatever is live; only main's own callers
+   * (session change, renderer replaced) do that, the renderer must always name
+   * its launch. Enqueued synchronously, like `openSandboxUi`.
+   */
+  closeSandboxUi(
+    options: {
+      launchId?: string
+      reason?: import('./sandboxUiDriver.js').SandboxUiReleaseReason
+    } = {}
+  ): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(() =>
+      this.teardownSandboxUiView(options.reason ?? 'closed', options.launchId)
+    )
   }
 
-  private async teardownSandboxUiView(): Promise<void> {
+  /**
+   * Reloads the document of the view `launchId` owns, in place: same view, same
+   * session cookie, same refresh loop, so nothing is minted. Enqueued
+   * synchronously like `openSandboxUi`, so it acts on the view the queue holds
+   * when it gets there; a launch that no longer owns the view reloads nothing.
+   */
+  reloadSandboxUi(options: { launchId: string }): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(async () => {
+      const driver = await import('./sandboxUiDriver.js')
+      if (driver.getActiveSandboxUi()?.launchId !== options.launchId) return
+      driver.reloadActiveSandboxUiView()
+    })
+  }
+
+  private async teardownSandboxUiView(
+    reason: import('./sandboxUiDriver.js').SandboxUiReleaseReason,
+    onlyLaunchId?: string
+  ): Promise<void> {
     const driver = await import('./sandboxUiDriver.js')
     const refreshModule = await import('./sandboxUiSessionRefresh.js')
-    refreshModule.cancelSandboxUiRefresh()
-    tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
-    await driver.unmountSandboxUiView()
-  }
-
-  // Read the active embed's current in-app route for the renderer's tab store
-  // (mini-spec 05 §1). Mirrors `createSandboxUiDeepLink`'s read: it wraps
-  // `driver.getActiveSandboxUiLocation()` and reshapes to the renderer contract.
-  // Returns null when no embed is mounted or its webContents is destroyed.
-  // An out-of-prefix current URL makes `getActiveSandboxUiLocation` THROW
-  // ('Cannot read the current app route'); that propagates so the renderer can
-  // fall back to the default route instead of persisting a stale one.
-  async getSandboxUiLocation(): Promise<{ appRef: string; routePath?: string } | null> {
-    const driver = await import('./sandboxUiDriver.js')
-    const location = driver.getActiveSandboxUiLocation()
-    if (!location) return null
-    return {
-      appRef: `${location.recipeNs}/${location.recipeName}`,
-      ...(location.path ? { routePath: location.path } : {}),
+    if (onlyLaunchId !== undefined && driver.getActiveSandboxUi()?.launchId !== onlyLaunchId) {
+      return
     }
+    // Neither must keep the view from being unmounted and released.
+    try {
+      refreshModule.cancelSandboxUiRefresh()
+    } catch (error) {
+      console.error('[SandboxUI] Could not cancel the session refresh of a closing view:', error)
+    }
+    try {
+      tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
+    } catch (error) {
+      console.error('[SandboxUI] Could not unpin the surfaces of a closing view:', error)
+    }
+    await driver.unmountSandboxUiView(reason)
   }
 
   async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
@@ -6085,15 +6169,6 @@ export class AppService {
         teamId: String(teamId || '').trim() || undefined,
       }),
     }
-  }
-
-  // In-place hard-reload of the active embed (user-initiated "Refresh"). The
-  // session cookie is still valid, so this only reloads page content — it does
-  // NOT re-mint the session or cancel the refresh timer. No-op when nothing is
-  // mounted.
-  async reloadSandboxUi(): Promise<void> {
-    const driver = await import('./sandboxUiDriver.js')
-    driver.reloadActiveSandboxUiView()
   }
 
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {

@@ -132,9 +132,8 @@ export function InvitationClient({
   const expirationText = useMemo(() => {
     if (!invitation || invitation.status !== 'pending') return ''
     const remaining = formatRemaining(invitation.expiresAt, now)
-    return remaining === 'expired'
-      ? 'This invitation has expired.'
-      : `This invitation will expire in ${remaining}.`
+    if (remaining === 'expired') return 'This invitation has expired.'
+    return remaining ? `This invitation will expire in ${remaining}.` : ''
   }, [invitation, now])
 
   const downloadUrl = getEvenfireDownloadUrl()

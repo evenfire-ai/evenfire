@@ -12,6 +12,14 @@
  * (`buildMcpServerGrantKey`), so the rule lives here once.
  */
 import { rootLogger } from '../observability/logger.js'
+import {
+  detectAsProfile,
+  isAsProfileId,
+  profileHasResourceScope,
+  profileScopeViolation,
+  remoteWireForProfile,
+  withProfileScopes,
+} from './asProfiles.js'
 import type {
   GenericClientRouting,
   OAuthClientDecl,
@@ -46,6 +54,7 @@ export interface McpServerOAuthDecl {
   bearerInBody?: unknown
   supportsRefresh?: unknown
   issForCallback?: unknown
+  asProfile?: unknown
   // Generic self-hosted lane (`source:'generic'`, DEC-28). Untrusted CR data →
   // every field is validated before use; a malformed generic block fails closed.
   refreshEndpoint?: unknown
@@ -67,6 +76,7 @@ export interface McpServerOAuthSpecInput {
     // server belongs to", mcpserver.yaml). It is the AUTHORITATIVE Context of a
     // context-identity server — the shared grant coordinate — never the body.
     contextRef?: unknown
+    remote?: { baseUrl?: unknown }
   }
 }
 
@@ -240,13 +250,16 @@ export type RemoteOAuthSpecIncoherence =
   | 'bearer_in_body'
   | 'cimd_without_issuer_binding'
   | 'as_endpoints_cross_site'
+  | 'as_profile_issuer_mismatch'
+  | 'scope_audience_mismatch'
 
 /**
  * A remote `spec.oauth` the admission rules reject but that reached the apiserver
  * anyway (CRD applied after the object, or a write that bypassed validation, e.g. by
  * kubectl/GitOps). The phase using it refuses it with this specific error instead of
  * degrading to a generic failure: the CRD-mirror reasons (`public_client_with_secret_refs`,
- * `bearer_in_body`) in consent and token issuance alike; the per-server callback
+ * `bearer_in_body`, `as_profile_issuer_mismatch`) and the profile's scope audience
+ * (`scope_audience_mismatch`) in consent and token issuance alike; the per-server callback
  * reasons (`cimd_without_issuer_binding`, `as_endpoints_cross_site`) only in consent
  * (authorize-URL minting and the callback), so grants already obtained keep serving.
  */
@@ -270,6 +283,7 @@ export type RemoteOAuthCoherencePhase = 'consent' | 'token'
 
 function remoteOAuthSpecIncoherence(
   oauth: McpServerOAuthDecl,
+  baseUrl: unknown,
   phase: RemoteOAuthCoherencePhase
 ): RemoteOAuthSpecIncoherence | null {
   if (
@@ -279,6 +293,43 @@ function remoteOAuthSpecIncoherence(
     return 'public_client_with_secret_refs'
   }
   if (oauth.bearerInBody === true) return 'bearer_in_body'
+  // A profile stops sending RFC 8707 `resource`, so it is only honoured on the issuer it
+  // is recognised from; anywhere else it would strip the audience binding of another AS.
+  if (
+    oauth.asProfile !== undefined &&
+    (!isAsProfileId(oauth.asProfile) ||
+      typeof oauth.issuer !== 'string' ||
+      detectAsProfile(oauth.issuer)?.id !== oauth.asProfile)
+  ) {
+    return 'as_profile_issuer_mismatch'
+  }
+  // The converse: the install always pins the profile its issuer is recognised from, so
+  // a tenant issuer without one was written outside it, typically by an apiserver whose
+  // CRD predates the field and pruned it. On the generic wire that issuer either rejects
+  // the exchange or picks the audience from the browser's scopes.
+  if (
+    oauth.asProfile === undefined &&
+    typeof oauth.issuer === 'string' &&
+    detectAsProfile(oauth.issuer) !== null
+  ) {
+    return 'as_profile_issuer_mismatch'
+  }
+  // Without `resource` the scopes alone pick the token's audience, and the scopes or the
+  // base URL can be edited after the install (API or kubectl). The hard audience rules
+  // are therefore re-checked against the base URL in force now: a known API's GUID scope
+  // off its own host is refused. GUID scopes of an API the platform does not know pass:
+  // writing the CR is the operator's confirmation.
+  if (oauth.asProfile === 'entra-v2') {
+    const scopes = withProfileScopes(normalizeScopes(oauth.scopes) ?? [], 'entra-v2')
+    if (
+      typeof baseUrl !== 'string' ||
+      !URL.canParse(baseUrl) ||
+      profileScopeViolation('entra-v2', baseUrl, scopes) !== null ||
+      !profileHasResourceScope('entra-v2', baseUrl, scopes)
+    ) {
+      return 'scope_audience_mismatch'
+    }
+  }
   // The per-server rules defend the authorization response (which AS minted a code, and
   // where it is redeemed). A grant already obtained is sealed to this CR's uid and its
   // endpoints are immutable, so a refresh only ever returns to the token endpoint that
@@ -318,7 +369,10 @@ function asEndpointsOnIssuerSite(oauth: McpServerOAuthDecl): boolean {
 
 /**
  * Runtime mirror of the remote-carril coherence rules of the McpServer CRD
- * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER) and of the install's
+ * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER, AS-PROFILE-ISSUER), of the
+ * install's profile pinning (a recognised issuer always carries its profile; the CRD does
+ * not require it, and an older CRD prunes the field), of the install's
+ * scope-audience rules for an authorization-server profile, and of the install's
  * per-server callback rules (no CIMD client and same-site AS endpoints when the AS
  * does not return `iss`, which the CRD cannot express). Throws
  * {@link RemoteOAuthSpecIncoherentError} for a remote server whose shape no
@@ -336,7 +390,7 @@ export function assertRemoteOAuthSpecCoherent(
 ): void {
   const oauth = server.spec?.oauth
   if (!oauth || readOAuthLane(oauth) !== 'remote') return
-  const reason = remoteOAuthSpecIncoherence(oauth, phase)
+  const reason = remoteOAuthSpecIncoherence(oauth, server.spec?.remote?.baseUrl, phase)
   if (!reason) return
   const name = server.metadata?.name
   log.warn(
@@ -359,8 +413,14 @@ function extractRemoteRouting(oauth: McpServerOAuthDecl): RemoteClientRouting | 
   const tokenEndpoint = oauth.tokenEndpoint
   if (typeof authorizationEndpoint !== 'string' || authorizationEndpoint.length === 0) return null
   if (typeof tokenEndpoint !== 'string' || tokenEndpoint.length === 0) return null
+  const asProfile = isAsProfileId(oauth.asProfile) ? oauth.asProfile : undefined
+  // The CR keeps the PRM's `resource` for audit even when the profile does not send it.
   const resource =
-    typeof oauth.resource === 'string' && oauth.resource.length > 0 ? oauth.resource : undefined
+    remoteWireForProfile(asProfile).sendResource &&
+    typeof oauth.resource === 'string' &&
+    oauth.resource.length > 0
+      ? oauth.resource
+      : undefined
   const issForCallback =
     typeof oauth.issForCallback === 'string' && oauth.issForCallback.length > 0
       ? oauth.issForCallback
@@ -376,6 +436,7 @@ function extractRemoteRouting(oauth: McpServerOAuthDecl): RemoteClientRouting | 
     supportsRefresh: oauth.supportsRefresh === true,
     issForCallback,
     ...(issuer ? { issuer } : {}),
+    ...(asProfile ? { asProfile } : {}),
   }
 }
 
@@ -530,7 +591,9 @@ export function resolveServerOAuthSubject(
       // `remote` before any provider-adapter lookup. `'remote'` is the persisted /
       // displayed label.
       provider: 'remote',
-      scopes: normalizeScopes(oauth.scopes),
+      // With a profile the required scopes ride every authorize and refresh, even when
+      // the CR (edited after the install) dropped them.
+      scopes: withProfileScopes(normalizeScopes(oauth.scopes) ?? [], remote.asProfile),
       backgroundAccess: oauth.backgroundAccess === true,
       remote,
       secretSource,

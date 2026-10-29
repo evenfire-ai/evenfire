@@ -1,138 +1,147 @@
 import {
+  classifyGfsAclReadFailure,
+  gfsAncestorPathsOf,
+  gfsHttpStatusOf,
+  worstGfsCoverageClass,
+} from '@clerum/gfs-interaction-policy'
+import {
   type GfsResourceByPathView,
+  apiGet,
   getGfsGrants,
   getGfsResourceByPath,
   getGfsShares,
 } from '@lib/api'
-import type { GfsInheritedAccessItem } from './GfsGrantPanel.types'
+import type {
+  GfsInheritedAccessCoverage,
+  GfsInheritedAccessItem,
+  GfsInheritedAccessResult,
+} from './GfsGrantPanel.types'
 import { inheritedSubjectKey, mergeInheritedAccessItem } from './gfsInheritedAccessMerge'
-
-export { planInheritedRoleChange, strongestInheritedSource } from './gfsInheritedAccessMerge'
-
-/**
- * Frontend inheritance derivation for the Share dialog. The grants/shares GETs
- * list only the rows configured directly on one resource, so a file's
- * inherited access is derived by walking the ancestor folders of the
- * resource's canonical path and keeping the rows that apply to descendants
- * (grants with inherit=true, shares with includeDescendants=true — the same
- * rule the server's allow() evaluation uses). Rows are merged per subject
- * through the pure merge core (`gfsInheritedAccessMerge.ts`, property tested
- * in R1-M4); EVERY contributing ancestor folder is kept as an editable source
- * (with the grant/share ids to mutate), so a confirmed removal revokes all of
- * them and a confirmed downgrade lowers each one above the target role
- * (R1-H1). If any required ancestor or ACL read fails, the derivation fails
- * visibly instead of returning a result that looks complete.
- */
-
-/**
- * Walk semantics (R1-M1, unified with the desktop walk in
- * desktop-app/ui/src/gfs/inheritedAccess.ts):
- * - BOUNDED in depth: at most GFS_INHERITED_WALK_MAX_DEPTH ancestors are
- *   visited (the desktop rid-chain walk bounds itself with the same number
- *   via GFS_BREADCRUMB_MAX_DEPTH).
- * - COMPLETE or FAILED: every ancestor path must resolve to a directory and
- *   both ACL lists must load. Any failure throws the same derivation error as
- *   Desktop, so the UI cannot mistake partial data for no inherited access.
- * - This walk addresses ancestors by canonical PATH while Desktop follows
- *   parent resource IDs. The traversal differs, but the failure contract is
- *   shared.
- */
-const GFS_INHERITED_WALK_MAX_DEPTH = 64
 
 /** `/docs/report.md` → `['/docs', '/']` (nearest ancestor first, depth-capped). */
 export function gfsAncestorPaths(path: string): string[] {
-  const segments = (path.startsWith('/') ? path : `/${path}`)
-    .split('/')
-    .filter(segment => segment.length > 0)
-  if (segments.length === 0) return []
-  const ancestors: string[] = []
-  for (let count = segments.length - 1; count > 0; count -= 1) {
-    ancestors.push(`/${segments.slice(0, count).join('/')}`)
-  }
-  ancestors.push('/')
-  // Nearest-first cap, mirroring the desktop rid-chain walk's bound.
-  return ancestors.slice(0, GFS_INHERITED_WALK_MAX_DEPTH)
-}
-
-interface InheritingRow {
-  subject: { type: string; id?: string }
-  permissions: string[]
-  grantId: string | null
-  shareIds: string[]
-}
-
-async function listInheritingRows(
-  folder: GfsResourceByPathView,
-  drive: string,
-  signal?: AbortSignal
-): Promise<InheritingRow[]> {
-  const [grants, shares] = await Promise.all([
-    getGfsGrants(folder.resourceId, drive, signal),
-    getGfsShares(folder.resourceId, drive, signal),
-  ])
-  return [
-    ...grants.items
-      .filter(grant => grant.inherit)
-      .map(grant => ({
-        subject: grant.subject,
-        permissions: grant.permissions,
-        grantId: grant.id,
-        shareIds: [],
-      })),
-    ...shares.items
-      .filter(share => share.includeDescendants)
-      .map(share => ({
-        subject: share.subject,
-        permissions: share.permissions,
-        grantId: null,
-        shareIds: [share.id],
-      })),
-  ]
+  return gfsAncestorPathsOf(path)
 }
 
 /**
- * Derives inherited access only when every ancestor and ACL list is available.
- * Any incomplete walk throws `inherited_access_derivation_failed`, so the
- * caller can distinguish a read failure from a complete empty result. The
- * drive root carries an empty name, so its label falls back to the drive name,
- * matching the browser breadcrumb.
+ * Reconstruct inherited observations from the operator endpoints' direct rows.
+ * A later failed read never removes a member already proved by a readable
+ * ancestor. Coverage distinguishes partial observations from a complete empty
+ * result; grants and shares settle independently on each ancestor (P1-H1).
+ *
+ * Control UI normally has intrinsic operator access, unlike the Desktop
+ * folder-owner plane. Rate limits and transient failures can still interrupt
+ * this walk. Session/context expiry and cancellation rethrow before publishing
+ * any result; apiRead owns the global authentication boundary. Structured
+ * producer status wins over error prose, including a 500 body mentioning 401.
  */
 export async function loadGfsInheritedAccess(
-  path: string,
+  target: { path: string | null; gfsUri?: string | null },
   drive: string,
   signal?: AbortSignal
-): Promise<GfsInheritedAccessItem[]> {
+): Promise<GfsInheritedAccessResult> {
   const bySubject = new Map<string, GfsInheritedAccessItem>()
-  const ancestorPaths = gfsAncestorPaths(path)
+  const result = (coverage: GfsInheritedAccessCoverage): GfsInheritedAccessResult => ({
+    items: [...bySubject.values()],
+    coverage,
+  })
+  const readFailure = (error: unknown) => {
+    if (
+      signal?.aborted ||
+      (error instanceof DOMException && error.name === 'AbortError') ||
+      gfsHttpStatusOf(error) === 401
+    ) {
+      throw error
+    }
+    return classifyGfsAclReadFailure(error)
+  }
+  if (signal?.aborted) throw signal.reason
+
+  let canonicalPath = target.path
+  if (!canonicalPath) {
+    if (!target.gfsUri) return result('unavailable')
+    try {
+      const resolved = (await apiGet(
+        '/api/v1/gfs/resolve',
+        { uri: target.gfsUri },
+        { signal }
+      )) as { path?: string | null; kind?: string }
+      if (signal?.aborted) throw signal.reason
+      if (resolved.kind && resolved.kind !== 'directory' && resolved.kind !== 'file') {
+        return result('unavailable')
+      }
+      canonicalPath = resolved.path ?? null
+    } catch (error) {
+      return result(readFailure(error) === 'denied' ? 'read-boundary' : 'unavailable')
+    }
+    if (!canonicalPath) return result('unavailable')
+  }
+
+  let coverage: GfsInheritedAccessCoverage = 'complete'
+  const ancestorPaths = gfsAncestorPaths(canonicalPath)
   for (const ancestorPath of ancestorPaths) {
+    if (signal?.aborted) throw signal.reason
     let folder: GfsResourceByPathView
     try {
       folder = await getGfsResourceByPath(drive, ancestorPath, signal)
     } catch (error) {
-      if (signal?.aborted) throw error
-      throw new Error('inherited_access_derivation_failed')
+      return result(readFailure(error) === 'denied' ? 'read-boundary' : 'unavailable')
     }
-    if (folder.kind !== 'directory') {
-      throw new Error('inherited_access_derivation_failed')
-    }
-    let rows: InheritingRow[]
-    try {
-      rows = await listInheritingRows(folder, drive, signal)
-    } catch (error) {
-      if (signal?.aborted) throw error
-      throw new Error('inherited_access_derivation_failed')
-    }
+    if (signal?.aborted) throw signal.reason
+    if (folder.kind !== 'directory') return result('unavailable')
+
+    const settled = await Promise.allSettled([
+      getGfsGrants(folder.resourceId, drive, signal),
+      getGfsShares(folder.resourceId, drive, signal),
+    ])
+    if (signal?.aborted) throw signal.reason
+    // Inspect both failures before folding: a fulfilled sibling cannot turn
+    // genuine session expiry into a partial-success observation.
+    const failures = settled.filter(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected'
+    )
+    const worst = worstGfsCoverageClass(failures.map(failure => readFailure(failure.reason)))
+    const mustStop = worst !== 'complete' && worst !== 'denied'
+    if (worst === 'denied') coverage = 'acl-limited'
+    const grants = settled[0].status === 'fulfilled' ? settled[0].value.items : []
+    const shares = settled[1].status === 'fulfilled' ? settled[1].value.items : []
     const folderLabel = folder.name || drive
-    for (const row of rows) {
-      const key = inheritedSubjectKey(row.subject)
-      bySubject.set(
-        key,
-        mergeInheritedAccessItem(bySubject.get(key) ?? null, row, {
-          resourceId: folder.resourceId,
-          name: folderLabel,
-        })
-      )
+    for (const grant of grants) {
+      if (!grant.inherit) continue
+      fold(grant.subject, grant.permissions, grant.id, [], folder.resourceId, folderLabel)
     }
+    for (const share of shares) {
+      if (!share.includeDescendants) continue
+      fold(share.subject, share.permissions, null, [share.id], folder.resourceId, folderLabel)
+    }
+    // Preserve the successful family on this ancestor before an unavailable
+    // stop; ordinary ACL denials retain that family and allow the walk upward.
+    if (mustStop) return result('unavailable')
   }
-  return [...bySubject.values()]
+  // The shared path helper caps its result; no root means traversal stopped
+  // at that cap, not that every ancestor was observed.
+  if (ancestorPaths.length > 0 && ancestorPaths.at(-1) !== '/') return result('unavailable')
+  return result(coverage)
+
+  function fold(
+    subject: { type: string; id?: string },
+    permissions: string[],
+    grantId: string | null,
+    shareIds: string[],
+    resourceId: string,
+    name: string
+  ): void {
+    const key = inheritedSubjectKey(subject)
+    bySubject.set(
+      key,
+      mergeInheritedAccessItem(
+        bySubject.get(key) ?? null,
+        { subject, permissions, grantId, shareIds },
+        {
+          resourceId,
+          name,
+        }
+      )
+    )
+  }
 }
