@@ -186,7 +186,18 @@ describe('FilesPage', () => {
     }
     hookMock.useGfsBrowserController.mockReturnValue(base)
     const rendered = renderFilesPage()
-    expect(screen.getByLabelText('Your access').textContent).toBe('Your access: read, write')
+    // The line names the Share dialog role, never the raw permission bits.
+    expect(screen.getByLabelText('Your access').textContent).toBe('Your access: Editor')
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...base,
+      affordances: { ...base.affordances, held: ['read', 'share'] },
+    })
+    rendered.rerender(
+      <QueryClientProvider client={new QueryClient()}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
+    expect(screen.getByLabelText('Your access').textContent).toBe('Your access: Read')
     hookMock.useGfsBrowserController.mockReturnValue({
       ...base,
       crumbs: [child],

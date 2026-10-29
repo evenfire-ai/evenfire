@@ -350,7 +350,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         expect(home.drive).toBeTruthy()
         expect(home.storageUsername).toBe(owner.name)
         await openHomeFolder(page, home)
-        await new DesktopResourceView(page).expectYourAccess(OWNER_BITS)
+        await new DesktopResourceView(page).expectYourAccess('Editor')
         const ownerGrant = fx.accessFor(home.resourceId!, 'user', owner.id)
         expect(ownerGrant).toMatchObject({
           relation: 'grant',
@@ -933,7 +933,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
             .getByRole('navigation', { name: 'File location' })
             .getByRole('button', { name: home.storageUsername!, exact: true })
         ).toHaveAttribute('aria-current', 'page')
-        await new DesktopResourceView(adminPage).expectYourAccess(OWNER_BITS)
+        await new DesktopResourceView(adminPage).expectYourAccess('Editor')
       })
 
       await new DesktopResourceView(adminPage).uploadFile(

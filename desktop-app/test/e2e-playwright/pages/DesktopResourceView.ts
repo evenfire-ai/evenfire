@@ -53,10 +53,8 @@ export class DesktopResourceView {
     await humanRecordedPause([600, 1200])
   }
 
-  async expectYourAccess(bits: string[]): Promise<void> {
-    const line = this.page.getByLabel('Your access')
-    await expect(line).toBeVisible()
-    for (const bit of bits) await expect(line).toContainText(bit)
+  async expectYourAccess(role: 'Read' | 'Editor'): Promise<void> {
+    await expect(this.page.getByLabel('Your access')).toHaveText(`Your access: ${role}`)
   }
 
   async expectRefused(code: string): Promise<void> {

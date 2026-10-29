@@ -2325,7 +2325,10 @@ export function FilesPage({
           ctrl.home.drive === ctrl.drive &&
           crumbs.some(crumb => crumb.resourceId === ctrl.home?.resourceId) &&
           affordances ? (
-            <p aria-label="Your access">Your access: {affordances.held.join(', ')}</p>
+            <p aria-label="Your access">
+              Your access:{' '}
+              {roleForAccessPermissions(affordances.held) === 'editor' ? 'Editor' : 'Read'}
+            </p>
           ) : null}
 
           {dragActive || droppedUploadCount > 0 ? (
