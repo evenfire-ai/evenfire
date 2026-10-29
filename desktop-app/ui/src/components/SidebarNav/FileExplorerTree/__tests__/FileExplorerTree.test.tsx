@@ -16,6 +16,7 @@ import {
   gfsRouteFailureMessage,
   listAccessiblePage,
   listChildrenPage,
+  moveResourceReceipt,
   resolveResource,
   resolvedDirectory,
   resolvedFile,
@@ -36,14 +37,14 @@ function SessionProbe({ onApi }: { onApi: (api: ReturnType<typeof useGfsDragSess
 
 // useGfsBrowserController only reads { isAuthenticated, me, runtimeConfigState }
 // from AuthContext. Mock just those so the tree's controller instance stands up
-// without the full provider tree.
-vi.mock('@contexts/AuthContext', () => ({
-  useAuthContext: () => ({
-    isAuthenticated: true,
-    me: { id: 'user-1', teamId: 'team-1' },
-    runtimeConfigState: { envKey: 'test' },
-  }),
+// without the full provider tree. The mutable team lets the ownership tests
+// exercise a same-principal team switch during an in-flight Move.
+const mockAuthContext = vi.hoisted(() => ({
+  isAuthenticated: true,
+  me: { id: 'user-1', teamId: 'team-1' },
+  runtimeConfigState: { envKey: 'test' },
 }))
+vi.mock('@contexts/AuthContext', () => ({ useAuthContext: () => mockAuthContext }))
 
 // T1: every `window.clerum.gfs.*` value below is produced by the REAL main-process
 // producer (`GfsClient` in desktop-app/src, run through its transport seam and the
@@ -103,6 +104,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  mockAuthContext.me = { id: 'user-1', teamId: 'team-1' }
 })
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
@@ -794,7 +796,7 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
   const onOpenPreview = props.onOpenPreview ?? vi.fn()
   const pushToast = props.pushToast ?? vi.fn()
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  render(
+  const tree = () => (
     <QueryClientProvider client={queryClient}>
       <GfsDragSessionProvider>
         <FileExplorerTree
@@ -805,7 +807,15 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
       </GfsDragSessionProvider>
     </QueryClientProvider>
   )
-  return { onOpenFolder, onOpenPreview, pushToast, queryClient }
+  const rendered = render(tree())
+  return {
+    onOpenFolder,
+    onOpenPreview,
+    pushToast,
+    queryClient,
+    rerender: () => rendered.rerender(tree()),
+    unmount: rendered.unmount,
+  }
 }
 
 describe('FileExplorerTree — explicit Move permission retry', () => {
@@ -847,6 +857,235 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       })
     )
   }
+
+  it.each(['dialog closes', 'destination changes'] as const)(
+    'does not dispatch explicit Move after its owner changes while source resolve is pending (%s)',
+    async ownerChange => {
+      let finishResolve!: () => void
+      let markResolveStarted!: () => void
+      const resolveStarted = new Promise<void>(resolve => {
+        markResolveStarted = resolve
+      })
+      const resolveGate = new Promise<void>(resolve => {
+        finishResolve = resolve
+      })
+      const resolved = await resolveSource()
+      const resolve = vi.fn(async () => {
+        markResolveStarted()
+        await resolveGate
+        return resolved
+      })
+      const moveResource = vi.fn(async () =>
+        moveResourceReceipt(sourceResourceId, destinationAId, 5)
+      )
+      installDndClerum({
+        listAccessible: vi.fn(async () => accessibleRows()),
+        affordances: appServiceAffordanceProducer(async () =>
+          heldPermissionResponse(['read', 'write', 'delete'])
+        ),
+        resolve,
+        moveResource,
+      })
+      const { queryClient } = renderTreeWithSession()
+
+      try {
+        const dialog = await openMoveDialog()
+        await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+        await resolveStarted
+
+        if (ownerChange === 'dialog closes') {
+          fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+          expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
+        } else {
+          await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
+        }
+
+        await act(async () => {
+          finishResolve()
+          await resolveGate
+        })
+
+        await waitFor(() => expect(moveResource).not.toHaveBeenCalled())
+        if (ownerChange === 'destination changes') {
+          expect(
+            await within(dialog).findByRole('button', { name: 'Move here (Archive B)' })
+          ).toBeTruthy()
+        }
+      } finally {
+        queryClient.clear()
+      }
+    }
+  )
+
+  it('preserves a changed destination and reports the captured Move result once', async () => {
+    let finishMove!: () => void
+    let markMoveStarted!: () => void
+    const moveStarted = new Promise<void>(resolve => {
+      markMoveStarted = resolve
+    })
+    const moveGate = new Promise<void>(resolve => {
+      finishMove = resolve
+    })
+    const resolved = await resolveSource()
+    const moveResource = vi.fn(async () => {
+      markMoveStarted()
+      await moveGate
+      return moveResourceReceipt(sourceResourceId, destinationAId, 5)
+    })
+    const listAccessible = vi.fn(async () => accessibleRows())
+    installDndClerum({
+      listAccessible,
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    const { pushToast, queryClient } = renderTreeWithSession()
+    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main')
+    queryClient.setQueryData(oldScopeChildren, { marker: 'captured source cache' })
+
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+      await moveStarted
+
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
+      await act(async () => {
+        finishMove()
+        await moveGate
+      })
+
+      expect(await screen.findByRole('button', { name: 'Move here (Archive B)' })).toBeTruthy()
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith('Moved report.txt to Archive A', 'success')
+      )
+      expect(pushToast).toHaveBeenCalledTimes(1)
+      expect(moveResource).toHaveBeenCalledWith(
+        sourceResourceId,
+        destinationAId,
+        'main',
+        4,
+        undefined
+      )
+      expect(queryClient.getQueryState(oldScopeChildren)?.isInvalidated).toBe(true)
+    } finally {
+      queryClient.clear()
+    }
+  })
+
+  it('suppresses a captured result after a same-principal team switch and scopes convergence', async () => {
+    let finishMove!: () => void
+    let markMoveStarted!: () => void
+    const moveStarted = new Promise<void>(resolve => {
+      markMoveStarted = resolve
+    })
+    const moveGate = new Promise<void>(resolve => {
+      finishMove = resolve
+    })
+    const resolved = await resolveSource()
+    const moveResource = vi.fn(async () => {
+      markMoveStarted()
+      await moveGate
+      return moveResourceReceipt(sourceResourceId, destinationAId, 5)
+    })
+    const listAccessible = vi.fn(async () => accessibleRows())
+    installDndClerum({
+      listAccessible,
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    const { pushToast, queryClient, rerender } = renderTreeWithSession()
+    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main')
+    const newScopeAccessible = desktopQueryKeys.gfsAccessible('test:user-1:team-2', 'main')
+    const newScopeChildren = desktopQueryKeys.gfsChildren(
+      'test:user-1:team-2',
+      sourceParentId,
+      'main'
+    )
+
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+      await moveStarted
+
+      mockAuthContext.me = { id: 'user-1', teamId: 'team-2' }
+      rerender()
+      await waitFor(() => expect(queryClient.getQueryData(newScopeAccessible)).toBeDefined())
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
+      )
+      queryClient.setQueryData(oldScopeChildren, { marker: 'old team cache' })
+      queryClient.setQueryData(newScopeChildren, { marker: 'new team cache' })
+      await act(async () => {
+        finishMove()
+        await moveGate
+      })
+
+      await waitFor(() =>
+        expect(queryClient.getQueryState(oldScopeChildren)?.isInvalidated).toBe(true)
+      )
+      expect(queryClient.getQueryState(newScopeChildren)?.isInvalidated).toBe(false)
+      expect(pushToast).not.toHaveBeenCalledWith('Moved report.txt to Archive A', 'success')
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      queryClient.clear()
+    }
+  })
+
+  it('keeps captured cache convergence but suppresses Move presentation after tree unmount', async () => {
+    let finishMove!: () => void
+    let markMoveStarted!: () => void
+    const moveStarted = new Promise<void>(resolve => {
+      markMoveStarted = resolve
+    })
+    const moveGate = new Promise<void>(resolve => {
+      finishMove = resolve
+    })
+    const resolved = await resolveSource()
+    const moveResource = vi.fn(async () => {
+      markMoveStarted()
+      await moveGate
+      return moveResourceReceipt(sourceResourceId, destinationAId, 5)
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    const { pushToast, queryClient, unmount } = renderTreeWithSession()
+    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main')
+    queryClient.setQueryData(oldScopeChildren, { marker: 'captured source cache' })
+
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+      await moveStarted
+      unmount()
+
+      await act(async () => {
+        finishMove()
+        await moveGate
+      })
+      await waitFor(() =>
+        expect(queryClient.getQueryState(oldScopeChildren)?.isInvalidated).toBe(true)
+      )
+      expect(pushToast).not.toHaveBeenCalledWith('Moved report.txt to Archive A', 'success')
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      queryClient.clear()
+    }
+  })
 
   it('runs captured Move 401 authority handling once', async () => {
     const moveFailure = await gfsRouteFailureMessage(

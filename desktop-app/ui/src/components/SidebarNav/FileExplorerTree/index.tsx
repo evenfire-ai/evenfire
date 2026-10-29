@@ -503,6 +503,7 @@ export function FileExplorerTree({
   } | null>(null)
   const moveDialogTargetRef = useRef(moveDialogTarget)
   moveDialogTargetRef.current = moveDialogTarget
+  const mountedRef = useRef(false)
   const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | 'failed' | null>(
     null
   )
@@ -513,14 +514,15 @@ export function FileExplorerTree({
     setMoveDialogTarget(null)
   }, [])
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
       dragSessionEpochRef.current += 1
       hoverOwnerRef.current = null
       adjudication.endDragSession()
-    },
-    [adjudication.endDragSession]
-  )
+    }
+  }, [adjudication.endDragSession])
 
   const liveDragScope = ctrl.accessState === 'revoked' ? null : (ctrl.sessionScope ?? 'anonymous')
   const liveDragScopeRef = useRef(liveDragScope)
@@ -536,6 +538,9 @@ export function FileExplorerTree({
     setPendingFolderMove(null)
     setDropStatesByResourceId({})
     setDragSourceName(null)
+    moveDialogTargetRef.current = null
+    setMoveDialogTarget(null)
+    setMovePermissionStatus(null)
     // A NEW live session makes any session-ended refusal stale. A transition
     // TO revoked (scope null) must NOT clear it: that is exactly when the
     // message has to survive (A11), and the revoked surface below carries it.
@@ -777,7 +782,8 @@ export function FileExplorerTree({
       source: GfsDragSource,
       destination: { resourceId: string; name: string },
       allowNumberedRename: boolean,
-      isCurrent?: () => boolean
+      isCurrent?: () => boolean,
+      isPresentationCurrent?: () => boolean
     ) => {
       movingResourceIdRef.current = source.resourceId
       setMovingResourceId(source.resourceId)
@@ -798,7 +804,9 @@ export function FileExplorerTree({
               ctrl.handleAuthorityFailure(message, 'operation', source.scope),
             convergeCommittedMove: (input, receipt) =>
               ctrl.convergeCommittedMove(input, receipt, source.scope),
-            pushToast,
+            pushToast: (message, tone) => {
+              if (!isPresentationCurrent || isPresentationCurrent()) pushToast(message, tone)
+            },
           },
           {
             source,
@@ -810,7 +818,7 @@ export function FileExplorerTree({
         )
       } finally {
         movingResourceIdRef.current = null
-        setMovingResourceId(null)
+        if (mountedRef.current) setMovingResourceId(null)
       }
     },
     [cachedDestinationNames, ctrl, pushToast]
@@ -1176,9 +1184,10 @@ export function FileExplorerTree({
           busy={ctrl.mutating || movePermissionStatus === 'checking'}
           initialCrumbs={moveDialogTarget.initialCrumbs}
           onClose={closeMoveDialog}
-          onMove={async (destinationId, destinationName) => {
+          onMoveWithOwnership={async (destinationId, destinationName, isDialogCurrent) => {
             setMovePermissionStatus(null)
-            const target = moveDialogTarget
+            const target = moveDialogTargetRef.current
+            if (!target) return
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,
@@ -1195,15 +1204,26 @@ export function FileExplorerTree({
               scope: ctrl.sessionScope ?? 'anonymous',
               generation: dragSessionEpochRef.current,
             }
+            const isCurrent = () =>
+              mountedRef.current &&
+              moveDialogTargetRef.current === target &&
+              liveDragScopeRef.current === source.scope &&
+              isDialogCurrent()
+            const isPresentationCurrent = () =>
+              mountedRef.current && liveDragScopeRef.current === source.scope
             const outcome = await commitMove(
               source,
               { resourceId: destinationId, name: destinationName },
-              false
+              false,
+              isCurrent,
+              isPresentationCurrent
             )
-            if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
-              setMoveDialogTarget(null)
+            if (outcome.status === 'gesture-lost') return
+            if (outcome.status === 'session-lost') {
+              if (moveDialogTargetRef.current === target) closeMoveDialog()
               return
             }
+            if (!isCurrent()) return
             if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
               if (
                 moveDialogTargetRef.current === target &&
@@ -1214,7 +1234,7 @@ export function FileExplorerTree({
               }
               throw new Error(outcome.message)
             }
-            setMoveDialogTarget(null)
+            if (moveDialogTargetRef.current === target) closeMoveDialog()
           }}
           onRetryPermissionCheck={handleRetryMovePermission}
           onAuthorityFailure={message => {
