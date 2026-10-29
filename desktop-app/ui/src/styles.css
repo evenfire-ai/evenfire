@@ -7328,7 +7328,7 @@ h3 {
 
 .chat-message-bubble {
   min-width: 0;
-  max-width: 100%;
+  max-width: min(760px, 74ch);
 }
 
 .chat-loading-bubble {
