@@ -815,7 +815,7 @@ export async function prepareVerifiedDesktopPayload(args: {
 }): Promise<VerifiedDesktopPayload> {
   const { archivePath, destination, version, platform, architecture, packageType } = args
   const assetName = getDesktopReleaseAssetName(version, platform, architecture)
-  let packagePath = archivePath
+  let packagePath: string
   let appPath: string
 
   if (packageType === 'squirrel') {
