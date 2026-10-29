@@ -16,6 +16,7 @@ import {
   resolvedDirectory,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import {
+  affordancesApiError,
   appServiceAffordanceProducer,
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
@@ -795,10 +796,11 @@ describe('FilesPage stale permission action oracle', () => {
     )
     const children = await listChildrenPage([])
     let sourceParentReads = 0
-    const rateLimited = Object.assign(new Error('429 Too Many Requests'), {
-      status: 429,
-      retryAfter: '7',
-    })
+    const rateLimited = await affordancesApiError(
+      429,
+      { code: 'rate_limited', message: 'Too Many Requests' },
+      'source-parent'
+    )
     const produceAffordances = appServiceAffordanceProducer(resourceId => {
       if (resourceId === 'source-parent') {
         sourceParentReads += 1
@@ -879,6 +881,177 @@ describe('FilesPage stale permission action oracle', () => {
     expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
     expect(moveResource).not.toHaveBeenCalled()
     client.clear()
+  })
+
+  it('keeps a child Move candidate visible after the current-folder check returns 429', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const children = await listChildrenPage([
+      childView('child-report', 'report.txt', 'file', {
+        parentResourceId: 'folder-active',
+      }),
+    ])
+    const rateLimited = await affordancesApiError(
+      429,
+      { code: 'rate_limited', message: 'Too Many Requests' },
+      'folder-active'
+    )
+    let rejectCurrentCheck = false
+    const produceAffordances = appServiceAffordanceProducer(resourceId => {
+      if (resourceId === 'folder-active' && rejectCurrentCheck) {
+        rejectCurrentCheck = false
+        return Promise.reject(rateLimited)
+      }
+      return Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
+    })
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    const moveResource = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+          moveResource,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} pushToast={pushToast} />, {
+        wrapper: wrapper(client),
+      })
+      await screen.findByRole('button', { name: 'Options for report.txt' })
+      await waitFor(() => expect(affordances).toHaveBeenCalledWith('folder-active', 'main'))
+
+      const currentFolderKey = desktopQueryKeys.gfsAffordances(
+        'test-environment:user-1:team-1',
+        'folder-active',
+        'main'
+      )
+      rejectCurrentCheck = true
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: currentFolderKey })
+      })
+      await waitFor(() => expect(client.getQueryState(currentFolderKey)?.status).toBe('error'))
+      expect(String(client.getQueryState(currentFolderKey)?.error)).toContain('httpStatus=429')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+      const moveItem = within(
+        screen.getByRole('menu', { name: 'Actions for report.txt' })
+      ).getByRole('menuitem', { name: 'Move to' })
+      expect(moveItem).toBeTruthy()
+      fireEvent.click(moveItem)
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+      )
+      expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
+      expect(moveResource).not.toHaveBeenCalled()
+    } finally {
+      client.clear()
+    }
+  })
+
+  it('keeps the latest Move target when source checks finish out of order', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const children = await listChildrenPage([
+      childView('child-report', 'report.txt', 'file', {
+        parentResourceId: 'folder-active',
+      }),
+    ])
+    const accessible = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        path: '/Archive',
+        permissions: ['read', 'write'],
+      }),
+    ])
+    let deferSourceParentCheck = false
+    let releaseSourceParentCheck: (() => void) | null = null
+    let markSourceParentCheckStarted!: () => void
+    let markSourceParentCheckFinished!: () => void
+    const sourceParentCheckStarted = new Promise<void>(resolve => {
+      markSourceParentCheckStarted = resolve
+    })
+    const sourceParentCheckFinished = new Promise<void>(resolve => {
+      markSourceParentCheckFinished = resolve
+    })
+    const sourceParentCheckGate = new Promise<void>(resolve => {
+      releaseSourceParentCheck = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === 'source-parent' && deferSourceParentCheck) {
+        deferSourceParentCheck = false
+        markSourceParentCheckStarted()
+        await sourceParentCheckGate
+        markSourceParentCheckFinished()
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    const moveResource = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => accessible),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async resourceId =>
+            resourceId === 'folder-active' ? children : listChildrenPage([])
+          ),
+          affordances,
+          moveResource,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for report.txt' })
+      await screen.findByRole('button', { name: 'Options for Reports' })
+      await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main'))
+
+      vi.setSystemTime(Date.now() + 16_000)
+      deferSourceParentCheck = true
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+      fireEvent.click(
+        within(screen.getByRole('menu', { name: 'Actions for Reports' })).getByRole('menuitem', {
+          name: 'Move to',
+        })
+      )
+      await sourceParentCheckStarted
+
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+      fireEvent.click(
+        within(screen.getByRole('menu', { name: 'Actions for report.txt' })).getByRole('menuitem', {
+          name: 'Move to',
+        })
+      )
+      expect(await screen.findByRole('dialog', { name: 'Move file report.txt' })).toBeTruthy()
+
+      await act(async () => {
+        releaseSourceParentCheck?.()
+        await sourceParentCheckFinished
+      })
+
+      expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBeTruthy()
+      expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
+      expect(moveResource).not.toHaveBeenCalled()
+    } finally {
+      releaseSourceParentCheck?.()
+      client.clear()
+    }
   })
 
   it('keeps an idle current-folder 503 out of the page alert surface (R8-L5)', async () => {
