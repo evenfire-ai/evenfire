@@ -373,7 +373,10 @@ run_group "mcp-host" "mcp-host" \
   "src/config.codexToolPresentation.test.ts" \
   "src/llm/__tests__/codexPlatformJwt.test.ts" \
   "src/llm/__tests__/codexPolicyBinding.test.ts" \
-  "src/pluginWorkloadSdk/sdkOnlyCodexBinding.test.ts"
+  "src/pluginWorkloadSdk/sdkOnlyCodexBinding.test.ts" \
+  "src/llm/__tests__/subscriptionProviderRetry.test.ts" \
+  "src/agent/__tests__/modelStepCheckpointAttachments.test.ts" \
+  "src/db/migrations/__tests__/019-model-step-checkpoint-attachments.test.ts"
 
 run_group "rpc-proxy-image-budgets" "rpc-proxy" \
   "src/__tests__/bodylimits.test.ts"
