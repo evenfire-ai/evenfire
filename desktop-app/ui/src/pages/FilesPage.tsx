@@ -2132,7 +2132,12 @@ export function FilesPage({
               busy={ctrl.mutating}
             />
           ) : (
-            <AntButton htmlType="button" type="link" onClick={() => openResource(resource)}>
+            <AntButton
+              htmlType="button"
+              type="link"
+              className="gfs-resource-name"
+              onClick={() => openResource(resource)}
+            >
               {resource.name || resource.drive}
             </AntButton>
           )}

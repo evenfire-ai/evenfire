@@ -18435,6 +18435,11 @@ pre {
   background: transparent;
 }
 
+/* Align row names with the Name header by removing the link button's extra inset. */
+[data-gfs-browser='true'] .gfs-resource-table .gfs-resource-name.ant-btn {
+  padding-inline: 0;
+}
+
 [data-gfs-browser='true'] .gfs-resource-table .gfs-resource-row[data-dragging='true'] {
   opacity: 0.55;
 }
