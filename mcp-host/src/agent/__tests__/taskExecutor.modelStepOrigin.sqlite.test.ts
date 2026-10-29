@@ -193,7 +193,8 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
     Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
     const { handle, attachment, onFail, providerCalls } = await runOutageTask(1)
     try {
-      expect(providerCalls).toBe(2)
+      // The 503 is retried once automatically before it settles (N=1).
+      expect(providerCalls).toBe(3)
       expect(onFail).toHaveBeenCalledTimes(1)
       const taskError = onFail.mock.calls[0]![1]
       expect(taskError).toMatchObject({
@@ -320,7 +321,9 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
     for (const channel of ['rpc', 'slack'] as const) {
       const { handle, onFail, providerCalls } = await runOutageTask(1, true, channel)
       try {
-        expect(providerCalls).toBe(2)
+        // Only the rpc channel records a checkpoint, so only it can retry the
+        // failed model step automatically (N=1).
+        expect(providerCalls).toBe(channel === 'rpc' ? 3 : 2)
         expect(onFail).toHaveBeenCalledTimes(1)
         const rows = handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').all()
         if (channel === 'rpc') {

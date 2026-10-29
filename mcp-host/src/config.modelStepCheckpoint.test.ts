@@ -73,3 +73,46 @@ describe('model-step checkpoint timing config', () => {
     expect(config.modelStepClaimLeaseMs / 3).toBeLessThanOrEqual(2_147_483_647)
   })
 })
+
+/**
+ * #1043 §4 — the automatic model-step retry is bounded. Unset keeps 1, `0`
+ * disables it, and any other value outside 0–5 stops the Host at config load
+ * instead of silently multiplying billed model calls.
+ */
+describe('model-step automatic retry config', () => {
+  const KNOB = 'CLERUM_MODEL_STEP_AUTO_RETRIES'
+
+  it.each(['', 'abc', '-1', '1.5', '6'])('rejects %j at config load', async value => {
+    vi.resetModules()
+    vi.stubEnv(KNOB, value)
+    await expect(import('./config')).rejects.toThrow(
+      'CLERUM_MODEL_STEP_AUTO_RETRIES must be a valid bounded integer from 0 to 5 (inclusive)'
+    )
+
+    // Positive liveness witness: the same module loads with a value inside the
+    // range, and the knob the loop reads carries it.
+    vi.resetModules()
+    vi.stubEnv(KNOB, '2')
+    const { config } = await import('./config')
+    expect(config.modelStepAutoRetries).toBe(2)
+  })
+
+  it('keeps the documented default of 1 while the variable is absent', async () => {
+    vi.resetModules()
+    vi.stubEnv(KNOB, undefined)
+    const { config } = await import('./config')
+    expect(config.modelStepAutoRetries).toBe(1)
+  })
+
+  it('accepts 0 (retry disabled) and the upper bound 5', async () => {
+    vi.resetModules()
+    vi.stubEnv(KNOB, '0')
+    const disabled = await import('./config')
+    expect(disabled.config.modelStepAutoRetries).toBe(0)
+
+    vi.resetModules()
+    vi.stubEnv(KNOB, '5')
+    const upper = await import('./config')
+    expect(upper.config.modelStepAutoRetries).toBe(5)
+  })
+})

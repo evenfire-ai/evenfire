@@ -143,6 +143,10 @@ export interface Config {
   // uploaded files (unredacted, unencrypted). After it, Retry of a turn that
   // needs one is blocked with `attachment_expired`. Default 1 h.
   modelStepAttachmentTtlMs: number
+  // #1043 — how many times one failed model step is retried automatically,
+  // when that failure would leave a resumable checkpoint. `0` disables the
+  // retry. Default 1; a value outside 0–5 stops the Host at config load.
+  modelStepAutoRetries: number
 
   // Approval system (default ON; tools advertise requiresApproval()).
   enableApproval: boolean
@@ -971,6 +975,10 @@ export const config: Config = {
     ) * 1000, // 5 min
   modelStepAttachmentTtlMs:
     getExecutionLimit('CLERUM_MODEL_STEP_ATTACHMENT_TTL_MINUTES', 60) * 60 * 1000, // 1 h
+  // The automatic model-step retry shares the bounded-integer contract: absence
+  // keeps 1, `0` disables it, and anything outside 0–5 stops the Host at config
+  // load instead of silently multiplying billed model calls.
+  modelStepAutoRetries: getExecutionLimit('CLERUM_MODEL_STEP_AUTO_RETRIES', 1, true, 5),
 
   // Workflow step iteration limit — max LLM↔tool rounds per step before forced wrap-up.
   // Override per step via CRD spec.steps[].maxIterations. Default 50.

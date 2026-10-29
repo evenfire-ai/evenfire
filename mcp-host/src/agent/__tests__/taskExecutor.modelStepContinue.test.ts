@@ -32,6 +32,8 @@ import {
 import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
 import { GfscHttpError } from '../../internalTools/gfsClient'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { CodexProxyError } from '../../llm/codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../../llm/codexSubscription'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
 import type { SingleTurnProvider } from '../../llm/types'
@@ -59,6 +61,17 @@ const LEASE_MS = 300_000
 const UPLOAD = Buffer.from('Quarterly notes. SENTINEL-1043-continuation\n')
 const RID = '1234567890abcdef1234567890abcdef'
 const USAGE = { input_tokens: 1, output_tokens: 1, total_tokens: 2 }
+
+/**
+ * The real Codex classifier the production adapter applies to a proxy failure;
+ * only the provider's network deps are unused here (classifyError reads the
+ * thrown error alone).
+ */
+const codexClassifier = new CodexSubscriptionProvider('checkpoint-model', {
+  authorizer: { authorize: vi.fn() },
+  proxy: { stream: vi.fn() },
+  attemptContext: vi.fn(),
+} as never)
 
 const handles: StoreHandle[] = []
 let clock = NOW
@@ -90,20 +103,21 @@ function provider(
     requests,
     calls: () => invocations,
     getProviderType: () => type as never,
-    classifyError: error => ({
-      code:
-        error instanceof Error && error.message.includes('upstream 503')
-          ? LlmErrorCode.ModelOverloaded
-          : LlmErrorCode.ApiCallFailed,
-      retryable: error instanceof Error && error.message.includes('upstream 503') ? true : false,
-      message: error instanceof Error ? error.message : String(error),
-      httpStatus:
-        error instanceof Error && error.message.includes('upstream 503') ? 503 : undefined,
-      providerCode:
-        error instanceof Error && error.message.includes('upstream 503')
-          ? 'provider_unavailable'
-          : undefined,
-    }),
+    classifyError: error => {
+      // The 503 arm is the production failure shape: the real Codex classifier
+      // decides the class and the provider-native code, exactly as
+      // LlmPortAdapter.handleProviderError does (#1043 §2.1).
+      if (error instanceof Error && error.message.includes('upstream 503')) {
+        return codexClassifier.classifyError(
+          new CodexProxyError('provider_unavailable', error.message)
+        )
+      }
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        message: error instanceof Error ? error.message : String(error),
+      }
+    },
     completeSingleTurn: async () => {
       throw new Error('Unexpected tool-less completion')
     },
@@ -1308,7 +1322,8 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     await fixture.handle.persistQueue.drain()
 
     expect(toolNames).toEqual(['system_info'])
-    expect(llm.calls()).toBe(2)
+    // Three calls: the tool call, the outage and its single automatic retry.
+    expect(llm.calls()).toBe(3)
     expect(run.onFail).toHaveBeenCalledTimes(1)
     expect(run.onFail.mock.calls[0]![1]).toMatchObject({
       code: LlmErrorCode.ModelOverloaded,

@@ -61,6 +61,24 @@ export interface ModelStepCheckpointRecorder {
   recordResult(call: ToolCall, result: ToolResult): Promise<void>
   updateState(nextIteration: number): Promise<void>
   /**
+   * `settle`'s `resumable` condition for one error: the fence is open, the
+   * recorder is not poisoned, at least one tool result was confirmed in the
+   * turn and the error is checkpoint-eligible. It is the gate the automatic
+   * model-step retry applies before retrying a failed step, and one of the two
+   * ways `settle` can still make a checkpoint resumable (the other is the
+   * remembered first failure, see `noteModelStepRetry`). Reads local state only.
+   */
+  canResume(error: Error): boolean
+  /**
+   * F6: this step's automatic retries started on `cause` and the step ended on
+   * `finalError`. `settle` keeps the checkpoint resumable when the retries end
+   * on the very same `finalError` object, so an eligible first failure is not
+   * discarded by a later non-eligible one. The memory is per step: it is
+   * overwritten by the next retried step and never matches another error
+   * object, so a failure the retries did not produce cannot use it.
+   */
+  noteModelStepRetry(cause: Error, finalError: Error): void
+  /**
    * Returns the checkpoint id when resumable and updates claimReleased only
    * after an applied transition. A failed continuation abandon throws so the
    * executor can clean up the still-owned claim.
@@ -132,6 +150,11 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   private isPoisoned = false
   private settled = false
   private hasReleasedClaim = false
+  /**
+   * F6: the first failure that started this step's automatic retries and the
+   * error those retries ended on. Overwritten by the next retried step.
+   */
+  private retriedStep: { cause: Error; finalError: Error } | undefined
   private readonly imageCapture: CheckpointImageCapture
   private pendingMessages: ChatMessage[] = []
   private readonly restoredBindings: CheckpointAttachmentBinding[]
@@ -293,6 +316,19 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     )
   }
 
+  canResume(error: Error): boolean {
+    return (
+      this.currentFence !== null &&
+      !this.isPoisoned &&
+      this.confirmedResults > 0 &&
+      isModelStepCheckpointEligibleError(error)
+    )
+  }
+
+  noteModelStepRetry(cause: Error, finalError: Error): void {
+    this.retriedStep = { cause, finalError }
+  }
+
   async settle(result: LoopResult | undefined): Promise<string | undefined> {
     if (this.settled) throw new Error('model-step checkpoint recorder settled twice')
     // Warm approvals retain even an origin that has not dispatched its first tool.
@@ -308,12 +344,18 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
 
     this.settled = true
 
-    if (
-      result?.type === 'error' &&
-      !this.isPoisoned &&
-      this.confirmedResults > 0 &&
-      isModelStepCheckpointEligibleError(result.error)
-    ) {
+    // F6: an eligible failure keeps the checkpoint resumable either when it is
+    // the error the loop ended on, or when it is the failure this step's
+    // automatic retries started from and those retries ended on exactly this
+    // error object (R2-2: a later step's failure never latches onto it).
+    const retried = this.retriedStep
+    const stepError = result?.type === 'error' ? result.error : undefined
+    const leavesResumable =
+      stepError !== undefined &&
+      (this.canResume(stepError) ||
+        (retried?.finalError === stepError && this.canResume(retried.cause)))
+
+    if (leavesResumable) {
       const now = this.opts.now()
       let version: number | null | undefined
       const resumable = await this.write('transition', async () => {

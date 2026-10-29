@@ -2789,6 +2789,9 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    // An outage that would leave a resumable checkpoint retries the model step
+    // in place (#1043), before the failure can surface.
+    loopConfig.modelStepAutoRetries = appConfig.modelStepAutoRetries
     loopConfig.visualInput = {
       budget: this.executionBudget.visualInputs,
       resolveCapability: signal =>

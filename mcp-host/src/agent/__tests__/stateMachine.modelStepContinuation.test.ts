@@ -292,6 +292,8 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
         finish_reason: FinishReason.ToolUse,
       })
       .mockImplementationOnce(async () => unavailable())
+      // The automatic retry of the failed step hits the fallback again (N=1).
+      .mockImplementationOnce(async () => unavailable())
     const mcp = new McpManager()
     vi.spyOn(mcp, 'getAllTools').mockReturnValue([
       { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
@@ -336,7 +338,7 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
     await stateMachine.executeTask(origin)
     const snapshot = (await checkpoints.loadLive(SESSION_KEY))!
     expect(primaryCall).toHaveBeenCalledTimes(1)
-    expect(fallbackCall).toHaveBeenCalledTimes(2)
+    expect(fallbackCall).toHaveBeenCalledTimes(3)
     expect(execute).toHaveBeenCalledTimes(1)
     const resolver = vi.fn((selections: Record<string, string> | undefined) => ({
       provider: primary,
@@ -374,7 +376,7 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
       status: 'resumable',
     })
     expect(primaryCall).toHaveBeenCalledTimes(2)
-    expect(fallbackCall).toHaveBeenCalledTimes(2)
+    expect(fallbackCall).toHaveBeenCalledTimes(3)
     expect(execute).toHaveBeenCalledTimes(1)
     expect(handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').get()).toEqual({
       status: 'completed',
