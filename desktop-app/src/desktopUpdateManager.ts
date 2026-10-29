@@ -1,6 +1,6 @@
 import { BrowserWindow, app } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { AppService } from './appService.js'
 import { getActiveEnvKey } from './config.js'
@@ -20,6 +20,7 @@ import {
   verifyAppTree,
   verifyRecordedOperationDirectory,
 } from './desktopUpdateArtifacts.js'
+import { readRegularFileNoFollow } from './desktopUpdateFileSystem.js'
 import {
   type DesktopInstallLocation,
   type DesktopInstallPlan,
@@ -944,9 +945,8 @@ export class DesktopUpdateManager {
   ): Promise<PendingUpdatePointer | null> {
     const filePath = path.join(stageRoot, PENDING_UPDATE_FILE)
     try {
-      const info = await lstat(filePath)
-      if (!info.isFile() || info.isSymbolicLink()) return null
-      const parsed: unknown = JSON.parse(await readFile(filePath, 'utf8'))
+      const bytes = await readRegularFileNoFollow(filePath, 1024)
+      const parsed: unknown = JSON.parse(bytes.toString('utf8'))
       if (
         !isRecord(parsed) ||
         typeof parsed.operationId !== 'string' ||
@@ -981,9 +981,8 @@ export class DesktopUpdateManager {
   ): Promise<UpdateOperation | null> {
     try {
       const journalPath = path.join(operationPath, 'operation.json')
-      const info = await lstat(journalPath)
-      if (!info.isFile() || info.isSymbolicLink()) return null
-      const parsed: unknown = JSON.parse(await readFile(journalPath, 'utf8'))
+      const bytes = await readRegularFileNoFollow(journalPath, 64 * 1024)
+      const parsed: unknown = JSON.parse(bytes.toString('utf8'))
       return isUpdateOperation(parsed, operationId) ? parsed : null
     } catch {
       return null
@@ -1052,9 +1051,8 @@ export class DesktopUpdateManager {
 
   private async readMarker(filePath: string): Promise<Record<string, unknown> | null> {
     try {
-      const info = await lstat(filePath)
-      if (!info.isFile() || info.isSymbolicLink()) return null
-      const parsed: unknown = JSON.parse(await readFile(filePath, 'utf8'))
+      const bytes = await readRegularFileNoFollow(filePath, 16 * 1024)
+      const parsed: unknown = JSON.parse(bytes.toString('utf8'))
       return isRecord(parsed) ? parsed : null
     } catch {
       return null
@@ -1073,9 +1071,8 @@ export class DesktopUpdateManager {
   private async readHelperPid(operationPath: string): Promise<number | null> {
     try {
       const filePath = path.join(operationPath, 'helper.pid')
-      const info = await lstat(filePath)
-      if (!info.isFile() || info.isSymbolicLink()) return null
-      const pid = Number((await readFile(filePath, 'utf8')).trim())
+      const bytes = await readRegularFileNoFollow(filePath, 64)
+      const pid = Number(bytes.toString('utf8').trim())
       return Number.isSafeInteger(pid) && pid > 1 ? pid : null
     } catch {
       return null

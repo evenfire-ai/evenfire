@@ -2,11 +2,12 @@ import { extractFile } from '@electron/asar'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { lstat, mkdir, open, readFile, realpath, symlink, unlink } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, symlink, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import yauzl, { type Entry, type ZipFile } from 'yauzl'
+import { openRegularFileNoFollow } from './desktopUpdateFileSystem.js'
 
 const GITHUB_REPOSITORY = 'evenfire-ai/evenfire'
 const GITHUB_API_BASE = `https://api.github.com/repos/${GITHUB_REPOSITORY}`
@@ -671,21 +672,17 @@ export async function verifyAppTree(
     platform === 'darwin'
       ? path.join(appPath, 'Contents', 'MacOS', 'Evenfire')
       : path.join(appPath, platform === 'win32' ? 'Evenfire.exe' : 'Evenfire')
-  const executableInfo = await lstat(executable)
-  if (!executableInfo.isFile() || executableInfo.isSymbolicLink()) {
-    throw new Error('The selected Desktop archive has no safe application executable.')
-  }
-  const executableBytes = await open(executable, 'r')
+  const executableFile = await openRegularFileNoFollow(executable)
   let header: Buffer
   try {
     header = Buffer.alloc(4096)
-    const { bytesRead } = await executableBytes.read(header, 0, header.length, 0)
+    const { bytesRead } = await executableFile.handle.read(header, 0, header.length, 0)
     header = header.subarray(0, bytesRead)
   } finally {
-    await executableBytes.close()
+    await executableFile.handle.close()
   }
   assertExecutableArchitecture(header, platform, architecture)
-  if (platform !== 'win32' && (executableInfo.mode & 0o111) === 0) {
+  if (platform !== 'win32' && (executableFile.mode & 0o111) === 0) {
     throw new Error('The downloaded application is missing executable permissions.')
   }
 
