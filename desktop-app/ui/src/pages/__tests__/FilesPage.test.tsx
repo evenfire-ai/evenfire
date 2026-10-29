@@ -18,6 +18,10 @@ import {
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  appServiceAffordanceProducer,
+  heldPermissionResponse,
+} from '@/gfs/__fixtures__/permissionProducerFixtures'
 import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilesPage } from '../FilesPage'
@@ -1768,6 +1772,95 @@ describe('FilesPage', () => {
     expect(renameResource).toHaveBeenCalledWith('file-1', 'report-renamed.txt', 7)
     expect(pushToast).toHaveBeenCalledWith('precondition_failed: stale file version', 'error')
     expect(pushToast).toHaveBeenCalledWith('precondition_failed: stale resource version', 'error')
+  })
+
+  it('withholds Replace when the same file version changes during fresh permission check', async () => {
+    const resourceId = 'file-version-race'
+    let releaseRefresh!: (value: ReturnType<typeof heldPermissionResponse>) => void
+    const refresh = new Promise<ReturnType<typeof heldPermissionResponse>>(resolve => {
+      releaseRefresh = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(() => refresh)
+    const affordances = vi.fn((targetResourceId: string, drive: string) =>
+      produceAffordances(targetResourceId, drive)
+    )
+    const replaceFileFromPath = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    const controllerForVersion = (version: number, permissionStatus?: 'loading') => ({
+      ...baseController(),
+      current: {
+        resourceId,
+        gfsUri: 'gfs://main/file-version-race',
+        name: 'report.txt',
+        kind: 'file' as const,
+        version,
+      },
+      affordances: {
+        held: ['read', 'write', 'manage_acl'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      rowPermissionStatusByResourceId: permissionStatus
+        ? { [resourceId]: { status: permissionStatus } }
+        : undefined,
+      replaceFileFromPath,
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controllerForVersion(7))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          affordances,
+          getPathForFile: vi.fn(() => '/fixture/report.txt'),
+        },
+      },
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+    await openManageDialog('report.txt')
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Share file report.txt' })).getByRole('button', {
+        name: 'Close share dialog',
+      })
+    )
+
+    hookMock.useGfsBrowserController.mockReturnValue(controllerForVersion(7, 'loading'))
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+    await chooseResourceAction('report.txt', 'Replace file')
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Replace report.txt'), {
+        target: { files: [new File(['replacement'], 'report.txt', { type: 'text/plain' })] },
+      })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(affordances).toHaveBeenCalledOnce())
+
+    hookMock.useGfsBrowserController.mockReturnValue(controllerForVersion(8, 'loading'))
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+    await act(async () => releaseRefresh(heldPermissionResponse(['read', 'write', 'manage_acl'])))
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'Replace was not started for report.txt because the workspace changed.',
+        'error'
+      )
+    )
+    expect(replaceFileFromPath).not.toHaveBeenCalled()
+    queryClient.clear()
   })
 
   it('hides the Manage menu entry on rows the caller cannot manage (read-only access)', async () => {
@@ -4869,7 +4962,14 @@ describe('FilesPage', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Subfolder)' }))
     })
 
-    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 3, undefined, 'folder-1')
+    expect(moveResource).toHaveBeenCalledWith(
+      'child-1',
+      'sub-1',
+      3,
+      undefined,
+      'folder-1',
+      'env-1:user-1:team-1'
+    )
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
   })
@@ -4974,7 +5074,14 @@ describe('FilesPage', () => {
     fireEvent.drop(destinationRow, { dataTransfer })
 
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('file-1', 'archive-1', 3, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'file-1',
+        'archive-1',
+        3,
+        undefined,
+        'folder-1',
+        'env-1:user-1:team-1'
+      )
       expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Archive', 'success')
     })
   })
@@ -7427,7 +7534,14 @@ describe('FilesPage — folder drag-and-drop', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
     })
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('folder-src', 'archive-1', 4, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'archive-1',
+        4,
+        undefined,
+        'folder-1',
+        'env-1:user-1:team-1'
+      )
     })
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Moved Projects to Archive', 'success')
@@ -7619,7 +7733,14 @@ describe('FilesPage — folder drag-and-drop', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
     })
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('folder-src', 'folder-0', 4, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'folder-0',
+        4,
+        undefined,
+        'folder-1',
+        'env-1:user-1:team-1'
+      )
     })
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Moved Projects to Product', 'success')
@@ -7788,7 +7909,8 @@ describe('FilesPage — folder drag-and-drop', () => {
       'archive-1',
       3,
       'notes (1).txt',
-      'folder-1'
+      'folder-1',
+      'env-1:user-1:team-1'
     )
   })
 
