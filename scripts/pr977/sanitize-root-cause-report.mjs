@@ -79,6 +79,17 @@ const allowlistedTypes = [
   'Win32Exception',
 ]
 const text = assertions.map(item => item.message).join('\n')
+const selectedName =
+  kind === 'auth'
+    ? 'restores the accepted prior source when candidate preparation fails after publication'
+    : "accepts a child owned by the allowlisted 'SYSTEM' principal with current-user access intact"
+const selectedAssertions = assertions.filter(item => item.name.includes(selectedName))
+if (
+  !meta.watchdogExpired &&
+  (selectedAssertions.length !== 1 || selectedAssertions[0]?.status === 'skipped')
+) {
+  throw new Error('The required selected diagnostic assertion did not execute exactly once')
+}
 const type = allowlistedTypes.find(value => new RegExp(`\\b${value}\\b`).test(text)) ?? null
 const fixturePhase = text.match(
   /"fixturePhase":"(read-existing-acl|set-owner|write-acl|read-back-owner|owner-readback-mismatch)"/
@@ -106,6 +117,49 @@ const category =
       ? 'vitest-test-or-hook-timeout'
       : null)
 
+let aclVerifierDiagnostic = null
+const aclDiagnosticMatch = text.match(
+  /Windows session authority ACL verification failed:\s*(\{[^\r\n]*\})/
+)
+if (aclDiagnosticMatch) {
+  try {
+    const candidate = JSON.parse(aclDiagnosticMatch[1])
+    const safe = {}
+    for (const field of [
+      'phase',
+      'verifierExecutionPhase',
+      'verifierErrorType',
+      'verifierHresult',
+      'verifierInnerErrorType',
+      'verifierInnerHresult',
+      'verifierDetail',
+      'verifierOwnerClass',
+      'verifierAceClass',
+      'verifierInnerNativeOperation',
+      'verifierInnerNativeErrorCode',
+      'processErrorCode',
+      'exitStatus',
+      'processStarted',
+      'stdoutPresent',
+      'stderrPresent',
+    ]) {
+      const value = candidate?.[field]
+      if (field.toLowerCase().endsWith('hresult')) {
+        if (typeof value === 'string' && /^0x[0-9A-F]{8}$/i.test(value)) safe[field] = value
+      } else if (field === 'exitStatus' || field === 'verifierInnerNativeErrorCode') {
+        if (Number.isInteger(value) && value >= 0 && value <= 65535) safe[field] = value
+      } else if (['processStarted', 'stdoutPresent', 'stderrPresent'].includes(field)) {
+        if (typeof value === 'boolean') safe[field] = value
+      } else if (typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value)) {
+        safe[field] = value
+      }
+    }
+    if (Object.keys(safe).length) aclVerifierDiagnostic = safe
+  } catch {
+    aclVerifierDiagnostic = null
+  }
+}
+
 const safe = {
   kind,
   sourceSha: process.env.PR977_SOURCE_SHA,
@@ -127,8 +181,9 @@ const safe = {
     kind === 'acl' && fixturePrivileges
       ? { restore: fixturePrivileges[1], takeOwnership: fixturePrivileges[2] }
       : null,
+  aclVerifierDiagnostic,
   hresults,
-  selectedAssertions: assertions.map(({ name, status }) => ({
+  selectedAssertions: selectedAssertions.map(({ name, status }) => ({
     name: name.slice(0, 180),
     status,
   })),
