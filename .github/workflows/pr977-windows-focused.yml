@@ -107,16 +107,26 @@ jobs:
           $node = (Get-Command node).Source
           $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
           $filter = 'src/__tests/' + $target
-          $argumentLine = @(
-            ('"' + $vitest + '"'), 'run', '--maxWorkers=1', '--no-file-parallelism',
-            '--testTimeout=120000', '--hookTimeout=120000', '--reporter=json',
-            ('"--outputFile.json=' + $report + '"'), ('"' + $filter + '"')
-          ) -join ' '
           $deadlineSeconds = if ($target -eq 'windowsSessionAuthorityAcl.native.test.ts') { 1800 } else { 300 }
           $started = [DateTime]::UtcNow
-          $process = Start-Process -FilePath $node -ArgumentList $argumentLine `
-            -WorkingDirectory (Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app') `
-            -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = $node
+          $startInfo.WorkingDirectory = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app'
+          $startInfo.UseShellExecute = $false
+          $startInfo.RedirectStandardOutput = $true
+          $startInfo.RedirectStandardError = $true
+          foreach ($argument in @(
+            $vitest, 'run', '--maxWorkers=1', '--no-file-parallelism',
+            '--testTimeout=120000', '--hookTimeout=120000', '--reporter=json',
+            ('--outputFile.json=' + $report), $filter
+          )) {
+            [void]$startInfo.ArgumentList.Add($argument)
+          }
+          $process = [System.Diagnostics.Process]::new()
+          $process.StartInfo = $startInfo
+          if (-not $process.Start()) { throw 'The focused Vitest process did not start' }
+          $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+          $stderrTask = $process.StandardError.ReadToEndAsync()
           $watchdogExpired = $false
           $deadline = $started.AddSeconds($deadlineSeconds)
           while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
@@ -129,11 +139,29 @@ jobs:
             & taskkill.exe /PID $process.Id /T /F *> $null
             $process.WaitForExit()
           }
-          $process.Refresh()
+          $process.WaitForExit()
+          $stdoutText = $stdoutTask.GetAwaiter().GetResult()
+          $stderrText = $stderrTask.GetAwaiter().GetResult()
+          $combinedText = $stdoutText + "`n" + $stderrText
+          $failureClass = if ($watchdogExpired) { 'watchdog-expired' }
+            elseif ($process.ExitCode -eq 0) { 'none' }
+            elseif ($combinedText -match 'No test files found') { 'no-test-files' }
+            elseif ($combinedText -match 'Failed to load config') { 'config-load' }
+            elseif ($combinedText -match 'Unknown option') { 'invalid-option' }
+            elseif ($combinedText -match 'AssertionError|Test Files\s+[0-9]+ failed') {
+              'test-failure'
+            } else { 'unclassified-process-failure' }
           [ordered]@{
             exitCode = if ($watchdogExpired) { $null } else { $process.ExitCode }
             watchdogExpired = $watchdogExpired
             elapsedSeconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 1)
+            reportPresent = Test-Path -LiteralPath $report -PathType Leaf
+            reportBytes = if (Test-Path -LiteralPath $report -PathType Leaf) {
+              (Get-Item -LiteralPath $report).Length
+            } else { 0 }
+            stdoutBytes = [Text.Encoding]::UTF8.GetByteCount($stdoutText)
+            stderrBytes = [Text.Encoding]::UTF8.GetByteCount($stderrText)
+            failureClass = $failureClass
           } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
           $env:PR977_AUTH_TEST_FILE = $target
           node validation/scripts/pr977/sanitize-focused-windows-test.mjs $report $metaPath `
