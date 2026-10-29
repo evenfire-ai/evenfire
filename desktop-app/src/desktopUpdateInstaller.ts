@@ -35,6 +35,7 @@ export type DesktopInstallPlan = {
 }
 
 const MAC_SCRIPT = String.raw`set -eu
+PATH=/usr/bin:/bin; export PATH
 root="$1"; stage="$2"; id="$3"; app="$4"; staged="$5"; fresh="$6"; old="$7"
 version="$8"; digest="$9"; capable="@@ARG10@@"; parent="@@ARG11@@"; uid="@@ARG12@@"; pending="@@ARG13@@"
 log="$stage/install.log"
@@ -42,7 +43,7 @@ fail() { printf '%s\n' "$1" >> "$log"; exit 1; }
 case "$id" in *[!0-9a-f-]*|'') fail 'invalid operation id';; esac
 [ "$stage" = "$root/$id" ] && [ "$pending" = "$root/pending.json" ] || fail 'staging path mismatch'
 [ ! -L "$stage" ] && [ -f "$stage/operation.json" ] || fail 'staging record missing'
-grep -q "\"id\":\"$id\"" "$stage/operation.json" || fail 'operation record mismatch'
+/usr/bin/grep -q "\"id\":\"$id\"" "$stage/operation.json" || fail 'operation record mismatch'
 [ "$fresh" = "$app.evenfire-new-$id" ] && [ "$old" = "$app.evenfire-rollback-$id" ] || fail 'install path mismatch'
 [ -d "$app" ] && [ ! -L "$app" ] || fail 'installed app bundle changed before replacement'
 [ ! -e "$fresh" ] && [ ! -L "$fresh" ] && [ ! -e "$old" ] && [ ! -L "$old" ] || fail 'install or rollback path already exists'
@@ -112,8 +113,9 @@ printf '{"id":"%s","state":"safe-to-delete"}\n' "$id" > "$root/cleanup.json"
   .replaceAll('@@ARG13@@', () => '${13}')
 
 const USER_DIR_SCRIPT = String.raw`set -eu
+PATH=/usr/bin:/bin; export PATH
 root="$1"; stage="$2"; id="$3"; install="$4"; staged="$5"; fresh="$6"; old="$7"
-digest="$8"; capable="$9"; parent="@@ARG10@@"; exe="@@ARG11@@"; pending="@@ARG12@@"; version="@@ARG13@@"
+digest="$8"; capable="$9"; parent="@@ARG10@@"; pending="@@ARG11@@"; version="@@ARG12@@"
 log="$stage/install.log"
 fail() { printf '%s\n' "$1" >> "$log"; exit 1; }
 [ "$stage" = "$root/$id" ] && [ "$pending" = "$root/pending.json" ] || fail 'staging path mismatch'
@@ -132,26 +134,26 @@ kill -0 "$parent" 2>/dev/null && fail 'Evenfire did not exit'
 cp -a "$staged" "$fresh" || fail 'could not copy the verified app'
 actual=$(sha256sum "$fresh/resources/app.asar" | awk '{print $1}')
 [ "$actual" = "$digest" ] || { rm -rf -- "$fresh"; fail 'app digest mismatch'; }
-[ -x "$fresh/$exe" ] || { rm -rf -- "$fresh"; fail 'application executable is missing'; }
+[ -x "$fresh/Evenfire" ] || { rm -rf -- "$fresh"; fail 'application executable is missing'; }
 mv -- "$install" "$old" || fail 'could not preserve previous app'
 if ! mv -- "$fresh" "$install"; then mv -- "$old" "$install" || fail 'rollback failed'; fail 'install failed'; fi
-"$install/$exe" "--user-data-dir=$(dirname "$root")" "--evenfire-update-operation=$id" >/dev/null 2>&1 &
+(cd -- "$install" && ./Evenfire "--user-data-dir=$(dirname "$root")" "--evenfire-update-operation=$id") >/dev/null 2>&1 &
 appPid=$!; verified=0
 for i in $(seq 1 300); do
   actual=$(sha256sum "$install/resources/app.asar" | awk '{print $1}')
-  if [ "$actual" != "$digest" ] || [ ! -x "$install/$exe" ]; then break; fi
+  if [ "$actual" != "$digest" ] || [ ! -x "$install/Evenfire" ]; then break; fi
   if [ "$capable" = true ] && [ -f "$stage/startup-ok.json" ]; then verified=1; break; fi
   if [ "$capable" = false ] && [ "$i" -ge 50 ] && kill -0 "$appPid" 2>/dev/null; then verified=1; break; fi
   if ! kill -0 "$appPid" 2>/dev/null; then break; fi
   sleep 0.2
 done
 actual=$(sha256sum "$install/resources/app.asar" | awk '{print $1}')
-if [ "$actual" != "$digest" ] || [ ! -x "$install/$exe" ]; then verified=0; fi
+if [ "$actual" != "$digest" ] || [ ! -x "$install/Evenfire" ]; then verified=0; fi
 if [ "$verified" -ne 1 ]; then
   if kill -0 "$appPid" 2>/dev/null; then kill "$appPid" 2>/dev/null || true; fi
   mv -- "$install" "$fresh" || fail 'could not move failed app'
   mv -- "$old" "$install" || fail 'rollback failed'
-  rm -rf -- "$fresh"; "$install/$exe" "--user-data-dir=$(dirname "$root")" >/dev/null 2>&1 &
+  rm -rf -- "$fresh"; (cd -- "$install" && ./Evenfire "--user-data-dir=$(dirname "$root")") >/dev/null 2>&1 &
   printf '{"id":"%s","state":"rollback-complete"}\n' "$id" > "$stage/cleanup-safe.json"
   printf '{"id":"%s","state":"safe-to-delete"}\n' "$id" > "$root/cleanup.json"
   rm -rf -- "$stage"; rm -f "$pending" "$root/cleanup.json"; exit 1
@@ -164,38 +166,38 @@ rm -rf -- "$stage"; rm -f "$pending" "$root/cleanup.json"
   .replaceAll('@@ARG10@@', () => '${10}')
   .replaceAll('@@ARG11@@', () => '${11}')
   .replaceAll('@@ARG12@@', () => '${12}')
-  .replaceAll('@@ARG13@@', () => '${13}')
 
 const LINUX_ROOT_SCRIPT = String.raw`set -eu
+PATH=/usr/bin:/bin; export PATH
 stage="$1"; id="$2"; kind="$3"; action="$4"; target="$5"; targetHash="$6"
 rollback="$7"; rollbackHash="$8"; targetVersion="$9"; oldVersion="@@ARG10@@"
 targetAsar="@@ARG11@@"; oldAsar="@@ARG12@@"; exe="@@ARG13@@"
 parent="@@ARG14@@"
-[ "$stage" = "$(dirname "$stage")/$id" ] && [ ! -L "$stage" ] && [ -f "$stage/operation.json" ] || exit 2
-grep -q "\"id\":\"$id\"" "$stage/operation.json" || exit 2
+[ "$stage" = "$(/usr/bin/dirname "$stage")/$id" ] && [ ! -L "$stage" ] && [ -f "$stage/operation.json" ] || exit 2
+/usr/bin/grep -q "\"id\":\"$id\"" "$stage/operation.json" || exit 2
 case "$kind" in deb|rpm) ;; *) exit 2;; esac
 if [ "$action" = install ]; then
-  printf '%s\n' "$$" > "$(dirname "$stage")/privileged-ready"
-  for i in $(seq 1 180); do
+  printf '%s\n' "$$" > "$(/usr/bin/dirname "$stage")/privileged-ready"
+  for i in $(/usr/bin/seq 1 180); do
     [ ! -f "$stage/cancel-install.json" ] || exit 6
     if ! kill -0 "$parent" 2>/dev/null; then break; fi
-    sleep 0.2
+    /usr/bin/sleep 0.2
   done
   kill -0 "$parent" 2>/dev/null && exit 5
 fi
-tmp=$(mktemp -d /var/tmp/evenfire-update.XXXXXX); chmod 700 "$tmp"
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+tmp=$(/usr/bin/mktemp -d /var/tmp/evenfire-update.XXXXXX); /usr/bin/chmod 700 "$tmp"
+trap '/usr/bin/rm -rf "$tmp"' EXIT HUP INT TERM
 copy_verified() {
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
-  cp -- "$1" "$2"; chmod 600 "$2"
-  [ "$(sha256sum "$2" | awk '{print $1}')" = "$3" ]
+  /usr/bin/cp -- "$1" "$2"; /usr/bin/chmod 600 "$2"
+  [ "$(/usr/bin/sha256sum "$2" | /usr/bin/awk '{print $1}')" = "$3" ]
 }
 install_pkg() { if [ "$kind" = deb ]; then /usr/bin/dpkg --install "$1"; else /usr/bin/rpm --upgrade --oldpackage "$1"; fi; }
 version_now() {
-  if [ "$kind" = deb ]; then dpkg-query --show --showformat='@@DPKG_VERSION@@' evenfire
-  else rpm --query --queryformat '%{VERSION}' evenfire; fi
+  if [ "$kind" = deb ]; then /usr/bin/dpkg-query --show --showformat='@@DPKG_VERSION@@' evenfire
+  else /usr/bin/rpm --query --queryformat '%{VERSION}' evenfire; fi
 }
-asar_now() { sha256sum "$(dirname "$exe")/resources/app.asar" | awk '{print $1}'; }
+asar_now() { /usr/bin/sha256sum "$(/usr/bin/dirname "$exe")/resources/app.asar" | /usr/bin/awk '{print $1}'; }
 if [ "$action" = install ]; then
   copy_verified "$target" "$tmp/target.pkg" "$targetHash" || exit 3
   copy_verified "$rollback" "$tmp/rollback.pkg" "$rollbackHash" || exit 3
@@ -223,6 +225,7 @@ exit 4
   .replaceAll('@@DPKG_VERSION@@', () => '${Version}')
 
 const LINUX_PACKAGE_SCRIPT = String.raw`set -eu
+PATH=/usr/bin:/bin; export PATH
 root="$1"; stage="$2"; id="$3"; kind="$4"; target="$5"; targetHash="$6"; rollback="$7"; rollbackHash="$8"
 exe="$9"; version="@@ARG10@@"; targetAsar="@@ARG11@@"; capable="@@ARG12@@"; parent="@@ARG13@@"
 oldVersion="@@ARG14@@"; oldAsar="@@ARG15@@"; pending="@@ARG16@@"; rootB64="@@ARG17@@"; log="$stage/install.log"
@@ -231,41 +234,40 @@ fail() { printf '%s\n' "$1" >> "$log"; exit 1; }
 [ ! -L "$stage" ] && [ -f "$stage/operation.json" ] || fail 'staging record missing'
 grep -q "\"id\":\"$id\"" "$stage/operation.json" || fail 'operation record mismatch'
 printf '%s\n' "$$" > "$stage/helper.pid"
-rootScript=$(printf '%s' "$rootB64" | base64 --decode)
-result=$(pkexec /bin/sh -c "$rootScript" evenfire-root "$stage" "$id" "$kind" install \
+result=$(printf '%s' "$rootB64" | /usr/bin/base64 --decode | /usr/bin/pkexec /bin/sh -s "$stage" "$id" "$kind" install \
   "$target" "$targetHash" "$rollback" "$rollbackHash" "$version" "$oldVersion" "$targetAsar" "$oldAsar" "$exe" "$parent") ||
   fail 'OS authorization or package installation failed'
 printf '%s\n' "$result" >> "$log"
 if [ "$result" = rollback ]; then
-  "$exe" "--user-data-dir=$(dirname "$root")" >/dev/null 2>&1 &
+  "$exe" "--user-data-dir=$(/usr/bin/dirname "$root")" >/dev/null 2>&1 &
   printf '{"id":"%s","state":"rollback-complete"}\n' "$id" > "$stage/cleanup-safe.json"
   printf '{"id":"%s","state":"safe-to-delete"}\n' "$id" > "$root/cleanup.json"
-  rm -rf -- "$stage"; rm -f "$pending" "$root/cleanup.json"; exit 1
+  /usr/bin/rm -rf -- "$stage"; /usr/bin/rm -f "$pending" "$root/cleanup.json"; exit 1
 fi
 [ "$result" = installed ] || fail 'native installer returned an invalid result'
-"$exe" "--user-data-dir=$(dirname "$root")" "--evenfire-update-operation=$id" >/dev/null 2>&1 &
+"$exe" "--user-data-dir=$(/usr/bin/dirname "$root")" "--evenfire-update-operation=$id" >/dev/null 2>&1 &
 appPid=$!; verified=0
-for i in $(seq 1 300); do
+for i in $(/usr/bin/seq 1 300); do
   if [ "$capable" = true ] && [ -f "$stage/startup-ok.json" ]; then verified=1; break; fi
   if [ "$capable" = false ] && [ "$i" -ge 50 ] && kill -0 "$appPid" 2>/dev/null; then verified=1; break; fi
   if ! kill -0 "$appPid" 2>/dev/null; then break; fi
-  sleep 0.2
+  /usr/bin/sleep 0.2
 done
 if [ "$(version_now)" != "$version" ] || [ "$(asar_now)" != "$targetAsar" ]; then verified=0; fi
 if [ "$verified" -ne 1 ]; then
   if kill -0 "$appPid" 2>/dev/null; then kill "$appPid" 2>/dev/null || true; fi
-  result=$(pkexec /bin/sh -c "$rootScript" evenfire-root "$stage" "$id" "$kind" rollback \
+  result=$(printf '%s' "$rootB64" | /usr/bin/base64 --decode | /usr/bin/pkexec /bin/sh -s "$stage" "$id" "$kind" rollback \
     "$target" "$targetHash" "$rollback" "$rollbackHash" "$version" "$oldVersion" "$targetAsar" "$oldAsar" "$exe" "$parent") ||
     fail 'native package rollback needs manual recovery'
   [ "$result" = rollback ] || fail 'native package rollback did not verify'
-  "$exe" "--user-data-dir=$(dirname "$root")" >/dev/null 2>&1 &
+  "$exe" "--user-data-dir=$(/usr/bin/dirname "$root")" >/dev/null 2>&1 &
   printf '{"id":"%s","state":"rollback-complete"}\n' "$id" > "$stage/cleanup-safe.json"
   printf '{"id":"%s","state":"safe-to-delete"}\n' "$id" > "$root/cleanup.json"
-  rm -rf -- "$stage"; rm -f "$pending" "$root/cleanup.json"; exit 1
+  /usr/bin/rm -rf -- "$stage"; /usr/bin/rm -f "$pending" "$root/cleanup.json"; exit 1
 fi
 printf '{"id":"%s","state":"installed"}\n' "$id" > "$stage/cleanup-safe.json"
 printf '{"id":"%s","state":"safe-to-delete"}\n' "$id" > "$root/cleanup.json"
-rm -rf -- "$stage"; rm -f "$pending" "$root/cleanup.json"
+/usr/bin/rm -rf -- "$stage"; /usr/bin/rm -f "$pending" "$root/cleanup.json"
 `
   .replaceAll('@@ARG10@@', () => '${10}')
   .replaceAll('@@ARG11@@', () => '${11}')
@@ -278,9 +280,30 @@ rm -rf -- "$stage"; rm -f "$pending" "$root/cleanup.json"
 
 const WINDOWS_BODY = String.raw`
 $ErrorActionPreference = 'Stop'
+$plan = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$stageRoot = [string]$plan.stageRoot
+$stage = [string]$plan.operationPath
+$operationId = [string]$plan.operationId
+$pendingPath = [string]$plan.pendingPath
+$installRoot = [string]$plan.installRoot
+$setup = [string]$plan.setupPath
+$setupDigest = [string]$plan.setupDigest
+$version = [string]$plan.version
+$targetAsar = [string]$plan.targetAsar
+$updaterCapable = [bool]$plan.updaterCapable
+$parentPid = [int]$plan.parentPid
+$currentVersion = [string]$plan.currentVersion
+$currentAsar = [string]$plan.currentAsar
+$log = Join-Path $stage 'install.log'
 function Fail([string]$Message) { Add-Content -LiteralPath $log -Value $Message; throw $Message }
+if ($operationId -notmatch '^[0-9a-f-]{36}$') { Fail 'invalid operation id' }
+if ($setupDigest -notmatch '^[a-f0-9]{64}$' -or $targetAsar -notmatch '^[a-f0-9]{64}$') { Fail 'invalid package digest' }
+foreach ($candidate in @($stageRoot, $stage, $pendingPath, $installRoot, $setup)) {
+  if (!$candidate -or ![System.IO.Path]::IsPathFullyQualified($candidate)) { Fail 'invalid installation path' }
+}
 if ($stage -ne (Join-Path $stageRoot $operationId)) { Fail 'staging path mismatch' }
 if ($pendingPath -ne (Join-Path $stageRoot 'pending.json')) { Fail 'pending pointer path mismatch' }
+if (![System.IO.Path]::GetFullPath($setup).StartsWith([System.IO.Path]::GetFullPath($stage) + '\', [StringComparison]::OrdinalIgnoreCase)) { Fail 'setup path is outside updater staging' }
 if (!(Test-Path -LiteralPath (Join-Path $stage 'operation.json') -PathType Leaf)) { Fail 'staging record missing' }
 if ((Get-Content -Raw -LiteralPath (Join-Path $stage 'operation.json')) -notmatch ('"id":"' + [regex]::Escape($operationId) + '"')) { Fail 'operation record mismatch' }
 $localAppData = [Environment]::GetFolderPath('LocalApplicationData').TrimEnd('\') + '\'
@@ -354,14 +377,11 @@ try {
 }
 `
 
-function quotePowerShell(value: string): string {
-  return "'" + value.replaceAll("'", "''") + "'"
-}
-
-async function spawnDetachedAndWaitForMarker(
+async function launchDetachedAndWaitForMarker(
   command: string,
   args: string[],
-  markerPath: string
+  markerPath: string,
+  standardInput?: string
 ): Promise<void> {
   try {
     const marker = await lstat(markerPath)
@@ -373,7 +393,12 @@ async function spawnDetachedAndWaitForMarker(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true })
+    const child = spawn(command, args, {
+      detached: true,
+      shell: false,
+      stdio: standardInput === undefined ? 'ignore' : ['pipe', 'ignore', 'ignore'],
+      windowsHide: true,
+    })
     let settled = false
     const timeout = setTimeout(
       () => finish(new Error('The OS update helper did not become ready.')),
@@ -405,12 +430,22 @@ async function spawnDetachedAndWaitForMarker(
       }
     })
     child.once('spawn', () => child.unref())
+    if (standardInput !== undefined) {
+      if (!child.stdin) {
+        finish(new Error('The OS update helper did not accept its verified install plan.'))
+        return
+      }
+      child.stdin.end(standardInput, 'utf8')
+    }
   })
 }
 
 function packageManagerOwns(binaryPath: string): 'deb' | 'rpm' | null {
-  const deb = spawnSync('dpkg-query', ['-S', binaryPath], { encoding: 'utf8', timeout: 15000 })
-  const rpm = spawnSync('rpm', ['-qf', '--queryformat', '%{NAME}', binaryPath], {
+  const deb = spawnSync('/usr/bin/dpkg-query', ['-S', binaryPath], {
+    encoding: 'utf8',
+    timeout: 15000,
+  })
+  const rpm = spawnSync('/usr/bin/rpm', ['-qf', '--queryformat', '%{NAME}', binaryPath], {
     encoding: 'utf8',
     timeout: 15000,
   })
@@ -420,9 +455,25 @@ function packageManagerOwns(binaryPath: string): 'deb' | 'rpm' | null {
   return debMatch ? 'deb' : rpmMatch ? 'rpm' : null
 }
 
+const LINUX_PACKAGE_EXECUTABLE = '/usr/lib/evenfire/Evenfire'
+
 function releaseArchitecture(value: string): DesktopReleaseArchitecture {
   if (value === 'x64' || value === 'arm64') return value
   throw new Error('Desktop updates are not supported for this CPU architecture.')
+}
+
+function windowsPowerShellPath(): string {
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR
+  if (!systemRoot || !path.win32.isAbsolute(systemRoot)) {
+    throw new Error('The Windows system directory could not be verified.')
+  }
+  return path.win32.join(
+    path.win32.resolve(systemRoot),
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe'
+  )
 }
 
 export function isSupportedMacInstallPath(
@@ -505,20 +556,25 @@ export async function detectDesktopInstall(args: {
     }
     throw new Error('Automatic Windows updates require a verified per-user Squirrel install.')
   }
-  const packageType = packageManagerOwns(executablePath)
+  const packageType = packageManagerOwns(LINUX_PACKAGE_EXECUTABLE)
   if (packageType) {
+    const packagedExecutable = await realpath(LINUX_PACKAGE_EXECUTABLE).catch(() => null)
+    if (!packagedExecutable || executablePath !== packagedExecutable) {
+      throw new Error('The package-managed Evenfire executable location could not be verified.')
+    }
     return {
       platform,
       architecture,
       packageType,
-      installRoot: path.dirname(executablePath),
-      appPath: path.dirname(executablePath),
-      executablePath,
+      installRoot: path.dirname(LINUX_PACKAGE_EXECUTABLE),
+      appPath: path.dirname(LINUX_PACKAGE_EXECUTABLE),
+      executablePath: LINUX_PACKAGE_EXECUTABLE,
     }
   }
   const appPath = path.dirname(executablePath)
   const info = await lstat(appPath)
   if (
+    path.basename(executablePath) !== 'Evenfire' ||
     path.basename(appPath) !== 'Evenfire-linux-' + architecture ||
     !info.isDirectory() ||
     info.isSymbolicLink() ||
@@ -623,10 +679,11 @@ async function launchDirectoryInstall(plan: DesktopInstallPlan): Promise<void> {
       path.join(stageRoot, 'pending.json'),
     ]
     if (writable) {
-      await spawnDetachedAndWaitForMarker(
+      await launchDetachedAndWaitForMarker(
         '/bin/sh',
-        ['-c', MAC_SCRIPT, 'evenfire-update-helper', ...args],
-        path.join(operationPath, 'helper.pid')
+        ['-s', ...args],
+        path.join(operationPath, 'helper.pid'),
+        MAC_SCRIPT
       )
       return
     }
@@ -640,7 +697,7 @@ async function launchDirectoryInstall(plan: DesktopInstallPlan): Promise<void> {
       'do shell script commandLine with administrator privileges',
       'end run',
     ].join('\n')
-    await spawnDetachedAndWaitForMarker(
+    await launchDetachedAndWaitForMarker(
       '/usr/bin/osascript',
       ['-e', appleScript, '--', MAC_SCRIPT, ...args],
       path.join(operationPath, 'helper.pid')
@@ -661,14 +718,14 @@ async function launchDirectoryInstall(plan: DesktopInstallPlan): Promise<void> {
     digest,
     String(payload.updaterCapable),
     String(process.pid),
-    path.basename(location.executablePath),
     path.join(stageRoot, 'pending.json'),
     payload.appVersion,
   ]
-  await spawnDetachedAndWaitForMarker(
+  await launchDetachedAndWaitForMarker(
     '/bin/sh',
-    ['-c', USER_DIR_SCRIPT, 'evenfire-update-helper', ...args],
-    path.join(operationPath, 'helper.pid')
+    ['-s', ...args],
+    path.join(operationPath, 'helper.pid'),
+    USER_DIR_SCRIPT
   )
 }
 
@@ -676,28 +733,27 @@ async function launchSquirrelInstall(plan: DesktopInstallPlan): Promise<void> {
   const { location, operationId, operationPath, stageRoot, pendingPath, payload } = plan
   if (!location.updateExecutablePath) throw new Error('The Squirrel updater executable is missing.')
   const targetAsar = await sha256(path.join(payload.appPath, 'resources', 'app.asar'))
-  const script = [
-    '$stageRoot = ' + quotePowerShell(stageRoot),
-    '$stage = ' + quotePowerShell(operationPath),
-    '$operationId = ' + quotePowerShell(operationId),
-    '$pendingPath = ' + quotePowerShell(pendingPath),
-    '$installRoot = ' + quotePowerShell(location.installRoot),
-    '$setup = ' + quotePowerShell(payload.packagePath),
-    '$setupDigest = ' + quotePowerShell(plan.targetPackageSha256),
-    '$version = ' + quotePowerShell(payload.appVersion),
-    '$targetAsar = ' + quotePowerShell(targetAsar),
-    '$updaterCapable = ' + String(payload.updaterCapable).toLowerCase(),
-    '$parentPid = ' + process.pid,
-    '$currentVersion = ' + quotePowerShell(plan.currentVersion),
-    '$currentAsar = ' + quotePowerShell(plan.currentAsarSha256),
-    '$log = Join-Path $stage "install.log"',
-    WINDOWS_BODY,
-  ].join('\n')
-  const encoded = Buffer.from(script, 'utf16le').toString('base64')
-  await spawnDetachedAndWaitForMarker(
-    'powershell.exe',
+  const encoded = Buffer.from(WINDOWS_BODY, 'utf16le').toString('base64')
+  const installPlan = JSON.stringify({
+    stageRoot,
+    operationPath,
+    operationId,
+    pendingPath,
+    installRoot: location.installRoot,
+    setupPath: payload.packagePath,
+    setupDigest: plan.targetPackageSha256,
+    version: payload.appVersion,
+    targetAsar,
+    updaterCapable: payload.updaterCapable,
+    parentPid: process.pid,
+    currentVersion: plan.currentVersion,
+    currentAsar: plan.currentAsarSha256,
+  })
+  await launchDetachedAndWaitForMarker(
+    windowsPowerShellPath(),
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
-    path.join(operationPath, 'helper.pid')
+    path.join(operationPath, 'helper.pid'),
+    installPlan
   )
 }
 
@@ -719,7 +775,7 @@ async function launchLinuxPackageInstall(plan: DesktopInstallPlan): Promise<void
     plan.targetPackageSha256,
     plan.rollbackPackagePath,
     plan.rollbackPackageSha256,
-    location.executablePath,
+    LINUX_PACKAGE_EXECUTABLE,
     payload.appVersion,
     targetAsar,
     String(payload.updaterCapable),
@@ -729,9 +785,10 @@ async function launchLinuxPackageInstall(plan: DesktopInstallPlan): Promise<void
     pendingPath,
     rootScript,
   ]
-  await spawnDetachedAndWaitForMarker(
+  await launchDetachedAndWaitForMarker(
     '/bin/sh',
-    ['-c', LINUX_PACKAGE_SCRIPT, 'evenfire-update-helper', ...args],
-    path.join(stageRoot, 'privileged-ready')
+    ['-s', ...args],
+    path.join(stageRoot, 'privileged-ready'),
+    LINUX_PACKAGE_SCRIPT
   )
 }
