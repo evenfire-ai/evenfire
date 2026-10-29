@@ -209,7 +209,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Per-chat draft from the module-scoped store. Typing only re-renders this
   // component (it's the sole subscriber); the value is restored automatically when
   // activeChatId changes and survives the inline→docked composer swap.
-  const [draft, setDraft, draftOwnerConflictTabId] = useComposerDraft(
+  const [draft, setDraft] = useComposerDraft(
     activeChatId,
     selectedAgent ?? undefined,
     workspaceChatTabId
@@ -423,7 +423,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     composerImageAttachments.length > 0 && hostModelSelection.visualSendBlocked
   // Per-instance id: the main panel and the chat drawer can both be mounted.
   const imageNoticeId = useId()
-  const draftOwnerConflictId = useId()
   // #678 — a document that is still being read is not part of the message yet.
   // Sending now would leave it out without saying so, so send stays disabled
   // until each chip is ready or removed.
@@ -451,12 +450,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     selectedAgentCatalogState !== 'ready' && selectedAgentCatalogState !== 'available'
   const agentCatalogNoticeId = useId()
   const handleSend = useCallback(() => {
-    if (
-      imagesBlockedForSend ||
-      filesBlockedForSend ||
-      selectedAgentSendBlocked ||
-      draftOwnerConflictTabId
-    ) {
+    if (imagesBlockedForSend || filesBlockedForSend || selectedAgentSendBlocked) {
       return
     }
     if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
@@ -464,7 +458,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   }, [
     onSend,
     draft,
-    draftOwnerConflictTabId,
     imagesBlockedForSend,
     filesBlockedForSend,
     selectedAgentSendBlocked,
@@ -949,7 +942,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             ref={composerInputRef}
             data-testid="chat-input"
             aria-label="Agent message composer"
-            aria-describedby={draftOwnerConflictTabId ? draftOwnerConflictId : undefined}
             value={draft}
             onChange={event => {
               handleDraftChange(event.target.value)
@@ -958,7 +950,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             onPaste={handleComposerPaste}
             onKeyDown={handleComposerKeyDown}
             rows={3}
-            disabled={isDegraded || Boolean(draftOwnerConflictTabId)}
+            disabled={isDegraded}
             placeholder={
               isDegraded
                 ? 'Agent degraded — fix the LLM Secret to resume.'
@@ -966,11 +958,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             }
           />
         </div>
-        {draftOwnerConflictTabId ? (
-          <div className="composer-draft-owner-conflict" id={draftOwnerConflictId} role="alert">
-            Another workspace tab owns this draft. Select that tab to continue editing.
-          </div>
-        ) : null}
         {dragActive ? <div className="composer-drop-overlay">Drop files here</div> : null}
         <div className="composer-input-actions">
           {agentSelector && <span className="composer-agent-selector-slot">{agentSelector}</span>}
@@ -1278,7 +1265,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 imagesBlockedForSend ||
                 filesBlockedForSend ||
                 selectedAgentSendBlocked ||
-                Boolean(draftOwnerConflictTabId) ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
                   composerFileAttachments.length === 0 &&
@@ -1289,7 +1275,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 [
                   imagesBlockedForSend ? imageNoticeId : null,
                   selectedAgentCatalogMessage ? agentCatalogNoticeId : null,
-                  draftOwnerConflictTabId ? draftOwnerConflictId : null,
                 ]
                   .filter(Boolean)
                   .join(' ') || undefined
