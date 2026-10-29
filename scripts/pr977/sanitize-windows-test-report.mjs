@@ -5,6 +5,8 @@ const [reportPath, summaryPath] = process.argv.slice(2)
 if (!reportPath || !summaryPath) throw new Error('Expected report and summary paths')
 
 const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+const selectedTestName =
+  'restores the accepted prior source when candidate preparation fails after publication'
 const allowedTypes = [
   'AssertionError',
   'DirectoryNotFoundException',
@@ -78,8 +80,16 @@ function categoryFor(messages, code, type) {
 }
 
 const failed = []
+const selectedStatuses = []
 for (const suite of report.testResults ?? []) {
   for (const assertion of suite.assertionResults ?? []) {
+    const assertionName = String(assertion.fullName ?? assertion.title ?? '')
+    if (
+      assertionName.includes(selectedTestName) &&
+      (assertion.status === 'passed' || assertion.status === 'failed')
+    ) {
+      selectedStatuses.push(assertion.status)
+    }
     if (assertion.status !== 'failed') continue
     const messages = assertion.failureMessages ?? []
     const joined = messages.join('\n')
@@ -98,10 +108,14 @@ for (const suite of report.testResults ?? []) {
     })
   }
 }
+if (selectedStatuses.length !== 1) {
+  throw new Error('The selected password rollback diagnostic test did not execute exactly once')
+}
 
 const safe = {
   sourceSha: process.env.PR977_SOURCE_SHA ?? '075794e5606a65c30f4626a15f17718447393ec5',
   testFile: 'appService.passwordLoginRollback.regression.test.ts',
+  selectedTestStatus: selectedStatuses[0],
   totalFiles: report.numTotalTestSuites,
   totalTests: report.numTotalTests,
   passed: report.numPassedTests,
