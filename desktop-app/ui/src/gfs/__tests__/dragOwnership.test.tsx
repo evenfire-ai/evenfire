@@ -511,7 +511,8 @@ for (const surface of ['sidebar', 'files'] as const) {
         expect.any(Number),
         undefined,
         'other-parent',
-        h.ctrl.sessionScope
+        h.ctrl.sessionScope,
+        true
       )
     })
 
