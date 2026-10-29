@@ -3459,10 +3459,15 @@ export class AppService {
   async moveGfsResource(
     resourceId: string,
     destinationId: string,
+    expectedSessionGeneration: number,
     drive?: string,
     ifMatch?: number,
     newName?: string
   ) {
+    if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+      throw new Error('invalid_session_generation')
+    }
+    this.assertSessionGeneration(expectedSessionGeneration)
     return this.gfsClient.moveResource(
       { resourceId, drive, destinationId, ifMatch, ...(newName !== undefined ? { newName } : {}) },
       this.requireSessionToken()

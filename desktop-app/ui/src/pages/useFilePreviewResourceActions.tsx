@@ -636,6 +636,20 @@ export function useFilePreviewResourceActions({
     }
     const sourceName = resource.name
     const isActiveMove = () => moveRequestRef.current === requestId
+    const clearStaleMovePresentation = () => {
+      if (!isActiveMove()) return
+      setMovePermissionStatus(null)
+      if (!isDialogCurrent || isDialogCurrent()) setMoveOpen(false)
+    }
+    let sessionGeneration: number | null = null
+    const isCurrentSessionGeneration = async () => {
+      if (sessionGeneration === null) return false
+      try {
+        return (await window.clerum.auth.getSessionGeneration()) === sessionGeneration
+      } catch {
+        return false
+      }
+    }
     // Authorization is tied to the exact source snapshot until dispatch. After
     // dispatch, a competing move may legitimately advance its parent/version;
     // only a different Preview or principal should fence this result.
@@ -661,6 +675,11 @@ export function useFilePreviewResourceActions({
     let mutationDispatched = false
     let permissionsChecked = false
     try {
+      const capturedSessionGeneration = await window.clerum.auth.getSessionGeneration()
+      if (!Number.isSafeInteger(capturedSessionGeneration) || capturedSessionGeneration < 0) {
+        throw new Error('invalid_session_generation')
+      }
+      sessionGeneration = capturedSessionGeneration
       assertGfsAuthorityRetryAllowed(
         queryClient,
         desktopQueryKeys.gfsAffordances(
@@ -674,6 +693,10 @@ export function useFilePreviewResourceActions({
         desktopQueryKeys.gfsAffordances(moveContext.sessionScope, destinationId, moveContext.drive)
       )
       const sourceCheck = await sourceParentAffordancesQuery.refetch({ cancelRefetch: false })
+      if (!(await isCurrentSessionGeneration())) {
+        clearStaleMovePresentation()
+        return
+      }
       if (!isActiveMove()) return
       if (isDialogCurrent && !isDialogCurrent()) {
         setMovePermissionStatus(null)
@@ -700,6 +723,10 @@ export function useFilePreviewResourceActions({
         staleTime: 0,
         retry: false,
       })
+      if (!(await isCurrentSessionGeneration())) {
+        clearStaleMovePresentation()
+        return
+      }
       if (!isActiveMove()) return
       if (isDialogCurrent && !isDialogCurrent()) {
         setMovePermissionStatus(null)
@@ -733,7 +760,14 @@ export function useFilePreviewResourceActions({
           },
           moveResource: (resourceId, targetId, ifMatch) => {
             mutationDispatched = true
-            return window.clerum.gfs.moveResource(resourceId, targetId, moveContext.drive, ifMatch)
+            return window.clerum.gfs.moveResource(
+              resourceId,
+              targetId,
+              moveContext.drive,
+              ifMatch,
+              undefined,
+              capturedSessionGeneration
+            )
           },
           isSessionAuthorityFailure: error => {
             const message = errorMessage(error)
@@ -742,6 +776,7 @@ export function useFilePreviewResourceActions({
             }
             return onAuthorityFailure(message)
           },
+          isSessionGenerationCurrent: isCurrentSessionGeneration,
           isCurrent: () =>
             previewMountedRef.current &&
             isActiveMove() &&
@@ -761,9 +796,14 @@ export function useFilePreviewResourceActions({
             version: moveContext.version,
             parentResourceId: moveContext.parentResourceId,
           },
+          sessionGeneration: capturedSessionGeneration,
         }
       )
 
+      if (!(await isCurrentSessionGeneration())) {
+        clearStaleMovePresentation()
+        return
+      }
       if (outcome.status === 'committed') {
         if (
           moveContext.principalScope !== null &&
@@ -774,6 +814,10 @@ export function useFilePreviewResourceActions({
           } catch {
             // A failed follow-up read cannot downgrade the confirmed Move.
           }
+        }
+        if (!(await isCurrentSessionGeneration())) {
+          clearStaleMovePresentation()
+          return
         }
         if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
         if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) setMoveOpen(false)
@@ -807,6 +851,10 @@ export function useFilePreviewResourceActions({
       }
       toastMoveOutcome(pushToast, outcome, sourceName, destinationName, 'file')
     } catch (error) {
+      if (!(await isCurrentSessionGeneration())) {
+        clearStaleMovePresentation()
+        return
+      }
       if (!mutationDispatched) {
         if (!isActiveMove()) return
         if (isDialogCurrent && !isDialogCurrent()) {

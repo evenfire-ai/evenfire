@@ -14,7 +14,8 @@ export interface GfsMoveCommitRunnerDeps {
     destinationId: string,
     ifMatch?: number,
     newName?: string,
-    oldParentId?: string | null
+    oldParentId?: string | null,
+    expectedSessionGeneration?: number
   ) => Promise<{ resourceId: string; version: number }>
   /** Central fail-closed classifier; returns true when the session died. */
   handleAuthorityFailure: (message: string) => boolean
@@ -40,6 +41,8 @@ export interface GfsMoveCommitRequest {
   expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
   occupiedDestinationNames?: ReadonlySet<string>
+  /** Captured main-process authenticated session generation. */
+  sessionGeneration?: number
   /**
    * Gesture-ownership predicate, absent on paths that own no gesture (the
    * explicit Move dialog). Checked before every dispatch attempt.
@@ -66,6 +69,24 @@ export async function runGfsMoveCommit(
   request: GfsMoveCommitRequest
 ): Promise<MoveCommitOutcome> {
   const { source, destination } = request
+  let sessionGeneration = request.sessionGeneration
+  if (sessionGeneration === undefined) {
+    try {
+      sessionGeneration = await window.clerum.auth.getSessionGeneration()
+    } catch {
+      return { status: 'session-lost' }
+    }
+  }
+  if (!Number.isSafeInteger(sessionGeneration) || sessionGeneration < 0) {
+    return { status: 'session-lost' }
+  }
+  const isSessionGenerationCurrent = async (expected: number): Promise<boolean> => {
+    try {
+      return (await window.clerum.auth.getSessionGeneration()) === expected
+    } catch {
+      return false
+    }
+  }
   // A transport loss after dispatch leaves the dispatch unconfirmed even
   // though the PATCH may have landed.
   let dispatchConfirmed = false
@@ -82,19 +103,28 @@ export async function runGfsMoveCommit(
           parentResourceId: resolved.parentResourceId,
         }
       },
-      moveResource: async (resourceId, destinationId, ifMatch, newName, oldParentId) => {
+      moveResource: async (
+        resourceId,
+        destinationId,
+        ifMatch,
+        newName,
+        oldParentId,
+        expectedSessionGeneration
+      ) => {
         const receipt = await deps.moveResource(
           resourceId,
           destinationId,
           ifMatch,
           newName,
-          oldParentId
+          oldParentId,
+          expectedSessionGeneration
         )
         dispatchConfirmed = true
         return receipt
       },
       isSessionAuthorityFailure: error =>
         deps.handleAuthorityFailure(error instanceof Error ? error.message : String(error)),
+      isSessionGenerationCurrent,
       ...(deps.authorizeNumberedRename
         ? { authorizeNumberedRename: deps.authorizeNumberedRename }
         : {}),
@@ -114,8 +144,12 @@ export async function runGfsMoveCommit(
       ...(request.occupiedDestinationNames
         ? { occupiedDestinationNames: request.occupiedDestinationNames }
         : {}),
+      sessionGeneration,
     }
   )
+  if (!(await isSessionGenerationCurrent(sessionGeneration))) {
+    return { status: 'session-lost' }
+  }
   if (outcome.status === 'committed' && !dispatchConfirmed) {
     // The PATCH landed but the response was lost: the dispatch never
     // confirmed, so the convergence it would have run never ran. The item
@@ -129,6 +163,9 @@ export async function runGfsMoveCommit(
       },
       { version: outcome.version }
     )
+  }
+  if (!(await isSessionGenerationCurrent(sessionGeneration))) {
+    return { status: 'session-lost' }
   }
   toastMoveOutcome(deps.pushToast, outcome, source.name, destination.name, source.kind)
   return outcome

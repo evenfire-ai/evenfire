@@ -38,6 +38,7 @@ function gfsService() {
     moveGfsResource: (
       resourceId: string,
       destinationId: string,
+      expectedSessionGeneration: number,
       drive?: string,
       ifMatch?: number
     ) => Promise<{ resourceId: string; version: number }>
@@ -58,7 +59,7 @@ describe('AppService GFS delegation subject boundary', () => {
     const service = gfsService()
     const destinationId = '33333333-3333-4333-8333-333333333333'
 
-    await service.moveGfsResource(RESOURCE_ID, destinationId, 'main', 8)
+    await service.moveGfsResource(RESOURCE_ID, destinationId, 0, 'main', 8)
 
     expect(service.gfsClient.moveResource).toHaveBeenCalledTimes(1)
     expect(service.gfsClient.moveResource).toHaveBeenCalledWith(

@@ -30,6 +30,8 @@ export interface MoveCommitPlan {
   expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
   occupiedDestinationNames?: ReadonlySet<string>
+  /** Main-process authenticated session identity captured when this operation began. */
+  sessionGeneration?: number
 }
 
 export type MoveCommitOutcome =
@@ -72,10 +74,13 @@ export interface MoveCommitDeps {
     destinationId: string,
     ifMatch: number,
     newName?: string,
-    oldParentId?: string | null
+    oldParentId?: string | null,
+    expectedSessionGeneration?: number
   ) => Promise<{ resourceId: string; version: number }>
   /** Central fail-closed classifier; returns true when the session died. */
   isSessionAuthorityFailure: (error: unknown) => boolean
+  /** Compare with main-process session authority after asynchronous boundaries. */
+  isSessionGenerationCurrent?: (expected: number) => Promise<boolean>
   /**
    * Called only for the first producer-derived 409. The surface must obtain
    * explicit consent and fresh authority for this exact numbered name before
@@ -133,9 +138,20 @@ export async function commitGfsMove(
   deps: MoveCommitDeps,
   plan: MoveCommitPlan
 ): Promise<MoveCommitOutcome> {
+  const isSessionCurrent = async (): Promise<boolean> => {
+    if (plan.sessionGeneration === undefined || !deps.isSessionGenerationCurrent) return true
+    try {
+      return await deps.isSessionGenerationCurrent(plan.sessionGeneration)
+    } catch {
+      return false
+    }
+  }
+  if (!(await isSessionCurrent())) return { status: 'session-lost' }
+
   let snapshot: MoveCommitSourceSnapshot
   try {
     const resolved = await deps.resolveSource(plan.source.gfsUri)
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
     snapshot = {
       resourceId: resolved.resourceId,
       gfsUri: plan.source.gfsUri,
@@ -145,6 +161,7 @@ export async function commitGfsMove(
       parentResourceId: resolved.parentResourceId,
     }
   } catch (error) {
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
     if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
     const status = parseHttpStatus(messageOf(error))
     if (status === 404) {
@@ -195,6 +212,7 @@ export async function commitGfsMove(
     // attempt — was in flight. A PATCH dispatched after that would move the
     // item under a session the user no longer owns, so the gesture is
     // re-validated at the dispatch boundary instead of only at admission.
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
     if (deps.isCurrent?.() === false) {
       // Every later attempt is a numbered retry after a dispatched 409. Keep
       // that server outcome when the owner disappears instead of erasing it
@@ -214,8 +232,10 @@ export async function commitGfsMove(
         // The commit-time parent, so the convergence drops the item from the
         // folder it really left (the drag-start parent can be stale, or
         // unknown — and an unknown parent is not the physical root).
-        snapshot.parentResourceId
+        snapshot.parentResourceId,
+        plan.sessionGeneration
       )
+      if (!(await isSessionCurrent())) return { status: 'session-lost' }
       return {
         status: 'committed',
         version: receipt.version,
@@ -225,6 +245,7 @@ export async function commitGfsMove(
     } catch (attemptError) {
       error = attemptError
     }
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
     if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
 
     const message = messageOf(error)
@@ -252,6 +273,7 @@ export async function commitGfsMove(
       // (RP-027).
       try {
         const resolvedSource = await deps.resolveSource(plan.source.gfsUri)
+        if (!(await isSessionCurrent())) return { status: 'session-lost' }
         if (resolvedSource.parentResourceId === plan.destination.resourceId) {
           // The move landed after all; the 404 answered about something else.
           return {
@@ -266,6 +288,7 @@ export async function commitGfsMove(
           message: 'This folder is no longer available.',
         }
       } catch (resolveError) {
+        if (!(await isSessionCurrent())) return { status: 'session-lost' }
         if (deps.isSessionAuthorityFailure(resolveError)) return { status: 'session-lost' }
         const resolveStatus = parseHttpStatus(messageOf(resolveError))
         if (resolveStatus === 404 || resolveStatus === 410) {
@@ -306,6 +329,7 @@ export async function commitGfsMove(
       // Transport loss after dispatch: verify the outcome by identity; never
       // repeat a possibly committed move.
       const verified = await verifyOutcomeByResolve(deps, plan, snapshot)
+      if (!(await isSessionCurrent())) return { status: 'session-lost' }
       if (verified) return verified
       return {
         status: 'unconfirmed',
@@ -334,12 +358,14 @@ export async function commitGfsMove(
     try {
       authorized = await deps.authorizeNumberedRename(proposedName)
     } catch (authorizationError) {
+      if (!(await isSessionCurrent())) return { status: 'session-lost' }
       if (deps.isSessionAuthorityFailure(authorizationError)) return { status: 'session-lost' }
       return {
         status: 'conflict-stopped',
         message: CONFLICT_STOPPED_MESSAGE,
       }
     }
+    if (!(await isSessionCurrent())) return { status: 'session-lost' }
     if (!authorized || deps.isCurrent?.() === false) {
       return {
         status: 'conflict-stopped',
@@ -367,6 +393,13 @@ async function verifyOutcomeByResolve(
 ): Promise<Extract<MoveCommitOutcome, { status: 'committed' | 'session-lost' }> | null> {
   try {
     const resolved = await deps.resolveSource(plan.source.gfsUri)
+    if (
+      plan.sessionGeneration !== undefined &&
+      deps.isSessionGenerationCurrent &&
+      !(await deps.isSessionGenerationCurrent(plan.sessionGeneration))
+    ) {
+      return { status: 'session-lost' }
+    }
     if (resolved.parentResourceId === plan.destination.resourceId) {
       return {
         status: 'committed',
@@ -380,6 +413,13 @@ async function verifyOutcomeByResolve(
     }
     return null
   } catch (error) {
+    if (
+      plan.sessionGeneration !== undefined &&
+      deps.isSessionGenerationCurrent &&
+      !(await deps.isSessionGenerationCurrent(plan.sessionGeneration).catch(() => false))
+    ) {
+      return { status: 'session-lost' }
+    }
     if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
     return null
   }

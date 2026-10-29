@@ -426,7 +426,8 @@ declare global {
           destinationId: string,
           drive?: string,
           ifMatch?: number,
-          newName?: string
+          newName?: string,
+          expectedSessionGeneration?: number
         ) => Promise<{ resourceId: string; version: number }>
         deleteResource: (
           resourceId: string,
