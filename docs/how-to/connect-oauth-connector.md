@@ -1,10 +1,11 @@
 # How to: connect an OAuth connector and manage connector credentials
 
 Some connectors (MCP servers) authenticate with OAuth instead of a static API
-key. For these, an operator installs the connector once, and each user (or one
-member of a Context) authorizes it in the browser. control-api keeps the
-tokens. This page covers that flow, then the second half of the topic:
-setting and rotating credentials for connectors that use a static Secret.
+key. For these, an operator installs the connector once, and each user (or,
+for a shared grant, one user who reaches a Context that enables it) authorizes
+it in the browser. control-api keeps the tokens. This page covers that flow,
+then the second half of the topic: setting and rotating credentials for
+connectors that use a static Secret.
 
 Field-by-field reference: [McpServer CRD, OAuth (`spec.oauth`)](../crds/mcpserver.md#oauth-specoauth).
 
@@ -67,21 +68,39 @@ UID, so users must authorize again.
   account. One grant per user covers every agent of theirs that uses this
   connector.
 - **`context`** (shown as **Per context** / **Shared (context)**): one shared
-  grant per Context. Any member authorizes it, and every agent in that Context
-  then acts with that identity. Desktop asks the user to confirm before
-  connecting or disconnecting a shared grant.
+  grant per Context. One user who reaches that Context authorizes it (see
+  below), and every agent in that Context then acts with that identity.
+  Desktop asks the user to confirm before connecting or disconnecting a shared
+  grant.
 
-Users can only authorize or disconnect servers whose `spec.contextRef` is a
-Context they belong to. Otherwise the request fails with
-`context_membership_denied`.
+Who may authorize depends on the Contexts that enable the server in their
+`spec.mcpServers` allowlist; the McpServer itself names no Context.
+
+- **`user`**: a user can authorize the server when at least one Context they
+  reach (directly, or through an agent assigned to them) enables it in its
+  allowlist. The grant then serves every such Context.
+- **`context`**: the grant is keyed by (server, Context), so each Context that
+  enables the server has its own shared grant. A user can authorize it only
+  while that Context enables the server in its allowlist, and only if they
+  reach that Context (directly, or through an agent assigned to them). The
+  token belongs to the Context, not to the user who authorized it: it keeps
+  working after that user loses access, and it is removed when the Context
+  stops enabling the server or is deleted.
+
+Membership through a team does not count as reaching a Context for either
+scope.
+
+If the user does not qualify, the request fails with
+`context_membership_denied`. Installing a connector enables it for no Context;
+adding it to a Context's `mcpServers` is a separate step.
 
 ## Operator: add a remote MCP server (Control UI)
 
 1. Open **Connectors** (`/connectors`) and click **Add remote server**
    (`/connectors/remote/new`).
 2. **Identify**: enter the **Remote server URL** (for example
-   `https://mcp.example.com/mcp`), a **Server name** (a Kubernetes name), and
-   the **Context** to attach the server to. Click **Detect**.
+   `https://mcp.example.com/mcp`) and a **Server name** (a Kubernetes name).
+   Click **Detect**.
    control-api runs RFC 9728/8414 discovery and probes the MCP endpoint. If the
    endpoint is unreachable, the wizard stays on this step and may suggest the
    correct URL. If the server signs in through Microsoft Entra ID, the wizard
@@ -120,8 +139,9 @@ Context they belong to. Otherwise the request fails with
    Register exactly that URI. If the authorization server changed since
    detection, the wizard warns that the URI is different.
 
-The install creates the client Secret (pre-registered only), the McpServer, and
-the Context attachment, and rolls back if a step fails. The resulting
+The install creates the client Secret (pre-registered only) and the McpServer,
+and rolls back if a step fails. It enables the server for no Context: give
+agents access afterwards from the connector's access panel. The resulting
 McpServer runs the platform egress proxy image (`clerum/nginx-egress-proxy`)
 with an exact-host egress binding to port 443 of the remote host. API
 equivalents: `POST /api/v1/admin/mcp-servers/remote/discover` (dry run) and
@@ -377,7 +397,6 @@ metadata:
   name: notion
   namespace: mcp-server
 spec:
-  contextRef: context1
   # image, transport, egress: see the CRD reference
   auth:
     type: oauth # forbids auth.secretRef / auth.secretKey
@@ -502,7 +521,7 @@ out too, but the screen only tracks the current one.
 | **Detect** stops with an unreachable transport (`transport_unreachable` on install) | The URL is not the MCP endpoint                                                                                | Use the URL the wizard suggests, or the server's documented MCP path                                     |
 | Marketplace OAuth form says the callback URL is not configured                      | `CONTROL_API_OAUTH_CALLBACK_BASE_URL` is unset on control-api                                                  | Set it, restart control-api, and reload the form                                                         |
 | `503 integration_not_configured`                                                    | The client ID or secret Secret, or one of its keys, is missing                                                 | Create the Secret the hint names                                                                         |
-| `403 context_membership_denied`                                                     | The user is not a member of the server's Context                                                               | Add the user to the Context                                                                              |
+| `403 context_membership_denied`                                                     | No Context the user reaches enables the server (for **Per context**: the user does not reach that Context, or that Context does not enable the server) | Enable the server in one of the user's Contexts, or add the user to a Context that enables it            |
 | Users must authorize again after a reinstall                                        | Grants are bound to the old McpServer UID                                                                      | Expected                                                                                                 |
 | Connector shows **Missing Secret**                                                  | `SecretResolved=False`                                                                                         | Use **Set credentials** on the **Credentials** tab                                                       |
 | Rotation restarted other connectors                                                 | They share the same `envSecret`                                                                                | Expected. Check `affectedConnectors`.                                                                    |

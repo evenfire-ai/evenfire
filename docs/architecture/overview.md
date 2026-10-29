@@ -233,6 +233,8 @@ spec:
 
 Declares an MCP server that should be deployed and managed by the host-context-controller operator. When this CRD is created, host-context-controller automatically creates a matching Deployment and Service.
 
+An McpServer names no Context. A Context exposes it by listing its name in `spec.mcpServers` (section 2.3), and several Contexts can list the same server.
+
 ```yaml
 apiVersion: clerum.io/v1alpha1
 kind: McpServer
@@ -240,7 +242,6 @@ metadata:
   name: mongodb-server
   namespace: mcp-server
 spec:
-  contextRef: 'context1'
   description: 'MongoDB MCP server for database access'
   image: 'mongodb/mongodb-mcp-server:latest'
   imagePullPolicy: 'Always'
@@ -325,7 +326,7 @@ flowchart TD
     CC["CommunicationChannel<br/>spec.hostRef"]
     HOST["Host<br/>spec.contextRef, spec.secretRef"]
     CTX["Context<br/>spec.mcpServers[] allowlist"]
-    MCS["McpServer<br/>spec.contextRef, spec.auth.secretRef"]
+    MCS["McpServer<br/>spec.auth.secretRef"]
     SEC1[("Secret: LLM API keys")]
     SEC2[("Secret: MCP server credentials")]
 
@@ -333,7 +334,6 @@ flowchart TD
     HOST -->|contextRef| CTX
     HOST -->|secretRef| SEC1
     CTX -->|"mcpServers[] names"| MCS
-    MCS -->|contextRef back-reference| CTX
     MCS -->|auth.secretRef| SEC2
 
     WCR["channel-reader watches"] -.-> CC
@@ -1385,7 +1385,7 @@ cd mcp-servers/airtable && docker run -p 3000:3000 -e AIRTABLE_API_KEY=pat... ai
 cd mcp-host
 CLERUM_DEV_MODE=true \
 OPENAI_API_KEY=sk-... \
-CLERUM_MCP_SERVERS='[{"name":"airtable","transport":{"type":"streamableHttp","url":"http://localhost:3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true},"contextRef":"dev"}]' \
+CLERUM_MCP_SERVERS='[{"name":"airtable","transport":{"type":"streamableHttp","url":"http://localhost:3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true}}]' \
 npm run dev
 
 # Terminal 3: Run channel-reader
