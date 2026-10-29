@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { FullscreenOutlined, PlusOutlined, RightOutlined } from '@ant-design/icons'
 import { Button, Drawer, Flex } from 'antd'
 import { CHAT_DRAWER_MAX_ABSOLUTE, CHAT_DRAWER_MIN_WIDTH } from '@hooks/useChatDrawerResize'
@@ -19,6 +20,8 @@ export function ChatDrawer({
   onNewChat,
   onExpandFullScreen,
   onCollapse,
+  open,
+  onAfterClose,
   containerRef,
   ready,
   onResizeHandleMouseDown,
@@ -27,17 +30,22 @@ export function ChatDrawer({
   resizing,
   children,
 }: ChatDrawerProps) {
+  const [retainedReady, setRetainedReady] = useState(ready)
+  const drawerOpen = open && ready
+
+  useEffect(() => {
+    if (ready) setRetainedReady(true)
+  }, [ready])
+
   return (
     <aside
-      className={`chat-drawer${ready ? ' is-ready' : ''}${resizing ? ' is-resizing' : ''}`}
+      className={`chat-drawer${ready || retainedReady ? ' is-ready' : ''}${drawerOpen ? ' is-open' : ''}${resizing ? ' is-resizing' : ''}`}
       aria-label="Chat"
+      aria-hidden={!drawerOpen}
       data-ready={ready ? 'true' : 'false'}
-      // Not-ready is hidden with `opacity: 0; pointer-events: none`, which stops
-      // the mouse but NOT the keyboard: a `tabIndex=0` under opacity:0 is still
-      // focusable, so between mount and the embed's bounds-ack Tab could land on
-      // the invisible resize handle / CTAs. `inert` takes the whole subtree out
-      // of the tab order (and the a11y tree) until the drawer is actually shown.
-      inert={!ready}
+      // A hidden or closing drawer is inert even while it remains mounted for
+      // Ant Design's exit motion, so controls cannot receive focus or input.
+      inert={!drawerOpen}
     >
       <div
         className="chat-drawer__resize-handle"
@@ -93,7 +101,13 @@ export function ChatDrawer({
         getContainer={false}
         keyboard={false}
         mask={false}
-        open={ready}
+        afterOpenChange={isOpen => {
+          if (!isOpen) {
+            setRetainedReady(false)
+            onAfterClose()
+          }
+        }}
+        open={drawerOpen}
         placement="right"
         rootStyle={{ position: 'absolute', inset: 0 }}
         size={width}

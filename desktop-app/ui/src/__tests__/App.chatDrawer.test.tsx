@@ -2161,9 +2161,9 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
 
   // Right-rail single-occupancy (E): while the chat drawer holds the rail the
   // notification tray is forced to its overlay/popover form (never the app-drawer
-  // form), so opening the tray can't close the drawer. Collapsing the drawer frees
-  // the rail and the tray reclaims its drawer form — the tray behavior is intact.
-  it('keeps the notification tray out of the rail while the chat drawer occupies it', () => {
+  // form), so opening the tray can't close the drawer. The tray reclaims its
+  // drawer form after the chat drawer's exit motion finishes.
+  it('keeps the notification tray out of the rail until the chat drawer exits', async () => {
     renderApp(<App />)
     act(() =>
       sidebarHarness.props?.onOpenSandboxUiApp?.({
@@ -2178,6 +2178,6 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
 
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
-    expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
+    await waitFor(() => expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer'))
   })
 })

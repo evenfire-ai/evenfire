@@ -13543,6 +13543,10 @@ pre {
   pointer-events: auto;
 }
 
+.chat-drawer.is-ready:not(.is-open) {
+  pointer-events: none;
+}
+
 /* Drag handle on the drawer's LEFT edge. A comfortable ~8px grab strip (the
    hit-area) whose ::after paints the docked seam: a persistent 1px rule at rest
    that thickens to a 2px accent on hover / during a drag. Sits inside the drawer

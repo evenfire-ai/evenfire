@@ -18,12 +18,12 @@ export type ChatDrawerProps = {
   onExpandFullScreen: () => void
   /** Scroll container the embedded <ChatPage> anchors to. */
   containerRef: RefObject<HTMLElement | null>
-  /**
-   * When false the drawer stays mounted but visually hidden until the native
-   * embed has finished shrinking, mirroring the notification drawer's
-   * bounds-ack anti-flash gate.
-   */
+  /** Anti-flash gate: false keeps an unready drawer hidden until the embed acks its bounds. */
   ready: boolean
+  /** Whether the drawer is open; false allows Ant Design to play its exit motion. */
+  open: boolean
+  /** Called after Ant Design finishes the exit motion. */
+  onAfterClose: () => void
   /**
    * mousedown handler for the left-edge drag handle that resizes the drawer.
    * Wired from `useChatDrawerResize`.

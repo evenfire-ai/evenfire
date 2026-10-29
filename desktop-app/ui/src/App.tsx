@@ -296,6 +296,8 @@ export function App() {
   const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)
   const [notificationTrayLeft, setNotificationTrayLeft] = React.useState<number | null>(null)
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
+  // Keep manually closed drawers mounted until Ant Design finishes its exit.
+  const [chatDrawerExitPending, setChatDrawerExitPending] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
   // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
   // drawer follows the app content down when the sandbox-ui header wraps (narrow
@@ -333,6 +335,9 @@ export function App() {
   // callbacks) can tell whether a reveal should target the in-app drawer or the
   // full-screen chat route without re-binding on every render.
   const chatDrawerVisibleRef = React.useRef(false)
+  // Only manually closing a ready drawer needs an exit animation. Forced route
+  // changes continue to unmount it immediately, avoiding two live ChatPages.
+  const chatDrawerExitReadyRef = React.useRef(false)
   // Mirrors `chatDrawerDivertable`: the drawer is a VALID surface to divert a
   // gesture into only when the app is live AND the panel is wide enough to render
   // it. Below the minimum width the drawer is suppressed, so "new chat" /
@@ -662,6 +667,7 @@ export function App() {
       // clearing the open INTENT here keeps the drawer from silently re-opening
       // when the user later returns to a non-chat tab (going to a chat is an
       // explicit focus change; R5's "intact" only spans non-chat ↔ non-chat).
+      setChatDrawerExitPending(false)
       setChatDrawerOpen(false)
       leaveSandboxForChat()
       if (agentRef) {
@@ -739,6 +745,7 @@ export function App() {
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
       // chat in the drawer without tearing the live embed down.
+      setChatDrawerExitPending(false)
       setChatDrawerOpen(true)
       if (agentRef) {
         vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
@@ -767,6 +774,7 @@ export function App() {
   ])
 
   const openChatDrawer = React.useCallback(() => {
+    setChatDrawerExitPending(false)
     setChatDrawerOpen(true)
     // Seed the drawer from the conversation the app was opened from ONLY when
     // there is no real chat to return to yet. Once a real conversation is active
@@ -814,6 +822,7 @@ export function App() {
   }, [vm.activeChatId, vm.handleSelectChatAgent, vm.lastActiveChatTabId, vm.selectedAgent])
 
   const closeChatDrawer = React.useCallback(() => {
+    setChatDrawerExitPending(chatDrawerExitReadyRef.current)
     setChatDrawerOpen(false)
   }, [])
 
@@ -840,6 +849,7 @@ export function App() {
     } else {
       vm.handleNavSelect(DESKTOP_ROUTES.chat)
     }
+    setChatDrawerExitPending(false)
     setChatDrawerOpen(false)
     setComposerFocusRequestId(value => value + 1)
   }, [
@@ -872,6 +882,7 @@ export function App() {
         String(notification.agentName || '').trim() !== '' &&
         (!notification.teamId || notification.teamId === vm.getCurrentTeamId())
       if (surfacesInDrawer) {
+        setChatDrawerExitPending(false)
         setChatDrawerOpen(true)
         return vm.handleOpenNotification(notification, { keepNavItem: true })
       }
@@ -959,6 +970,16 @@ export function App() {
     drawerContentFloor
   )
   const chatDrawerVisible = chatDrawerDesired && !chatDrawerResize.panelTooNarrow
+  const chatDrawerExiting =
+    chatDrawerExitPending &&
+    !chatDrawerVisible &&
+    drawerAvailable &&
+    !chatDrawerResize.panelTooNarrow
+  React.useEffect(() => {
+    if (!drawerAvailable || chatDrawerResize.panelTooNarrow) {
+      setChatDrawerExitPending(false)
+    }
+  }, [chatDrawerResize.panelTooNarrow, drawerAvailable])
   // Can a gesture be diverted INTO the drawer right now? Only if it is a valid
   // surface: drawer available AND wide enough to render. Kept SEPARATE from the
   // hook's `active` input on purpose — folding `!panelTooNarrow` into
@@ -975,6 +996,10 @@ export function App() {
   // flicker, and never the "inert forever" trap where a DOM tab waits for a
   // bounds ack that never arrives.
   const drawerReady = drawerHasEmbed ? chatDrawerReady : chatDrawerVisible
+  chatDrawerExitReadyRef.current = chatDrawerVisible && drawerReady
+  const finishChatDrawerExit = React.useCallback(() => {
+    if (!chatDrawerVisibleRef.current) setChatDrawerExitPending(false)
+  }, [])
   // The rail starts below the header on both tab kinds: app tabs follow the
   // embed's measured header top; DOM tabs follow the measured bottom of the
   // global tab strip (both sit below the strip). The static 64px CSS fallback
@@ -987,7 +1012,8 @@ export function App() {
   // (the existing shell-overlay freeze covers that case) to avoid two stacked
   // drawers fighting for the same rect. AppHeader's tray open-state is its own
   // internal `notificationsOpen`, so flipping the mode never closes an open tray.
-  const notificationTrayUsesDrawer = Boolean(activeSandboxUiApp) && !chatDrawerVisible
+  const notificationTrayUsesDrawer =
+    Boolean(activeSandboxUiApp) && !chatDrawerVisible && !chatDrawerExiting
   const appNotificationDrawerOpen = notificationTrayUsesDrawer && headerNotificationTrayOpen
   const activeConversationOrigin = React.useMemo<SandboxUiConversationOrigin | null>(() => {
     if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent || !vm.activeChatId) {
@@ -1545,6 +1571,7 @@ export function App() {
       // instead of the destroy-and-reconstitute round-trip. `keepNavItem`
       // records a pending selection that survives the `apps` route change and
       // loads the chat. The reconcile effect adds the chat tab to the switcher.
+      setChatDrawerExitPending(false)
       setChatDrawerOpen(true)
       vm.handleSelectChatAgent(conversationOrigin.agentName, {
         chatId: conversationOrigin.chatId,
@@ -2070,6 +2097,7 @@ export function App() {
     setCommandPaletteOpen(false)
     setCommandPaletteReturnToSandbox(false)
     setSettingsShortcutsRequestId(0)
+    setChatDrawerExitPending(false)
     setChatDrawerOpen(false)
     setChatSwitcherFocusRequestId(0)
   }, [vm.authenticatedPrincipalIdentity])
@@ -3113,7 +3141,7 @@ export function App() {
                                   universal gutter. Single global <ChatPage>/
                                   ChatSwitcher — no duplicated tab state or
                                   streams. */}
-                                {chatDrawerVisible && (
+                                {(chatDrawerVisible || chatDrawerExiting) && (
                                   <RightRailShell
                                     occupant="chat-drawer"
                                     width={chatDrawerResize.width}
@@ -3134,6 +3162,8 @@ export function App() {
                                       onCollapse={closeChatDrawer}
                                       containerRef={chatDrawerRef}
                                       ready={drawerReady}
+                                      open={chatDrawerVisible}
+                                      onAfterClose={finishChatDrawerExit}
                                       onResizeHandleMouseDown={
                                         chatDrawerResize.onResizeHandleMouseDown
                                       }
