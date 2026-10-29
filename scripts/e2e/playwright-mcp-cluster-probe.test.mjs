@@ -337,7 +337,7 @@ test('refuses a new fixture when an earlier server or workload remains', () => {
   assert.throws(
     () =>
       assertNoResidue(args =>
-        args.includes('mcpservers.clerum.io') ? 'mcpserver/pwmcp0123456789abmcp\n' : ''
+        args.some(arg => arg === 'mcpservers.clerum.io') ? 'mcpserver/pwmcp0123456789abmcp\n' : ''
       ),
     /RESIDUE_PRESENT/
   )
