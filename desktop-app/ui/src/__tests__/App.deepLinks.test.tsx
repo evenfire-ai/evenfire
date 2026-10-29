@@ -2144,6 +2144,10 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(confirmDialogHarness.mountedCount).toBe(0))
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
     expect(queue.list().map(item => item.id)).toEqual([first.id])
+    expect(
+      view.container.querySelector('[data-testid="sandbox-ui-deep-link-rollback-pending"]')
+        ?.textContent
+    ).toContain('cannot be retried')
     expect(getController().getCurrentTeamId()).toBe('team-b')
     expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSettlement)
     expect(listApps.mock.calls.length).toBe(listCallsBeforeSettlement)
@@ -2160,6 +2164,9 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-a'))
     expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === first.id)).toHaveLength(1)
     expect(queue.list()).toEqual([])
+    expect(
+      view.container.querySelector('[data-testid="sandbox-ui-deep-link-rollback-pending"]')
+    ).toBeNull()
 
     const listCallsBeforeLaterLink = listApps.mock.calls.length
     const opensBeforeLaterLink = openSandboxUi().mock.calls.length

@@ -18,7 +18,7 @@ import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatSwitcher } from '@components/ChatSwitcher'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
-import { Button, ToastStack } from '@components/Common'
+import { Button, StatusBanner, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
@@ -3151,6 +3151,14 @@ export function App() {
   const failedSandboxUiDeepLink = vm.authenticatedPrincipalIdentity
     ? pendingSandboxUiDeepLinks.find(item => item.failedMessage && !item.failedMessageDismissed)
     : null
+  const pendingSandboxUiDeepLinkRollback = vm.authenticatedPrincipalIdentity
+    ? pendingSandboxUiDeepLinks.find(
+        item =>
+          item.link.id === processingSandboxUiDeepLinkIdRef.current &&
+          item.failedMessageDismissed &&
+          !isPendingSandboxUiDeepLinkStale(item, vm.authenticatedPrincipalIdentity)
+      )
+    : null
 
   const handleConfirmSandboxUiDeepLink = React.useCallback(
     (linkId: number) => {
@@ -3813,6 +3821,19 @@ export function App() {
                                     />
                                   </TitlebarActionsPortal>
                                   <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
+                                  {pendingSandboxUiDeepLinkRollback ? (
+                                    <div
+                                      className="app-link-rollback-pending"
+                                      data-testid="sandbox-ui-deep-link-rollback-pending"
+                                      role="status"
+                                      aria-live="polite"
+                                    >
+                                      <StatusBanner
+                                        tone="info"
+                                        text="This app link is waiting for the previous team restore to finish. It remains queued and cannot be retried yet."
+                                      />
+                                    </div>
+                                  ) : null}
                                   {/* Single global strip: driven by the universal
                                     store, visible on every route above the
                                     per-kind seam so any tab is reachable from any
