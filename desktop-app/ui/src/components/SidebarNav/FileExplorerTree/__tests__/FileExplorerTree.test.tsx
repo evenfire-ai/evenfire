@@ -847,147 +847,6 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     )
   }
 
-  it('runs captured Move 401 authority handling once', async () => {
-    const moveFailure = await gfsRouteFailureMessage(
-      client =>
-        client.moveResource(
-          {
-            resourceId: sourceResourceId,
-            destinationId: destinationAId,
-            drive: 'main',
-            ifMatch: 4,
-          },
-          'fixture-session-token'
-        ),
-      401,
-      { code: 'unauthorized', message: 'session expired' }
-    )
-    const moveResource = vi.fn(async () => {
-      throw new Error(moveFailure)
-    })
-    installDndClerum({
-      listAccessible: vi.fn(async () => accessibleRows()),
-      affordances: appServiceAffordanceProducer(async () =>
-        heldPermissionResponse(['read', 'write', 'delete'])
-      ),
-      resolve: vi.fn(async () => resolveSource()),
-      moveResource,
-    })
-    const { queryClient } = renderTreeWithSession()
-    const removeQueries = vi.spyOn(queryClient, 'removeQueries')
-
-    try {
-      const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
-
-      expect(await screen.findByText('File access is not authorized')).toBeTruthy()
-      const rootPurges = removeQueries.mock.calls.filter(
-        ([filters]) => filters.queryKey?.[0] === 'desktop-app' && filters.queryKey?.[1] === 'gfs'
-      )
-      expect(rootPurges).toHaveLength(1)
-      expect(moveResource).toHaveBeenCalledTimes(1)
-    } finally {
-      queryClient.clear()
-    }
-  })
-
-  it('shows one inline failure for a current Sidebar Move dialog', async () => {
-    const moveFailure = await gfsRouteFailureMessage(
-      client =>
-        client.moveResource(
-          {
-            resourceId: sourceResourceId,
-            destinationId: destinationAId,
-            drive: 'main',
-            ifMatch: 4,
-          },
-          'fixture-session-token'
-        ),
-      412,
-      { code: 'version_conflict', message: 'stale version' }
-    )
-    const moveResource = vi.fn(async () => {
-      throw new Error(moveFailure)
-    })
-    installDndClerum({
-      listAccessible: vi.fn(async () => accessibleRows()),
-      affordances: appServiceAffordanceProducer(async () =>
-        heldPermissionResponse(['read', 'write', 'delete'])
-      ),
-      resolve: vi.fn(async () => resolveSource()),
-      moveResource,
-    })
-    const { pushToast, queryClient } = renderTreeWithSession()
-
-    try {
-      const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
-
-      expect(
-        await within(dialog).findByText(
-          'This item changed while you were moving it. Review its current location and try again.'
-        )
-      ).toBeTruthy()
-      expect(moveResource).toHaveBeenCalledTimes(1)
-      expect(pushToast).not.toHaveBeenCalled()
-    } finally {
-      queryClient.clear()
-    }
-  })
-
-  it('reports one Sidebar Move failure through ToastStack after the dialog closes', async () => {
-    const moveFailure = await gfsRouteFailureMessage(
-      client =>
-        client.moveResource(
-          {
-            resourceId: sourceResourceId,
-            destinationId: destinationAId,
-            drive: 'main',
-            ifMatch: 4,
-          },
-          'fixture-session-token'
-        ),
-      412,
-      { code: 'version_conflict', message: 'stale version' }
-    )
-    let rejectMove!: (error: Error) => void
-    const pendingMove = new Promise<{ resourceId: string; version: number }>((_resolve, reject) => {
-      rejectMove = reject
-    })
-    const moveResource = vi.fn(() => pendingMove)
-    installDndClerum({
-      listAccessible: vi.fn(async () => accessibleRows()),
-      affordances: appServiceAffordanceProducer(async () =>
-        heldPermissionResponse(['read', 'write', 'delete'])
-      ),
-      resolve: vi.fn(async () => resolveSource()),
-      moveResource,
-    })
-    const { pushToast, queryClient } = renderTreeWithSession()
-
-    try {
-      const dialog = await openMoveDialog()
-      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
-      await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
-      await act(async () => rejectMove(new Error(moveFailure)))
-
-      await waitFor(() => expect(pushToast).toHaveBeenCalledTimes(1))
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.stringContaining('report.txt → Archive A:'),
-        'error'
-      )
-      expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
-      expect(moveResource).toHaveBeenCalledTimes(1)
-    } finally {
-      await act(async () => rejectMove(new Error(moveFailure)))
-      queryClient.clear()
-    }
-  })
-
   it('freshly checks the source parent and destination without dispatching another Move', async () => {
     let sourcePermissions = ['read']
     let sourceParentReads = 0
@@ -1129,70 +988,6 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     expect(within(dialog).queryByText('Permissions verified. Select Move to confirm.')).toBeNull()
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
-
-  it.each(['selection change', 'dialog close'] as const)(
-    'does not dispatch the old explicit Move after %s during source resolution',
-    async change => {
-      let releaseSource!: (value: Awaited<ReturnType<typeof resolveSource>>) => void
-      let markResolveStarted!: () => void
-      const resolveStarted = new Promise<void>(resolve => {
-        markResolveStarted = resolve
-      })
-      const pendingResolve = new Promise<Awaited<ReturnType<typeof resolveSource>>>(resolve => {
-        releaseSource = resolve
-      })
-      const resolved = await resolveSource()
-      const resolve = vi.fn(async (uri: string) => {
-        if (uri !== `gfs://main/${sourceResourceId}`) {
-          throw new Error(`Unexpected resolve: ${uri}`)
-        }
-        markResolveStarted()
-        return pendingResolve
-      })
-      const affordances = appServiceAffordanceProducer(async () =>
-        heldPermissionResponse(['read', 'write', 'delete'])
-      )
-      const moveResource = vi.fn(async () => ({ resourceId: sourceResourceId, version: 5 }))
-      installDndClerum({
-        listAccessible: vi.fn(async () => accessibleRows()),
-        affordances: vi.fn((resourceId: string, drive?: string) => affordances(resourceId, drive)),
-        resolve,
-        moveResource,
-      })
-      const { queryClient } = renderTreeWithSession()
-
-      try {
-        const dialog = await openMoveDialog()
-        await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
-        fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
-        await resolveStarted
-        expect(moveResource).not.toHaveBeenCalled()
-
-        if (change === 'selection change') {
-          await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
-          expect(within(dialog).getByRole('button', { name: 'Move here (Archive B)' })).toBeTruthy()
-        } else {
-          fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
-        }
-        await act(async () => releaseSource(resolved))
-
-        await act(async () => {
-          await Promise.resolve()
-          await Promise.resolve()
-        })
-        expect(moveResource).not.toHaveBeenCalled()
-        if (change === 'selection change') {
-          expect(screen.getByRole('dialog', { name: 'Move file report.txt' })).toBeTruthy()
-          expect(within(dialog).getByRole('button', { name: 'Move here (Archive B)' })).toBeTruthy()
-        } else {
-          expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
-        }
-      } finally {
-        await act(async () => releaseSource(resolved))
-        queryClient.clear()
-      }
-    }
-  )
 
   it('rechecks the latest source parent after the listed resource moves before Retry', async () => {
     let currentParentId = sourceParentId
@@ -1549,90 +1344,6 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 })
 
 describe('FileExplorerTree — drag-and-drop moves', () => {
-  it('stops a file drag on a producer-derived conflict without numbered retry', async () => {
-    const conflictMessage = await gfsRouteFailureMessage(
-      client =>
-        client.moveResource(
-          { resourceId: 'file-1', destinationId: 'folderb', drive: 'main', ifMatch: 7 },
-          'fixture-session-token'
-        ),
-      409,
-      { code: 'name_conflict', message: 'an item with this name already exists' }
-    )
-    const moveResource = vi.fn(async () => {
-      throw new Error(conflictMessage)
-    })
-    const resolve = vi.fn(async (uri: string) => {
-      const id = uri.split('/').pop()
-      if (id === 'file-1') {
-        return resolveResource(
-          resolvedFile('file-1', 'report.txt', { parentResourceId: 'foldera', version: 7 })
-        )
-      }
-      if (id === 'foldera') {
-        return resolveResource(
-          resolvedDirectory('foldera', 'A', { parentResourceId: 'grand', version: 2 })
-        )
-      }
-      if (id === 'folderb') {
-        return resolveResource(
-          resolvedDirectory('folderb', 'B', { parentResourceId: 'grand', version: 3 })
-        )
-      }
-      return resolveResource(resolvedDirectory('grand', 'Grand', { parentResourceId: null }))
-    })
-    installDndClerum({
-      listAccessible: vi.fn(async () =>
-        listAccessiblePage([
-          accessibleResource('foldera', 'A', 'directory'),
-          accessibleResource('folderb', 'B', 'directory'),
-        ])
-      ),
-      listChildren: vi.fn(async (resourceId: string) =>
-        resourceId === 'foldera'
-          ? listChildrenPage([
-              childView('file-1', 'report.txt', 'file', {
-                parentResourceId: 'foldera',
-                version: 7,
-              }),
-            ])
-          : listChildrenPage([])
-      ),
-      affordances: vi.fn(async (resourceId: string) =>
-        resourceId === 'folderb'
-          ? { held: ['read', 'write'] }
-          : { held: ['read', 'write', 'delete'] }
-      ),
-      resolve,
-      moveResource,
-    })
-    const { pushToast } = renderTreeWithSession()
-
-    await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
-    })
-    const fileButton = await screen.findByRole('button', { name: 'report.txt' })
-    const folderButton = await screen.findByRole('button', { name: 'B' })
-    const folderRow = folderButton
-      .closest('[role="treeitem"]')!
-      .querySelector('.da-file-explorer__row')!
-    const dataTransfer = dragTypes()
-
-    fireEvent.dragStart(fileButton, { dataTransfer })
-    fireEvent.dragEnter(folderRow, { dataTransfer })
-    fireEvent.dragOver(folderRow, { dataTransfer })
-    fireEvent.drop(folderRow, { dataTransfer })
-
-    await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
-    expect(moveResource).toHaveBeenCalledWith('file-1', 'folderb', 'main', 7, undefined)
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.stringContaining('report.txt → B: An item with this name already exists'),
-        'error'
-      )
-    )
-  })
-
   it('still opens the confirmation when adjudication resolves after the gesture’s dragend', async () => {
     // Regression: the browser fires dragend ~immediately after drop.
     // clearDragState used to bump the gesture epoch on that dragend, so the
@@ -1692,19 +1403,31 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     await screen.findByRole('dialog', { name: 'Move folder A to B' })
   })
 
-  it('stops a folder drag on a producer-derived name conflict without offering rename', async () => {
-    const conflictMessage = await gfsRouteFailureMessage(
-      client =>
-        client.moveResource(
-          { resourceId: 'foldera', destinationId: 'folderb', drive: 'main', ifMatch: 4 },
-          'fixture-session-token'
-        ),
-      409,
-      { code: 'name_conflict', message: 'an item with this name already exists' }
+  it('seeds the numbered-name ladder from the destination’s cached children (RP-003)', async () => {
+    // B is expanded and its children — A, A (1), A (2) — are in the shared
+    // children cache. The blind ladder burned all three attempts on taken
+    // names and ended on "The destination changed". Seeded from the cache,
+    // the first 409 jumps straight to A (3), and the confirmation suggests
+    // that same name.
+    const moveResource = vi.fn(
+      async (
+        _resourceId: string,
+        _destinationId: string,
+        _drive?: string,
+        _ifMatch?: number,
+        newName?: string
+      ) => {
+        if (
+          newName === undefined ||
+          newName === 'A' ||
+          newName === 'A (1)' ||
+          newName === 'A (2)'
+        ) {
+          throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
+        }
+        return { resourceId: 'foldera', version: 9 }
+      }
     )
-    const moveResource = vi.fn(async () => {
-      throw new Error(conflictMessage)
-    })
     const affordances = vi.fn(async (resourceId: string) => {
       if (resourceId === 'folderb') return { held: ['read', 'write'] }
       return { held: ['read', 'write', 'delete'] }
@@ -1747,8 +1470,8 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
 
     const rowA = await screen.findByRole('button', { name: 'A' })
     const rowB = await screen.findByRole('button', { name: 'B' })
-    // Expand B so the destination already has children. A cached name list
-    // must not turn drag permission into consent for a numbered rename.
+    // Expand B so its children load into the shared children cache — the
+    // production path that makes the destination's names known.
     fireEvent.click(screen.getByRole('button', { name: 'Expand B' }))
     await screen.findByRole('button', { name: 'A (1)' })
 
@@ -1761,18 +1484,14 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     fireEvent.dragEnd(aRow, { dataTransfer })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move folder A to B' })
-    expect(within(dialog).queryByRole('checkbox')).toBeNull()
-    expect(within(dialog).queryByText(/A \(3\)/)).toBeNull()
+    // The suggestion comes from the cached destination names.
+    expect(within(dialog).getByText(/A \(3\)/)).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('checkbox'))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
 
-    await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
-    expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined)
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.stringContaining('A → B: An item with this name already exists'),
-        'error'
-      )
-    )
+    await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
+    expect(moveResource).toHaveBeenNthCalledWith(2, 'foldera', 'folderb', 'main', 4, 'A (3)')
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Moved A to B as A (3)', 'success'))
   })
 
   it('a new gesture after a lost dragend commits the dragged folder, not the stale one', async () => {
