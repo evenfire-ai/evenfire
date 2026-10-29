@@ -13923,17 +13923,17 @@ pre {
    `margin-left: 0`), so the toggle sits in flow between the search and the bell
    with the top-bar gap — it must NOT carry a `margin-left: auto`, which would
    absorb the row's free space and shove the search pill to the far left, on top
-   of the app's leading actions. */
-.window-titlebar__actions .chat-drawer-toggle {
-  /* 36px wide to match the bell's footprint: the real toggle is an IconButton,
-     whose `.ui-icon-button` base pins `min-width: 36px`, so its used width is 36
-     regardless of this `width`. Pin `min-width` here too so the placeholder span
-     (which lacks `.ui-icon-button`) reserves the identical 36px — otherwise it
-     collapses to 30px and the search pill still shifts ~6px on toggle. */
+   of the app's leading actions. Keep the hidden placeholder at the same size so
+   toggling availability does not shift the search field. */
+.window-titlebar__actions .chat-drawer-toggle,
+.window-titlebar__actions .chat-drawer-toggle--placeholder {
   width: 36px;
   min-width: 36px;
   height: 30px;
   min-height: 30px;
+}
+
+.window-titlebar__actions .chat-drawer-toggle {
   border-color: transparent;
   background: transparent;
   box-shadow: none;
