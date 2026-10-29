@@ -12,8 +12,17 @@ if (!scratchRoot || !path.isAbsolute(scratchRoot)) {
 const here = path.dirname(fileURLToPath(import.meta.url))
 const sanitizer =
   process.env.PR977_SANITIZER_PATH ?? path.join(here, 'sanitize-windows-vitest-report.mjs')
+const workflowPath =
+  process.env.PR977_FOCUSED_WORKFLOW_PATH ??
+  path.join(here, '../../.github/workflows/pr977-windows-acl-focused-diagnostic.yml')
 const tempRoot = mkdtempSync(path.join(scratchRoot, 'evenfire', 'pr977-acl-sanitizer-fixtures-'))
 process.on('exit', () => rmSync(tempRoot, { recursive: true, force: true }))
+
+const focusedWorkflow = readFileSync(workflowPath, 'utf8')
+assert.ok(
+  !/^\s*continue-on-error:\s*true\s*$/m.test(focusedWorkflow),
+  'Focused ACL workflow must fail the job when native assertions fail'
+)
 
 function runCase(name, report) {
   const input = path.join(tempRoot, `${name}-input.json`)

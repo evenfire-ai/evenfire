@@ -69,8 +69,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native helper preparation failed' }
 
       - name: Run only the two representative ACL cases with an external watchdog
-        id: diagnostic
-        continue-on-error: true
         working-directory: source/desktop-app
         shell: pwsh
         env:
