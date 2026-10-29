@@ -26,6 +26,13 @@
 # manifest literal, so a later sync would otherwise revert the value; running
 # the reconcile after every apply is what keeps it.
 #
+# ORIGIN SOURCE
+# The origin comes only from the branch profile's own ports.env: PROFILE_UI_URL
+# first, then http://127.0.0.1:${PROFILE_UI_PORT}. An ambient PROFILE_UI_URL
+# (operator shell, wrapper, dotenv) must not diverge from that file, so a
+# disagreement is refused before any cluster call instead of being written onto
+# the profile Deployment.
+#
 # NOT A BRANCH PROFILE -> NO-OP
 # A branch-owned profile always carries a persisted ports.env written by
 # scripts/minikube-profiles/branch-profile.sh. Without one this script logs and
@@ -72,13 +79,13 @@ Options:
   --dry-run            Print the resolved Profile UI origin without patching the cluster
   -h, --help           Show this help
 
-The Deployment env value is resolved in this order:
-  1. PROFILE_UI_URL already exported in the environment
-  2. PROFILE_UI_URL from the branch profile ports.env
-  3. http://127.0.0.1:${PROFILE_UI_PORT} from the same file
+The Deployment env value is resolved from the branch profile ports.env:
+  1. PROFILE_UI_URL from ports.env
+  2. http://127.0.0.1:${PROFILE_UI_PORT} from the same file
 
-Without a branch profile ports.env this is a no-op. Shared or protected
-contexts are refused outright.
+An ambient PROFILE_UI_URL that disagrees with that file is refused. Without a
+branch profile ports.env this is a no-op. Shared or protected contexts are
+refused outright, case-insensitively.
 EOF
 }
 
@@ -129,8 +136,12 @@ is_branch_scoped_profile() {
 # Shared and protected contexts keep their manifest value. They are checked
 # only after a ports.env was found, so an ordinary `make minikube-deploy-all`
 # against a shared profile stays a plain no-op instead of failing the deploy.
+# The name list is case-insensitive, exactly like refuse_shared_profile_name in
+# scripts/minikube-profiles/branch-profile.sh.
 is_shared_or_protected_profile() {
-  case "$1" in
+  local normalized
+  normalized="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "${normalized}" in
     clerum | clerum-dev | clerum-test | minikube | docker-desktop | default | *gke* | *prod* | *staging*) return 0 ;;
     *) return 1 ;;
   esac
@@ -157,10 +168,7 @@ is_shared_or_protected_profile "${PROFILE}" &&
 
 resolve_profile_ui_origin() {
   local origin port
-  origin="${PROFILE_UI_URL:-}"
-  if [[ -z "${origin}" ]]; then
-    origin="$(read_ports_env_value PROFILE_UI_URL)"
-  fi
+  origin="$(read_ports_env_value PROFILE_UI_URL)"
   if [[ -z "${origin}" ]]; then
     port="$(read_ports_env_value PROFILE_UI_PORT)"
     if [[ "${port}" =~ ^[0-9]{2,5}$ ]]; then
@@ -188,6 +196,14 @@ current_cors_origin() {
 }
 
 PROFILE_UI_ORIGIN="$(resolve_profile_ui_origin)"
+
+# The branch profile owns its Profile UI port. Refuse an ambient value that
+# disagrees with the file before any cluster call instead of writing it onto
+# the profile Deployment.
+if [[ -n "${PROFILE_UI_URL:-}" && "${PROFILE_UI_URL%/}" != "${PROFILE_UI_ORIGIN}" ]]; then
+  die "refusing ambient PROFILE_UI_URL='${PROFILE_UI_URL}': ${PORTS_ENV} records '${PROFILE_UI_ORIGIN:-<no Profile UI origin>}'"
+fi
+
 [[ -n "${PROFILE_UI_ORIGIN}" ]] ||
   die "could not resolve PROFILE_UI_URL from ${PORTS_ENV}; the profile UI login origin is unknown"
 validate_origin "${PROFILE_UI_ORIGIN}"
