@@ -3551,6 +3551,11 @@ h3 {
   flex: 0 1 120px;
 }
 
+.settings-notification-sound-card.ant-card {
+  width: 100%;
+  max-width: 720px;
+}
+
 .settings-actions {
   display: flex;
   flex-wrap: wrap;

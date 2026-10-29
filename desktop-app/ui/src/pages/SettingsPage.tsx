@@ -757,6 +757,7 @@ export function SettingsPage({
           </Card>
 
           <Card
+            className="settings-notification-sound-card"
             title={
               <Flex align="center" gap="small">
                 <SoundOutlined aria-hidden="true" />
