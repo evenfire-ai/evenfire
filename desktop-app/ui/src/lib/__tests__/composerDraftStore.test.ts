@@ -50,6 +50,50 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('')
   })
 
+  it('preserves the first pending resource prefill when requests repeat for one tab', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.string({ minLength: 1, maxLength: 16 }), { minLength: 2, maxLength: 6 }),
+        suffixes => {
+          resetComposerDraftStore()
+          const requests = suffixes.map((suffix, index) => `gfs://main/${index}-${suffix}`)
+          const [first, ...retries] = requests
+
+          expect(setResourceComposerPrefill('tab-a', first, null)).toBe(true)
+          for (const retry of retries) {
+            expect(setResourceComposerPrefill('tab-a', retry, null)).toBe(false)
+          }
+
+          claimPendingResourceComposerPrefill('tab-a', 'agent-a')
+          expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe(first)
+          expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('')
+        }
+      ),
+      { numRuns: 100 }
+    )
+  })
+
+  it('keeps an existing tab draft when a pending resource prefill is claimed', () => {
+    fc.assert(
+      fc.property(fc.string({ minLength: 1, maxLength: 24 }), suffix => {
+        resetComposerDraftStore()
+        const existing = `existing draft:${suffix}`
+        const pending = `gfs://main/pending-${suffix}`
+
+        expect(setResourceComposerPrefill('tab-a', existing, 'agent-a')).toBe(true)
+        expect(setResourceComposerPrefill('tab-a', pending, null)).toBe(true)
+        expect(setResourceComposerPrefill('tab-b', 'gfs://main/sibling', 'agent-a')).toBe(true)
+
+        claimPendingResourceComposerPrefill('tab-a', 'agent-a')
+
+        expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe(existing)
+        expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('gfs://main/sibling')
+        expect(getComposerDraft(null, undefined, 'tab-a')).toBe('')
+      }),
+      { numRuns: 100 }
+    )
+  })
+
   it('preserves a legacy agent draft beside its new tab resource prefill', () => {
     setComposerDraft(null, 'existing draft', 'agent-a')
     expect(setResourceComposerPrefill('tab-a', 'gfs://main/resource', 'agent-a')).toBe(true)
