@@ -13519,15 +13519,23 @@ pre {
   --app-header-utilities-width: var(--chat-drawer-width);
 }
 
+/* Keep the content gutter transition on the stable panel class so the active
+   surface reflows with the rail in both directions. The rail is fixed, so the
+   measured content-panel width stays constant and useChatDrawerResize has no
+   ResizeObserver feedback loop. */
+.content-panel.content-panel--titlebar-actions > .page,
+.content-panel.content-panel--titlebar-actions > :has(.sandbox-ui-embed-slot) {
+  transition: padding-right var(--motion-medium);
+}
+
 /* Universal tab-area gutter (mini-spec 04a §A1). The chat drawer is available on
-   any non-chat tab, so the "tab area" — the page content between the sidebar and
-   the drawer — must shrink for ANY active tab kind, not only the app embed. The
-   gutter is `padding-right` on the active tab's `.page` child (app embed slot,
-   files, settings, connectors, agents, plugins, the apps picker — all render a
-   direct `.page`), never on the measured content-panel, so opening the drawer
-   (which is `position: fixed`) never changes the panel's `clientWidth` and there
-   is no ResizeObserver feedback loop (confirmed in useChatDrawerResize). */
-.content-panel.content-panel--chat-drawer-open > .page {
+   any non-chat tab, so the content between the sidebar and the drawer shrinks
+   for every route. DOM surfaces render a direct `.page`; the mounted native app
+   renders a direct Flex containing `.sandbox-ui-embed-slot` instead. Applying
+   the same gutter to that Flex resizes the measured native WebContentsView slot
+   so the app cannot paint over the drawer or hide its last column. */
+.content-panel.content-panel--chat-drawer-open > .page,
+.content-panel.content-panel--chat-drawer-open > :has(.sandbox-ui-embed-slot) {
   padding-right: var(--app-header-utilities-width);
 }
 

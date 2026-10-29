@@ -31,7 +31,11 @@ export function ChatDrawer({
   children,
 }: ChatDrawerProps) {
   const [retainedReady, setRetainedReady] = useState(ready)
-  const drawerOpen = open && ready
+  // Once revealed, keep the drawer open while an app tab changes and the next
+  // native view reapplies its bounds. The panel gutter remains in place during
+  // that handoff, so closing and reopening here would make the conversation
+  // disappear or bounce even though the drawer itself never closed.
+  const drawerOpen = open && (ready || retainedReady)
 
   useEffect(() => {
     if (ready) setRetainedReady(true)
@@ -102,7 +106,7 @@ export function ChatDrawer({
         keyboard={false}
         mask={false}
         afterOpenChange={isOpen => {
-          if (!isOpen) {
+          if (!isOpen && !open) {
             setRetainedReady(false)
             onAfterClose()
           }
