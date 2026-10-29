@@ -192,43 +192,46 @@ export function AuthPage() {
                       onChange={event => setPassword(event.target.value)}
                     />
                   </Flex>
-                  <Button
-                    block
-                    disabled={!hasPasswordLoginCredentials || busy}
-                    htmlType="submit"
-                    size="middle"
-                    type="primary"
-                  >
-                    {authTransitioning ? (
-                      <Flex align="center" gap="small" justify="center">
-                        <Spin aria-hidden="true" size="small" />
-                        <span>Signing in...</span>
-                      </Flex>
-                    ) : (
-                      'Sign in'
-                    )}
-                  </Button>
-                  {authTransitioning ? (
-                    <span
-                      ref={loginStatusRef}
-                      aria-live="polite"
-                      className="visually-hidden"
-                      role="status"
-                      tabIndex={-1}
-                    >
-                      Signing in...
-                    </span>
-                  ) : null}
-                  <Flex align="flex-start">
+                  <Flex vertical gap="small">
                     <Button
-                      disabled={busy || forgotPasswordBusy}
-                      htmlType="button"
-                      onClick={() => void handleForgotPasswordClick()}
+                      block
+                      disabled={!hasPasswordLoginCredentials || busy}
+                      htmlType="submit"
                       size="middle"
-                      type="text"
+                      type="primary"
                     >
-                      <Typography.Text type="secondary">Forgot password</Typography.Text>
+                      {authTransitioning ? (
+                        <Flex align="center" gap="small" justify="center">
+                          <Spin aria-hidden="true" size="small" />
+                          <span>Signing in...</span>
+                        </Flex>
+                      ) : (
+                        'Sign in'
+                      )}
                     </Button>
+                    {authTransitioning ? (
+                      <span
+                        ref={loginStatusRef}
+                        aria-live="polite"
+                        className="visually-hidden"
+                        role="status"
+                        tabIndex={-1}
+                      >
+                        Signing in...
+                      </span>
+                    ) : null}
+                    <Flex align="flex-start">
+                      <Button
+                        disabled={busy || forgotPasswordBusy}
+                        htmlType="button"
+                        onClick={() => void handleForgotPasswordClick()}
+                        size="middle"
+                        style={{ paddingInline: 0 }}
+                        type="text"
+                      >
+                        <Typography.Text type="secondary">Forgot password</Typography.Text>
+                      </Button>
+                    </Flex>
                   </Flex>
                   {backendSwitchHint ? (
                     <Alert
