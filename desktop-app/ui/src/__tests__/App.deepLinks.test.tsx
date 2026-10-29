@@ -936,6 +936,39 @@ describe('App deep-link orchestration', () => {
     return { getController, handle, queryClient, view }
   }
 
+  function installSameIdentityLoginFixture() {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const service = main.service
+    const transportBoundaries = service as unknown as {
+      authClient: { googleLogin: ReturnType<typeof vi.fn> }
+      gfsClient: GfsClient
+      bindCurrentChatStore: () => Promise<void>
+      updateDesktopGfsUploadState: () => Promise<void>
+      migrateLegacyDesktopGfsUploadScopes: () => Promise<void>
+      updateEntityChangeSessionToken: () => void
+      restartEntityChangeStreamForSessionReplacement: () => void
+    }
+    transportBoundaries.authClient.googleLogin = vi
+      .fn()
+      .mockResolvedValueOnce({ token: 'session-permission-A', me: userA })
+      .mockResolvedValueOnce({ token: 'session-permission-B', me: userA })
+    // Keep public login, generation publication and the production controller real.
+    transportBoundaries.bindCurrentChatStore = vi.fn(async () => undefined)
+    transportBoundaries.updateDesktopGfsUploadState = vi.fn(async () => undefined)
+    transportBoundaries.migrateLegacyDesktopGfsUploadScopes = vi.fn(async () => undefined)
+    transportBoundaries.updateEntityChangeSessionToken = vi.fn()
+    transportBoundaries.restartEntityChangeStreamForSessionReplacement = vi.fn()
+    return { userA, service, transportBoundaries }
+  }
+
   // An app launched the way the sidebar does, into a new app tab. The stubbed
   // page measures for it, and main mounts it unless told otherwise.
   const LIVE_APP = { appRef: 'ns/app', label: 'App', defaultPath: '/' }
@@ -5407,36 +5440,7 @@ describe('App deep-link orchestration', () => {
   )
 
   it('R6-M4 ignores an outgoing preview refresh 401 after replacement publication', async () => {
-    const userA: NonNullable<AppController['me']> = {
-      id: 'user-a',
-      email: 'a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
-    const service = main.service
-    const transportBoundaries = service as unknown as {
-      authClient: { googleLogin: ReturnType<typeof vi.fn> }
-      gfsClient: GfsClient
-      bindCurrentChatStore: () => Promise<void>
-      updateDesktopGfsUploadState: () => Promise<void>
-      migrateLegacyDesktopGfsUploadScopes: () => Promise<void>
-      updateEntityChangeSessionToken: () => void
-      restartEntityChangeStreamForSessionReplacement: () => void
-    }
-    transportBoundaries.authClient.googleLogin = vi
-      .fn()
-      .mockResolvedValueOnce({ token: 'session-permission-A', me: userA })
-      .mockResolvedValueOnce({ token: 'session-permission-B', me: userA })
-    // Only filesystem and stream transports are omitted; real public login
-    // commits token, identity, generation and invalidation publication.
-    transportBoundaries.bindCurrentChatStore = vi.fn(async () => undefined)
-    transportBoundaries.updateDesktopGfsUploadState = vi.fn(async () => undefined)
-    transportBoundaries.migrateLegacyDesktopGfsUploadScopes = vi.fn(async () => undefined)
-    transportBoundaries.updateEntityChangeSessionToken = vi.fn()
-    transportBoundaries.restartEntityChangeStreamForSessionReplacement = vi.fn()
+    const { userA, service } = installSameIdentityLoginFixture()
     await service.googleLogin('fixture-google-A')
     let dispatch: ((event: unknown) => void) | null = null
     window.clerum.entityChanges = {
@@ -5512,36 +5516,7 @@ describe('App deep-link orchestration', () => {
   it.each([false, true])(
     'R6-M4 isolates a pending permission read across actual same-identity login (current 401=%s)',
     async current401 => {
-      const userA: NonNullable<AppController['me']> = {
-        id: 'user-a',
-        email: 'a@example.test',
-        name: 'User A',
-        picture: null,
-        teamId: 'team-a',
-        teamName: 'Team A',
-        role: 'member',
-      }
-      const service = main.service
-      const transportBoundaries = service as unknown as {
-        authClient: { googleLogin: ReturnType<typeof vi.fn> }
-        gfsClient: GfsClient
-        bindCurrentChatStore: () => Promise<void>
-        updateDesktopGfsUploadState: () => Promise<void>
-        migrateLegacyDesktopGfsUploadScopes: () => Promise<void>
-        updateEntityChangeSessionToken: () => void
-        restartEntityChangeStreamForSessionReplacement: () => void
-      }
-      transportBoundaries.authClient.googleLogin = vi
-        .fn()
-        .mockResolvedValueOnce({ token: 'session-permission-A', me: userA })
-        .mockResolvedValueOnce({ token: 'session-permission-B', me: userA })
-      // Only filesystem and stream transports are omitted; real public login
-      // commits token, identity, generation and invalidation publication.
-      transportBoundaries.bindCurrentChatStore = vi.fn(async () => undefined)
-      transportBoundaries.updateDesktopGfsUploadState = vi.fn(async () => undefined)
-      transportBoundaries.migrateLegacyDesktopGfsUploadScopes = vi.fn(async () => undefined)
-      transportBoundaries.updateEntityChangeSessionToken = vi.fn()
-      transportBoundaries.restartEntityChangeStreamForSessionReplacement = vi.fn()
+      const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
       const folderId = 'a'.repeat(32)
       const parentId = 'b'.repeat(32)
       const folder = resolvedDirectory(folderId, 'Generation Projects', {
