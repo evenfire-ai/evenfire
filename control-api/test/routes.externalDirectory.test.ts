@@ -64,8 +64,24 @@ describe('external directory authorization', () => {
     mocks.checkAndIncrement.mockResolvedValue(allowedRateLimitResult())
   })
 
-  it('denies an ordinary member without executing the PII search', async () => {
+  it('allows an ordinary member of the team to search', async () => {
     mocks.membership.mockResolvedValue({ teamId: 'team-1', role: 'member' })
+
+    const response = await request(app())
+      .get('/external/directory/search?teamId=team-1&q=person')
+      .set('x-user-session-token', 'session')
+
+    expect(response.status).toBe(200)
+    expect(mocks.membership).toHaveBeenCalledWith(
+      'user-1',
+      'team-1',
+      expect.objectContaining({ budget: expect.anything() })
+    )
+    expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
+  })
+
+  it('refuses a caller without a live team membership', async () => {
+    mocks.membership.mockResolvedValue(null)
 
     const response = await request(app())
       .get('/external/directory/search?teamId=team-1&q=person')
@@ -73,6 +89,11 @@ describe('external directory authorization', () => {
 
     expect(response.status).toBe(403)
     expect(response.body.error.code).toBe('forbidden')
+    expect(mocks.membership).toHaveBeenCalledWith(
+      'user-1',
+      'team-1',
+      expect.objectContaining({ budget: expect.anything() })
+    )
     expect(mocks.searchDirectory).not.toHaveBeenCalled()
   })
 

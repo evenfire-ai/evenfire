@@ -5,7 +5,6 @@ import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBud
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
-  requireExternalRoleWithPublicErrors,
   requireExternalTeamParamMatchWithPublicErrors,
   requireValidExternalSessionTokenWithPublicErrors,
 } from '../../middleware/externalSessionAuth.js'
@@ -32,7 +31,6 @@ export function createExternalDirectoryRouter(): Router {
   router.get(
     '/external/directory/search',
     requireExternalTeamParamMatchWithPublicErrors(),
-    requireExternalRoleWithPublicErrors(['admin', 'inviter']),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const teamId = String(req.query.teamId || '').trim()
