@@ -53,6 +53,7 @@ let authorityPath = ''
 function powershellFailureCategory(stderr: string): string {
   const diagnostic = powershellFixtureDiagnostics(stderr)
   const errorTypes = [diagnostic?.errorType, diagnostic?.innerErrorType]
+  if (stderr.includes('EVENFIRE_FIXTURE_PRIVILEGE=not-assigned')) return 'privilege-not-held'
   if (errorTypes.some(type => type === 'PrivilegeNotHeldException')) return 'privilege-not-held'
   if (errorTypes.some(type => type === 'UnauthorizedAccessException')) return 'access-denied'
   if (errorTypes.some(type => type === 'Win32Exception')) return 'win32-api-failure'
@@ -286,7 +287,104 @@ if ($ownerSid -notin @('S-1-5-18', 'S-1-5-32-544')) {
 }
 $acl = [IO.Directory]::GetAccessControl($target)
 $acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new($ownerSid))
-[IO.Directory]::SetAccessControl($target, $acl)
+$privilegeHelper = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class EvenfireAclFixturePrivilege {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Luid {
+    public uint LowPart;
+    public int HighPart;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct LuidAndAttributes {
+    public Luid Luid;
+    public uint Attributes;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct TokenPrivileges {
+    public uint PrivilegeCount;
+    public LuidAndAttributes Privileges;
+  }
+
+  private const uint TokenAdjustPrivileges = 0x20;
+  private const uint TokenQuery = 0x08;
+  private const uint SePrivilegeEnabled = 0x02;
+  private const int ErrorNotAllAssigned = 1300;
+
+  [DllImport("kernel32.dll")]
+  private static extern IntPtr GetCurrentProcess();
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool CloseHandle(IntPtr handle);
+
+  [DllImport("kernel32.dll")]
+  private static extern void SetLastError(uint error);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool LookupPrivilegeValue(string systemName, string name, out Luid luid);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool AdjustTokenPrivileges(
+    IntPtr token,
+    bool disableAllPrivileges,
+    ref TokenPrivileges newState,
+    uint bufferLength,
+    out TokenPrivileges previousState,
+    out uint returnLength
+  );
+
+  public static void SetOwnerWithAssignedRestorePrivilege(Action writeAcl) {
+    IntPtr token;
+    if (!OpenProcessToken(GetCurrentProcess(), TokenAdjustPrivileges | TokenQuery, out token))
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "fixture-token-open-failed");
+
+    try {
+      Luid restore;
+      if (!LookupPrivilegeValue(null, "SeRestorePrivilege", out restore))
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "fixture-restore-privilege-lookup-failed");
+
+      TokenPrivileges requested = new TokenPrivileges {
+        PrivilegeCount = 1,
+        Privileges = new LuidAndAttributes { Luid = restore, Attributes = SePrivilegeEnabled }
+      };
+      TokenPrivileges previous;
+      uint returnLength;
+      SetLastError(0);
+      if (!AdjustTokenPrivileges(token, false, ref requested, (uint)Marshal.SizeOf(typeof(TokenPrivileges)), out previous, out returnLength))
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "fixture-restore-privilege-enable-failed");
+  if (Marshal.GetLastWin32Error() == ErrorNotAllAssigned) {
+    Console.Error.WriteLine("EVENFIRE_FIXTURE_PRIVILEGE=not-assigned");
+        throw new InvalidOperationException("fixture-restore-privilege-not-assigned");
+  }
+
+      try {
+        writeAcl();
+      } finally {
+        SetLastError(0);
+        TokenPrivileges ignored;
+        uint ignoredLength;
+        if (!AdjustTokenPrivileges(token, false, ref previous, (uint)Marshal.SizeOf(typeof(TokenPrivileges)), out ignored, out ignoredLength) ||
+            Marshal.GetLastWin32Error() == ErrorNotAllAssigned)
+          throw new Win32Exception(Marshal.GetLastWin32Error(), "fixture-restore-privilege-restore-failed");
+      }
+    } finally {
+      CloseHandle(token);
+    }
+  }
+}
+'@
+Add-Type -TypeDefinition $privilegeHelper -ErrorAction Stop
+[EvenfireAclFixturePrivilege]::SetOwnerWithAssignedRestorePrivilege({
+  [IO.Directory]::SetAccessControl($target, $acl)
+})
 $readBack = [IO.Directory]::GetAccessControl($target)
 $actual = $readBack.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
 if ($actual -ne $ownerSid) { throw 'fixture-owner-readback-mismatch' }
