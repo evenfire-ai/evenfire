@@ -190,6 +190,10 @@ describe('SettingsPage', () => {
     expect(screen.getByText('0.1.36')).toBeTruthy()
     expect(screen.getByText('http://127.0.0.1:8091')).toBeTruthy()
     expect(screen.getByText('http://127.0.0.1:8094')).toBeTruthy()
+    const updateButton = screen.getByRole('button', { name: 'Check for updates' })
+    const diagnosticTable = screen.getByText('Desktop app version').closest('dl')
+    expect(updateButton.parentElement?.classList.contains('settings-control-width')).toBe(true)
+    expect(diagnosticTable?.classList.contains('settings-control-width')).toBe(true)
 
     expect(vi.mocked(window.clerum.auth.getDesktopReleaseStatus)).toHaveBeenCalledTimes(1)
   })

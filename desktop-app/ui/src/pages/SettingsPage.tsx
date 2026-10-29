@@ -932,10 +932,12 @@ export function SettingsPage({
           >
             <section className="page-card settings-card" aria-label="Connection endpoints">
               <div className="settings-form">
-                <Button type="button" color="secondary" onClick={onCheckForUpdates}>
-                  Check for updates
-                </Button>
-                <dl className="settings-runtime-details settings-runtime-details--diagnostics">
+                <div className="settings-control-width">
+                  <Button block type="button" color="secondary" onClick={onCheckForUpdates}>
+                    Check for updates
+                  </Button>
+                </div>
+                <dl className="settings-control-width settings-runtime-details settings-runtime-details--diagnostics">
                   <div>
                     <dt>Desktop app version</dt>
                     <dd>

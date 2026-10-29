@@ -3250,7 +3250,7 @@ h3 {
 }
 
 .settings-form > .settings-field,
-.settings-form > .settings-runtime-details--diagnostics,
+.settings-form > .settings-control-width,
 .settings-form > .settings-runtime-diagnostic-error {
   width: min(100%, var(--settings-control-width));
 }
