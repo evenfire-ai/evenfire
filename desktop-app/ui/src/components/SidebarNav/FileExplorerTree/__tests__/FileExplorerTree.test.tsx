@@ -1123,7 +1123,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
 
       expect(await screen.findByText('File access is not authorized')).toBeTruthy()
       const rootPurges = removeQueries.mock.calls.filter(
-        ([filters]) => filters.queryKey?.[0] === 'desktop-app' && filters.queryKey?.[1] === 'gfs'
+        ([filters]) => filters?.queryKey?.[0] === 'desktop-app' && filters?.queryKey?.[1] === 'gfs'
       )
       expect(rootPurges).toHaveLength(1)
       expect(moveResource).toHaveBeenCalledTimes(1)

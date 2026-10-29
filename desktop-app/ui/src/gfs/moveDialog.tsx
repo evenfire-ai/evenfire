@@ -355,8 +355,10 @@ export function GfsMoveDialog({
     try {
       if (onMoveWithOwnership) {
         await onMoveWithOwnership(destination.resourceId, destination.name, isCurrent)
-      } else {
+      } else if (onMove) {
         await onMove(destination.resourceId, destination.name)
+      } else {
+        throw new Error('Move dialog requires a commit handler')
       }
     } catch (moveError) {
       if (isCurrent()) setError(errorMessage(moveError))
