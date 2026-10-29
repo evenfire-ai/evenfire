@@ -21,9 +21,18 @@ export interface GfsDelegationPanelProps {
   subjectOptions: GfsDelegationSubjectOption[]
   subjectOptionsLoading?: boolean
   subjectOptionsError?: string | null
+  /** The cached affordance result is being revalidated and cannot authorize a grant. */
+  permissionCheckPending?: boolean
+  /** The latest affordance check failed; cached bits remain non-actionable. */
+  permissionCheckFailed?: boolean
   /** Directories offer the "Include contents" toggle (default ON); files always send inherit=false. */
   isDirectory: boolean
-  onGrant: (subjectKeys: string[], bits: string[], inherit: boolean) => Promise<void>
+  onGrant: (
+    subjectKeys: string[],
+    bits: string[],
+    inherit: boolean,
+    isDraftCurrent: () => boolean
+  ) => Promise<void>
   onDetailViewChange?: (open: boolean) => void
 }
 

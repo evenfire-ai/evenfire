@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, DropdownSelect, StatusBanner } from '@components/Common'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { GfsSubjectPicker } from '@/gfs/GfsSubjectPicker'
@@ -53,12 +53,15 @@ export function GfsDelegationPanel({
   subjectOptions,
   subjectOptionsLoading = false,
   subjectOptionsError = null,
+  permissionCheckPending = false,
+  permissionCheckFailed = false,
   isDirectory,
   onGrant,
   onDetailViewChange,
 }: GfsDelegationPanelProps) {
   const [subjectKeys, setSubjectKeys] = useState<string[]>([])
-  const [role, setRole] = useState<AccessRole>('read')
+  const [role, setRole] = useState<AccessRole | null>('read')
+  const [roleNeedsSelection, setRoleNeedsSelection] = useState(false)
   const [inherit, setInherit] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -68,40 +71,105 @@ export function GfsDelegationPanel({
   // Hosts cap the WHOLE bulk grant to read/write (the server enforces this per
   // host subject; the bulk request is atomic, so the cap applies to all). Also
   // keep the cap within the bits the caller actually holds.
-  const bits = permissionsForRole(role, hasHost, grantableBits)
+  const bits = role === null ? [] : permissionsForRole(role, hasHost, grantableBits)
   const canOfferEditor = (hasHost ? ['write'] : ['write', 'delete', 'manage_acl']).some(bit =>
     grantableBits.includes(bit)
   )
   const roleOptions = canOfferEditor ? ROLE_OPTIONS : ROLE_OPTIONS.slice(0, 1)
 
+  const permissionDenied =
+    !affordances.canDelegate && !permissionCheckPending && !permissionCheckFailed
+  const draftGenerationRef = useRef(0)
+  const wasPermissionDeniedRef = useRef(permissionDenied)
+
+  useLayoutEffect(() => {
+    if (permissionDenied && !wasPermissionDeniedRef.current) {
+      draftGenerationRef.current += 1
+    }
+    wasPermissionDeniedRef.current = permissionDenied
+  }, [permissionDenied])
+
+  useLayoutEffect(() => {
+    const roleStillOffered = role === 'read' || (role === 'editor' && canOfferEditor)
+    if (
+      role !== null &&
+      !roleStillOffered &&
+      !permissionDenied &&
+      !permissionCheckPending &&
+      !permissionCheckFailed
+    ) {
+      // Retire only the unavailable role choice. Keep the recipients and scope
+      // inputs, but prevent any in-flight completion from owning this draft.
+      draftGenerationRef.current += 1
+      setRole(null)
+      setRoleNeedsSelection(true)
+      setError(null)
+    }
+  }, [canOfferEditor, permissionCheckFailed, permissionCheckPending, permissionDenied, role])
+
+  useLayoutEffect(
+    () => () => {
+      draftGenerationRef.current += 1
+    },
+    []
+  )
+
   useEffect(() => {
+    if (permissionDenied) {
+      if (subjectKeys.length > 0) {
+        setSubjectKeys([])
+      }
+      setRole('read')
+      setRoleNeedsSelection(false)
+      setInherit(true)
+      setError(null)
+      onDetailViewChange?.(false)
+      return
+    }
     onDetailViewChange?.(subjectKeys.length > 0)
-  }, [onDetailViewChange, subjectKeys.length])
+  }, [onDetailViewChange, permissionDenied, subjectKeys.length])
 
   function changeSubjects(nextKeys: string[]) {
     setSubjectKeys(nextKeys)
   }
 
-  async function run(action: () => Promise<void>) {
+  async function run(action: (isDraftCurrent: () => boolean) => Promise<void>) {
+    const generation = draftGenerationRef.current
+    const isDraftCurrent = () => draftGenerationRef.current === generation
     setError(null)
     setBusy(true)
     try {
-      await action()
-      setSubjectKeys([])
-      setRole('read')
+      await action(isDraftCurrent)
+      if (isDraftCurrent()) {
+        setSubjectKeys([])
+        setRole('read')
+        setRoleNeedsSelection(false)
+      }
     } catch (e) {
       // The bulk grant is atomic — a failure means NONE of the subjects landed,
       // so keep the whole selection for a retry. Surface the server's
       // verdict (escalation_rejected, subjects_invalid with 1-based positions, a
       // rate-limit retry, …) via the shared presentation map — never swallow it.
-      setError(describeGfsGrantError(e).message)
+      // A settled authority denial retires this draft, so its old failure cannot
+      // overwrite the read-only state or a later fresh form.
+      if (isDraftCurrent()) setError(describeGfsGrantError(e).message)
     } finally {
+      // Busy belongs to the real request, not the draft. Keep duplicate-submit
+      // protection until this operation settles even if authority retired it.
       setBusy(false)
     }
   }
 
   // A Leader without manage_acl (canDelegate=false) sees no controls.
   if (!affordances.canDelegate) {
+    if (permissionCheckPending) {
+      return (
+        <p className="muted" role="status">
+          Checking permissions…
+        </p>
+      )
+    }
+    if (permissionCheckFailed) return null
     return (
       <div className="da-gfs-delegation__empty" role="note">
         <strong>Read-only access</strong>
@@ -126,19 +194,32 @@ export function GfsDelegationPanel({
           <DropdownSelect
             ariaLabel="Access role for selected recipients"
             disabled={busy}
-            onChange={value => setRole(value as AccessRole)}
+            onChange={value => {
+              setRole(value as AccessRole)
+              setRoleNeedsSelection(false)
+            }}
             options={roleOptions}
             placeholder="Role"
-            value={role}
+            value={role ?? ''}
           />
         ) : null}
       </div>
+      {roleNeedsSelection && subjectKeys.length > 0 ? (
+        <p className="muted" role="status" aria-live="polite">
+          Choose an available role before sharing.
+        </p>
+      ) : null}
       {subjectKeys.length > 0 && hasHost ? (
         <p className="da-gfs-delegation__hint muted">
           Agents, workflows, and plugins use read/write access only.
         </p>
       ) : null}
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
+      {permissionCheckPending ? (
+        <p className="muted" role="status">
+          Checking permissions…
+        </p>
+      ) : null}
       {subjectKeys.length > 0 ? (
         <div className="da-gfs-delegation__scope-actions">
           {isDirectory ? (
@@ -158,6 +239,7 @@ export function GfsDelegationPanel({
               onClick={() => {
                 setSubjectKeys([])
                 setRole('read')
+                setRoleNeedsSelection(false)
               }}
               type="button"
               variant="ghost"
@@ -167,8 +249,20 @@ export function GfsDelegationPanel({
             <Button
               type="button"
               loading={busy}
-              disabled={busy || bits.length === 0}
-              onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
+              disabled={
+                busy ||
+                permissionCheckPending ||
+                permissionCheckFailed ||
+                role === null ||
+                !roleOptions.some(option => option.value === role) ||
+                bits.length === 0
+              }
+              onClick={() => {
+                if (role === null || !roleOptions.some(option => option.value === role)) return
+                void run(isDraftCurrent =>
+                  onGrant(subjectKeys, bits, isDirectory ? inherit : false, isDraftCurrent)
+                )
+              }}
             >
               Share
             </Button>

@@ -40,6 +40,7 @@ function baseController() {
     rowAffordancesError: null,
     loadingAccessible: false,
     loading: false,
+    loadingCurrentView: false,
     accessibleError: null,
     accessibleNotice: null,
     error: null,
@@ -252,7 +253,21 @@ describe('FilesPage', () => {
   })
 
   it.each([
-    ['initial GFS discovery', { loadingAccessible: true }],
+    ['initial GFS discovery', { loadingAccessible: true, loadingCurrentView: true }],
+    [
+      'selected-file authority validation',
+      {
+        current: {
+          resourceId: 'file-loading',
+          gfsUri: 'gfs://main/file-loading',
+          name: 'Loading report.md',
+          kind: 'file' as const,
+          version: 1,
+        },
+        authorityPending: true,
+        loadingCurrentView: true,
+      },
+    ],
     [
       'folder navigation',
       {
@@ -264,6 +279,7 @@ describe('FilesPage', () => {
           version: 1,
         },
         loading: true,
+        loadingCurrentView: true,
       },
     ],
   ])('shows a subtle borderless loader during %s', (_scenario, state) => {
@@ -924,6 +940,51 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Uploaded diagram.png', 'success')
     expect(pushToast).toHaveBeenCalledWith('Uploaded notes.markdown', 'success')
     expect(pushToast).toHaveBeenCalledWith('Uploaded clip.mov', 'success')
+  })
+
+  it('keeps the browser busy for an upload while current-view loading is idle', async () => {
+    let finishUpload: (() => void) | undefined
+    const createFileFromPath = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          finishUpload = resolve
+        })
+    )
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Team folder',
+        kind: 'directory',
+        version: 7,
+      },
+      affordances: {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      loadingCurrentView: false,
+      createFileFromPath,
+    })
+
+    renderFilesPage()
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    const dataTransfer = {
+      dropEffect: 'none',
+      files: [new File(['desktop image'], 'diagram.png', { type: 'image/png' })],
+      types: ['Files'],
+    }
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+
+    fireEvent.drop(browser, { dataTransfer })
+    await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('status').textContent).toContain('Uploading 1 file')
+    expect(browser.getAttribute('aria-busy')).toBe('true')
+
+    await act(async () => finishUpload?.())
+    await waitFor(() => expect(browser.getAttribute('aria-busy')).toBe('false'))
   })
 
   it('adds numbered suffixes for duplicate names in one dropped batch', async () => {
@@ -3914,7 +3975,7 @@ describe('FilesPage', () => {
     renderFilesPage()
     await openManageDialog('Product')
 
-    expect(screen.getByText('Refreshing permissions…')).toBeTruthy()
+    expect(screen.getByText('Checking permissions…')).toBeTruthy()
     expect(screen.queryByText('Read-only access')).toBeNull()
   })
 

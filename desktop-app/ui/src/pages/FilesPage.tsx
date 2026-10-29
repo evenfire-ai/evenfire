@@ -439,8 +439,7 @@ export function FilesPage({
     affordances,
     affordancesError,
     loadingAffordances,
-    loadingAccessible,
-    loading,
+    loadingCurrentView,
     accessibleError,
     accessibleNotice,
     error,
@@ -780,17 +779,24 @@ export function FilesPage({
   // partial-success outcome. People, teams, and agents share a single picker;
   // agents are capped to read/write inside the panel. Inherit is honored for
   // directories (default ON) and forced false for files.
-  const handleGrant = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
+  const handleGrant = async (
+    subjectKeys: string[],
+    bits: string[],
+    inherit: boolean,
+    isDraftCurrent: () => boolean
+  ) => {
     try {
       await ctrl.grant(subjectKeys, bits, inherit)
     } catch (grantError) {
       if (failClosedOnAuthorizationError(grantError)) return
       throw grantError
     }
-    pushToast?.(
-      `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
-      'success'
-    )
+    if (isDraftCurrent()) {
+      pushToast?.(
+        `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
+        'success'
+      )
+    }
     // The grant PUT returns no ids — list-after-write is the revoke-id source.
     await ctrl.refreshGrants()
   }
@@ -2050,21 +2056,10 @@ export function FilesPage({
       return (left.name || left.drive).localeCompare(right.name || right.drive)
     })
   }, [accessibleResources, currentIsFile, currentIsFolder, items])
-  // authorityPending keeps the loading state up: cached rows must not render
-  // (and must not be mistaken for an empty folder) until discovery re-proves
-  // the session (R4 spec §1).
-  //
-  // A settled discovery error is not a pending load, though — the same
-  // principle the controller already applies to `loadingAccessible`. The flag
-  // itself stays true, because a 429 or a 404 does not re-prove the session and
-  // the controller must go on withholding every cached surface; what changes is
-  // only that the page stops calling that a load in progress. Without this a
-  // 404 from an older server leaves "Loading files…" spinning forever
-  // underneath the notice that says discovery is unavailable, and a link opened
-  // while discovery is down never reveals the file it resolved.
-  const visibleLoading =
-    (ctrl.authorityPending && !ctrl.discoveryFailure) ||
-    (currentIsFolder ? loading : !current ? loadingAccessible : false)
+  // The controller owns current-view loading semantics, including the
+  // page-wide authority gate and the distinction between initial and
+  // background query activity.
+  const visibleLoading = loadingCurrentView
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
   const unavailableLocation = !current && openError === GFS_UNAVAILABLE_LOCATION_MESSAGE
   // Scoped to the root view on purpose: `accessibleError` only reaches
@@ -2877,30 +2872,29 @@ export function FilesPage({
                     <h4>Add people, teams, agents, or workflows</h4>
                   </div>
                 </div>
-                {loadingAffordances ? (
-                  <p className="muted">Refreshing permissions…</p>
-                ) : affordancesError ? (
-                  <StatusBanner tone="error" text={affordancesError} />
-                ) : affordances ? (
-                  <>
-                    <GfsDelegationPanel
-                      affordances={affordances}
-                      subjectOptions={grantSubjectOptions}
-                      subjectOptionsLoading={
-                        teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
-                      }
-                      subjectOptionsError={mergeErrorMessages(
-                        teamDirectoryQuery.error,
-                        myAgentsQuery.error
-                      )}
-                      isDirectory={currentIsFolder}
-                      onGrant={handleGrant}
-                      onDetailViewChange={setShareDetailsOpen}
-                    />
-                  </>
-                ) : (
-                  <p className="muted">Loading permissions…</p>
-                )}
+                {affordancesError ? <StatusBanner tone="error" text={affordancesError} /> : null}
+                {affordances ? (
+                  <GfsDelegationPanel
+                    affordances={affordances}
+                    subjectOptions={grantSubjectOptions}
+                    subjectOptionsLoading={
+                      teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
+                    }
+                    subjectOptionsError={mergeErrorMessages(
+                      teamDirectoryQuery.error,
+                      myAgentsQuery.error
+                    )}
+                    permissionCheckPending={loadingAffordances}
+                    permissionCheckFailed={Boolean(affordancesError)}
+                    isDirectory={currentIsFolder}
+                    onGrant={handleGrant}
+                    onDetailViewChange={setShareDetailsOpen}
+                  />
+                ) : !affordancesError ? (
+                  <p className="muted" role="status">
+                    Loading permissions…
+                  </p>
+                ) : null}
               </section>
 
               {!shareDetailsOpen ? (
