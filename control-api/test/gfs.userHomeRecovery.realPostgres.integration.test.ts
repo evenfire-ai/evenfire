@@ -770,4 +770,45 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
     ])
     expect(successAudit.rows).toEqual([{ op: 'user_home.conflict_cleared.path_conflict' }])
   })
+
+  it('pages the user-home inventory with a strictly increasing cursor', async () => {
+    const seeded = Array.from({ length: 120 }, () => randomUUID())
+    await fixturePool.query(
+      `INSERT INTO users (id, email, name)
+       SELECT input.id, input.id || '@example.test', 'Inventory User'
+         FROM unnest($1::uuid[]) AS input(id)`,
+      [seeded]
+    )
+    // The enrollment trigger creates one pending home per new user.
+    const enrolled = await fixturePool.query<{ count: number }>(
+      'SELECT count(*)::int AS count FROM gfs_user_homes WHERE user_id = ANY($1::uuid[])',
+      [seeded]
+    )
+    expect(enrolled.rows[0]!.count).toBe(seeded.length)
+
+    const seen: string[] = []
+    let pages = 0
+    let cursor: string | null = null
+    do {
+      const query: { limit: string; cursor?: string } = { limit: '100' }
+      if (cursor) query.cursor = cursor
+      const response: request.Response = await request(app)
+        .get('/gfs/user-homes')
+        .query(query)
+        .set('x-test-operator', 'yes')
+      expect(response.status).toBe(200)
+      pages += 1
+      seen.push(...response.body.items.map((item: { userId: string }) => item.userId))
+      cursor = response.body.nextCursor
+      expect(pages).toBeLessThan(20)
+    } while (cursor !== null)
+
+    expect(pages).toBeGreaterThanOrEqual(2)
+    for (const userId of seeded) {
+      expect(seen.filter(id => id === userId)).toHaveLength(1)
+    }
+    for (let index = 1; index < seen.length; index += 1) {
+      expect(seen[index]! > seen[index - 1]!).toBe(true)
+    }
+  })
 })

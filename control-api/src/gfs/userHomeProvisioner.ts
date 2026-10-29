@@ -79,7 +79,8 @@ export async function retireUserHomeForInactiveUser(
   db: DbClient,
   userId: string,
   configuredDrive: string | null,
-  actorKey = 'platform:user-home'
+  actorKey = 'platform:user-home',
+  actorOnBehalfOf?: string
 ): Promise<void> {
   // A hard delete by an older image cascades user_agents; startup repair cannot
   // identify those agents' grants outside the home (the D31 rollback gap).
@@ -114,6 +115,7 @@ export async function retireUserHomeForInactiveUser(
   if (home?.conflict_code) {
     await auditMutation(db, {
       actorKey,
+      actorOnBehalfOf,
       targetKey: `user:${userId}`,
       op: `user_home.conflict_cleared.${home.conflict_code}`,
       drive,
@@ -123,6 +125,7 @@ export async function retireUserHomeForInactiveUser(
   }
   await auditMutation(db, {
     actorKey,
+    actorOnBehalfOf,
     targetKey: `user:${userId}`,
     op: 'user_home.retired',
     drive,

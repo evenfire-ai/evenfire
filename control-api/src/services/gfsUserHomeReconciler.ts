@@ -42,12 +42,17 @@ function errorClass(error: unknown): string {
   return typeof error
 }
 
+type StartupRepairPhase = 'retired' | 'owner'
+type StartupRepairTarget = { phase: StartupRepairPhase; userId: string }
+
 export class GfsUserHomeReconciler {
   private cursor = FIRST_CURSOR
   private timer: ReturnType<typeof setInterval> | undefined
   private running: Promise<void> | undefined
   private stopping = false
-  private startupRepairPending = true
+  // null until the full startup pass completes; afterwards it holds only the
+  // rows that still failed, so a retry tick never rescans the whole registry.
+  private startupRepairRetry: StartupRepairTarget[] | null = null
 
   constructor(
     private readonly drive: string,
@@ -109,8 +114,11 @@ export class GfsUserHomeReconciler {
       locked = lockResult.rows[0]?.acquired === true
       if (!locked || this.stopping) return
 
-      if (this.startupRepairPending) {
-        this.startupRepairPending = !(await this.repairStartup(client))
+      if (this.startupRepairRetry === null) {
+        this.startupRepairRetry = await this.repairStartup(client)
+        if (this.stopping || sessionFailed) return
+      } else if (this.startupRepairRetry.length > 0) {
+        await this.retryFailedStartupRepairs()
         if (this.stopping || sessionFailed) return
       }
 
@@ -182,29 +190,53 @@ export class GfsUserHomeReconciler {
     }
   }
 
-  private async repairStartup(client: Client): Promise<boolean> {
-    let failed = false
-    for (const [sql, repair] of [
-      [
-        STARTUP_RETIRED_SQL,
-        (userId: string) => provisionUserHome(userId, { drive: this.drive, dbPool: this.dbPool }),
-      ],
-      [
-        STARTUP_OWNER_SQL,
-        (userId: string) => repairUserHomeOwnerGrant(userId, this.drive, this.dbPool),
-      ],
-    ] as const) {
+  private async repairStartupTarget(target: StartupRepairTarget): Promise<void> {
+    if (target.phase === 'retired') {
+      await provisionUserHome(target.userId, { drive: this.drive, dbPool: this.dbPool })
+      return
+    }
+    await repairUserHomeOwnerGrant(target.userId, this.drive, this.dbPool)
+  }
+
+  /** Retry only the rows that failed, and keep only the ones that fail again. */
+  private async retryFailedStartupRepairs(): Promise<void> {
+    const remaining: StartupRepairTarget[] = []
+    for (const target of this.startupRepairRetry ?? []) {
+      if (this.stopping) return
+      try {
+        await this.repairStartupTarget(target)
+      } catch (error) {
+        remaining.push(target)
+        log.error(
+          {
+            event: 'user_home_startup_repair_failed',
+            userId: target.userId,
+            errorClass: errorClass(error),
+          },
+          'User-home startup repair failed'
+        )
+      }
+    }
+    this.startupRepairRetry = remaining
+  }
+
+  /** Returns the failed rows, or null when the pass was interrupted. */
+  private async repairStartup(client: Client): Promise<StartupRepairTarget[] | null> {
+    const failed: StartupRepairTarget[] = []
+    for (const phase of ['retired', 'owner'] as const) {
+      const sql = phase === 'retired' ? STARTUP_RETIRED_SQL : STARTUP_OWNER_SQL
       let cursor = FIRST_CURSOR
-      while (!this.stopping) {
+      for (;;) {
+        if (this.stopping) return null
         const page = await client.query<{ user_id: string; needs_repair: boolean }>(sql, [cursor])
         if (page.rows.length === 0) break
         for (const row of page.rows) {
-          if (this.stopping) return false
+          if (this.stopping) return null
           if (!row.needs_repair) continue
           try {
-            await repair(row.user_id)
+            await this.repairStartupTarget({ phase, userId: row.user_id })
           } catch (error) {
-            failed = true
+            failed.push({ phase, userId: row.user_id })
             log.error(
               {
                 event: 'user_home_startup_repair_failed',
@@ -218,7 +250,7 @@ export class GfsUserHomeReconciler {
         cursor = page.rows[page.rows.length - 1]!.user_id
       }
     }
-    return !failed && !this.stopping
+    return this.stopping ? null : failed
   }
 }
 

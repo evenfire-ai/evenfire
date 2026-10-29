@@ -509,7 +509,8 @@ export async function retireDesktopUser(
       db,
       targetUserId,
       config.gfsHomeDrive,
-      actor.kind === 'control_admin' ? 'operator:' : `user:${actor.desktopUserId}`
+      actor.kind === 'control_admin' ? 'operator:' : `user:${actor.desktopUserId}`,
+      actor.kind === 'control_admin' ? actor.controlAdminId : undefined
     )
 
     if (!hasLinkHistory && options.retainWithoutLinkHistory !== true) {

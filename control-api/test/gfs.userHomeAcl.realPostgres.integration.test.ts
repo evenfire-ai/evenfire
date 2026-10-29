@@ -12,7 +12,11 @@ import {
   handleGrantListForCaller,
   handleGrantWrite,
 } from '../src/routes/gfs/grants.js'
-import { handleShareListForCaller, handleShareWrite } from '../src/routes/gfs/shares.js'
+import {
+  handleShareDelete,
+  handleShareListForCaller,
+  handleShareWrite,
+} from '../src/routes/gfs/shares.js'
 import {
   createDrive,
   createUser,
@@ -71,6 +75,7 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
     app.delete('/grants/:id', asyncHandler(handleGrantDelete))
     app.get('/shares', asyncHandler(handleShareListForCaller))
     app.post('/shares', asyncHandler(handleShareWrite))
+    app.delete('/shares/:id', asyncHandler(handleShareDelete))
   }, 60_000)
 
   afterAll(async () => {
@@ -882,5 +887,167 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
         )
       ).rows
     ).toEqual([{ outcome: 'allowed', desktop_user_id: owner, authority_source: 'user-session' }])
+  })
+
+  it('waits for the drive structure lock before deleting a share', async () => {
+    const target = await createUser(database.pool, 'Revoked Target')
+    const shareId = (
+      await database.pool.query<{ id: string }>(
+        `INSERT INTO gfs_shares (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by)
+         VALUES ($1, $2, 'user', $3, '{read}', false, 'operator:') RETURNING id::text`,
+        [drive, home, target]
+      )
+    ).rows[0]!.id
+    const blocker = await database.pool.connect()
+    let pending: Promise<request.Response> | undefined
+    let blocked = false
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query(
+        "SELECT pg_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint)",
+        [drive]
+      )
+      pending = request(app)
+        .delete(`/shares/${shareId}`)
+        .set('x-operator', 'yes')
+        .then(response => response)
+      for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+        const result = await database.pool.query(
+          `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+            AND wait_event_type='Lock' AND query LIKE '%gfs:structure:%') AS blocked`
+        )
+        blocked = result.rows[0].blocked === true
+        if (!blocked) await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      await blocker.query('COMMIT')
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+    expect((await pending!).status).toBe(200)
+    expect(blocked).toBe(true)
+    // Witness: the authorized deletion still removed the share row.
+    expect(
+      (await database.pool.query('SELECT id FROM gfs_shares WHERE id=$1', [shareId])).rows
+    ).toHaveLength(0)
+  }, 15_000)
+
+  it('holds the drive structure lock before it waits on the share row', async () => {
+    const target = await createUser(database.pool, 'Order Target')
+    const shareId = (
+      await database.pool.query<{ id: string }>(
+        `INSERT INTO gfs_shares (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by)
+         VALUES ($1, $2, 'user', $3, '{read}', false, 'operator:') RETURNING id::text`,
+        [drive, home, target]
+      )
+    ).rows[0]!.id
+    const blocker = await database.pool.connect()
+    let pending: Promise<request.Response> | undefined
+    let waitingOnRow = false
+    let structureFree = true
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM gfs_shares WHERE id = $1 FOR UPDATE', [shareId])
+      pending = request(app)
+        .delete(`/shares/${shareId}`)
+        .set('x-operator', 'yes')
+        .then(response => response)
+      for (let attempt = 0; attempt < 100 && !waitingOnRow; attempt++) {
+        const result = await database.pool.query(
+          `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+            AND wait_event_type='Lock' AND query LIKE '%FROM gfs_shares%FOR UPDATE%') AS waiting`
+        )
+        waitingOnRow = result.rows[0].waiting === true
+        if (!waitingOnRow) await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      // Structure lock first: while the DELETE waits on the row it already holds
+      // gfs:structure:<drive>, so another session cannot take it. With the row
+      // lock first, the DELETE would wait on the row without holding it.
+      const check = await database.pool.query(
+        "SELECT pg_try_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint) AS available",
+        [drive]
+      )
+      structureFree = check.rows[0].available === true
+      await blocker.query('COMMIT')
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+    expect(waitingOnRow).toBe(true)
+    expect(structureFree).toBe(false)
+    expect((await pending!).status).toBe(200)
+    // Witness: the DELETE completed once the row lock was released.
+    expect(
+      (await database.pool.query('SELECT id FROM gfs_shares WHERE id=$1', [shareId])).rows
+    ).toHaveLength(0)
+  }, 15_000)
+
+  it('rejects a non-operator owner grant that drops inherit and leaves the row unchanged', async () => {
+    const manager = await createUser(database.pool, 'Manager')
+    await grant(home, 'user', manager, ALL, true)
+    const ownerRow = () =>
+      database.pool.query(
+        `SELECT permissions, inherit FROM gfs_grants
+          WHERE resource_id=$1 AND subject_type='user' AND subject_id=$2`,
+        [home, owner]
+      )
+    const before = (await ownerRow()).rows
+    expect(before).toHaveLength(1)
+    await request(app)
+      .put('/grants')
+      .set('x-user', manager)
+      .send({
+        drive,
+        resourceId: home,
+        subject: { type: 'user', id: owner },
+        permissions: ALL,
+        inherit: false,
+      })
+      .expect(403)
+      .expect(({ body }) => expect(body.error).toBe('home_owner_grant_protected'))
+    // Witness: the protected row is readable after the refusal and unchanged.
+    expect((await ownerRow()).rows).toEqual(before)
+  })
+
+  it('rejects a bulk owner grant PUT with an uppercase owner id and writes no other subject', async () => {
+    const manager = await createUser(database.pool, 'Manager')
+    const other = await createUser(database.pool, 'Other')
+    await grant(home, 'user', manager, ALL, true)
+    const otherRows = async () =>
+      (
+        await database.pool.query(
+          `SELECT id::text FROM gfs_grants
+            WHERE resource_id=$1 AND subject_type='user' AND subject_id=$2`,
+          [home, other]
+        )
+      ).rows
+    // Witness: the second subject has no pre-request entry to lose.
+    expect(await otherRows()).toHaveLength(0)
+    // Witness: the same query shape returns a row for a subject that has one.
+    expect(
+      (
+        await database.pool.query(
+          `SELECT id::text FROM gfs_grants
+            WHERE resource_id=$1 AND subject_type='user' AND subject_id=$2`,
+          [home, manager]
+        )
+      ).rows
+    ).toHaveLength(1)
+    await request(app)
+      .put('/grants')
+      .set('x-user', manager)
+      .send({
+        drive,
+        resourceId: home,
+        subjects: [
+          { type: 'user', id: owner.toUpperCase() },
+          { type: 'user', id: other },
+        ],
+        permissions: ['read'],
+        inherit: true,
+      })
+      .expect(403)
+      .expect(({ body }) => expect(body.error).toBe('home_owner_grant_protected'))
+    expect(await otherRows()).toHaveLength(0)
   })
 })

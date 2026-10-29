@@ -319,6 +319,17 @@ describeRealPostgres('user-home retirement on PostgreSQL', () => {
         await prepareRetirement(path, f)
       )()
       await assertClean(f)
+      if (path === 'admin-delete') {
+        expect(
+          (
+            await database.pool.query(
+              `SELECT actor_on_behalf_of FROM gfs_audit
+                WHERE op='user_home.retired' AND subject=$1`,
+              [`user:${f.owner}`]
+            )
+          ).rows
+        ).toEqual([{ actor_on_behalf_of: admin }])
+      }
       for (const subject of [`user:${f.other}`, `team:${f.team}`, `host:${f.agentId}`]) {
         expect(
           await checkAccess(
@@ -371,6 +382,56 @@ describeRealPostgres('user-home retirement on PostgreSQL', () => {
     },
     15_000
   )
+
+  it("removes only the retired user's own entries on / and /Users", async () => {
+    const f = await fixture()
+    const users = (
+      await database.pool.query<{ parent_resource_id: string }>(
+        'SELECT parent_resource_id::text FROM gfs_resources WHERE resource_id=$1',
+        [f.home]
+      )
+    ).rows[0]!.parent_resource_id
+    await database.pool.query(
+      `INSERT INTO gfs_grants(drive,resource_id,subject_type,subject_id,permissions,inherit,granted_by)
+       VALUES ($1,$2,'user',$3,'{read}',false,'operator:'),
+              ($1,$2,'user',$4,'{read}',false,'operator:'),
+              ($1,$5,'user',$3,'{read}',false,'operator:'),
+              ($1,$5,'user',$4,'{read}',false,'operator:')`,
+      [f.drive, f.root, f.owner, f.other, users]
+    )
+    await database.pool.query(
+      `INSERT INTO gfs_shares(drive,resource_id,subject_type,subject_id,permissions,include_descendants)
+       VALUES ($1,$2,'user',$3,'{read}',false),($1,$2,'user',$4,'{read}',false),
+              ($1,$5,'user',$3,'{read}',false),($1,$5,'user',$4,'{read}',false)`,
+      [f.drive, f.root, f.owner, f.other, users]
+    )
+    const subjectEntries = async (subjectId: string) =>
+      (
+        await database.pool.query<{ relation: string; resource_id: string }>(
+          `SELECT 'grant' AS relation, resource_id::text AS resource_id FROM gfs_grants
+            WHERE resource_id=ANY($1::uuid[]) AND subject_type='user' AND subject_id=$2
+           UNION ALL
+           SELECT 'share' AS relation, resource_id::text AS resource_id FROM gfs_shares
+            WHERE resource_id=ANY($1::uuid[]) AND subject_type='user' AND subject_id=$2
+           ORDER BY relation, resource_id`,
+          [[f.root, users], subjectId]
+        )
+      ).rows
+    expect(await subjectEntries(f.owner)).toHaveLength(4)
+    const otherEntries = await subjectEntries(f.other)
+    expect(otherEntries).toHaveLength(4)
+
+    await request(app)
+      .delete(`/admin/users/${f.owner}`)
+      .set('Idempotency-Key', randomUUID())
+      .send({ reason: 'Retirement test' })
+      .expect(200)
+
+    // Witness: the retired user's own four rows on / and /Users are gone.
+    expect(await subjectEntries(f.owner)).toHaveLength(0)
+    // Another subject's entries on the same two ancestors are untouched.
+    expect(await subjectEntries(f.other)).toEqual(otherEntries)
+  })
 
   it('records conflict clearing before retirement and logs the cleanup counts', async () => {
     const f = await fixture()

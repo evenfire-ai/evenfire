@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Pool } from 'pg'
 import { repairUserHomeOwnerGrant } from '../src/gfs/userHomeProvisioner.js'
-import { GfsUserHomeReconciler } from '../src/services/gfsUserHomeReconciler.js'
+import {
+  GfsUserHomeReconciler,
+  STARTUP_OWNER_SQL,
+  STARTUP_RETIRED_SQL,
+} from '../src/services/gfsUserHomeReconciler.js'
 
 const mocks = vi.hoisted(() => ({
   query: vi.fn(),
@@ -69,6 +73,46 @@ describe('user-home startup repair', () => {
     const completedQueries = startupQueries
     await worker.tick()
     expect(startupQueries).toBe(completedQueries)
+    // The repaired row left the retry set: a third tick repairs nothing.
+    expect(repairUserHomeOwnerGrant).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries only the failed startup row without rescanning', async () => {
+    const userId = '11111111-1111-4111-8111-111111111111'
+    const startupQueries: string[] = []
+    vi.mocked(repairUserHomeOwnerGrant).mockRejectedValue(new Error('injected repair failure'))
+    mocks.query.mockImplementation(async (sql: string, values?: string[]) => {
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] }
+      if (sql.includes('pg_advisory_unlock')) return { rows: [] }
+      if (sql === STARTUP_RETIRED_SQL) {
+        startupQueries.push('retired')
+        return { rows: [] }
+      }
+      if (sql === STARTUP_OWNER_SQL) {
+        startupQueries.push('owner')
+        return { rows: values?.[0] === userId ? [] : [{ user_id: userId, needs_repair: true }] }
+      }
+      if (sql.includes('WITH candidates AS MATERIALIZED')) return { rows: [] }
+      if (sql.includes("state = 'pending'")) return { rows: [] }
+      throw new Error(`Unexpected query: ${sql}`)
+    })
+    const worker = new GfsUserHomeReconciler('main', { options: {} } as Pool)
+
+    await worker.tick()
+    expect(repairUserHomeOwnerGrant).toHaveBeenCalledTimes(1)
+    // One full pass: both phases, plus the second page that ends the owner scan.
+    const completedScan = [...startupQueries]
+    expect(completedScan).toEqual(['retired', 'owner', 'owner'])
+
+    await worker.tick()
+    // Witness: the failing row is repaired again, so the skipped scan is not a
+    // tick that silently does nothing.
+    expect(repairUserHomeOwnerGrant).toHaveBeenCalledTimes(2)
+    expect(startupQueries).toEqual(completedScan)
+
+    await worker.tick()
+    expect(repairUserHomeOwnerGrant).toHaveBeenCalledTimes(3)
+    expect(startupQueries).toEqual(completedScan)
   })
 
   it.each([1, 2])('retries %i failed startup passes and stops after success', async failures => {

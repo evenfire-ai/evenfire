@@ -1,10 +1,16 @@
 const RESERVED_NAMES = new Set(['users', 'shared', 'system', 'org', 'admin', 'root', 'public'])
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
-/** Normalize before reserving a storage name; the result contains only ASCII. */
+/**
+ * Normalize before reserving a storage name; the result contains only ASCII.
+ * NFKD splits an accented letter into its base letter plus combining marks, so
+ * dropping the marks keeps `José` readable as `jose` instead of `jos`.
+ * Letters without a decomposition (`ß`, `ø`, `ł`) are still dropped.
+ */
 export function normalizeUserHomeName(value: string): string {
   return value
-    .normalize('NFC')
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/[\p{Cc}\p{Cf}]/gu, '')
     .replace(/[\s\p{Z}/\\]+/gu, '-')

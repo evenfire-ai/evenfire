@@ -59,4 +59,44 @@ describe('0131_gfs_user_homes migration', () => {
     ).toBe(false)
     expect(currentRelease).toHaveBeenCalledOnce()
   })
+
+  it('records 0131 without re-running DDL when only 0130_gfs_user_homes is recorded', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const earlier = CONTROL_API_MIGRATIONS.map(migration => migration.version).filter(
+      version => version !== VERSION
+    )
+    const legacyQuery = recordingQuery([...earlier, '0130_gfs_user_homes'])
+    const legacyRelease = vi.fn()
+    await initDb({
+      connect: vi.fn().mockResolvedValue({ query: legacyQuery, release: legacyRelease }),
+    } as never)
+
+    expect(
+      legacyQuery.mock.calls.some(([sql]) => sql.includes('CREATE TABLE gfs_user_homes'))
+    ).toBe(false)
+    // Witness: the renamed migration is recorded, so the run is not a no-op.
+    expect(legacyQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO schema_migrations(version)'),
+      [VERSION]
+    )
+    expect(legacyRelease).toHaveBeenCalledOnce()
+  })
+
+  it('accepts the legacy 0130_gfs_user_homes receipt as evidence for 0131', async () => {
+    const { CONTROL_API_MIGRATIONS, assertDbReady } = await import('../src/db.js')
+    const recorded = [
+      ...CONTROL_API_MIGRATIONS.map(migration => migration.version).filter(
+        version => version !== VERSION
+      ),
+      '0130_gfs_user_homes',
+    ]
+    const query = vi.fn(async (sql: string) =>
+      sql.includes('password_admission_rollout_is_ready')
+        ? { rows: [{ ready: true }], rowCount: 1 }
+        : { rows: recorded.map(version => ({ version })), rowCount: recorded.length }
+    )
+
+    await expect(assertDbReady({ query })).resolves.toBeUndefined()
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('schema_migrations'))
+  })
 })

@@ -17,6 +17,13 @@ describe('user home naming policy', () => {
     expect(normalizeUserHomeName('..')).toBe('')
   })
 
+  it('keeps accented letters as their base letter instead of dropping them', () => {
+    expect(normalizeUserHomeName('José García')).toBe('jose-garcia')
+    expect(normalizeUserHomeName('Ñandú')).toBe('nandu')
+    expect(normalizeUserHomeName('Zoë')).toBe('zoe')
+    expect(normalizeUserHomeName('jose-garcia')).toBe('jose-garcia')
+  })
+
   it('rejects reserved and foreign UUID names while allowing the owner UUID', () => {
     for (const reserved of ['users', 'shared', 'system', 'org', 'admin', 'root', 'public']) {
       expect(isValidUserHomeName(reserved, userId)).toBe(false)
