@@ -11,6 +11,87 @@ import { requestJson } from '../httpClient.js'
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService GFS Move session generation', () => {
+  it('invalidates the outgoing identity with the new authoritative generation before replacement publication', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const userA = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const userB = {
+      id: 'user-b',
+      email: 'user-b@example.test',
+      name: 'User B',
+      picture: null,
+      teamId: 'team-b',
+      teamName: 'Team B',
+      role: 'member',
+    }
+    service.authClient = {
+      googleLogin: vi
+        .fn()
+        .mockResolvedValueOnce({ token: 'session-a', me: userA })
+        .mockResolvedValueOnce({ token: 'session-b', me: userB }),
+    } as never
+    const main = service as unknown as {
+      getSessionGeneration(): number
+      getCachedUserId(): string | null
+      onSandboxUiSessionInvalidated?: () => void
+      bindCurrentChatStore(userId: string): Promise<void>
+    }
+    await service.googleLogin('google-token-a')
+    const outgoingGeneration = main.getSessionGeneration()
+    const invalidated: Array<{ generation: number; outgoingUserId: string | null }> = []
+    main.onSandboxUiSessionInvalidated = () => {
+      invalidated.push({
+        generation: main.getSessionGeneration(),
+        outgoingUserId: main.getCachedUserId(),
+      })
+    }
+
+    let markBindingStarted!: () => void
+    const bindingStarted = new Promise<void>(resolve => {
+      markBindingStarted = resolve
+    })
+    let releaseBinding!: () => void
+    const bindingGate = new Promise<void>(resolve => {
+      releaseBinding = resolve
+    })
+    main.bindCurrentChatStore = async userId => {
+      if (userId === 'user-b') {
+        markBindingStarted()
+        await bindingGate
+      }
+    }
+
+    let replacementPublished = false
+    const replacement = service.googleLogin('google-token-b').then(result => {
+      replacementPublished = true
+      return result
+    })
+    try {
+      await bindingStarted
+      expect(invalidated).toEqual([
+        { generation: main.getSessionGeneration(), outgoingUserId: 'user-a' },
+      ])
+      expect(main.getSessionGeneration()).toBeGreaterThan(outgoingGeneration)
+      expect(await service.getSessionState()).toMatchObject({
+        authenticated: true,
+        me: { id: 'user-b' },
+        sessionGeneration: main.getSessionGeneration(),
+      })
+      expect(replacementPublished).toBe(false)
+    } finally {
+      releaseBinding()
+    }
+    await replacement
+    expect(replacementPublished).toBe(true)
+  })
+
   it('rejects an old-generation Move after same-principal login replacement', async () => {
     const { service } = await createNativeCommitTestHarness()
     const me = {

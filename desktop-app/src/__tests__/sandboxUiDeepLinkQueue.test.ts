@@ -35,6 +35,18 @@ describe('SandboxUiDeepLinkQueue', () => {
     expect(queue.enqueue({ appRef: 'ns/app' }).id).toBe(2)
   })
 
+  it('returns a monotonic floor so links admitted after invalidation survive that reset', () => {
+    const queue = new SandboxUiDeepLinkQueue()
+    const prior = queue.enqueue({ appRef: 'ns/prior' })
+
+    const minimumId = queue.clear()
+    const postInvalidation = queue.enqueue({ appRef: 'ns/after' })
+
+    expect(minimumId).toBe(prior.id + 1)
+    expect(queue.list()).toEqual([postInvalidation])
+    expect(postInvalidation.id).toBe(minimumId)
+  })
+
   it('keeps the newest bounded set of links', () => {
     const queue = new SandboxUiDeepLinkQueue(2)
     queue.enqueue({ appRef: 'ns/one' })

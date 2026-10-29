@@ -1633,6 +1633,7 @@ export function useAppController() {
   return {
     // Auth
     booting: auth.booting,
+    sessionGeneration: sessionGenerationRef.current,
     initialExperienceLoading:
       auth.isAuthenticated &&
       !auth.hasDependencyOutage &&

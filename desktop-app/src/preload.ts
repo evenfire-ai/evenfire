@@ -11,6 +11,35 @@ import type {
   SandboxUiReleasedEvent,
 } from './types.js'
 
+type SandboxUiQueuedDeepLinkEnvelope = SandboxUiDeepLinkEnvelope & {
+  userNavigationGenerationAtActivation: number
+}
+type SandboxUiSessionInvalidation = {
+  sessionGeneration: number
+  appDeepLinkMinimumId: number
+  gfsDeepLinkMinimumId: number
+}
+
+function parseSandboxUiSessionInvalidation(value: unknown): SandboxUiSessionInvalidation | null {
+  if (!value || typeof value !== 'object') return null
+  const event = value as Record<string, unknown>
+  if (
+    !Number.isSafeInteger(event.sessionGeneration) ||
+    Number(event.sessionGeneration) < 0 ||
+    !Number.isSafeInteger(event.appDeepLinkMinimumId) ||
+    Number(event.appDeepLinkMinimumId) < 1 ||
+    !Number.isSafeInteger(event.gfsDeepLinkMinimumId) ||
+    Number(event.gfsDeepLinkMinimumId) < 1
+  ) {
+    return null
+  }
+  return {
+    sessionGeneration: Number(event.sessionGeneration),
+    appDeepLinkMinimumId: Number(event.appDeepLinkMinimumId),
+    gfsDeepLinkMinimumId: Number(event.gfsDeepLinkMinimumId),
+  }
+}
+
 // Sandboxed Electron preloads cannot load relative runtime modules. Keep this
 // allowlist self-contained and pin it to the authoritative registry in
 // desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
@@ -815,13 +844,16 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:findResult', listener)
       return () => ipcRenderer.off('sandboxUi:findResult', listener)
     },
-    onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => {
-      const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
+    onDeepLink: (callback: (args: SandboxUiQueuedDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, args: SandboxUiQueuedDeepLinkEnvelope) => callback(args)
       ipcRenderer.on('sandboxUi:deepLink', listener)
       return () => ipcRenderer.off('sandboxUi:deepLink', listener)
     },
-    onSessionInvalidated: (callback: () => void) => {
-      const listener = () => callback()
+    onSessionInvalidated: (callback: (event: SandboxUiSessionInvalidation) => void) => {
+      const listener = (_event: unknown, payload: unknown) => {
+        const event = parseSandboxUiSessionInvalidation(payload)
+        if (event) callback(event)
+      }
       ipcRenderer.on('sandboxUi:sessionInvalidated', listener)
       return () => ipcRenderer.off('sandboxUi:sessionInvalidated', listener)
     },

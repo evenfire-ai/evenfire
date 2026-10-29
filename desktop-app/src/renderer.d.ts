@@ -822,7 +822,9 @@ declare global {
         // Reloads that launch's view in place only if it is still the live one.
         reload: (args: { launchId: string }) => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
-        listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
+        listPendingDeepLinks: () => Promise<{
+          links: Array<SandboxUiDeepLinkEnvelope & { userNavigationGenerationAtActivation: number }>
+        }>
         clearPendingDeepLinks: () => Promise<void>
         acknowledgeDeepLink: (id: number) => Promise<void>
         setBounds: (bounds: {
@@ -858,8 +860,18 @@ declare global {
             finalUpdate: boolean
           }) => void
         ) => () => void
-        onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
-        onSessionInvalidated: (callback: () => void) => () => void
+        onDeepLink: (
+          callback: (
+            args: SandboxUiDeepLinkEnvelope & { userNavigationGenerationAtActivation: number }
+          ) => void
+        ) => () => void
+        onSessionInvalidated: (
+          callback: (event: {
+            sessionGeneration: number
+            appDeepLinkMinimumId: number
+            gfsDeepLinkMinimumId: number
+          }) => void
+        ) => () => void
         // Once per view main tears down, whatever the reason, with the route it
         // represented (`null`: unreadable, keep the last known one).
         onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void

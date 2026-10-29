@@ -77,9 +77,14 @@ const appService = new AppService({
     ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
     : {}),
   onSandboxUiSessionInvalidated: () => {
-    sandboxUiDeepLinkQueue.clear()
+    const appDeepLinkMinimumId = sandboxUiDeepLinkQueue.clear()
+    const gfsDeepLinkMinimumId = gfsResourceDeepLinkQueue.clear()
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('sandboxUi:sessionInvalidated')
+      mainWindow.webContents.send('sandboxUi:sessionInvalidated', {
+        sessionGeneration: appService.getSessionGeneration(),
+        appDeepLinkMinimumId,
+        gfsDeepLinkMinimumId,
+      })
     }
   },
 })
@@ -350,7 +355,7 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
   // Coalesce only while the same semantic target is awaiting renderer
   // acknowledgement. Query-parameter order cannot bypass this check, and once
   // acknowledged, an immediate user re-click creates a fresh envelope.
-  const envelope = sandboxUiDeepLinkQueue.enqueue(target)
+  const envelope = sandboxUiDeepLinkQueue.enqueue(target, gfsUserNavigationGeneration.current())
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sandboxUi:deepLink', envelope)
   }

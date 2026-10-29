@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-app-links'
 import { buildGfsResourceDeepLink } from '../gfsDeepLinks.js'
 
 type MainEvent = {
@@ -17,6 +18,9 @@ const harness = vi.hoisted(() => {
     readyResolver: null as null | (() => void),
     initialize: vi.fn().mockResolvedValue(undefined),
     logout: vi.fn(async () => 7),
+    sessionGeneration: 0,
+    invalidateSandboxUiSession: null as null | (() => void),
+    parseSandboxUiDeepLink: vi.fn(() => null),
     registeredLogout: null as null | (() => Promise<unknown>),
     createWindow: null as null | (() => Record<string, any>),
   }
@@ -102,8 +106,12 @@ vi.mock('electron', () => ({
 
 vi.mock('../appService.js', () => ({
   AppService: class {
+    constructor(options?: { onSandboxUiSessionInvalidated?: () => void }) {
+      harness.invalidateSandboxUiSession = options?.onSandboxUiSessionInvalidated ?? null
+    }
     initialize = harness.initialize
     logout = harness.logout
+    getSessionGeneration = () => harness.sessionGeneration
   },
 }))
 vi.mock('../config.js', () => ({
@@ -142,10 +150,10 @@ vi.mock('../protocolLaunchArgs.js', () => ({
 }))
 vi.mock('../sandboxUiDeepLinks.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../sandboxUiDeepLinks.js')>()
-  return { ...actual, parseSandboxUiDeepLink: vi.fn(() => null) }
+  return { ...actual, parseSandboxUiDeepLink: harness.parseSandboxUiDeepLink }
 })
 vi.mock('../sandboxUiProtocolWindowPolicy.js', () => ({
-  shouldAcceptSandboxUiProtocolLink: vi.fn(() => false),
+  shouldAcceptSandboxUiProtocolLink: vi.fn(() => true),
 }))
 vi.mock('../sandboxUiSessionRefresh.js', () => ({ notifySandboxUiHostResumed: vi.fn() }))
 vi.mock('../shortcutRouter.js', () => ({ wireHostDesktopShortcutRouting: vi.fn() }))
@@ -249,5 +257,72 @@ describe('main.ts GFS navigation-generation composition', () => {
     await expect(harness.registeredLogout?.()).resolves.toBe(7)
     expect(harness.logout).toHaveBeenCalledTimes(2)
     expect(listPending(ipcEvent(ownContents)).links).toEqual([])
+  })
+
+  it('keeps post-invalidation App and resource links above the main queue reset floors', () => {
+    const mainWindow = harness.windows[0]
+    const ownContents = mainWindow?.webContents
+    if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
+    const listAppLinks = registeredHandler(
+      harness.handleHandlers,
+      'sandboxUi:listPendingDeepLinks'
+    ) as (event: MainEvent) => { links: Array<Record<string, unknown>> }
+    const listGfsLinks = registeredHandler(harness.handleHandlers, 'gfs:listPendingDeepLinks') as (
+      event: MainEvent
+    ) => { links: Array<Record<string, unknown>> }
+    const appLink = buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'app', path: '/inbox' })
+    const resourceUri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    expect(parseSandboxUiDeepLink(appLink)).toBeTruthy()
+    ownContents.send.mockClear()
+    const openUrl = harness.appListeners.get('open-url')
+    if (!openUrl) throw new Error('main.ts did not register the OS deep-link route')
+
+    harness.parseSandboxUiDeepLink.mockReturnValue(parseSandboxUiDeepLink(appLink))
+    openUrl({ preventDefault: vi.fn() }, appLink)
+    harness.parseSandboxUiDeepLink.mockReturnValue(null)
+    openUrl({ preventDefault: vi.fn() }, buildGfsResourceDeepLink(resourceUri))
+    const priorApp = listAppLinks(ipcEvent(ownContents)).links[0]
+    const priorGfs = listGfsLinks(ipcEvent(ownContents)).links[0]
+    expect({ priorApp, priorGfs }).toEqual(
+      expect.objectContaining({ priorApp: expect.anything(), priorGfs: expect.anything() })
+    )
+
+    harness.sessionGeneration = 23
+    harness.invalidateSandboxUiSession?.()
+
+    expect(listAppLinks(ipcEvent(ownContents)).links).toEqual([])
+    expect(listGfsLinks(ipcEvent(ownContents)).links).toEqual([])
+    const invalidation = ownContents.send.mock.calls
+      .filter(([channel]) => channel === 'sandboxUi:sessionInvalidated')
+      .at(-1)
+    const reset = invalidation?.[1] as
+      | {
+          sessionGeneration: number
+          appDeepLinkMinimumId: number
+          gfsDeepLinkMinimumId: number
+        }
+      | undefined
+    expect(reset).toEqual({
+      sessionGeneration: 23,
+      appDeepLinkMinimumId: Number(priorApp.id) + 1,
+      gfsDeepLinkMinimumId: Number(priorGfs.id) + 1,
+    })
+
+    const postInvalidationAppUrl = buildSandboxUiDeepLink({
+      recipeNs: 'ns',
+      recipeName: 'after',
+      path: '/after',
+    })
+    harness.parseSandboxUiDeepLink.mockReturnValue(parseSandboxUiDeepLink(postInvalidationAppUrl))
+    openUrl({ preventDefault: vi.fn() }, postInvalidationAppUrl)
+    harness.parseSandboxUiDeepLink.mockReturnValue(null)
+    openUrl({ preventDefault: vi.fn() }, buildGfsResourceDeepLink(resourceUri))
+    const postApp = listAppLinks(ipcEvent(ownContents)).links
+    const postGfs = listGfsLinks(ipcEvent(ownContents)).links
+    expect(postApp).toHaveLength(1)
+    expect(postGfs).toHaveLength(1)
+    expect(postApp[0]?.id).toBe(reset?.appDeepLinkMinimumId)
+    expect(postApp[0]).toMatchObject({ userNavigationGenerationAtActivation: 1 })
+    expect(postGfs[0]?.id).toBe(reset?.gfsDeepLinkMinimumId)
   })
 })
