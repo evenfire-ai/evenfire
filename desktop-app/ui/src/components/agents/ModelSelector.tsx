@@ -156,6 +156,7 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
       open={open}
       options={options}
       placement={placementValue}
+      popupMatchSelectWidth={false}
       placeholder={effectiveLabel || SELECT_MODEL_LABEL}
       popupRender={menu => (
         <>
