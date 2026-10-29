@@ -1,0 +1,144 @@
+name: PR 977 focused Windows ACL diagnostic
+
+on:
+  push:
+    branches:
+      - test/pr977-windows-41ed9e64-20261029-r24m6
+    paths:
+      - .validation/windows/acl-diagnostic.trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr977-windows-acl-focused-41ed9e64
+  cancel-in-progress: false
+
+env:
+  PR977_SOURCE_SHA: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+
+jobs:
+  acl-focused-diagnostic:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out diagnostic harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify source and harness revisions
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nodePin = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $env:GITHUB_SHA"
+          Write-Output "Diagnostic harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA -or $harnessSha -ne $env:GITHUB_SHA) {
+            throw 'Application source or harness SHA mismatch'
+          }
+          if ($nodePin -ne '24.22.1') { throw 'Unexpected repository Node pin' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: source/desktop-app/package-lock.json
+
+      - name: Install Desktop dependencies and prepare the native helper
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed' }
+          npm run prepare:windows-native
+          if ($LASTEXITCODE -ne 0) { throw 'Native helper preparation failed' }
+
+      - name: Run only the two representative ACL cases with an external watchdog
+        id: diagnostic
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+        run: |
+          $rawReport = Join-Path $env:RUNNER_TEMP 'acl-focused-raw.json'
+          $safeReport = Join-Path $env:RUNNER_TEMP 'acl-focused-safe.json'
+          $stdout = Join-Path $env:RUNNER_TEMP 'acl-focused-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'acl-focused-stderr.log'
+          $node = (Get-Command node).Source
+          $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
+          $filter = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
+          $pattern = 'provisions a protected authority directory and verifies every existing child|rejects an unsafe ACL on an existing child instead of repairing or trusting it'
+          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '--reporter=json', '"--outputFile.json=' + $rawReport + '"', '"' + $filter + '"', '--testNamePattern', '"' + $pattern + '"') -join ' '
+          $started = [DateTime]::UtcNow
+          $process = Start-Process -FilePath $node -ArgumentList $argumentLine -WorkingDirectory (Get-Location).Path -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $watchdogExpired = $false
+          $deadline = $started.AddSeconds(240)
+          while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Seconds 2
+            $process.Refresh()
+          }
+          if (-not $process.HasExited) {
+            $watchdogExpired = $true
+            Write-Output 'External watchdog expired; terminating only the focused Vitest process tree.'
+            & taskkill.exe /PID $process.Id /T /F *> $null
+            $process.WaitForExit()
+          }
+          $process.Refresh()
+          $testExit = if ($watchdogExpired) { $null } else { $process.ExitCode }
+          Write-Output "Focused Vitest exit code: $testExit"
+          Write-Output "External watchdog expired: $watchdogExpired"
+          Write-Output "Elapsed seconds: $([Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 1))"
+          if (-not (Test-Path -LiteralPath $rawReport -PathType Leaf)) {
+            throw 'Focused ACL cases did not produce a complete JSON report.'
+          }
+          node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $rawReport $safeReport
+          $sanitizeExit = $LASTEXITCODE
+          Write-Output "Sanitizer exit code: $sanitizeExit"
+          $report = Get-Content -LiteralPath $safeReport -Raw | ConvertFrom-Json
+          $expected = @(
+            'provisions a protected authority directory and verifies every existing child',
+            'rejects an unsafe ACL on an existing child instead of repairing or trusting it'
+          )
+          $suiteNames = @($report.testResults | ForEach-Object { $_.name })
+          $selected = @($report.testResults | ForEach-Object { $_.assertionResults } | Where-Object { $expected -contains $_.title })
+          $selectedPassed = @($selected | Where-Object { $_.status -eq 'passed' })
+          $selectedFailed = @($selected | Where-Object { $_.status -eq 'failed' })
+          $caseCounts = @($expected | ForEach-Object { $caseTitle = $_; @($selected | Where-Object { $_.title -eq $caseTitle }).Count })
+          $filteredPending = @($report.testResults | ForEach-Object { $_.assertionResults } | Where-Object { $_.status -in @('pending', 'skipped') -and $expected -notcontains $_.title })
+          Write-Output "Selected ACL cases reported: $($selected.Count); passed: $($selectedPassed.Count); failed: $($selectedFailed.Count)"
+          Write-Output "Per-case report counts: $($caseCounts -join ',')"
+          Write-Output "Other name-filtered cases pending/skipped: $($filteredPending.Count)"
+          if ($watchdogExpired -or $report.testResults.Count -ne 1 -or $suiteNames[0] -ne 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' -or $selected.Count -ne 2 -or $caseCounts.Count -ne 2 -or @($caseCounts | Where-Object { $_ -ne 1 }).Count -ne 0 -or $selectedPassed.Count + $selectedFailed.Count -ne 2 -or $filteredPending.Count -ne $report.numPendingTests) {
+            throw 'Focused ACL diagnostic was incomplete or timed out.'
+          }
+          if ($sanitizeExit -ne 0 -or $report.counterConsistency.valid -ne $true) {
+            throw 'Focused ACL diagnostic report is inconsistent; sanitized evidence is retained.'
+          }
+          if ($testExit -ne 0 -or $report.success -ne $true -or $report.numFailedTests -ne 0 -or $selectedPassed.Count -ne 2 -or $selectedFailed.Count -ne 0) {
+            throw 'Focused ACL assertions failed; sanitized evidence is retained.'
+          }
+
+      - name: Preserve sanitized focused ACL evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr977-windows-acl-focused-diagnostic
+          path: ${{ runner.temp }}/acl-focused-safe.json
+          if-no-files-found: error
+          retention-days: 7

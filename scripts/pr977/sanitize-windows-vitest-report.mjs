@@ -80,31 +80,222 @@ const errorTypes = [
   'RangeError',
 ]
 const classifyFailure = message => {
+  const structured = extractStructuredDiagnostic(message)
   const errorType =
     errorTypes.find(type => new RegExp(`\\b${type}\\b`).test(message)) ?? 'unclassified'
   const code = errorCodes.find(value =>
     new RegExp(`(^|[^A-Za-z0-9_])${value}([^A-Za-z0-9_]|$)`).test(message)
   )
-  const category = message.includes('Native Windows ACL fixture failed:')
-    ? 'native-fixture'
-    : errorType === 'PrivilegeNotHeldException'
-      ? 'privilege-not-held'
-      : errorType === 'PlatformNotSupportedException'
-        ? 'platform-api-unavailable'
-        : code === 'EACCES' || code === 'EPERM' || errorType === 'UnauthorizedAccessException'
-          ? 'access-denied'
-          : code === 'ETIMEDOUT' || errorType === 'TimeoutError'
-            ? 'timeout'
-            : errorType === 'AssertionError'
-              ? 'assertion'
-              : 'unclassified'
+  const category =
+    structured?.source === 'native-fixture'
+      ? 'native-fixture'
+      : structured?.source === 'verifier'
+        ? 'native-verifier'
+        : /expected \[Function\] to throw(?: an error)?/i.test(message)
+          ? 'expected-rejection-not-observed'
+          : /expected .*to throw/i.test(message)
+            ? 'expected-rejection-mismatch'
+            : errorType === 'PrivilegeNotHeldException'
+              ? 'privilege-not-held'
+              : errorType === 'PlatformNotSupportedException'
+                ? 'platform-api-unavailable'
+                : code === 'EACCES' ||
+                    code === 'EPERM' ||
+                    errorType === 'UnauthorizedAccessException'
+                  ? 'access-denied'
+                  : code === 'ETIMEDOUT' || errorType === 'TimeoutError'
+                    ? 'timeout'
+                    : errorType === 'AssertionError'
+                      ? 'assertion'
+                      : 'unclassified'
   const match = message.match(/([^\\/\s()]+\.test\.[cm]?[jt]sx?):(\d+):(\d+)/)
   return {
     category,
     errorType,
     ...(code ? { code } : {}),
     location: match ? `${match[1]}:${match[2]}` : 'unavailable',
+    ...(structured ? { diagnostic: structured.fields } : {}),
   }
+}
+
+const safeErrorTypes = new Set([
+  'ArgumentException',
+  'DirectoryNotFoundException',
+  'FileNotFoundException',
+  'IOException',
+  'InvalidCastException',
+  'InvalidOperationException',
+  'MethodInvocationException',
+  'PlatformNotSupportedException',
+  'PrivilegeNotHeldException',
+  'UnauthorizedAccessException',
+  'Win32Exception',
+])
+const safeFailureCategories = new Set([
+  'privilege-not-held',
+  'access-denied',
+  'win32-api-failure',
+  'argument-rejected',
+  'platform-api-unavailable',
+  'fixture-ace-readback-mismatch',
+  'invalid-cast',
+  'method-invocation-failed',
+  'script-parse-failed',
+  'overload-resolution-failed',
+  'unclassified-powershell-failure',
+])
+const safeFixtureOperations = new Set([
+  'add-everyone-modify',
+  'add-trusted-installer-modify',
+  'add-authenticated-users-create-directory',
+  'add-current-user-inherit-only-ace',
+  'create-authority-child-junction',
+  'create-user-data-parent-junction',
+  'remove-user-data-parent-junction',
+  'set-allowed-child-owner',
+])
+const allowedDiagnosticEnums = {
+  ownerClass: new Set([
+    'current-user',
+    'system',
+    'administrators',
+    'trusted-installer',
+    'everyone',
+    'authenticated-users',
+    'builtin-users',
+    'interactive',
+    'creator-owner',
+    'other',
+  ]),
+  aceClass: new Set([
+    'current-user',
+    'system',
+    'administrators',
+    'trusted-installer',
+    'everyone',
+    'authenticated-users',
+    'builtin-users',
+    'interactive',
+    'creator-owner',
+    'other',
+  ]),
+}
+
+function sanitizeDiagnosticFields(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const fields = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'operation' && typeof item === 'string' && safeFixtureOperations.has(item))
+      fields[key] = item
+    else if (
+      key === 'powershellFailureCategory' &&
+      typeof item === 'string' &&
+      safeFailureCategories.has(item)
+    )
+      fields[key] = item
+    else if (
+      ['errorType', 'innerErrorType', 'verifierErrorType', 'verifierInnerErrorType'].includes(
+        key
+      ) &&
+      typeof item === 'string' &&
+      safeErrorTypes.has(item)
+    )
+      fields[key] = item
+    else if (
+      ['ownerClass', 'aceClass', 'verifierOwnerClass', 'verifierAceClass'].includes(key) &&
+      typeof item === 'string' &&
+      allowedDiagnosticEnums[
+        key.replace(/^verifier/, '').replace(/^./, char => char.toLowerCase())
+      ]?.has(item)
+    )
+      fields[key] = item
+    else if (
+      [
+        'phase',
+        'verifierExecutionPhase',
+        'verifierPhase',
+        'innerNativeOperation',
+        'verifierInnerNativeOperation',
+      ].includes(key) &&
+      typeof item === 'string' &&
+      /^[A-Za-z0-9-]{1,80}$/.test(item)
+    )
+      fields[key] = item
+    else if (
+      ['detail', 'verifierDetail'].includes(key) &&
+      typeof item === 'string' &&
+      /^[A-Za-z0-9-]{1,80}$/.test(item)
+    )
+      fields[key] = item
+    else if (
+      ['hresult', 'innerHresult', 'verifierHresult', 'verifierInnerHresult'].includes(key) &&
+      typeof item === 'string' &&
+      /^0x[0-9A-F]{8}$/i.test(item)
+    )
+      fields[key] = item
+    else if (
+      ['processErrorCode', 'verifierProcessErrorCode'].includes(key) &&
+      typeof item === 'string' &&
+      errorCodes.includes(item)
+    )
+      fields[key] = item
+    else if (key === 'signal' && typeof item === 'string' && ['SIGTERM', 'SIGKILL'].includes(item))
+      fields[key] = item
+    else if (
+      [
+        'processStarted',
+        'processSignaled',
+        'stdoutPresent',
+        'stderrPresent',
+        'verifierAceWriteContent',
+        'verifierAceDeleteChild',
+        'verifierAceDelete',
+        'verifierAceWriteDacl',
+        'verifierAceTakeOwnership',
+        'verifierAceWriteMetadata',
+        'verifierAceInherited',
+      ].includes(key) &&
+      typeof item === 'boolean'
+    )
+      fields[key] = item
+    else if (
+      ['exitStatus', 'innerNativeErrorCode', 'verifierInnerNativeErrorCode'].includes(key) &&
+      Number.isSafeInteger(item) &&
+      (key === 'exitStatus' || (item >= 0 && item <= 0xffff))
+    )
+      fields[key] = item
+  }
+  return Object.keys(fields).length > 0 ? fields : undefined
+}
+
+function extractStructuredDiagnostic(message) {
+  const markers = [
+    { text: 'Native Windows ACL fixture failed:', source: 'native-fixture' },
+    { text: 'Windows session authority ACL verification failed', source: 'verifier' },
+    {
+      text: 'Windows session authority ACL verification returned invalid evidence',
+      source: 'verifier',
+    },
+    {
+      text: 'Windows session authority ACL verification returned incomplete evidence',
+      source: 'verifier',
+    },
+  ]
+  for (const marker of markers) {
+    const markerIndex = message.indexOf(marker.text)
+    if (markerIndex < 0) continue
+    const jsonStart = message.indexOf('{', markerIndex + marker.text.length)
+    if (jsonStart < 0) continue
+    let value
+    try {
+      value = JSON.parse(message.slice(jsonStart, message.indexOf('}', jsonStart) + 1))
+    } catch {
+      continue
+    }
+    const fields = sanitizeDiagnosticFields(value)
+    if (fields) return { source: marker.source, fields }
+  }
+  return undefined
 }
 
 const testResults = report.testResults.map(suite => {
