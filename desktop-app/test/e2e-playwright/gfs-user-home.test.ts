@@ -18,6 +18,8 @@
  *  - Test-user credentials are generated at runtime; all credentials stay in memory.
  */
 import {
+  type Browser,
+  type BrowserContext,
   type ElectronApplication,
   type Page,
   type TestInfo,
@@ -69,6 +71,18 @@ function requiredEnv(name: string): string {
   const value = process.env[name]?.trim()
   if (!value) throw new Error(`[USER-HOME-E2E] ${name} is required (no default).`)
   return value.replace(/\/$/, '')
+}
+
+/**
+ * A Control UI operator context whose actions and navigations fail within a
+ * minute. Playwright Test sets both defaults to 0 (no limit), so a stalled
+ * operator step otherwise waits for the whole journey timeout.
+ */
+async function newOperatorContext(browser: Browser): Promise<BrowserContext> {
+  const context = await browser.newContext({ baseURL: requiredEnv('CONTROL_UI_BASE_URL') })
+  context.setDefaultTimeout(60_000)
+  context.setDefaultNavigationTimeout(60_000)
+  return context
 }
 
 function runTagFor(testInfo: TestInfo): string {
@@ -865,7 +879,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     const sentinel = `J5 private file ${fx.runTag}`
     const sessions: DesktopSession[] = []
     let controlPage: Page | null = null
-    let control: Awaited<ReturnType<typeof browser.newContext>> | null = null
+    let control: BrowserContext | null = null
     let adminSession: DesktopSession | null = null
     let adminHome: Awaited<ReturnType<UserHomeFixtures['waitForHomeState']>> | null = null
     let adminFileCreated = false
@@ -873,7 +887,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     let guest: HomeTestUser | null = null
     try {
       guest = fx.createUser('j5-guest')
-      control = await browser.newContext({ baseURL: requiredEnv('CONTROL_UI_BASE_URL') })
+      control = await newOperatorContext(browser)
       controlPage = await control.newPage()
       const operatorPanel = new ControlUiAccessPanel(controlPage)
       await operatorPanel.login(adminLogin, adminPassword)
@@ -1039,7 +1053,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     browser,
   }, testInfo) => {
     test.setTimeout(4 * RESPONSE_TIMEOUT_MS + 15 * 60_000)
-    const controlUiUrl = requiredEnv('CONTROL_UI_BASE_URL')
     const adminUser = requiredEnv('ADMIN_USER')
     const adminPass = requiredEnv('ADMIN_PASS')
     const fx = new UserHomeFixtures(runTagFor(testInfo))
@@ -1051,7 +1064,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     const file = `j6-file-${fx.runTag}.txt`
     const sentinel = `J6 ${fx.runTag}`
     const sessions: DesktopSession[] = []
-    const control = await browser.newContext({ baseURL: controlUiUrl })
+    const control = await newOperatorContext(browser)
     try {
       const ownerS = await launchDesktopAs(testInfo, owner)
       sessions.push(ownerS)
@@ -1146,7 +1159,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     const other = fx.createUser('guard-other')
     const file = `guard-file-${fx.runTag}.txt`
     const sessions: DesktopSession[] = []
-    const controls: Array<Awaited<ReturnType<typeof browser.newContext>>> = []
+    const controls: BrowserContext[] = []
     try {
       const ownerS = await launchDesktopAs(testInfo, owner)
       sessions.push(ownerS)
@@ -1181,7 +1194,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expect(fileRow).toBeVisible()
 
         // Use the same governed operator retirement journey as Control UI J8.
-        const control = await browser.newContext({ baseURL: requiredEnv('CONTROL_UI_BASE_URL') })
+        const control = await newOperatorContext(browser)
         controls.push(control)
         const controlPage = await control.newPage()
         await new ControlUiAccessPanel(controlPage).login(

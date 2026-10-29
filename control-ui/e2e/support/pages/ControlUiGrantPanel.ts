@@ -1,4 +1,5 @@
 import { type Page, type Response, expect } from '@playwright/test'
+import { revealInFolderListing } from '../../../../desktop-app/test/e2e-playwright/helpers/gfsFolderListing'
 import { humanRecordedPause } from '../../../../desktop-app/test/e2e-playwright/helpers/humanPause'
 import { openGlobalFileSystemFromSidebar } from '../gfs-control-ui-session'
 
@@ -38,7 +39,9 @@ export class ControlUiGrantPanel {
           result.request().method() === 'GET' &&
           /\/gfs\/resources\/[^/]+\/children(?:\?|$)/.test(result.url())
       )
-      await resources.getByRole('button', { name, exact: true }).click()
+      const folderButton = resources.getByRole('button', { name, exact: true })
+      await revealInFolderListing(this.page, folderButton)
+      await folderButton.click()
       expect((await response).ok()).toBe(true)
       await expect(this.page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(name)
     }

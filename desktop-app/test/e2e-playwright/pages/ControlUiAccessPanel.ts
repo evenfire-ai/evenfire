@@ -1,4 +1,5 @@
 import { type Page, expect } from '@playwright/test'
+import { revealInFolderListing } from '../helpers/gfsFolderListing'
 
 type AccessRole = 'Read' | 'Editor'
 
@@ -51,7 +52,9 @@ export class ControlUiAccessPanel {
           response.request().method() === 'GET' &&
           /\/gfs\/resources\/[^/]+\/children(?:\?|$)/.test(response.url())
       )
-      await resources.getByRole('button', { name: folder, exact: true }).click()
+      const folderButton = resources.getByRole('button', { name: folder, exact: true })
+      await revealInFolderListing(this.page, folderButton)
+      await folderButton.click()
       expect((await children).ok()).toBe(true)
       await expect(this.page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(folder)
     }
