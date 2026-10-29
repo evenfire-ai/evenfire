@@ -85,21 +85,11 @@ export function useChatScroll({
       const anchor = chatEndRef.current
       if (!anchor) return
 
-      // Keep the end-of-chat anchor visible.
-      anchor.scrollIntoView({ behavior: 'auto', block: 'end' })
-
-      // Force max scroll for every scrollable ancestor.
-      let node: HTMLElement | null = anchor.parentElement
-      while (node) {
-        node.scrollTop = node.scrollHeight
-        node = node.parentElement
-      }
-
-      // And force page-level roots too.
-      const scrollingRoot = document.scrollingElement as HTMLElement | null
-      if (scrollingRoot) scrollingRoot.scrollTop = scrollingRoot.scrollHeight
-      document.documentElement.scrollTop = document.documentElement.scrollHeight
-      document.body.scrollTop = document.body.scrollHeight
+      // The conversation thread owns message scrolling. Avoid moving workspace
+      // or page ancestors when the user requests the latest conversation turn.
+      const thread = anchor.closest<HTMLElement>('.chat-thread') ?? anchor.parentElement
+      if (!thread) return
+      thread.scrollTop = thread.scrollHeight
     }
 
     const runBurst = (remainingFrames: number) => {
@@ -109,8 +99,9 @@ export function useChatScroll({
       scheduleAnimationFrame(() => runBurst(remainingFrames - 1))
     }
 
-    // Run across several frames and one delayed pass to catch late layout
-    // shifts (sticky sections, async message hydration, image/code block sizing).
+    // Move immediately, then repeat across a few frames and one delayed pass to
+    // catch late layout shifts (async hydration, image/code block sizing).
+    applyBottomScroll()
     scheduleAnimationFrame(() => runBurst(5))
     scheduleTimeout(() => runBurst(2), 80)
   }, [cancelScheduledScrolls])
