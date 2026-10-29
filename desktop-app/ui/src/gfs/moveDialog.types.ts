@@ -29,6 +29,8 @@ type GfsMoveDialogBaseProps = {
   onAuthorityFailure?: (message: string) => boolean
 }
 
+export type GfsNumberedNameConsent = (proposedName: string) => Promise<boolean>
+
 /** Commit adapter: ordinary callers may use onMove; snapshot owners may use the
  * ownership-aware adapter instead, or provide both for compatibility. */
 type GfsMoveDialogCommitProps =
@@ -39,7 +41,8 @@ type GfsMoveDialogCommitProps =
       onMoveWithOwnership?: (
         destinationId: string,
         destinationName: string,
-        isCurrent: () => boolean
+        isCurrent: () => boolean,
+        requestNumberedNameConsent: GfsNumberedNameConsent
       ) => Promise<void>
     }
   | {
@@ -47,7 +50,8 @@ type GfsMoveDialogCommitProps =
       onMoveWithOwnership: (
         destinationId: string,
         destinationName: string,
-        isCurrent: () => boolean
+        isCurrent: () => boolean,
+        requestNumberedNameConsent: GfsNumberedNameConsent
       ) => Promise<void>
     }
 

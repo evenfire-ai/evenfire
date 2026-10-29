@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { GFS_MOVE_MAX_NETWORK_ATTEMPTS } from '@clerum/gfs-interaction-policy'
 import {
   isGfsSessionAuthorityFailure,
   parseHttpStatus,
@@ -27,7 +26,6 @@ const plan: MoveCommitPlan = {
     name: 'report.md',
   },
   destination: { resourceId: destinationId, name: 'Dest' },
-  allowNumberedRename: false,
 }
 
 async function wireFailure(
@@ -75,9 +73,10 @@ async function run(text: string, approveRename = false, landed = false, isCurren
       resolveSource,
       moveResource,
       isSessionAuthorityFailure: error => isGfsSessionAuthorityFailure(String(error), 'operation'),
+      ...(approveRename ? { authorizeNumberedRename: async () => true } : {}),
       ...(isCurrent ? { isCurrent } : {}),
     },
-    { ...plan, allowNumberedRename: approveRename }
+    plan
   )
   return { outcome, resolveSource, moveResource }
 }
@@ -249,16 +248,15 @@ describe('real move producer verdicts (R1-M3)', () => {
     }
   )
 
-  it('keeps the approved 409 numbered-name attempts bounded', async () => {
+  it('keeps the produced 409 numbered retry to one consented attempt', async () => {
     const { text } = await wireFailure(409)
     const result = await run(text, true)
     expect(result.outcome.status).toBe('conflict-stopped')
-    expect(result.moveResource).toHaveBeenCalledTimes(GFS_MOVE_MAX_NETWORK_ATTEMPTS)
+    expect(result.moveResource).toHaveBeenCalledTimes(2)
     expect(result.resolveSource).toHaveBeenCalledTimes(1)
     expect(result.moveResource.mock.calls.map(call => call[3])).toEqual([
       undefined,
       'report (1).md',
-      'report (2).md',
     ])
   })
 

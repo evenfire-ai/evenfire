@@ -782,7 +782,6 @@ export function FileExplorerTree({
     async (
       source: GfsDragSource,
       destination: { resourceId: string; name: string },
-      allowNumberedRename: boolean,
       isCurrent?: () => boolean,
       isPresentationCurrent?: () => boolean,
       reportOutcomes = true
@@ -819,7 +818,6 @@ export function FileExplorerTree({
           {
             source,
             destination,
-            allowNumberedRename,
             occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
             ...(isCurrent ? { isCurrent } : {}),
           }
@@ -901,7 +899,6 @@ export function FileExplorerTree({
         await commitMove(
           source,
           { resourceId: node.resourceId, name: node.name },
-          false,
           () => ownsDrop(source, epoch, sessionGeneration),
           () => mountedRef.current && liveDragScopeRef.current === source.scope
         )
@@ -1186,7 +1183,6 @@ export function FileExplorerTree({
               void commitMove(
                 pending.source,
                 pending.destination,
-                false,
                 () =>
                   ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration),
                 () => mountedRef.current && liveDragScopeRef.current === pending.source.scope
@@ -1231,7 +1227,6 @@ export function FileExplorerTree({
             const outcome = await commitMove(
               source,
               { resourceId: destinationId, name: destinationName },
-              false,
               isCurrent,
               isPresentationCurrent,
               false

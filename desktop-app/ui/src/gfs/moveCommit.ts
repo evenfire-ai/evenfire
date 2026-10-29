@@ -26,8 +26,6 @@ export type MoveCommitExpectedSourceSnapshot = Pick<
 export interface MoveCommitPlan {
   source: { resourceId: string; gfsUri: string; kind: 'file' | 'directory'; name: string }
   destination: { resourceId: string; name: string }
-  /** Pre-approved numbered-name conflict policy (rev-2 §5). */
-  allowNumberedRename: boolean
   /** Explicit Move only: the target shown by the dialog, before its fresh resolve. */
   expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
@@ -78,6 +76,12 @@ export interface MoveCommitDeps {
   ) => Promise<{ resourceId: string; version: number }>
   /** Central fail-closed classifier; returns true when the session died. */
   isSessionAuthorityFailure: (error: unknown) => boolean
+  /**
+   * Called only for the first producer-derived 409. The surface must obtain
+   * explicit consent and fresh authority for this exact numbered name before
+   * returning true. No callback means the surface never retries a conflict.
+   */
+  authorizeNumberedRename?: (proposedName: string) => Promise<boolean>
   /**
    * Gesture-ownership predicate, absent on paths that own no gesture (the
    * explicit Move dialog). A drag can be superseded WHILE the commit-time
@@ -309,8 +313,15 @@ export async function commitGfsMove(
       }
     }
 
-    // 409 name conflict.
-    if (!plan.allowNumberedRename) {
+    // 409 name conflict. Only the first real 409 can offer a consent-gated
+    // numbered retry; a repeated conflict is terminal.
+    if (attempt > 0) {
+      return {
+        status: 'conflict-stopped',
+        message: 'The destination changed. Refresh it or choose another folder.',
+      }
+    }
+    if (!deps.authorizeNumberedRename) {
       return {
         status: 'conflict-stopped',
         message: CONFLICT_STOPPED_MESSAGE,
@@ -318,10 +329,26 @@ export async function commitGfsMove(
     }
     occupied.add(moveName)
     if (attempt + 1 >= GFS_MOVE_MAX_NETWORK_ATTEMPTS) break
-    moveName = nextAvailableGfsResourceName(snapshot.name, occupied)
+    const proposedName = nextAvailableGfsResourceName(snapshot.name, occupied)
+    let authorized = false
+    try {
+      authorized = await deps.authorizeNumberedRename(proposedName)
+    } catch (authorizationError) {
+      if (deps.isSessionAuthorityFailure(authorizationError)) return { status: 'session-lost' }
+      return {
+        status: 'conflict-stopped',
+        message: CONFLICT_STOPPED_MESSAGE,
+      }
+    }
+    if (!authorized || deps.isCurrent?.() === false) {
+      return {
+        status: 'conflict-stopped',
+        message: CONFLICT_STOPPED_MESSAGE,
+      }
+    }
+    moveName = proposedName
   }
-  // Bounded attempts exhausted under an approved rename policy: a concurrent
-  // naming storm, not "all numbered names used".
+  // The one consented retry also conflicted. Do not offer or dispatch another.
   return {
     status: 'conflict-stopped',
     message: 'The destination changed. Refresh it or choose another folder.',

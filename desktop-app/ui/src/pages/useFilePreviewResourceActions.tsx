@@ -756,7 +756,6 @@ export function useFilePreviewResourceActions({
             name: resource.name,
           },
           destination: { resourceId: destinationId, name: destinationName },
-          allowNumberedRename: false,
           expectedSourceSnapshot: {
             resourceId: moveContext.resourceId,
             version: moveContext.version,

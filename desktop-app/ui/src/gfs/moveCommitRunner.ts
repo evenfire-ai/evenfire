@@ -28,14 +28,14 @@ export interface GfsMoveCommitRunnerDeps {
   ) => Promise<void> | void
   /** Transient outcome toasts; omitted where a surface shows its own. */
   pushToast?: MoveToast
+  /** Files explicit Move only: explicit consent plus fresh operation authority. */
+  authorizeNumberedRename?: (proposedName: string) => Promise<boolean>
 }
 
 /** One move request, independent of the surface that produced it. */
 export interface GfsMoveCommitRequest {
   source: GfsDragSource
   destination: { resourceId: string; name: string }
-  /** Numbered renaming is pre-approved (source write proved or confirmed). */
-  allowNumberedRename: boolean
   /** Explicit Move only: the immutable source snapshot shown by its dialog. */
   expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
@@ -65,7 +65,7 @@ export async function runGfsMoveCommit(
   deps: GfsMoveCommitRunnerDeps,
   request: GfsMoveCommitRequest
 ): Promise<MoveCommitOutcome> {
-  const { source, destination, allowNumberedRename } = request
+  const { source, destination } = request
   // A transport loss after dispatch leaves the dispatch unconfirmed even
   // though the PATCH may have landed.
   let dispatchConfirmed = false
@@ -95,6 +95,9 @@ export async function runGfsMoveCommit(
       },
       isSessionAuthorityFailure: error =>
         deps.handleAuthorityFailure(error instanceof Error ? error.message : String(error)),
+      ...(deps.authorizeNumberedRename
+        ? { authorizeNumberedRename: deps.authorizeNumberedRename }
+        : {}),
       ...(request.isCurrent ? { isCurrent: request.isCurrent } : {}),
     },
     {
@@ -105,7 +108,6 @@ export async function runGfsMoveCommit(
         name: source.name,
       },
       destination,
-      allowNumberedRename,
       ...(request.expectedSourceSnapshot
         ? { expectedSourceSnapshot: request.expectedSourceSnapshot }
         : {}),

@@ -101,12 +101,367 @@ function authFor(teamId: string, userId = 'user-a'): AuthContextValue {
   }
 }
 
+async function numberedMoveFixture(
+  options: {
+    permissionsAfterConflict?: Record<string, string[]>
+    repeatConflict?: boolean
+    holdFreshPermissionResource?: string
+  } = {}
+) {
+  const conflictMessage = await gfsRouteFailureMessage(
+    client =>
+      client.moveResource(
+        { resourceId: 'file-src', destinationId: 'destination-1', ifMatch: 3 },
+        'fixture-session-token'
+      ),
+    409,
+    { code: 'name_conflict', message: 'private upstream diagnostic' }
+  )
+  const rows = await listAccessiblePage([
+    accessibleResource('destination-1', 'Archive', 'directory', {
+      path: '/Archive',
+      permissions: ['read', 'write'],
+    }),
+    accessibleResource('destination-2', 'Vault', 'directory', {
+      path: '/Vault',
+      permissions: ['read', 'write'],
+    }),
+  ])
+  const children = await listChildrenPage([
+    childView('file-src', 'notes.txt', 'file', {
+      parentResourceId: 'source-parent',
+      path: '/Team/notes.txt',
+      version: 3,
+    }),
+  ])
+  const sourceParent = await resolveResource(
+    resolvedDirectory('source-parent', 'Team', { gfsUri: 'gfs://main/source-parent' })
+  )
+  const resolvedSource = await resolveResource(
+    resolvedFile('file-src', 'notes.txt', {
+      parentResourceId: 'source-parent',
+      path: '/Team/notes.txt',
+      version: 3,
+    })
+  )
+  const resolvedArchive = await resolveResource(
+    resolvedDirectory('destination-1', 'Archive', {
+      parentResourceId: 'source-parent',
+      path: '/Team/Archive',
+      version: 4,
+    })
+  )
+  const permissionReads: string[] = []
+  const permissionAnswers: Array<{ resourceId: string; held: string[] }> = []
+  let firstMoveDispatched = false
+  let permissionReadCountAtFirstMove = 0
+  let releaseFreshPermission!: () => void
+  let markFreshPermissionRead!: () => void
+  const freshPermissionGate = new Promise<void>(resolve => {
+    releaseFreshPermission = resolve
+  })
+  const freshPermissionStarted = new Promise<void>(resolve => {
+    markFreshPermissionRead = resolve
+  })
+  const produceAffordances = appServiceAffordanceProducer(async resourceId => {
+    permissionReads.push(resourceId)
+    if (firstMoveDispatched && resourceId === options.holdFreshPermissionResource) {
+      markFreshPermissionRead()
+      await freshPermissionGate
+    }
+    const held =
+      firstMoveDispatched && options.permissionsAfterConflict?.[resourceId]
+        ? options.permissionsAfterConflict[resourceId]
+        : resourceId === 'source-parent'
+          ? ['read', 'write', 'delete']
+          : resourceId === 'destination-1' || resourceId === 'destination-2'
+            ? ['read', 'write']
+            : ['read', 'write']
+    permissionAnswers.push({ resourceId, held })
+    return heldPermissionResponse(held)
+  })
+  const affordances = vi.fn((resourceId: string, drive?: string) =>
+    produceAffordances(resourceId, drive)
+  )
+  const successReceipt = await moveResourceReceipt('file-src', 'destination-1', 4)
+  const moveResource = vi.fn(
+    async (
+      _resourceId: string,
+      _destinationId: string,
+      _drive = 'main',
+      _version?: number,
+      _newName?: string
+    ) => {
+      const callNumber = moveResource.mock.calls.length
+      if (callNumber === 1 || options.repeatConflict) {
+        if (callNumber === 1) permissionReadCountAtFirstMove = permissionReads.length
+        firstMoveDispatched = true
+        throw new Error(conflictMessage)
+      }
+      return successReceipt
+    }
+  )
+  Object.defineProperty(window, 'clerum', {
+    configurable: true,
+    value: {
+      gfs: {
+        listAccessible: vi.fn(async () => rows),
+        listChildren: vi.fn(async (resourceId: string) =>
+          resourceId === 'source-parent' ? children : listChildrenPage([])
+        ),
+        affordances,
+        resolve: vi.fn(async (uri: string) =>
+          uri.endsWith('/source-parent')
+            ? sourceParent
+            : uri.endsWith('/filesrc') || uri.endsWith('/file-src')
+              ? resolvedSource
+              : resolvedArchive
+        ),
+        moveResource,
+      },
+    },
+  })
+
+  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+  const renderForTeam = (teamId: string) => (
+    <AuthContext.Provider value={authFor(teamId)}>
+      <QueryClientProvider client={queryClient}>
+        <ToastingFilesPage pendingGfsUri="gfs://main/source-parent" />
+      </QueryClientProvider>
+    </AuthContext.Provider>
+  )
+  const view = render(renderForTeam('team-a'))
+  const startMove = async () => {
+    fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' })).toBeTruthy()
+    })
+    return dialog
+  }
+
+  return {
+    queryClient,
+    moveResource,
+    permissionReads,
+    permissionAnswers,
+    get postConflictPermissionAnswers() {
+      return permissionAnswers.slice(permissionReadCountAtFirstMove)
+    },
+    get postConflictPermissionReads() {
+      return permissionReads.slice(permissionReadCountAtFirstMove)
+    },
+    freshPermissionStarted,
+    releaseFreshPermission,
+    startMove,
+    rerenderTeam: (teamId: string) => view.rerender(renderForTeam(teamId)),
+    dispose: () => queryClient.clear(),
+  }
+}
+
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
 })
 
 describe('FilesPage Move permission generation fencing', () => {
+  it('requires explicit consent and fresh composite authority for one numbered retry', async () => {
+    const fixture = await numberedMoveFixture()
+    try {
+      const dialog = await fixture.startMove()
+      expect(fixture.moveResource).toHaveBeenCalledWith(
+        'file-src',
+        'destination-1',
+        'main',
+        3,
+        undefined
+      )
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' }))
+
+      await waitFor(() => expect(fixture.moveResource).toHaveBeenCalledTimes(2))
+      expect(fixture.moveResource).toHaveBeenLastCalledWith(
+        'file-src',
+        'destination-1',
+        'main',
+        3,
+        'notes (1).txt'
+      )
+      expect(fixture.postConflictPermissionReads).toEqual(
+        expect.arrayContaining(['file-src', 'source-parent', 'destination-1'])
+      )
+      expect(
+        fixture.postConflictPermissionAnswers.find(answer => answer.resourceId === 'file-src')?.held
+      ).toContain('write')
+      expect(
+        fixture.postConflictPermissionAnswers.find(answer => answer.resourceId === 'source-parent')
+          ?.held
+      ).toEqual(expect.arrayContaining(['write', 'delete']))
+      expect(
+        fixture.postConflictPermissionAnswers.find(answer => answer.resourceId === 'destination-1')
+          ?.held
+      ).toContain('write')
+      expect(await screen.findByText('Moved notes.txt to Archive as notes (1).txt')).toBeTruthy()
+      expect(screen.queryByText('private upstream diagnostic')).toBeNull()
+      expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
+      expect(fixture.moveResource).toHaveBeenCalledTimes(2)
+    } finally {
+      fixture.dispose()
+    }
+  })
+
+  it.each([
+    { resourceId: 'file-src', held: ['read'] },
+    { resourceId: 'source-parent', held: ['read', 'write'] },
+    { resourceId: 'destination-1', held: ['read'] },
+  ])(
+    'does not dispatch the numbered retry when fresh $resourceId rename authority is denied',
+    async deniedAuthority => {
+      const fixture = await numberedMoveFixture({
+        permissionsAfterConflict: { [deniedAuthority.resourceId]: deniedAuthority.held },
+      })
+      try {
+        const dialog = await fixture.startMove()
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' }))
+
+        expect(
+          await within(dialog).findByText(
+            'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+          )
+        ).toBeTruthy()
+        expect(fixture.moveResource).toHaveBeenCalledTimes(1)
+        expect(fixture.postConflictPermissionReads).toEqual(
+          expect.arrayContaining(['file-src', 'source-parent', 'destination-1'])
+        )
+        expect(screen.queryByText('private upstream diagnostic')).toBeNull()
+      } finally {
+        fixture.dispose()
+      }
+    }
+  )
+
+  it('treats an explicit refusal as no consent and keeps one captured conflict outcome', async () => {
+    const fixture = await numberedMoveFixture()
+    try {
+      const dialog = await fixture.startMove()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Keep current name' }))
+
+      expect(
+        await within(dialog).findByText(
+          'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+        )
+      ).toBeTruthy()
+      expect(fixture.moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      fixture.dispose()
+    }
+  })
+
+  it('keeps the selected destination and reports the dispatched conflict against Archive', async () => {
+    const fixture = await numberedMoveFixture()
+    try {
+      const dialog = await fixture.startMove()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Vault' }))
+
+      expect(
+        within(dialog).getByRole('button', { name: 'Vault' }).getAttribute('aria-selected')
+      ).toBe('true')
+      expect(fixture.moveResource).toHaveBeenCalledTimes(1)
+      expect(
+        await screen.findByText(
+          'notes.txt → Archive: An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+        )
+      ).toBeTruthy()
+      expect(fixture.moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      fixture.dispose()
+    }
+  })
+
+  it('settles the old conflict once when its dialog closes during rename consent', async () => {
+    const fixture = await numberedMoveFixture()
+    try {
+      const dialog = await fixture.startMove()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+
+      expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
+      expect(
+        await screen.findByText(
+          'notes.txt → Archive: An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+        )
+      ).toBeTruthy()
+      expect(fixture.moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      fixture.dispose()
+    }
+  })
+
+  it('does not retry after the session changes while rename consent is pending', async () => {
+    const fixture = await numberedMoveFixture()
+    try {
+      await fixture.startMove()
+      fixture.rerenderTeam('team-b')
+
+      await waitFor(() => expect(fixture.moveResource).toHaveBeenCalledTimes(1))
+      expect(fixture.moveResource).toHaveBeenCalledWith(
+        'file-src',
+        'destination-1',
+        'main',
+        3,
+        undefined
+      )
+      expect(screen.queryByText('Moved notes.txt to Archive as notes (1).txt')).toBeNull()
+    } finally {
+      fixture.dispose()
+    }
+  })
+
+  it('stops after a second producer-derived 409 without offering another numbered retry', async () => {
+    const fixture = await numberedMoveFixture({ repeatConflict: true })
+    try {
+      const dialog = await fixture.startMove()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' }))
+
+      expect(
+        await within(dialog).findByText(
+          'The destination changed. Refresh it or choose another folder.'
+        )
+      ).toBeTruthy()
+      expect(fixture.moveResource).toHaveBeenCalledTimes(2)
+      expect(within(dialog).queryByRole('button', { name: 'Move as notes (2).txt' })).toBeNull()
+    } finally {
+      fixture.dispose()
+    }
+  })
+
+  it('does not retry when exact dialog ownership is lost during the fresh permission read', async () => {
+    const fixture = await numberedMoveFixture({ holdFreshPermissionResource: 'file-src' })
+    try {
+      const dialog = await fixture.startMove()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' }))
+      await fixture.freshPermissionStarted
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Vault' }))
+      fixture.releaseFreshPermission()
+
+      expect(fixture.moveResource).toHaveBeenCalledTimes(1)
+      expect(
+        within(dialog).getByRole('button', { name: 'Vault' }).getAttribute('aria-selected')
+      ).toBe('true')
+      expect(
+        await screen.findByText(
+          'notes.txt → Archive: An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+        )
+      ).toBeTruthy()
+      expect(fixture.moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      fixture.releaseFreshPermission()
+      fixture.dispose()
+    }
+  })
+
   it('retries Move authority without dispatching a Move (R4-L2)', async () => {
     const rows = await listAccessiblePage([
       accessibleResource('destination-1', 'Archive', 'directory', {

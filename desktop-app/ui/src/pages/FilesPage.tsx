@@ -2071,10 +2071,10 @@ export function FilesPage({
   const runMoveCommit = async (
     source: GfsDragSource,
     destination: { resourceId: string; name: string },
-    allowNumberedRename: boolean,
     isCurrent?: () => boolean,
     expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot,
-    reportOutcomes = true
+    reportOutcomes = true,
+    authorizeNumberedRename?: (proposedName: string) => Promise<boolean>
   ): Promise<MoveCommitOutcome> => {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
@@ -2093,6 +2093,7 @@ export function FilesPage({
             ),
           handleAuthorityFailure: message =>
             ctrl.handleAuthorityFailure(message, 'operation', source.scope),
+          ...(authorizeNumberedRename ? { authorizeNumberedRename } : {}),
           convergeCommittedMove: (input, receipt) =>
             ctrl.convergeCommittedMove(input, receipt, source.scope),
           ...(reportOutcomes && pushToast
@@ -2111,7 +2112,6 @@ export function FilesPage({
         {
           source,
           destination,
-          allowNumberedRename,
           ...(expectedSourceSnapshot ? { expectedSourceSnapshot } : {}),
           occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
           ...(isCurrent ? { isCurrent } : {}),
@@ -2195,7 +2195,6 @@ export function FilesPage({
       await runMoveCommit(
         source,
         { resourceId: destination.resourceId, name: destination.name },
-        false,
         () => ownsDrop(source, dragGeneration, sessionGeneration)
       )
     } finally {
@@ -2418,7 +2417,8 @@ export function FilesPage({
     destinationId: string,
     destinationName: string,
     executeMove = true,
-    isDialogCurrent?: () => boolean
+    isDialogCurrent?: () => boolean,
+    requestNumberedNameConsent?: (proposedName: string) => Promise<boolean>
   ) => {
     if (!moveTarget) return
     const target = moveTarget
@@ -2505,40 +2505,6 @@ export function FilesPage({
         return
       }
 
-      // Source-resource write is only the optional numbered-name capability.
-      // It uses an exact, uncached request here; the drag-only 5s probe stays
-      // confined to drop adjudication. A failed optional probe does not gate a
-      // parent-authorized ordinary move.
-      let allowNumberedRename = false
-      const resourceKey = desktopQueryKeys.gfsAffordances(
-        sessionScope,
-        target.resourceId,
-        GFS_DRIVE_MAIN
-      )
-      try {
-        assertGfsAuthorityRetryAllowed(queryClient, resourceKey)
-        const resourceAuthority = await queryClient.fetchQuery({
-          queryKey: resourceKey,
-          queryFn: () => window.clerum.gfs.affordances(target.resourceId, GFS_DRIVE_MAIN),
-          staleTime: 0,
-          retry: false,
-        })
-        if (!ownsDialog()) return
-        allowNumberedRename = resourceAuthority.held.includes('write')
-      } catch (optionalPermissionError) {
-        if (!ownsDialog()) return
-        if (failClosedOnAuthorizationError(optionalPermissionError)) {
-          closeOwnedDialog()
-          return
-        }
-      }
-      if (!pageActiveRef.current || !ownsDialog()) return
-      if (!contextStillMatches()) {
-        throw new Error(
-          'Move was not started because the workspace changed; review the destination.'
-        )
-      }
-
       const moveSource: GfsDragSource = {
         resourceId: target.resourceId,
         gfsUri: `gfs://${GFS_DRIVE_MAIN}/${target.resourceId.replace(/-/g, '').toLowerCase()}`,
@@ -2558,13 +2524,92 @@ export function FilesPage({
         version: target.version,
         parentResourceId: sourceParentId,
       }
+      const authorizeNumberedRename = async (proposedName: string): Promise<boolean> => {
+        if (
+          !requestNumberedNameConsent ||
+          !pageActiveRef.current ||
+          !ownsDialog() ||
+          !contextStillMatches()
+        ) {
+          return false
+        }
+        const consented = await requestNumberedNameConsent(proposedName)
+        if (!consented || !pageActiveRef.current || !ownsDialog() || !contextStillMatches()) {
+          return false
+        }
+
+        // A numbered rename+move needs fresh authority for the entire server
+        // operation: resource write, old-parent write+delete, and destination
+        // write. Source-resource write by itself is not enough.
+        setMovePermissionStatus('checking')
+        try {
+          const resourceKey = desktopQueryKeys.gfsAffordances(
+            origin.sessionScope,
+            target.resourceId,
+            GFS_DRIVE_MAIN
+          )
+          const sourceParentKey = desktopQueryKeys.gfsAffordances(
+            origin.sessionScope,
+            sourceParentId,
+            GFS_DRIVE_MAIN
+          )
+          const destinationKey = desktopQueryKeys.gfsAffordances(
+            origin.sessionScope,
+            destinationId,
+            GFS_DRIVE_MAIN
+          )
+          for (const key of [resourceKey, sourceParentKey, destinationKey]) {
+            assertGfsAuthorityRetryAllowed(queryClient, key)
+          }
+          const [resourceAuthority, sourceParentAuthority, destinationAuthority] =
+            await Promise.all([
+              queryClient.fetchQuery({
+                queryKey: resourceKey,
+                queryFn: () => window.clerum.gfs.affordances(target.resourceId, GFS_DRIVE_MAIN),
+                staleTime: 0,
+                retry: false,
+              }),
+              queryClient.fetchQuery({
+                queryKey: sourceParentKey,
+                queryFn: () => window.clerum.gfs.affordances(sourceParentId, GFS_DRIVE_MAIN),
+                staleTime: 0,
+                retry: false,
+              }),
+              queryClient.fetchQuery({
+                queryKey: destinationKey,
+                queryFn: () => window.clerum.gfs.affordances(destinationId, GFS_DRIVE_MAIN),
+                staleTime: 0,
+                retry: false,
+              }),
+            ])
+          return (
+            pageActiveRef.current &&
+            ownsDialog() &&
+            contextStillMatches() &&
+            resourceAuthority.held.includes('write') &&
+            hasGfsMoveSourcePermissions(sourceParentAuthority.held) &&
+            destinationAuthority.held.includes('write')
+          )
+        } finally {
+          if (ownsDialogGeneration()) setMovePermissionStatus(null)
+        }
+      }
+      if (!pageActiveRef.current || !ownsDialog()) return
+      if (!contextStillMatches()) {
+        throw new Error(
+          'Move was not started because the workspace changed; review the destination.'
+        )
+      }
+      // The permission-checking state belongs only to the reads above. Let the
+      // consent prompt remain actionable after the original PATCH settles.
+      setMovePermissionStatus(null)
       const outcome = await runMoveCommit(
         moveSource,
         { resourceId: destinationId, name: destinationName },
-        allowNumberedRename,
         () => pageActiveRef.current && ownsDialog() && contextStillMatches(),
         expectedSourceSnapshot,
-        false
+        false,
+        authorizeNumberedRename
       )
       if (!pageActiveRef.current) return
       if (!sessionStillMatches()) {
@@ -3865,8 +3910,8 @@ export function FilesPage({
           onMove={(destinationId, destinationName) =>
             handleMoveTarget(destinationId, destinationName)
           }
-          onMoveWithOwnership={(destinationId, destinationName, isCurrent) =>
-            handleMoveTarget(destinationId, destinationName, true, isCurrent)
+          onMoveWithOwnership={(destinationId, destinationName, isCurrent, requestConsent) =>
+            handleMoveTarget(destinationId, destinationName, true, isCurrent, requestConsent)
           }
           onRetryPermissionCheck={(destinationId, destinationName, isCurrent) =>
             handleMoveTarget(destinationId, destinationName, false, isCurrent)
@@ -3893,7 +3938,7 @@ export function FilesPage({
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void runMoveCommit(pending.source, pending.destination, false, () =>
+              void runMoveCommit(pending.source, pending.destination, () =>
                 ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
               )
             }
