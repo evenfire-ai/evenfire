@@ -191,6 +191,7 @@ for (const surface of ['sidebar', 'files'] as const) {
       Object.defineProperty(window, 'clerum', {
         configurable: true,
         value: {
+          auth: { getSessionGeneration: vi.fn(async () => 0) },
           gfs: {
             listChildren: vi.fn(async () =>
               listChildrenPage([
@@ -512,7 +513,8 @@ for (const surface of ['sidebar', 'files'] as const) {
         undefined,
         'other-parent',
         h.ctrl.sessionScope,
-        true
+        true,
+        0
       )
     })
 
@@ -556,7 +558,12 @@ for (const surface of ['sidebar', 'files'] as const) {
       h.drop()
       await waitFor(() => expect(h.ctrl.convergeCommittedMove).toHaveBeenCalled())
       expect(h.ctrl.convergeCommittedMove).toHaveBeenCalledWith(
-        { resourceId: 'source', destinationId: 'target', oldParentId: 'grand' },
+        {
+          resourceId: 'source',
+          destinationId: 'target',
+          oldParentId: 'grand',
+          expectedSessionGeneration: 0,
+        },
         { version: expect.any(Number) },
         h.ctrl.sessionScope
       )
@@ -582,6 +589,7 @@ describe('files surface drop admission (RP-002)', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
         gfs: {
           listChildren: vi.fn(async () => listChildrenPage([])),
           affordances,

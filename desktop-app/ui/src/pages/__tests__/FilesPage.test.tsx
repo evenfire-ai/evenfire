@@ -120,6 +120,23 @@ function renderFilesPage(
   onPendingGfsUriHandled?: () => void,
   titlebarLeadingTarget?: HTMLElement | null
 ) {
+  const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
+  if (clerum) {
+    const auth = (clerum.auth ?? {}) as Record<string, unknown>
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        ...clerum,
+        auth: {
+          ...auth,
+          getSessionGeneration:
+            typeof auth.getSessionGeneration === 'function'
+              ? auth.getSessionGeneration
+              : vi.fn(async () => 0),
+        },
+      },
+    })
+  }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
@@ -3963,7 +3980,10 @@ describe('FilesPage', () => {
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { affordances } },
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
+        gfs: { affordances },
+      },
     })
     const controllerState = {
       ...baseController(),
@@ -4970,7 +4990,8 @@ describe('FilesPage', () => {
       undefined,
       'folder-1',
       'env-1:user-1:team-1',
-      true
+      true,
+      0
     )
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
@@ -5083,7 +5104,8 @@ describe('FilesPage', () => {
         undefined,
         'folder-1',
         'env-1:user-1:team-1',
-        true
+        true,
+        0
       )
       expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Archive', 'success')
     })
@@ -5918,7 +5940,10 @@ describe('FilesPage', () => {
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { affordances } },
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
+        gfs: { affordances },
+      },
     })
     const healthyController = {
       ...baseController(),
@@ -7548,7 +7573,8 @@ describe('FilesPage — folder drag-and-drop', () => {
         undefined,
         'folder-1',
         'env-1:user-1:team-1',
-        true
+        true,
+        0
       )
     })
     await waitFor(() =>
@@ -7635,7 +7661,8 @@ describe('FilesPage — folder drag-and-drop', () => {
       undefined,
       'folder-1',
       'env-1:user-1:team-1',
-      true
+      true,
+      0
     )
   })
 
@@ -7776,7 +7803,8 @@ describe('FilesPage — folder drag-and-drop', () => {
         undefined,
         'folder-1',
         'env-1:user-1:team-1',
-        true
+        true,
+        0
       )
     })
     await waitFor(() =>
@@ -7953,7 +7981,8 @@ describe('FilesPage — folder drag-and-drop', () => {
       undefined,
       'folder-1',
       'env-1:user-1:team-1',
-      true
+      true,
+      0
     )
   })
 

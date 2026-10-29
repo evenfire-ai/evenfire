@@ -215,6 +215,23 @@ function renderHarness(
     ) => boolean
   } = {}
 ) {
+  const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
+  if (clerum) {
+    const auth = (clerum.auth ?? {}) as Record<string, unknown>
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        ...clerum,
+        auth: {
+          ...auth,
+          getSessionGeneration:
+            typeof auth.getSessionGeneration === 'function'
+              ? auth.getSessionGeneration
+              : vi.fn(async () => 0),
+        },
+      },
+    })
+  }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return {
     client,

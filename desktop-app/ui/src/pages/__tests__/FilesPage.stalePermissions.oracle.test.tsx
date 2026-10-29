@@ -48,6 +48,23 @@ const authValue = {
 } as unknown as AuthContextValue
 
 function wrapper(client: QueryClient) {
+  const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
+  if (clerum) {
+    const auth = (clerum.auth ?? {}) as Record<string, unknown>
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        ...clerum,
+        auth: {
+          ...auth,
+          getSessionGeneration:
+            typeof auth.getSessionGeneration === 'function'
+              ? auth.getSessionGeneration
+              : vi.fn(async () => 0),
+        },
+      },
+    })
+  }
   return function TestProviders({ children }: { children: ReactNode }) {
     return (
       <AuthContext.Provider value={authValue}>
