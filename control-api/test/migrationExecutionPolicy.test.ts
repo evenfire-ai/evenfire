@@ -99,10 +99,12 @@ describe('D34 migration execution policy', () => {
     // made revision tables read-only for the runtime, ordered revision writers,
     // kept the Admin UI attribution sentinel, added three revision triggers and
     // a pre-lock for archive batches, now locking parents before revisions.
+    // RP-3 (PR #334 review r2) added the approval-batch pre-lock, which also
+    // covers the runs its DELETE cascade rewrites.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'f345f81dcb274246b0fb86fe345447addd9182d71f3fba140d087a33877a1df9',
+        'af67426f87cdfd442499b394f12421b267cc97bdc9e15fb54c9db86102bb2013',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',

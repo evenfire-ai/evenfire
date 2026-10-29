@@ -3,6 +3,8 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
+import { archiveTerminalApprovals } from '../src/services/userApprovalRequestArchiveService.js'
+import { expirePendingRequests } from '../src/services/userApprovalRequestService.js'
 import { updateRunPhase } from '../src/services/workflowRunService.js'
 import { archiveTerminalRuns } from '../src/services/workflowRunsArchiveService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
@@ -56,7 +58,9 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       DECLARE barrier RECORD;
       BEGIN
         IF current_setting('application_name') LIKE 'archive-delete-%'
-          OR current_setting('application_name') LIKE 'delete-principal-%' THEN
+          OR current_setting('application_name') LIKE 'delete-principal-%'
+          OR current_setting('application_name') LIKE 'approval-archive-%'
+          OR current_setting('application_name') LIKE 'approval-expiry-%' THEN
           INSERT INTO archive_delete_revision_observations
             (application_name, revision_table, subject_id, revision)
           VALUES (current_setting('application_name'), TG_TABLE_NAME,
@@ -161,6 +165,16 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
     return (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
   }
 
+  // Bind the real archive/expiry service to one configured session for its
+  // first transaction; later drain batches get ordinary pooled connections.
+  function bindFirstSession(session: PoolClient) {
+    let connects = 0
+    return vi.spyOn(pool, 'connect').mockImplementation(() => {
+      connects += 1
+      return connects === 1 ? Promise.resolve(session) : databasePool.connect()
+    })
+  }
+
   async function waitForBlock(blocked: number, blockers: number[]) {
     const deadline = Date.now() + 5_000
     while (Date.now() < deadline) {
@@ -214,6 +228,45 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         )
       ).rows
     ).toHaveLength(2)
+  }
+
+  // One archive batch holding a user-targeted approval and a team-targeted one,
+  // drained by the real archive sweep.
+  async function approvalFixture() {
+    const [userApprovalId, teamApprovalId] = [randomUUID(), randomUUID()].sort()
+    const user = randomUUID()
+    const team = randomUUID()
+    const live = randomUUID()
+    await databasePool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+      user,
+      `approval-order-${user}@example.test`,
+    ])
+    await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Approval order')", [team])
+    // The user-targeted approval is first in heap order and lower in id order,
+    // so both a sequential and an index scan reach its subject first.
+    const targets = [
+      [userApprovalId, 'target_user_id', user],
+      [teamApprovalId, 'target_team_id', team],
+    ] as const
+    for (const [id, column, target] of targets) {
+      await databasePool.query(
+        `INSERT INTO workflow_approval_requests(
+           id, recipe_namespace, recipe_name, expires_at, status, ${column},
+           payload, idempotency_key, requested_at, decided_at
+         ) VALUES ($1, 'revision', 'approval-order', NOW() - INTERVAL '200 days',
+           'approved', $2, '{}'::jsonb, $3, NOW() - INTERVAL '200 days',
+           NOW() - INTERVAL '200 days')`,
+        [id, target, `approval-order-${id}`]
+      )
+    }
+    // A live run shares the team and the user, so a phase write takes T then U.
+    await databasePool.query(
+      `INSERT INTO workflow_runs(run_id, recipe_namespace, recipe_name, phase, actor_type,
+         actor_id, team_id, trigger_source)
+       VALUES ($1, 'revision', 'approval-order', 'Pending', 'user', $2, $3, 'onDemand')`,
+      [live, user, team]
+    )
+    return { userApprovalId, teamApprovalId, user, team, live }
   }
 
   it('archives two rows and advances revisions with a phase-update liveness witness', async () => {
@@ -581,6 +634,218 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         DROP FUNCTION observe_archive_prelock();
         DROP TABLE archive_prelock_observations;
       `)
+    }
+  })
+
+  it('creates missing revisions once per approval-batch subject in team-then-user order', async () => {
+    const targetUser = randomUUID()
+    const runActor = randomUUID()
+    const targetTeam = randomUUID()
+    const runTeam = randomUUID()
+    const usageTeam = randomUUID()
+    const userApproval = randomUUID()
+    const teamApproval = randomUUID()
+    const run = randomUUID()
+    for (const user of [targetUser, runActor]) {
+      await databasePool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+        user,
+        `approval-prelock-${user}@example.test`,
+      ])
+    }
+    for (const team of [targetTeam, runTeam, usageTeam]) {
+      await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Approval prelock')", [
+        team,
+      ])
+    }
+    await databasePool.query(
+      `INSERT INTO workflow_approval_requests(
+         id, recipe_namespace, recipe_name, expires_at, status, target_user_id,
+         payload, idempotency_key
+       ) VALUES ($1, 'revision', 'approval-prelock', NOW() + INTERVAL '1 hour', 'pending',
+         $2, '{}'::jsonb, $3)`,
+      [userApproval, targetUser, `approval-prelock-user-${userApproval}`]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_approval_requests(
+         id, recipe_namespace, recipe_name, expires_at, status, target_team_id,
+         payload, idempotency_key
+       ) VALUES ($1, 'revision', 'approval-prelock', NOW() + INTERVAL '1 hour', 'pending',
+         $2, '{}'::jsonb, $3)`,
+      [teamApproval, targetTeam, `approval-prelock-team-${teamApproval}`]
+    )
+    // The referencing run's attribution joins the approval targets.
+    await databasePool.query(
+      `INSERT INTO workflow_runs(run_id, recipe_namespace, recipe_name, phase, actor_type,
+         actor_id, team_id, usage_team_id, trigger_source, approval_request_id)
+       VALUES ($1, 'revision', 'approval-prelock', 'Pending', 'user', $2, $3, $4, 'onDemand', $5)`,
+      [run, runActor, runTeam, usageTeam, userApproval]
+    )
+    const subjects = {
+      users: [targetUser, runActor].sort(),
+      teams: [targetTeam, runTeam, usageTeam].sort(),
+    }
+    await databasePool.query(
+      'DELETE FROM authorization_user_revisions WHERE user_id = ANY($1::uuid[])',
+      [subjects.users]
+    )
+    await databasePool.query(
+      'DELETE FROM authorization_team_revisions WHERE team_id = ANY($1::uuid[])',
+      [subjects.teams]
+    )
+    await databasePool.query(`
+      CREATE TABLE approval_prelock_observations (
+        position BIGSERIAL, subject_type TEXT, subject_id TEXT
+      );
+      CREATE FUNCTION observe_approval_prelock() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+      BEGIN
+        INSERT INTO approval_prelock_observations(subject_type, subject_id)
+        VALUES (
+          CASE WHEN TG_TABLE_NAME = 'authorization_team_revisions' THEN 'team' ELSE 'user' END,
+          COALESCE(to_jsonb(NEW)->>'team_id', to_jsonb(NEW)->>'user_id')
+        );
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER observe_approval_prelock AFTER INSERT OR UPDATE
+        ON authorization_team_revisions FOR EACH ROW EXECUTE FUNCTION observe_approval_prelock();
+      CREATE TRIGGER observe_approval_prelock AFTER INSERT OR UPDATE
+        ON authorization_user_revisions FOR EACH ROW EXECUTE FUNCTION observe_approval_prelock();
+    `)
+    const client = await databasePool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('SET LOCAL ROLE control_api_runtime')
+      const expectedOrder = [
+        ...subjects.teams.map(subject_id => ({ subject_type: 'team', subject_id })),
+        ...subjects.users.map(subject_id => ({ subject_type: 'user', subject_id })),
+      ]
+      for (const expectedRevision of [1, 2]) {
+        // The duplicate first id proves the batch is deduplicated.
+        await client.query('SELECT authorization_prelock_workflow_approval_revisions($1::uuid[])', [
+          [userApproval, teamApproval, userApproval, randomUUID()],
+        ])
+        const after = await client.query<{ revision: number }>(
+          `SELECT revision::int FROM authorization_user_revisions WHERE user_id = ANY($1::uuid[])
+           UNION ALL
+           SELECT revision::int FROM authorization_team_revisions WHERE team_id = ANY($2::uuid[])`,
+          [subjects.users, subjects.teams]
+        )
+        expect(after.rows).toEqual(
+          Array.from({ length: 5 }, () => ({ revision: expectedRevision }))
+        )
+      }
+      await client.query('COMMIT')
+      // Each call bumps every subject once, teams before users.
+      const observed = await databasePool.query(
+        'SELECT subject_type, subject_id FROM approval_prelock_observations ORDER BY position'
+      )
+      expect(observed.rows).toEqual([...expectedOrder, ...expectedOrder])
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+      await databasePool.query(`
+        DROP TRIGGER observe_approval_prelock ON authorization_team_revisions;
+        DROP TRIGGER observe_approval_prelock ON authorization_user_revisions;
+        DROP FUNCTION observe_approval_prelock();
+        DROP TABLE approval_prelock_observations;
+      `)
+      await databasePool.query('DELETE FROM workflow_runs WHERE run_id = $1', [run])
+      await databasePool.query(
+        'DELETE FROM workflow_approval_requests WHERE id = ANY($1::uuid[])',
+        [[userApproval, teamApproval]]
+      )
+      await databasePool.query('DELETE FROM users WHERE id = ANY($1::uuid[])', [subjects.users])
+      await databasePool.query('DELETE FROM teams WHERE id = ANY($1::uuid[])', [subjects.teams])
+    }
+  })
+
+  it('commits an approval archive batch beside a run phase write without reversing subject locks', async () => {
+    const ids = await approvalFixture()
+    const before = await revisions({ users: [ids.user], teams: [ids.team] })
+    const archiveGate = await databasePool.connect()
+    const archive = await databasePool.connect()
+    const update = await databasePool.connect()
+    const archivePid = await pid(archive)
+    const updatePid = await pid(update)
+    const gatePid = await pid(archiveGate)
+    let archiveOutcome: Promise<Outcome> | undefined
+    let updateOutcome: Promise<Outcome> | undefined
+    const connect = bindFirstSession(archive)
+    try {
+      await configure(archive, 'approval-archive-order')
+      await configure(update, 'approval-phase-order')
+      await archiveGate.query('SELECT pg_advisory_lock($1, 21)', [barrierClass])
+      await databasePool.query('INSERT INTO archive_order_barriers VALUES ($1, $2, $3, 21)', [
+        'approval-archive-order',
+        'authorization_user_revisions',
+        ids.user,
+      ])
+      archiveOutcome = observe(archiveTerminalApprovals(180, 500))
+      // The prelock pauses on the user only after taking the batch's team.
+      await waitForBlock(archivePid, [gatePid])
+      await update.query('BEGIN')
+      updateOutcome = observe(updateRunPhase(ids.live, 'Running', update))
+      // The phase writer takes its team first and waits there, so it can never
+      // hold the team this batch already prelocked while asking for its user.
+      await waitForBlock(updatePid, [archivePid])
+      await archiveGate.query('SELECT pg_advisory_unlock_all()')
+      const phaseResult = await updateOutcome
+      await update.query(phaseResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      const archiveResult = await archiveOutcome
+      console.info('APPROVAL_ORDER_OUTCOMES', {
+        archive: archiveResult,
+        phase: phaseResult,
+      })
+      expect([archiveResult.status, phaseResult.status]).toEqual(['fulfilled', 'fulfilled'])
+      expect(archiveResult).toEqual({ status: 'fulfilled', value: 2 })
+      expect(
+        (await databasePool.query('SELECT phase FROM workflow_runs WHERE run_id = $1', [ids.live]))
+          .rows
+      ).toEqual([{ phase: 'Running' }])
+      expect(
+        (
+          await databasePool.query(
+            'SELECT id FROM workflow_approval_requests WHERE id = ANY($1::uuid[])',
+            [[ids.userApprovalId, ids.teamApprovalId]]
+          )
+        ).rows
+      ).toHaveLength(0)
+      // The prelock and the DELETE's row trigger bump each subject once; the
+      // phase UPDATE adds a NEW and an OLD attribution pair.
+      const after = await revisions({ users: [ids.user], teams: [ids.team] })
+      expect(after.user).toEqual([{ id: ids.user, revision: before.user[0]!.revision + 4 }])
+      expect(after.team).toEqual([{ id: ids.team, revision: before.team[0]!.revision + 4 }])
+      // The prelock takes the team first; the DELETE then meets the
+      // user-targeted row first, as the fixture intends.
+      expect(
+        (
+          await databasePool.query(
+            `SELECT revision_table, subject_id FROM archive_delete_revision_observations
+              WHERE application_name = $1 ORDER BY position`,
+            ['approval-archive-order']
+          )
+        ).rows
+      ).toEqual([
+        { revision_table: 'authorization_team_revisions', subject_id: ids.team },
+        { revision_table: 'authorization_user_revisions', subject_id: ids.user },
+        { revision_table: 'authorization_user_revisions', subject_id: ids.user },
+        { revision_table: 'authorization_team_revisions', subject_id: ids.team },
+      ])
+    } finally {
+      await archiveGate.query('SELECT pg_advisory_unlock_all()')
+      await Promise.all([archiveOutcome, updateOutcome])
+      await update.query('ROLLBACK')
+      connect.mockRestore()
+      for (const client of [archiveGate, update]) client.release()
+      if (!archiveOutcome) archive.release()
+      await databasePool.query('TRUNCATE archive_order_barriers')
+      await databasePool.query(
+        'DELETE FROM workflow_approval_requests WHERE id = ANY($1::uuid[])',
+        [[ids.userApprovalId, ids.teamApprovalId]]
+      )
+      await databasePool.query('DELETE FROM workflow_runs WHERE run_id = $1', [ids.live])
+      await databasePool.query('DELETE FROM users WHERE id = $1', [ids.user])
+      await databasePool.query('DELETE FROM teams WHERE id = $1', [ids.team])
     }
   })
 

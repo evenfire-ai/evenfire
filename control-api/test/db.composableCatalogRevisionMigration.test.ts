@@ -28,6 +28,17 @@ describe('0134 composable catalog revisions migration', () => {
     expect(sql).toMatch(
       /GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_run_revisions\(UUID\[\]\)\s+TO control_api_runtime/
     )
+    // The approval prelock also covers the runs its DELETE cascade rewrites.
+    expect(sql).toContain(
+      'authorization_prelock_workflow_approval_revisions(\n      target_request_ids UUID[]\n    )'
+    )
+    expect(sql).toContain('run.approval_request_id = ANY(target_request_ids)')
+    expect(sql).toContain(
+      'REVOKE ALL ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[]) FROM PUBLIC'
+    )
+    expect(sql).toMatch(
+      /GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions\(UUID\[\]\)\s+TO control_api_runtime/
+    )
     expect(sql).toContain('authorization_bump_workflow_approval_revision')
     expect(sql).toContain('authorization_bump_notification_revision')
     expect(sql).toContain('authorization_bump_gfs_resource_revision')

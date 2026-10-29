@@ -309,6 +309,86 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
+    -- Approval batches delete rows whose FK cascade also updates every live run
+    -- that references them, so the subject set covers both the approval targets
+    -- and those runs' attribution. Both phases mirror the run prelock.
+    CREATE OR REPLACE FUNCTION authorization_prelock_workflow_approval_revisions(
+      target_request_ids UUID[]
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- Parent locks must precede revisions and the FK checks of the bumped
+      -- rows, matching principal deletion's parent-before-cascade order.
+      PERFORM team.id
+        FROM teams AS team
+       WHERE team.id::TEXT IN (
+         SELECT approval.target_team_id::TEXT
+           FROM workflow_approval_requests AS approval
+          WHERE approval.id = ANY(target_request_ids)
+         UNION
+         SELECT run.team_id::TEXT FROM workflow_runs AS run
+          WHERE run.approval_request_id = ANY(target_request_ids)
+         UNION
+         -- Keep malformed usage IDs for the existing subject validator below.
+         SELECT lower(run.usage_team_id) FROM workflow_runs AS run
+          WHERE run.approval_request_id = ANY(target_request_ids)
+            AND run.usage_team_id <> 'control-plane-admin-ui'
+       )
+       ORDER BY team.id
+       FOR KEY SHARE;
+
+      PERFORM principal.id
+        FROM users AS principal
+       WHERE principal.id IN (
+         SELECT approval.target_user_id
+           FROM workflow_approval_requests AS approval
+          WHERE approval.id = ANY(target_request_ids)
+         UNION
+         SELECT run.actor_id FROM workflow_runs AS run
+          WHERE run.approval_request_id = ANY(target_request_ids) AND run.actor_type = 'user'
+       )
+       ORDER BY principal.id
+       FOR KEY SHARE;
+
+      -- A batch must hold every team before any user, across the approval
+      -- target, the referencing runs, and both the archive INSERT and live
+      -- DELETE triggers. Bumping also creates missing rows.
+      FOR revision IN
+        SELECT DISTINCT batch.subject_type, batch.subject_id
+          FROM (
+            SELECT 'team'::TEXT AS subject_type, approval.target_team_id::TEXT AS subject_id
+              FROM workflow_approval_requests AS approval
+             WHERE approval.id = ANY(target_request_ids)
+            UNION ALL
+            SELECT 'user'::TEXT, approval.target_user_id::TEXT
+              FROM workflow_approval_requests AS approval
+             WHERE approval.id = ANY(target_request_ids)
+            UNION ALL
+            SELECT subjects.subject_type, subjects.subject_id
+              FROM workflow_runs AS run
+              CROSS JOIN LATERAL (VALUES
+                ('team', run.team_id::TEXT),
+                ('team', CASE
+                  WHEN run.usage_team_id = 'control-plane-admin-ui' THEN NULL
+                  ELSE run.usage_team_id
+                END),
+                ('user', CASE WHEN run.actor_type = 'user' THEN run.actor_id::TEXT END)
+              ) AS subjects(subject_type, subject_id)
+             WHERE run.approval_request_id = ANY(target_request_ids)
+          ) AS batch(subject_type, subject_id)
+         WHERE batch.subject_id IS NOT NULL AND batch.subject_id <> ''
+         ORDER BY batch.subject_type, batch.subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
+    END;
+    $$;
+
     CREATE OR REPLACE FUNCTION authorization_bump_user_row_revision()
     RETURNS TRIGGER
     LANGUAGE plpgsql
@@ -616,6 +696,9 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     REVOKE ALL ON FUNCTION authorization_bump_subject_revision(TEXT, TEXT) FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_prelock_workflow_run_revisions(UUID[]) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_run_revisions(UUID[])
+      TO control_api_runtime;
+    REVOKE ALL ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[]) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[])
       TO control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_row_revision() FROM PUBLIC;

@@ -47,6 +47,7 @@ const accessFoundationDefinerSignatures = [
   'authorization_bump_team_revision(pg_catalog.uuid)',
   'authorization_bump_subject_revision(pg_catalog.text, pg_catalog.text)',
   'authorization_prelock_workflow_run_revisions(pg_catalog.uuid[])',
+  'authorization_prelock_workflow_approval_revisions(pg_catalog.uuid[])',
   'authorization_bump_user_row_revision()',
   'authorization_bump_team_row_revision()',
   'authorization_bump_workflow_run_revision()',
@@ -899,19 +900,31 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          ORDER BY routine.proname
       `)
       expect(revisionExecute.rows).toEqual([
+        { function_name: 'authorization_prelock_workflow_approval_revisions' },
         { function_name: 'authorization_prelock_workflow_run_revisions' },
       ])
       const prelockGrants = await runtimeClient.query<{ grantee: string }>(`
-        SELECT pg_get_userbyid(privilege.grantee) AS grantee
+        SELECT routine.proname AS function_name, pg_get_userbyid(privilege.grantee) AS grantee
           FROM pg_proc routine
           CROSS JOIN LATERAL aclexplode(routine.proacl) privilege
-         WHERE routine.oid =
-               'public.authorization_prelock_workflow_run_revisions(uuid[])'::regprocedure
+         WHERE routine.oid IN (
+                 'public.authorization_prelock_workflow_run_revisions(uuid[])'::regprocedure,
+                 'public.authorization_prelock_workflow_approval_revisions(uuid[])'::regprocedure
+               )
            AND privilege.grantee <> routine.proowner
            AND privilege.privilege_type = 'EXECUTE'
-         ORDER BY grantee
+         ORDER BY grantee, function_name
       `)
-      expect(prelockGrants.rows).toEqual([{ grantee: 'control_api_runtime' }])
+      expect(prelockGrants.rows).toEqual([
+        {
+          function_name: 'authorization_prelock_workflow_approval_revisions',
+          grantee: 'control_api_runtime',
+        },
+        {
+          function_name: 'authorization_prelock_workflow_run_revisions',
+          grantee: 'control_api_runtime',
+        },
+      ])
       expect(
         (
           await runtimeClient.query(
