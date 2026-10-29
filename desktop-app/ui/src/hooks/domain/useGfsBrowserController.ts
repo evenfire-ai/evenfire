@@ -939,18 +939,22 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const childrenErrorMessage = childrenQuery.error ? toMessage(childrenQuery.error) : null
   const childrenErrorUpdatedAt = childrenQuery.error ? childrenQuery.errorUpdatedAt : 0
   const discoveryFailure = useMemo<GfsDiscoveryFailure | null>(() => {
-    if (!accessibleErrorMessage) return null
-    const kind = classifyDiscoveryFailure(accessibleErrorMessage)
-    const retryAfterSeconds = parseRetryAfterSeconds(accessibleErrorMessage)
+    // Error presence is the settled verdict. Its message may be empty, so do
+    // not let message truthiness turn a failed discovery into a false empty
+    // result or leave authority waiting without a Retry path.
+    if (accessibleQuery.error == null) return null
+    const message = accessibleErrorMessage ?? ''
+    const kind = classifyDiscoveryFailure(message)
+    const retryAfterSeconds = parseRetryAfterSeconds(message)
     return {
       kind,
-      message: accessibleErrorMessage,
+      message: message || toPresentedMessage(accessibleQuery.error),
       retryAvailableAt:
         kind === 'rate-limited' && retryAfterSeconds !== null
           ? accessibleErrorUpdatedAt + retryAfterSeconds * 1000
           : null,
     }
-  }, [accessibleErrorMessage, accessibleErrorUpdatedAt])
+  }, [accessibleErrorMessage, accessibleErrorUpdatedAt, accessibleQuery.error])
   const authorityWait = authorityPending && !discoveryFailure
   const childrenInitialRequestPending =
     childrenQueryEnabled && !childrenQuery.isError && childrenQuery.data === undefined
@@ -1424,7 +1428,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // the server refused, and only the query knows it; deriving it from render
     // time would restart the wait on every re-render.
     errorUpdatedAt: childrenErrorUpdatedAt,
-    accessibleError: accessibleNotice ? null : accessibleErrorMessage,
+    accessibleError:
+      accessibleNotice || accessibleErrorMessage === null
+        ? null
+        : accessibleErrorMessage || toPresentedMessage(accessibleQuery.error),
     accessibleNotice,
     discoveryFailure,
     retryDiscovery,
