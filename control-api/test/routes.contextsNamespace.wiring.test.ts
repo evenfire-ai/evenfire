@@ -49,6 +49,7 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
 }))
 
 const MCP_NS = config.mcpServersNamespace
+const EXTERNAL_REST_TOKEN = 'dev-external-rest-api-token'
 const CONTEXTS_NS = 'contexts-apart'
 const USER = '66666666-6666-4666-8666-666666666666'
 const TEAM = '77777777-7777-4777-8777-777777777777'
@@ -139,7 +140,7 @@ describe('Context allowlists are read from the configured contexts namespace', (
     let app: express.Express
     const internal = (req: request.Test) =>
       req
-        .set('authorization', 'Bearer dev-external-rest-api-token')
+        .set('authorization', `Bearer ${EXTERNAL_REST_TOKEN}`)
         .set('x-service-token', 'external-rest-api')
     const rpcToken = signRpcAccessToken({
       sub: USER,
