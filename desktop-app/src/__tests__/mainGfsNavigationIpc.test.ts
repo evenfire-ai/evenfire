@@ -325,4 +325,88 @@ describe('main.ts GFS navigation-generation composition', () => {
     expect(postApp[0]).toMatchObject({ userNavigationGenerationAtActivation: 1 })
     expect(postGfs[0]?.id).toBe(reset?.gfsDeepLinkMinimumId)
   })
+  it.each(['sandboxUi', 'gfs'] as const)(
+    'atomically guards %s exact-ID retirement with current session and navigation authority',
+    family => {
+      const ownContents = harness.windows[0]?.webContents
+      if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
+      const owner = ipcEvent(ownContents)
+      const list = registeredHandler(harness.handleHandlers, family + ':listPendingDeepLinks') as (
+        event: MainEvent
+      ) => { links: Array<{ id: number }> }
+      const clear = registeredHandler(harness.handleHandlers, family + ':clearPendingDeepLinks')
+      const acknowledge = registeredHandler(
+        harness.handleHandlers,
+        family + ':acknowledgeDeepLink'
+      ) as (event: MainEvent, payload: unknown) => unknown
+      const navigation = registeredHandler(harness.onHandlers, 'gfs:getUserNavigationGeneration')
+      const advance = registeredHandler(harness.onHandlers, 'gfs:advanceUserNavigationGeneration')
+      const openUrl = harness.appListeners.get('open-url')
+      if (!openUrl) throw new Error('main.ts did not register protocol routing')
+      const enqueue = (suffix: string) => {
+        harness.parseSandboxUiDeepLink.mockImplementation(parseSandboxUiDeepLink)
+        const url =
+          family === 'sandboxUi'
+            ? buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'guarded', path: '/' + suffix })
+            : buildGfsResourceDeepLink('gfs://main/' + (suffix === 'first' ? 'a' : 'b').repeat(32))
+        openUrl({ preventDefault: vi.fn() }, url)
+      }
+
+      clear(owner)
+      enqueue('first')
+      enqueue('second')
+      const links = list(owner).links
+      expect(links).toHaveLength(2)
+      const id = links[0]!.id
+      const otherId = links[1]!.id
+      const event = ipcEvent(ownContents)
+      navigation(event)
+      const userNavigationGeneration = event.returnValue as number
+      harness.sessionGeneration = 40
+      const authority = { sessionGeneration: 40, userNavigationGeneration }
+
+      for (const invalid of [
+        undefined,
+        null,
+        {},
+        [],
+        { ...authority, sessionGeneration: -1 },
+        { ...authority, userNavigationGeneration: 0.5 },
+        { ...authority, sessionGeneration: Number.MAX_SAFE_INTEGER + 1 },
+      ]) {
+        expect(() => acknowledge(owner, { id, authority: invalid })).toThrow()
+        expect(list(owner).links).toEqual(links)
+      }
+      for (const denied of [
+        ipcEvent(ownContents, 'https://untrusted.example/'),
+        ipcEvent({ id: 99 }),
+      ]) {
+        expect(() => acknowledge(denied, { id, authority })).toThrow()
+        expect(list(owner).links).toEqual(links)
+      }
+      expect(acknowledge(owner, { id: Number.MAX_SAFE_INTEGER, authority })).toBe(false)
+      harness.sessionGeneration = 41
+      expect(acknowledge(owner, { id, authority })).toBe(false)
+      expect(list(owner).links).toEqual(links)
+      harness.sessionGeneration = 40
+      advance(ipcEvent(ownContents))
+      expect(acknowledge(owner, { id, authority })).toBe(false)
+      expect(list(owner).links).toEqual(links)
+
+      navigation(event)
+      const currentAuthority = {
+        ...authority,
+        userNavigationGeneration: event.returnValue as number,
+      }
+      expect(acknowledge(owner, { id, authority: currentAuthority })).toBe(true)
+      expect(list(owner).links.map(link => link.id)).toEqual([otherId])
+      expect(acknowledge(owner, { id, authority: currentAuthority })).toBe(false)
+      harness.sessionGeneration = 41
+      expect(acknowledge(owner, { id: otherId, authority: currentAuthority })).toBe(false)
+      expect(list(owner).links.map(link => link.id)).toEqual([otherId])
+      expect(acknowledge(owner, { id: otherId })).toBeUndefined()
+      expect(list(owner).links).toEqual([])
+      harness.sessionGeneration = 0
+    }
+  )
 })

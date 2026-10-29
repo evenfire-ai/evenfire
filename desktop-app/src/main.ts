@@ -25,7 +25,11 @@ import {
   GfsUserNavigationGeneration,
   createLogoutWithGfsResourceDeepLinkClear,
 } from './gfsResourceDeepLinkQueue.js'
-import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
+import {
+  assertTrustedSender,
+  registerDeepLinkAcknowledgmentHandlers,
+  registerIpcHandlers,
+} from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
@@ -94,6 +98,11 @@ const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkCl
   gfsResourceDeepLinkQueue,
   () => appService.logout()
 )
+registerDeepLinkAcknowledgmentHandlers(appService, () => mainWindow, {
+  appQueue: sandboxUiDeepLinkQueue,
+  gfsQueue: gfsResourceDeepLinkQueue,
+  navigation: gfsUserNavigationGeneration,
+})
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
 const mcpOauthCompletionQueue = new McpOauthCompletionQueue(completion => {
@@ -280,13 +289,6 @@ ipcMain.handle('sandboxUi:clearPendingDeepLinks', event => {
   sandboxUiDeepLinkQueue.clear()
 })
 
-ipcMain.handle('sandboxUi:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
-  assertTrustedSender(event)
-  const id = Number(payload?.id)
-  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid app deep-link id')
-  sandboxUiDeepLinkQueue.acknowledge(id)
-})
-
 ipcMain.handle('gfs:listPendingDeepLinks', event => {
   assertTrustedSender(event)
   return { links: gfsResourceDeepLinkQueue.list() }
@@ -322,12 +324,6 @@ ipcMain.handle('gfs:clearPendingDeepLinks', event => {
   return gfsResourceDeepLinkQueue.clear()
 })
 
-ipcMain.handle('gfs:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
-  assertTrustedSender(event)
-  const id = Number(payload?.id)
-  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid EvenDrive deep-link id')
-  gfsResourceDeepLinkQueue.acknowledge(id)
-})
 function focusMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isMinimized()) mainWindow.restore()

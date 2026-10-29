@@ -39,6 +39,7 @@ import {
 import {
   type ChatAuthorityScope,
   type ChatDeleteFence,
+  type DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
   HostActivityStreamEvent,
@@ -48,6 +49,73 @@ import {
   TaskProgressStreamEvent,
   WorkflowNotificationStreamEvent,
 } from './types.js'
+
+type DeepLinkQueue = {
+  list(): Array<{ id: number }>
+  acknowledge(id: number): void
+}
+
+type DeepLinkAcknowledgmentQueues = {
+  appQueue: DeepLinkQueue
+  gfsQueue: DeepLinkQueue
+  navigation: { current(): number }
+}
+
+function parseDeepLinkAcknowledgmentAuthority(input: unknown): DeepLinkAcknowledgmentAuthority {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid deep-link acknowledgment authority')
+  }
+  const value = input as Record<string, unknown>
+  for (const generation of [value.sessionGeneration, value.userNavigationGeneration]) {
+    if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0) {
+      throw new Error('Invalid deep-link acknowledgment authority')
+    }
+  }
+  return {
+    sessionGeneration: value.sessionGeneration as number,
+    userNavigationGeneration: value.userNavigationGeneration as number,
+  }
+}
+
+export function registerDeepLinkAcknowledgmentHandlers(
+  service: AppService,
+  getMainWindow: () => BrowserWindow | null,
+  queues: DeepLinkAcknowledgmentQueues
+): void {
+  const register = (channel: string, queue: DeepLinkQueue, message: string) => {
+    ipcMain.handle(channel, (event, payload: { id?: unknown; authority?: unknown }) => {
+      assertTrustedSender(event)
+      if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'authority')) {
+        const id = Number(payload?.id)
+        if (!Number.isInteger(id) || id <= 0) throw new Error(message)
+        queue.acknowledge(id)
+        return
+      }
+
+      const id = payload.id
+      if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+        throw new Error(message)
+      }
+      const authority = parseDeepLinkAcknowledgmentAuthority(payload.authority)
+      const mainWindow = getMainWindow()
+      if (!mainWindow || event.sender !== mainWindow.webContents) {
+        throw new Error('Deep-link acknowledgment requires the owning window')
+      }
+      if (
+        authority.sessionGeneration !== service.getSessionGeneration() ||
+        authority.userNavigationGeneration !== queues.navigation.current()
+      ) {
+        return false
+      }
+      if (!queue.list().some(item => item.id === id)) return false
+      queue.acknowledge(id)
+      return true
+    })
+  }
+
+  register('sandboxUi:acknowledgeDeepLink', queues.appQueue, 'Invalid app deep-link id')
+  register('gfs:acknowledgeDeepLink', queues.gfsQueue, 'Invalid EvenDrive deep-link id')
+}
 
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()

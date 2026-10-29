@@ -13,6 +13,12 @@ import {
   sandboxUiMintFetch,
   startRealMain,
 } from '../../../../src/__tests__/__fixtures__/sandboxUiRealMain'
+import type {
+  GfsResourceDeepLinkQueue,
+  GfsUserNavigationGeneration,
+} from '../../../../src/gfsResourceDeepLinkQueue'
+import { registerDeepLinkAcknowledgmentHandlers } from '../../../../src/ipc'
+import type { SandboxUiDeepLinkQueue } from '../../../../src/sandboxUiDeepLinkQueue'
 import { getActiveSandboxUi, getActiveSandboxUiLocation } from '../../../../src/sandboxUiDriver'
 import {
   SANDBOX_UI_COOKIE_TTL_MS,
@@ -20,7 +26,7 @@ import {
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   SANDBOX_UI_RETRY_GRACE_MS,
 } from '../../../../src/sandboxUiSessionRefresh'
-import type { SandboxUiReleasedEvent } from '../../../../src/types'
+import type { DeepLinkAcknowledgmentAuthority, SandboxUiReleasedEvent } from '../../../../src/types'
 
 /**
  * The trusted renderer's `window.clerum.sandboxUi` lifecycle bridge, backed by
@@ -300,6 +306,21 @@ export function createSandboxUiMainFake() {
         return () => sessionInvalidatedListeners.delete(listener)
       }),
     },
+    useDeepLinkQueues(
+      appQueue: SandboxUiDeepLinkQueue,
+      gfsQueue: GfsResourceDeepLinkQueue,
+      navigation: GfsUserNavigationGeneration
+    ): void {
+      registerDeepLinkAcknowledgmentHandlers(main.service, () => main.parent as never, {
+        appQueue,
+        gfsQueue,
+        navigation,
+      })
+    },
+    acknowledgeHeldAppDeepLink: (id: number, authority: DeepLinkAcknowledgmentAuthority) =>
+      send('sandboxUi:acknowledgeDeepLink', { id, authority }) as Promise<boolean>,
+    acknowledgeHeldResourceDeepLink: (id: number, authority: DeepLinkAcknowledgmentAuthority) =>
+      send('gfs:acknowledgeDeepLink', { id, authority }) as Promise<boolean>,
     /** The main bridge clears exactly the test queue owned by the prior session. */
     setSessionInvalidationCleanup(
       cleanup: () => { appDeepLinkMinimumId: number; gfsDeepLinkMinimumId: number } | void

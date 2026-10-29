@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
+  DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfigHandoffSelection,
   EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
@@ -212,7 +213,11 @@ const clerum = Object.freeze({
       ipcRenderer.sendSync('gfs:advanceUserNavigationGeneration'),
     listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('gfs:clearPendingDeepLinks'),
-    acknowledgeDeepLink: (id: number) => ipcRenderer.invoke('gfs:acknowledgeDeepLink', { id }),
+    acknowledgeDeepLink: (id: number, authority?: DeepLinkAcknowledgmentAuthority) =>
+      ipcRenderer.invoke('gfs:acknowledgeDeepLink', {
+        id,
+        ...(authority !== undefined ? { authority } : {}),
+      }),
     onDeepLink: (callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
       const listener = (_event: unknown, payload: GfsResourceDeepLinkEnvelope) => callback(payload)
       ipcRenderer.on('gfs:deepLink', listener)
@@ -797,8 +802,11 @@ const clerum = Object.freeze({
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
-    acknowledgeDeepLink: (id: number) =>
-      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', { id }),
+    acknowledgeDeepLink: (id: number, authority?: DeepLinkAcknowledgmentAuthority) =>
+      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', {
+        id,
+        ...(authority !== undefined ? { authority } : {}),
+      }),
     setBounds: (bounds: { x: number; y: number; width: number; height: number; dpr?: number }) =>
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),

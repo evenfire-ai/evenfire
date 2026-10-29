@@ -19,6 +19,11 @@ export type RpcScope =
   | 'sandbox:ui:view'
 export type RpcAccessScope = 'team' | 'user'
 
+export type DeepLinkAcknowledgmentAuthority = {
+  sessionGeneration: number
+  userNavigationGeneration: number
+}
+
 export type SandboxUiApp = {
   appRef: string
   title?: string

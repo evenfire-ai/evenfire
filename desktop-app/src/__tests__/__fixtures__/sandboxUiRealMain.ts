@@ -116,7 +116,7 @@ export function startRealMain(options: RealMainOptions): RealMain {
   })
   ;(service as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
   const parent = new FakeParentWindow()
-  const sender = { id: 1 }
+  const sender = Object.assign(parent.webContents, { id: 1 })
   const mainWebContents = new FakeMainWebContents()
   const main: LiveMain = {
     service,
@@ -129,7 +129,9 @@ export function startRealMain(options: RealMainOptions): RealMain {
       const handler = electronMocks.ipcHandlers.get(channel)
       if (!handler) return Promise.reject(new Error(`no IPC handler for ${channel}`))
       try {
-        return handler({ sender, senderFrame: { url: 'file:///app/index.html' } }, payload)
+        return Promise.resolve(
+          handler({ sender, senderFrame: { url: 'file:///app/index.html' } }, payload)
+        )
       } catch (error) {
         return Promise.reject(error)
       }

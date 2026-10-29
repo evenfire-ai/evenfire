@@ -15,6 +15,7 @@ import {
   ChatMessage,
   ChatMetadata,
   ContextBreakdownResult,
+  DeepLinkAcknowledgmentAuthority,
   DesktopAppInfo,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
@@ -134,7 +135,10 @@ declare global {
           }>
         }>
         clearPendingDeepLinks?: () => Promise<number>
-        acknowledgeDeepLink?: (id: number) => Promise<void>
+        acknowledgeDeepLink?: {
+          (id: number): Promise<void>
+          (id: number, authority: DeepLinkAcknowledgmentAuthority): Promise<boolean>
+        }
         onDeepLink?: (
           callback: (link: {
             id: number
@@ -826,7 +830,10 @@ declare global {
           links: Array<SandboxUiDeepLinkEnvelope & { userNavigationGenerationAtActivation: number }>
         }>
         clearPendingDeepLinks: () => Promise<void>
-        acknowledgeDeepLink: (id: number) => Promise<void>
+        acknowledgeDeepLink: {
+          (id: number): Promise<void>
+          (id: number, authority: DeepLinkAcknowledgmentAuthority): Promise<boolean>
+        }
         setBounds: (bounds: {
           x: number
           y: number

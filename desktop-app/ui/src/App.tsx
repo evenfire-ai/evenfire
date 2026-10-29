@@ -130,6 +130,7 @@ import {
   isDesktopCommandEligible,
   platformFromNavigator,
 } from '../../src/desktopCommands'
+import type { DeepLinkAcknowledgmentAuthority } from '../../src/types'
 
 type SandboxUiSessionInvalidation = {
   sessionGeneration: number
@@ -2496,6 +2497,26 @@ export function App() {
       queues.apps.some(link => !checkedAppIds.has(link.id)) ||
       queues.resources.some(link => !checkedResourceIds.has(link.id))
 
+    const retireHeldQueues = async (
+      queues: Awaited<ReturnType<typeof listHeldQueues>>,
+      authority: DeepLinkAcknowledgmentAuthority
+    ): Promise<boolean> => {
+      const acknowledgeResource = window.clerum.gfs?.acknowledgeDeepLink
+      if (queues.resources.length && !acknowledgeResource) {
+        throw new Error('EvenDrive link acknowledgment is unavailable')
+      }
+      const results = await Promise.all([
+        ...queues.apps.map(link => window.clerum.sandboxUi.acknowledgeDeepLink(link.id, authority)),
+        ...queues.resources.map(link => acknowledgeResource!(link.id, authority)),
+      ])
+      if (!stillOwnsBarrier()) return false
+      if (results.some(result => result !== true)) {
+        retryAfterQueueChange()
+        return false
+      }
+      return true
+    }
+
     void (async () => {
       try {
         const [session, liveSessionGeneration, runtimeConfig] = await Promise.all([
@@ -2510,6 +2531,12 @@ export function App() {
         )
           return
 
+        const navigationGeneration = window.clerum.gfs?.getUserNavigationGeneration?.()
+        if (!Number.isSafeInteger(navigationGeneration) || navigationGeneration === null) return
+        const retirementAuthority = {
+          sessionGeneration: liveSessionGeneration,
+          userNavigationGeneration: navigationGeneration!,
+        }
         const queueRevisionBeforeSnapshot = sessionInvalidationQueueRevisionRef.current
         const heldQueues = await listHeldQueues()
         if (!stillOwnsBarrier()) return
@@ -2531,15 +2558,7 @@ export function App() {
           // A confirmed signed-out snapshot retires only the exact IDs that
           // belonged to this barrier. A later invalidation can never be
           // acknowledged by this batch because queue IDs are monotonic.
-          await Promise.all([
-            ...heldQueues.apps.map(link =>
-              window.clerum.sandboxUi.acknowledgeDeepLink(link.id).catch(() => undefined)
-            ),
-            ...heldQueues.resources.map(link =>
-              window.clerum.gfs?.acknowledgeDeepLink?.(link.id).catch(() => undefined)
-            ),
-          ])
-          if (!stillOwnsBarrier()) return
+          if (!(await retireHeldQueues(heldQueues, retirementAuthority))) return
           const queueRevisionBeforeFinalSnapshot = sessionInvalidationQueueRevisionRef.current
           const [finalQueues, finalSession, finalSessionGeneration, finalRuntimeConfig] =
             await Promise.all([
@@ -2607,8 +2626,6 @@ export function App() {
         }
         if (!matchesPublishedSession(session, liveSessionGeneration, runtimeConfig)) return
 
-        const navigationGeneration = window.clerum.gfs?.getUserNavigationGeneration?.()
-        if (!Number.isSafeInteger(navigationGeneration) || navigationGeneration === null) return
         const rendererIntentSequence = vm.navigationIntentSequence
         const eligibleApps: typeof heldApps = []
         const staleApps: typeof heldApps = []
@@ -2691,15 +2708,13 @@ export function App() {
         ]
         const discardedResources = staleResources.filter(link => currentResourceIds.has(link.id))
         const finalResources = eligibleResources.filter(link => currentResourceIds.has(link.id))
-        await Promise.all([
-          ...discardedApps.map(link =>
-            window.clerum.sandboxUi.acknowledgeDeepLink(link.id).catch(() => undefined)
-          ),
-          ...discardedResources.map(link =>
-            window.clerum.gfs?.acknowledgeDeepLink?.(link.id).catch(() => undefined)
-          ),
-        ])
-        if (!stillOwnsBarrier()) return
+        if (
+          !(await retireHeldQueues(
+            { apps: discardedApps, resources: discardedResources },
+            retirementAuthority
+          ))
+        )
+          return
 
         const queueRevisionBeforeFinalSnapshot = sessionInvalidationQueueRevisionRef.current
         const [finalQueues, finalSession, finalSessionGeneration, finalRuntimeConfig] =
