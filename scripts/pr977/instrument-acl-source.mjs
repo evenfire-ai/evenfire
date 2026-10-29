@@ -52,5 +52,19 @@ result = result.replace(
   requestEnvAnchor,
   `${requestEnvAnchor}\n      PR977_ACL_PHASE_FILE: process.env.PR977_DIAGNOSTIC_PHASE_FILE ?? '',`
 )
+result = result.replace(
+  "import path from 'node:path'\n",
+  "import path from 'node:path'\nimport { appendFileSync } from 'node:fs'\n\nfunction recordAclDuration(value: string): void {\n  const file = process.env.PR977_DIAGNOSTIC_TIMING_FILE\n  if (file) appendFileSync(file, value + '\\n', 'utf8')\n}\n"
+)
+result = result.replace(
+  'const result = spawnSync(powershell, [...POWERSHELL_ARGS], {',
+  "const aclStarted = performance.now()\n  recordAclDuration('acl-operation-start')\n  const result = spawnSync(powershell, [...POWERSHELL_ARGS], {"
+)
+result = result.replace(
+  '  })\n  if (result.error || result.status !== 0 || result.signal || !result.stdout) {',
+  '  })\n  recordAclDuration(`acl-operation-ms=${Math.round(performance.now() - aclStarted)}`)\n  if (result.error || result.status !== 0 || result.signal || !result.stdout) {'
+)
+if (!result.includes('acl-operation-ms='))
+  throw new Error('Missing ACL operation timing overlay anchor')
 writeFileSync(sourcePath, result)
 process.stdout.write('Instrumented allowlisted Windows ACL phase markers only.\n')

@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-const [kind, reportPath, phasePath, metaPath] = process.argv.slice(2)
-if (!['auth', 'acl'].includes(kind) || !reportPath || !phasePath || !metaPath) {
+const [kind, reportPath, phasePath, metaPath, timingPath] = process.argv.slice(2)
+if (!['auth', 'acl'].includes(kind) || !reportPath || !phasePath || !metaPath || !timingPath) {
   throw new Error('Expected diagnostic kind and report paths')
 }
 
@@ -116,6 +116,23 @@ const phases = existsSync(phasePath)
       .split(/\r?\n/)
       .filter(value => phaseAllowlist.has(value))
   : []
+const timingLines = existsSync(timingPath)
+  ? readFileSync(timingPath, 'utf8').split(/\r?\n/).filter(Boolean)
+  : []
+const aclOperationDurationsMs = []
+let unfinishedAclOperationCount = 0
+for (const line of timingLines) {
+  if (line === 'acl-operation-start') {
+    unfinishedAclOperationCount += 1
+    continue
+  }
+  const match = /^acl-operation-ms=(\d{1,6})$/.exec(line)
+  if (!match) continue
+  const duration = Number(match[1])
+  if (!Number.isSafeInteger(duration) || duration > 120000) continue
+  aclOperationDurationsMs.push(duration)
+  unfinishedAclOperationCount = Math.max(0, unfinishedAclOperationCount - 1)
+}
 const assertions = (report?.testResults ?? []).flatMap(suite =>
   (suite.assertionResults ?? []).map(assertion => ({
     name: String(assertion.fullName ?? assertion.title ?? ''),
@@ -246,6 +263,8 @@ const safe = {
   exitCode: Number.isInteger(meta.exitCode) ? meta.exitCode : null,
   watchdogExpired: Boolean(meta.watchdogExpired),
   elapsedSeconds: Number.isFinite(meta.elapsedSeconds) ? meta.elapsedSeconds : null,
+  aclOperationDurationsMs,
+  unfinishedAclOperationCount,
   phaseSequence: phases,
   lastPhase: phases.at(-1) ?? null,
   failureType: type,
