@@ -7,6 +7,7 @@ import {
 } from '@contexts/AgentTaskTrackerContext'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { InFlightAssistantPlaceholder } from '../InFlightAssistantPlaceholder'
+import { accessCatalogFromWire } from './__fixtures__/accessCatalog'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -156,7 +157,7 @@ describe('InFlightAssistantPlaceholder (D.5)', () => {
       await Promise.resolve()
     })
 
-    expect(connectMcpServer).toHaveBeenCalledWith('monday', 'agent-x')
+    expect(connectMcpServer).toHaveBeenCalledWith('monday', 'agent-x', undefined)
     // The rejection is handled by the call-site `.catch` — it does NOT float as an
     // unhandled rejection. Its observable is the error log; delete the `.catch`
     // (revert to `void connectMcpServer(...)`) and this assertion goes red.
@@ -168,5 +169,68 @@ describe('InFlightAssistantPlaceholder (D.5)', () => {
     // the ProgressStepper's re-enable timer can return it to an actionable state.
     expect(getByTestId('connect-mcp-btn')).not.toBeNull()
     errSpy.mockRestore()
+  })
+
+  // A `grantScope: context` connector is authorized against a Context, and the
+  // McpServer no longer names one, so the placeholder must send the Context of
+  // the Host it is chatting with or control-api rejects the authorize-url request.
+  it('Connect passes the agent Host context (from the access catalog) as contextId', async () => {
+    let handler: ((e: unknown) => void | Promise<void>) | null = null
+    const connectMcpServer = vi.fn(() => Promise.resolve())
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      writable: true,
+      value: {
+        rpc: {
+          subscribeTaskProgress: vi.fn(async (_h: string, _t: string, onEvent: typeof handler) => {
+            handler = onEvent
+            return async () => undefined
+          }),
+          getTaskResult: vi.fn(async () => ({ response: 'ok' })),
+          cancelTask: vi.fn(async () => undefined),
+          connectMcpServer,
+        },
+      },
+    })
+    const catalog = await accessCatalogFromWire([
+      { name: 'agent-x', contextRef: 'ctx-sales' },
+      { name: 'agent-y', contextRef: 'ctx-ops' },
+    ])
+
+    const tracker = new TaskTracker()
+    tracker.start(makeTaskKey('agent-x', 'c1'), 'task-1', 'um-1')
+    const { getByTestId } = render(
+      <AgentTaskTrackerContext.Provider value={tracker}>
+        <InFlightAssistantPlaceholder
+          agentRef="agent-x"
+          chatId="c1"
+          localMessageIds={new Set()}
+          onCancelTask={vi.fn()}
+          decideApproval={vi.fn(async () => undefined)}
+          agentContextByName={catalog.agentContextByName}
+        />
+      </AgentTaskTrackerContext.Provider>
+    )
+    await act(async () => {
+      if (!handler) throw new Error('no progress handler registered')
+      await handler({
+        type: 'suspended',
+        data: {
+          taskId: 'task-1',
+          requestId: 'req-1',
+          displayName: 'monday tool',
+          reason: 'connect_required',
+          mcpServerName: 'monday',
+        },
+      })
+    })
+
+    await act(async () => {
+      fireEvent.click(getByTestId('connect-mcp-btn'))
+      await Promise.resolve()
+    })
+
+    expect(connectMcpServer).toHaveBeenCalledTimes(1)
+    expect(connectMcpServer).toHaveBeenCalledWith('monday', 'agent-x', 'ctx-sales')
   })
 })
