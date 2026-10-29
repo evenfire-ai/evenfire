@@ -30,6 +30,26 @@ describe('GfsDelegationPanel', () => {
     expect(screen.queryByRole('button', { name: 'Grant' })).toBeNull()
   })
 
+  it('does not present failed permission validation as settled read-only access', () => {
+    const onGrant = vi.fn()
+    const { container } = render(
+      <GfsDelegationPanel
+        affordances={{ canDelegate: false, grantableBits: [], canCreateShare: false }}
+        permissionCheckFailed
+        subjectOptions={[]}
+        isDirectory={false}
+        onGrant={onGrant}
+      />
+    )
+
+    expect(screen.queryByRole('note')).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('combobox')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull()
+    expect(container.firstChild).toBeNull()
+    expect(onGrant).not.toHaveBeenCalled()
+  })
+
   it('a folder owner offers ONLY the bits it holds (no escalation) and grants them', async () => {
     const onGrant = vi.fn().mockResolvedValue(undefined)
     render(
