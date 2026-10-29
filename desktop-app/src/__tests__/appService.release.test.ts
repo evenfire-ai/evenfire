@@ -3,6 +3,7 @@ import { app } from 'electron'
 import { buildDesktopReleasePolicy } from '../../../external-rest-api/src/desktopReleasePolicy.js'
 import { releaseManifest } from '../../../external-rest-api/src/releaseManifest.js'
 import { AppService } from '../appService.js'
+import { requestJson } from '../httpClient.js'
 
 function makeReleasePolicy(
   overrides: Partial<typeof releaseManifest> = {}
@@ -183,5 +184,41 @@ describe('AppService.getDesktopReleaseStatus', () => {
     await expect(service.getDesktopReleaseStatus()).rejects.toThrow(
       'invalid Desktop compatibility policy'
     )
+  })
+
+  it('normalizes release API errors without exposing response bodies or endpoint secrets', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response('{"message":"token=secret-response-body"}', {
+        status: 401,
+        statusText: 'Unauthorized',
+      })
+    ) as typeof fetch
+
+    try {
+      const upstreamError = await requestJson(
+        'GET',
+        'https://user:password@api.example.test/api/v1/desktop/release?access_token=secret-query'
+      ).catch(error => error)
+      const { service, getDesktopReleasePolicy } = createServiceWithPolicy(makeReleasePolicy())
+      getDesktopReleasePolicy.mockRejectedValue(upstreamError)
+
+      let reportedError: unknown
+      try {
+        await service.getDesktopReleaseStatus()
+      } catch (error) {
+        reportedError = error
+      }
+
+      expect(reportedError).toBeInstanceOf(Error)
+      expect((reportedError as Error).message).toBe(
+        'The selected API rejected the Desktop release check (HTTP 401).'
+      )
+      expect((reportedError as Error).message).not.toContain('secret-response-body')
+      expect((reportedError as Error).message).not.toContain('secret-query')
+      expect((reportedError as Error).message).not.toContain('password')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })

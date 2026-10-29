@@ -238,14 +238,66 @@ type DesktopUpdateFlow = {
   error?: string
 }
 
+function getSelectedBackendOrigin(
+  runtimeConfigState: ReturnType<typeof useAppController>['runtimeConfigState']
+): string | undefined {
+  const selected = runtimeConfigState?.options.find(
+    option => option.id === runtimeConfigState.activeOptionId
+  )
+  if (!selected) return undefined
+  try {
+    const endpoint = new URL(selected.externalRestApiBaseUrl)
+    if (endpoint.protocol !== 'http:' && endpoint.protocol !== 'https:') return undefined
+    return endpoint.origin
+  } catch {
+    return undefined
+  }
+}
+
+function getSafeDesktopUpdateFailure(error: string | undefined, backendOrigin?: string) {
+  const details: Array<{ label: string; value: string }> = []
+  let message = 'The Desktop update could not be completed.'
+  let category: string | undefined
+  let status: string | undefined
+
+  const releaseStatus =
+    /^The selected API (rejected|could not complete) the Desktop release check \(HTTP ([1-5]\d\d)\)\.$/.exec(
+      error ?? ''
+    )
+  if (releaseStatus) {
+    status = releaseStatus[2]
+    category =
+      releaseStatus[1] === 'rejected'
+        ? 'Selected API rejected the release check'
+        : 'Selected API could not complete the release check'
+    message = releaseStatus[0]
+  } else if (error === 'The Desktop release check failed before a usable response was received.') {
+    category = 'No usable release response was received'
+    message = error
+  } else if (error === 'The downloaded macOS target failed signature verification.') {
+    category = 'Downloaded target signature verification failed'
+    message = error
+  } else if (error === 'The downloaded macOS target failed macOS trust assessment.') {
+    category = 'macOS rejected the downloaded target'
+    message = error
+  }
+
+  if (category) details.push({ label: 'Failure category', value: category })
+  if (status) details.push({ label: 'HTTP status', value: status })
+  if (backendOrigin) details.push({ label: 'Selected backend origin', value: backendOrigin })
+  return { message, details }
+}
+
 function DesktopUpdatePanel({
   flow,
+  backendOrigin,
   onClose,
   onDownload,
   onRestart,
   onLegacyInstall,
 }: {
   flow: DesktopUpdateFlow
+  backendOrigin?: string
   onClose: () => void
   onDownload: () => void
   onRestart: () => void
@@ -256,6 +308,9 @@ function DesktopUpdatePanel({
   const detailsId = React.useId()
   const [detailsOpen, setDetailsOpen] = React.useState(false)
   const status = flow.status
+  const failure =
+    flow.phase === 'error' ? getSafeDesktopUpdateFailure(flow.error, backendOrigin) : null
+  const hasDetails = Boolean(status || failure?.details.length)
   const title =
     flow.phase === 'checking'
       ? 'Checking for updates'
@@ -342,7 +397,7 @@ function DesktopUpdatePanel({
           ) : null}
           {flow.phase === 'error' ? (
             <p role="alert">
-              {flow.error || 'The update could not be completed.'} You can keep using the app.
+              {failure?.message || 'The update could not be completed.'} You can keep using the app.
             </p>
           ) : null}
         </div>
@@ -388,34 +443,45 @@ function DesktopUpdatePanel({
             </Button>
           </div>
         ) : null}
-        <button
-          type="button"
-          className="desktop-update-dialog__more-info"
-          aria-controls={detailsId}
-          aria-expanded={detailsOpen}
-          onClick={() => setDetailsOpen(open => !open)}
-        >
-          {detailsOpen ? 'Hide info' : 'More info'}
-        </button>
-        {detailsOpen ? (
-          <dl className="desktop-update-dialog__versions" id={detailsId}>
-            {status ? (
-              <>
-                <div>
-                  <dt>Installed</dt>
-                  <dd>{status.currentVersion}</dd>
-                </div>
-                <div>
-                  <dt>Backend target</dt>
-                  <dd>{status.latestVersion}</dd>
-                </div>
-                <div>
-                  <dt>Compatible versions</dt>
-                  <dd>{status.compatibleVersions.join(', ')}</dd>
-                </div>
-              </>
+        {hasDetails ? (
+          <>
+            <button
+              type="button"
+              className="desktop-update-dialog__more-info"
+              aria-controls={detailsId}
+              aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen(open => !open)}
+            >
+              {detailsOpen ? 'Hide info' : 'More info'}
+            </button>
+            {detailsOpen ? (
+              <dl className="desktop-update-dialog__versions" id={detailsId}>
+                {status ? (
+                  <>
+                    <div>
+                      <dt>Installed</dt>
+                      <dd>{status.currentVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>Backend target</dt>
+                      <dd>{status.latestVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>Compatible versions</dt>
+                      <dd>{status.compatibleVersions.join(', ')}</dd>
+                    </div>
+                  </>
+                ) : (
+                  failure?.details.map(detail => (
+                    <div key={detail.label}>
+                      <dt>{detail.label}</dt>
+                      <dd>{detail.value}</dd>
+                    </div>
+                  ))
+                )}
+              </dl>
             ) : null}
-          </dl>
+          </>
         ) : null}
       </section>
     </div>
@@ -3186,6 +3252,7 @@ export function App() {
   const desktopUpdateNotice = desktopUpdateFlow ? (
     <DesktopUpdatePanel
       flow={desktopUpdateFlow}
+      backendOrigin={getSelectedBackendOrigin(vm.runtimeConfigState)}
       onClose={dismissDesktopUpdateFlow}
       onDownload={beginDesktopUpdate}
       onRestart={restartDesktopUpdate}

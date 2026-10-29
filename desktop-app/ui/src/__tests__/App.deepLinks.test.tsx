@@ -2,7 +2,8 @@
 import { type ReactElement, type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
@@ -206,7 +207,14 @@ vi.mock('@pages/SandboxUiPage', () => ({
   },
 }))
 const settingsPageHarness = vi.hoisted(() => ({
-  props: null as null | { shortcutsFocusRequestId?: number },
+  props: null as null | {
+    shortcutsFocusRequestId?: number
+    onCheckForUpdates?: () => void
+  },
+}))
+const desktopUpdateCheckHarness = vi.hoisted(() => ({
+  onRequested: null as null | (() => void),
+  getStatus: vi.fn<() => Promise<unknown>>(),
 }))
 vi.mock('@pages/SettingsPage', () => ({
   SettingsPage: (props: NonNullable<typeof settingsPageHarness.props>) => {
@@ -529,6 +537,86 @@ describe('App deep-link orchestration', () => {
     view.unmount()
   })
 
+  it('shows safe populated failure details and keeps the update notice dismissible', async () => {
+    const user = userEvent.setup()
+    currentController = makeController({
+      initialExperienceLoading: false,
+      runtimeConfigState: {
+        configured: true,
+        isLocalhost: false,
+        selectorVisible: false,
+        activeOptionId: 'selected-api',
+        envKey: 'https://api.example.test',
+        storagePath: '/tmp/evenfire-runtime-config',
+        options: [
+          {
+            id: 'selected-api',
+            label: 'Selected API',
+            source: 'file',
+            configPath: null,
+            externalRestApiBaseUrl:
+              'https://user:password@api.example.test/api/v1?access_token=secret',
+            rpcProxyBaseUrl: 'https://rpc.example.test/api/v1',
+            appName: 'Evenfire',
+          },
+        ],
+      },
+    } as Partial<AppController>)
+    desktopUpdateCheckHarness.getStatus.mockRejectedValue(
+      new Error('The selected API rejected the Desktop release check (HTTP 401).')
+    )
+
+    const view = renderApp(<App />)
+    await act(async () => {
+      desktopUpdateCheckHarness.onRequested?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(view.container.querySelector('[role="alert"]')?.textContent).toContain('HTTP 401')
+    })
+
+    const moreInfo = view.container.querySelector<HTMLButtonElement>(
+      '.desktop-update-dialog__more-info'
+    )
+    expect(moreInfo?.textContent).toBe('More info')
+    await user.click(moreInfo!)
+    expect(moreInfo?.getAttribute('aria-expanded')).toBe('true')
+    const details = view.container.querySelector('.desktop-update-dialog__versions')
+    expect(details?.textContent).toContain('Selected API rejected the release check')
+    expect(details?.textContent).toContain('401')
+    expect(details?.textContent).toContain('https://api.example.test')
+    expect(details?.textContent).not.toContain('password')
+    expect(details?.textContent).not.toContain('secret')
+
+    moreInfo?.focus()
+    await user.keyboard('{Enter}')
+    expect(moreInfo?.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(view.container.querySelector('[aria-label="Dismiss update notice"]')!)
+    expect(view.container.querySelector('[aria-label="Desktop update notice"]')).toBeNull()
+    expect(view.container.querySelector('.app-frame')).not.toBeNull()
+  })
+
+  it('hides More info when a failure has no useful safe diagnostic detail', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    desktopUpdateCheckHarness.getStatus.mockRejectedValue(
+      new Error('token=secret raw server response body')
+    )
+
+    const view = renderApp(<App />)
+    await act(async () => {
+      desktopUpdateCheckHarness.onRequested?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(view.container.querySelector('[role="alert"]')).not.toBeNull()
+    })
+
+    expect(view.container.querySelector('.desktop-update-dialog__more-info')).toBeNull()
+    expect(view.container.querySelector('.desktop-update-dialog__versions')).toBeNull()
+    expect(view.container.textContent).not.toContain('secret')
+    expect(view.container.querySelector('.app-frame')).not.toBeNull()
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     confirmDialogHarness.props = null
@@ -537,6 +625,8 @@ describe('App deep-link orchestration', () => {
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
     settingsPageHarness.props = null
+    desktopUpdateCheckHarness.onRequested = null
+    desktopUpdateCheckHarness.getStatus = vi.fn().mockResolvedValue(null)
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
@@ -551,6 +641,13 @@ describe('App deep-link orchestration', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: {
+          getDesktopReleaseStatus: () => desktopUpdateCheckHarness.getStatus(),
+          onDesktopUpdateCheckRequested: (callback: () => void) => {
+            desktopUpdateCheckHarness.onRequested = callback
+            return vi.fn()
+          },
+        },
         shortcuts: {
           onCommand: vi.fn(
             (callback: (commandId: DesktopCommandId, source: 'host' | 'sandbox') => void) => {

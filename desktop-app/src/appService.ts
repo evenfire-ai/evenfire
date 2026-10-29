@@ -52,6 +52,7 @@ import {
   ContextBreakdownResult,
   DependencyHealth,
   DesktopAppInfo,
+  DesktopReleasePolicy,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
@@ -2637,7 +2638,19 @@ export class AppService {
   async getDesktopReleaseStatus(): Promise<DesktopReleaseStatus> {
     const { app } = await import('electron')
     const currentVersion = resolveDesktopAppVersion(app)
-    const policy = await this.authClient.getDesktopReleasePolicy()
+    let policy: DesktopReleasePolicy
+    try {
+      policy = await this.authClient.getDesktopReleasePolicy()
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status <= 599) {
+        const message =
+          error.status >= 500
+            ? 'The selected API could not complete the Desktop release check'
+            : 'The selected API rejected the Desktop release check'
+        throw new Error(`${message} (HTTP ${error.status}).`)
+      }
+      throw new Error('The Desktop release check failed before a usable response was received.')
+    }
     if (
       !Array.isArray(policy.compatibleDesktopVersions) ||
       policy.compatibleDesktopVersions.length === 0 ||
