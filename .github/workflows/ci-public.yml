@@ -557,6 +557,7 @@ jobs:
             entityChangeFeed.realPostgres.integration.test.ts \
             routes.mcp-host.renewal.realPostgres.integration.test.ts \
             routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
+            oauth.contextGrant.scenarios.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts
 
       - name: Install gfs-controller dependencies
