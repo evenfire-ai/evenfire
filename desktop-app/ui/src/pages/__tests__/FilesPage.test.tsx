@@ -4969,8 +4969,7 @@ describe('FilesPage', () => {
       3,
       undefined,
       'folder-1',
-      'env-1:user-1:team-1',
-      true
+      'env-1:user-1:team-1'
     )
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
@@ -5082,8 +5081,7 @@ describe('FilesPage', () => {
         3,
         undefined,
         'folder-1',
-        'env-1:user-1:team-1',
-        true
+        'env-1:user-1:team-1'
       )
       expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Archive', 'success')
     })
@@ -7547,8 +7545,7 @@ describe('FilesPage — folder drag-and-drop', () => {
         4,
         undefined,
         'folder-1',
-        'env-1:user-1:team-1',
-        true
+        'env-1:user-1:team-1'
       )
     })
     await waitFor(() =>
@@ -7634,8 +7631,7 @@ describe('FilesPage — folder drag-and-drop', () => {
       4,
       undefined,
       'folder-1',
-      'env-1:user-1:team-1',
-      true
+      'env-1:user-1:team-1'
     )
   })
 
@@ -7775,8 +7771,7 @@ describe('FilesPage — folder drag-and-drop', () => {
         4,
         undefined,
         'folder-1',
-        'env-1:user-1:team-1',
-        true
+        'env-1:user-1:team-1'
       )
     })
     await waitFor(() =>
@@ -7952,8 +7947,7 @@ describe('FilesPage — folder drag-and-drop', () => {
       3,
       undefined,
       'folder-1',
-      'env-1:user-1:team-1',
-      true
+      'env-1:user-1:team-1'
     )
   })
 

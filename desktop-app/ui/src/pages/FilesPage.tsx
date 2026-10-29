@@ -2088,8 +2088,7 @@ export function FilesPage({
               ifMatch,
               newName,
               oldParentId,
-              source.scope,
-              true
+              source.scope
             ),
           handleAuthorityFailure: message =>
             ctrl.handleAuthorityFailure(message, 'operation', source.scope),
