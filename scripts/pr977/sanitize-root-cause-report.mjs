@@ -99,6 +99,9 @@ const fixturePrivileges = text.match(
 )
 const hresults = [...new Set(text.match(/0x[0-9A-F]{8}/gi) ?? [])].slice(0, 2)
 const categories = [
+  'acl-verifier-unavailable',
+  'powerShell-process-timeout',
+  'powershell-exit-without-rejection-evidence',
   'authentication-state-mismatch',
   'assertion-mismatch',
   'filesystem-access-denied',
@@ -111,19 +114,27 @@ const categories = [
 ]
 const category =
   categories.find(value => text.toLowerCase().includes(value.toLowerCase())) ??
-  (meta.watchdogExpired
-    ? 'external-watchdog-expired'
-    : /timed out in \d+ms/i.test(text)
-      ? 'vitest-test-or-hook-timeout'
-      : null)
+  (text.includes('ETIMEDOUT')
+    ? 'powerShell-process-timeout'
+    : meta.watchdogExpired
+      ? 'external-watchdog-expired'
+      : /timed out in \d+ms/i.test(text)
+        ? 'vitest-test-or-hook-timeout'
+        : null)
 
 let aclVerifierDiagnostic = null
-const aclDiagnosticMatch = text.match(
-  /Windows session authority ACL verification failed:\s*(\{[^\r\n]*\})/
-)
-if (aclDiagnosticMatch) {
+const aclDiagnosticCandidates = [...text.matchAll(/\{[^{}]{1,2500}\}/g)]
+for (const aclDiagnosticMatch of aclDiagnosticCandidates) {
   try {
-    const candidate = JSON.parse(aclDiagnosticMatch[1])
+    const candidate = JSON.parse(aclDiagnosticMatch[0])
+    if (
+      !(
+        'processStarted' in candidate ||
+        'verifierExecutionPhase' in candidate ||
+        'processErrorCode' in candidate
+      )
+    )
+      continue
     const safe = {}
     for (const field of [
       'phase',
@@ -154,9 +165,12 @@ if (aclDiagnosticMatch) {
         safe[field] = value
       }
     }
-    if (Object.keys(safe).length) aclVerifierDiagnostic = safe
+    if (Object.keys(safe).length) {
+      aclVerifierDiagnostic = safe
+      break
+    }
   } catch {
-    aclVerifierDiagnostic = null
+    continue
   }
 }
 
