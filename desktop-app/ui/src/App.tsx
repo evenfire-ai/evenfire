@@ -356,6 +356,8 @@ export function App() {
   >([])
   const [sessionInvalidation, setSessionInvalidation] =
     React.useState<SandboxUiSessionInvalidation | null>(null)
+  const [sessionInvalidationReadFailed, setSessionInvalidationReadFailed] = React.useState(false)
+  const [sessionInvalidationRetryTick, setSessionInvalidationRetryTick] = React.useState(0)
   const [activeGfsDeepLink, setActiveGfsDeepLink] =
     React.useState<GfsResourceNavigationRequest | null>(null)
   const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
@@ -422,6 +424,7 @@ export function App() {
   const processingGfsDeepLinkIdRef = React.useRef<number | null>(null)
   const activeGfsDeepLinkRef = React.useRef<GfsResourceNavigationRequest | null>(null)
   const sessionInvalidationRef = React.useRef<SandboxUiSessionInvalidation | null>(null)
+  const sessionInvalidationQueueRevisionRef = React.useRef(0)
   activeGfsDeepLinkRef.current = activeGfsDeepLink
   const acknowledgedGfsDeepLinkIdsRef = React.useRef(new Set<number>())
   const gfsDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
@@ -1855,6 +1858,7 @@ export function App() {
       if (current && event.sessionGeneration < current.sessionGeneration) return
       sessionInvalidationRef.current = event
       setSessionInvalidation(event)
+      setSessionInvalidationReadFailed(false)
       sandboxUiDeepLinkMinimumIdRef.current = Math.max(
         sandboxUiDeepLinkMinimumIdRef.current,
         event.appDeepLinkMinimumId
@@ -1902,6 +1906,10 @@ export function App() {
   const enqueueGfsDeepLink = React.useCallback(
     (value: GfsResourceDeepLinkEnvelope) => {
       if (!Number.isSafeInteger(value?.id) || value.id <= 0) return
+      if (sessionInvalidationRef.current) {
+        sessionInvalidationQueueRevisionRef.current += 1
+        return
+      }
       if (!gfsDeepLinkAcceptingRef.current || value.id < gfsDeepLinkMinimumIdRef.current) return
       if (acknowledgedGfsDeepLinkIdsRef.current.has(value.id)) return
       if (pendingGfsDeepLinksRef.current.some(item => item.id === value.id)) return
@@ -2340,13 +2348,12 @@ export function App() {
 
   React.useEffect(() => {
     const enqueue = (link: SandboxUiDeepLinkEnvelope) => {
-      if (
-        sessionInvalidationRef.current ||
-        !Number.isSafeInteger(link?.id) ||
-        link.id < sandboxUiDeepLinkMinimumIdRef.current
-      ) {
+      if (!Number.isSafeInteger(link?.id) || link.id <= 0) return
+      if (sessionInvalidationRef.current) {
+        sessionInvalidationQueueRevisionRef.current += 1
         return
       }
+      if (link.id < sandboxUiDeepLinkMinimumIdRef.current) return
       const next = enqueuePendingSandboxUiDeepLink(
         pendingSandboxUiDeepLinksRef.current,
         link,
@@ -2464,6 +2471,30 @@ export function App() {
     if (!barrier || sessionInvalidationRef.current !== barrier) return
     let cancelled = false
     const stillOwnsBarrier = () => !cancelled && sessionInvalidationRef.current === barrier
+    const retryAfterQueueChange = () => {
+      if (stillOwnsBarrier()) setSessionInvalidationRetryTick(value => value + 1)
+    }
+    const listHeldQueues = async () => {
+      const [appPending, gfsPending] = await Promise.all([
+        window.clerum.sandboxUi.listPendingDeepLinks(),
+        window.clerum.gfs?.listPendingDeepLinks?.(),
+      ])
+      return {
+        apps: appPending.links
+          .filter(link => link.id >= barrier.appDeepLinkMinimumId)
+          .sort((left, right) => left.id - right.id),
+        resources: (gfsPending?.links ?? [])
+          .filter(link => link.id >= barrier.gfsDeepLinkMinimumId)
+          .sort((left, right) => left.id - right.id),
+      }
+    }
+    const hasNewQueueIds = (
+      queues: Awaited<ReturnType<typeof listHeldQueues>>,
+      checkedAppIds: ReadonlySet<number>,
+      checkedResourceIds: ReadonlySet<number>
+    ) =>
+      queues.apps.some(link => !checkedAppIds.has(link.id)) ||
+      queues.resources.some(link => !checkedResourceIds.has(link.id))
 
     void (async () => {
       try {
@@ -2472,68 +2503,109 @@ export function App() {
           window.clerum.auth.getSessionGeneration(),
           window.clerum.auth.getRuntimeConfigState(),
         ])
+        if (!stillOwnsBarrier()) return
         if (
-          !stillOwnsBarrier() ||
-          session.sessionGeneration !== barrier.sessionGeneration ||
-          liveSessionGeneration !== barrier.sessionGeneration
-        ) {
+          !Number.isSafeInteger(liveSessionGeneration) ||
+          session.sessionGeneration !== liveSessionGeneration
+        )
+          return
+
+        const queueRevisionBeforeSnapshot = sessionInvalidationQueueRevisionRef.current
+        const heldQueues = await listHeldQueues()
+        if (!stillOwnsBarrier()) return
+        if (sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeSnapshot) {
+          retryAfterQueueChange()
           return
         }
-
-        const [appPending, gfsPending] = await Promise.all([
-          window.clerum.sandboxUi.listPendingDeepLinks(),
-          window.clerum.gfs?.listPendingDeepLinks?.(),
-        ])
-        if (!stillOwnsBarrier()) return
-
-        const heldApps = appPending.links
-          .filter(link => link.id >= barrier.appDeepLinkMinimumId)
-          .sort((left, right) => left.id - right.id)
-        const heldResources = (gfsPending?.links ?? [])
-          .filter(link => link.id >= barrier.gfsDeepLinkMinimumId)
-          .sort((left, right) => left.id - right.id)
+        const heldApps = heldQueues.apps
+        const heldResources = heldQueues.resources
+        const checkedAppIds = new Set(heldQueues.apps.map(link => link.id))
+        const checkedResourceIds = new Set(heldQueues.resources.map(link => link.id))
 
         if (!session.authenticated || !session.me) {
-          if (vm.isAuthenticated) return
+          if (
+            vm.isAuthenticated ||
+            (vm.sessionGeneration !== null && vm.sessionGeneration !== undefined)
+          )
+            return
           // A confirmed signed-out snapshot retires only the exact IDs that
           // belonged to this barrier. A later invalidation can never be
           // acknowledged by this batch because queue IDs are monotonic.
           await Promise.all([
-            ...heldApps.map(link =>
+            ...heldQueues.apps.map(link =>
               window.clerum.sandboxUi.acknowledgeDeepLink(link.id).catch(() => undefined)
             ),
-            ...heldResources.map(link =>
+            ...heldQueues.resources.map(link =>
               window.clerum.gfs?.acknowledgeDeepLink?.(link.id).catch(() => undefined)
             ),
           ])
           if (!stillOwnsBarrier()) return
+          const queueRevisionBeforeFinalSnapshot = sessionInvalidationQueueRevisionRef.current
+          const [finalQueues, finalSession, finalSessionGeneration, finalRuntimeConfig] =
+            await Promise.all([
+              listHeldQueues(),
+              window.clerum.auth.getSessionState(),
+              window.clerum.auth.getSessionGeneration(),
+              window.clerum.auth.getRuntimeConfigState(),
+            ])
+          if (!stillOwnsBarrier()) return
+          if (
+            sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeFinalSnapshot ||
+            hasNewQueueIds(finalQueues, checkedAppIds, checkedResourceIds)
+          ) {
+            retryAfterQueueChange()
+            return
+          }
+          if (
+            finalSession.authenticated ||
+            finalSession.me ||
+            finalSession.sessionGeneration !== finalSessionGeneration ||
+            vm.isAuthenticated ||
+            (vm.sessionGeneration !== null && vm.sessionGeneration !== undefined) ||
+            finalRuntimeConfig.envKey !== runtimeConfig.envKey
+          )
+            return
           sessionInvalidationRef.current = null
           setSessionInvalidation(null)
+          setSessionInvalidationReadFailed(false)
           sandboxUiDeepLinkMinimumIdRef.current = barrier.appDeepLinkMinimumId
           gfsDeepLinkMinimumIdRef.current = barrier.gfsDeepLinkMinimumId
           gfsDeepLinkAcceptingRef.current = true
           return
         }
+        if (vm.sessionGeneration !== liveSessionGeneration) return
 
         const sessionTeamId = String(session.me.teamId ?? '').trim()
         const publishedIdentity = `${session.me.id}:${String(session.me.email || '')
           .trim()
           .toLowerCase()}:${sessionTeamId}`
-        const controllerIdentity = vm.me
-          ? `${vm.me.id}:${String(vm.me.email || '')
+        const matchesPublishedSession = (
+          candidate: typeof session,
+          candidateGeneration: number,
+          candidateRuntimeConfig: typeof runtimeConfig
+        ) => {
+          const controllerIdentity = vm.me
+            ? `${vm.me.id}:${String(vm.me.email || '')
+                .trim()
+                .toLowerCase()}:${String(vm.me.teamId ?? '').trim()}`
+            : null
+          return (
+            candidate.authenticated &&
+            !!candidate.me &&
+            candidate.sessionGeneration === candidateGeneration &&
+            candidateGeneration === vm.sessionGeneration &&
+            `${candidate.me.id}:${String(candidate.me.email || '')
               .trim()
-              .toLowerCase()}:${String(vm.me.teamId ?? '').trim()}`
-          : null
-        if (
-          !vm.isAuthenticated ||
-          vm.sessionGeneration !== barrier.sessionGeneration ||
-          controllerIdentity !== publishedIdentity ||
-          vm.currentTeamId !== sessionTeamId ||
-          !vm.runtimeConfigState?.envKey ||
-          runtimeConfig.envKey !== vm.runtimeConfigState.envKey
-        ) {
-          return
+              .toLowerCase()}:${String(candidate.me.teamId ?? '').trim()}` === publishedIdentity &&
+            vm.isAuthenticated &&
+            controllerIdentity === publishedIdentity &&
+            vm.currentTeamId === sessionTeamId &&
+            !!vm.runtimeConfigState?.envKey &&
+            candidateRuntimeConfig.envKey === runtimeConfig.envKey &&
+            candidateRuntimeConfig.envKey === vm.runtimeConfigState.envKey
+          )
         }
+        if (!matchesPublishedSession(session, liveSessionGeneration, runtimeConfig)) return
 
         const navigationGeneration = window.clerum.gfs?.getUserNavigationGeneration?.()
         if (!Number.isSafeInteger(navigationGeneration) || navigationGeneration === null) return
@@ -2571,51 +2643,97 @@ export function App() {
           sameTeamApps.length ? window.clerum.sandboxUi.listApps() : Promise.resolve(null),
           crossTeamApps.length ? window.clerum.team.directory() : Promise.resolve(null),
         ])
-        if (
-          !stillOwnsBarrier() ||
-          !vm.isNavigationIntentCurrent(rendererIntentSequence) ||
-          window.clerum.gfs?.getUserNavigationGeneration?.() !== navigationGeneration ||
-          (await window.clerum.auth.getSessionGeneration()) !== barrier.sessionGeneration
-        ) {
-          return
-        }
-
-        const authorizedAppRefs = new Set(
-          (appListing?.apps ?? []).map(app => app.appRef.toLowerCase())
-        )
-        const authorizedTeamIds = new Set((teamDirectory?.items ?? []).map(item => item.team.id))
-        const finalApps = eligibleApps.filter(link =>
-          link.teamId && link.teamId !== sessionTeamId
-            ? authorizedTeamIds.has(link.teamId)
-            : authorizedAppRefs.has(link.appRef.toLowerCase())
-        )
-        const discardedApps = [
-          ...staleApps,
-          ...eligibleApps.filter(link => !finalApps.includes(link)),
-        ]
-        await Promise.all([
-          ...discardedApps.map(link =>
-            window.clerum.sandboxUi.acknowledgeDeepLink(link.id).catch(() => undefined)
-          ),
-          ...staleResources.map(link =>
-            window.clerum.gfs?.acknowledgeDeepLink?.(link.id).catch(() => undefined)
-          ),
+        const [latestSession, latestSessionGeneration, latestRuntimeConfig] = await Promise.all([
+          window.clerum.auth.getSessionState(),
+          window.clerum.auth.getSessionGeneration(),
+          window.clerum.auth.getRuntimeConfigState(),
         ])
         if (
           !stillOwnsBarrier() ||
           !vm.isNavigationIntentCurrent(rendererIntentSequence) ||
           window.clerum.gfs?.getUserNavigationGeneration?.() !== navigationGeneration ||
-          (await window.clerum.auth.getSessionGeneration()) !== barrier.sessionGeneration
+          !matchesPublishedSession(latestSession, latestSessionGeneration, latestRuntimeConfig)
         ) {
           return
         }
+        if (sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeSnapshot) {
+          retryAfterQueueChange()
+          return
+        }
+        const queueRevisionBeforeAuthorizationSnapshot = sessionInvalidationQueueRevisionRef.current
+        const authorizedQueues = await listHeldQueues()
+        if (!stillOwnsBarrier()) return
+        if (
+          sessionInvalidationQueueRevisionRef.current !==
+            queueRevisionBeforeAuthorizationSnapshot ||
+          hasNewQueueIds(authorizedQueues, checkedAppIds, checkedResourceIds)
+        ) {
+          retryAfterQueueChange()
+          return
+        }
+        const currentAppIds = new Set(authorizedQueues.apps.map(link => link.id))
+        const currentResourceIds = new Set(authorizedQueues.resources.map(link => link.id))
 
+        const authorizedAppRefs = new Set(
+          (appListing?.apps ?? []).map(app => app.appRef.toLowerCase())
+        )
+        const authorizedTeamIds = new Set((teamDirectory?.items ?? []).map(item => item.team.id))
+        const finalApps = eligibleApps.filter(
+          link =>
+            currentAppIds.has(link.id) &&
+            (link.teamId && link.teamId !== sessionTeamId
+              ? authorizedTeamIds.has(link.teamId)
+              : authorizedAppRefs.has(link.appRef.toLowerCase()))
+        )
+        const discardedApps = [
+          ...staleApps.filter(link => currentAppIds.has(link.id)),
+          ...eligibleApps.filter(link => currentAppIds.has(link.id) && !finalApps.includes(link)),
+        ]
+        const discardedResources = staleResources.filter(link => currentResourceIds.has(link.id))
+        const finalResources = eligibleResources.filter(link => currentResourceIds.has(link.id))
+        await Promise.all([
+          ...discardedApps.map(link =>
+            window.clerum.sandboxUi.acknowledgeDeepLink(link.id).catch(() => undefined)
+          ),
+          ...discardedResources.map(link =>
+            window.clerum.gfs?.acknowledgeDeepLink?.(link.id).catch(() => undefined)
+          ),
+        ])
+        if (!stillOwnsBarrier()) return
+
+        const queueRevisionBeforeFinalSnapshot = sessionInvalidationQueueRevisionRef.current
+        const [finalQueues, finalSession, finalSessionGeneration, finalRuntimeConfig] =
+          await Promise.all([
+            listHeldQueues(),
+            window.clerum.auth.getSessionState(),
+            window.clerum.auth.getSessionGeneration(),
+            window.clerum.auth.getRuntimeConfigState(),
+          ])
+        if (!stillOwnsBarrier()) return
+        if (
+          sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeFinalSnapshot ||
+          hasNewQueueIds(finalQueues, checkedAppIds, checkedResourceIds) ||
+          !vm.isNavigationIntentCurrent(rendererIntentSequence) ||
+          window.clerum.gfs?.getUserNavigationGeneration?.() !== navigationGeneration ||
+          !matchesPublishedSession(finalSession, finalSessionGeneration, finalRuntimeConfig)
+        ) {
+          if (
+            sessionInvalidationQueueRevisionRef.current !== queueRevisionBeforeFinalSnapshot ||
+            hasNewQueueIds(finalQueues, checkedAppIds, checkedResourceIds)
+          )
+            retryAfterQueueChange()
+          return
+        }
+
+        const finalAppIds = new Set(finalQueues.apps.map(link => link.id))
+        const finalResourceIds = new Set(finalQueues.resources.map(link => link.id))
         sandboxUiDeepLinkMinimumIdRef.current = barrier.appDeepLinkMinimumId
         gfsDeepLinkMinimumIdRef.current = barrier.gfsDeepLinkMinimumId
         gfsDeepLinkAcceptingRef.current = true
         sessionInvalidationRef.current = null
         setSessionInvalidation(null)
-        for (const link of finalApps) {
+        setSessionInvalidationReadFailed(false)
+        for (const link of finalApps.filter(link => finalAppIds.has(link.id))) {
           const next = enqueuePendingSandboxUiDeepLink(
             pendingSandboxUiDeepLinksRef.current,
             link,
@@ -2624,10 +2742,9 @@ export function App() {
           )
           setPendingSandboxUiDeepLinkState(next)
         }
-        eligibleResources.forEach(enqueueGfsDeepLink)
+        finalResources.filter(link => finalResourceIds.has(link.id)).forEach(enqueueGfsDeepLink)
       } catch {
-        // Fail closed: keep the exact queue IDs held until the current main
-        // session and its authorization/navigation state can be revalidated.
+        if (stillOwnsBarrier()) setSessionInvalidationReadFailed(true)
       }
     })()
 
@@ -2646,6 +2763,7 @@ export function App() {
     vm.navigationIntentSequence,
     vm.runtimeConfigState?.envKey,
     vm.sessionGeneration,
+    sessionInvalidationRetryTick,
   ])
 
   React.useEffect(() => {
@@ -4090,6 +4208,31 @@ export function App() {
                                       tone="warn"
                                       text="You’re signed in, but this session has no active team."
                                     />
+                                  ) : null}
+                                  {sessionInvalidation && sessionInvalidationReadFailed ? (
+                                    <div
+                                      data-testid="sandbox-ui-session-revalidation-pending"
+                                      role="status"
+                                      aria-live="polite"
+                                    >
+                                      <StatusBanner tone="warn">
+                                        <span>
+                                          Could not verify pending links. Retry to check this
+                                          session.
+                                        </span>
+                                        <Button
+                                          color="neutral"
+                                          onClick={() => {
+                                            setSessionInvalidationReadFailed(false)
+                                            setSessionInvalidationRetryTick(value => value + 1)
+                                          }}
+                                          size="xs"
+                                          variant="outline"
+                                        >
+                                          Retry verification
+                                        </Button>
+                                      </StatusBanner>
+                                    </div>
                                   ) : null}
                                   {pendingSandboxUiDeepLinkRollback ? (
                                     <div

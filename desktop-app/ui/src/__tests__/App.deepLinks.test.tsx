@@ -10,7 +10,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, render, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import fc, { type AsyncCommand } from 'fast-check'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
@@ -212,7 +212,16 @@ vi.mock('@components/Common', async () => {
   const actual = await vi.importActual<typeof import('@components/Common')>('@components/Common')
   return {
     ...actual,
-    Button: () => null,
+    Button: (props: Parameters<typeof actual.Button>[0]) =>
+      createElement(
+        'button',
+        {
+          disabled: props.disabled,
+          onClick: props.onClick,
+          type: props.type ?? 'button',
+        },
+        props.children
+      ),
     IconButton: () => null,
     ToastStack: (props: Parameters<typeof actual.ToastStack>[0]) =>
       commonHarness.renderActualToastStack ? createElement(actual.ToastStack, props) : null,
@@ -4776,6 +4785,438 @@ describe('App deep-link orchestration', () => {
     queryClient.clear()
   })
 
+  it('drains App links added while replacement-session authorization is pending', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+    }
+    sessionAuthority.sessionGeneration = 7
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.setSessionInvalidationCleanup(() => ({
+      appDeepLinkMinimumId: appQueue.clear(),
+      gfsDeepLinkMinimumId: gfsQueue.clear(),
+    }))
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    clearPendingDeepLinks.mockImplementation(async () => appQueue.clear())
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+
+    const { getController, queryClient } = await mountSessionBackedApp(userA)
+    listApps.mockClear()
+    listApps.mockResolvedValue({
+      apps: [
+        { appRef: 'ns/app', title: 'App', defaultPath: '/', ready: true, phase: 'active' },
+        {
+          appRef: 'ns/app-two',
+          title: 'App Two',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    let releaseAppsRead!: () => void
+    let markAppsReadStarted!: () => void
+    const appsReadStarted = new Promise<void>(resolve => (markAppsReadStarted = resolve))
+    const appsResponse = new Promise<{
+      apps: Array<{
+        appRef: string
+        title: string
+        defaultPath: string
+        ready: boolean
+        phase: string
+      }>
+    }>(resolve => {
+      releaseAppsRead = () =>
+        resolve({
+          apps: [
+            { appRef: 'ns/app', title: 'App', defaultPath: '/', ready: true, phase: 'active' },
+            {
+              appRef: 'ns/app-two',
+              title: 'App Two',
+              defaultPath: '/',
+              ready: true,
+              phase: 'active',
+            },
+          ],
+        })
+    })
+    listApps.mockImplementationOnce(async () => {
+      markAppsReadStarted()
+      return appsResponse
+    })
+
+    const appTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'app',
+        path: '/first',
+        teamId: 'team-a',
+      })
+    )
+    const lateAppTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'app-two',
+        path: '/late-second',
+        teamId: 'team-a',
+      })
+    )
+    if (!appTarget || !lateAppTarget) throw new Error('the production parser rejected an App link')
+
+    main.endSession(8)
+    await main.settle()
+    sessionAuthority.sessionToken = 'session-b'
+    sessionAuthority.me = userA
+    const navigationGeneration = window.clerum.gfs.getUserNavigationGeneration?.() ?? 0
+    const firstLink = appQueue.enqueue(appTarget, navigationGeneration)
+    act(() => emitDeepLink?.(firstLink))
+    await act(async () => {
+      await getController().loadSession()
+    })
+    await appsReadStarted
+
+    const lateLink = appQueue.enqueue(lateAppTarget, navigationGeneration)
+    act(() => emitDeepLink?.(lateLink))
+    expect(appQueue.list()).toEqual([firstLink, lateLink])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(lateLink.id)
+
+    releaseAppsRead()
+    const openCallsBefore = openSandboxUi().mock.calls.length
+    await confirmPendingAppLink()
+    await waitForAppOpen(openCallsBefore + 1)
+    await main.settle()
+    expect(main.live()).toMatchObject({ appRef: 'ns/app', routePath: '/first' })
+    await waitFor(() => {
+      expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain('ns/app-two')
+    })
+    await confirmPendingAppLink()
+    await waitForAppOpen(openCallsBefore + 2)
+    await main.settle()
+
+    expect(main.live()).toMatchObject({ appRef: 'ns/app-two', routePath: '/late-second' })
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === firstLink.id)).toHaveLength(1)
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === lateLink.id)).toHaveLength(1)
+    expect(acknowledgeDeepLink.mock.calls).toEqual([[firstLink.id], [lateLink.id]])
+    expect(appQueue.list()).toEqual([])
+    queryClient.clear()
+  })
+
+  it('keeps links queued and offers a read-only Retry after listApps fails', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+    }
+    sessionAuthority.sessionGeneration = 7
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.setSessionInvalidationCleanup(() => ({
+      appDeepLinkMinimumId: appQueue.clear(),
+      gfsDeepLinkMinimumId: gfsQueue.clear(),
+    }))
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    clearPendingDeepLinks.mockImplementation(async () => appQueue.clear())
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+
+    const { getController, handle, queryClient, view } = await mountSessionBackedApp(userA)
+    listApps.mockClear()
+    listApps.mockRejectedValueOnce(new Error('temporary authorization read failure'))
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    clearPendingDeepLinks.mockClear()
+    const clearsBeforeRetry = clearPendingDeepLinks.mock.calls.length
+    const switchesBeforeRetry = handle.switchTeam.mock.calls.length
+    const opensBeforeRetry = openSandboxUi().mock.calls.length
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'app',
+        path: '/retry-auth-read',
+        teamId: 'team-a',
+      })
+    )
+    if (!target) throw new Error('the production parser rejected the App fixture')
+
+    main.endSession(8)
+    await main.settle()
+    sessionAuthority.sessionToken = 'session-b'
+    sessionAuthority.me = userA
+    const link = appQueue.enqueue(target, window.clerum.gfs.getUserNavigationGeneration?.() ?? 0)
+    act(() => emitDeepLink?.(link))
+    await act(async () => {
+      await getController().loadSession()
+    })
+
+    const retry = await view.findByRole('button', { name: 'Retry verification' })
+    expect(
+      view.getByText('Could not verify pending links. Retry to check this session.')
+    ).toBeTruthy()
+    expect(appQueue.list()).toEqual([link])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+    expect(clearPendingDeepLinks).toHaveBeenCalledTimes(clearsBeforeRetry)
+    expect(handle.switchTeam).toHaveBeenCalledTimes(switchesBeforeRetry)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeRetry)
+    expect(listApps).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(retry)
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    expect(view.queryByRole('button', { name: 'Retry verification' })).toBeNull()
+    expect(appQueue.list()).toEqual([link])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+    expect(clearPendingDeepLinks).toHaveBeenCalledTimes(clearsBeforeRetry)
+    expect(handle.switchTeam).toHaveBeenCalledTimes(switchesBeforeRetry)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeRetry)
+
+    await confirmPendingAppLink()
+    await waitForAppOpen(opensBeforeRetry + 1)
+    await main.settle()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
+    expect(appQueue.list()).toEqual([])
+    queryClient.clear()
+  })
+
+  it('keeps cross-team links queued and offers Retry after team.directory fails', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+    }
+    sessionAuthority.sessionGeneration = 7
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.setSessionInvalidationCleanup(() => ({
+      appDeepLinkMinimumId: appQueue.clear(),
+      gfsDeepLinkMinimumId: gfsQueue.clear(),
+    }))
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    clearPendingDeepLinks.mockImplementation(async () => appQueue.clear())
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+
+    const { getController, handle, queryClient, view } = await mountSessionBackedApp(userA)
+    listApps.mockClear()
+    listApps.mockResolvedValue({ apps: [] })
+    handle.teamDirectory.mockClear()
+    let directoryRetryAllowed = false
+    handle.teamDirectory.mockImplementation(async () => {
+      if (!directoryRetryAllowed) throw new Error('temporary team directory failure')
+      return {
+        items: [{ team: { id: 'team-b', name: 'Team B' }, members: [] }],
+        currentTeamId: 'team-a',
+      }
+    })
+    clearPendingDeepLinks.mockClear()
+    const clearsBeforeRetry = clearPendingDeepLinks.mock.calls.length
+    const switchesBeforeRetry = handle.switchTeam.mock.calls.length
+    const opensBeforeRetry = openSandboxUi().mock.calls.length
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'app',
+        path: '/retry-team-directory',
+        teamId: 'team-b',
+      })
+    )
+    if (!target) throw new Error('the production parser rejected the cross-team fixture')
+
+    main.endSession(8)
+    await main.settle()
+    sessionAuthority.sessionToken = 'session-b'
+    sessionAuthority.me = userA
+    const link = appQueue.enqueue(target, window.clerum.gfs.getUserNavigationGeneration?.() ?? 0)
+    act(() => emitDeepLink?.(link))
+    await act(async () => {
+      await getController().loadSession()
+    })
+
+    const retry = await view.findByRole('button', { name: 'Retry verification' })
+    expect(appQueue.list()).toEqual([link])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+    expect(handle.teamDirectory).toHaveBeenCalled()
+    expect(handle.switchTeam).toHaveBeenCalledTimes(switchesBeforeRetry)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeRetry)
+
+    const directoryReadsBeforeRetry = handle.teamDirectory.mock.calls.length
+    directoryRetryAllowed = true
+    fireEvent.click(retry)
+    await waitFor(() =>
+      expect(handle.teamDirectory.mock.calls.length).toBeGreaterThan(directoryReadsBeforeRetry)
+    )
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    expect(view.queryByRole('button', { name: 'Retry verification' })).toBeNull()
+    expect(appQueue.list()).toEqual([link])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+    expect(clearPendingDeepLinks).toHaveBeenCalledTimes(clearsBeforeRetry)
+    expect(handle.switchTeam).toHaveBeenCalledTimes(switchesBeforeRetry)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeRetry)
+    expect(listApps).not.toHaveBeenCalled()
+    queryClient.clear()
+  })
+
+  it('revalidates held links against a newer ordinary same-principal session', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const userInTeamB = { ...userA, teamId: 'team-b', teamName: 'Team B' }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+      authClient: {
+        switchTeam: (token: string, teamId: string) => Promise<{ token: string }>
+        getMe: (token: string) => Promise<typeof userA>
+      }
+      tokenStore: { setSessionToken: (token: string, envKey: string) => Promise<void> }
+      switchTeam: (teamId: string) => ReturnType<typeof main.service.switchTeam>
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+      updateEntityChangeSessionToken: (token: string | null) => void
+      restartEntityChangeStreamForSessionReplacement: () => void
+    }
+    sessionAuthority.sessionGeneration = 7
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    sessionAuthority.authClient.switchTeam = vi.fn(async (_token, _teamId) => ({
+      token: 'session-b-team-b',
+    }))
+    sessionAuthority.authClient.getMe = vi.fn(async () => userInTeamB)
+    sessionAuthority.tokenStore.setSessionToken = vi.fn(async () => undefined)
+    sessionAuthority.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => undefined)
+    sessionAuthority.updateEntityChangeSessionToken = vi.fn()
+    sessionAuthority.restartEntityChangeStreamForSessionReplacement = vi.fn()
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.setSessionInvalidationCleanup(() => ({
+      appDeepLinkMinimumId: appQueue.clear(),
+      gfsDeepLinkMinimumId: gfsQueue.clear(),
+    }))
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    clearPendingDeepLinks.mockImplementation(async () => appQueue.clear())
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+
+    const { getController, handle, queryClient } = await mountSessionBackedApp(userA)
+    listApps.mockClear()
+    let releaseOldListing!: () => void
+    let markOldListingStarted!: () => void
+    const oldListingStarted = new Promise<void>(resolve => (markOldListingStarted = resolve))
+    const oldListing = new Promise<{
+      apps: Array<{
+        appRef: string
+        title: string
+        defaultPath: string
+        ready: boolean
+        phase: string
+      }>
+    }>(resolve => {
+      releaseOldListing = () =>
+        resolve({
+          apps: [
+            { appRef: 'ns/app', title: 'App', defaultPath: '/', ready: true, phase: 'active' },
+          ],
+        })
+    })
+    listApps.mockImplementationOnce(async () => {
+      markOldListingStarted()
+      return oldListing
+    })
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'app',
+        path: '/team-hop',
+        teamId: 'team-a',
+      })
+    )
+    if (!target) throw new Error('the production parser rejected the team-hop App link')
+
+    main.endSession(8)
+    await main.settle()
+    sessionAuthority.sessionToken = 'session-b'
+    sessionAuthority.me = userA
+    const link = appQueue.enqueue(target, window.clerum.gfs.getUserNavigationGeneration?.() ?? 0)
+    act(() => emitDeepLink?.(link))
+    await act(async () => {
+      await getController().loadSession()
+    })
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(1))
+    await oldListingStarted
+    expect(getController().sessionGeneration).toBe(8)
+    expect(appQueue.list()).toEqual([link])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+
+    const invalidationCount = (main.reported('sandboxUi:sessionInvalidated') as unknown[]).length
+    handle.switchTeam.mockImplementation(async teamId => sessionAuthority.switchTeam(teamId))
+    await act(async () => {
+      await window.clerum.team.switch('team-b')
+      await getController().loadSession({ preserveNav: true })
+    })
+    await main.settle()
+    expect(getController().getCurrentTeamId()).toBe('team-b')
+    expect(getController().sessionGeneration).toBe(9)
+    expect(main.service.getSessionGeneration()).toBe(9)
+    expect((main.reported('sandboxUi:sessionInvalidated') as unknown[]).length).toBe(
+      invalidationCount
+    )
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    expect(handle.teamDirectory).toHaveBeenCalled()
+    expect(appQueue.list()).toEqual([link])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+
+    releaseOldListing()
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(appQueue.list()).toEqual([link])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+    queryClient.clear()
+  })
+
   it('discards a held App link when the replacement principal lacks target-team access', async () => {
     const userA: NonNullable<AppController['me']> = {
       id: 'user-a',
@@ -5233,6 +5674,109 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
     expect(acknowledgeGfsDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
     expect(resolveUri.mock.calls.every(([, token]) => token === 'session-b')).toBe(true)
+    expect(gfsQueue.list()).toEqual([])
+    queryClient.clear()
+  })
+
+  it('drains resource links added while replacement-team authorization is pending', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+      resolveGfsUri(uri: string): Promise<Awaited<ReturnType<typeof window.clerum.gfs.resolve>>>
+      gfsClient: { resolveUri: (uri: string, token: string) => Promise<unknown> }
+    }
+    sessionAuthority.sessionGeneration = 7
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const resolvedResource: Awaited<ReturnType<typeof window.clerum.gfs.resolve>> = {
+      drive: 'main',
+      resourceId: '0123456789abcdef0123456789abcdef',
+      parentResourceId: null,
+      gfsUri: uri,
+      name: 'Late shared document.md',
+      kind: 'file',
+      pathCache: '/Late shared document.md',
+      version: 5,
+    }
+    const resolveUri = vi.fn(async (_uri: string, _token: string) => resolvedResource)
+    sessionAuthority.gfsClient.resolveUri = resolveUri
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.setSessionInvalidationCleanup(() => ({
+      appDeepLinkMinimumId: appQueue.clear(),
+      gfsDeepLinkMinimumId: gfsQueue.clear(),
+    }))
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    clearPendingDeepLinks.mockImplementation(async () => appQueue.clear())
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+
+    const { getController, handle, queryClient } = await mountSessionBackedApp(userA)
+    filesPageHarness.renderActual = true
+    window.clerum.gfs.resolve = vi.fn(uri => sessionAuthority.resolveGfsUri(uri))
+    handle.teamDirectory.mockClear()
+    let releaseDirectory!: () => void
+    let markDirectoryReadStarted!: () => void
+    const directoryReadStarted = new Promise<void>(resolve => (markDirectoryReadStarted = resolve))
+    const directoryResponse = new Promise<{ items: []; currentTeamId: string }>(resolve => {
+      releaseDirectory = () => resolve({ items: [], currentTeamId: 'team-a' })
+    })
+    handle.teamDirectory.mockImplementationOnce(async () => {
+      markDirectoryReadStarted()
+      return directoryResponse
+    })
+    handle.teamDirectory.mockImplementation(async () => ({
+      items: [],
+      currentTeamId: 'team-a',
+    }))
+    const appTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'app',
+        path: '/cross-team',
+        teamId: 'team-b',
+      })
+    )
+    const resourceTarget = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
+    if (!appTarget || !resourceTarget) throw new Error('a production parser rejected the fixture')
+
+    main.endSession(8)
+    await main.settle()
+    sessionAuthority.sessionToken = 'session-b'
+    sessionAuthority.me = userA
+    const navigationGeneration = window.clerum.gfs.getUserNavigationGeneration?.() ?? 0
+    const appLink = appQueue.enqueue(appTarget, navigationGeneration)
+    act(() => emitDeepLink?.(appLink))
+    await act(async () => {
+      await getController().loadSession()
+    })
+    await directoryReadStarted
+
+    const resourceLink = gfsQueue.enqueue(resourceTarget, navigationGeneration)
+    act(() => emitGfsDeepLink?.(resourceLink))
+    expect(gfsQueue.list()).toEqual([resourceLink])
+    expect(resolveUri).not.toHaveBeenCalled()
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalledWith(resourceLink.id)
+
+    releaseDirectory()
+    await waitFor(() => expect(resolveUri).toHaveBeenCalledWith(uri, 'session-b'))
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(appLink.id))
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(resourceLink.id))
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === appLink.id)).toHaveLength(1)
+    expect(acknowledgeGfsDeepLink.mock.calls.filter(([id]) => id === resourceLink.id)).toHaveLength(
+      1
+    )
+    expect(resolveUri.mock.calls.every(([, token]) => token === 'session-b')).toBe(true)
+    expect(getController().activeWorkspaceTab?.kind).toBe('preview')
     expect(gfsQueue.list()).toEqual([])
     queryClient.clear()
   })
