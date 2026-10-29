@@ -1291,7 +1291,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           activityCallbacks.push(onEvent)
           unsubscribeCalls.push(0)
           return async () => {
-            unsubscribeCalls[subscriptionIndex] += 1
+            const calls = unsubscribeCalls[subscriptionIndex]
+            if (calls === undefined) throw new Error('the activity subscription was not recorded')
+            unsubscribeCalls[subscriptionIndex] = calls + 1
           }
         }
       )
@@ -1327,8 +1329,10 @@ describe('useAgentChatController — characterization (D.0)', () => {
         'streaming'
       )
 
+      const staleActivityCallback = activityCallbacks[0]
+      if (!staleActivityCallback) throw new Error('the Team A activity callback was not retained')
       await act(async () => {
-        activityCallbacks[0]({ type: 'error', message: 'stale Team A activity stream' })
+        staleActivityCallback({ type: 'error', message: 'stale Team A activity stream' })
       })
 
       const currentActivity = Object.values(controller.result.current.activityByMessageId ?? {})[0]
