@@ -20,7 +20,7 @@ env:
 jobs:
   password-rollback-diagnostic:
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -69,21 +69,22 @@ jobs:
         working-directory: source/desktop-app
         run: npm ci
 
-      - name: Run only the password rollback test file
+      - name: Run the selected password rollback test case
         id: focused_test
         continue-on-error: true
         working-directory: source/desktop-app
         shell: pwsh
         run: |
           $reportPath = Join-Path $env:RUNNER_TEMP 'pr977-password-rollback-windows.json'
+          $logPath = Join-Path $env:RUNNER_TEMP 'pr977-password-rollback-windows.log'
           $filter = 'src/__tests__/appService.passwordLoginRollback.regression.test.ts'
           $testName = 'restores the accepted prior source when candidate preparation fails after publication'
-          npm test -- --testTimeout=60000 --hookTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=json "--outputFile.json=$reportPath" $filter --testNamePattern $testName
+          npm test -- --testTimeout=60000 --hookTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=verbose --reporter=json "--outputFile.json=$reportPath" $filter --testNamePattern $testName *> $logPath
           $testExit = $LASTEXITCODE
           Write-Output "Single-file command exit code: $testExit"
           if (-not (Test-Path $reportPath)) { throw 'Single-file JSON report is missing' }
           $sanitizer = Join-Path $env:GITHUB_WORKSPACE 'validation/scripts/pr977/sanitize-windows-test-report.mjs'
-          node $sanitizer $reportPath $env:GITHUB_STEP_SUMMARY
+          node $sanitizer $reportPath $env:GITHUB_STEP_SUMMARY $logPath
           if ($testExit -ne 0) { exit $testExit }
 
       - name: Preserve sanitized failure report

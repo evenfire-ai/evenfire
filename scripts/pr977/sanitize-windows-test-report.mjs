@@ -1,10 +1,13 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-const [reportPath, summaryPath] = process.argv.slice(2)
-if (!reportPath || !summaryPath) throw new Error('Expected report and summary paths')
+const [reportPath, summaryPath, logPath] = process.argv.slice(2)
+if (!reportPath || !summaryPath || !logPath) {
+  throw new Error('Expected report, summary, and log paths')
+}
 
 const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+const verboseLog = readFileSync(logPath, 'utf8')
 const selectedTestName =
   'restores the accepted prior source when candidate preparation fails after publication'
 const allowedTypes = [
@@ -36,20 +39,34 @@ const allowedCodes = [
   'ETIMEDOUT',
 ]
 
-function sanitizeExcerpt(messages) {
-  const firstLine = String(messages?.[0] ?? 'No failure message was recorded')
+function sanitizeLine(value) {
+  return String(value)
     .replace(/\u001b\[[0-9;]*m/g, '')
-    .split(/\r?\n/)[0]
-  return firstLine
     .replace(/EVENFIRE_[A-Z0-9_]+=\{[^}]*\}/g, '<structured-diagnostic>')
     .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer <redacted>')
     .replace(/\b(token|password|credential|secret)\s*[:=]?\s*[^\s,;]+/gi, '$1=<redacted>')
     .replace(/\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '<redacted-token>')
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '<redacted-email>')
-    .replace(/\b[A-Za-z0-9_+/=-]{32,}\b/g, '<redacted-value>')
+    .replace(/\b[A-Za-z0-9_+/=-]{16,}\b/g, '<redacted-value>')
     .replace(/(?:[A-Z]:\\|\\\\)[^\s,;)}]+/gi, '<redacted-path>')
     .replace(/\/(?:Users|home|private|tmp)\/[^\s,;)}]+/g, '<redacted-path>')
     .slice(0, 240)
+}
+
+function sanitizeExcerpt(messages, logText) {
+  const lines = [...messages, ...String(logText).split(/\r?\n/)]
+    .flatMap(value => String(value).split(/\r?\n/))
+    .map(line => line.replace(/\u001b\[[0-9;]*m/g, '').trim())
+    .filter(Boolean)
+    .filter(line => !/^at\s/.test(line))
+    .filter(line => !line.includes('STACK_TRACE_ERROR'))
+    .filter(line => !/^(?:npm test|> vitest run|Single-file command exit code)/i.test(line))
+  const detail = lines.find(line =>
+    /(?:AssertionError|TypeError|Error:|expected|received|not authenticated|ENOENT|EACCES|EPERM|timeout|failed)/i.test(
+      line
+    )
+  )
+  return sanitizeLine(detail ?? 'No safe failure detail was recorded')
 }
 
 function categoryFor(messages, code, type) {
@@ -91,11 +108,15 @@ for (const suite of report.testResults ?? []) {
       selectedStatuses.push(assertion.status)
     }
     if (assertion.status !== 'failed') continue
-    const messages = assertion.failureMessages ?? []
+    const messages = [String(suite.message ?? ''), ...(assertion.failureMessages ?? [])].filter(
+      Boolean
+    )
     const joined = messages.join('\n')
-    const type = allowedTypes.find(value => new RegExp(`\\b${value}\\b`).test(joined)) ?? 'Error'
+    const diagnosticText = `${joined}\n${verboseLog}`
+    const type =
+      allowedTypes.find(value => new RegExp(`\\b${value}\\b`).test(diagnosticText)) ?? 'Error'
     const code = allowedCodes.find(value =>
-      new RegExp(`(^|[^A-Za-z0-9_])${value}([^A-Za-z0-9_]|$)`).test(joined)
+      new RegExp(`(^|[^A-Za-z0-9_])${value}([^A-Za-z0-9_]|$)`).test(diagnosticText)
     )
     const location = joined.match(/([^\\/\s()]+\.test\.[cm]?[jt]sx?):(\d+):(\d+)/)
     failed.push({
@@ -103,8 +124,8 @@ for (const suite of report.testResults ?? []) {
       location: location ? `${location[1]}:${location[2]}` : 'unavailable',
       errorType: type,
       ...(code ? { code } : {}),
-      category: categoryFor(messages, code, type),
-      safeExcerpt: sanitizeExcerpt(messages),
+      category: categoryFor([...messages, verboseLog], code, type),
+      safeExcerpt: sanitizeExcerpt(messages, verboseLog),
     })
   }
 }

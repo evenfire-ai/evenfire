@@ -1,1 +1,1 @@
-Retry the first password rollback case with the corrected sibling harness path and a 60-second bound.
+Capture a redacted verbose diagnostic for the first Windows password rollback case.
