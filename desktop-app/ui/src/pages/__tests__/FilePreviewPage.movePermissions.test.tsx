@@ -1151,6 +1151,15 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   })
 
   it('shows one safe failure after close without repeating the Move', async () => {
+    const failureMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          'fixture-session-token'
+        ),
+      400,
+      { code: 'bad_request', message: 'Move rejected' }
+    )
     let rejectMove!: (error: Error) => void
     const pendingMove = new Promise<MoveReceipt>((_resolve, reject) => {
       rejectMove = reject
@@ -1174,7 +1183,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
       expect(screen.queryByRole('alert')).toBeNull()
-      await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
+      await act(async () => rejectMove(new Error(failureMessage)))
 
       const failure = await screen.findByRole('alert')
       expect(failure.textContent).toContain('diagram.png → Archive:')
@@ -1185,7 +1194,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(screen.getAllByRole('alert')).toHaveLength(1)
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
-      await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
+      await act(async () => rejectMove(new Error(failureMessage)))
       queryClient.clear()
     }
   })
@@ -1337,6 +1346,11 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   })
 
   it('keeps a confirmed Move success visible when its resource refetch fails', async () => {
+    const refetchFailureMessage = await gfsRouteFailureMessage(
+      client => client.resolveUri(uri, 'fixture-session-token'),
+      500,
+      { code: 'internal_error', message: 'preview refetch failed' }
+    )
     let settleMove!: (receipt: MoveReceipt) => void
     const pendingMove = new Promise<MoveReceipt>(resolve => {
       settleMove = resolve
@@ -1361,7 +1375,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(queryClient.getQueryData(previewResourceKey)).toEqual(
         expect.objectContaining({ resourceId })
       )
-      resolve.mockRejectedValue(new Error('preview refetch failed httpStatus=500'))
+      resolve.mockRejectedValue(new Error(refetchFailureMessage))
 
       await act(async () => {
         await expect(
@@ -1393,6 +1407,15 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
   })
 
   it('keeps a dispatched failure in the open dialog without duplicate toast feedback', async () => {
+    const failureMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          'fixture-session-token'
+        ),
+      400,
+      { code: 'bad_request', message: 'Move rejected' }
+    )
     let rejectMove!: (error: Error) => void
     const pendingMove = new Promise<MoveReceipt>((_resolve, reject) => {
       rejectMove = reject
@@ -1411,7 +1434,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const { queryClient } = renderPreviewWithToastStack()
     try {
       const dialog = await dispatchArchiveMove()
-      await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
+      await act(async () => rejectMove(new Error(failureMessage)))
 
       expect(
         within(dialog).getByText(
@@ -1422,7 +1445,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(screen.queryByRole('alert')).toBeNull()
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
-      await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
+      await act(async () => rejectMove(new Error(failureMessage)))
       queryClient.clear()
     }
   })
