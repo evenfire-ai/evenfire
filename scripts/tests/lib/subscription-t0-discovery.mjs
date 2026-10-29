@@ -73,6 +73,8 @@ const runtimeSuites = new Map([
   ['tests/e2e/playwright/control-ui/codex-subscription-connection.spec.ts', 'tests/e2e/playwright/playwright.codex-subscription.config.ts'],
   ['tests/e2e/playwright/desktop/codex-subscription-prompt-bridge.spec.ts', 'tests/e2e/playwright/playwright.codex-subscription.config.ts'],
   ['tests/e2e/playwright/desktop/codex-subscription-approved-tools.spec.ts', 'tests/e2e/playwright/playwright.codex-approved-tools.config.ts'],
+  ['tests/e2e/playwright/desktop/model-step-retry-codex.spec.ts', 'tests/e2e/playwright/playwright.codex-approved-tools.config.ts'],
+  ['tests/e2e/playwright/desktop/model-step-retry-codex-hybrid.spec.ts', 'tests/e2e/playwright/playwright.codex-approved-tools.config.ts'],
   ['tests/e2e/playwright/desktop/codex-subscription-channel-cron.spec.ts', 'tests/e2e/playwright/playwright.codex-subscription.config.ts'],
   ['tests/e2e/playwright/desktop/codex-subscription-direct.spec.ts', 'tests/e2e/playwright/playwright.codex-subscription.config.ts'],
   ['scripts/e2e/e2e-codex-subscription-runtime.sh', 'scripts/e2e/e2e-codex-subscription-runtime.sh'],

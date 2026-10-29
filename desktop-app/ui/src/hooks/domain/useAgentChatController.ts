@@ -7,12 +7,14 @@ import {
   useAgentTaskTracker,
 } from '@contexts/AgentTaskTrackerContext'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import type { ModelStepRetryState } from '@components/agents/ModelStepRetryNotice.types'
 import {
   COMPOSER_MAX_ATTACHMENTS,
   COMPOSER_MAX_NON_IMAGE_BODY_BYTES,
   COMPOSER_MAX_REQUEST_BODY_BYTES,
   COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
 } from '@constants/attachments'
+import { agentErrorText } from '@lib/agentErrorText'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -22,7 +24,6 @@ import type { PendingChatSwitchRequest, ProvisionalSelection } from '@lib/chatSw
 import { truncateTitle } from '@lib/chatTitle'
 import {
   clearAllComposerDrafts,
-  clearComposerDraft,
   getComposerDraft,
   getComposerDraftRevision,
   setComposerDraft,
@@ -56,7 +57,7 @@ import type {
   HostActivityEvent,
   HostActivityStreamEvent,
   MessageToolStep,
-  SessionMessagesQuery,
+  ModelStepCheckpointView,
 } from '../../../../src/types'
 import type { SessionMessagesResult } from '../../../../src/types'
 import { DESKTOP_ROUTES } from '../../constants/navigation'
@@ -531,7 +532,6 @@ export function useAgentChatController({
     applyEntryTitle,
     applyLatestTitle,
     upsertHydratedEntry,
-    removeFromList,
     bumpActivity,
     appendNewEntry,
     readPendingSelection,
@@ -645,6 +645,24 @@ export function useAgentChatController({
   const [agentSending, setAgentSending] = useState(false)
   const [agentError, setAgentError] = useState<string | null>(null)
   const [failedAgentSend, setFailedAgentSend] = useState<FailedAgentSend | null>(null)
+  // #1044 — the Host's model-step checkpoint per chat key, exactly as the last
+  // session read (or continuation answer) reported it. The Host is the
+  // authority: an absent field clears the entry. A ref mirrors the state so the
+  // async terminal/reconcile paths read the latest value without re-binding.
+  const [modelStepCheckpointByChatKey, setModelStepCheckpointByChatKey] = useState<
+    Record<string, ModelStepCheckpointView>
+  >({})
+  const modelStepCheckpointByChatKeyRef = useRef<Record<string, ModelStepCheckpointView>>({})
+  const [modelStepRetryByChatKey, setModelStepRetryByChatKey] = useState<
+    Record<string, ModelStepRetryState>
+  >({})
+  const modelStepRetryInFlightRef = useRef(new Set<string>())
+  const modelStepContinuationByTaskIdRef = useRef<
+    Record<string, { chatKey: string; checkpointId: string; originTaskId: string }>
+  >({})
+  const [modelStepFailureByCheckpointId, setModelStepFailureByCheckpointId] = useState<
+    Record<string, ModelStepRetryState['lastFailure']>
+  >({})
   const [retainedRevision, setRetainedRevision] = useState(0)
   const [retainedSends] = useState(() =>
     createRetainedSendStore(() => setRetainedRevision(value => value + 1))
@@ -661,6 +679,113 @@ export function useAgentChatController({
     markRetainedSendReason,
     failRetainedSend,
   } = retainedSends
+
+  // #1044 — record (or, with `undefined`, clear) the Host's checkpoint view for
+  // one chat. Idempotent: an unchanged view does not re-render.
+  const recordModelStepCheckpoint = useCallback(
+    (chatKey: string, view: ModelStepCheckpointView | undefined) => {
+      const current = modelStepCheckpointByChatKeyRef.current
+      const previous = current[chatKey]
+      if (!view && !previous) return
+      if (
+        view &&
+        previous &&
+        previous.checkpointId === view.checkpointId &&
+        previous.version === view.version &&
+        previous.status === view.status &&
+        previous.continuationTaskId === view.continuationTaskId &&
+        previous.blockedReason === view.blockedReason
+      ) {
+        return
+      }
+      const next = { ...current }
+      if (view) next[chatKey] = view
+      else delete next[chatKey]
+      modelStepCheckpointByChatKeyRef.current = next
+      setModelStepCheckpointByChatKey(next)
+    },
+    []
+  )
+  const setModelStepRetryState = useCallback(
+    (chatKey: string, state: ModelStepRetryState | undefined) => {
+      setModelStepRetryByChatKey(previous => {
+        if (!state) {
+          if (!(chatKey in previous)) return previous
+          const { [chatKey]: _removed, ...remaining } = previous
+          return remaining
+        }
+        return { ...previous, [chatKey]: state }
+      })
+    },
+    []
+  )
+  const recordModelStepContinuation = useCallback(
+    (chatKey: string, checkpoint: ModelStepCheckpointView, taskId: string) => {
+      modelStepContinuationByTaskIdRef.current[taskId] = {
+        chatKey,
+        checkpointId: checkpoint.checkpointId,
+        originTaskId: checkpoint.originTaskId,
+      }
+    },
+    []
+  )
+  const completeModelStepTask = useCallback(
+    (taskId: string) => {
+      releaseSucceededRetainedSendsForTask(taskId)
+      const continuation = modelStepContinuationByTaskIdRef.current[taskId]
+      if (!continuation) return
+      releaseSucceededRetainedSendsForTask(continuation.originTaskId)
+      const checkpoint = modelStepCheckpointByChatKeyRef.current[continuation.chatKey]
+      if (checkpoint?.checkpointId === continuation.checkpointId) {
+        recordModelStepCheckpoint(continuation.chatKey, undefined)
+      }
+      delete modelStepContinuationByTaskIdRef.current[taskId]
+      setModelStepFailureByCheckpointId(previous => {
+        const { [continuation.checkpointId]: _removed, ...remaining } = previous
+        return remaining
+      })
+    },
+    [releaseSucceededRetainedSendsForTask, recordModelStepCheckpoint]
+  )
+  const clearModelStepCheckpoints = useCallback((agentRef?: string) => {
+    const current = modelStepCheckpointByChatKeyRef.current
+    const next = agentRef
+      ? Object.fromEntries(
+          Object.entries(current).filter(([chatKey]) => parseTaskKey(chatKey).agentRef !== agentRef)
+        )
+      : {}
+    modelStepCheckpointByChatKeyRef.current = next
+    setModelStepCheckpointByChatKey(next)
+    setModelStepRetryByChatKey(previous =>
+      agentRef
+        ? Object.fromEntries(
+            Object.entries(previous).filter(
+              ([chatKey]) => parseTaskKey(chatKey).agentRef !== agentRef
+            )
+          )
+        : {}
+    )
+    const continuations = modelStepContinuationByTaskIdRef.current
+    const removedCheckpointIds = new Set<string>()
+    for (const [taskId, continuation] of Object.entries(continuations)) {
+      if (!agentRef || parseTaskKey(continuation.chatKey).agentRef === agentRef) {
+        removedCheckpointIds.add(continuation.checkpointId)
+        delete continuations[taskId]
+      }
+    }
+    for (const [chatKey, checkpoint] of Object.entries(current)) {
+      if (!agentRef || parseTaskKey(chatKey).agentRef === agentRef) {
+        removedCheckpointIds.add(checkpoint.checkpointId)
+      }
+    }
+    setModelStepFailureByCheckpointId(previous =>
+      agentRef
+        ? Object.fromEntries(
+            Object.entries(previous).filter(([id]) => !removedCheckpointIds.has(id))
+          )
+        : {}
+    )
+  }, [])
   const sendScopeGeneration = useRef(0)
   const currentAuthScopeRef = useRef(`${isAuthenticated}:${authenticatedScope}`)
   currentAuthScopeRef.current = `${isAuthenticated}:${authenticatedScope}`
@@ -683,9 +808,10 @@ export function useAgentChatController({
     setAgentSending(false)
     retainedSends.resetRetainedSendStore()
     parkedRestorationsRef.current.clear()
+    clearModelStepCheckpoints()
     setFailedAgentSend(null)
     setAgentError(null)
-  }, [authenticatedScope, isAuthenticated, retainedSends])
+  }, [authenticatedScope, isAuthenticated, retainedSends, clearModelStepCheckpoints])
 
   const activityUnsubByAgentRef = useRef<Record<string, () => Promise<void>>>({})
   const activityInFlightByAgentRef = useRef<Record<string, string[]>>({})
@@ -1189,6 +1315,7 @@ export function useAgentChatController({
     agentSendInFlightRef.current = false
     retainedSends.resetRetainedSendStore()
     parkedRestorationsRef.current.clear()
+    clearModelStepCheckpoints()
     // Abort any in-flight reconcile so a run mid-backoff can't resurrect a
     // just-cleared tracker/FSM entry after this teardown (security review).
     reconcileChatRef.current?.reset()
@@ -1218,6 +1345,7 @@ export function useAgentChatController({
     chatStore.clearCachedRemoteData,
     cancelOlderMessagesLoad,
     transcriptMemo,
+    clearModelStepCheckpoints,
   ])
 
   // Unified switch (post-D.4): cache-first render → server reconcile → tracker
@@ -2304,6 +2432,16 @@ export function useAgentChatController({
       // would resurrect a task (and its SSE) in a torn-down session. `isActive`
       // can't cover this: a legitimate background rejoin is also "not active".
       if (!stillRelevant()) return 'stale_drop'
+      // #1044 — a live task can be a claimed continuation; record the Host's
+      // view so the Resend affordance of the origin task stays suppressed.
+      recordModelStepCheckpoint(chatKey, resp.modelStepCheckpoint)
+      if (resp.modelStepCheckpoint?.continuationTaskId) {
+        recordModelStepContinuation(
+          chatKey,
+          resp.modelStepCheckpoint,
+          resp.modelStepCheckpoint.continuationTaskId
+        )
+      }
       const anchor = [...rendered].reverse().find(m => m.role === 'user')?.id
       fsm.dispatch(chatKey, {
         type: 'SERVER_SNAPSHOT',
@@ -2332,7 +2470,13 @@ export function useAgentChatController({
       // is gone (§4.7.3 / §8-R2).
       return 'reconcile_rejoined'
     },
-    [fsm, tracker, hydrateActiveChatFromServer]
+    [
+      fsm,
+      tracker,
+      hydrateActiveChatFromServer,
+      recordModelStepCheckpoint,
+      recordModelStepContinuation,
+    ]
   )
 
   const reconcileSettleIdle = useCallback<ReconcileChatDeps['settleIdle']>(
@@ -2358,14 +2502,44 @@ export function useAgentChatController({
 
       // Active chat → reflect any newly-persisted server turns into the visible
       // view (replace-never-append parity with switchToChat Phase 2, A.4.4).
-      const { replaced, cached, stale } = await hydrateActiveChatFromServer(
+      const { rendered, replaced, cached, stale } = await hydrateActiveChatFromServer(
         chatKey as TaskKey,
         resp,
         taskIdHint,
         stillRelevant
       )
       if (stale) return 'stale_drop'
-      if (replaced) return 'reconcile_replaced'
+
+      // #1044 — the Host's model-step checkpoint outranks every Resend branch
+      // below: a resumable turn is offered as **Retry model step** (the loud
+      // caller paints no Resend), and a claimed continuation is a live task the
+      // tracker must follow even though the session itself reads idle.
+      const checkpoint = resp.modelStepCheckpoint
+      recordModelStepCheckpoint(chatKey, checkpoint)
+      if (checkpoint?.retryAvailable) return 'model_step_resumable'
+      if (checkpoint?.status === 'claimed' && checkpoint.continuationTaskId) {
+        if (!stillRelevant()) return 'stale_drop'
+        recordModelStepContinuation(chatKey, checkpoint, checkpoint.continuationTaskId)
+        if (tracker.get(chatKey as TaskKey)?.taskId === checkpoint.continuationTaskId) {
+          return 'reconcile_rejoined'
+        }
+        const anchor = [...rendered].reverse().find(m => m.role === 'user')?.id
+        const attached = tracker.attach(
+          chatKey as TaskKey,
+          checkpoint.continuationTaskId,
+          anchor ?? '<unknown>',
+          { reason: 'rejoin' }
+        )
+        if (!attached) {
+          fsm.dispatch(chatKey, { type: 'WENT_OFFLINE', underlying: 'idle' })
+          return 'rejoin_capped_offline'
+        }
+        return 'reconcile_rejoined'
+      }
+      if (replaced) {
+        if (taskIdHint) completeModelStepTask(taskIdHint)
+        return 'reconcile_replaced'
+      }
 
       // GAP-H1 durable fallback (rama 4): a task whose result the server never
       // reflected as a turn (deny pre-executor) is materialized + PERSISTED
@@ -2406,7 +2580,10 @@ export function useAgentChatController({
         // Loud toast parity with the stream-loss terminal path (SR-7): a durable
         // failure the stream never delivered is still a failed send. Silent on the
         // switch path is not an option — the user asked and it errored.
-        liveDepsRef.current.pushToast(`Message to ${agentRef} failed: ${message}`, 'error')
+        liveDepsRef.current.pushToast(
+          `Message to ${agentRef} failed: ${agentErrorText(errorCode, message)}`,
+          'error'
+        )
         // Distinct outcome so the loud caller paints the stepper red (not green).
         return 'recovered_error'
       }
@@ -2423,11 +2600,20 @@ export function useAgentChatController({
           task_id: taskIdHint,
           ...(attachments.length ? { attachments } : {}),
         })
+        completeModelStepTask(taskIdHint)
         return 'recovered_from_task_result'
       }
       return 'fell_through_to_resend'
     },
-    [fsm, tracker, hydrateActiveChatFromServer, appendAssistantMessage]
+    [
+      fsm,
+      tracker,
+      hydrateActiveChatFromServer,
+      appendAssistantMessage,
+      recordModelStepCheckpoint,
+      recordModelStepContinuation,
+      completeModelStepTask,
+    ]
   )
 
   const hideHostAccess = useCallback(
@@ -2455,6 +2641,9 @@ export function useAgentChatController({
         const { [agentRef]: _removed, ...remaining } = previous
         return remaining
       })
+      // The checkpoint view is Host-protected session state like the progress
+      // above; a later authorized read re-derives it.
+      clearModelStepCheckpoints(agentRef)
       if (kind === 'revoked') {
         hideAgent(agentRef)
       }
@@ -2495,6 +2684,7 @@ export function useAgentChatController({
       beginSelectionIntent,
       onHostAccessRevoked,
       onHostAuthorityUncertain,
+      clearModelStepCheckpoints,
     ]
   )
   const revokeHostAccess = useCallback(
@@ -2644,6 +2834,43 @@ export function useAgentChatController({
     reconcileRevokeAccess,
     reconcileHoldAccess,
   ])
+
+  // #1044 — re-read the Host's model-step checkpoint for one chat after a failed
+  // terminal. The smallest page is enough: the checkpoint is session state, not
+  // a turn. An authorization rejection hides the Host exactly like every other
+  // protected read; any other read failure logs only an allowlisted status and leaves
+  // the previous view in place, so the next reconcile of the chat re-derives it.
+  const refreshModelStepCheckpoint = useCallback(
+    async (agentRef: string, chatId: string, stillAuthorized: () => boolean): Promise<void> => {
+      let resp: SessionMessagesResult
+      try {
+        resp = await chatStore.loadSessionMessages(agentRef, agentRef, chatId, { limit: 1 })
+      } catch (error) {
+        if (isAuthorizationError(error)) {
+          if (stillAuthorized()) {
+            hideHostAccessRef.current!(
+              agentRef,
+              isConfirmedHostAccessRevoked(error) ? 'revoked' : 'uncertain'
+            )
+          }
+          return
+        }
+        console.warn('[useAgentChatController] model step checkpoint read failed', {
+          status:
+            typeof error === 'object' &&
+            error !== null &&
+            'status' in error &&
+            [400, 401, 403, 404, 409, 429, 500, 502, 503, 504].includes(error.status as number)
+              ? error.status
+              : undefined,
+        })
+        return
+      }
+      if (!stillAuthorized()) return
+      recordModelStepCheckpoint(makeTaskKey(agentRef, chatId), resp.modelStepCheckpoint)
+    },
+    [chatStore.loadSessionMessages, recordModelStepCheckpoint]
+  )
 
   // ─── Tracker callbacks + subscription (the post-D.3 fire & forget glue) ───
 
@@ -2831,7 +3058,10 @@ export function useAgentChatController({
               status: 'error',
               errorMessage: message,
             }))
-            liveDepsRef.current.pushToast(`Message to ${agentRef} failed: ${message}`, 'error')
+            liveDepsRef.current.pushToast(
+              `Message to ${agentRef} failed: ${agentErrorText(errorCode, message)}`,
+              'error'
+            )
             // Settle the session to idle so it can't linger dirty (spinner /
             // "processing") until the next switchToChat — that's exactly the bug
             // this fix targets. Re-check first: a fresh task could have started
@@ -2931,7 +3161,7 @@ export function useAgentChatController({
             // exists, so this is as terminal as the `reply` branch below: release
             // the retained payload instead of leaving it to accumulate, together
             // with the older failures of this chat that the reply supersedes.
-            releaseSucceededRetainedSendsForTask(state.taskId)
+            completeModelStepTask(state.taskId)
             dropActivity()
             paintProgressDone()
             setIdle()
@@ -2985,6 +3215,27 @@ export function useAgentChatController({
             // Should-fix).
             dropActivity()
             break
+          case 'model_step_resumable':
+            // #1044 — the Host kept the turn as a resumable model-step
+            // checkpoint. The turn is unfinished, so the stepper and activity
+            // turn red, but recovery is **Retry model step** (rendered from the
+            // recorded checkpoint), never Resend: no `setFailedAgentSend` here.
+            dropActivity()
+            updateMessageProgress(agentRef, state.userMessageId, () => ({
+              taskId: state.taskId,
+              status: 'error',
+              steps: state.steps,
+              currentIteration: state.currentIteration,
+              llmElapsedMs: state.llmElapsedMs,
+            }))
+            updateMessageActivity(agentRef, state.userMessageId, previous => ({
+              ...previous,
+              taskId: state.taskId,
+              status: 'error',
+              errorMessage: result.message,
+            }))
+            setIdle()
+            break
           case 'fell_through_to_resend':
             // settleIdle already consulted `getTaskResult` and it was empty → the
             // task is genuinely lost. Today's Resend UX.
@@ -3005,7 +3256,7 @@ export function useAgentChatController({
         // payload for this task can be released (idempotent — duplicate SSE/poll
         // terminals only release once). The success also supersedes the older
         // failures of this chat, which would otherwise resurface under the reply.
-        releaseSucceededRetainedSendsForTask(state.taskId)
+        completeModelStepTask(state.taskId)
         if (result.content && result.content !== 'Message failed') {
           const toolSteps = toMessageToolSteps(state.steps)
           await appendAssistantMessage(agentRef, chatId, {
@@ -3021,6 +3272,22 @@ export function useAgentChatController({
         if (!terminalStillAuthorized()) return
         liveDepsRef.current.pushToast(`Message sent to ${agentRef}.`, 'success')
       } else if (result?.kind === 'error') {
+        const continuation = modelStepContinuationByTaskIdRef.current[state.taskId]
+        if (continuation && result.source === 'failed') {
+          setModelStepFailureByCheckpointId(previous => ({
+            ...previous,
+            [continuation.checkpointId]:
+              result.code === 'FILE_REFERENCE_CHECK_FAILED'
+                ? 'reference_check_failed'
+                : 'provider_unavailable',
+          }))
+        }
+        // #1044 — a failed task may have left a resumable model-step checkpoint.
+        // Read it BEFORE the retained failure is marked, so a resumable turn
+        // shows **Retry model step** without a Resend banner flashing first.
+        if (result.source === 'failed') {
+          await refreshModelStepCheckpoint(agentRef, chatId, terminalStillAuthorized)
+        }
         // Terminal failure: the payload stays retained for explicit recovery.
         markRetainedSendReason(
           state.taskId,
@@ -3041,7 +3308,10 @@ export function useAgentChatController({
             errorProvider: result.provider,
           })
           if (!terminalStillAuthorized()) return
-          liveDepsRef.current.pushToast(`Message to ${agentRef} failed: ${result.message}`, 'error')
+          liveDepsRef.current.pushToast(
+            `Message to ${agentRef} failed: ${agentErrorText(result.code, result.message)}`,
+            'error'
+          )
         } else if (result.source === 'result_fetch') {
           await appendAssistantMessage(agentRef, chatId, {
             id: crypto.randomUUID(),
@@ -3126,6 +3396,9 @@ export function useAgentChatController({
       isChatDeleted,
       revokeHostAccess,
       holdHostAccess,
+      refreshModelStepCheckpoint,
+      recordModelStepCheckpoint,
+      completeModelStepTask,
     ]
   )
 
@@ -3759,6 +4032,11 @@ export function useAgentChatController({
           // 200 or a missing `success` boolean never imply success.
           const explicitFailure = responseRecord.success === false
           const isErrorResponse = Boolean(errorRecord) || explicitFailure
+          if (!isErrorResponse && sendChatId) {
+            const taskKey = makeTaskKey(sendAgent, sendChatId)
+            recordModelStepCheckpoint(taskKey, undefined)
+            setModelStepRetryState(taskKey, undefined)
+          }
           const content =
             typeof errorRecord?.message === 'string'
               ? errorRecord.message
@@ -3822,7 +4100,10 @@ export function useAgentChatController({
               status: 'error',
               errorMessage: failureMessage,
             }))
-            pushToast(`Message to ${sendAgent} failed: ${failureMessage || 'error'}`, 'error')
+            pushToast(
+              `Message to ${sendAgent} failed: ${agentErrorText(errorRecord?.code, failureMessage) || 'error'}`,
+              'error'
+            )
           } else if (filesNotDeliveredMessage) {
             // The Host answered but never received the documents: keep the
             // snapshot (and its files) with the failure instead of releasing it.
@@ -3909,6 +4190,9 @@ export function useAgentChatController({
             references: effectiveReferences,
           })
           const taskKey = makeTaskKey(sendAgent, sendChatId)
+          // The Host admitted this new turn; only now retire its predecessor's checkpoint.
+          recordModelStepCheckpoint(taskKey, undefined)
+          setModelStepRetryState(taskKey, undefined)
           tracker.start(taskKey, taskId, userMessageId)
           // SEND_STARTED bumps the epoch (R2 snapshot staleness anchor), adopts
           // the new taskId (R1 then drops the previous task's late events) and
@@ -4053,6 +4337,8 @@ export function useAgentChatController({
       appendAssistantMessage,
       appendNewEntry,
       bumpActivity,
+      recordModelStepCheckpoint,
+      setModelStepRetryState,
     ]
   )
 
@@ -4077,18 +4363,48 @@ export function useAgentChatController({
     ]
   )
 
+  const activeChatKey =
+    selectedAgent && activeChatId ? makeTaskKey(selectedAgent, activeChatId) : null
+  const activeModelStepCheckpoint = activeChatKey
+    ? (modelStepCheckpointByChatKey[activeChatKey] ?? null)
+    : null
+  const activeModelStepRetryRequest = activeChatKey
+    ? (modelStepRetryByChatKey[activeChatKey] ?? null)
+    : null
+  const activeModelStepFailure = activeModelStepCheckpoint
+    ? modelStepFailureByCheckpointId[activeModelStepCheckpoint.checkpointId]
+    : undefined
+  const activeModelStepRetry = activeModelStepFailure
+    ? {
+        pending: false,
+        error: null,
+        ...activeModelStepRetryRequest,
+        lastFailure: activeModelStepFailure,
+      }
+    : activeModelStepRetryRequest
+  // #1044 — while the Host offers the origin turn as a resumable checkpoint, or
+  // runs its claimed continuation, recovery is the continuation, not Resend.
+  // A blocked checkpoint cannot continue, so Resend stays available beside it.
+  const modelStepOriginTaskId =
+    activeModelStepCheckpoint &&
+    (activeModelStepCheckpoint.status === 'resumable' ||
+      activeModelStepCheckpoint.status === 'claimed')
+      ? activeModelStepCheckpoint.originTaskId
+      : null
+
   const visibleRetainedFailure = useMemo(() => {
     const snapshot = selectedAgent
       ? retainedSends.getLatestRetainedSendSnapshotForChat(selectedAgent, activeChatId)
       : undefined
     if (!snapshot?.failure) return null
+    if (modelStepOriginTaskId && snapshot.taskId === modelStepOriginTaskId) return null
     return {
       ...snapshot,
       message: snapshot.failure.message,
       kind: snapshot.failure.kind,
       answeredWithoutFiles: snapshot.reason === 'host_files_dropped',
     } satisfies FailedAgentSend
-  }, [retainedSends, retainedRevision, selectedAgent, activeChatId])
+  }, [retainedSends, retainedRevision, selectedAgent, activeChatId, modelStepOriginTaskId])
   const visibleFailure =
     visibleRetainedFailure ??
     (failedAgentSend &&
@@ -4257,6 +4573,189 @@ export function useAgentChatController({
     },
     [getRetainedSendsForTask, applyKeptAttachments]
   )
+
+  // #1044 — **Retry model step**: ask the Host to continue the resumable
+  // checkpoint of the active chat at the version this view holds, then follow
+  // the continuation task like a send. Every contract row of the POST has its
+  // own outcome; a request that got no contract answer stays on the notice as
+  // an error with the button still offered.
+  const handleRetryModelStep = useCallback(async () => {
+    const agentRef = activeChatVisibilityRef.current.selectedAgent
+    const chatId = activeChatVisibilityRef.current.activeChatId
+    if (!agentRef || !chatId) return
+    const chatKey = makeTaskKey(agentRef, chatId)
+    const checkpoint = modelStepCheckpointByChatKeyRef.current[chatKey]
+    if (!checkpoint?.retryAvailable) return
+    if (modelStepRetryInFlightRef.current.has(chatKey)) return
+    const retryEpoch = fsm.getState(chatKey)?.epoch ?? 0
+    const anchor =
+      activityTaskToMessageByAgentRef.current[agentRef]?.[checkpoint.originTaskId] ??
+      chatMessagesRef.current.find(
+        message => message.role === 'user' && message.task_id === checkpoint.originTaskId
+      )?.id ??
+      // Server turns omit task ids after reopening; the checkpoint belongs to the latest admitted turn.
+      [...chatMessagesRef.current].reverse().find(message => message.role === 'user')?.id
+    if (!anchor) {
+      void reconcileChat(chatKey, { reason: 'model_step_missing_origin' })
+      return
+    }
+    const scope = sendScopeGeneration.current
+    const scopeIdentity = currentAuthScopeRef.current
+    const stillAuthorized = () =>
+      scope === sendScopeGeneration.current &&
+      scopeIdentity === currentAuthScopeRef.current &&
+      !isHostAccessBlocked(agentRef) &&
+      !isChatDeleted(agentRef, chatId)
+    const stillCurrent = () => {
+      const current = modelStepCheckpointByChatKeyRef.current[chatKey]
+      return (
+        (fsm.getState(chatKey)?.epoch ?? 0) === retryEpoch &&
+        current?.checkpointId === checkpoint.checkpointId &&
+        current.version === checkpoint.version
+      )
+    }
+    const reconcileStaleRetry = () => {
+      setModelStepRetryState(chatKey, undefined)
+      void reconcileChat(chatKey, { reason: 'model_step_retry_superseded' })
+    }
+    const followContinuation = (current: ModelStepCheckpointView, taskId: string) => {
+      recordModelStepContinuation(chatKey, current, taskId)
+      activityTaskToMessageByAgentRef.current[agentRef] = {
+        ...(activityTaskToMessageByAgentRef.current[agentRef] || {}),
+        [taskId]: anchor,
+      }
+      reconcileTaskOwnership(agentRef, taskId, anchor)
+      updateMessageProgress(agentRef, anchor, () => ({
+        taskId,
+        status: 'connecting',
+        steps: [],
+        currentIteration: 0,
+      }))
+      updateMessageActivity(agentRef, anchor, previous => ({
+        ...previous,
+        taskId,
+        status: 'streaming',
+        errorMessage: undefined,
+      }))
+      if (tracker.get(chatKey)?.taskId !== taskId) {
+        tracker.attach(chatKey, taskId, anchor, {
+          reason: 'model_step_retry',
+          armConnTimeout: true,
+        })
+        fsm.dispatch(chatKey, { type: 'SEND_STARTED', taskId })
+        fsm.dispatch(chatKey, { type: 'TASK_CREATED', taskId })
+      }
+    }
+    modelStepRetryInFlightRef.current.add(chatKey)
+    setModelStepRetryState(chatKey, { pending: true, error: null })
+    let answer: Awaited<ReturnType<typeof window.clerum.rpc.continueModelStep>>
+    try {
+      answer = await window.clerum.rpc.continueModelStep(
+        agentRef,
+        agentRef,
+        chatId,
+        checkpoint.checkpointId,
+        checkpoint.version
+      )
+    } catch (error) {
+      modelStepRetryInFlightRef.current.delete(chatKey)
+      if (!stillAuthorized()) return
+      if (!stillCurrent()) {
+        reconcileStaleRetry()
+        return
+      }
+      if (isAuthorizationError(error)) {
+        setModelStepRetryState(chatKey, undefined)
+        if (stillAuthorized()) {
+          hideHostAccessRef.current!(
+            agentRef,
+            isConfirmedHostAccessRevoked(error) ? 'revoked' : 'uncertain'
+          )
+        }
+        return
+      }
+      setModelStepRetryState(chatKey, {
+        pending: false,
+        error: 'The model step could not be retried. Try again.',
+      })
+      return
+    }
+    modelStepRetryInFlightRef.current.delete(chatKey)
+    if (!stillAuthorized()) return
+    if (!stillCurrent()) {
+      reconcileStaleRetry()
+      return
+    }
+    setModelStepRetryState(chatKey, undefined)
+
+    switch (answer.outcome) {
+      case 'claimed': {
+        // Rows 3, 3b and 7: a continuation task owns the checkpoint (a replay
+        // returns the one already running). Follow it under the origin turn's
+        // user message — a checkpoint always belongs to the latest turn.
+        const taskId = answer.body.taskId
+        recordModelStepCheckpoint(chatKey, {
+          ...checkpoint,
+          status: 'claimed',
+          retryAvailable: false,
+          continuationTaskId: taskId,
+        })
+        followContinuation(checkpoint, taskId)
+        return
+      }
+      case 'completed':
+        // Row 2: the continuation already finished. Its reply is durable on
+        // the Host; the reconcile gate materializes it under this chat.
+        recordModelStepContinuation(chatKey, checkpoint, answer.body.taskId)
+        completeModelStepTask(answer.body.taskId)
+        void reconcileChat(chatKey, {
+          reason: 'model_step_completed',
+          taskIdHint: answer.body.taskId,
+        })
+        return
+      case 'not_found':
+        // Row 1: the checkpoint was abandoned, expired or never existed here.
+        // The notice stays to say so (a toast would vanish and leave the user
+        // with no reason); clearing the view makes the origin turn
+        // Resend-eligible again.
+        recordModelStepCheckpoint(chatKey, undefined)
+        setModelStepRetryState(chatKey, { pending: false, error: null, unavailable: true })
+        return
+      case 'version_mismatch':
+        // Row 5: another transition moved the checkpoint; adopt the Host's
+        // current view, which carries the version a new retry must send.
+        recordModelStepCheckpoint(chatKey, answer.body.current)
+        if (answer.body.current.status === 'claimed' && answer.body.current.continuationTaskId) {
+          followContinuation(answer.body.current, answer.body.current.continuationTaskId)
+          return
+        }
+        pushToast('The model step changed on the Host. Review it and retry again.', 'info')
+        return
+      case 'blocked':
+        // Rows 4 and 6: the continuation cannot run; show why, without a button.
+        recordModelStepCheckpoint(chatKey, {
+          ...checkpoint,
+          status: 'blocked',
+          retryAvailable: false,
+          blockedReason: answer.body.blockedReason,
+        })
+        return
+    }
+  }, [
+    isHostAccessBlocked,
+    isChatDeleted,
+    setModelStepRetryState,
+    recordModelStepCheckpoint,
+    recordModelStepContinuation,
+    completeModelStepTask,
+    reconcileTaskOwnership,
+    updateMessageProgress,
+    updateMessageActivity,
+    tracker,
+    fsm,
+    reconcileChat,
+    pushToast,
+  ])
 
   const cancelTask = useCallback(
     async (taskId: string) => {
@@ -4500,6 +4999,9 @@ export function useAgentChatController({
     // has been reported.
     agentError: agentError ?? visibleRetainedFailure?.message ?? null,
     failedAgentSend: visibleFailure,
+    // #1044 — the active chat's model-step checkpoint and its retry request.
+    modelStepCheckpoint: activeModelStepCheckpoint,
+    modelStepRetry: activeModelStepRetry,
     chatEndRef,
     scrollChatToBottom,
     activityByMessageId,
@@ -4525,6 +5027,7 @@ export function useAgentChatController({
     handleRetryFailedAgentSend,
     handleRecoverFailedAgentSend,
     handleDiscardFailedAgentSend,
+    handleRetryModelStep,
     clearComposerSendError,
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,

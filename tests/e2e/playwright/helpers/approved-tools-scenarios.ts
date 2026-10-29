@@ -40,6 +40,7 @@ export type Scenario = {
 export type Evidence = {
   runId: string
   catalogSize: number
+  executions: Record<string, number>
   calls: Array<{ runId: string; tool: string; callId: string | number; businessId: string }>
 }
 export type UpstreamEvidence = {
@@ -57,6 +58,9 @@ export type UpstreamEvidence = {
     finalResponses: number
     unexpectedRetries: number
   }
+  // #1044: the deterministic upstream's model-step retry turns
+  // (`codex-llm-proxy/test/approvedToolsUpstream.ts`).
+  modelStepRetry: ModelStepRetryEvidence
   requests: Array<{
     definitionCount: number
     explicitNonStrictCount: number
@@ -67,6 +71,22 @@ export type UpstreamEvidence = {
     stage: string
   }>
 }
+export const modelStepRetryFields = [
+  'turns',
+  'markerSearches',
+  'unavailableResponses',
+  'zeroToolUnavailable',
+  'continuationUnavailable',
+  'continuations',
+  'toolResults',
+  'resends',
+  'followUps',
+  'unexpectedRetries',
+  'approvalRequests',
+  'approvalFinals',
+  'absorbed',
+] as const
+export type ModelStepRetryEvidence = Record<(typeof modelStepRetryFields)[number], number>
 export function required(name: string): string {
   const value = process.env[name]?.trim()
   if (!value) throw new Error(`Missing required isolated-profile precondition: ${name}`)
@@ -141,6 +161,10 @@ export async function readEvidence(scenario: Scenario): Promise<Evidence> {
     !Array.isArray(evidence.calls)
   )
     throw new Error('Evidence scenario mismatch')
+  for (const call of evidence.calls) {
+    if (call.runId !== scenario.runId || !Number.isSafeInteger(evidence.executions?.[call.tool]))
+      throw new Error('Missing physical execution evidence')
+  }
   return evidence
 }
 
@@ -179,6 +203,11 @@ export async function readUpstreamEvidence(scenario: Scenario): Promise<Upstream
     const value = evidence.limitBoundary?.[field]
     if (!Number.isSafeInteger(value) || value < 0)
       throw new Error(`Missing upstream limit boundary evidence ${field}`)
+  }
+  for (const field of modelStepRetryFields) {
+    const value = evidence.modelStepRetry?.[field]
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error(`Missing upstream model-step retry evidence ${field}`)
   }
   if (!Array.isArray(evidence.requests)) throw new Error('Missing upstream request evidence')
   return evidence

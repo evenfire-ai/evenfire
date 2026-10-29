@@ -87,6 +87,24 @@ test('same owned run restores after a commit change and keeps an audit record', 
   assert.deepEqual(f.state.headAudit, { createdHead: 'old', restoredAtHead: 'new' })
 })
 
+test('real-hybrid restoration removes the two test-only upstream flags', async () => {
+  const f = fixture()
+  f.state.mode = 'real-hybrid'
+  f.options.patchProxy = value => {
+    f.events.push('patch')
+    assert.deepEqual(value.env.map(entry => entry.name), [
+      'CODEX_APPROVED_TOOLS_TEST_ONLY',
+      'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE',
+      'NODE_ENV',
+      'APPROVED_TOOLS_UPSTREAM_MODE',
+      'CODEX_REAL_UPSTREAM_CONFIRM',
+    ])
+    assert(value.env.every(entry => entry.$patch === 'delete'))
+  }
+  await restoreOwnedFixture(f.options)
+  assert.equal(f.state.restored, true)
+})
+
 test('a started identity seed prevents restored success until its cleanup completes', async () => {
   const f = fixture()
   f.state.identitySeedStarted = true

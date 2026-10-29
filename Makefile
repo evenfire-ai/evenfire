@@ -351,7 +351,7 @@ minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools f
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
 
-minikube-run-codex-approved-tools: ## Prepare, run visible deterministic E2E and restore production proxy image in owned Minikube
+minikube-run-codex-approved-tools: ## Run approved-tools Desktop E2E (deterministic or prepared real-hybrid) and restore the owned proxy
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run

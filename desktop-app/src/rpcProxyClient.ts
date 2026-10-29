@@ -1,5 +1,9 @@
 import { config } from './config.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
+import {
+  parseModelStepCheckpointView,
+  parseModelStepContinueResponse,
+} from './modelStepCheckpointWire.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   ApprovalDecisionResult,
@@ -11,6 +15,7 @@ import {
   HostRuntimeHealth,
   HostRuntimeStatus,
   MessageToolStep,
+  ModelStepContinueResult,
   PendingApprovalLite,
   RpcAllowedServersResult,
   RpcConnectorsResult,
@@ -290,6 +295,21 @@ function parseSessionMessagesResult(
   }
   if (!Array.isArray(record.turns)) throw new Error('Invalid session messages response.turns')
   const state = parseSessionState(record.state, 'session messages response.state')
+  let modelStepCheckpoint: SessionMessagesResult['modelStepCheckpoint']
+  if (record.modelStepCheckpoint != null) {
+    try {
+      modelStepCheckpoint = parseModelStepCheckpointView(
+        record.modelStepCheckpoint,
+        'session messages response.modelStepCheckpoint'
+      )
+    } catch {
+      // A malformed optional checkpoint must not hide the transcript. Never log
+      // the wire value or parser error: both can contain upstream content.
+      console.warn(
+        '[RpcProxyClient] Ignored malformed model-step checkpoint in session messages response'
+      )
+    }
+  }
   return {
     agent,
     chatId,
@@ -356,6 +376,7 @@ function parseSessionMessagesResult(
     ...(record.tokens != null
       ? { tokens: parseTokens(record.tokens, 'session messages response.tokens') }
       : {}),
+    ...(modelStepCheckpoint !== undefined ? { modelStepCheckpoint } : {}),
     turns: record.turns.map((turn, index) => {
       const entry = wireObject(turn, `session messages response.turns[${index}]`)
       return {
@@ -1134,6 +1155,61 @@ export class RpcProxyClient {
     // `pendingApproval` + per-turn `tool_steps`, and the renderer's recovery path
     // reads them. The previous cast dropped them, silently weakening the contract.
     return parseSessionMessagesResult(await response.json(), agent, chatId)
+  }
+
+  /**
+   * Issue #1044 — asks the Host to continue a `resumable` model-step checkpoint
+   * (`docs/contracts/model-step-checkpoint.md`). Every row of the contract's
+   * precedence table (202 claimed/replayed/re-claimed, 200 completed, 404 not
+   * found, 409 version mismatch / blocked) resolves to a typed result so the
+   * renderer can branch on it after the IPC hop. Anything else — 503
+   * `host_draining`, an rpc-proxy without the route, a 5xx, an unparseable
+   * body — throws an {@link ApiError} carrying the status.
+   */
+  async continueModelStep(
+    rpcToken: string,
+    hostRef: string,
+    agent: string,
+    chatId: string,
+    checkpointId: string,
+    version: number
+  ): Promise<ModelStepContinueResult> {
+    assertSafeRouteSegment('hostRef', hostRef)
+    assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+    assertSafeRouteSegment('chatId', chatId)
+    assertSafeRouteSegment('checkpointId', checkpointId)
+    if (!Number.isSafeInteger(version) || version < 1) {
+      throw new Error('version must be a non-negative integer greater than zero')
+    }
+    const response = await fetch(
+      this.url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/model-step-checkpoints/${encodeURIComponent(checkpointId)}/continue`
+      ),
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${rpcToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ version }),
+        signal: withTimeout(),
+      }
+    )
+    const text = await readErrorBody(response)
+    let parsedBody: unknown = null
+    if (text) {
+      try {
+        parsedBody = JSON.parse(text)
+      } catch {
+        parsedBody = null
+      }
+    }
+    const result = parseModelStepContinueResponse(response.status, parsedBody, checkpointId)
+    if (result) return result
+    const hostAccessDenial = hostAccessDenialError(response.status, text)
+    if (hostAccessDenial) throw hostAccessDenial
+    throw new ApiError(
+      `Continue model step failed (${response.status}): ${boundedErrorExcerpt(text)}`,
+      response.status,
+      text
+    )
   }
 
   /**

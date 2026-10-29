@@ -101,12 +101,16 @@ describe('ChatThread semantic renderer compatibility', () => {
 })
 
 describe('ChatThread error code labels', () => {
-  function renderErrorLabel(errorCode: string, errorProvider?: string) {
+  function renderErrorLabel(
+    errorCode: string,
+    errorProvider?: string,
+    content = 'The agent stopped.'
+  ) {
     messages = [
       {
         id: `error-${errorCode}`,
         role: 'assistant',
-        content: 'The agent stopped.',
+        content,
         timestamp: 1,
         isError: true,
         errorCode,
@@ -120,13 +124,15 @@ describe('ChatThread error code labels', () => {
     return {
       label: container.querySelector('.error-bubble-label')?.textContent,
       text: response.textContent,
+      body: container.querySelector('.error-bubble-message')?.textContent,
+      details: container.querySelector('.error-bubble-details-text')?.textContent,
     }
   }
 
-  it('labels a tool-call limit as "Too Many Tool Calls", not "Model Overloaded"', () => {
+  it('labels a tool-call limit as "Too Many Tool Calls", not a provider outage', () => {
     const { label, text } = renderErrorLabel('LLM_TOOL_CALL_LIMIT_EXCEEDED')
     expect(label).toBe('Too Many Tool Calls')
-    expect(text).not.toContain('Model Overloaded')
+    expect(text).not.toContain('Provider Unavailable')
   })
 
   it('appends the provider that raised the tool-call limit to the label', () => {
@@ -140,7 +146,7 @@ describe('ChatThread error code labels', () => {
   it('labels the Grok tool-call limit with the same copy and its own provider', () => {
     const { label, text } = renderErrorLabel('LLM_TOOL_CALL_LIMIT_EXCEEDED', 'grok-subscription')
     expect(label).toBe('Too Many Tool Calls · GROK-SUBSCRIPTION')
-    expect(text).not.toContain('Model Overloaded')
+    expect(text).not.toContain('Provider Unavailable')
   })
 
   // The subscription proxies refuse a tool call whose arguments are not a JSON
@@ -151,18 +157,41 @@ describe('ChatThread error code labels', () => {
     expect(text).not.toContain('Connection Error')
   })
 
-  it('labels a stream duration cap as "Response Took Too Long", not "Model Overloaded"', () => {
+  it('labels a stream duration cap as "Response Took Too Long", not a provider outage', () => {
     const { label, text } = renderErrorLabel('LLM_STREAM_DURATION_EXCEEDED', 'grok-subscription')
     expect(label).toBe('Response Took Too Long · GROK-SUBSCRIPTION')
-    expect(text).not.toContain('Model Overloaded')
+    expect(text).not.toContain('Provider Unavailable')
   })
 
   it('labels a context length error as "Conversation Too Long"', () => {
     expect(renderErrorLabel('LLM_CONTEXT_LENGTH_EXCEEDED').label).toBe('Conversation Too Long')
   })
 
-  it('still labels an overload as "Model Overloaded"', () => {
-    expect(renderErrorLabel('LLM_MODEL_OVERLOADED').label).toBe('Model Overloaded')
+  // #1043: the Host uses LLM_MODEL_OVERLOADED for every provider that cannot
+  // serve the request (any 5xx, 503, 529, overloaded_error and the
+  // subscription's provider_unavailable), so the title no longer claims an
+  // overload and the Host's own message moves to Details.
+  it('labels a provider outage as "Provider Unavailable" with a fixed summary', () => {
+    const { label, body, details } = renderErrorLabel(
+      'LLM_MODEL_OVERLOADED',
+      'codex-subscription',
+      'proxy stream failed with provider_unavailable'
+    )
+    expect(label).toBe('Provider Unavailable · CODEX-SUBSCRIPTION')
+    expect(body).toBe('The model provider could not complete this response.')
+    expect(details).toBe('proxy stream failed with provider_unavailable')
+  })
+
+  // The summary is opt-in per code: a code without one keeps the Host message
+  // as the body, so the mapping cannot silently replace every error's own text.
+  it('keeps the Host message as the body for a code without a summary', () => {
+    const { label, body } = renderErrorLabel(
+      'LLM_RATE_LIMITED',
+      'codex-subscription',
+      'proxy stream failed with llm_rate_limited'
+    )
+    expect(label).toBe('Rate Limited · CODEX-SUBSCRIPTION')
+    expect(body).toBe('proxy stream failed with llm_rate_limited')
   })
 
   // G1-8 (#720): the Host reports a control plane that did not answer with its
@@ -170,7 +199,7 @@ describe('ChatThread error code labels', () => {
   it('labels a control-plane outage as "Control Plane Unavailable"', () => {
     const { label, text } = renderErrorLabel('LLM_CONTROL_PLANE_UNAVAILABLE', 'codex-subscription')
     expect(label).toBe('Control Plane Unavailable · CODEX-SUBSCRIPTION')
-    expect(text).not.toContain('Model Overloaded')
+    expect(text).not.toContain('Provider Unavailable')
     expect(text).not.toContain('Connection Error')
   })
 
