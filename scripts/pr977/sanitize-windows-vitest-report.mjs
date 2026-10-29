@@ -169,23 +169,29 @@ const assertionCounts = testResults.reduce(
   },
   { total: 0, passed: 0, failed: 0, pending: 0, todo: 0 }
 )
-if (
-  report.numTotalTestSuites !== suiteCounts.total ||
-  report.numPassedTestSuites !== suiteCounts.passed ||
-  report.numFailedTestSuites !== suiteCounts.failed ||
-  report.numPendingTestSuites !== suiteCounts.pending ||
-  report.numTotalTests !== assertionCounts.total ||
-  report.numPassedTests !== assertionCounts.passed ||
-  report.numFailedTests !== assertionCounts.failed ||
-  report.numPendingTests !== assertionCounts.pending ||
-  report.numTodoTests !== assertionCounts.todo
-) {
-  throw new Error('Vitest aggregate counters do not match the suite and assertion entries')
+const derivedSummary = {
+  numTotalTestSuites: suiteCounts.total,
+  numPassedTestSuites: suiteCounts.passed,
+  numFailedTestSuites: suiteCounts.failed,
+  numPendingTestSuites: suiteCounts.pending,
+  numTotalTests: assertionCounts.total,
+  numPassedTests: assertionCounts.passed,
+  numFailedTests: assertionCounts.failed,
+  numPendingTests: assertionCounts.pending,
+  numTodoTests: assertionCounts.todo,
 }
+const counterDiscrepancies = summaryFields.flatMap(field =>
+  report[field] === derivedSummary[field]
+    ? []
+    : [{ field, reported: report[field], derived: derivedSummary[field] }]
+)
+const countersConsistent = counterDiscrepancies.length === 0
+const hasFailures = suiteCounts.failed > 0 || assertionCounts.failed > 0
 
 const safeReport = {
-  success: report.success,
+  success: report.success && countersConsistent && !hasFailures,
   ...Object.fromEntries(summaryFields.map(key => [key, report[key]])),
+  counterConsistency: { valid: countersConsistent, discrepancies: counterDiscrepancies },
   testResults,
 }
 writeFileSync(outputPath, `${JSON.stringify(safeReport)}\n`)
@@ -194,6 +200,11 @@ process.stdout.write(
     `tests=${safeReport.numTotalTests} passed=${safeReport.numPassedTests} ` +
     `failed=${safeReport.numFailedTests} skipped=${safeReport.numPendingTests}\n`
 )
+if (!countersConsistent) {
+  process.stdout.write(
+    `Counter mismatch: ${counterDiscrepancies.map(({ field }) => field).join(', ')}\n`
+  )
+}
 for (const suite of testResults) {
   if (suite.failure) {
     process.stdout.write(
@@ -212,3 +223,4 @@ for (const suite of testResults) {
     )
   }
 }
+if (!countersConsistent) process.exitCode = 1

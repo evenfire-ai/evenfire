@@ -109,6 +109,8 @@ if (
 ) {
   throw new Error('Native Windows report is missing one or both required suites')
 }
+if (nativeReport.counterConsistency?.valid !== true)
+  throw new Error('Native Windows report has inconsistent aggregate counters')
 const nativeNames = new Set(nativeReport.testResults.map(result => normalizeTestFile(result.name)))
 if (
   nativeNames.size !== nativeFiles.size ||
@@ -136,7 +138,12 @@ let totalSkipped = 0
 let totalTodo = 0
 
 for (const { label, file, report } of reports) {
-  if (!report.success || report.numTotalTestSuites <= 0 || report.numTotalTests <= 0) {
+  if (
+    report.counterConsistency?.valid !== true ||
+    !report.success ||
+    report.numTotalTestSuites <= 0 ||
+    report.numTotalTests <= 0
+  ) {
     throw new Error(`${file} failed or executed no test suites/cases`)
   }
   if (!Array.isArray(report.testResults)) throw new Error(`${file} has no test result list`)
