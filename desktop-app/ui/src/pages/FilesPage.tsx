@@ -453,6 +453,7 @@ export function FilesPage({
     source: GfsDragSource
     gestureGeneration: number
     sessionGeneration: number | null
+    authoritativeSessionGeneration: number
     destination: { resourceId: string; name: string }
   } | null>(null)
   const draggingResourceRef = useRef<GfsDriveResource | null>(null)
@@ -2074,14 +2075,22 @@ export function FilesPage({
     isCurrent?: () => boolean,
     expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot,
     reportOutcomes = true,
-    authorizeNumberedRename?: (proposedName: string) => Promise<boolean>
+    authorizeNumberedRename?: (proposedName: string) => Promise<boolean>,
+    authoritativeSessionGeneration?: number
   ): Promise<MoveCommitOutcome> => {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
     try {
       return await runGfsMoveCommit(
         {
-          moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
+          moveResource: (
+            resourceId,
+            destinationId,
+            ifMatch,
+            newName,
+            oldParentId,
+            expectedSessionGeneration
+          ) =>
             ctrl.moveResource(
               resourceId,
               destinationId,
@@ -2089,7 +2098,8 @@ export function FilesPage({
               newName,
               oldParentId,
               source.scope,
-              true
+              true,
+              expectedSessionGeneration
             ),
           handleAuthorityFailure: message =>
             ctrl.handleAuthorityFailure(message, 'operation', source.scope),
@@ -2114,6 +2124,9 @@ export function FilesPage({
           destination,
           ...(expectedSourceSnapshot ? { expectedSourceSnapshot } : {}),
           occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+          ...(authoritativeSessionGeneration !== undefined
+            ? { sessionGeneration: authoritativeSessionGeneration }
+            : {}),
           ...(isCurrent ? { isCurrent } : {}),
         }
       )
@@ -2141,12 +2154,16 @@ export function FilesPage({
     const sessionGeneration = dragSession?.currentGeneration() ?? null
     const scopeAtDrop = liveDragScopeRef.current
     try {
+      const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
       const decision = await adjudication.adjudicateDrop(source, {
         resourceId: destination.resourceId,
         name: destination.name,
         kind: destination.kind,
         ancestorIds: rowTargetAncestorIds(),
       })
+      if ((await window.clerum.auth.getSessionGeneration()) !== authoritativeSessionGeneration) {
+        return
+      }
       if (!decision.allowed && decision.reason === 'session-lost') {
         // Presented BEFORE the ownership guard: the revocation that caused
         // this refusal has already invalidated the gesture's ownership, so
@@ -2188,6 +2205,7 @@ export function FilesPage({
           source,
           gestureGeneration: dragGeneration,
           sessionGeneration,
+          authoritativeSessionGeneration,
           destination: { resourceId: destination.resourceId, name: destination.name },
         })
         return
@@ -2195,7 +2213,11 @@ export function FilesPage({
       await runMoveCommit(
         source,
         { resourceId: destination.resourceId, name: destination.name },
-        () => ownsDrop(source, dragGeneration, sessionGeneration)
+        () => ownsDrop(source, dragGeneration, sessionGeneration),
+        undefined,
+        true,
+        undefined,
+        authoritativeSessionGeneration
       )
     } finally {
       finishDropCleanup(source, dragGeneration, sessionGeneration)
@@ -2445,10 +2467,20 @@ export function FilesPage({
     const contextStillMatches = () =>
       sessionStillMatches() &&
       moveWorkspaceRef.current.currentResourceId === origin.currentResourceId
+    let authoritativeSessionGeneration: number | null = null
+    const ownsAuthoritativeSession = async () => {
+      if (authoritativeSessionGeneration === null) return false
+      try {
+        return (await window.clerum.auth.getSessionGeneration()) === authoritativeSessionGeneration
+      } catch {
+        return false
+      }
+    }
     let permissionsChecked = false
     if (!ownsDialog()) return
     setMovePermissionStatus('checking')
     try {
+      authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
       if (!sessionScope || !sourceParentId) {
         throw new Error('Could not verify the source folder for this move.')
       }
@@ -2478,6 +2510,10 @@ export function FilesPage({
           retry: false,
         }),
       ])
+      if (!(await ownsAuthoritativeSession())) {
+        closeOwnedDialog()
+        return
+      }
       if (!pageActiveRef.current || !ownsDialogGeneration()) return
       if (!contextStillMatches()) {
         closeOwnedDialog()
@@ -2529,12 +2565,19 @@ export function FilesPage({
           !requestNumberedNameConsent ||
           !pageActiveRef.current ||
           !ownsDialog() ||
-          !contextStillMatches()
+          !contextStillMatches() ||
+          !(await ownsAuthoritativeSession())
         ) {
           return false
         }
         const consented = await requestNumberedNameConsent(proposedName)
-        if (!consented || !pageActiveRef.current || !ownsDialog() || !contextStillMatches()) {
+        if (
+          !consented ||
+          !pageActiveRef.current ||
+          !ownsDialog() ||
+          !contextStillMatches() ||
+          !(await ownsAuthoritativeSession())
+        ) {
           return false
         }
 
@@ -2583,6 +2626,7 @@ export function FilesPage({
               }),
             ])
           return (
+            (await ownsAuthoritativeSession()) &&
             pageActiveRef.current &&
             ownsDialog() &&
             contextStillMatches() &&
@@ -2595,6 +2639,10 @@ export function FilesPage({
         }
       }
       if (!pageActiveRef.current || !ownsDialog()) return
+      if (!(await ownsAuthoritativeSession())) {
+        closeOwnedDialog()
+        return
+      }
       if (!contextStillMatches()) {
         throw new Error(
           'Move was not started because the workspace changed; review the destination.'
@@ -2609,7 +2657,8 @@ export function FilesPage({
         () => pageActiveRef.current && ownsDialog() && contextStillMatches(),
         expectedSourceSnapshot,
         false,
-        authorizeNumberedRename
+        authorizeNumberedRename,
+        authoritativeSessionGeneration ?? undefined
       )
       if (!pageActiveRef.current) return
       if (!sessionStillMatches()) {
@@ -2646,6 +2695,10 @@ export function FilesPage({
     } catch (moveError) {
       if (!pageActiveRef.current) return
       if (!ownsDialogGeneration()) return
+      if (authoritativeSessionGeneration !== null && !(await ownsAuthoritativeSession())) {
+        closeOwnedDialog()
+        return
+      }
       if (!contextStillMatches()) {
         closeOwnedDialog()
         return
@@ -3938,8 +3991,15 @@ export function FilesPage({
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void runMoveCommit(pending.source, pending.destination, () =>
-                ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
+              void runMoveCommit(
+                pending.source,
+                pending.destination,
+                () =>
+                  ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration),
+                undefined,
+                true,
+                undefined,
+                pending.authoritativeSessionGeneration
               )
             }
           }}

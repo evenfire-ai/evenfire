@@ -285,10 +285,10 @@ const clerum = Object.freeze({
     moveResource: (
       resourceId: string,
       destinationId: string,
-      drive?: string,
-      ifMatch?: number,
-      newName?: string,
-      expectedSessionGeneration?: number
+      drive: string | undefined,
+      ifMatch: number | undefined,
+      newName: string | undefined,
+      expectedSessionGeneration: number
     ) =>
       ipcRenderer.invoke('gfs:moveResource', {
         resourceId,

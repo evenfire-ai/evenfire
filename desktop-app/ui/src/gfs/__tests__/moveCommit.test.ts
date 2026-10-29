@@ -38,7 +38,14 @@ describe('commitGfsMove — commit-time source refresh', () => {
     const outcome = await commitGfsMove(deps({ moveResource }), plan())
     expect(outcome).toEqual({ status: 'committed', version: 8, previousParentId: 'old-parent' })
     expect(moveResource).toHaveBeenCalledTimes(1)
-    expect(moveResource).toHaveBeenCalledWith('r-1', 'dest-1', 7, undefined, 'old-parent')
+    expect(moveResource).toHaveBeenCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      undefined,
+      'old-parent',
+      undefined
+    )
   })
 
   it('refuses without a request when the fresh parent already IS the destination (no-op)', async () => {
@@ -118,7 +125,14 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
     expect(moveResource).toHaveBeenCalledTimes(2)
     expect(authorizeNumberedRename).toHaveBeenCalledTimes(1)
     expect(authorizeNumberedRename).toHaveBeenCalledWith('report (1).md')
-    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (1).md', 'old-parent')
+    expect(moveResource).toHaveBeenLastCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      'report (1).md',
+      'old-parent',
+      undefined
+    )
   })
 
   it('seeds the ladder from plan.occupiedDestinationNames so known-taken names are skipped', async () => {
@@ -151,7 +165,14 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
       previousParentId: 'old-parent',
     })
     expect(moveResource).toHaveBeenCalledTimes(2)
-    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (3).md', 'old-parent')
+    expect(moveResource).toHaveBeenLastCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      'report (3).md',
+      'old-parent',
+      undefined
+    )
   })
 
   it('a repeated 409 stops after one explicitly consented numbered retry', async () => {
@@ -395,7 +416,14 @@ describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
       }),
       plan()
     )
-    expect(moveResource).toHaveBeenCalledWith('r-1', 'dest-1', 7, undefined, 'fresh-parent')
+    expect(moveResource).toHaveBeenCalledWith(
+      'r-1',
+      'dest-1',
+      7,
+      undefined,
+      'fresh-parent',
+      undefined
+    )
   })
 
   it('dispatches every retry with the commit-time parent', async () => {
@@ -417,14 +445,23 @@ describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
       }),
       plan()
     )
-    expect(moveResource).toHaveBeenNthCalledWith(1, 'r-1', 'dest-1', 7, undefined, 'fresh-parent')
+    expect(moveResource).toHaveBeenNthCalledWith(
+      1,
+      'r-1',
+      'dest-1',
+      7,
+      undefined,
+      'fresh-parent',
+      undefined
+    )
     expect(moveResource).toHaveBeenNthCalledWith(
       2,
       'r-1',
       'dest-1',
       7,
       'report (1).md',
-      'fresh-parent'
+      'fresh-parent',
+      undefined
     )
   })
 

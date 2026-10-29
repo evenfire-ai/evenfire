@@ -169,6 +169,53 @@ describe('useAppController session ownership oracle', () => {
     expect(clerum.hasProgressHandler('team-a-load-session-task')).toBe(false)
   })
 
+  it('refetches active GFS data when the same published identity gets a new session generation', async () => {
+    const { handle } = installAppControllerClerum()
+    const app = installCoordinatorHarness()
+    tracker = app.result.current.tracker
+
+    await waitFor(() => expect(app.result.current.controller.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.controller.initialExperienceLoading).toBe(false))
+
+    let publishedGeneration = 1
+    const loadReplacementGfsData = vi.fn(async () => ({ generation: publishedGeneration }))
+    const loadOtherScopeData = vi.fn(async () => ({ generation: 'other-scope' }))
+    const currentGfsQueryKey = desktopQueryKeys.gfsAccessible(
+      `harness-environment:${HARNESS_ME.id}:${HARNESS_ME.teamId}`,
+      'main'
+    )
+    const otherGfsQueryKey = desktopQueryKeys.gfsAccessible(
+      'other-environment:user-z:team-z',
+      'main'
+    )
+    await app.queryClient.fetchQuery({
+      queryKey: currentGfsQueryKey,
+      queryFn: loadReplacementGfsData,
+    })
+    await app.queryClient.fetchQuery({
+      queryKey: otherGfsQueryKey,
+      queryFn: loadOtherScopeData,
+    })
+    expect(app.queryClient.getQueryData(currentGfsQueryKey)).toEqual({ generation: 1 })
+
+    publishedGeneration = 2
+    handle.getSessionGeneration.mockResolvedValue(publishedGeneration)
+    handle.getSessionState.mockResolvedValue({
+      authenticated: true,
+      me: { ...HARNESS_ME },
+      sessionGeneration: publishedGeneration,
+    })
+    await act(async () => {
+      await app.result.current.controller.loadSession()
+    })
+
+    await waitFor(() => expect(loadReplacementGfsData).toHaveBeenCalledTimes(2))
+    expect(loadOtherScopeData).toHaveBeenCalledTimes(1)
+    expect(app.queryClient.getQueryData(currentGfsQueryKey)).toEqual({ generation: 2 })
+    expect(app.queryClient.getQueryData(otherGfsQueryKey)).toEqual({ generation: 'other-scope' })
+    expect(app.result.current.controller.currentTeamId).toBe(HARNESS_ME.teamId)
+  })
+
   it('does not carry the prior principal workspace through A → null → B', async () => {
     const { handle } = installAppControllerClerum()
     const app = installCoordinatorHarness()

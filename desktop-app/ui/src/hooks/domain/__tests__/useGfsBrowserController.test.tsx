@@ -2016,7 +2016,7 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
   })
 
-  it('reconciles the open folder after a move and feeds the returned version into follow-up actions', async () => {
+  it('reconciles same-generation Moves and suppresses stale-generation navigation after settlement', async () => {
     const docsId = '11111111-1111-1111-1111-111111111111'
     const rootId = '00000000-0000-0000-0000-00000000000a'
     const projectsId = '00000000-0000-0000-0000-00000000000b'
@@ -2086,11 +2086,32 @@ describe('useGfsBrowserController', () => {
       if (!resource) throw new Error(`Unexpected URI: ${uri}`)
       return resource
     })
+    let sessionGeneration = 1
+    let holdNextDocsResolve = false
+    let markHeldDocsResolveStarted!: () => void
+    let finishHeldDocsResolve!: (resource: ResolvedResource) => void
+    const heldDocsResolveStarted = new Promise<void>(resolveStarted => {
+      markHeldDocsResolveStarted = resolveStarted
+    })
+    const heldDocsResolve = new Promise<ResolvedResource>(resolveResource => {
+      finishHeldDocsResolve = resolveResource
+    })
+    resolve.mockImplementation(async uri => {
+      if (holdNextDocsResolve && uri === `gfs://main/${rid(docsId)}`) {
+        holdNextDocsResolve = false
+        markHeldDocsResolveStarted()
+        return heldDocsResolve
+      }
+      const resource = state.get(uri)
+      if (!resource) throw new Error(`Unexpected URI: ${uri}`)
+      return resource
+    })
     const moveResource = vi.fn(async () => ({ resourceId: docsId, version: 9 }))
     const renameResource = vi.fn(async () => ({ resourceId: docsId, version: 10 }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => sessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => ({
             items: [
@@ -2146,7 +2167,7 @@ describe('useGfsBrowserController', () => {
       screen.getByRole('button', { name: 'move current' }).click()
     })
     await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith(docsId, 'destination-1', 'main', 3, undefined)
+      expect(moveResource).toHaveBeenCalledWith(docsId, 'destination-1', 'main', 3, undefined, 1)
     )
     // Navigation reconciles to the new location and consumes the new version.
     await waitFor(() =>
@@ -2161,6 +2182,33 @@ describe('useGfsBrowserController', () => {
     await waitFor(() =>
       expect(renameResource).toHaveBeenCalledWith(docsId, 'Renamed report.md', 'main', 9)
     )
+
+    state.set(`gfs://main/${rid(docsId)}`, {
+      ...docsBefore,
+      name: 'Renamed report.md',
+      parentResourceId: rootId,
+      version: 11,
+    })
+    moveResource.mockResolvedValue({ resourceId: docsId, version: 11 })
+    holdNextDocsResolve = true
+    await act(async () => {
+      screen.getByRole('button', { name: 'move current' }).click()
+    })
+    await heldDocsResolveStarted
+    expect(moveResource).toHaveBeenCalledTimes(2)
+    sessionGeneration = 2
+    await act(async () => {
+      finishHeldDocsResolve({
+        ...docsBefore,
+        name: 'Renamed report.md',
+        parentResourceId: rootId,
+        version: 11,
+      })
+      await heldDocsResolve
+    })
+    await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('idle'))
+    expect(screen.getByTestId('crumbs').textContent).toBe('Root / Archive / Renamed report.md')
+    expect(moveResource).toHaveBeenLastCalledWith(docsId, 'destination-1', 'main', 10, undefined, 1)
   })
 
   it('fails closed on an authorization failure and drops cached gfs state under production query defaults', async () => {

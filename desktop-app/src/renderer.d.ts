@@ -424,10 +424,10 @@ declare global {
         moveResource: (
           resourceId: string,
           destinationId: string,
-          drive?: string,
-          ifMatch?: number,
-          newName?: string,
-          expectedSessionGeneration?: number
+          drive: string | undefined,
+          ifMatch: number | undefined,
+          newName: string | undefined,
+          expectedSessionGeneration: number
         ) => Promise<{ resourceId: string; version: number }>
         deleteResource: (
           resourceId: string,

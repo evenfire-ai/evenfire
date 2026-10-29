@@ -177,6 +177,7 @@ export function useAppController() {
   const loadSessionRef = useRef(async (_options?: { preserveNav?: boolean }) => {})
   const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
   const authenticatedSessionIdentityRef = useRef<string | null>(null)
+  const sessionGenerationRef = useRef<number | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
   const onExternalSessionEnded = useCallback(() => {
     activeAuthenticatedSessionIdentityRef.current = null
@@ -731,6 +732,11 @@ export function useAppController() {
         if (!sessionState.authenticated || !sessionState.me) {
           throw new Error('Team switch ended without an authenticated session')
         }
+        sessionGenerationRef.current =
+          Number.isSafeInteger(sessionState.sessionGeneration) &&
+          (sessionState.sessionGeneration ?? -1) >= 0
+            ? sessionState.sessionGeneration!
+            : null
         // Team is a data scope, not a principal boundary. Terminate Team A's
         // task/FSM/reconcile ownership while preserving workspace tabs, focus,
         // selection, and local drafts for this same principal.
@@ -848,11 +854,20 @@ export function useAppController() {
           })
         const sessionState = await window.clerum.auth.getSessionState()
         const authenticated = Boolean(sessionState.authenticated && sessionState.me)
+        const nextSessionGeneration =
+          Number.isSafeInteger(sessionState.sessionGeneration) &&
+          (sessionState.sessionGeneration ?? -1) >= 0
+            ? sessionState.sessionGeneration!
+            : null
         const sessionIdentity =
           authenticated && sessionState.me
             ? `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
             : null
         const previousIdentity = activeAuthenticatedSessionIdentityRef.current
+        const generationChangedForPublishedSession =
+          sessionGenerationRef.current !== null &&
+          nextSessionGeneration !== null &&
+          sessionGenerationRef.current !== nextSessionGeneration
         const previousPrincipal = previousIdentity ? authenticatedPrincipalIdentity : null
         const nextPrincipal =
           authenticated && sessionState.me
@@ -881,6 +896,7 @@ export function useAppController() {
         auth.setIsAuthenticated(authenticated)
         auth.setMe(sessionState.me)
         currentTeamIdRef.current = authenticated ? String(sessionState.me?.teamId ?? '').trim() : ''
+        sessionGenerationRef.current = authenticated ? nextSessionGeneration : null
 
         if (!authenticated || !sessionState.me) {
           setPostPaintDataReady(false)
@@ -897,6 +913,7 @@ export function useAppController() {
           notif.resetNotifications()
           activeAuthenticatedSessionIdentityRef.current = null
           authenticatedSessionIdentityRef.current = null
+          sessionGenerationRef.current = null
           if (!preserveNav) {
             nav.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' })
           }
@@ -921,6 +938,31 @@ export function useAppController() {
           // A prior post-paint callback may have been invalidated by an identity
           // transition. An already-initialized matching session is ready now.
           setPostPaintDataReady(true)
+        }
+        if (generationChangedForPublishedSession && sessionState.me) {
+          let liveGeneration: number | null = null
+          try {
+            liveGeneration = await window.clerum.auth.getSessionGeneration()
+          } catch {
+            // A generation we cannot revalidate cannot safely authorize cache
+            // effects for this snapshot.
+          }
+          if (
+            nextSessionGeneration !== null &&
+            liveGeneration === nextSessionGeneration &&
+            sessionGenerationRef.current === nextSessionGeneration &&
+            activeAuthenticatedSessionIdentityRef.current === authenticatedIdentity
+          ) {
+            // Scope this refresh to the replacement session's existing query
+            // keys. Other cached principals/environments must not refetch
+            // under the newly published main-process session.
+            const currentGfsSessionScope = `${auth.runtimeConfigState?.envKey ?? ''}:${sessionState.me.id}:${sessionState.me.teamId ?? ''}`
+            await queryClient.invalidateQueries({
+              queryKey: desktopQueryKeys.gfsRoot,
+              predicate: query => query.queryKey[2] === currentGfsSessionScope,
+              refetchType: 'all',
+            })
+          }
         }
         if (!preserveNav) {
           nav.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' })
@@ -999,6 +1041,7 @@ export function useAppController() {
       await attemptCleanup(() => queryClient.clear())
       activeAuthenticatedSessionIdentityRef.current = null
       authenticatedSessionIdentityRef.current = null
+      sessionGenerationRef.current = null
       await attemptCleanup(() => nav.resetSessionNavigation())
       await attemptCleanup(() => auth.setDesktopReleaseStatus(null))
       await attemptCleanup(() => setPostPaintDataReady(false))

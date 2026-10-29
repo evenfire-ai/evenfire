@@ -996,7 +996,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       payload: {
         resourceId: string
         destinationId: string
-        expectedSessionGeneration?: number
+        expectedSessionGeneration: number
         drive?: string
         ifMatch?: number
         newName?: string
@@ -1005,17 +1005,17 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertTrustedSender(event)
       const requestedGeneration = payload?.expectedSessionGeneration
       if (
-        requestedGeneration !== undefined &&
-        (!Number.isSafeInteger(requestedGeneration) || requestedGeneration < 0)
+        typeof requestedGeneration !== 'number' ||
+        !Number.isSafeInteger(requestedGeneration) ||
+        requestedGeneration < 0
       ) {
         throw new Error('invalid_session_generation')
       }
-      const expectedSessionGeneration = requestedGeneration ?? service.getSessionGeneration()
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
       return service.moveGfsResource(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.destinationId),
-        expectedSessionGeneration,
+        requestedGeneration,
         drive,
         sanitizeOptionalInteger(payload?.ifMatch),
         payload?.newName !== undefined ? sanitizeString(payload.newName) : undefined

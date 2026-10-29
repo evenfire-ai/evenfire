@@ -58,12 +58,14 @@ type Producers = {
   listAccessible?: (drive?: string, cursor?: string) => Promise<unknown>
   listChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
   download?: (uri: string) => Promise<unknown>
+  getSessionGeneration?: () => Promise<number>
 }
 
 function installClerum(producers: Producers) {
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
+      auth: { getSessionGeneration: producers.getSessionGeneration ?? vi.fn(async () => 7) },
       gfs: {
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
         listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
@@ -762,6 +764,7 @@ function installDndClerum(producers: DndProducers) {
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
+      auth: { getSessionGeneration: producers.getSessionGeneration ?? vi.fn(async () => 7) },
       gfs: {
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
         listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
@@ -968,10 +971,76 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
         destinationAId,
         'main',
         4,
-        undefined
+        undefined,
+        7
       )
       expect(queryClient.getQueryState(oldScopeChildren)?.isInvalidated).toBe(true)
     } finally {
+      queryClient.clear()
+    }
+  })
+
+  it('suppresses same-tuple old-generation Sidebar Move cache and presentation effects', async () => {
+    let sessionGeneration = 7
+    let finishMove!: () => void
+    let markMoveStarted!: () => void
+    const moveStarted = new Promise<void>(resolve => {
+      markMoveStarted = resolve
+    })
+    const moveGate = new Promise<void>(resolve => {
+      finishMove = resolve
+    })
+    const resolved = await resolveSource()
+    const moveReceipt = await moveResourceReceipt(sourceResourceId, destinationAId, 5)
+    const moveResource = vi.fn(async () => {
+      markMoveStarted()
+      await moveGate
+      return moveReceipt
+    })
+    installDndClerum({
+      getSessionGeneration: vi.fn(async () => sessionGeneration),
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    const { pushToast, queryClient } = renderTreeWithSession()
+    const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
+    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main')
+    queryClient.setQueryData(oldScopeChildren, { marker: 'captured source cache' })
+
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+      await moveStarted
+      invalidateQueries.mockClear()
+      sessionGeneration += 1
+
+      await act(async () => {
+        finishMove()
+        await moveGate
+      })
+
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
+      )
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(moveResource).toHaveBeenCalledWith(
+        sourceResourceId,
+        destinationAId,
+        'main',
+        4,
+        undefined,
+        7
+      )
+      expect(pushToast).not.toHaveBeenCalled()
+      expect(invalidateQueries).not.toHaveBeenCalled()
+      expect(queryClient.getQueryState(oldScopeChildren)?.isInvalidated).toBe(false)
+    } finally {
+      finishMove()
       queryClient.clear()
     }
   })
@@ -1749,7 +1818,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     fireEvent.drop(folderRow, { dataTransfer })
 
     await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
-    expect(moveResource).toHaveBeenCalledWith('file-1', 'folderb', 'main', 7, undefined)
+    expect(moveResource).toHaveBeenCalledWith('file-1', 'folderb', 'main', 7, undefined, 7)
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith(
         expect.stringContaining('report.txt → B: An item with this name already exists'),
@@ -1891,7 +1960,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
 
     await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
-    expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined)
+    expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined, 7)
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith(
         expect.stringContaining('A → B: An item with this name already exists'),
@@ -2186,7 +2255,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
 
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined)
+      expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined, 7)
     })
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Moved A to B', 'success'))
     // Folder-impact info accompanies the success toast (rev-2 §1/§8).
@@ -2891,7 +2960,7 @@ describe('FileExplorerTree — drag Move presentation lifetime', () => {
       await waitFor(() => expect(queryClient.getQueryState(sourceCache)?.isInvalidated).toBe(true))
       expect(pushToast).not.toHaveBeenCalled()
       expect(moveResource).toHaveBeenCalledTimes(1)
-      expect(moveResource).toHaveBeenCalledWith('file-1', 'folderb', 'main', 7, undefined)
+      expect(moveResource).toHaveBeenCalledWith('file-1', 'folderb', 'main', 7, undefined, 7)
     } finally {
       queryClient.clear()
     }
@@ -2965,7 +3034,7 @@ describe('FileExplorerTree — drag Move presentation lifetime', () => {
       await waitFor(() => expect(queryClient.getQueryState(sourceCache)?.isInvalidated).toBe(true))
       expect(pushToast).not.toHaveBeenCalled()
       expect(moveResource).toHaveBeenCalledTimes(1)
-      expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined)
+      expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined, 7)
     } finally {
       queryClient.clear()
     }

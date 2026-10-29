@@ -1763,6 +1763,7 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => ({
         authenticated: Boolean(this.sessionToken && this.me),
         me: this.me,
+        sessionGeneration: this.sessionGeneration,
       }))
     }
 
@@ -1780,13 +1781,14 @@ export class AppService {
     const currentSession = () => ({
       authenticated: Boolean(this.sessionToken && this.me),
       me: this.me,
+      sessionGeneration: this.sessionGeneration,
     })
 
     if (reservation.tokenReadFailed) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
 
@@ -1795,7 +1797,7 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
 
@@ -1845,7 +1847,7 @@ export class AppService {
         // setup and other work prepared against the signed-out generation only
         // after the restored session and its GFS scope are coherent.
         this.sessionGeneration += 1
-        return { authenticated: true, me: restoredMe }
+        return { authenticated: true, me: restoredMe, sessionGeneration: this.sessionGeneration }
       })
       if (session.authenticated && options.runLaunchMaintenance) {
         // Launch-time sandbox-ui partition GC is best-effort and must not delay
@@ -1862,7 +1864,7 @@ export class AppService {
             legacyEnvKeys: getActiveLegacyEnvKeys(),
           })
         }
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
   }
@@ -1946,7 +1948,7 @@ export class AppService {
           getActiveLegacyEnvKeys()
         ).catch(() => undefined)
       }
-      return { authenticated: true, me: result.me }
+      return { authenticated: true, me: result.me, sessionGeneration: this.sessionGeneration }
     } finally {
       releasePrewarm()
     }
@@ -3468,10 +3470,23 @@ export class AppService {
       throw new Error('invalid_session_generation')
     }
     this.assertSessionGeneration(expectedSessionGeneration)
-    return this.gfsClient.moveResource(
-      { resourceId, drive, destinationId, ifMatch, ...(newName !== undefined ? { newName } : {}) },
-      this.requireSessionToken()
-    )
+    try {
+      const receipt = await this.gfsClient.moveResource(
+        {
+          resourceId,
+          drive,
+          destinationId,
+          ifMatch,
+          ...(newName !== undefined ? { newName } : {}),
+        },
+        this.requireSessionToken()
+      )
+      this.assertSessionGeneration(expectedSessionGeneration)
+      return receipt
+    } catch (error) {
+      this.assertSessionGeneration(expectedSessionGeneration)
+      throw error
+    }
   }
 
   async deleteGfsResource(resourceId: string, drive?: string, ifMatch?: number) {
@@ -3487,7 +3502,10 @@ export class AppService {
 
   async getSessionState(): Promise<SessionState> {
     if (!this.sessionToken || !this.me) {
-      if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
+      if (this.restoreSavedSessionInFlight) {
+        const restored = await this.restoreSavedSession()
+        return { ...restored, sessionGeneration: this.sessionGeneration }
+      }
       // createWindow() already performs the saved-token restore before showing
       // the renderer. Do not immediately repeat a failed 60-second network
       // attempt from the renderer bootstrap; a new app launch or environment
@@ -3496,11 +3514,12 @@ export class AppService {
         this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
         Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
       ) {
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       }
-      return this.restoreSavedSession()
+      const restored = await this.restoreSavedSession()
+      return { ...restored, sessionGeneration: this.sessionGeneration }
     }
-    return { authenticated: true, me: this.me }
+    return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
   }
 
   /**
@@ -4176,7 +4195,7 @@ export class AppService {
         // cached org/agents/contexts answer is now about the wrong team. Drop the
         // cache and tell mounted plugins to refetch.
         tryGetPluginSdkRuntime()?.notifySessionChanged(true)
-        return { authenticated: true, me: this.me }
+        return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
       })
     } finally {
       releasePrewarm()

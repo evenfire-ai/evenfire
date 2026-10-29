@@ -74,4 +74,16 @@ describe('gfs:moveResource generation boundary', () => {
 
     expect(service.moveGfsResource).not.toHaveBeenCalled()
   })
+
+  it('rejects a Move without its captured generation instead of adopting the current one', async () => {
+    await expect(
+      moveHandler()(trusted, {
+        resourceId: 'source-a',
+        destinationId: 'destination-b',
+        drive: 'main',
+      })
+    ).rejects.toThrow('invalid_session_generation')
+
+    expect(service.moveGfsResource).not.toHaveBeenCalled()
+  })
 })

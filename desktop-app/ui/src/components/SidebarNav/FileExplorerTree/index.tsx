@@ -496,6 +496,7 @@ export function FileExplorerTree({
     source: GfsDragSource
     gestureGeneration: number
     sessionGeneration: number | null
+    authoritativeSessionGeneration: number
     destination: { resourceId: string; name: string }
   } | null>(null)
   const [moveDialogTarget, setMoveDialogTarget] = useState<{
@@ -784,14 +785,22 @@ export function FileExplorerTree({
       destination: { resourceId: string; name: string },
       isCurrent?: () => boolean,
       isPresentationCurrent?: () => boolean,
-      reportOutcomes = true
+      reportOutcomes = true,
+      authoritativeSessionGeneration?: number
     ) => {
       movingResourceIdRef.current = source.resourceId
       setMovingResourceId(source.resourceId)
       try {
         return await runGfsMoveCommit(
           {
-            moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
+            moveResource: (
+              resourceId,
+              destinationId,
+              ifMatch,
+              newName,
+              oldParentId,
+              expectedSessionGeneration
+            ) =>
               ctrl.moveResource(
                 resourceId,
                 destinationId,
@@ -799,7 +808,8 @@ export function FileExplorerTree({
                 newName,
                 oldParentId,
                 source.scope,
-                true
+                true,
+                expectedSessionGeneration
               ),
             handleAuthorityFailure: message =>
               ctrl.handleAuthorityFailure(message, 'operation', source.scope),
@@ -819,6 +829,9 @@ export function FileExplorerTree({
             source,
             destination,
             occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+            ...(authoritativeSessionGeneration !== undefined
+              ? { sessionGeneration: authoritativeSessionGeneration }
+              : {}),
             ...(isCurrent ? { isCurrent } : {}),
           }
         )
@@ -847,12 +860,16 @@ export function FileExplorerTree({
       const sessionGeneration = dragSession?.currentGeneration() ?? null
       const scopeAtDrop = liveDragScopeRef.current
       try {
+        const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
         const decision = await adjudication.adjudicateDrop(source, {
           resourceId: node.resourceId,
           name: node.name,
           kind: node.kind,
           ancestorIds,
         })
+        if ((await window.clerum.auth.getSessionGeneration()) !== authoritativeSessionGeneration) {
+          return
+        }
         if (!decision.allowed && decision.reason === 'session-lost') {
           // Presented BEFORE the ownership guard: the revocation that caused
           // this refusal has already invalidated the gesture's ownership, so
@@ -892,6 +909,7 @@ export function FileExplorerTree({
             source,
             gestureGeneration: epoch,
             sessionGeneration,
+            authoritativeSessionGeneration,
             destination: { resourceId: node.resourceId, name: node.name },
           })
           return
@@ -900,7 +918,9 @@ export function FileExplorerTree({
           source,
           { resourceId: node.resourceId, name: node.name },
           () => ownsDrop(source, epoch, sessionGeneration),
-          () => mountedRef.current && liveDragScopeRef.current === source.scope
+          () => mountedRef.current && liveDragScopeRef.current === source.scope,
+          true,
+          authoritativeSessionGeneration
         )
       } finally {
         finishNodeDropCleanup(source, epoch, sessionGeneration)
@@ -1185,7 +1205,9 @@ export function FileExplorerTree({
                 pending.destination,
                 () =>
                   ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration),
-                () => mountedRef.current && liveDragScopeRef.current === pending.source.scope
+                () => mountedRef.current && liveDragScopeRef.current === pending.source.scope,
+                true,
+                pending.authoritativeSessionGeneration
               )
             }
           }}
@@ -1224,12 +1246,14 @@ export function FileExplorerTree({
               isDialogCurrent()
             const isPresentationCurrent = () =>
               mountedRef.current && liveDragScopeRef.current === source.scope
+            const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
             const outcome = await commitMove(
               source,
               { resourceId: destinationId, name: destinationName },
               isCurrent,
               isPresentationCurrent,
-              false
+              false,
+              authoritativeSessionGeneration
             )
             if (outcome.status === 'gesture-lost') return
             if (outcome.status === 'session-lost') {

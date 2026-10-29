@@ -688,6 +688,8 @@ export type HostMessageResponse = {
 export type SessionState = {
   authenticated: boolean
   me: SessionMe | null
+  /** Main-process authentication epoch captured with this identity snapshot. */
+  sessionGeneration?: number
 }
 
 export type PasswordLoginResult = SessionState

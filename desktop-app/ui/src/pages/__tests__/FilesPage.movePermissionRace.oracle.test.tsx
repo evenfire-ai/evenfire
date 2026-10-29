@@ -26,6 +26,8 @@ import {
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { FilesPage } from '../FilesPage'
 
+let authoritativeSessionGeneration = 1
+
 function ToastingFilesPage({ pendingGfsUri }: { pendingGfsUri: string }) {
   const toast = useToastController()
   return (
@@ -106,6 +108,8 @@ async function numberedMoveFixture(
     permissionsAfterConflict?: Record<string, string[]>
     repeatConflict?: boolean
     holdFreshPermissionResource?: string
+    holdPermissionResource?: string
+    holdMove?: boolean
   } = {}
 ) {
   const conflictMessage = await gfsRouteFailureMessage(
@@ -157,6 +161,24 @@ async function numberedMoveFixture(
   let permissionReadCountAtFirstMove = 0
   let releaseFreshPermission!: () => void
   let markFreshPermissionRead!: () => void
+  let releaseInitialPermission!: () => void
+  let markInitialPermissionRead!: () => void
+  let finishPendingMove!: (receipt: { resourceId: string; version: number }) => void
+  let rejectPendingMove!: (error: Error) => void
+  let markMoveStarted!: () => void
+  const pendingMoveStarted = new Promise<void>(resolve => {
+    markMoveStarted = resolve
+  })
+  const pendingMove = new Promise<{ resourceId: string; version: number }>((resolve, reject) => {
+    finishPendingMove = resolve
+    rejectPendingMove = reject
+  })
+  const initialPermissionGate = new Promise<void>(resolve => {
+    releaseInitialPermission = resolve
+  })
+  const initialPermissionStarted = new Promise<void>(resolve => {
+    markInitialPermissionRead = resolve
+  })
   const freshPermissionGate = new Promise<void>(resolve => {
     releaseFreshPermission = resolve
   })
@@ -165,6 +187,10 @@ async function numberedMoveFixture(
   })
   const produceAffordances = appServiceAffordanceProducer(async resourceId => {
     permissionReads.push(resourceId)
+    if (!firstMoveDispatched && resourceId === options.holdPermissionResource) {
+      markInitialPermissionRead()
+      await initialPermissionGate
+    }
     if (firstMoveDispatched && resourceId === options.holdFreshPermissionResource) {
       markFreshPermissionRead()
       await freshPermissionGate
@@ -193,6 +219,11 @@ async function numberedMoveFixture(
       _newName?: string
     ) => {
       const callNumber = moveResource.mock.calls.length
+      if (options.holdMove) {
+        firstMoveDispatched = true
+        markMoveStarted()
+        return pendingMove
+      }
       if (callNumber === 1 || options.repeatConflict) {
         if (callNumber === 1) permissionReadCountAtFirstMove = permissionReads.length
         firstMoveDispatched = true
@@ -204,6 +235,7 @@ async function numberedMoveFixture(
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
+      auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
       gfs: {
         listAccessible: vi.fn(async () => rows),
         listChildren: vi.fn(async (resourceId: string) =>
@@ -231,12 +263,16 @@ async function numberedMoveFixture(
     </AuthContext.Provider>
   )
   const view = render(renderForTeam('team-a'))
-  const startMove = async () => {
+  const beginMove = async () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
     fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+    return dialog
+  }
+  const startMove = async () => {
+    const dialog = await beginMove()
     await waitFor(() => {
       expect(moveResource).toHaveBeenCalledTimes(1)
       expect(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' })).toBeTruthy()
@@ -257,6 +293,12 @@ async function numberedMoveFixture(
     },
     freshPermissionStarted,
     releaseFreshPermission,
+    initialPermissionStarted,
+    releaseInitialPermission,
+    pendingMoveStarted,
+    finishPendingMove,
+    rejectPendingMove,
+    beginMove,
     startMove,
     rerenderTeam: (teamId: string) => view.rerender(renderForTeam(teamId)),
     dispose: () => queryClient.clear(),
@@ -266,6 +308,7 @@ async function numberedMoveFixture(
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  authoritativeSessionGeneration = 1
 })
 
 describe('FilesPage Move permission generation fencing', () => {
@@ -278,7 +321,8 @@ describe('FilesPage Move permission generation fencing', () => {
         'destination-1',
         'main',
         3,
-        undefined
+        undefined,
+        1
       )
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move as notes (1).txt' }))
 
@@ -288,7 +332,8 @@ describe('FilesPage Move permission generation fencing', () => {
         'destination-1',
         'main',
         3,
-        'notes (1).txt'
+        'notes (1).txt',
+        1
       )
       expect(fixture.postConflictPermissionReads).toEqual(
         expect.arrayContaining(['file-src', 'source-parent', 'destination-1'])
@@ -411,7 +456,8 @@ describe('FilesPage Move permission generation fencing', () => {
         'destination-1',
         'main',
         3,
-        undefined
+        undefined,
+        1
       )
       expect(screen.queryByText('Moved notes.txt to Archive as notes (1).txt')).toBeNull()
     } finally {
@@ -461,6 +507,86 @@ describe('FilesPage Move permission generation fencing', () => {
       fixture.dispose()
     }
   })
+
+  it('captures the main session generation before the explicit Move permission reads', async () => {
+    const fixture = await numberedMoveFixture({ holdPermissionResource: 'destination-1' })
+    try {
+      const dialog = await fixture.beginMove()
+      await fixture.initialPermissionStarted
+      authoritativeSessionGeneration += 1
+      fixture.releaseInitialPermission()
+
+      await waitFor(() => expect(fixture.permissionReads).toContain('destination-1'))
+      expect(fixture.moveResource).not.toHaveBeenCalled()
+      expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
+      expect(screen.queryByText(/Moved notes\.txt to Archive/)).toBeNull()
+      expect(dialog).toBeTruthy()
+    } finally {
+      fixture.releaseInitialPermission()
+      fixture.releaseFreshPermission()
+      fixture.dispose()
+    }
+  })
+
+  it.each(['success', 'unauthorized'] as const)(
+    'suppresses a same-tuple old-generation Move %s before cache or authority effects',
+    async outcome => {
+      const unauthorizedMessage =
+        outcome === 'unauthorized'
+          ? await gfsRouteFailureMessage(
+              client =>
+                client.moveResource(
+                  { resourceId: 'file-src', destinationId: 'destination-1', ifMatch: 3 },
+                  'fixture-session-token'
+                ),
+              401,
+              { code: 'unauthorized', message: 'captured session denied' }
+            )
+          : null
+      const fixture = await numberedMoveFixture({ holdMove: true })
+      const invalidateQueries = vi.spyOn(fixture.queryClient, 'invalidateQueries')
+      const removeQueries = vi.spyOn(fixture.queryClient, 'removeQueries')
+      const accessStateKey = desktopQueryKeys.gfsAccessState(':user-a:team-a')
+      try {
+        await fixture.beginMove()
+        await fixture.pendingMoveStarted
+        invalidateQueries.mockClear()
+        removeQueries.mockClear()
+        authoritativeSessionGeneration += 1
+
+        await act(async () => {
+          if (outcome === 'success') {
+            fixture.finishPendingMove(await moveResourceReceipt('file-src', 'destination-1', 4))
+          } else {
+            fixture.rejectPendingMove(new Error(unauthorizedMessage ?? 'missing producer error'))
+          }
+        })
+
+        await waitFor(() =>
+          expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
+        )
+        expect(fixture.moveResource).toHaveBeenCalledTimes(1)
+        expect(screen.queryByText('Moved notes.txt to Archive')).toBeNull()
+        expect(screen.queryByText(/401 Unauthorized/)).toBeNull()
+        if (outcome === 'success') expect(invalidateQueries).not.toHaveBeenCalled()
+        if (outcome === 'unauthorized') {
+          expect(removeQueries).not.toHaveBeenCalled()
+          expect(fixture.queryClient.getQueryData(accessStateKey)).toBe('active')
+        }
+        expect(fixture.moveResource).toHaveBeenCalledWith(
+          'file-src',
+          'destination-1',
+          'main',
+          3,
+          undefined,
+          1
+        )
+      } finally {
+        fixture.finishPendingMove(await moveResourceReceipt('file-src', 'destination-1', 4))
+        fixture.dispose()
+      }
+    }
+  )
 
   it('retries Move authority without dispatching a Move (R4-L2)', async () => {
     const rows = await listAccessiblePage([
@@ -524,6 +650,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
@@ -649,6 +776,7 @@ describe('FilesPage Move permission generation fencing', () => {
       Object.defineProperty(window, 'clerum', {
         configurable: true,
         value: {
+          auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
           gfs: {
             listAccessible: vi.fn(async () => rows),
             listChildren,
@@ -691,7 +819,8 @@ describe('FilesPage Move permission generation fencing', () => {
           'destination-1',
           'main',
           7,
-          undefined
+          undefined,
+          1
         )
       )
       expect(moveResource).toHaveBeenCalledTimes(1)
@@ -814,6 +943,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
@@ -843,7 +973,14 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
     await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+      expect(moveResource).toHaveBeenCalledWith(
+        'file-src',
+        'destination-1',
+        'main',
+        3,
+        undefined,
+        1
+      )
     )
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Backup' }))
@@ -906,6 +1043,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
@@ -952,7 +1090,14 @@ describe('FilesPage Move permission generation fencing', () => {
       fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
       await waitFor(() =>
-        expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+        expect(moveResource).toHaveBeenCalledWith(
+          'file-src',
+          'destination-1',
+          'main',
+          3,
+          undefined,
+          1
+        )
       )
 
       view.rerender(renderPage('team-b'))
@@ -1028,6 +1173,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
@@ -1057,7 +1203,14 @@ describe('FilesPage Move permission generation fencing', () => {
       fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
       await waitFor(() =>
-        expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+        expect(moveResource).toHaveBeenCalledWith(
+          'file-src',
+          'destination-1',
+          'main',
+          3,
+          undefined,
+          1
+        )
       )
 
       view.rerender(renderPage('team-b'))
@@ -1118,6 +1271,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
@@ -1152,7 +1306,14 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith('folder-src', 'destination-1', 'main', 7, undefined)
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'destination-1',
+        'main',
+        7,
+        undefined,
+        1
+      )
     )
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
     expect(screen.queryByRole('dialog', { name: 'Move folder Projects' })).toBeNull()
@@ -1211,6 +1372,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
@@ -1245,7 +1407,14 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+      expect(moveResource).toHaveBeenCalledWith(
+        'file-src',
+        'destination-1',
+        'main',
+        3,
+        undefined,
+        1
+      )
     )
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
     expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
@@ -1321,6 +1490,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
@@ -1355,7 +1525,14 @@ describe('FilesPage Move permission generation fencing', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+      expect(moveResource).toHaveBeenCalledWith(
+        'file-src',
+        'destination-1',
+        'main',
+        3,
+        undefined,
+        1
+      )
     )
     expect(moveResource).toHaveBeenCalledTimes(1)
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
@@ -1413,6 +1590,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible,
           listChildren: vi.fn(async () => listChildrenPage([])),
@@ -1504,6 +1682,7 @@ describe('FilesPage Move permission generation fencing', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async () => listChildrenPage([])),
@@ -1650,6 +1829,7 @@ describe('FilesPage Move permission generation fencing', () => {
       Object.defineProperty(window, 'clerum', {
         configurable: true,
         value: {
+          auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
           gfs: {
             listAccessible: vi.fn(async () => rows),
             listChildren: vi.fn(async (resourceId: string) =>
@@ -1745,7 +1925,8 @@ describe('FilesPage Move permission generation fencing', () => {
           destinationId,
           'main',
           sourceVersion,
-          undefined
+          undefined,
+          1
         )
         expect(pushToast).not.toHaveBeenCalled()
         invalidateQueries.mockClear()

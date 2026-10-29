@@ -24,7 +24,12 @@ export interface GfsMoveCommitRunnerDeps {
    * the mutation rejected, so its success path never ran.
    */
   convergeCommittedMove: (
-    input: { resourceId: string; destinationId: string; oldParentId: string | null },
+    input: {
+      resourceId: string
+      destinationId: string
+      oldParentId: string | null
+      expectedSessionGeneration: number
+    },
     receipt: { version: number }
   ) => Promise<void> | void
   /** Transient outcome toasts; omitted where a surface shows its own. */
@@ -160,6 +165,7 @@ export async function runGfsMoveCommit(
         resourceId: source.resourceId,
         destinationId: destination.resourceId,
         oldParentId: outcome.previousParentId,
+        expectedSessionGeneration: sessionGeneration,
       },
       { version: outcome.version }
     )

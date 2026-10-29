@@ -298,7 +298,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const backgroundOpenUriGenerationRef = useRef(0)
   const backgroundOpenErrorRef = useRef(false)
   const pendingDeniedResourceIdRef = useRef<string | null>(null)
-  const backgroundLocationRetryRef = useRef<(uri: string) => void>(() => undefined)
+  const backgroundLocationRetryRef = useRef<(uri: string, sessionGeneration?: number) => void>(
+    () => undefined
+  )
   const backgroundLocationRetryTimerRef = useRef<number | null>(null)
   const backgroundLocationRetryAttemptRef = useRef(0)
   // Any browser-location update supersedes an in-flight URI resolution. This
@@ -693,22 +695,25 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
     [revokeAccess]
   )
-  const scheduleBackgroundLocationRetry = useCallback((uri: string, error: unknown) => {
-    const message = toMessage(error)
-    const status = parseHttpStatus(message)
-    if (status !== null && status !== 429 && status < 500) return
-    if (backgroundLocationRetryTimerRef.current !== null) return
-    const attempt = backgroundLocationRetryAttemptRef.current + 1
-    backgroundLocationRetryAttemptRef.current = attempt
-    const retryAfterSeconds = parseRetryAfterSeconds(message)
-    const delayMs = retryAfterSeconds
-      ? Math.min(retryAfterSeconds * 1000, 60_000)
-      : Math.min(500 * 2 ** Math.min(attempt - 1, 4), 8_000)
-    backgroundLocationRetryTimerRef.current = window.setTimeout(() => {
-      backgroundLocationRetryTimerRef.current = null
-      backgroundLocationRetryRef.current(uri)
-    }, delayMs)
-  }, [])
+  const scheduleBackgroundLocationRetry = useCallback(
+    (uri: string, error: unknown, sessionGeneration?: number) => {
+      const message = toMessage(error)
+      const status = parseHttpStatus(message)
+      if (status !== null && status !== 429 && status < 500) return
+      if (backgroundLocationRetryTimerRef.current !== null) return
+      const attempt = backgroundLocationRetryAttemptRef.current + 1
+      backgroundLocationRetryAttemptRef.current = attempt
+      const retryAfterSeconds = parseRetryAfterSeconds(message)
+      const delayMs = retryAfterSeconds
+        ? Math.min(retryAfterSeconds * 1000, 60_000)
+        : Math.min(500 * 2 ** Math.min(attempt - 1, 4), 8_000)
+      backgroundLocationRetryTimerRef.current = window.setTimeout(() => {
+        backgroundLocationRetryTimerRef.current = null
+        backgroundLocationRetryRef.current(uri, sessionGeneration)
+      }, delayMs)
+    },
+    []
+  )
   // All GFS mutations share the central fail-closed boundary: an authority
   // rejection (401 / typed lifecycle code) revokes the session even when the
   // caller would only have toasted. Policy verdicts (403/412) stay local.
@@ -1139,6 +1144,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const retryChildren = useCallback(async () => {
     await childrenQuery.refetch()
   }, [childrenQuery])
+  const isMoveSessionGenerationCurrent = useCallback(async (expected: number): Promise<boolean> => {
+    try {
+      return (await window.clerum.auth.getSessionGeneration()) === expected
+    } catch {
+      return false
+    }
+  }, [])
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
       ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
@@ -1154,6 +1166,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         background?: boolean
         onFailure?: (failure: GfsUriOpenFailure) => void
         shouldContinue?: () => boolean
+        sessionGeneration?: number
       }
     ) => {
       const background = options?.background === true
@@ -1169,6 +1182,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         (!background ||
           (backgroundOpenUriGenerationRef.current === backgroundGeneration &&
             currentCrumbRef.current?.gfsUri === uri))
+      const isSessionGenerationCurrent = async () => {
+        if (options?.sessionGeneration === undefined) return true
+        try {
+          return (await window.clerum.auth.getSessionGeneration()) === options.sessionGeneration
+        } catch {
+          return false
+        }
+      }
+      const reportSuperseded = async () => {
+        if (!background && isCurrent() === false && (await isSessionGenerationCurrent())) {
+          options?.onFailure?.({ kind: 'superseded' })
+        }
+      }
+      if (!(await isSessionGenerationCurrent())) return false
       if (!background) {
         if (backgroundLocationRetryTimerRef.current !== null) {
           window.clearTimeout(backgroundLocationRetryTimerRef.current)
@@ -1182,8 +1209,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       try {
         const resource = await window.clerum.gfs.resolve(uri.trim())
-        if (!isCurrent()) {
-          if (!background) options?.onFailure?.({ kind: 'superseded' })
+        if (!(await isSessionGenerationCurrent()) || !isCurrent()) {
+          await reportSuperseded()
           return false
         }
         const crumb: GfsCrumb = {
@@ -1207,8 +1234,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           try {
             const parentRid = parentResourceId.replace(/-/g, '').toLowerCase()
             const parent = await window.clerum.gfs.resolve(`gfs://${resource.drive}/${parentRid}`)
-            if (!isCurrent()) {
-              if (!background) options?.onFailure?.({ kind: 'superseded' })
+            if (!(await isSessionGenerationCurrent()) || !isCurrent()) {
+              await reportSuperseded()
               return false
             }
             if (parent.kind !== 'directory') break
@@ -1225,6 +1252,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             }
             parentResourceId = parent.parentResourceId
           } catch (error) {
+            if (!(await isSessionGenerationCurrent()) || !isCurrent()) {
+              await reportSuperseded()
+              return false
+            }
             const status = parseHttpStatus(toMessage(error))
             if (status === 403 || status === 404) {
               // The leaf already resolved authoritatively. A denied or deleted
@@ -1236,7 +1267,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             if (background) {
               backgroundOpenErrorRef.current = true
               setOpenError(toPresentedMessage(error))
-              scheduleBackgroundLocationRetry(uri, error)
+              scheduleBackgroundLocationRetry(uri, error, options?.sessionGeneration)
               return false
             }
             // A direct file grant can be readable while its parent is not. Keep
@@ -1245,8 +1276,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           }
         }
 
-        if (!isCurrent()) {
-          if (!background) options?.onFailure?.({ kind: 'superseded' })
+        if (!(await isSessionGenerationCurrent()) || !isCurrent()) {
+          await reportSuperseded()
           return false
         }
         // A background resolve may recover its own transient error, but it
@@ -1266,8 +1297,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         setCrumbsState([...ancestors.reverse(), crumb])
         return crumb
       } catch (error) {
-        if (!isCurrent()) {
-          if (!background) options?.onFailure?.({ kind: 'superseded' })
+        if (!(await isSessionGenerationCurrent()) || !isCurrent()) {
+          await reportSuperseded()
           return false
         }
         const message = toMessage(error)
@@ -1284,7 +1315,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           } else {
             if (background) backgroundOpenErrorRef.current = true
             setOpenError(toPresentedMessage(error))
-            if (background) scheduleBackgroundLocationRetry(uri, error)
+            if (background) {
+              scheduleBackgroundLocationRetry(uri, error, options?.sessionGeneration)
+            }
           }
         }
         options?.onFailure?.({ kind: 'error', error })
@@ -1299,8 +1332,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [clearInaccessibleGfsLocation, handleAuthorityFailure, scheduleBackgroundLocationRetry]
   )
   useEffect(() => {
-    backgroundLocationRetryRef.current = uri => {
-      void openUri(uri, { background: true, clearIfUnavailable: true })
+    backgroundLocationRetryRef.current = (uri, sessionGeneration) => {
+      void openUri(uri, {
+        background: true,
+        clearIfUnavailable: true,
+        ...(sessionGeneration !== undefined ? { sessionGeneration } : {}),
+      })
     }
     return () => {
       backgroundLocationRetryRef.current = () => undefined
@@ -1365,10 +1402,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         destinationId: string
         newName?: string
         oldParentId?: string | null
+        expectedSessionGeneration?: number
       },
       receipt: { version: number },
       operationScope?: string | null
     ) => {
+      if (
+        input.expectedSessionGeneration !== undefined &&
+        !(await isMoveSessionGenerationCurrent(input.expectedSessionGeneration))
+      ) {
+        return
+      }
       const capturedScope = operationScope === undefined ? sessionScope : operationScope
       const ownsLiveSession = capturedScope === liveSessionScopeRef.current
       const movedCrumb = ownsLiveSession
@@ -1408,10 +1452,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         await refreshGfs()
       }
       if (!ownsLiveSession) return
-      if (movedCrumb) await openUri(movedCrumb.gfsUri)
+      if (
+        movedCrumb &&
+        (input.expectedSessionGeneration === undefined ||
+          (await isMoveSessionGenerationCurrent(input.expectedSessionGeneration)))
+      ) {
+        await openUri(movedCrumb.gfsUri, {
+          ...(input.expectedSessionGeneration !== undefined
+            ? { sessionGeneration: input.expectedSessionGeneration }
+            : {}),
+        })
+      }
     },
     [
       crumbs,
+      isMoveSessionGenerationCurrent,
       liveSessionScopeRef,
       openAncestryDependentResourceIds,
       openUri,
@@ -1430,18 +1485,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       oldParentId?: string | null
       operationScope?: string
       authorityHandledByCaller?: boolean
+      expectedSessionGeneration: number
     }) =>
       window.clerum.gfs.moveResource(
         input.resourceId,
         input.destinationId,
         DRIVE,
         input.ifMatch,
-        input.newName
+        input.newName,
+        input.expectedSessionGeneration
       ),
     onSuccess: async (receipt, input) => {
       await convergeCommittedMove(input, receipt, input.operationScope)
     },
-    onError: (error, input) => {
+    onError: async (error, input) => {
+      if (!(await isMoveSessionGenerationCurrent(input.expectedSessionGeneration))) return
       if (!input.authorityHandledByCaller) {
         handleAuthorityFailure(toMessage(error), 'operation', input.operationScope)
       }
@@ -1700,17 +1758,23 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       newName?: string,
       oldParentId?: string | null,
       operationScope?: string,
-      authorityHandledByCaller?: boolean
+      authorityHandledByCaller?: boolean,
+      expectedSessionGeneration?: number
     ) =>
-      moveResourceMutation.mutateAsync({
-        resourceId,
-        destinationId,
-        ifMatch,
-        newName,
-        oldParentId,
-        operationScope,
-        authorityHandledByCaller,
-      }),
+      (async () => {
+        const capturedGeneration =
+          expectedSessionGeneration ?? (await window.clerum.auth.getSessionGeneration())
+        return moveResourceMutation.mutateAsync({
+          resourceId,
+          destinationId,
+          ifMatch,
+          newName,
+          oldParentId,
+          operationScope,
+          authorityHandledByCaller,
+          expectedSessionGeneration: capturedGeneration,
+        })
+      })(),
     deleteResource: (resourceId: string, ifMatch?: number) =>
       deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),
     /**
