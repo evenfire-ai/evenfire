@@ -1182,7 +1182,7 @@ export class RpcProxyClient {
       throw new Error('version must be a non-negative integer greater than zero')
     }
     const response = await fetch(
-      url(
+      this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/model-step-checkpoints/${encodeURIComponent(checkpointId)}/continue`
       ),
       {

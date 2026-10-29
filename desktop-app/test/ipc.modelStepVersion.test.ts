@@ -11,7 +11,7 @@ const testState = vi.hoisted(() => {
   }
 })
 
-vi.mock('electron', () => ({ ipcMain: { handle: testState.handle } }))
+vi.mock('electron', () => ({ ipcMain: { handle: testState.handle, on: vi.fn() } }))
 
 describe('rpc:continueModelStep version validation', () => {
   const service = { continueModelStep: vi.fn() }
