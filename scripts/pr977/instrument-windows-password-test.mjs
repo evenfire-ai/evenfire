@@ -81,6 +81,10 @@ const markers = [
   'acl-powershell-fast',
   'acl-powershell-slow',
   'acl-powershell-timeout',
+  'fileops-powershell-start',
+  'fileops-powershell-fast',
+  'fileops-powershell-slow',
+  'fileops-powershell-timeout',
 ]
 
 function replaceOnce(before, after) {
@@ -121,12 +125,15 @@ replaceOnce(
     'const pr977OriginalSpawnSync = childProcess.spawnSync\n' +
     'childProcess.spawnSync = ((command: string, ...args: unknown[]) => {\n' +
     '  if (!/powershell\\.exe$/i.test(String(command))) return pr977OriginalSpawnSync(command, ...args as never[])\n' +
-    "  pr977Mark('acl-powershell-start')\n" +
+    '  const spawnOptions = args[1] as { env?: Record<string, string> } | undefined\n' +
+    '  const env = spawnOptions?.env ?? {}\n' +
+    "  const operation = Object.hasOwn(env, 'EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST') ? 'acl' : Object.hasOwn(env, 'EVENFIRE_SESSION_AUTHORITY_FILE_OPS') ? 'fileops' : null\n" +
+    '  if (!operation) return pr977OriginalSpawnSync(command, ...args as never[])\n' +
+    '  pr977Mark(`${operation}-powershell-start`)\n' +
     '  const started = Date.now()\n' +
     '  const result = pr977OriginalSpawnSync(command, ...args as never[])\n' +
-    "  if ((result as { error?: { code?: string } }).error?.code === 'ETIMEDOUT') pr977Mark('acl-powershell-timeout')\n" +
-    "  else if (Date.now() - started >= 10000) pr977Mark('acl-powershell-slow')\n" +
-    "  else pr977Mark('acl-powershell-fast')\n" +
+    "  const outcome = (result as { error?: { code?: string } }).error?.code === 'ETIMEDOUT' ? 'timeout' : Date.now() - started >= 10000 ? 'slow' : 'fast'\n" +
+    '  pr977Mark(`${operation}-powershell-${outcome}`)\n' +
     '  return result\n' +
     '}) as typeof childProcess.spawnSync\n' +
     'syncBuiltinESMExports()\n'

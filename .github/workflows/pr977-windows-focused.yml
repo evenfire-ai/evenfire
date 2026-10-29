@@ -105,7 +105,7 @@ jobs:
           $phaseFile = Join-Path $env:RUNNER_TEMP 'focused-phases.txt'
           $node = (Get-Command node).Source
           $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
-          $deadlineSeconds = if ($target -eq 'windowsSessionAuthorityAcl.native.test.ts') { 1800 } else { 300 }
+          $deadlineSeconds = if ($target -eq 'windowsSessionAuthorityAcl.native.test.ts') { 1800 } else { 150 }
           $started = [DateTime]::UtcNow
           $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
           $startInfo.FileName = $node
@@ -165,7 +165,7 @@ jobs:
             $overlayText = node validation/scripts/pr977/instrument-windows-password-test.mjs $sourceTestPath
             if ($LASTEXITCODE -ne 0) { throw 'Password test diagnostic instrumentation failed' }
             $overlay = $overlayText | ConvertFrom-Json
-            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 66) {
+            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 70) {
               throw 'Password test instrumentation did not match its reviewed contract'
             }
             $testOverlay = $overlay.mode
@@ -235,7 +235,9 @@ jobs:
             'transaction-publish-verify-start', 'transaction-publish-verify-end',
             'transaction-execute-start', 'transaction-execute-end',
             'acl-powershell-start', 'acl-powershell-fast',
-            'acl-powershell-slow', 'acl-powershell-timeout'
+            'acl-powershell-slow', 'acl-powershell-timeout',
+            'fileops-powershell-start', 'fileops-powershell-fast',
+            'fileops-powershell-slow', 'fileops-powershell-timeout'
           )
           $lastProgressMarker = 'none'
           $phaseLines = @()

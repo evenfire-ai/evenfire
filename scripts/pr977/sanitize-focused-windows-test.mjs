@@ -215,6 +215,10 @@ const allowedProgressMarkers = new Set([
   'acl-powershell-fast',
   'acl-powershell-slow',
   'acl-powershell-timeout',
+  'fileops-powershell-start',
+  'fileops-powershell-fast',
+  'fileops-powershell-slow',
+  'fileops-powershell-timeout',
 ])
 const overlayValid =
   target !== 'appService.passwordLoginRollback.regression.test.ts' ||
