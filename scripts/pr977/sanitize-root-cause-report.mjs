@@ -23,6 +23,30 @@ const phaseAllowlist = new Set([
   'restart-start',
   'restart-end',
   'http-password-start',
+  'http-password-end',
+  'complete-password-start',
+  'complete-password-end',
+  'credential-producer-start',
+  'credential-producer-end',
+  'credential-producer-error',
+  'session-persistence-start',
+  'session-persistence-end',
+  'session-persistence-error',
+  'login-install-start',
+  'login-install-end',
+  'login-install-error',
+  'login-install-once-start',
+  'login-install-once-end',
+  'login-install-once-error',
+  'acceptance-install-start',
+  'acceptance-install-end',
+  'acceptance-install-error',
+  'within-persistence-start',
+  'within-persistence-end',
+  'within-persistence-error',
+  'legacy-recovery-start',
+  'legacy-recovery-end',
+  'legacy-recovery-error',
   'http-me-start',
   'http-me-end',
   'keytar-get-start',
@@ -94,9 +118,12 @@ const type = allowlistedTypes.find(value => new RegExp(`\\b${value}\\b`).test(te
 const fixturePhase = text.match(
   /"fixturePhase":"(read-existing-acl|set-owner|write-acl|read-back-owner|owner-readback-mismatch)"/
 )?.[1]
-const fixturePrivileges = text.match(
-  /EVENFIRE_OWNER_FIXTURE_PRIVILEGES=restore:(enabled|disabled|not-listed);takeOwnership:(enabled|disabled|not-listed)/
+const fixturePrivilegesMatch = text.match(
+  /"fixturePrivileges":\{"restore":"(enabled|disabled|not-listed)","takeOwnership":"(enabled|disabled|not-listed)"\}/
 )
+const fixturePrivileges = fixturePrivilegesMatch
+  ? { restore: fixturePrivilegesMatch[1], takeOwnership: fixturePrivilegesMatch[2] }
+  : null
 const hresults = [...new Set(text.match(/0x[0-9A-F]{8}/gi) ?? [])].slice(0, 2)
 const categories = [
   'acl-verifier-unavailable',
@@ -190,11 +217,8 @@ const safe = {
   lastPhase: phases.at(-1) ?? null,
   failureType: type,
   failureCategory: category,
-  fixturePhase: kind === 'acl' ? (fixturePhase ?? null) : null,
-  fixturePrivileges:
-    kind === 'acl' && fixturePrivileges
-      ? { restore: fixturePrivileges[1], takeOwnership: fixturePrivileges[2] }
-      : null,
+  fixturePhase: kind === 'acl' ? fixturePhase : null,
+  fixturePrivileges: kind === 'acl' ? fixturePrivileges : null,
   aclVerifierDiagnostic,
   hresults,
   selectedAssertions: selectedAssertions.map(({ name, status }) => ({
