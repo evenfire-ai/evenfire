@@ -54,6 +54,12 @@ vi.mock('electron', () => ({
   shell: { openExternal: vi.fn() },
 }))
 vi.mock('keytar', () => fixture)
+vi.mock('../windowsSessionAuthorityAcl.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityAcl.js')>()
+  const { createWindowsSessionAuthorityAclUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityAclUnitFixture.js')
+  return createWindowsSessionAuthorityAclUnitFixture(actual)
+})
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(async (userId: string) => {
     fixture.activeChatUserId = userId

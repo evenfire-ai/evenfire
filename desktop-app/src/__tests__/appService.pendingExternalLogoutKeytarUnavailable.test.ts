@@ -10,6 +10,12 @@ const testRuntime = vi.hoisted(() => ({
 const { notifySessionChanged } = vi.hoisted(() => ({ notifySessionChanged: vi.fn() }))
 
 vi.mock('keytar', () => ({}))
+vi.mock('../windowsSessionAuthorityAcl.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityAcl.js')>()
+  const { createWindowsSessionAuthorityAclUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityAclUnitFixture.js')
+  return createWindowsSessionAuthorityAclUnitFixture(actual)
+})
 vi.mock('electron', () => ({
   app: {
     getPath: vi.fn(() => testRuntime.userDataDirectory),
