@@ -105,7 +105,13 @@ function sessionTokenRequest(overrides: Record<string, unknown> = {}) {
     .post('/external/auth/session-token')
     .set('x-forwarded-for', '203.0.113.44')
     .set('x-user-session-token', 'synthetic-source-token')
-    .send({ userId: v1Claims.userId, email: v1Claims.email, teamId: 'team-1', ...overrides })
+    .send({
+      userId: v1Claims.userId,
+      email: v1Claims.email,
+      teamId: 'team-1',
+      role: 'admin',
+      ...overrides,
+    })
 }
 
 beforeEach(() => {
