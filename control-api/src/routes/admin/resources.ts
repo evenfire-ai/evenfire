@@ -10,7 +10,10 @@ import {
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
-import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
+import {
+  stripLegacyMcpServerSpecFields,
+  validateMcpServerSpecPreflight,
+} from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { uninstallMcpServer } from '../../oauth/mcpServerUninstall.js'
@@ -556,7 +559,13 @@ async function purgeContextSharedGrants(
   }
 }
 
-export function createAdminResourcesRouter(gateway: K8sGateway): Router {
+export function createAdminResourcesRouter(
+  gateway: K8sGateway,
+  deps: {
+    /** DB for the OAuth grant purge and the McpServer uninstall; defaults to the shared pool. */
+    oauthDb?: DbClient
+  } = {}
+): Router {
   const router = Router()
   // Uses the module-level `log` (= exported `adminResourcesLogger`). A local
   // child here would shadow it with a different instance, so handler logs would
@@ -564,7 +573,7 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   // Reliable local revocation of a remote server's DCR client on uninstall; the
   // AS-side RFC 7592 delete is courtesy (real pinned transport in production).
   const oauthEncryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
-  const oauthDb: DbClient = { query: (text, values) => pool.query(text, values) }
+  const oauthDb: DbClient = deps.oauthDb ?? { query: (text, values) => pool.query(text, values) }
 
   // Middleware: enforce namespace per resource type and audit any injection attempt.
   // Uses enforceNamespace() consistently with all other admin routers.
@@ -802,6 +811,7 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // Early validation for McpServer specs — UX safety net + defense-in-depth.
       // HCC reconciler also sanitizes as a backstop.
       if (plural === 'mcpservers' && body.spec) {
+        body.spec = stripLegacyMcpServerSpecFields(body.spec)
         const errors = await validateMcpServerSpecPreflight(body.spec, {
           allowedImagePrefixes: config.allowedPluginImagePrefixes,
           enforceImageAllowlist: config.enforcePluginImageAllowlist,
@@ -946,8 +956,10 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
       }
 
-      // Same early validation for McpServer updates.
+      // Same early validation for McpServer updates. A PUT replaces the whole spec, so
+      // a client resending the spec it read would otherwise carry the legacy fields on.
       if (plural === 'mcpservers' && body.spec) {
+        body.spec = stripLegacyMcpServerSpecFields(body.spec)
         const errors = await validateMcpServerSpecPreflight(body.spec, {
           allowedImagePrefixes: config.allowedPluginImagePrefixes,
           enforceImageAllowlist: config.enforcePluginImageAllowlist,

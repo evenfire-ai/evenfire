@@ -121,7 +121,7 @@ function makeApp(
   return app
 }
 
-/** Seed a Context in the gateway's default namespace (where the route reads it). */
+/** Seed a Context, so a test can show the install leaves it alone. */
 function gatewayWithContext(contextName = 'ctx-a'): MockGateway {
   const gw = new MockGateway(NS)
   void gw.createResource(
@@ -364,12 +364,11 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
 
   const CIMD_SELF_CLIENT_ID = 'https://control.example.com/api/v1/.well-known/evenfire-mcp-client'
 
-  it('CIMD (public): creates the CR with the pinned spec.oauth shape + attaches to Context', async () => {
+  it('CIMD (public): creates the CR with the pinned spec.oauth shape and leaves every Context alone', async () => {
     mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'notion-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'cimd',
     })
@@ -406,11 +405,12 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       supportsRefresh: true,
     })
 
-    // Context now allowlists the server.
+    expect(cr.spec).not.toHaveProperty('contextRef')
+    // Enabling the server for an agent is a later Context write, not part of the install.
     const ctx = (await gw.getResource('contexts', 'ctx-a', NS)) as {
       spec: { mcpServers?: string[] }
     }
-    expect(ctx.spec.mcpServers).toContain('notion-remote')
+    expect(ctx.spec.mcpServers ?? []).not.toContain('notion-remote')
   })
 
   // Before the per-server callback, an AS without RFC 9207 was refused outright (422
@@ -429,7 +429,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'no-rfc9207-remote',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'pre-registered',
         clientId: 'client-abc',
@@ -449,7 +448,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     const ctx = (await gw.getResource('contexts', 'ctx-a', NS)) as {
       spec: { mcpServers?: string[] }
     }
-    expect(ctx.spec.mcpServers).toContain('no-rfc9207-remote')
+    expect(ctx.spec.mcpServers ?? []).not.toContain('no-rfc9207-remote')
   })
 
   // The CIMD identity lists only the shared callback, so a CIMD install on an AS without
@@ -463,7 +462,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     const createResourceSpy = vi.spyOn(gw, 'createResource')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'cimd-no-iss',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'cimd',
     })
@@ -480,7 +478,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'notion-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'cimd',
     })
@@ -500,7 +497,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'slack-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'pre-registered',
       clientId: 'client-abc',
@@ -546,7 +542,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'stripe-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.linear.app/mcp',
       mode: 'dcr',
     })
@@ -560,7 +555,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'x-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'pre-registered',
       clientId: 'only-id',
@@ -573,7 +567,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'y-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.example.com/mcp',
       mode: 'cimd',
     })
@@ -588,7 +581,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     vi.spyOn(gw, 'createResource').mockRejectedValueOnce(k8sErr)
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'roll-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'pre-registered',
       clientId: 'cid',
@@ -597,24 +589,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     expect(res.status).toBe(409)
     // The client Secret created before the CR must be rolled back.
     await expect(gw.getSecret('roll-remote-oauth-client', NS)).rejects.toThrow()
-  })
-
-  it('rolls back the CR AND Secret when the Context attach fails', async () => {
-    mockDiscovery(rfc9207Result)
-    // Context does NOT exist → getResource('contexts', …) throws K8sNotFoundError.
-    const gw = new MockGateway(NS)
-    const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
-      serverName: 'attach-remote',
-      contextRef: 'missing-ctx',
-      baseUrl: 'https://mcp.notion.com/mcp',
-      mode: 'pre-registered',
-      clientId: 'cid',
-      clientSecret: 'csecret',
-    })
-    expect(res.status).toBeGreaterThanOrEqual(400)
-    // Both the CR and the Secret are rolled back.
-    await expect(gw.getResource('mcpservers', 'attach-remote', NS)).rejects.toThrow()
-    await expect(gw.getSecret('attach-remote-oauth-client', NS)).rejects.toThrow()
   })
 
   it('fenced Secret rollback: a homonym recreated with a NEW uid survives the CR-create rollback (P1)', async () => {
@@ -642,7 +616,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
 
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'race-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'pre-registered',
       clientId: 'cid',
@@ -657,54 +630,11 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     expect(survivor.metadata.uid).toBe(recreatedUid)
   })
 
-  it('fenced CR rollback: a homonym recreated with a NEW uid survives the Context-attach rollback (P1)', async () => {
-    mockDiscovery(rfc9207Result)
-    const gw = gatewayWithContext('ctx-a')
-    const serverName = 'race2-remote'
-
-    // Let the CR create succeed, then fail the Context attach (updateResource).
-    // Between the two, simulate a concurrent uninstall+reinstall that replaces
-    // the McpServer CR with a homonym carrying a NEW uid (createResource is the
-    // real producer, T1). A by-name rollback would delete the wrong object.
-    let recreatedCrUid: string | undefined
-    vi.spyOn(gw, 'updateResource').mockImplementationOnce(async () => {
-      await gw.deleteResource('mcpservers', serverName, NS)
-      const recreated = (await gw.createResource(
-        'mcpservers',
-        { metadata: { name: serverName }, spec: { image: 'other' } },
-        NS
-      )) as { metadata: { uid: string } }
-      recreatedCrUid = recreated.metadata.uid
-      // Not a 409: the attach re-reads and retries on a conflict (the Context status
-      // subresource moves its resourceVersion), so only a non-retryable failure
-      // reaches the compensation this test is about.
-      throw Object.assign(new Error('context write failed'), { code: 500 })
-    })
-
-    const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
-      serverName,
-      contextRef: 'ctx-a',
-      baseUrl: 'https://mcp.notion.com/mcp',
-      mode: 'pre-registered',
-      clientId: 'cid',
-      clientSecret: 'csecret',
-    })
-
-    expect(res.status).toBeGreaterThanOrEqual(400)
-    // The recreated CR (a different uid) must survive: the fenced deleteResource
-    // precondition rejects the compensating delete instead of razing it.
-    const survivor = (await gw.getResource('mcpservers', serverName, NS)) as {
-      metadata: { uid: string }
-    }
-    expect(survivor.metadata.uid).toBe(recreatedCrUid)
-  })
-
   it('forces the namespace server-side (caller-supplied namespace is ignored)', async () => {
     mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'ns-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'cimd',
       namespace: 'attacker-ns',
@@ -723,7 +653,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'md-remote',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'cimd',
         metadata: { namespace: 'evil' },
@@ -753,7 +682,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     )
     const res = await request(app).post('/admin/mcp-servers/remote').send({
       serverName: 'vercel-remote',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.vercel.com/mcp',
       mode: 'dcr',
     })
@@ -783,7 +711,6 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'inconclusive-remote',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'cimd',
       })
@@ -888,7 +815,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'no-rfc9207-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -920,7 +846,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'notion-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -961,7 +886,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'vercel-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1019,7 +943,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'vercel-downgrade-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1066,7 +989,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'echoed-secret-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1101,7 +1023,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'basic-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1134,7 +1055,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'rollback-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1173,7 +1093,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'persistfail-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1193,30 +1112,69 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     await expect(gw.getResource('mcpservers', 'persistfail-dcr', NS)).rejects.toThrow()
   })
 
-  it('rolls back the dynamic client when the Context attach fails', async () => {
+  /** The in-memory store whose bind (the saga's last step) runs `onBind` and then throws. */
+  function failingBindDb(onBind: () => Promise<void> = async () => {}) {
+    const store = makeInMemoryDynamicClientsDb()
+    const db: DbClient = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes('UPDATE dynamic_clients') && text.includes('cr_uid = $5')) {
+          await onBind()
+          throw new Error('bind boom')
+        }
+        return store.db.query(text, values)
+      },
+    } as DbClient
+    return { db, rows: store.rows }
+  }
+
+  it('rolls back the dynamic client and the CR when the bind throws', async () => {
     vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
-    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { db, rows } = failingBindDb()
     const { transport, calls } = makeDcrTransport({
       responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
     })
-    // Context exists at the step-0 precheck, then the ATTACH update fails.
     const gw = gatewayWithContext('ctx-a')
-    vi.spyOn(gw, 'updateResource').mockRejectedValueOnce(new Error('attach boom'))
     const res = await request(
       makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
     )
       .post('/admin/mcp-servers/remote')
-      .send({
-        serverName: 'attach-dcr',
-        contextRef: 'ctx-a',
-        baseUrl: 'https://mcp.notion.com/mcp',
-        mode: 'dcr',
-      })
-    expect(res.status).toBeGreaterThanOrEqual(400)
+      .send({ serverName: 'bind-dcr', baseUrl: 'https://mcp.notion.com/mcp', mode: 'dcr' })
+    expect(res.status).toBe(500)
     expect(rows.size).toBe(0)
     expect(calls.some(c => c.method === 'DELETE')).toBe(true)
-    // The CR minted before attach is rolled back too.
-    await expect(gw.getResource('mcpservers', 'attach-dcr', NS)).rejects.toThrow()
+    await expect(gw.getResource('mcpservers', 'bind-dcr', NS)).rejects.toThrow()
+  })
+
+  it('fenced CR rollback: a homonym recreated with a NEW uid survives the rollback of a failed bind (P1)', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrPublicResult })
+    const serverName = 'race2-dcr'
+    const gw = gatewayWithContext('ctx-a')
+    // Between the CR create and the bind, a concurrent uninstall+reinstall replaces the
+    // McpServer with a homonym carrying a NEW uid (createResource is the real producer,
+    // T1). A by-name rollback would delete the wrong object.
+    let recreatedCrUid: string | undefined
+    const { db } = failingBindDb(async () => {
+      await gw.deleteResource('mcpservers', serverName, NS)
+      const recreated = (await gw.createResource(
+        'mcpservers',
+        { metadata: { name: serverName }, spec: { image: 'other' } },
+        NS
+      )) as { metadata: { uid: string } }
+      recreatedCrUid = recreated.metadata.uid
+    })
+    const { transport } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
+    })
+    const res = await request(
+      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({ serverName, baseUrl: 'https://mcp.notion.com/mcp', mode: 'dcr' })
+    expect(res.status).toBe(500)
+    const survivor = (await gw.getResource('mcpservers', serverName, NS)) as {
+      metadata: { uid: string }
+    }
+    expect(survivor.metadata.uid).toBe(recreatedCrUid)
   })
 
   it('DCR with an unconfigured public callback base URL → 503, nothing registered', async () => {
@@ -1233,36 +1191,12 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'unconfigured-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('callback_base_url_unconfigured')
     // Fail-closed BEFORE any registration POST.
-    expect(calls).toHaveLength(0)
-    expect(rows.size).toBe(0)
-  })
-
-  it('DCR against a missing Context → 404 before minting a throwaway client', async () => {
-    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrPublicResult })
-    const { db, rows } = makeInMemoryDynamicClientsDb()
-    const { transport, calls } = makeDcrTransport({
-      responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
-    })
-    const gw = new MockGateway(NS) // no Context seeded
-    const res = await request(
-      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
-    )
-      .post('/admin/mcp-servers/remote')
-      .send({
-        serverName: 'noctx-dcr',
-        contextRef: 'missing-ctx',
-        baseUrl: 'https://mcp.notion.com/mcp',
-        mode: 'dcr',
-      })
-    expect(res.status).toBe(404)
-    // No registration POST fired; no row persisted.
     expect(calls).toHaveLength(0)
     expect(rows.size).toBe(0)
   })
@@ -1327,7 +1261,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'live-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1391,7 +1324,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'toctou-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1451,7 +1383,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'throwrevoke-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1492,7 +1423,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'inprogress-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1545,7 +1475,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'reclaim-dcr',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1661,7 +1590,6 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       .post('/admin/mcp-servers/remote')
       .send({
         serverName,
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -1819,7 +1747,7 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       })
     )
       .post('/admin/mcp-servers/remote')
-      .send({ serverName, contextRef: 'ctx-a', baseUrl: 'https://mcp.notion.com/mcp', mode: 'dcr' })
+      .send({ serverName, baseUrl: 'https://mcp.notion.com/mcp', mode: 'dcr' })
     return { res, deleteUrls: calls.filter(c => c.method === 'DELETE').map(c => c.url) }
   }
 
@@ -2004,7 +1932,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'atlassian',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.atlassian.com/v2/mcp',
         mode: 'dcr',
       })
@@ -2054,7 +1981,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
         .post('/admin/mcp-servers/remote')
         .send({
           serverName: 'i15-server',
-          contextRef: 'ctx-a',
           baseUrl: 'https://mcp.notion.com/mcp',
           mode: c.mode,
           ...(c.mode === 'pre-registered' ? { clientId: 'cid-i15', clientSecret: 's' } : {}),
@@ -2091,7 +2017,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
         .post('/admin/mcp-servers/remote')
         .send({
           serverName: 'i12-server',
-          contextRef: 'ctx-a',
           baseUrl: 'https://mcp.notion.com/mcp',
           mode: 'dcr',
         })
@@ -2122,7 +2047,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'i12-shared',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -2145,7 +2069,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'i12-omit',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -2173,7 +2096,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
         .post('/admin/mcp-servers/remote')
         .send({
           serverName: 'i12-cimd',
-          contextRef: 'ctx-a',
           baseUrl: 'https://mcp.notion.com/mcp',
           mode: 'dcr',
         })
@@ -2200,7 +2122,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'huge-client-id',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -2229,7 +2150,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'huge-no-handle',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -2246,7 +2166,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'long-cid',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'pre-registered',
         clientId: 'c'.repeat(513),
@@ -2268,7 +2187,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
     mockDiscovery(result)
     return request(app(gw, deps)).post('/admin/mcp-servers/remote').send({
       serverName,
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'pre-registered',
       clientId,
@@ -2302,7 +2220,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'dcr-server',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -2367,7 +2284,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'dcr-server',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'dcr',
       })
@@ -2443,7 +2359,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
         .post('/admin/mcp-servers/remote')
         .send({
           serverName: 'no-origin-dcr',
-          contextRef: 'ctx-a',
           baseUrl: 'https://mcp.notion.com/mcp',
           mode: 'dcr',
         })
@@ -2483,7 +2398,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       const gw = gatewayWithContext('ctx-a')
       const res = await request(app(gw, {})).post('/admin/mcp-servers/remote').send({
         serverName: 'cimd-req',
-        contextRef: 'ctx-a',
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'cimd',
       })
@@ -2500,7 +2414,6 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
     const gw = gatewayWithContext('ctx-a')
     const res = await request(app(gw, {})).post('/admin/mcp-servers/remote').send({
       serverName: 'cimd-req2',
-      contextRef: 'ctx-a',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'cimd',
     })
@@ -2645,7 +2558,6 @@ describe('Microsoft Entra ID — authorizationServer override on /discover and i
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'workiq',
-        contextRef: 'ctx-a',
         baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl,
         mode: 'pre-registered',
         clientId: 'entra-client',
@@ -2759,7 +2671,6 @@ describe('Microsoft Entra ID — authorizationServer override on /discover and i
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'linear-entra',
-        contextRef: 'ctx-a',
         baseUrl: PILOTS.linear.mcpUrl,
         mode: 'cimd',
         authorizationServer: TENANT_AUTHORITY,
@@ -2836,7 +2747,6 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'workiq',
-        contextRef: 'ctx-a',
         baseUrl: pilot.mcpUrl,
         mode: 'pre-registered',
         clientId: 'entra-client-id',
@@ -3000,9 +2910,19 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
     })
   })
 
-  it('row 14: the confirmation is audited once the CR exists, even if attach and its rollback fail', async () => {
+  it('row 14: the confirmation is audited once the CR exists, even if a later step and its rollback fail', async () => {
     const gw = gatewayWithContext()
-    vi.spyOn(gw, 'updateResource').mockRejectedValueOnce(new Error('attach boom'))
+    // An apiserver whose CRD predates `asProfile` prunes it, which fails the install after
+    // the CR exists; the compensating delete then fails too.
+    const createResource = gw.createResource.bind(gw)
+    vi.spyOn(gw, 'createResource').mockImplementation(async (plural, body, ns) => {
+      if (plural !== 'mcpservers') return createResource(plural, body, ns)
+      const pruned = structuredClone(body) as typeof body & {
+        spec?: { oauth?: Record<string, unknown> }
+      }
+      delete pruned.spec?.oauth?.asProfile
+      return createResource(plural, pruned, ns)
+    })
     vi.spyOn(gw, 'deleteResource').mockRejectedValue(new Error('delete boom'))
     const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const res = await entraInstall(
@@ -3011,7 +2931,8 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
       { scopes: [UNKNOWN_GUID_SCOPE], confirmedUnverifiedScopes: [UNKNOWN_GUID_SCOPE] },
       { reqLog }
     )
-    expect(res.status).toBe(500)
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('mcpserver_crd_outdated')
     // The rollback failed, so the CR — and with it the confirmation — is live.
     expect((await installedOauth(gw)).scopes).toEqual([UNKNOWN_GUID_SCOPE, 'offline_access'])
     expect(reqLog.info).toHaveBeenCalledWith(
@@ -3130,7 +3051,6 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'notion-dcr-scopes',
-        contextRef: 'ctx-a',
         baseUrl: pilot.mcpUrl,
         mode: 'dcr',
         scopes: ['custom'],
@@ -3158,7 +3078,6 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
       .post('/admin/mcp-servers/remote')
       .send({
         serverName: 'notion-dcr-dup-scopes',
-        contextRef: 'ctx-a',
         baseUrl: pilot.mcpUrl,
         mode: 'dcr',
         scopes: ['a', 'b', 'a'],
