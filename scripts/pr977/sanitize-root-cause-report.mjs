@@ -112,6 +112,15 @@ const phaseAllowlist = new Set([
   'read-back-owner',
   'owner-readback-mismatch',
   'fixture-owner-readback-verified',
+  'owner-test-start',
+  'owner-provision-start',
+  'owner-provision-complete',
+  'owner-child-created',
+  'owner-fixture-start',
+  'owner-fixture-complete',
+  'production-verifier-start',
+  'production-verifier-accepted',
+  'production-verifier-rejected',
 ])
 const phases = existsSync(phasePath)
   ? readFileSync(phasePath, 'utf8')

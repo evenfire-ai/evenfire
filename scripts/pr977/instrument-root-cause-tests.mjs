@@ -158,6 +158,18 @@ vi.mock('../chatStoreBinding.js', () => ({`,
 if (kind === 'acl') {
   result = replaceOnce(
     result,
+    "import { createWindowsSessionAuthorityPowerShellEnvironment } from '../windowsSessionAuthorityPowerShellEnvironment.js'\n",
+    "import { createWindowsSessionAuthorityPowerShellEnvironment } from '../windowsSessionAuthorityPowerShellEnvironment.js'\nimport { appendFileSync as diagnosticAppendFileSync } from 'node:fs'\n\nconst diagnosticPhases = new Set([\n  'owner-test-start', 'owner-provision-start', 'owner-provision-complete',\n  'owner-child-created', 'owner-fixture-start', 'owner-fixture-complete',\n  'production-verifier-start', 'production-verifier-accepted', 'production-verifier-rejected'\n])\nfunction diagnosticPhase(name: string): void {\n  const phaseFile = process.env.PR977_DIAGNOSTIC_PHASE_FILE\n  if (!phaseFile) return\n  if (!diagnosticPhases.has(name)) throw new Error('Diagnostic phase is not allowlisted')\n  diagnosticAppendFileSync(phaseFile, name + '\\n', 'utf8')\n}\n",
+    'ACL selected-test phase helper'
+  )
+  result = replaceOnce(
+    result,
+    '        ...createWindowsSessionAuthorityPowerShellEnvironment(systemRoot, temporaryDirectory),\n        ...variables,',
+    "        ...createWindowsSessionAuthorityPowerShellEnvironment(systemRoot, temporaryDirectory),\n        PR977_DIAGNOSTIC_PHASE_FILE: process.env.PR977_DIAGNOSTIC_PHASE_FILE ?? '',\n        ...variables,",
+    'ACL fixture phase-file environment'
+  )
+  result = replaceOnce(
+    result,
     "      innerHresult?: string\n    } = {}\n    for (const field of ['errorType', 'innerErrorType'] as const) {",
     "      innerHresult?: string\n      fixturePhase?: string\n      fixturePrivileges?: { restore: string; takeOwnership: string }\n    } = {}\n    for (const field of ['errorType', 'innerErrorType'] as const) {",
     'ACL diagnostic type'
@@ -215,6 +227,18 @@ if (kind === 'acl') {
   for (const [before, after, label] of aclFixtureMarkers) {
     result = replaceOnce(result, before, after, `SYSTEM owner fixture ${label}`)
   }
+  result = replaceOnce(
+    result,
+    '    async ({ sid }) => {\n      provisionWindowsSessionAuthorityDirectory(userDataPath, authorityPath)',
+    "    async ({ sid }) => {\n      diagnosticPhase('owner-test-start')\n      diagnosticPhase('owner-provision-start')\n      provisionWindowsSessionAuthorityDirectory(userDataPath, authorityPath)\n      diagnosticPhase('owner-provision-complete')",
+    'SYSTEM owner provisioning boundaries'
+  )
+  result = replaceOnce(
+    result,
+    '      await fs.mkdir(child)\n      setAllowedChildOwner(child, sid)\n\n      expect(verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath).objectCount).toBe(\n        2\n      )',
+    "      await fs.mkdir(child)\n      diagnosticPhase('owner-child-created')\n      diagnosticPhase('owner-fixture-start')\n      setAllowedChildOwner(child, sid)\n      diagnosticPhase('owner-fixture-complete')\n\n      diagnosticPhase('production-verifier-start')\n      let verified\n      try {\n        verified = verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath)\n        diagnosticPhase('production-verifier-accepted')\n      } catch (error) {\n        diagnosticPhase('production-verifier-rejected')\n        throw error\n      }\n      expect(verified.objectCount).toBe(2)",
+    'SYSTEM owner fixture and production verifier boundaries'
+  )
 }
 
 writeFileSync(testPath, result)
