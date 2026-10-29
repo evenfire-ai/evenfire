@@ -233,7 +233,8 @@ for (const scenario of cases) {
       await page.getByRole('button', { name: 'Add connector', exact: true }).click()
       const dialog = page.getByRole('dialog', { name: 'Add connectors' })
       await expect(dialog).toBeVisible()
-      await dialog.getByRole('option', { name: scenario.connectorName, exact: true }).click()
+      // The picker is MultiSelectActionDialog: one checkbox per connector.
+      await dialog.getByRole('checkbox', { name: scenario.connectorName, exact: true }).check()
       await saveConnector(page, scenario, false)
     })
     await test.step('Wait for the agent rollout the model binding triggered', async () => {

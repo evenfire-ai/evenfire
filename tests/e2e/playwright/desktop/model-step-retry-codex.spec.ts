@@ -243,7 +243,8 @@ async function restoreReceiptConnector(page: Page) {
   const generation = readAgentDeploymentGeneration(active.agentName)
   await page.getByRole('button', { name: 'Add connector', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Add connectors' })
-  await dialog.getByRole('option', { name: active.connectorName, exact: true }).click()
+  // The picker is MultiSelectActionDialog: one checkbox per connector.
+  await dialog.getByRole('checkbox', { name: active.connectorName, exact: true }).check()
   const savedResponse = page.waitForResponse(
     response =>
       new URL(response.url()).pathname ===
