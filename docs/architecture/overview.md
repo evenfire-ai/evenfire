@@ -1383,9 +1383,10 @@ cd mcp-servers/airtable && docker run -p 3000:3000 -e AIRTABLE_API_KEY=pat... ai
 
 # Terminal 2: Run mcp-host
 cd mcp-host
+MCP_HOST=localhost
 CLERUM_DEV_MODE=true \
 OPENAI_API_KEY=sk-... \
-CLERUM_MCP_SERVERS='[{"name":"airtable","transport":{"type":"streamableHttp","url":"http://localhost:3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true}}]' \
+CLERUM_MCP_SERVERS='[{"name":"airtable","transport":{"type":"streamableHttp","url":"http://'"$MCP_HOST"':3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true}}]' \
 npm run dev
 
 # Terminal 3: Run channel-reader

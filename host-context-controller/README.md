@@ -748,7 +748,8 @@ make dev-example
 
 ```bash
 CLERUM_DEV_MODE=true
-CLERUM_MCP_SERVERS='[{"name":"filesystem","spec":{"description":"Filesystem operations","image":"mcp/filesystem:latest","transport":{"type":"sse","url":"http://localhost:3001/sse","port":3001},"enabled":true}}]'
+MCP_HOST=localhost
+CLERUM_MCP_SERVERS='[{"name":"filesystem","spec":{"description":"Filesystem operations","image":"mcp/filesystem:latest","transport":{"type":"sse","url":"http://'"$MCP_HOST"':3001/sse","port":3001},"enabled":true}}]'
 CLERUM_CONTEXTS='[{"name":"dev-context","namespace":"dev","spec":{"contextId":"dev-context","description":"Dev context","mcpServers":["filesystem"]}}]'
 CLERUM_MCP_AUTH='{"github":"ghp_your_token_here"}'
 ```

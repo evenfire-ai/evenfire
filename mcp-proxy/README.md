@@ -49,8 +49,9 @@ MCP Server (e.g. mongodb-mcp:3000, stdio-bridge:3000)
 ```bash
 cd mcp-proxy
 npm install
+MCP_HOST=localhost
 CLERUM_DEV_MODE=true \
-MCP_PROXY_SERVERS='[{"name":"echo","url":"http://localhost:3001/mcp","managed":true,"ready":true,"port":3001}]' \
+MCP_PROXY_SERVERS='[{"name":"echo","url":"http://'"$MCP_HOST"':3001/mcp","managed":true,"ready":true,"port":3001}]' \
 npm run dev
 ```
 
