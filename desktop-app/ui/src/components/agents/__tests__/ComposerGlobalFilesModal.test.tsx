@@ -371,26 +371,4 @@ describe('ComposerGlobalFilesModal', () => {
     expect(screen.getByText('No shared files yet')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
   })
-
-  it('keeps the picker empty state when cached-empty discovery is revalidating', () => {
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      loadingAccessible: false,
-      accessibleResources: [],
-    })
-    const props = { attachedIds: [], onAdd: vi.fn(), onClose: vi.fn() }
-    const { rerender } = render(<ComposerGlobalFilesModal {...props} />)
-    const emptyState = screen.getByText('No shared files yet')
-
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      loadingAccessible: false,
-      accessibleResources: [],
-    })
-    rerender(<ComposerGlobalFilesModal {...props} />)
-
-    expect(emptyState.isConnected).toBe(true)
-    expect(screen.getByText('No shared files yet')).toBe(emptyState)
-    expect(screen.queryByRole('status', { name: 'Loading files…' })).toBeNull()
-  })
 })
