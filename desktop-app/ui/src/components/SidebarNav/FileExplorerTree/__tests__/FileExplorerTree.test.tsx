@@ -2970,3 +2970,89 @@ describe('FileExplorerTree — drag Move presentation lifetime', () => {
     }
   })
 })
+
+describe('FileExplorerTree — sanitizes GFS names in Move outcome toasts', () => {
+  it('cleans bidi and zero-width characters from producer-backed attribution', async () => {
+    const rawSourceName = 'report\u202e.txt'
+    const rawDestinationName = 'Archive\u200b'
+    const conflictMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId: 'file-1', destinationId: 'folderb', drive: 'main', ifMatch: 7 },
+          'fixture-session-token'
+        ),
+      409,
+      { code: 'name_conflict', message: 'an item with this name already exists' }
+    )
+    const moveResource = vi.fn(async () => {
+      throw new Error(conflictMessage)
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      if (id === 'file-1') {
+        return resolveResource(
+          resolvedFile('file-1', rawSourceName, { parentResourceId: 'foldera', version: 7 })
+        )
+      }
+      if (id === 'foldera') {
+        return resolveResource(resolvedDirectory('foldera', 'A', { parentResourceId: 'grand' }))
+      }
+      if (id === 'folderb') {
+        return resolveResource(
+          resolvedDirectory('folderb', rawDestinationName, { parentResourceId: 'grand' })
+        )
+      }
+      return resolveResource(resolvedDirectory('grand', 'Grand', { parentResourceId: null }))
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory'),
+          accessibleResource('folderb', rawDestinationName, 'directory'),
+        ])
+      ),
+      listChildren: vi.fn(async (resourceId: string) =>
+        resourceId === 'foldera'
+          ? listChildrenPage([
+              childView('file-1', rawSourceName, 'file', {
+                parentResourceId: 'foldera',
+                version: 7,
+              }),
+            ])
+          : listChildrenPage([])
+      ),
+      affordances: appServiceAffordanceProducer(async resourceId =>
+        resourceId === 'folderb'
+          ? heldPermissionResponse(['read', 'write'])
+          : heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve,
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
+    })
+    const source = await screen.findByRole('button', { name: 'report.txt' })
+    const destination = await screen.findByRole('button', { name: 'Archive' })
+    const destinationRow = destination
+      .closest('[role="treeitem"]')!
+      .querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+    fireEvent.dragStart(source, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.stringContaining('report.txt → Archive: An item with this name already exists.'),
+        'error'
+      )
+    )
+    const message = pushToast.mock.calls[0]?.[0]
+    expect(message).not.toContain('\u202e')
+    expect(message).not.toContain('\u200b')
+  })
+})

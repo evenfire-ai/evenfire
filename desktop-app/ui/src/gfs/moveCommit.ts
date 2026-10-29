@@ -5,6 +5,7 @@ import {
   nextAvailableGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { describeGfsReadError, parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
+import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 
 /** Server truth from a commit-time resolve of the source. */
 export interface MoveCommitSourceSnapshot {
@@ -379,12 +380,14 @@ export function toastMoveOutcome(
   destinationName: string,
   sourceKind: 'file' | 'directory'
 ): void {
+  const displayedSourceName = sanitizeAppTabTitle(sourceName) || 'Unnamed'
+  const displayedDestinationName = sanitizeAppTabTitle(destinationName) || 'Unnamed'
   switch (outcome.status) {
     case 'committed':
       pushToast?.(
         outcome.renamedTo
-          ? `Moved ${sourceName} to ${destinationName} as ${outcome.renamedTo}`
-          : `Moved ${sourceName} to ${destinationName}`,
+          ? `Moved ${displayedSourceName} to ${displayedDestinationName} as ${sanitizeAppTabTitle(outcome.renamedTo) || 'Unnamed'}`
+          : `Moved ${displayedSourceName} to ${displayedDestinationName}`,
         'success'
       )
       if (sourceKind === 'directory') {
@@ -395,14 +398,20 @@ export function toastMoveOutcome(
       }
       break
     case 'no-op':
-      pushToast?.(`${sourceName} → ${destinationName}: ${outcome.message}`, 'info')
+      pushToast?.(
+        `${displayedSourceName} → ${displayedDestinationName}: ${outcome.message}`,
+        'info'
+      )
       break
     case 'unconfirmed':
     // The dispatch's outcome is unknown: verify-by-identity already ran and
     // could not settle it. Warn — do not report a failure that was not shown.
     case 'rate-limited':
       // A metered refusal is a "try again" verdict, not a failed move.
-      pushToast?.(`${sourceName} → ${destinationName}: ${outcome.message}`, 'warn')
+      pushToast?.(
+        `${displayedSourceName} → ${displayedDestinationName}: ${outcome.message}`,
+        'warn'
+      )
       break
     case 'session-lost':
     // A superseded gesture never reached the server: there is nothing to
@@ -410,6 +419,9 @@ export function toastMoveOutcome(
     case 'gesture-lost':
       break
     default:
-      pushToast?.(`${sourceName} → ${destinationName}: ${outcome.message}`, 'error')
+      pushToast?.(
+        `${displayedSourceName} → ${displayedDestinationName}: ${outcome.message}`,
+        'error'
+      )
   }
 }

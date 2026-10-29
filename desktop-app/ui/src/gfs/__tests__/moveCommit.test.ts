@@ -482,6 +482,27 @@ describe('toastMoveOutcome — unknown outcomes warn, definite negatives error (
     ])
   })
 
+  it('sanitizes captured names and the renamed-to label before toast interpolation', () => {
+    const pushToast = vi.fn()
+    toastMoveOutcome(
+      pushToast,
+      {
+        status: 'committed',
+        version: 8,
+        previousParentId: 'p',
+        renamedTo: 'report\u202e (1).txt',
+      },
+      'report\u202e.txt',
+      'Archive\u200b',
+      'file'
+    )
+
+    expect(pushToast).toHaveBeenCalledWith(
+      'Moved report.txt to Archive as report (1).txt',
+      'success'
+    )
+  })
+
   it('a dead or superseded gesture stays silent', () => {
     expect(present({ status: 'session-lost' })).toEqual([])
     expect(present({ status: 'gesture-lost' })).toEqual([])
