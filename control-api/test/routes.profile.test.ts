@@ -40,6 +40,7 @@ const rpcMock = vi.hoisted(() => ({
 
 const googleAuthMock = vi.hoisted(() => ({
   verifyGoogleIdToken: vi.fn(),
+  GoogleIdentityRejectedError: class GoogleIdentityRejectedError extends Error {},
 }))
 
 const sandboxUiScopeMock = vi.hoisted(() => ({
@@ -155,7 +156,7 @@ describe('routes/profile', () => {
   beforeEach(() => {
     Object.values(svc).forEach(fn => fn.mockReset())
     Object.values(rpcMock).forEach(fn => fn.mockReset())
-    Object.values(googleAuthMock).forEach(fn => fn.mockReset())
+    googleAuthMock.verifyGoogleIdToken.mockReset()
     Object.values(sandboxUiScopeMock).forEach(fn => fn.mockReset())
     Object.values(invitationFlowRegistrationMock).forEach(fn => fn.mockReset())
     Object.values(passwordAuthMock).forEach(fn => fn.mockReset())

@@ -43,7 +43,7 @@ import {
   googleLoginData,
   requestProfilePasswordReset,
 } from '../../services/directory/index.js'
-import { verifyGoogleIdToken } from '../../utils/auth/googleAuth.js'
+import { GoogleIdentityRejectedError, verifyGoogleIdToken } from '../../utils/auth/googleAuth.js'
 import {
   SANDBOX_UI_RPC_HOST_REF,
   classifyRpcTokenDenial,
@@ -171,7 +171,18 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     try {
       const idToken = String(req.body?.idToken || '').trim()
       if (!idToken) return res.status(400).json({ error: 'idToken is required' })
-      const google = await verifyGoogleIdToken(idToken)
+      let google: Awaited<ReturnType<typeof verifyGoogleIdToken>>
+      try {
+        google = await verifyGoogleIdToken(idToken)
+      } catch (error) {
+        // Only the verifier's own identity rejections are a client-facing
+        // credential failure. Library verification errors keep the sanitized
+        // 500 path through the outer catch.
+        if (error instanceof GoogleIdentityRejectedError) {
+          return res.status(401).json({ error: 'Unauthorized' })
+        }
+        throw error
+      }
       const policy = await resolveEffectiveUserAccessPolicy()
       const login = await googleLoginData({
         email: google.email,

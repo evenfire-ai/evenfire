@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { verifyGoogleIdToken } from '../src/utils/auth/googleAuth.js'
+import { GoogleIdentityRejectedError, verifyGoogleIdToken } from '../src/utils/auth/googleAuth.js'
 
 const googleMock = vi.hoisted(() => ({ verifyIdToken: vi.fn() }))
 
@@ -42,8 +42,28 @@ describe('verifyGoogleIdToken', () => {
       }),
     })
 
-    await expect(verifyGoogleIdToken('unverified-token')).rejects.toThrow(
-      'Google token email is not verified'
+    const rejection = verifyGoogleIdToken('unverified-token')
+    await expect(rejection).rejects.toBeInstanceOf(GoogleIdentityRejectedError)
+    await expect(rejection).rejects.toThrow('Google token email is not verified')
+  })
+
+  it('rejects a verified payload without an email', async () => {
+    googleMock.verifyIdToken.mockResolvedValue({
+      getPayload: () => ({ email_verified: true }),
+    })
+
+    await expect(verifyGoogleIdToken('emailless-token')).rejects.toBeInstanceOf(
+      GoogleIdentityRejectedError
+    )
+  })
+
+  it('leaves library verification errors as plain errors', async () => {
+    const libraryError = new Error('Wrong number of segments in token: secret-token')
+    googleMock.verifyIdToken.mockRejectedValue(libraryError)
+
+    await expect(verifyGoogleIdToken('malformed-token')).rejects.toBe(libraryError)
+    await expect(verifyGoogleIdToken('malformed-token')).rejects.not.toBeInstanceOf(
+      GoogleIdentityRejectedError
     )
   })
 })

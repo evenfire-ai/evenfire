@@ -9,6 +9,21 @@ export type VerifiedGoogleProfile = {
   picture?: string
 }
 
+/**
+ * A Google identity that this verifier itself refuses to authenticate after
+ * the ID token verified. Callers answer it as a rejected credential (401).
+ *
+ * Errors raised by `verifyIdToken` (malformed, expired or wrong-audience
+ * tokens, certificate fetch failures) are deliberately not wrapped: they stay
+ * plain errors and keep the existing sanitized 500 path.
+ */
+export class GoogleIdentityRejectedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'GoogleIdentityRejectedError'
+  }
+}
+
 export async function verifyGoogleIdToken(idToken: string): Promise<VerifiedGoogleProfile> {
   const ticket = await googleClient.verifyIdToken({
     idToken,
@@ -16,10 +31,10 @@ export async function verifyGoogleIdToken(idToken: string): Promise<VerifiedGoog
   })
   const payload = ticket.getPayload()
   if (!payload?.email) {
-    throw new Error('Google token has no email')
+    throw new GoogleIdentityRejectedError('Google token has no email')
   }
   if (payload.email_verified !== true) {
-    throw new Error('Google token email is not verified')
+    throw new GoogleIdentityRejectedError('Google token email is not verified')
   }
   return {
     email: payload.email.toLowerCase(),
