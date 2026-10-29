@@ -23,6 +23,12 @@ vi.mock('../windowsSessionAuthorityAcl.js', async importOriginal => {
     await import('../../testSupport/windowsSessionAuthorityAclUnitFixture.js')
   return createWindowsSessionAuthorityAclUnitFixture(actual)
 })
+vi.mock('../windowsSessionAuthorityFileOps.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityFileOps.js')>()
+  const { createWindowsSessionAuthorityFileOpsUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityFileOpsUnitFixture.js')
+  return createWindowsSessionAuthorityFileOpsUnitFixture(actual)
+})
 vi.mock('electron', () => ({
   app: { getPath: () => boundary.directory, isReady: () => true },
   safeStorage: {
