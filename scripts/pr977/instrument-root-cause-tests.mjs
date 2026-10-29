@@ -5,7 +5,7 @@ if (!['auth', 'acl'].includes(kind) || !testPath) {
   throw new Error('Expected diagnostic kind and test path')
 }
 
-const source = readFileSync(testPath, 'utf8')
+const source = readFileSync(testPath, 'utf8').replace(/\r\n/g, '\n')
 function replaceOnce(value, before, after, label) {
   const count = value.split(before).length - 1
   if (count < 1) throw new Error(`Missing instrumentation anchor: ${label}`)
