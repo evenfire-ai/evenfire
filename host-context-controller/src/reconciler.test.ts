@@ -11,6 +11,7 @@ import {
   createMockNetworkingApi,
 } from '../test/__fixtures__/testMocks'
 import { MANAGED_BY_LABEL, MCPSERVER_LABEL, WRC_MANAGED_BY_VALUE } from './constants'
+import { hccLogger } from './logger'
 import {
   McpServerReconciler,
   RUNTIME_NOT_DESIRED_DISABLED_MESSAGE,
@@ -1574,7 +1575,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
       .mockRejectedValueOnce(conflict)
       .mockRejectedValueOnce(conflict)
       .mockRejectedValueOnce(conflict)
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => undefined)
 
     await reconciler.writeStatusCondition(
       {
@@ -1592,10 +1593,15 @@ describe('PR-B B1 — writeStatusCondition', () => {
 
     expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(3)
     expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(3)
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to write status condition Ready=True'),
-      conflict
-    )
+    expect(warn).toHaveBeenCalledWith('Failed to write status condition', {
+      scope: '[Reconciler]',
+      name: 'pg',
+      type: 'Ready',
+      status: 'True',
+      attempt: 3,
+      maxAttempts: 3,
+      err: conflict,
+    })
     warn.mockRestore()
   })
 
@@ -1632,7 +1638,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
       ])
       throw writeFailure
     })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => undefined)
 
     await reconciler.writeStatusCondition(staleServer, {
       type: 'Ready',
@@ -1641,10 +1647,15 @@ describe('PR-B B1 — writeStatusCondition', () => {
       message: 'stale reconcile result',
     })
 
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to write status condition Ready=True'),
-      writeFailure
-    )
+    expect(warn).toHaveBeenCalledWith('Failed to write status condition', {
+      scope: '[Reconciler]',
+      name: 'recreated',
+      type: 'Ready',
+      status: 'True',
+      attempt: 1,
+      maxAttempts: 3,
+      err: writeFailure,
+    })
     warn.mockRestore()
   })
 
@@ -2312,15 +2323,15 @@ describe('full reconciliation inventory authority', () => {
 
   it('rejects when Deployment inventory LIST fails so startup retry remains possible', async () => {
     const inventoryError = new Error('deployment inventory unavailable')
-    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const error = vi.spyOn(hccLogger, 'error').mockImplementation(() => undefined)
     appsApi.listNamespacedDeployment.mockRejectedValueOnce(inventoryError)
 
     await expect(reconciler.fullReconcile([])).rejects.toBe(inventoryError)
 
-    expect(error).toHaveBeenCalledWith(
-      '[Reconciler] Failed to list managed deployments:',
-      inventoryError
-    )
+    expect(error).toHaveBeenCalledWith('Failed to list managed deployments', {
+      scope: '[Reconciler]',
+      err: inventoryError,
+    })
     error.mockRestore()
   })
 
