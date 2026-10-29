@@ -878,6 +878,7 @@ export function migrateDesktopGfsUploadState(value: unknown): {
 
 export interface AppServiceOptions {
   tokenStore?: TokenStore
+  onSandboxUiSessionInvalidated?: () => void
 }
 
 export class AppService {
@@ -894,6 +895,7 @@ export class AppService {
     fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
   private readonly tokenStore: TokenStore
+  private readonly onSandboxUiSessionInvalidated?: () => void
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -996,6 +998,7 @@ export class AppService {
 
   constructor(options: AppServiceOptions = {}) {
     this.tokenStore = options.tokenStore ?? new TokenStore()
+    this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1589,6 +1592,7 @@ export class AppService {
   /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
   private invalidateSandboxUiSession(): void {
     this.sandboxUiSessionEpoch += 1
+    this.onSandboxUiSessionInvalidated?.()
     // The embed and its refresh loop run on the outgoing session. Queued rather
     // than awaited: callers must not wait on a pending open's mint; the serial
     // queue still tears down whatever that open mounts.

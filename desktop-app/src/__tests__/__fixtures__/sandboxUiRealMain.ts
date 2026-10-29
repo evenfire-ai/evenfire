@@ -26,6 +26,8 @@ export type RealMainOptions = {
   mint(recipeName: string, recipeNs: string): Response | Promise<Response>
   /** Everything main sends to the window the embed lives in. */
   onSend(channel: string, payload: unknown): void
+  /** Main's authoritative App-link queue reset and renderer notification. */
+  onSessionInvalidated?: () => void
   /** Every document load the driver starts; unset, a load never commits. */
   onLoad?(webContents: FakeWebContents, url: string): void
 }
@@ -104,7 +106,9 @@ export async function resetRealMain(): Promise<void> {
 /** Starts a main process with one trusted window. The previous one must have been reset. */
 export function startRealMain(options: RealMainOptions): RealMain {
   if (current) throw new Error('a main process is already running: await resetRealMain() first')
-  const service = new AppService()
+  const service = new AppService({
+    onSandboxUiSessionInvalidated: () => options.onSessionInvalidated?.(),
+  })
   ;(service as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
   const parent = new FakeParentWindow()
   const sender = { id: 1 }

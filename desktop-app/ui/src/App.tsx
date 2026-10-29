@@ -1654,26 +1654,6 @@ export function App() {
   }, [vm.currentTeamId, vm.isAuthenticated])
 
   React.useEffect(() => {
-    const identity = vm.authenticatedPrincipalIdentity
-    const previousIdentity = sandboxUiDeepLinkIdentityRef.current
-    sandboxUiDeepLinkIdentityRef.current = identity
-    if (!shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)) return
-
-    pendingSandboxUiDeepLinksRef.current = []
-    setPendingSandboxUiDeepLinks([])
-    processingSandboxUiDeepLinkIdRef.current = null
-    sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
-    sandboxUiDeepLinkOriginNavigationByIdRef.current.clear()
-    sandboxUiDeepLinkOriginAppByIdRef.current.clear()
-    sandboxUiDeepLinkIntentByIdRef.current.clear()
-    sandboxUiDeepLinkClosedOriginEmbedsRef.current.clear()
-    sandboxUiDeepLinkGenerationRef.current += 1
-    void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
-      console.warn('[Desktop] Could not clear stale app deep links:', error)
-    })
-  }, [vm.authenticatedPrincipalIdentity])
-
-  React.useEffect(() => {
     setNotificationDrawerReady(false)
   }, [activeSandboxUiApp?.appRef, headerNotificationTrayOpen])
 
@@ -1816,6 +1796,35 @@ export function App() {
     pendingSandboxUiDeepLinksRef.current = next
     setPendingSandboxUiDeepLinks(next)
   }, [])
+
+  const resetSandboxUiDeepLinkSession = React.useCallback(() => {
+    pendingSandboxUiDeepLinksRef.current = []
+    processingSandboxUiDeepLinkIdRef.current = null
+    sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
+    sandboxUiDeepLinkOriginNavigationByIdRef.current.clear()
+    sandboxUiDeepLinkOriginAppByIdRef.current.clear()
+    sandboxUiDeepLinkIntentByIdRef.current.clear()
+    sandboxUiDeepLinkClosedOriginEmbedsRef.current.clear()
+    sandboxUiDeepLinkGenerationRef.current += 1
+    setPendingSandboxUiDeepLinkState([])
+  }, [setPendingSandboxUiDeepLinkState])
+
+  React.useEffect(() => {
+    const identity = vm.authenticatedPrincipalIdentity
+    const previousIdentity = sandboxUiDeepLinkIdentityRef.current
+    sandboxUiDeepLinkIdentityRef.current = identity
+    if (!shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)) return
+
+    resetSandboxUiDeepLinkSession()
+    void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
+      console.warn('[Desktop] Could not clear stale app deep links:', error)
+    })
+  }, [resetSandboxUiDeepLinkSession, vm.authenticatedPrincipalIdentity])
+
+  React.useEffect(
+    () => window.clerum.sandboxUi.onSessionInvalidated(resetSandboxUiDeepLinkSession),
+    [resetSandboxUiDeepLinkSession]
+  )
 
   const setPendingGfsDeepLinkState = React.useCallback((next: GfsResourceNavigationRequest[]) => {
     const ordered = [...next].sort((left, right) => left.id - right.id)
@@ -2597,6 +2606,7 @@ export function App() {
           const embedSnapshot = embed.getSnapshot()
           if (originApp || embedSnapshot.owner !== null || embedSnapshot.views.size > 0) {
             const handoff = await handOffEmbedBeforeTeamSwitch()
+            if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
             if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
               await cancelSupersededSandboxUiDeepLink(pending.link.id)
               return
@@ -2703,6 +2713,12 @@ export function App() {
         if (outcome === null) return
         await finishSandboxUiDeepLinkLaunch(makeLaunchContext(), launchId, outcome)
       } catch (err) {
+        if (
+          processingGeneration !== sandboxUiDeepLinkGenerationRef.current ||
+          processingSandboxUiDeepLinkIdRef.current !== pending.link.id
+        ) {
+          return
+        }
         if (
           processingGeneration === sandboxUiDeepLinkGenerationRef.current &&
           processingSandboxUiDeepLinkIdRef.current === pending.link.id &&

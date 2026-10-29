@@ -858,6 +858,7 @@ declare global {
           }) => void
         ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
+        onSessionInvalidated: (callback: () => void) => () => void
         // Once per view main tears down, whatever the reason, with the route it
         // represented (`null`: unreadable, keep the last known one).
         onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void

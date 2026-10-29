@@ -818,6 +818,11 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:deepLink', listener)
       return () => ipcRenderer.off('sandboxUi:deepLink', listener)
     },
+    onSessionInvalidated: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('sandboxUi:sessionInvalidated', listener)
+      return () => ipcRenderer.off('sandboxUi:sessionInvalidated', listener)
+    },
     onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => {
       const listener = (_event: unknown, args: SandboxUiReleasedEvent) => callback(args)
       ipcRenderer.on('sandboxUi:released', listener)

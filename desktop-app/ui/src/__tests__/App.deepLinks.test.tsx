@@ -2106,7 +2106,10 @@ describe('App deep-link orchestration', () => {
     queryClient.clear()
   })
 
-  async function exerciseDismissedTerminalLinkAfterRollback(failWorkspaceRestore: boolean) {
+  async function exerciseDismissedTerminalLinkAfterRollback(
+    failWorkspaceRestore: boolean,
+    resetSessionWhilePending = false
+  ) {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const actualControllerModule =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
@@ -2197,6 +2200,7 @@ describe('App deep-link orchestration', () => {
             ],
     }))
     const queue = new SandboxUiDeepLinkQueue()
+    main.setSessionInvalidationCleanup(() => queue.clear())
     acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const view = render(
@@ -2270,11 +2274,57 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
     expect(main.live()).toBeNull()
 
+    let postResetLink: SandboxUiDeepLinkEnvelope | undefined
+    if (resetSessionWhilePending) {
+      const principalIdentity = getController().authenticatedPrincipalIdentity
+      expect(principalIdentity).toBeTruthy()
+      main.endSession()
+      await main.settle()
+      await waitFor(() => expect(queue.list()).toEqual([]))
+      await waitFor(() =>
+        expect(
+          view.container.querySelector('[data-testid="sandbox-ui-deep-link-rollback-pending"]')
+        ).toBeNull()
+      )
+      expect(getController().authenticatedPrincipalIdentity).toBe(principalIdentity)
+      expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+
+      const laterTarget = parseSandboxUiDeepLink(
+        buildSandboxUiDeepLink({
+          recipeNs: 'ns',
+          recipeName: 'ready-team-b-app',
+          path: '/after-session-reset',
+          teamId: 'team-b',
+        })
+      )
+      if (!laterTarget) throw new Error('the production parser rejected the post-reset link')
+      postResetLink = queue.enqueue(laterTarget)
+      act(() => emitDeepLink?.(postResetLink!))
+      await confirmPendingAppLink()
+      await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSettlement + 1))
+      await waitForMounted()
+      await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(postResetLink!.id))
+      expect(main.live()).toMatchObject({
+        appRef: 'ns/ready-team-b-app',
+        routePath: '/after-session-reset',
+      })
+      expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+    }
+
     await act(async () => {
       releaseOriginRollback()
       await Promise.resolve()
       await new Promise<void>(resolve => setImmediate(resolve))
     })
+    if (resetSessionWhilePending) {
+      await main.settle()
+      expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+      expect(
+        acknowledgeDeepLink.mock.calls.filter(([id]) => id === postResetLink?.id)
+      ).toHaveLength(1)
+      queryClient.clear()
+      return
+    }
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
     await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-a'))
     if (failWorkspaceRestore) expect(workspaceRestoreAttempted).toBe(true)
@@ -2328,6 +2378,10 @@ describe('App deep-link orchestration', () => {
 
   it('acknowledges a dismissed terminal link when workspace restoration throws', async () => {
     await exerciseDismissedTerminalLinkAfterRollback(true)
+  })
+
+  it('resets a held App-link owner on same-principal session replacement', async () => {
+    await exerciseDismissedTerminalLinkAfterRollback(false, true)
   })
 
   it('releases the exact app-link owner after workspace capture throws', async () => {
@@ -4095,14 +4149,7 @@ describe('App deep-link orchestration', () => {
     expect(main.live()).toBeNull()
   })
 
-  it('continues a cross-team link after a matching session release without relaunching origin', async () => {
-    const targetApp = {
-      appRef: 'ns/target',
-      title: 'Target App',
-      defaultPath: '/',
-      ready: true,
-      phase: 'active',
-    }
+  it('suppresses a cross-team link after its authentication session is invalidated', async () => {
     listApps.mockResolvedValue({ apps: [READY_APP] })
     currentController = makeController({ initialExperienceLoading: false })
     renderApp(<App />)
@@ -4122,7 +4169,6 @@ describe('App deep-link orchestration', () => {
         })
     )
 
-    listApps.mockResolvedValueOnce({ apps: [targetApp] })
     const target = parseSandboxUiDeepLink(
       buildSandboxUiDeepLink({
         recipeNs: 'ns',
@@ -4138,6 +4184,7 @@ describe('App deep-link orchestration', () => {
     await confirmPendingAppLink()
     await waitFor(() => expect(embedState().handoffs).toHaveLength(1))
     expect(currentController.getCurrentTeamId()).toBe('team-a')
+    const listAppsCallsBeforeReset = listApps.mock.calls.length
 
     main.endSession()
     await waitFor(() =>
@@ -4151,17 +4198,24 @@ describe('App deep-link orchestration', () => {
           )
       ).toBe(true)
     )
-    await waitFor(() => expect(currentController.getCurrentTeamId()).toBe('team-b'))
+    await main.settle()
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
     closeRequestControl.release?.()
-    await waitForAppOpen(2)
-    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    await main.settle()
+    await act(async () => {
+      await Promise.resolve()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    })
 
-    expect(main.openCall(1)).toMatchObject({ recipeNs: 'ns', recipeName: 'target' })
-    expect(openSandboxUi()).toHaveBeenCalledTimes(2)
-    expect(currentController.getCurrentTeamId()).toBe('team-b')
+    expect(currentController.handleEnsureTeamContext).not.toHaveBeenCalled()
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeReset)
+    expect(openSandboxUi()).toHaveBeenCalledOnce()
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+    expect(confirmDialogHarness.mountedCount).toBe(0)
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
     expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
       kind: 'app',
-      app: { appRef: targetApp.appRef },
+      app: { appRef: READY_APP.appRef },
     })
   })
 

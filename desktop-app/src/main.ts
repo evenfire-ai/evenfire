@@ -71,12 +71,18 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
-const appService = new AppService(
-  devIsolationPlan
-    ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
-    : {}
-)
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
+const appService = new AppService({
+  ...(devIsolationPlan
+    ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
+    : {}),
+  onSandboxUiSessionInvalidated: () => {
+    sandboxUiDeepLinkQueue.clear()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sandboxUi:sessionInvalidated')
+    }
+  },
+})
 const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
 const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
 const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkClear(

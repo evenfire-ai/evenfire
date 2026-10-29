@@ -74,6 +74,7 @@ export function createSandboxUiMainFake() {
     (event: { appRef: string; launchId: string; message: string }) => void
   >()
   const refreshRecoveredListeners = new Set<(event: { appRef: string; launchId: string }) => void>()
+  const sessionInvalidatedListeners = new Set<() => void>()
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'clerum-sandbox-ui-main-'))
   const openMints: MintDecision[] = []
   let failNextMount: Error | null = null
@@ -131,6 +132,9 @@ export function createSandboxUiMainFake() {
           for (const listener of [...refreshRecoveredListeners]) {
             listener(payload as { appRef: string; launchId: string })
           }
+          return
+        case 'sandboxUi:sessionInvalidated':
+          for (const listener of [...sessionInvalidatedListeners]) listener()
       }
     })
   }
@@ -189,7 +193,17 @@ export function createSandboxUiMainFake() {
       })
   }
 
-  const main: RealMain = startRealMain({ userDataDir, mint, onSend: fromMain, onLoad })
+  let clearSessionOwnedDeepLinks: () => void = () => {}
+  const main: RealMain = startRealMain({
+    userDataDir,
+    mint,
+    onSend: fromMain,
+    onLoad,
+    onSessionInvalidated: () => {
+      clearSessionOwnedDeepLinks()
+      fromMain('sandboxUi:sessionInvalidated', undefined)
+    },
+  })
   vi.stubGlobal('fetch', sandboxUiMintFetch)
   const attach = main.parent.contentView.addChildView.getMockImplementation() as (
     view: unknown
@@ -261,6 +275,14 @@ export function createSandboxUiMainFake() {
           return () => refreshRecoveredListeners.delete(listener)
         }
       ),
+      onSessionInvalidated: vi.fn((listener: () => void) => {
+        sessionInvalidatedListeners.add(listener)
+        return () => sessionInvalidatedListeners.delete(listener)
+      }),
+    },
+    /** The main bridge clears exactly the test queue owned by the prior session. */
+    setSessionInvalidationCleanup(cleanup: () => void): void {
+      clearSessionOwnedDeepLinks = cleanup
     },
     /** The open request of the `index`-th open call. */
     openCall(index: number): SandboxUiOpenCall {
