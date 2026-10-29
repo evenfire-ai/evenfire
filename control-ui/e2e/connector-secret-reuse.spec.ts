@@ -62,7 +62,6 @@ function connectorResource(
     },
     spec: {
       image: overrides.image ?? 'ghcr.io/example/linear-mcp:1.4.0',
-      contextRef: `ctx-${name}`,
       managed: true,
       enabled: true,
       ...(envSecret ? { envSecret } : {}),
@@ -275,7 +274,11 @@ async function createConnectorUsingSharedSecret(page: Page, name: string) {
   await expect(page.getByLabel(/^Environment variable 1/)).toHaveValue('API_KEY')
 
   await page.getByRole('button', { name: 'Create connector' }).click()
-  await expect(page.getByText('Connector created successfully.')).toBeVisible({ timeout: 15_000 })
+  await expect(
+    page.getByText(
+      'Connector created. Give agents access from the Installed Connectors list whenever you’re ready.'
+    )
+  ).toBeVisible({ timeout: 15_000 })
 }
 
 test.describe('Connector Secret reuse — creation', () => {

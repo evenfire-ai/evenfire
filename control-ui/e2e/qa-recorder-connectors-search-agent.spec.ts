@@ -50,7 +50,6 @@ test.describe('optional QA recorder: Control UI connectors search by agent', () 
         metadata: { name: serverName },
         spec: {
           image: 'clerum/mock-mcp-server:test',
-          contextRef: contextName,
           enabled: true,
           managed: true,
           transport: {

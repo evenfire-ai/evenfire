@@ -4,7 +4,6 @@ import * as api from '../../lib/api'
 import * as clipboard from '../../lib/clipboard'
 import * as remoteMcp from '../../lib/remoteMcp'
 import type { DiscoverRemoteResponse, RemoteTransportProbe } from '../../lib/remoteMcp.types'
-import { buildContextResource } from '../../test/fixtures/contextResource'
 import {
   TRANSPORT_INCONCLUSIVE_TIMEOUT,
   VERCEL_TRANSPORT_DEAD,
@@ -44,16 +43,10 @@ vi.mock('../../lib/remoteMcp', async importOriginal => ({
   installRemoteServer: vi.fn(),
 }))
 
-// Keep isSilentApiError etc.; only getContexts is stubbed. The fixture import is
-// done inside the factory because vi.mock is hoisted above top-level imports.
+// Spied, not stubbed: the wizard must not read Contexts at all.
 vi.mock('../../lib/api', async importOriginal => {
-  const { buildContextResource } = await import('../../test/fixtures/contextResource')
-  return {
-    ...(await importOriginal<typeof import('../../lib/api')>()),
-    getContexts: vi.fn().mockResolvedValue({
-      items: [buildContextResource({ metadata: { name: 'research', resourceVersion: 'rv1' } })],
-    }),
-  }
+  const actual = await importOriginal<typeof import('../../lib/api')>()
+  return { ...actual, getContexts: vi.fn(actual.getContexts) }
 })
 
 // The wizard copies through this helper; the test asserts what it is handed.
@@ -78,10 +71,6 @@ function discovered(
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  // vi.clearAllMocks resets the default resolved value, so restore it.
-  getContextsMock.mockResolvedValue({
-    items: [buildContextResource({ metadata: { name: 'research', resourceVersion: 'rv1' } })],
-  })
   // mockClear keeps queued *Once values; reset so an unused one cannot leak into the
   // next test, then restore the default successful copy.
   copyMock.mockReset()
@@ -108,15 +97,11 @@ function renderWizard(props?: Partial<Parameters<typeof AddRemoteServerWizard>[0
 }
 
 async function fillIdentity(baseUrl = 'https://mcp.notion.com/mcp', name = 'notion-remote') {
-  // Wait until the context select is populated from getContexts (option present).
-  await screen.findByRole('option', { name: 'research' })
+  await screen.findByPlaceholderText('https://mcp.example.com/mcp')
   fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/mcp'), {
     target: { value: baseUrl },
   })
   fireEvent.change(screen.getByPlaceholderText('example-remote'), { target: { value: name } })
-  fireEvent.change(screen.getByRole('combobox', { name: /context/i }), {
-    target: { value: 'research' },
-  })
 }
 
 function clickDetect() {
@@ -161,7 +146,7 @@ describe('AddRemoteServerWizard', () => {
 
   it('keeps Detect disabled and shows an error for a malformed base URL (no detect round-trip)', async () => {
     renderWizard()
-    // Valid name + context, but a non-https URL — the base URL gate must block detect.
+    // Valid name, but a non-https URL — the base URL gate must block detect.
     await fillIdentity('http://mcp.notion.com/mcp')
 
     const detect = screen.getByRole('button', { name: 'Detect' })
@@ -245,7 +230,6 @@ describe('AddRemoteServerWizard', () => {
     expect(installMock).toHaveBeenCalledWith(
       expect.objectContaining({
         serverName: 'linear',
-        contextRef: 'research',
         baseUrl: 'https://mcp.linear.app/mcp',
         mode: 'cimd',
         grantScope: 'user',
@@ -253,8 +237,16 @@ describe('AddRemoteServerWizard', () => {
     )
     // Without a profile, the untouched advertised scopes are left to control-api.
     expect(lastInstallBody()).not.toHaveProperty('scopes')
+    expect(lastInstallBody()).not.toHaveProperty('contextRef')
+    expect(getContextsMock).not.toHaveBeenCalled()
+    expect(screen.queryByText('Context')).not.toBeInTheDocument()
     await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
-    expect(await screen.findByText(/installed\./i)).toBeInTheDocument()
+    // The server is enabled in no Context yet, so the success copy points at agent access.
+    expect(
+      await screen.findByText(
+        'Remote server linear installed. Give agents access from the Installed Connectors list whenever you’re ready.'
+      )
+    ).toBeInTheDocument()
   })
 
   it('shows a mapped install error inline', async () => {
@@ -424,6 +416,12 @@ describe('AddRemoteServerWizard', () => {
     )
     const uri = await screen.findByRole('textbox', { name: 'Redirect URI' })
     expect(uri).toHaveValue(PRE_REGISTERED_PER_SERVER_INSTALLED.redirectUri)
+    expect(
+      screen.getByText(
+        /is installed\. Register this redirect URI in the provider’s OAuth client, then give agents access from the Installed Connectors list\./
+      )
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Users can connect once/)).not.toBeInTheDocument()
     expect(screen.queryByText(/differs from the one shown before/i)).not.toBeInTheDocument()
     // The URI the operator copies after install is the one control-api reported.
     fireEvent.click(screen.getByRole('button', { name: 'Copy redirect URI' }))

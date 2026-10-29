@@ -9,8 +9,6 @@ import type {
 import type { ContextResource, ContextSpec, HostResource, McpServerResource } from './api'
 import { getAgentTeams, getAgentUsers, updateContext } from './api'
 import { mergeAccessSummaries, sortAccessPrincipals } from './connectorAccess'
-import { connectorContextAssignmentError } from './connectorOAuthAccess'
-import { contextAliases, contextForAlias, contextResourceName } from './contextIdentity'
 import { buildContextUpdatePayload, contextMutationError } from './contextMutation'
 
 export type ConnectorAccessState = {
@@ -33,13 +31,27 @@ export function connectorResourceKey(connector: McpServerResource): string {
   return `${resourceNamespace(connector)}/${resourceName(connector)}`
 }
 
+// A Host reaches the Context whose metadata.name equals its spec.contextRef, exactly as the
+// token broker resolves it. Matching spec.contextId too, or trimming, could write the allowlist
+// of a Context the Host does not use.
 function getContextRef(resource: { spec?: Record<string, unknown> }): string {
   const contextRef = resource.spec?.contextRef
-  return typeof contextRef === 'string' ? contextRef.trim() : ''
+  return typeof contextRef === 'string' ? contextRef : ''
+}
+
+function contextName(context: ContextResource): string {
+  return context.metadata?.name ?? ''
+}
+
+function contextNamed(
+  contexts: readonly ContextResource[],
+  name: string
+): ContextResource | undefined {
+  return name ? contexts.find(context => contextName(context) === name) : undefined
 }
 
 function contextSpec(context: ContextResource): ContextSpec {
-  const name = contextResourceName(context)
+  const name = contextName(context)
   return {
     contextId: context.spec?.contextId || name,
     description: context.spec?.description,
@@ -68,16 +80,15 @@ export function connectorAgentBindingsFromContexts(
 ): Record<string, ConnectorAgentBinding[]> {
   const bindings: Record<string, ConnectorAgentBinding[]> = {}
   for (const context of contexts) {
-    const contextName = contextResourceName(context)
-    const aliases = new Set(contextAliases(context))
+    const name = contextName(context)
     const agents = agentTargets
-      .filter(target => aliases.has(target.contextRef))
+      .filter(target => target.contextRef === name)
       .map(target => ({ id: target.name, label: target.label }))
-    if (!contextName || agents.length === 0) continue
+    if (!name || agents.length === 0) continue
 
     for (const connectorName of context.spec?.mcpServers ?? []) {
       const list = bindings[connectorName] ?? []
-      list.push({ contextRef: contextName, agents: sortAccessPrincipals(agents) })
+      list.push({ contextRef: name, agents: sortAccessPrincipals(agents) })
       bindings[connectorName] = list
     }
   }
@@ -180,32 +191,21 @@ export async function loadConnectorAccessState(
 export async function addConnectorToAgentContexts(
   server: ServerRef,
   agents: readonly Pick<ConnectorAgentTarget, 'name' | 'contextRef'>[],
-  contexts: readonly ContextResource[],
-  connectorSpec: { contextRef?: unknown; oauth?: unknown } | undefined
+  contexts: readonly ContextResource[]
 ): Promise<void> {
   const contextRefs = [...new Set(agents.map(agent => agent.contextRef))]
-  const oauthScopeError = connectorContextAssignmentError(connectorSpec, contextRefs)
-  if (oauthScopeError) throw new Error(oauthScopeError)
-
-  const resolvedTargets = contextRefs.map(contextRef => contextForAlias(contexts, contextRef))
-  if (resolvedTargets.some(target => !target)) {
+  const targets = contextRefs.map(contextRef => contextNamed(contexts, contextRef))
+  if (targets.some(target => !target)) {
     throw new Error(
       'One or more selected agents could not be resolved. Please refresh and try again.'
     )
   }
-  const targets = Array.from(
-    new Map(
-      resolvedTargets.map(
-        target => [contextResourceName(target as ContextResource), target] as const
-      )
-    ).values()
-  ) as ContextResource[]
 
   await Promise.all(
-    targets.map(context => {
+    (targets as ContextResource[]).map(context => {
       const spec = contextSpec(context)
       return updateContext(
-        contextResourceName(context),
+        contextName(context),
         buildContextUpdatePayload(context.metadata?.resourceVersion, {
           ...spec,
           mcpServers: Array.from(new Set([...spec.mcpServers, server.name])),
@@ -220,14 +220,14 @@ export async function removeConnectorFromAgentContext(
   binding: ConnectorAgentBinding,
   contexts: readonly ContextResource[]
 ): Promise<void> {
-  const target = contextForAlias(contexts, binding.contextRef)
+  const target = contextNamed(contexts, binding.contextRef)
   if (!target) {
     throw new Error('This agent’s connector set could not be loaded. Please refresh and try again.')
   }
 
   const spec = contextSpec(target)
   await updateContext(
-    contextResourceName(target),
+    contextName(target),
     buildContextUpdatePayload(target.metadata?.resourceVersion, {
       ...spec,
       mcpServers: spec.mcpServers.filter(name => name !== serverName),

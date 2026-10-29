@@ -11,6 +11,7 @@ import {
 import TeamDetailsPage from '../../app/profile-admin/teams/[teamId]/page'
 import UserDetailsPage from '../../app/profile-admin/users/[userId]/page'
 import * as api from '../../lib/api'
+import { buildContextList, buildContextResource } from '../../test/fixtures/contextResource'
 import { ToastProvider } from '../Toast'
 
 const pushMock = vi.fn()
@@ -748,5 +749,135 @@ describe('profile-admin agent compatibility access', () => {
       'ctx-alpha',
       'ctx-unrelated',
     ])
+  })
+})
+
+describe('profile-admin Context membership resolves by Context name', () => {
+  // A Context whose alias was written outside control-api differs from its name; the
+  // membership tables store the name.
+  const externallyAliased = buildContextList([
+    buildContextResource({ metadata: { name: 'ctx-alpha' }, spec: { contextId: 'x-alpha' } }),
+    buildContextResource({ metadata: { name: 'ctx-beta' } }),
+  ])
+
+  it('shows a member Agent reached through a Context membership stored by name', async () => {
+    vi.mocked(api.getContexts).mockResolvedValue(externallyAliased)
+    vi.mocked(api.getAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-alpha'],
+    })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+
+    renderUserDetails()
+
+    expect(await screen.findByRole('button', { name: 'agent-alpha' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'agent-beta' })).not.toBeInTheDocument()
+  })
+
+  it('shows a team Agent reached through a Context membership stored by name', async () => {
+    vi.mocked(api.getContexts).mockResolvedValue(externallyAliased)
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-alpha'],
+    })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+
+    renderTeamDetails()
+
+    expect(await screen.findByRole('button', { name: 'agent-alpha' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'agent-beta' })).not.toBeInTheDocument()
+  })
+
+  describe('when another Context carries a member Context name as its alias', () => {
+    // Listed first so a lookup that also accepts spec.contextId would resolve 'ctx-alpha' to it.
+    const collidingAlias = buildContextList([
+      buildContextResource({ metadata: { name: 'ctx-beta' }, spec: { contextId: 'ctx-alpha' } }),
+      buildContextResource({ metadata: { name: 'ctx-alpha' } }),
+    ])
+
+    beforeEach(() => {
+      vi.mocked(api.getContexts).mockResolvedValue(collidingAlias)
+    })
+
+    it('derives only the Agents of the named Context from the membership', async () => {
+      vi.mocked(api.getAdminUserContexts).mockResolvedValue({
+        userId: 'user-1',
+        contextIds: ['ctx-alpha'],
+      })
+      vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+        userId: 'user-1',
+        agentNames: [],
+        deletedAgentNames: [],
+        deletedHistoryLimit: 10,
+      })
+
+      renderUserDetails()
+
+      expect(await screen.findByRole('button', { name: 'agent-alpha' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'agent-beta' })).not.toBeInTheDocument()
+    })
+
+    it('stores the granted Agent Context by its name', async () => {
+      vi.mocked(api.getAdminUserContexts).mockResolvedValue({ userId: 'user-1', contextIds: [] })
+      vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+        userId: 'user-1',
+        agentNames: [],
+        deletedAgentNames: [],
+        deletedHistoryLimit: 10,
+      })
+      vi.mocked(api.updateAdminUserAgents).mockResolvedValue({
+        userId: 'user-1',
+        agentNames: ['agent-alpha'],
+        deletedAgentNames: [],
+        deletedHistoryLimit: 10,
+      })
+      vi.mocked(api.updateAdminUserContexts).mockResolvedValue({
+        userId: 'user-1',
+        contextIds: ['ctx-alpha'],
+      })
+      renderUserDetails()
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Grant agent' }))
+      const dialog = screen.getByRole('dialog', { name: 'Grant agent access' })
+      fireEvent.click(within(dialog).getByRole('option', { name: /agent-alpha/ }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Grant agent' }))
+
+      await waitFor(() => expect(api.updateAdminUserContexts).toHaveBeenCalledTimes(1))
+      expect(api.updateAdminUserContexts).toHaveBeenCalledWith('user-1', ['ctx-alpha'])
+    })
+  })
+
+  it('does not derive an Agent whose contextRef only matches after trimming', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha ' } },
+        { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
+      ],
+    })
+    vi.mocked(api.getAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-alpha', 'ctx-beta'],
+    })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+
+    renderUserDetails()
+
+    expect(await screen.findByRole('button', { name: 'agent-beta' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'agent-alpha' })).not.toBeInTheDocument()
   })
 })

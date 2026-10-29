@@ -2,12 +2,10 @@
 
 import { useMemo, useState } from 'react'
 import { MultiSelectActionDialog } from '@clerum/frontend-components'
-import { canAssignConnectorToContext } from '@lib/connectorOAuthAccess'
 import type { ConnectorAgentAccessDialogProps } from './types'
 
 export function ConnectorAgentAccessDialog({
   server,
-  connectorSpec,
   agentTargets,
   boundAgentNames,
   pending = false,
@@ -20,11 +18,7 @@ export function ConnectorAgentAccessDialog({
   const items = useMemo(
     () =>
       agentTargets
-        .filter(
-          target =>
-            !boundAgentNamesSet.has(target.name) &&
-            canAssignConnectorToContext(connectorSpec, target.contextRef)
-        )
+        .filter(target => !boundAgentNamesSet.has(target.name))
         .map(target => ({
           id: target.name,
           label: target.label,
@@ -32,7 +26,7 @@ export function ConnectorAgentAccessDialog({
           title: `${target.label} (${target.name})`,
           searchText: `${target.label} ${target.name}`,
         })),
-    [agentTargets, boundAgentNamesSet, connectorSpec]
+    [agentTargets, boundAgentNamesSet]
   )
 
   return (

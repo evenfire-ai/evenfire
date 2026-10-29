@@ -154,7 +154,6 @@ export interface DiscoverRemoteResponse {
 
 export interface InstallRemoteRequest {
   serverName: string
-  contextRef: string
   baseUrl: string
   mode: RemoteInstallMode
   /** Pre-registered confidential only. */
@@ -173,8 +172,6 @@ export interface InstallRemoteRequest {
 export interface InstallRemoteResponse {
   serverName: string
   namespace: string
-  contextRef: string
-  contextUpdated: true
   clientMode: RemoteClientMode
   registrationMode: RemoteRegistrationMode
   callbackVariant?: RemoteCallbackVariant

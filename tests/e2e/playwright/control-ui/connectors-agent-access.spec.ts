@@ -35,7 +35,6 @@ test.describe('Control UI — Connectors agent access', () => {
         metadata: { name: serverName },
         spec: {
           image: 'clerum/mock-mcp-server:test',
-          contextRef: contextA,
           enabled: true,
           managed: true,
           transport: {
@@ -121,8 +120,9 @@ test.describe('Control UI — Connectors agent access', () => {
         name: 'Give agents access to this connector',
       })
       await expect(grantDialog).toBeVisible({ timeout: 10_000 })
-      await expect(grantDialog.getByLabel('Agents')).toBeVisible()
-      await grantDialog.getByRole('option', { name: agentA, exact: true }).click()
+      await expect(grantDialog.getByRole('searchbox', { name: 'Search agents' })).toBeVisible()
+      // Each choice is a labelled checkbox whose name carries the label and the agent name.
+      await grantDialog.getByRole('checkbox', { name: new RegExp(agentA) }).check()
       await grantDialog.getByRole('button', { name: 'Add to agent', exact: true }).click()
       await expect(
         authedPage.getByText(`Connector ${serverName} added to agent ${agentA}.`)

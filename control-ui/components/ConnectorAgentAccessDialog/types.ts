@@ -2,7 +2,6 @@ import type { ConnectorAgentTarget, ServerRef } from '@components/McpServerTable
 
 export type ConnectorAgentAccessDialogProps = {
   server: ServerRef
-  connectorSpec?: { contextRef?: unknown; oauth?: unknown }
   agentTargets: ConnectorAgentTarget[]
   boundAgentNames: string[]
   pending?: boolean

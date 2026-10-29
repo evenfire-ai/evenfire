@@ -42,7 +42,6 @@ vi.mock('@lib/api', () => ({
   getAdminUsers: vi.fn(),
   getAgentTeams: vi.fn(),
   getAgentUsers: vi.fn(),
-  getContexts: vi.fn(),
   getHost: vi.fn(),
   getHostDetailBundle: vi.fn(),
   getHosts: vi.fn(),
@@ -90,12 +89,6 @@ describe('HostAccessTab — extracted access behavior', () => {
     })
     ;(api.getAgentTeams as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       items: [],
-    })
-    ;(api.getContexts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      items: [
-        { metadata: { name: 'foo-context' }, spec: { contextId: 'foo-context' } },
-        { metadata: { name: 'unowned-context' }, spec: { contextId: 'unowned-context' } },
-      ],
     })
     ;(api.getHosts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       items: [{ metadata: { name: 'foo' }, spec: { contextRef: 'foo-context' } }],
