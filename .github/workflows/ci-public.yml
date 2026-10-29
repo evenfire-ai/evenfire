@@ -638,7 +638,10 @@ jobs:
             routes.externalTeamsFinalAuthority.realPostgres.integration.test.ts \
             routes.externalTeamsLegacyAdminRevocation.realPostgres.integration.test.ts \
             userAccessRuntimeContract.realPostgres.integration.test.ts \
-            userSessionDatabaseClock.realPostgres.integration.test.ts
+            userSessionDatabaseClock.realPostgres.integration.test.ts \
+            archiveRevisionLockOrder.realPostgres.integration.test.ts \
+            revisionWritersLockOrder.realPostgres.integration.test.ts \
+            workflowRunReadAndApprovalV1Compatibility.realPostgres.integration.test.ts
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
