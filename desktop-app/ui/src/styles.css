@@ -7820,6 +7820,10 @@ h3 {
   overflow-y: hidden;
 }
 
+.composer-input-shell textarea.ant-input {
+  resize: none;
+}
+
 .composer-input-shell textarea:not(.ant-input):focus {
   border-color: transparent;
   box-shadow: none;
