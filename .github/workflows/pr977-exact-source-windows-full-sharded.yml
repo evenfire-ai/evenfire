@@ -238,6 +238,11 @@ jobs:
           cache-dependency-path: |
             source/desktop-app/package-lock.json
             source/mcp-host/package-lock.json
+            source/control-api/package-lock.json
+
+      - name: Install Control API token-producer dependencies
+        working-directory: source/control-api
+        run: npm ci
 
       - name: Install Host fixture dependencies
         working-directory: source/mcp-host
@@ -256,11 +261,13 @@ jobs:
           EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
           EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
         run: |
+          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
+          $reporter = Join-Path $env:GITHUB_WORKSPACE 'validation/scripts/pr977/windows-diagnostic-reporter.mjs'
           $rawReportPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX-raw.json"
           $reportPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX.json"
           $logPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX.log"
           $shard = "$env:PR977_SHARD_INDEX/8"
-          npm test -- --exclude 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' --exclude 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' "--shard=$shard" --reporter=json "--outputFile.json=$rawReportPath" *> $logPath
+          npm test -- --exclude 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' --exclude 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' "--shard=$shard" "--reporter=$reporter" "--outputFile.json=$rawReportPath" *> $logPath
           $testExit = $LASTEXITCODE
           Write-Output "Full Desktop shard $shard command exit code: $testExit"
           if (-not (Test-Path $rawReportPath)) { throw "Full Desktop shard report is missing: $shard" }

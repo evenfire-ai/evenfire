@@ -1,2 +1,2 @@
 source=41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
-harness=counter-report-diagnostics-v1
+harness=verified-native-and-complete-producer-dependencies-v3
