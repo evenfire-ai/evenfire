@@ -142,6 +142,7 @@ const osxNotarize = resolveOsxNotarizeConfig()
 module.exports = {
   packagerConfig: {
     asar: true,
+    ignore: [/^\/testSupport\//],
     // npm installs internal file: dependencies as symlinks. Copy their contents
     // into the staging app so ASAR never contains links to the monorepo outside
     // desktop-app (which Electron correctly rejects as an escaping symlink).
