@@ -1411,9 +1411,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     rowAffordancesError: rowAffordancesQuery.error
       ? toPresentedMessage(rowAffordancesQuery.error)
       : null,
-    // These query-facing flags mean an enabled query has no settled result,
-    // not that an empty cached result happens to be fetching again. Keep the
-    // children initial request independent from discovery failure handling.
+    // Initial-load flags use query-result presence with enablement and error guards.
+    // Authority waiting can also withhold settled cached data; current-view loading
+    // includes that wait and an active refetch that must replace an ineligible result.
     loading,
     loadingAccessible,
     // FilesPage has a stricter page-wide authority gate than other controller
