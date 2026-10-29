@@ -180,6 +180,36 @@ describe('main.ts GFS navigation-generation composition', () => {
     })
   })
 
+  it('returns null for denied sync IPC without changing the generation', () => {
+    const mainWindow = harness.windows[0]
+    const ownContents = mainWindow?.webContents
+    if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
+    const getGeneration = registeredHandler(harness.onHandlers, 'gfs:getUserNavigationGeneration')
+    const advanceGeneration = registeredHandler(
+      harness.onHandlers,
+      'gfs:advanceUserNavigationGeneration'
+    )
+
+    for (const denied of [
+      ipcEvent({ id: 42 }, 'https://untrusted.example/'),
+      ipcEvent({ id: 42 }),
+    ]) {
+      expect(() => getGeneration(denied)).not.toThrow()
+      expect(denied.returnValue).toBeNull()
+    }
+    for (const denied of [
+      ipcEvent({ id: 42 }, 'https://untrusted.example/'),
+      ipcEvent({ id: 42 }),
+    ]) {
+      expect(() => advanceGeneration(denied)).not.toThrow()
+      expect(denied.returnValue).toBeNull()
+    }
+
+    const ownerEvent = ipcEvent(ownContents)
+    getGeneration(ownerEvent)
+    expect(ownerEvent.returnValue).toBe(0)
+  })
+
   it('composes generation stamping and logout purge through the real main router', async () => {
     const mainWindow = harness.windows[0]
     const ownContents = mainWindow?.webContents

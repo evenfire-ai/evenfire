@@ -281,20 +281,28 @@ ipcMain.handle('gfs:listPendingDeepLinks', event => {
   return { links: gfsResourceDeepLinkQueue.list() }
 })
 
-function assertTrustedGfsNavigationSender(event: IpcMainEvent): void {
-  assertTrustedSender(event)
-  if (!mainWindow || event.sender !== mainWindow.webContents) {
-    throw new Error('Untrusted GFS navigation sender')
+function isTrustedGfsNavigationSender(event: IpcMainEvent): boolean {
+  try {
+    assertTrustedSender(event)
+  } catch {
+    return false
   }
+  return Boolean(mainWindow && event.sender === mainWindow.webContents)
 }
 
 ipcMain.on('gfs:getUserNavigationGeneration', event => {
-  assertTrustedGfsNavigationSender(event)
+  if (!isTrustedGfsNavigationSender(event)) {
+    event.returnValue = null
+    return
+  }
   event.returnValue = gfsUserNavigationGeneration.current()
 })
 
 ipcMain.on('gfs:advanceUserNavigationGeneration', event => {
-  assertTrustedGfsNavigationSender(event)
+  if (!isTrustedGfsNavigationSender(event)) {
+    event.returnValue = null
+    return
+  }
   event.returnValue = gfsUserNavigationGeneration.advance()
 })
 

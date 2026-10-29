@@ -123,8 +123,8 @@ declare global {
         switch: (teamId: string) => Promise<SessionState>
       }
       gfs: {
-        getUserNavigationGeneration?: () => number
-        advanceUserNavigationGeneration?: () => number
+        getUserNavigationGeneration?: () => number | null
+        advanceUserNavigationGeneration?: () => number | null
         copyDeepLink?: (uri: string) => Promise<{ url: string }>
         listPendingDeepLinks?: () => Promise<{
           links: Array<{
