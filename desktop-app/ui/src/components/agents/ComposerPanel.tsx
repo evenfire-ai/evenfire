@@ -1044,19 +1044,22 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     const attachment = item.attachment
                     const typeLabel = getComposerReferenceTypeLabel(attachment.type)
                     return (
-                      <Flex align="center" gap="small" key={item.id}>
-                        <Tag icon={getComposerReferenceIcon(attachment)} title={typeLabel}>
-                          {attachment.label}
+                      <Flex align="center" key={item.id}>
+                        <Tag title={typeLabel}>
+                          <Flex align="center" gap={4}>
+                            <span aria-hidden="true">{getComposerReferenceIcon(attachment)}</span>
+                            <Typography.Text>{attachment.label}</Typography.Text>
+                            <AntButton
+                              htmlType="button"
+                              type="text"
+                              size="small"
+                              shape="circle"
+                              icon={<CloseOutlined aria-hidden="true" width={12} height={12} />}
+                              onClick={() => onRemoveComposerReferenceAttachment(attachment.id)}
+                              aria-label={`Remove ${attachment.label}`}
+                            />
+                          </Flex>
                         </Tag>
-                        <AntButton
-                          htmlType="button"
-                          type="text"
-                          size="small"
-                          shape="circle"
-                          icon={<CloseOutlined aria-hidden="true" width={16} height={16} />}
-                          onClick={() => onRemoveComposerReferenceAttachment(attachment.id)}
-                          aria-label={`Remove ${attachment.label}`}
-                        />
                       </Flex>
                     )
                   }
@@ -1066,54 +1069,63 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     return (
                       <Flex
                         align="center"
-                        gap="small"
                         key={item.id}
                         data-testid="composer-file-chip"
                         data-file-status={attachment.status}
                         title={`${attachment.filename} - ${meta}`}
                       >
-                        <Tag icon={<FileTextOutlined aria-hidden="true" width={14} height={14} />}>
-                          <Flex vertical>
-                            <Typography.Text>{attachment.filename}</Typography.Text>
-                            <Typography.Text type="secondary">{meta}</Typography.Text>
+                        <Tag>
+                          <Flex align="center" gap={4}>
+                            <span aria-hidden="true">
+                              <FileTextOutlined width={14} height={14} />
+                            </span>
+                            <Flex vertical>
+                              <Typography.Text>{attachment.filename}</Typography.Text>
+                              <Typography.Text type="secondary">{meta}</Typography.Text>
+                            </Flex>
+                            <AntButton
+                              htmlType="button"
+                              type="text"
+                              size="small"
+                              shape="circle"
+                              icon={<CloseOutlined aria-hidden="true" width={12} height={12} />}
+                              onClick={() => onRemoveComposerFileAttachment(attachment.id)}
+                              aria-label={`Remove ${attachment.filename}`}
+                            />
                           </Flex>
                         </Tag>
-                        <AntButton
-                          htmlType="button"
-                          type="text"
-                          size="small"
-                          shape="circle"
-                          icon={<CloseOutlined aria-hidden="true" width={16} height={16} />}
-                          onClick={() => onRemoveComposerFileAttachment(attachment.id)}
-                          aria-label={`Remove ${attachment.filename}`}
-                        />
                       </Flex>
                     )
                   }
                   const attachment = item.attachment
                   const tooltip = getComposerImageTooltip(attachment)
                   return (
-                    <Flex align="center" gap="small" key={item.id} title={tooltip}>
-                      <Tag icon={<PictureOutlined aria-hidden="true" width={14} height={14} />}>
-                        <AntButton
-                          htmlType="button"
-                          type="link"
-                          size="small"
-                          onClick={() => setPreviewAttachmentId(attachment.id)}
-                          title={tooltip}
-                        >
-                          {attachment.name}
-                        </AntButton>
+                    <Flex align="center" key={item.id} title={tooltip}>
+                      <Tag>
+                        <Flex align="center" gap={4}>
+                          <span aria-hidden="true">
+                            <PictureOutlined width={14} height={14} />
+                          </span>
+                          <AntButton
+                            htmlType="button"
+                            type="link"
+                            size="small"
+                            onClick={() => setPreviewAttachmentId(attachment.id)}
+                            title={tooltip}
+                          >
+                            {attachment.name}
+                          </AntButton>
+                          <AntButton
+                            htmlType="button"
+                            type="text"
+                            size="small"
+                            shape="circle"
+                            icon={<CloseOutlined aria-hidden="true" width={12} height={12} />}
+                            onClick={() => onRemoveComposerImageAttachment(attachment.id)}
+                            aria-label={`Remove ${attachment.name}`}
+                          />
+                        </Flex>
                       </Tag>
-                      <AntButton
-                        htmlType="button"
-                        type="text"
-                        size="small"
-                        shape="circle"
-                        icon={<CloseOutlined aria-hidden="true" width={16} height={16} />}
-                        onClick={() => onRemoveComposerImageAttachment(attachment.id)}
-                        aria-label={`Remove ${attachment.name}`}
-                      />
                     </Flex>
                   )
                 })}
