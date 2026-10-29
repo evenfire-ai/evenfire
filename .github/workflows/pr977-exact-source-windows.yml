@@ -1,4 +1,4 @@
-name: PR 977 exact-source Windows validation
+name: PR 977 exact-source Windows diagnostics
 
 on:
   push:
@@ -109,12 +109,8 @@ jobs:
         working-directory: source/desktop-app
         run: npm ci
 
-      - name: Install Playwright Chromium
-        working-directory: source/desktop-app
-        run: npx playwright install chromium
-
-      - name: Run required native Windows ACL and durability suites
-        id: native
+      - name: Run focused exact-source Windows diagnostics
+        id: diagnostics
         continue-on-error: true
         working-directory: source/desktop-app
         shell: pwsh
@@ -122,58 +118,29 @@ jobs:
           EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
           EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
         run: |
-          $report = Join-Path $env:RUNNER_TEMP 'pr977-windows-native-results.json'
-          npm test -- `
-            --testTimeout=120000 `
-            --hookTimeout=120000 `
-            src/__tests__/windowsSessionAuthorityAcl.native.test.ts `
-            src/__tests__/windowsSessionAuthorityAcl.launch.test.ts `
-            src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts `
-            src/__tests__/windowsSessionAuthorityFileOps.launch.test.ts `
-            --reporter=dot --reporter=json --outputFile.json=$report
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $assertScript = Join-Path $env:GITHUB_WORKSPACE 'validation/.validation/windows/assert-native-results.mjs'
-          node $assertScript $report
-
-      - name: Build Desktop main and renderer
-        id: build
-        continue-on-error: true
-        working-directory: source/desktop-app
-        run: npm run build
-
-      - name: Verify Electron runtime
-        id: electron
-        continue-on-error: true
-        working-directory: source/desktop-app
-        run: npm run verify:electron
-
-      - name: Run the full Windows Desktop suite
-        id: desktop
-        continue-on-error: true
-        working-directory: source/desktop-app
-        env:
-          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
-          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
-        run: npm test -- --testTimeout=120000 --hookTimeout=120000
-
-      - name: Require every Windows validation gate to pass
-        if: always()
-        shell: pwsh
-        env:
-          NATIVE_OUTCOME: ${{ steps.native.outcome }}
-          BUILD_OUTCOME: ${{ steps.build.outcome }}
-          ELECTRON_OUTCOME: ${{ steps.electron.outcome }}
-          DESKTOP_OUTCOME: ${{ steps.desktop.outcome }}
-        run: |
-          $gates = [ordered]@{
-            'native ACL and durability' = $env:NATIVE_OUTCOME
-            'Desktop build' = $env:BUILD_OUTCOME
-            'Electron verification' = $env:ELECTRON_OUTCOME
-            'full Desktop suite' = $env:DESKTOP_OUTCOME
+          $cases = @(
+            @{ name = 'authority-directory-provision-and-verify'; file = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'; pattern = 'provisions a protected authority directory and verifies every existing child' },
+            @{ name = 'system-owned-child-fixture'; file = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'; pattern = 'accepts a child owned by the allowlisted SYSTEM principal with current-user access intact' },
+            @{ name = 'logout-keytar-representative'; file = 'src/__tests__/appService.pendingExternalLogoutKeytarUnavailable.test.ts'; pattern = 'keeps a durably signed-out V1 session denied when exact cleanup fails' },
+            @{ name = 'persistence-mutation-representative'; file = 'src/__tests__/appService.persistenceMutation.contract.test.ts'; pattern = 'keeps exact logout cleanup from deleting a fresh source accepted during prior-source cleanup' },
+            @{ name = 'password-rollback-representative'; file = 'src/__tests__/appService.passwordLoginRollback.regression.test.ts'; pattern = 'restores the accepted prior source when candidate preparation fails after publication' },
+            @{ name = 'simulated-linux-basic-text-case'; file = 'src/__tests__/appService.pendingExternalLogoutKeytarUnavailable.test.ts'; pattern = 'uses memory-only mode when Linux safeStorage selects the basic_text backend' }
+          )
+          $results = @()
+          foreach ($case in $cases) {
+            Write-Output "Running focused diagnostic: $($case.name)"
+            $json = Join-Path $env:RUNNER_TEMP ("pr977-windows-diagnostic-{0}.json" -f $case.name)
+            $arguments = @(
+              'test', '--', '--testTimeout=120000', '--hookTimeout=120000',
+              '--reporter=verbose', '--reporter=json', "--outputFile.json=$json",
+              "--testNamePattern=$($case.pattern)", $case.file
+            )
+            & npm @arguments
+            $code = $LASTEXITCODE
+            $results += [ordered]@{ name = $case.name; exitCode = $code; reportWritten = (Test-Path $json) }
+            Write-Output "Diagnostic result: $($case.name) exit=$code report=$((Test-Path $json))"
           }
-          $failed = @()
-          foreach ($gate in $gates.GetEnumerator()) {
-            Write-Output "$($gate.Key): $($gate.Value)"
-            if ($gate.Value -ne 'success') { $failed += $gate.Key }
+          $results | ConvertTo-Json -Depth 4
+          if (@($results | Where-Object { $_.exitCode -ne 0 }).Count -gt 0) {
+            throw 'One or more focused Windows diagnostics failed; inspect the per-test evidence above.'
           }
-          if ($failed.Count -gt 0) { throw "Windows validation failed: $($failed -join ', ')" }

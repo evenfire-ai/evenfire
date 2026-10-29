@@ -20,8 +20,7 @@ const powershell = path.join(
   'v1.0',
   'powershell.exe'
 )
-const powershellLauncher =
-  '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
+const powershellLauncher = String.raw`$sourceText = [Console]::In.ReadToEnd(); try { & ([scriptblock]::Create($sourceText)) } catch { $exception = $_.Exception; $inner = $exception.InnerException; while ($inner -and $inner.InnerException) { $inner = $inner.InnerException }; $safe = [ordered]@{ errorType = $exception.GetType().Name; hresult = ('0x{0:X8}' -f $exception.HResult); innerErrorType = if ($inner) { $inner.GetType().Name } else { $null }; innerHresult = if ($inner) { '0x{0:X8}' -f $inner.HResult } else { $null } }; [Console]::Error.WriteLine('EVENFIRE_FIXTURE_FAILURE=' + ($safe | ConvertTo-Json -Compress)); exit 1 }`
 const powershellOperations = new Set([
   'add-everyone-modify',
   'add-trusted-installer-modify',
@@ -52,6 +51,14 @@ let userDataPath = ''
 let authorityPath = ''
 
 function powershellFailureCategory(stderr: string): string {
+  const diagnostic = powershellFixtureDiagnostics(stderr)
+  const errorTypes = [diagnostic?.errorType, diagnostic?.innerErrorType]
+  if (errorTypes.some(type => type === 'PrivilegeNotHeldException')) return 'privilege-not-held'
+  if (errorTypes.some(type => type === 'UnauthorizedAccessException')) return 'access-denied'
+  if (errorTypes.some(type => type === 'Win32Exception')) return 'win32-api-failure'
+  if (errorTypes.some(type => type === 'ArgumentException')) return 'argument-rejected'
+  if (errorTypes.some(type => type === 'PlatformNotSupportedException'))
+    return 'platform-api-unavailable'
   if (stderr.includes('fixture-inherit-only-ace-not-persisted'))
     return 'fixture-ace-readback-mismatch'
   if (stderr.includes('InvalidCastException')) return 'invalid-cast'
@@ -61,6 +68,46 @@ function powershellFailureCategory(stderr: string): string {
   if (/ParserError|parse error/i.test(stderr)) return 'script-parse-failed'
   if (/Cannot find an overload/i.test(stderr)) return 'overload-resolution-failed'
   return 'unclassified-powershell-failure'
+}
+
+function powershellFixtureDiagnostics(
+  stderr: string
+): { errorType?: string; hresult?: string; innerErrorType?: string; innerHresult?: string } | null {
+  const match = stderr.match(/EVENFIRE_FIXTURE_FAILURE=(\{[^\r\n]*\})/)
+  if (!match) return null
+  try {
+    const parsed: unknown = JSON.parse(match[1]!)
+    if (!parsed || typeof parsed !== 'object') return null
+    const fields = parsed as Record<string, unknown>
+    const allowedTypes = new Set([
+      'ArgumentException',
+      'DirectoryNotFoundException',
+      'IOException',
+      'InvalidOperationException',
+      'MethodInvocationException',
+      'PlatformNotSupportedException',
+      'PrivilegeNotHeldException',
+      'UnauthorizedAccessException',
+      'Win32Exception',
+    ])
+    const output: {
+      errorType?: string
+      hresult?: string
+      innerErrorType?: string
+      innerHresult?: string
+    } = {}
+    for (const field of ['errorType', 'innerErrorType'] as const) {
+      const value = fields[field]
+      if (typeof value === 'string' && allowedTypes.has(value)) output[field] = value
+    }
+    for (const field of ['hresult', 'innerHresult'] as const) {
+      const value = fields[field]
+      if (typeof value === 'string' && /^0x[0-9A-F]{8}$/i.test(value)) output[field] = value
+    }
+    return output
+  } catch {
+    return null
+  }
 }
 
 function powershellProcessErrorCode(error: Error | undefined): string | undefined {
@@ -101,6 +148,7 @@ function runPowerShell(
     }
   )
   if (result.error || result.status !== 0 || result.signal) {
+    const fixtureDiagnostic = powershellFixtureDiagnostics(result.stderr ?? '')
     throw new Error(
       `Native Windows ACL fixture failed: ${JSON.stringify({
         operation,
@@ -111,6 +159,7 @@ function runPowerShell(
         stdoutPresent: Boolean(result.stdout),
         stderrPresent: Boolean(result.stderr),
         powershellFailureCategory: powershellFailureCategory(result.stderr ?? ''),
+        ...(fixtureDiagnostic ?? {}),
       })}`
     )
   }
