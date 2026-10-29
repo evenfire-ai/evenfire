@@ -227,6 +227,7 @@ function NotificationSoundVolumeField({
       />
       <Flex flex={1}>
         <Slider
+          className="settings-notification-volume-slider"
           ariaLabelledByForHandle="settings-notification-sound-label"
           ariaValueTextFormatterForHandle={() => volumeLabel}
           min={0}
@@ -238,6 +239,7 @@ function NotificationSoundVolumeField({
         />
       </Flex>
       <InputNumber
+        className="settings-notification-volume-input"
         aria-label="Notification sound volume percentage"
         type="number"
         min={0}

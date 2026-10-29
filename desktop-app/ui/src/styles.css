@@ -3540,6 +3540,17 @@ h3 {
   text-align: right;
 }
 
+.settings-notification-volume-slider.ant-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings-notification-volume-input.ant-input-number {
+  width: 120px;
+  max-width: 100%;
+  flex: 0 1 120px;
+}
+
 .settings-actions {
   display: flex;
   flex-wrap: wrap;
