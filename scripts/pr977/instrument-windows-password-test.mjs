@@ -35,6 +35,16 @@ const markers = [
   'password-login-http-response',
   'me-http-start',
   'me-http-response',
+  'credential-write-start',
+  'credential-write-complete',
+  'pending-logout-start',
+  'pending-logout-settled',
+  'accepted-login-start',
+  'accepted-login-settled',
+  'acceptance-transaction-start',
+  'acceptance-transaction-settled',
+  'login-persistence-start',
+  'login-persistence-settled',
   'test-1-start',
   'test-2-start',
   'test-3-start',
@@ -103,6 +113,16 @@ replaceOnce(
     "    pr977Mark('beforeEach-complete')\n  })\n\n  afterEach"
 )
 replaceOnce(
+  '    fixture.setPassword.mockImplementation(\n' +
+    '      async (service: string, account: string, token: string) => {\n' +
+    '        fixture.keychain.set(keyOf(service, account), token)\n',
+  '    fixture.setPassword.mockImplementation(\n' +
+    '      async (service: string, account: string, token: string) => {\n' +
+    "        pr977Mark('credential-write-start')\n" +
+    '        fixture.keychain.set(keyOf(service, account), token)\n' +
+    "        pr977Mark('credential-write-complete')\n"
+)
+replaceOnce(
   '  afterEach(async () => {\n    vi.unstubAllGlobals()\n    vi.restoreAllMocks()\n' +
     '    if (directory) await fs.rm(directory, { recursive: true, force: true })\n',
   "  afterEach(async () => {\n    pr977Mark('afterEach-start')\n" +
@@ -125,6 +145,26 @@ replaceOnce(
   "  it('restores the accepted prior source when candidate preparation fails after publication', async () => {\n",
   "  it('restores the accepted prior source when candidate preparation fails after publication', async () => {\n" +
     "    pr977Mark('test-1-start')\n"
+)
+replaceFirst(
+  '    const service = createService()\n',
+  '    const service = createService()\n' +
+    '    const diagnosticReceiver = service as unknown as Record<\n' +
+    '      string,\n' +
+    '      (...args: unknown[]) => Promise<unknown>\n' +
+    '    >\n' +
+    '    for (const [method, start, settled] of [\n' +
+    "      ['applyPendingExternalLogoutBeforeLogin', 'pending-logout-start', 'pending-logout-settled'],\n" +
+    "      ['installAuthenticatedLogin', 'accepted-login-start', 'accepted-login-settled'],\n" +
+    "      ['installAuthenticatedLoginWithAcceptanceTransaction', 'acceptance-transaction-start', 'acceptance-transaction-settled'],\n" +
+    "      ['installAuthenticatedLoginWithinPersistence', 'login-persistence-start', 'login-persistence-settled'],\n" +
+    '    ] as const) {\n' +
+    '      const original = diagnosticReceiver[method].bind(service)\n' +
+    '      diagnosticReceiver[method] = async (...args: unknown[]) => {\n' +
+    '        pr977Mark(start)\n' +
+    '        try { return await original(...args) } finally { pr977Mark(settled) }\n' +
+    '      }\n' +
+    '    }\n'
 )
 replaceFirst(
   '    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {\n' +
