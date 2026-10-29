@@ -53,6 +53,13 @@ changing the value does not create a second home or migrate the existing one,
 and the reconciler only provisions pending rows with no drive or the configured
 drive.
 
+The governed-root guard and the `ancestor_home_exposure` check apply to the
+root and a top-level `Users` folder on whichever drive a request targets; they
+do not read `GFS_HOME_DRIVE`. The core serves one drive (`main`), so in
+practice this is the home drive. A top-level `Users` folder that already exists
+on that drive becomes immutable once the migration runs, because it is the
+parent of the homes.
+
 ## Rollout and per-cluster verification
 
 1. Before deploying to dev, require the release's J1–J8 and access-guard
@@ -69,7 +76,10 @@ drive.
 3. When the new Control API starts, it creates `/Users` as needed under the
    drive structure lock, then enrolls and provisions homes. Do not add
    `/Users` to a GFS layout. Backfill and provisioning run automatically; a
-   60-second tick is a scheduling interval, not a completion deadline.
+   60-second tick is a scheduling interval, not a completion deadline. Each
+   tick enrolls up to 200 existing users and provisions up to 50 pending homes
+   (`control-api/src/services/gfsUserHomeReconciler.ts`), so 10,000 users take
+   about 50 minutes to enroll and about 3.3 hours to provision.
 4. In each cluster, open the operator home inventory and watch the overall
    `pending` count fall to zero. Review all `conflict` entries separately.
    Production follows dev through the existing promotion.
@@ -120,12 +130,12 @@ Use the user detail block as an operator. Never delete a foreign item or adopt
 it as the home to make a conflict disappear; renaming or moving it out of the
 reserved path in the Control UI GFS browser is allowed.
 
-| Conflict                              | Cause                                                                                                                              | Operator action                                                                                                                                                                                              |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `path_conflict`, home not yet created | Another item occupies `/Users/<name>`.                                                                                             | Rename or move that item in the GFS browser and select **Retry**, or enter a different valid folder name and select **Retry**. The item and its contents are never changed by the reconciler.                 |
-| `path_conflict`, home already bound   | The bound home is no longer at `/Users/<name>`. This happens only through a manual database change.                               | A bound home root cannot be moved or renamed, even by an operator. An administrator with cluster access corrects the path in the database; move any item occupying the reserved path first, then select **Retry**. |
-| `ancestor_grant_conflict`             | A user, team, agent, or context grant or share on the drive root or `/Users` is inheritable (created before this release, or by a direct database change). | Remove the entry or make it non-inheritable with operator authority, then select **Retry**.                                                                                                                   |
-| `ownership_conflict`                  | A bound home's owner grant is missing, narrowed, or no longer inheritable.                                                         | Select **Restore owner access**, or re-grant the owner all five permissions with inheritance in the grant panel. Retry cannot restore this grant.                                                             |
+| Conflict                              | Cause                                                                                                                                                      | Operator action                                                                                                                                                                                                    |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `path_conflict`, home not yet created | Another item occupies `/Users/<name>`.                                                                                                                     | Rename or move that item in the GFS browser and select **Retry**, or enter a different valid folder name and select **Retry**. The item and its contents are never changed by the reconciler.                      |
+| `path_conflict`, home already bound   | The bound home is no longer at `/Users/<name>`. This happens only through a manual database change.                                                        | A bound home root cannot be moved or renamed, even by an operator. An administrator with cluster access corrects the path in the database; move any item occupying the reserved path first, then select **Retry**. |
+| `ancestor_grant_conflict`             | A user, team, agent, or context grant or share on the drive root or `/Users` is inheritable (created before this release, or by a direct database change). | Remove the entry or make it non-inheritable with operator authority, then select **Retry**.                                                                                                                        |
+| `ownership_conflict`                  | A bound home's owner grant is missing, narrowed, or no longer inheritable.                                                                                 | Select **Restore owner access**, or re-grant the owner all five permissions with inheritance in the grant panel. Retry cannot restore this grant.                                                                  |
 
 A `ready` home is not re-checked against its path. Whoever changes a bound
 home's resource or path by hand in the database must also set its
@@ -172,12 +182,20 @@ on the home and its descendants with owner or operator authority. This review
 is read-only until an authorized person selects an entry to change or remove;
 the release does not add a provenance table or infer a revocation cascade.
 
+Moving an item into a home makes it inherit the home owner's grant, including
+`manage_acl` and `share`, and drops access it inherited from its old location.
+Moving requires `write` and `delete` on the source folder and `write` on the
+destination. A Desktop Editor share already carries `manage_acl` and `share`;
+the move adds them only for a narrower grant an operator created.
+
 ## Retirement and deletion
 
 On retirement or hard deletion, the home and its data remain. Cleanup removes
 all user, team, host, and context grants and shares on the home and its
 descendants, including entries an operator created. Operator-subject entries
-remain. The retired user's own grants and shares elsewhere are also removed.
+remain. The retired user's own grants and shares elsewhere are also removed,
+including any on the drive root or `/Users`; other subjects' entries there are
+not touched.
 The operator may later grant selected access to the retained home through
 Control UI.
 
@@ -199,6 +217,12 @@ Keep the new table and triggers when rolling back to an older Control API
 image. During that rollback window the older image does not provision homes,
 does not perform the new retirement cleanup, and does not protect the owner
 grant. Do not reset the data or automatically re-grant owner access.
+
+An older Control API also ignores the `X-Evenfire-Gfs-Authority` header that
+Desktop sends, so during the rollback window the linked initial admin using the
+new Desktop has operator authority in Files again. An older Control API has no
+`/me/gfs/home`: the new Desktop shows My home as unavailable, while Shared with
+me and its row actions keep working with the drive each row reports.
 
 After roll-forward, the planned startup repair runs once per Control API
 process start, before its first regular tick, in batches of 50. For ready or
