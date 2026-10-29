@@ -3,7 +3,7 @@ name: PR 977 exact-source Windows full Desktop suite (sharded)
 on:
   push:
     branches:
-      - test/pr977-windows-075794e5-20261028-r24m3
+      - test/pr977-windows-41ed9e64-20261029-r24m6
     paths:
       - .validation/windows/full-sharded.trigger
 
@@ -11,11 +11,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr977-windows-full-sharded-075794e5-${{ github.ref }}
+  group: pr977-windows-full-sharded-41ed9e64-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 075794e5606a65c30f4626a15f17718447393ec5
+  PR977_SOURCE_SHA: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
 
 jobs:
   desktop-windows-build:
@@ -25,7 +25,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -72,25 +72,6 @@ jobs:
           Write-Output "npm: $(npm --version)"
           if ((node --version) -ne 'v24.22.1') { throw 'Unexpected Node runtime' }
 
-      - name: Overlay durability test from validation harness
-        shell: pwsh
-        run: |
-          $sourceSha = (git -C source rev-parse HEAD).Trim()
-          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source changed before overlay' }
-          $committedAcl = 'source/desktop-app/src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
-          if (-not (Test-Path $committedAcl)) { throw 'Committed native ACL suite is missing' }
-          $name = 'windowsSessionAuthorityDurableFileOps.native.test.ts'
-          $target = Join-Path 'source/desktop-app/src/__tests__' $name
-          if (Test-Path $target) { throw 'Refusing to replace a source-controlled test' }
-          $inputFile = Join-Path 'validation/.validation/windows' $name
-          if (-not (Test-Path $inputFile)) { throw 'Missing native durability test overlay' }
-          Copy-Item -LiteralPath $inputFile -Destination $target
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputFile).Hash.ToLowerInvariant()
-          Write-Output "Validation-only durability test overlay: $name SHA256=$hash"
-          if ((git -C source rev-parse HEAD).Trim() -ne $env:PR977_SOURCE_SHA) {
-            throw 'Application source SHA changed during test overlay'
-          }
-
       - name: Install Host fixture dependencies
         working-directory: source/mcp-host
         run: npm ci
@@ -107,10 +88,101 @@ jobs:
         working-directory: source/desktop-app
         run: npm run verify:electron
 
-  desktop-windows-shard:
-    needs: desktop-windows-build
+  native-windows-authority:
     runs-on: windows-2025
-    timeout-minutes: 360
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact PR application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out validation harness commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify source, harness, and Node pin
+        shell: pwsh
+        run: |
+          $triggerSha = $env:GITHUB_SHA
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nvmrc = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $triggerSha"
+          Write-Output "Validation harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          if ($triggerSha -ne $harnessSha) { throw 'Harness checkout does not match trigger SHA' }
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source SHA mismatch' }
+          if ($nvmrc -ne '24.22.1') { throw 'Repository Node pin is not 24.22.1' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: source/desktop-app/package-lock.json
+
+      - name: Install Desktop dependencies
+        working-directory: source/desktop-app
+        run: npm ci
+
+      - name: Run native Windows ACL and durability suites
+        id: native_suite
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+        run: |
+          $rawReportPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority-raw.json'
+          $reportPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority.json'
+          $logPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority.log'
+          npm test -- 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' --reporter=json "--outputFile.json=$rawReportPath" *> $logPath
+          $testExit = $LASTEXITCODE
+          Write-Output "Native Windows ACL/durability command exit code: $testExit"
+          if (-not (Test-Path $rawReportPath)) { throw 'Native Windows suites did not produce a JSON report.' }
+          node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $rawReportPath $reportPath
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows suite report could not be sanitized.' }
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          $nativeNames = @($report.testResults | ForEach-Object { [System.IO.Path]::GetFileName($_.name) })
+          Write-Output "Native Windows suites: files=$($report.numTotalTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          $requiredNativeNames = @('windowsSessionAuthorityAcl.native.test.ts', 'windowsSessionAuthorityDurableFileOps.native.test.ts')
+          $missingNativeNames = @($requiredNativeNames | Where-Object { $nativeNames -notcontains $_ })
+          $nativeNamesMatch = $nativeNames.Count -eq 2 -and $missingNativeNames.Count -eq 0
+          if ($testExit -ne 0 -or -not $report.success -or $report.numTotalTestSuites -ne 2 -or $report.testResults.Count -ne 2 -or -not $nativeNamesMatch -or $report.numTotalTests -le 0 -or $report.numFailedTests -ne 0 -or $report.numPendingTests -ne 0) {
+            throw 'Native Windows ACL or durability validation failed.'
+          }
+          Remove-Item -LiteralPath $rawReportPath, $logPath -ErrorAction SilentlyContinue
+
+      - name: Preserve native Windows report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr977-windows-native-authority
+          path: ${{ runner.temp }}/native-windows-authority.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce native Windows result
+        if: always()
+        shell: pwsh
+        env:
+          NATIVE_SUITE_STEP: ${{ steps.native_suite.outcome }}
+        run: |
+          if ($env:NATIVE_SUITE_STEP -ne 'success') { throw 'Native Windows ACL and durability gates did not pass.' }
+
+  desktop-windows-shard:
+    needs: [desktop-windows-build, native-windows-authority]
+    runs-on: windows-2025
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -122,7 +194,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -165,22 +237,6 @@ jobs:
         working-directory: source/desktop-app
         run: npm ci
 
-      - name: Overlay durability test from validation harness
-        shell: pwsh
-        run: |
-          $sourceSha = (git -C source rev-parse HEAD).Trim()
-          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source changed before overlay' }
-          $committedAcl = 'source/desktop-app/src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
-          if (-not (Test-Path $committedAcl)) { throw 'Committed native ACL suite is missing' }
-          $name = 'windowsSessionAuthorityDurableFileOps.native.test.ts'
-          $target = Join-Path 'source/desktop-app/src/__tests__' $name
-          if (Test-Path $target) { throw 'Refusing to replace a source-controlled test' }
-          $inputFile = Join-Path 'validation/.validation/windows' $name
-          if (-not (Test-Path $inputFile)) { throw 'Missing native durability test overlay' }
-          Copy-Item -LiteralPath $inputFile -Destination $target
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputFile).Hash.ToLowerInvariant()
-          Write-Output "Validation-only durability test overlay: $name SHA256=$hash"
-
       - name: Run full Desktop suite shard on Windows
         id: full_suite
         continue-on-error: true
@@ -190,17 +246,22 @@ jobs:
           EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
           EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
         run: |
+          $rawReportPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX-raw.json"
           $reportPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX.json"
+          $logPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX.log"
           $shard = "$env:PR977_SHARD_INDEX/8"
-          npm test -- "--shard=$shard" --reporter=json "--outputFile.json=$reportPath"
+          npm test -- --exclude 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' --exclude 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' "--shard=$shard" --reporter=json "--outputFile.json=$rawReportPath" *> $logPath
           $testExit = $LASTEXITCODE
           Write-Output "Full Desktop shard $shard command exit code: $testExit"
-          if (-not (Test-Path $reportPath)) { throw "Full Desktop shard report is missing: $shard" }
+          if (-not (Test-Path $rawReportPath)) { throw "Full Desktop shard report is missing: $shard" }
+          node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $rawReportPath $reportPath
+          if ($LASTEXITCODE -ne 0) { throw "Full Desktop shard report could not be sanitized: $shard" }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           Write-Output "Shard ${shard}: files=$($report.numTotalTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
           if ($testExit -ne 0 -or -not $report.success -or $report.numTotalTestSuites -le 0 -or $report.numTotalTests -le 0) {
             throw "Full Desktop shard failed or executed no tests: $shard"
           }
+          Remove-Item -LiteralPath $rawReportPath, $logPath -ErrorAction SilentlyContinue
 
       - name: Preserve shard test report
         if: always()
@@ -221,14 +282,14 @@ jobs:
 
   aggregate-windows-suite:
     if: always()
-    needs: [desktop-windows-build, desktop-windows-shard]
+    needs: [desktop-windows-build, native-windows-authority, desktop-windows-shard]
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -258,27 +319,38 @@ jobs:
           node-version: 24.22.1
 
       - name: Download all shard reports
+        if: needs.desktop-windows-shard.result == 'success'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: pr977-full-desktop-shard-*
           path: reports
           merge-multiple: true
 
+      - name: Download native Windows authority report
+        if: needs.native-windows-authority.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr977-windows-native-authority
+          path: native-report
+
       - name: Verify complete Windows suite coverage and aggregate results
         id: aggregate
-        run: node validation/scripts/pr977/aggregate-windows-full-shards.mjs reports source/desktop-app ${{ env.PR977_SOURCE_SHA }} ${{ github.sha }}
+        if: needs.native-windows-authority.result == 'success' && needs.desktop-windows-shard.result == 'success'
+        run: node validation/scripts/pr977/aggregate-windows-full-shards.mjs reports source/desktop-app ${{ env.PR977_SOURCE_SHA }} ${{ github.sha }} native-report/native-windows-authority.json
 
       - name: Enforce build and shard job results
         if: always()
         shell: pwsh
         env:
           BUILD_RESULT: ${{ needs.desktop-windows-build.result }}
+          NATIVE_RESULT: ${{ needs.native-windows-authority.result }}
           SHARD_RESULT: ${{ needs.desktop-windows-shard.result }}
           AGGREGATE_STEP: ${{ steps.aggregate.outcome }}
         run: |
           Write-Output "Desktop build and Electron job: $env:BUILD_RESULT"
+          Write-Output "Native Windows ACL and durability gate: $env:NATIVE_RESULT"
           Write-Output "Eight full Desktop shard jobs: $env:SHARD_RESULT"
-          if ($env:BUILD_RESULT -ne 'success' -or $env:SHARD_RESULT -ne 'success') {
+          if ($env:BUILD_RESULT -ne 'success' -or $env:NATIVE_RESULT -ne 'success' -or $env:SHARD_RESULT -ne 'success') {
             throw 'A required Windows build or test-shard job did not pass.'
           }
           if ($env:AGGREGATE_STEP -ne 'success') {

@@ -1,0 +1,214 @@
+import { readFileSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+
+const [inputPath, outputPath] = process.argv.slice(2)
+if (!inputPath || !outputPath) throw new Error('Expected input and output report paths')
+
+const report = JSON.parse(readFileSync(inputPath, 'utf8'))
+const summaryFields = [
+  'numTotalTestSuites',
+  'numPassedTestSuites',
+  'numFailedTestSuites',
+  'numPendingTestSuites',
+  'numTotalTests',
+  'numPassedTests',
+  'numFailedTests',
+  'numPendingTests',
+  'numTodoTests',
+]
+if (
+  !report ||
+  typeof report !== 'object' ||
+  !Array.isArray(report.testResults) ||
+  typeof report.success !== 'boolean' ||
+  summaryFields.some(key => !Number.isInteger(report[key]) || report[key] < 0)
+) {
+  throw new Error('Vitest report is incomplete or malformed')
+}
+
+const allowedSkips = new Set([
+  'uses memory-only mode when Linux safeStorage selects the basic_text backend',
+  'quarantines only a confirmed wrong-mode writer journal after its denial fence callback',
+  'preserves confirmed invalid-file evidence when descriptor close also fails transiently',
+  'rejects an actual nonregular FIFO without blocking',
+  'discard refuses a real nonregular FIFO before decrypting bytes',
+  'repair refuses a real nonregular FIFO before decrypting bytes',
+])
+const safeTitle = value =>
+  String(value ?? 'unknown case')
+    .replace(/[\r\n]/g, ' ')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer <redacted>')
+    .replace(/\b[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_.-]{20,}\b/g, '<token>')
+    .replace(/\b[A-Za-z0-9_=-]{32,}\b/g, '<value>')
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>')
+    .replace(/(?:[A-Za-z]:[\\/]|\/Users\/|\/home\/)[^\s:]+/g, '<path>')
+    .slice(0, 180)
+const safeTestPath = value => {
+  const normalized = String(value).replaceAll('\\', '/')
+  const marker = '/desktop-app/'
+  const markerIndex = normalized.lastIndexOf(marker)
+  if (markerIndex >= 0) return normalized.slice(markerIndex + marker.length)
+  if (normalized.startsWith('desktop-app/')) return normalized.slice('desktop-app/'.length)
+  if (/^(src|test|ui\/src)\//.test(normalized)) return normalized
+  throw new Error('Vitest report contains a test path outside Desktop source')
+}
+const errorCodes = [
+  'E2BIG',
+  'EACCES',
+  'EEXIST',
+  'EIO',
+  'EINVAL',
+  'EMFILE',
+  'ENFILE',
+  'ENOENT',
+  'ENOSPC',
+  'ENOTEMPTY',
+  'EPERM',
+  'ETIMEDOUT',
+]
+const errorTypes = [
+  'PrivilegeNotHeldException',
+  'UnauthorizedAccessException',
+  'PlatformNotSupportedException',
+  'DirectoryNotFoundException',
+  'FileNotFoundException',
+  'Win32Exception',
+  'AssertionError',
+  'TimeoutError',
+  'TypeError',
+  'ReferenceError',
+  'RangeError',
+]
+const classifyFailure = message => {
+  const errorType =
+    errorTypes.find(type => new RegExp(`\\b${type}\\b`).test(message)) ?? 'unclassified'
+  const code = errorCodes.find(value =>
+    new RegExp(`(^|[^A-Za-z0-9_])${value}([^A-Za-z0-9_]|$)`).test(message)
+  )
+  const category = message.includes('Native Windows ACL fixture failed:')
+    ? 'native-fixture'
+    : errorType === 'PrivilegeNotHeldException'
+      ? 'privilege-not-held'
+      : errorType === 'PlatformNotSupportedException'
+        ? 'platform-api-unavailable'
+        : code === 'EACCES' || code === 'EPERM' || errorType === 'UnauthorizedAccessException'
+          ? 'access-denied'
+          : code === 'ETIMEDOUT' || errorType === 'TimeoutError'
+            ? 'timeout'
+            : errorType === 'AssertionError'
+              ? 'assertion'
+              : 'unclassified'
+  const match = message.match(/([^\\/\s()]+\.test\.[cm]?[jt]sx?):(\d+):(\d+)/)
+  return {
+    category,
+    errorType,
+    ...(code ? { code } : {}),
+    location: match ? `${match[1]}:${match[2]}` : 'unavailable',
+  }
+}
+
+const testResults = report.testResults.map(suite => {
+  if (!suite || typeof suite.name !== 'string' || !Array.isArray(suite.assertionResults)) {
+    throw new Error('Vitest report contains an invalid suite entry')
+  }
+  const assertionResults = suite.assertionResults.map((assertion, index) => {
+    if (
+      !assertion ||
+      !['passed', 'failed', 'pending', 'skipped', 'todo'].includes(assertion.status)
+    ) {
+      throw new Error('Vitest report contains an invalid assertion entry')
+    }
+    const safeAssertion = {
+      status: assertion.status,
+      title:
+        ['skipped', 'pending', 'todo'].includes(assertion.status) &&
+        allowedSkips.has(String(assertion.title ?? ''))
+          ? String(assertion.title)
+          : safeTitle(assertion.title ?? `case-${index + 1}`),
+    }
+    if (assertion.status === 'failed') {
+      safeAssertion.failure = classifyFailure((assertion.failureMessages ?? []).join('\n'))
+    }
+    return safeAssertion
+  })
+  if (!['passed', 'failed', 'pending', 'skipped'].includes(suite.status)) {
+    throw new Error('Vitest report contains an invalid suite status')
+  }
+  const suiteFailure =
+    typeof suite.message === 'string' && suite.message.length > 0
+      ? classifyFailure(suite.message)
+      : undefined
+  return {
+    name: safeTestPath(suite.name),
+    status: suite.status,
+    assertionResults,
+    ...(suiteFailure ? { failure: suiteFailure } : {}),
+  }
+})
+
+const suiteCounts = testResults.reduce(
+  (counts, suite) => {
+    counts.total += 1
+    if (suite.status === 'passed') counts.passed += 1
+    else if (suite.status === 'failed') counts.failed += 1
+    else counts.pending += 1
+    return counts
+  },
+  { total: 0, passed: 0, failed: 0, pending: 0 }
+)
+const assertionCounts = testResults.reduce(
+  (counts, suite) => {
+    for (const assertion of suite.assertionResults) {
+      counts.total += 1
+      if (assertion.status === 'passed') counts.passed += 1
+      else if (assertion.status === 'failed') counts.failed += 1
+      else if (assertion.status === 'pending' || assertion.status === 'skipped') counts.pending += 1
+      else counts.todo += 1
+    }
+    return counts
+  },
+  { total: 0, passed: 0, failed: 0, pending: 0, todo: 0 }
+)
+if (
+  report.numTotalTestSuites !== suiteCounts.total ||
+  report.numPassedTestSuites !== suiteCounts.passed ||
+  report.numFailedTestSuites !== suiteCounts.failed ||
+  report.numPendingTestSuites !== suiteCounts.pending ||
+  report.numTotalTests !== assertionCounts.total ||
+  report.numPassedTests !== assertionCounts.passed ||
+  report.numFailedTests !== assertionCounts.failed ||
+  report.numPendingTests !== assertionCounts.pending ||
+  report.numTodoTests !== assertionCounts.todo
+) {
+  throw new Error('Vitest aggregate counters do not match the suite and assertion entries')
+}
+
+const safeReport = {
+  success: report.success,
+  ...Object.fromEntries(summaryFields.map(key => [key, report[key]])),
+  testResults,
+}
+writeFileSync(outputPath, `${JSON.stringify(safeReport)}\n`)
+process.stdout.write(
+  `Sanitized Windows report: files=${safeReport.numTotalTestSuites} ` +
+    `tests=${safeReport.numTotalTests} passed=${safeReport.numPassedTests} ` +
+    `failed=${safeReport.numFailedTests} skipped=${safeReport.numPendingTests}\n`
+)
+for (const suite of testResults) {
+  if (suite.failure) {
+    process.stdout.write(
+      `Failed suite: file=${path.basename(suite.name)} type=${suite.failure.errorType} ` +
+        `category=${suite.failure.category}${suite.failure.code ? ` code=${suite.failure.code}` : ''} ` +
+        `at=${suite.failure.location}\n`
+    )
+  }
+  for (const [index, assertion] of suite.assertionResults.entries()) {
+    if (assertion.status !== 'failed' || !assertion.failure) continue
+    process.stdout.write(
+      `Failed test: file=${path.basename(suite.name)} case=${index + 1} title=${assertion.title} ` +
+        `type=${assertion.failure.errorType} category=${assertion.failure.category}` +
+        `${assertion.failure.code ? ` code=${assertion.failure.code}` : ''} ` +
+        `at=${assertion.failure.location}\n`
+    )
+  }
+}
