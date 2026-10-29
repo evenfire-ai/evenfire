@@ -279,7 +279,8 @@ export class DesktopUpdateManager {
 
     const controller = new AbortController()
     const operation = this.downloadAndStageUpdate(expectedVersion, controller.signal)
-    this.activeDownload = { version: expectedVersion, controller, promise: operation }
+    const activeDownload = { version: expectedVersion, controller, promise: operation }
+    this.activeDownload = activeDownload
     try {
       const result = await operation
       if (restartAfterDownload && result.updaterCapable) {
@@ -287,7 +288,7 @@ export class DesktopUpdateManager {
       }
       return result
     } finally {
-      if (this.activeDownload?.promise === operation) this.activeDownload = null
+      if (this.activeDownload === activeDownload) this.activeDownload = null
     }
   }
 
