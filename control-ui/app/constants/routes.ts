@@ -58,7 +58,6 @@ export const CONTROL_ROUTES = {
     edit: (name: string) => `/external-channels/${segment(name)}/edit`,
   },
   globalFileSystem: '/global-file-system',
-  gfsUserHomes: '/global-file-system/user-homes',
   guardrails: {
     root: '/guardrails',
     detail: (name: string) => `/guardrails/${segment(name)}`,

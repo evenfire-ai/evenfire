@@ -105,7 +105,6 @@ describe('Sidebar publisher gating', () => {
     ['/agent-outputs/recipe-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/agent-outputs/desktop-app-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/global-file-system', 'EvenDrive', '/global-file-system'],
-    ['/global-file-system/user-homes', 'Home folders', '/global-file-system/user-homes'],
   ])('selects the matching Files child for %s', (pathname, label, href) => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
@@ -214,7 +213,6 @@ describe('Sidebar publisher gating', () => {
     ])
     expect(SIDEBAR_TABS.directories.children?.map(child => child.label)).toEqual([
       'EvenDrive',
-      'Home folders',
       'Agent Outputs',
     ])
   })

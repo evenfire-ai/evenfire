@@ -17,8 +17,10 @@ are local to each cluster; they are not replicated across clusters.
 In Desktop, the user opens **My home** and manages access to the home or its
 contents with user authority, including when the user has an operator link.
 The user can share with users and teams in their team directory and grant
-`read` and `write` to their own first-party agents. Control UI is for operators;
-it provides the home inventory, recovery actions, and existing ACL management.
+`read` and `write` to their own first-party agents. Control UI is for operators:
+homes appear as ordinary folders under `/Users` in EvenDrive, where the existing
+ACL management applies, and each member's Contact tab shows the home folder with
+its recovery actions.
 
 The owner can see and manage entries throughout their own home tree, including
 entries created by another manager. In that tree, user entries include the
@@ -80,7 +82,7 @@ parent of the homes.
    tick enrolls up to 200 existing users and provisions up to 50 pending homes
    (`control-api/src/services/gfsUserHomeReconciler.ts`), so 10,000 users take
    about 50 minutes to enroll and about 3.3 hours to provision.
-4. In each cluster, open the operator home inventory and watch the overall
+4. In each cluster, read the home inventory API (below) and watch the overall
    `pending` count fall to zero. Review all `conflict` entries separately.
    Production follows dev through the existing promotion.
 
@@ -104,17 +106,24 @@ review conflicts and validate the relevant access separately.
 
 ## Inventory and user detail
 
-The operator inventory can filter by `pending`, `ready`, `conflict`, or
-`retired` and links rows to users. Its counts cover the whole registry, not
-just the displayed page. A retained home whose user was hard-deleted remains
-in `retired` as **Deleted user**, with the user ID and path. Its home-detail
-API still returns the row; `404 home_not_found` means there is no home row.
+Control UI has no separate home inventory page. Operators browse homes in
+EvenDrive under `/Users/<name>`, including a retained home whose user was
+hard-deleted. To list homes by state (for example every `conflict`, or the
+`retired` homes of deleted users), use the inventory API below. Its counts
+cover the whole registry, not just the returned page. A retained home's
+detail API still returns the row; `404 home_not_found` means there is no home
+row.
 
-The **Home folder** block on `/users-and-teams/users/<id>` shows the state,
-drive, and path. A conflict shows its cause and the appropriate recovery
-action. After an action, the block polls for up to 60 seconds. If the home is
-still pending, it shows **Still pending** and **Refresh**; this is neither a
-success nor a failure.
+The **Home folder** field is the last field of the Contact tab on
+`/users-and-teams/users/<id>`. It shows one line: the home path when it
+exists, **Being created…** or **Still pending** while pending, **Not created**
+for a home that does not exist yet, or **No home folder yet** when the member
+has no home row. A conflict adds its cause, the details needed to fix it, and
+the recovery action: **Retry**, **Retry with another name…** (a dialog, only
+for a home that was never bound), or **Restore owner access**. After an
+action, the field polls for up to 60 seconds. If the home is still pending, it
+shows **Still pending** and **Refresh**; this is neither a success nor a
+failure.
 
 For an operator using the API, the inventory route is
 `GET /api/v1/gfs/user-homes?state=&cursor=&limit=`. It returns `items`,
@@ -140,7 +149,8 @@ reserved path in the Control UI GFS browser is allowed.
 A `ready` home is not re-checked against its path. Whoever changes a bound
 home's resource or path by hand in the database must also set its
 `gfs_user_homes` row to `pending`, or select **Retry** afterwards, so the next
-provisioning pass records `path_conflict` and the user card shows it.
+provisioning pass records `path_conflict` and the member's Home folder field
+shows it.
 
 Retry accepts an optional storage name. For a home that was never bound
 (`path_conflict` or `ancestor_grant_conflict`), a new valid name is reserved;
@@ -197,7 +207,7 @@ remain. The retired user's own grants and shares elsewhere are also removed,
 including any on the drive root or `/Users`; other subjects' entries there are
 not touched.
 The operator may later grant selected access to the retained home through
-Control UI.
+EvenDrive in Control UI.
 
 Cleanup also removes grants anywhere for the user's captured first-party
 agents when no other active user and no team is associated with that agent.

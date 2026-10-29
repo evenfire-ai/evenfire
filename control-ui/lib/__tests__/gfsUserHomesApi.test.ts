@@ -1,49 +1,32 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getGfsUserHome, getGfsUserHomes, restoreGfsUserHomeOwner, retryGfsUserHome } from '../api'
+import { getGfsUserHome, restoreGfsUserHomeOwner, retryGfsUserHome } from '../api'
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('GFS user-home operator API', () => {
-  it('uses the specified routes, pagination and mutation bodies', async () => {
+  it('uses the specified detail and mutation routes and bodies', async () => {
     const response = {
       home: { userId: 'user/id', email: null, state: 'retired', conflictDetail: null },
     }
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            items: [],
-            nextCursor: 'cursor',
-            counts: { pending: 0, ready: 0, conflict: 0, retired: 0 },
-          }),
-          {
-            status: 200,
-          }
-        )
-      )
       .mockResolvedValueOnce(new Response(JSON.stringify(response), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(response), { status: 202 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(response), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
-    expect(
-      (await getGfsUserHomes({ state: 'retired', cursor: 'page+2', limit: 50 })).nextCursor
-    ).toBe('cursor')
     expect((await getGfsUserHome('user/id')).home.email).toBeNull()
     await retryGfsUserHome('user/id', 'new-name')
     await restoreGfsUserHomeOwner('user/id')
-    expect(String(fetchMock.mock.calls[0][0])).toContain(
-      '/gfs/user-homes?state=retired&cursor=page%2B2&limit=50'
-    )
-    expect(String(fetchMock.mock.calls[1][0])).toContain('/gfs/user-homes/user%2Fid')
-    expect(fetchMock.mock.calls[2][1]).toMatchObject({
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/gfs/user-homes/user%2Fid')
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
       method: 'POST',
       body: '{"storageUsername":"new-name"}',
     })
-    expect(String(fetchMock.mock.calls[2][0])).toContain('/gfs/user-homes/user%2Fid/retry')
-    expect(fetchMock.mock.calls[3][1]).toMatchObject({ method: 'POST', body: undefined })
-    expect(String(fetchMock.mock.calls[3][0])).toContain('/gfs/user-homes/user%2Fid/restore-owner')
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/gfs/user-homes/user%2Fid/retry')
+    expect(fetchMock.mock.calls[2][1]).toMatchObject({ method: 'POST', body: undefined })
+    expect(String(fetchMock.mock.calls[2][0])).toContain('/gfs/user-homes/user%2Fid/restore-owner')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('preserves a validation error and accepts a subsequent valid retry', async () => {

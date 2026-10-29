@@ -707,27 +707,6 @@ export type GfsUserHomeDetail = GfsUserHome & {
   conflictDetail: GfsUserHomeConflictDetail | null
 }
 
-export type GfsUserHomeInventory = {
-  items: GfsUserHome[]
-  nextCursor: string | null
-  counts: Record<GfsUserHomeState, number>
-}
-
-export function getGfsUserHomes(
-  query: { state?: GfsUserHomeState; cursor?: string; limit?: number } = {},
-  signal?: AbortSignal
-): Promise<GfsUserHomeInventory> {
-  return apiGet(
-    '/api/v1/gfs/user-homes',
-    {
-      state: query.state,
-      cursor: query.cursor,
-      limit: query.limit === undefined ? undefined : String(query.limit),
-    },
-    { signal }
-  ) as Promise<GfsUserHomeInventory>
-}
-
 export function getGfsUserHome(
   userId: string,
   signal?: AbortSignal

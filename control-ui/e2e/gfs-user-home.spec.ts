@@ -39,7 +39,6 @@ import {
   userAccessOnUsersFolder,
 } from './support/gfs-user-home-fixtures'
 import { ControlUiGrantPanel } from './support/pages/ControlUiGrantPanel'
-import { ControlUiHomeInventory } from './support/pages/ControlUiHomeInventory'
 import { ControlUiUserHomeBlock } from './support/pages/ControlUiUserHomeBlock'
 
 const OWNER_BITS = ['read', 'write', 'delete', 'share', 'manage_acl']
@@ -87,7 +86,9 @@ async function expectReadyAfterRetry(
   readyAfterMs: number
 ): Promise<void> {
   const home = page.getByRole('region', { name: 'Home folder' })
-  await expect(home.getByText(/^(ready|Still pending)$/)).toBeVisible({ timeout: 90_000 })
+  await expect(
+    home.getByText(path, { exact: true }).or(home.getByText('Still pending', { exact: true }))
+  ).toBeVisible({ timeout: 90_000 })
   const stillPending = home.getByText('Still pending', { exact: true })
   if ((await stillPending.count()) > 0) {
     expect(readyAfterMs, 'polling stopped although the home was ready in time').toBeGreaterThan(
@@ -104,8 +105,8 @@ async function expectReadyAfterRetry(
       description: `ready by polling; database ready after ${readyAfterMs} ms`,
     })
   }
-  await expect(home.getByText('ready', { exact: true })).toBeVisible()
   await expect(home.getByText(path, { exact: true })).toBeVisible()
+  await expect(home.locator('.cu-banner--warn[role="status"]')).toHaveCount(0)
 }
 
 async function cleanupUsers(
@@ -135,25 +136,24 @@ test.describe('Per-user GFS homes — Control UI', () => {
         createHomeFixtureUser(user)
         await waitForHome(user, 'conflict', 'path_conflict')
       })
-      await test.step('operator signs in and finds the conflict in the inventory', async () => {
+      await test.step('operator signs in and opens the member with the conflict', async () => {
         await loginControlUi(page)
-        const inventory = new ControlUiHomeInventory(page)
-        await inventory.open()
-        await inventory.filter('conflict')
-        await inventory.expectUserListed(user.id, 'conflict')
-        await inventory.openUser(user.id)
+        await new ControlUiUserHomeBlock(page).open(user.id)
         const block = page.getByRole('region', { name: 'Home folder' })
-        await expect(block.getByRole('alert')).toContainText('An item was found')
-        await expect(block.getByLabel('Folder name')).toHaveValue(user.name)
+        await expect(block.getByRole('status')).toContainText('An item was found')
+        await expect(block.getByText('Not created', { exact: true })).toBeVisible()
+        // The new name is chosen in a dialog, never edited inline on the Contact tab.
+        await expect(block.getByLabel('Folder name')).toHaveCount(0)
         const guidance = block.getByRole('region', { name: 'Path conflict recovery' })
         await expect(guidance).toContainText(`Another item occupies /Users/${user.name}.`)
-        await expect(guidance).toContainText('GFS browser on drive main')
-        await expect(guidance).toContainText('rename or move it, then press Retry')
-        await expect(guidance).toContainText('enter a different folder name and press Retry')
+        await expect(guidance).toContainText('rename or move it in EvenDrive, then press Retry')
+        await expect(guidance).toContainText('Retry with another name')
         const details = block.getByRole('region', { name: 'Path conflict details' })
-        await expect(details.getByText(`/Users/${user.name}`, { exact: true })).toBeVisible()
-        await expect(details.getByText(foreignDirectory!, { exact: true })).toBeVisible()
-        await expect(details.getByText('directory', { exact: true })).toBeVisible()
+        await expect(
+          details.getByText(`Conflicting directory: /Users/${user.name}`, { exact: true })
+        ).toBeVisible()
+        // No internal identifiers on the operator surface.
+        await expect(block.getByText(foreignDirectory!)).toHaveCount(0)
       })
       const newName = `${user.name}-retry`
       await test.step('operator changes the name and retries; the block turns ready by itself', async () => {
@@ -170,7 +170,6 @@ test.describe('Per-user GFS homes — Control UI', () => {
         if (!home.resourceId) throw new Error('Ready home has no resource ID')
         await expectReadyAfterRetry(page, `/Users/${newName}`, readyAfterMs)
         await expect(region).toHaveAttribute('data-e2e-block', 'before-retry')
-        await expect(page.getByTestId('home-resource-id')).toHaveText(home.resourceId)
         await expectOwnerGrant(home.resourceId, user.id)
         await expect(
           page
@@ -384,18 +383,6 @@ test.describe('Per-user GFS homes — Control UI', () => {
         )
       })
       await test.step('operator reads the retained file and grants another member access', async () => {
-        const inventory = new ControlUiHomeInventory(page)
-        await inventory.open()
-        await inventory.filter('retired')
-        await inventory.expectUserListed(owner.id, 'retired')
-        const row = page
-          .getByRole('row')
-          .filter({ has: page.getByRole('link', { name: owner.id, exact: true }) })
-        await expect(row).toContainText('Deleted user')
-        await expect(row).toContainText(home.path!)
-        await inventory.openUser(owner.id)
-        await expect(page.getByRole('heading', { name: 'Deleted user' })).toBeVisible()
-        await expect(page.getByText(`User ID: ${owner.id}`)).toBeVisible()
         const panel = new ControlUiGrantPanel(page)
         await panel.openFile(filePath)
         await expect(
@@ -427,30 +414,13 @@ test.describe('Per-user GFS homes — Control UI', () => {
     }
   })
 
-  test('Control UI guard — inventory redirects to login and works after login', async ({
-    page,
-  }) => {
-    // E2E_GUARDIAN_NAVIGATION: negative-route-guard — inventory requires operator login
-    await page.goto('/global-file-system/user-homes')
-    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
-    await expect(page.getByRole('table', { name: 'Home folders' })).toHaveCount(0)
-    await loginControlUi(page)
-    const inventoryResponse = page.waitForResponse(
-      response =>
-        response.request().method() === 'GET' &&
-        new URL(response.url()).pathname.endsWith('/gfs/user-homes')
-    )
-    await new ControlUiHomeInventory(page).open()
-    expect((await inventoryResponse).ok()).toBe(true)
-  })
-
   test('Control UI guard — member home redirects to login and works after login', async ({
     page,
   }) => {
     const user = newHomeFixtureUser()
     try {
       createHomeFixtureUser(user)
-      await waitForHome(user, 'ready')
+      const home = await waitForHome(user, 'ready')
       const userId = user.id
       // E2E_GUARDIAN_NAVIGATION: negative-route-guard — member home requires operator login
       await page.goto(
@@ -464,9 +434,17 @@ test.describe('Per-user GFS homes — Control UI', () => {
       await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
       await expect(page.getByRole('region', { name: 'Home folder' })).toHaveCount(0)
       await loginControlUi(page)
+      const homeResponse = page.waitForResponse(
+        response =>
+          response.request().method() === 'GET' &&
+          new URL(response.url()).pathname.endsWith(`/gfs/user-homes/${user.id}`)
+      )
       const block = new ControlUiUserHomeBlock(page)
       await block.open(user.id)
-      await block.expectState('ready')
+      const loaded = await homeResponse
+      expect(loaded.status()).toBe(200)
+      expect(((await loaded.json()) as { home: { state: string } }).home.state).toBe('ready')
+      await block.expectState('ready', home.path!)
     } finally {
       await cleanupUsers(page, [user])
     }

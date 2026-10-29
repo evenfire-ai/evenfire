@@ -28,14 +28,22 @@ const baseHome: GfsUserHomeDetail = {
   conflictDetail: null,
 }
 
+function homeField() {
+  return screen.getByRole('region', { name: 'Home folder' })
+}
+
+function renameDialog() {
+  return screen.getByRole('dialog', { name: 'Retry with another name' })
+}
+
 beforeEach(() => vi.clearAllMocks())
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
 })
 
-describe('Home folder block', () => {
-  it('silently polls an initially pending home without replacing the card content', async () => {
+describe('Home folder field', () => {
+  it('silently polls an initially pending home without replacing the field content', async () => {
     const pending = { ...baseHome, state: 'pending' as const }
     let finishPoll!: (value: { home: GfsUserHomeDetail }) => void
     const poll = new Promise<{ home: GfsUserHomeDetail }>(resolve => {
@@ -50,46 +58,60 @@ describe('Home folder block', () => {
       render(<GfsUserHomeBlock userId={baseHome.userId} />)
     })
 
-    const card = screen.getByRole('region', { name: 'Home folder' })
-    const content = screen.getByTestId('home-resource-id')
-    const busy = card.getAttribute('aria-busy')
-    card.scrollTop = 100
-    expect(screen.getByText('pending', { exact: true })).toBeVisible()
+    const field = homeField()
     // One steady status line for the whole polling window, not one per request.
-    const checking = screen.getByText('Checking home folder status…')
+    const line = screen.getByText('Being created…')
+    field.scrollTop = 100
 
     await act(async () => vi.advanceTimersByTimeAsync(5_000))
     expect(getGfsUserHome).toHaveBeenCalledTimes(2)
-    expect(screen.getByTestId('home-resource-id')).toBe(content)
-    expect(card.getAttribute('aria-busy')).toBe(busy)
-    expect(card.scrollTop).toBe(100)
-    expect(screen.queryByText('Loading home folder…')).not.toBeInTheDocument()
-    expect(screen.getByText('Checking home folder status…')).toBe(checking)
+    expect(screen.getByText('Being created…')).toBe(line)
+    expect(field.scrollTop).toBe(100)
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
 
     await act(async () => finishPoll({ home: { ...pending } }))
-    expect(screen.getByTestId('home-resource-id')).toBe(content)
-    expect(screen.getByText('Checking home folder status…')).toBe(checking)
-    expect(card.scrollTop).toBe(100)
+    expect(screen.getByText('Being created…')).toBe(line)
     await act(async () => vi.advanceTimersByTimeAsync(5_000))
-    expect(screen.getByText('ready', { exact: true })).toBeVisible()
-    expect(screen.getByTestId('home-resource-id')).toBe(content)
-    expect(card.getAttribute('aria-busy')).toBe(busy)
-    expect(card.scrollTop).toBe(100)
+    expect(screen.getByText('/Users/member')).toBe(line)
+    expect(homeField()).toBe(field)
+    expect(field.scrollTop).toBe(100)
   })
 
-  it.each(['ready', 'pending', 'retired'] as const)(
-    'renders the %s state with the server path and drive',
-    async state => {
-      vi.mocked(getGfsUserHome).mockResolvedValue({
-        home: { ...baseHome, state },
-      })
+  it.each([
+    ['ready', '/Users/member'],
+    ['pending', 'Being created…'],
+    ['retired', 'Retired — files kept for operators'],
+  ] as const)(
+    'shows the %s state as one line, without drive or resource id',
+    async (state, line) => {
+      vi.mocked(getGfsUserHome).mockResolvedValue({ home: { ...baseHome, state } })
       render(<GfsUserHomeBlock userId={baseHome.userId} />)
-      const region = await screen.findByRole('region', { name: 'Home folder' })
-      expect(await within(region).findByText(state, { exact: true })).toBeVisible()
-      expect(within(region).getByText('/Users/member')).toBeVisible()
-      expect(within(region).getByText('main')).toBeVisible()
+      const field = await screen.findByRole('region', { name: 'Home folder' })
+      expect(await within(field).findByText(line)).toBeVisible()
+      expect(within(field).queryByText('main')).not.toBeInTheDocument()
+      expect(within(field).queryByText(/resource-1/)).not.toBeInTheDocument()
+      expect(within(field).queryByText(/Drive|Resource ID/)).not.toBeInTheDocument()
+      expect(within(field).queryByRole('status')).not.toBeInTheDocument()
     }
   )
+
+  it('shows a member without a home row as not having a home yet, not as an error', async () => {
+    vi.mocked(getGfsUserHome)
+      .mockRejectedValueOnce(
+        Object.assign(new Error('404 Not Found - home_not_found'), {
+          code: 'home_not_found',
+          status: 404,
+        })
+      )
+      .mockResolvedValueOnce({ home: { ...baseHome, state: 'pending' } })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    expect(await screen.findByText('No home folder yet')).toBeVisible()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText(/home_not_found/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText('Being created…')).toBeVisible()
+    expect(getGfsUserHome).toHaveBeenCalledTimes(2)
+  })
 
   it('explains both recovery choices for an unbound path conflict and retries a new name', async () => {
     const conflict: GfsUserHomeDetail = {
@@ -116,15 +138,39 @@ describe('Home folder block', () => {
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const guidance = await screen.findByRole('region', { name: 'Path conflict recovery' })
     expect(within(guidance).getByText('Another item occupies /Users/member.')).toBeVisible()
-    expect(within(guidance).getByText(/GFS browser.*drive main.*rename or move/i)).toBeVisible()
-    expect(within(guidance).getByText(/enter a different folder name.*Retry/i)).toBeVisible()
-    const name = screen.getByLabelText('Folder name')
+    expect(within(guidance).getByText(/rename or move it in EvenDrive.*Retry/i)).toBeVisible()
+    expect(within(guidance).getByText(/Retry with another name/)).toBeVisible()
+    expect(within(homeField()).getByText('Not created')).toBeVisible()
+    // The name is an action parameter edited in a dialog, never inline on the read surface.
+    expect(screen.queryByLabelText('Folder name')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry with another name…' }))
+    const name = within(renameDialog()).getByLabelText('Folder name')
     expect(name).toHaveValue('member')
     fireEvent.change(name, { target: { value: 'member-new' } })
-    expect(name).toHaveValue('member-new')
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    fireEvent.click(within(renameDialog()).getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Being created…')).toBeVisible()
     expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, 'member-new')
+    expect(screen.queryByRole('dialog', { name: 'Retry with another name' })).toBeNull()
+  })
+
+  it('retries an unbound path conflict with its reserved name from the Retry button', async () => {
+    const conflict: GfsUserHomeDetail = {
+      ...baseHome,
+      state: 'conflict',
+      path: null,
+      resourceId: null,
+      conflictCode: 'path_conflict',
+      conflictDetail: { code: 'path_conflict', resource: null, access: [] },
+    }
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: conflict })
+    vi.mocked(retryGfsUserHome).mockResolvedValue({
+      home: { ...conflict, state: 'pending', conflictCode: null },
+    })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Being created…')).toBeVisible()
+    expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, 'member')
   })
 
   it('explains a moved bound home and retries without a new name', async () => {
@@ -143,17 +189,19 @@ describe('Home folder block', () => {
 
     const guidance = await screen.findByRole('region', { name: 'Path conflict recovery' })
     expect(within(guidance).getByText('Home moved')).toBeVisible()
-    expect(within(guidance).getByText('/Moved/member')).toBeVisible()
-    expect(within(guidance).getByText('/Users/member')).toBeVisible()
+    expect(within(guidance).getByText('Current home path: /Moved/member')).toBeVisible()
+    expect(within(guidance).getByText('Reserved home path: /Users/member')).toBeVisible()
     expect(
       within(guidance).getByText(/cannot be moved or renamed.*database correction.*cluster access/i)
     ).toBeVisible()
-    expect(within(guidance).getByText(/GFS browser on drive main.*press Retry/i)).toBeVisible()
-    const name = screen.getByLabelText('Folder name')
-    expect(name).toHaveValue('member')
-    expect(name).toHaveAttribute('readonly')
+    expect(within(guidance).getByText(/in EvenDrive.*press Retry/i)).toBeVisible()
+    expect(screen.getByText('The home is not at its reserved path.')).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: 'Retry with another name…' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Folder name')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    expect(await screen.findByText('Being created…')).toBeVisible()
     expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, undefined)
   })
 
@@ -169,8 +217,9 @@ describe('Home folder block', () => {
     })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const guidance = await screen.findByRole('region', { name: 'Path conflict recovery' })
-    expect(within(guidance).getByText('Not available')).toBeVisible()
-    expect(within(guidance).getByText('/Users/member')).toBeVisible()
+    expect(within(guidance).getByText('Current home path: Not available')).toBeVisible()
+    expect(within(guidance).getByText('Reserved home path: /Users/member')).toBeVisible()
+    expect(within(homeField()).getByText('Not available')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled()
   })
 
@@ -194,19 +243,19 @@ describe('Home folder block', () => {
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const retry = await screen.findByRole('button', { name: 'Retry' })
     fireEvent.click(retry)
-    const error = await screen.findByText(/This home could not be retried/)
+    const error = await screen.findByRole('alert')
+    expect(error).toHaveTextContent(/This home could not be retried/)
     expect(error).toHaveTextContent(/cannot be moved or renamed.*database correction/i)
-    expect(error).toHaveTextContent(/GFS browser on drive main.*press Retry/i)
+    expect(error).toHaveTextContent(/in EvenDrive.*press Retry/i)
     expect(error).not.toHaveTextContent('home_not_retryable')
-    expect(screen.getByLabelText('Folder name')).toHaveAttribute('readonly')
     expect(screen.getByText('Home moved')).toBeVisible()
     expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, undefined)
     fireEvent.click(retry)
-    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    expect(await screen.findByText('Being created…')).toBeVisible()
     expect(retryGfsUserHome).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps the name read-only and retries without a name for a bound ancestor conflict', async () => {
+  it('offers no name control and retries without a name for a bound ancestor conflict', async () => {
     const conflict: GfsUserHomeDetail = {
       ...baseHome,
       state: 'conflict',
@@ -218,14 +267,17 @@ describe('Home folder block', () => {
       home: { ...conflict, state: 'pending', conflictCode: null },
     })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'An inherited grant or share on the drive root or Users folder exposed home folders.'
-    )
-    const name = screen.getByLabelText('Folder name')
-    expect(name).toHaveValue('member')
-    expect(name).toHaveAttribute('readonly')
+    expect(
+      await screen.findByText(
+        'An inherited grant or share on the drive root or Users folder exposed home folders.'
+      )
+    ).toHaveAttribute('role', 'status')
+    expect(screen.queryByLabelText('Folder name')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Retry with another name…' })
+    ).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    expect(await screen.findByText('Being created…')).toBeVisible()
     expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, undefined)
   })
 
@@ -252,7 +304,7 @@ describe('Home folder block', () => {
     expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, undefined)
   })
 
-  it('keeps the name editable for an unbound ancestor conflict', async () => {
+  it('retries an unbound ancestor conflict with its reserved name and no name control', async () => {
     const conflict: GfsUserHomeDetail = {
       ...baseHome,
       state: 'conflict',
@@ -266,18 +318,17 @@ describe('Home folder block', () => {
       home: { ...conflict, state: 'pending', conflictCode: null },
     })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
-    await screen.findByRole('alert')
-    const name = screen.getByLabelText('Folder name')
-    expect(name).toHaveValue('member')
-    expect(name).not.toHaveAttribute('readonly')
-    fireEvent.change(name, { target: { value: 'member-new' } })
-    expect(name).toHaveValue('member-new')
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
-    expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, 'member-new')
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+    expect(screen.queryByLabelText('Folder name')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Retry with another name…' })
+    ).not.toBeInTheDocument()
+    fireEvent.click(retry)
+    expect(await screen.findByText('Being created…')).toBeVisible()
+    expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, 'member')
   })
 
-  it('shows a validation error without leaving conflict and then accepts a valid name', async () => {
+  it('keeps a name validation error in the dialog and then accepts a valid name', async () => {
     const conflict: GfsUserHomeDetail = {
       ...baseHome,
       state: 'conflict',
@@ -293,18 +344,20 @@ describe('Home folder block', () => {
       )
       .mockResolvedValueOnce({ home: { ...conflict, state: 'pending', conflictCode: null } })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
-    const name = await screen.findByLabelText('Folder name')
-    const guidance = screen.getByRole('region', { name: 'Path conflict recovery' })
+    const guidance = await screen.findByRole('region', { name: 'Path conflict recovery' })
     expect(
       within(guidance).getByText('The item that occupied /Users/member no longer exists.')
     ).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry with another name…' }))
+    const name = within(renameDialog()).getByLabelText('Folder name')
     fireEvent.change(name, { target: { value: '..' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText(/Enter a valid folder name/)).toBeVisible()
-    expect(screen.getByText('conflict', { exact: true })).toBeVisible()
+    fireEvent.click(within(renameDialog()).getByRole('button', { name: 'Retry' }))
+    expect(await within(renameDialog()).findByText(/Enter a valid folder name/)).toBeVisible()
+    expect(within(homeField()).getByText('Not created')).toBeVisible()
     fireEvent.change(name, { target: { value: 'member-new' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    fireEvent.click(within(renameDialog()).getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Being created…')).toBeVisible()
+    expect(retryGfsUserHome).toHaveBeenLastCalledWith(baseHome.userId, 'member-new')
   })
 
   it('restores an ownership conflict without offering Retry', async () => {
@@ -319,19 +372,21 @@ describe('Home folder block', () => {
     vi.mocked(restoreGfsUserHomeOwner).mockResolvedValue({ home: baseHome })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const restore = await screen.findByRole('button', { name: 'Restore owner access' })
-    expect(screen.getByRole('alert')).toHaveTextContent('The owner’s access was removed or reduced')
+    expect(
+      screen.getByText('The owner’s access was removed or reduced by an operator.')
+    ).toBeVisible()
     expect(screen.getByText('The owner grant is missing.')).toBeVisible()
     expect(
       screen.getByText('Missing permissions: read, write, delete, share, manage_acl.')
     ).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
     fireEvent.click(restore)
-    expect(await screen.findByText('ready', { exact: true })).toBeVisible()
+    expect(await screen.findByText('/Users/member')).toBeVisible()
     expect(restoreGfsUserHomeOwner).toHaveBeenCalledWith(baseHome.userId)
     expect(screen.queryByRole('button', { name: 'Restore owner access' })).not.toBeInTheDocument()
   })
 
-  it('shows the conflicting resource and the grants and shares on it', async () => {
+  it('shows the conflicting item and the grants and shares on it, without its resource id', async () => {
     vi.mocked(getGfsUserHome).mockResolvedValue({
       home: {
         ...baseHome,
@@ -368,10 +423,9 @@ describe('Home folder block', () => {
     })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const details = await screen.findByRole('region', { name: 'Path conflict details' })
-    expect(within(details).getByText('/Users/member')).toBeVisible()
-    expect(within(details).getByText('foreign-id')).toBeVisible()
-    expect(within(details).getByText('directory')).toBeVisible()
-    expect(within(details).getByText('2026-10-27T00:00:00Z')).toBeVisible()
+    expect(within(details).getByText('Conflicting directory: /Users/member')).toBeVisible()
+    expect(within(details).queryByText(/foreign-id/)).not.toBeInTheDocument()
+    expect(within(details).queryByText(/2026-10-27/)).not.toBeInTheDocument()
     expect(
       within(details).getByText(
         /Grant — user: Alice \(person-id\); Permissions: read, write; Includes contents: yes/
@@ -385,7 +439,7 @@ describe('Home folder block', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
   })
 
-  it('shows every conflicting ancestor and the subject and scope of its access', async () => {
+  it('shows every conflicting ancestor path and the subject and scope of its access', async () => {
     vi.mocked(getGfsUserHome).mockResolvedValue({
       home: {
         ...baseHome,
@@ -420,10 +474,9 @@ describe('Home folder block', () => {
     })
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const details = await screen.findByRole('region', { name: 'Ancestor access conflict details' })
-    expect(within(details).getByText('Path: /Users; resource ID: ancestor-1')).toBeVisible()
-    expect(within(details).getByText('Path: /; resource ID: ancestor-2')).toBeVisible()
-    expect(within(details).getByText(/Share — team: Platform \(team-1\)/)).toBeVisible()
-    expect(within(details).getByText(/Grant — user \(user-2\)/)).toBeVisible()
+    expect(within(details).getByText(/^\/Users — Share — team: Platform \(team-1\)/)).toBeVisible()
+    expect(within(details).getByText(/^\/ — Grant — user \(user-2\)/)).toBeVisible()
+    expect(within(details).queryByText(/ancestor-[12]/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
   })
 
@@ -470,16 +523,13 @@ describe('Home folder block', () => {
       })
     const first = render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const pathDetails = await screen.findByRole('region', { name: 'Path conflict details' })
-    expect(within(pathDetails).getByText('conflict-1')).toBeVisible()
-    expect(within(pathDetails).getByText('Not available')).toBeVisible()
+    expect(within(pathDetails).getByText('Conflicting directory: path not available')).toBeVisible()
     first.unmount()
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     const ancestorDetails = await screen.findByRole('region', {
       name: 'Ancestor access conflict details',
     })
-    expect(
-      within(ancestorDetails).getByText('Path: Not available; resource ID: ancestor-1')
-    ).toBeVisible()
+    expect(within(ancestorDetails).getByText(/^Path not available — Grant — team/)).toBeVisible()
   })
 
   it('explains the missing permissions and inheritance in a narrowed owner grant', async () => {
@@ -547,7 +597,7 @@ describe('Home folder block', () => {
     await screen.findByRole('button', { name: 'Retry' })
     vi.useFakeTimers()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry' })))
-    expect(screen.getByText('pending', { exact: true })).toBeVisible()
+    expect(screen.getByText('Being created…')).toBeVisible()
     await act(async () => vi.advanceTimersByTimeAsync(60_000))
     expect(screen.getByText('Still pending')).toBeVisible()
     const callsAtDeadline = vi.mocked(getGfsUserHome).mock.calls.length
@@ -556,7 +606,7 @@ describe('Home folder block', () => {
     expect(getGfsUserHome).toHaveBeenCalledTimes(callsAtDeadline)
     vi.mocked(getGfsUserHome).mockResolvedValueOnce({ home: baseHome })
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Refresh' })))
-    expect(screen.getByText('ready', { exact: true })).toBeVisible()
+    expect(screen.getByText('/Users/member')).toBeVisible()
     expect(screen.queryByText('Still pending')).not.toBeInTheDocument()
   })
 
@@ -576,7 +626,7 @@ describe('Home folder block', () => {
     vi.useFakeTimers()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry' })))
     await act(async () => vi.advanceTimersByTimeAsync(5_000))
-    expect(screen.getByText('ready', { exact: true })).toBeVisible()
+    expect(screen.getByText('/Users/member')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 
@@ -588,9 +638,9 @@ describe('Home folder block', () => {
     await act(async () => {})
 
     await act(async () => vi.advanceTimersByTimeAsync(5_000))
-    // Witness: the load plus exactly one poll, with the polling status on screen.
+    // Witness: the load plus exactly one poll, with the pending line on screen.
     expect(getGfsUserHome).toHaveBeenCalledTimes(2)
-    expect(screen.getByText('Checking home folder status…')).toBeVisible()
+    expect(screen.getByText('Being created…')).toBeVisible()
 
     view.unmount()
     await act(async () => vi.advanceTimersByTimeAsync(60_000))
@@ -610,5 +660,16 @@ describe('Home folder block', () => {
     expect(getGfsUserHome).toHaveBeenCalledTimes(2)
     expect(screen.getByRole('alert')).toHaveTextContent('Could not read the home folder.')
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+  })
+
+  it('shows the load error and a Refresh that recovers', async () => {
+    vi.mocked(getGfsUserHome)
+      .mockRejectedValueOnce(new Error('Could not read the home folder.'))
+      .mockResolvedValueOnce({ home: baseHome })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not read the home folder.')
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText('/Users/member')).toBeVisible()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })

@@ -69,11 +69,6 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
         icon: <IconHardDrive />,
       },
       {
-        label: 'Home folders',
-        href: CONTROL_ROUTES.gfsUserHomes,
-        icon: <IconUsers />,
-      },
-      {
         label: 'Agent Outputs',
         href: CONTROL_ROUTES.agentOutputs.root,
         icon: <IconOutputs />,

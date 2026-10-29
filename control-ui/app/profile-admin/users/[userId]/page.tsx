@@ -47,7 +47,6 @@ import {
   getAdminUserContexts,
   getAdminUserTeams,
   getContexts,
-  getGfsUserHome,
   getHosts,
   updateAdminMemberRole,
   updateAdminUserAgents,
@@ -97,7 +96,8 @@ export default function UserDetailsPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
-  const [deletedUser, setDeletedUser] = useState(false)
+  // The home folder field mounts only for a member whose context loaded (never on a 404).
+  const [memberLoaded, setMemberLoaded] = useState(false)
   const [approvalDmsRefreshDisabled, setApprovalDmsRefreshDisabled] = useState(true)
   const [refreshApprovalDms, setRefreshApprovalDms] = useState<(() => void) | null>(null)
   const [editingContact, setEditingContact] = useState(false)
@@ -284,27 +284,9 @@ export default function UserDetailsPage() {
   async function loadData() {
     setBusy(true)
     setError('')
-    setDeletedUser(false)
     try {
-      let context: Awaited<ReturnType<typeof getAdminUserContext>>
-      try {
-        context = await getAdminUserContext(userId)
-      } catch (contextError) {
-        if ((contextError as { status?: number })?.status !== 404) throw contextError
-        let home: Awaited<ReturnType<typeof getGfsUserHome>>['home']
-        try {
-          home = (await getGfsUserHome(userId)).home
-        } catch (homeError) {
-          // A missing home must not replace the member 404 that got us here.
-          if ((homeError as { status?: number })?.status === 404) throw contextError
-          throw homeError
-        }
-        if (home.state !== 'retired' || home.email !== null || home.name !== null)
-          throw contextError
-        setDeletedUser(true)
-        return
-      }
       const [
+        context,
         contexts,
         contextAccess,
         teamsData,
@@ -313,6 +295,7 @@ export default function UserDetailsPage() {
         userAgentAccess,
         communicationChannelsData,
       ] = await Promise.all([
+        getAdminUserContext(userId),
         getContexts(),
         getAdminUserContexts(userId),
         getAdminTeams(),
@@ -326,6 +309,7 @@ export default function UserDetailsPage() {
 
       setEmailDraft(context.email || '')
       setUserName(context.name || context.displayName || context.email || '')
+      setMemberLoaded(true)
       setContactEmailsDraft(uniqueTrimmed(context.channels.emails || [], true))
       setSlackHandlesDraft(uniqueTrimmed(context.channels.slackUserNames || []))
       setTelegramIdsDraft(uniqueTrimmed(context.channels.telegramIds || []))
@@ -374,6 +358,7 @@ export default function UserDetailsPage() {
   }
 
   useEffect(() => {
+    setMemberLoaded(false)
     void loadData()
   }, [userId])
 
@@ -775,22 +760,6 @@ export default function UserDetailsPage() {
     )
   }
 
-  if (deletedUser) {
-    return (
-      <DetailPageShell
-        backLabel="Back to home folders"
-        contentMode="plain"
-        icon={<IconUsers />}
-        onBack={() => router.push(CONTROL_ROUTES.gfsUserHomes)}
-        subtitle="The account was deleted, but its home folder is retained."
-        title="Deleted user"
-      >
-        <p>User ID: {userId}</p>
-        <GfsUserHomeBlock key={userId} userId={userId} />
-      </DetailPageShell>
-    )
-  }
-
   return (
     <DetailPageShell<UserTab>
       activeTab={activeTab}
@@ -846,13 +815,13 @@ export default function UserDetailsPage() {
               </strong>
             </div>
 
-            <div className="cu-field" style={{ marginBottom: 0 }}>
+            <div className="cu-field">
               <div className="cu-field__label">Telegram IDs</div>
               <strong>{telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}</strong>
             </div>
-          </div>
 
-          <GfsUserHomeBlock key={userId} userId={userId} />
+            {memberLoaded ? <GfsUserHomeBlock key={userId} userId={userId} /> : null}
+          </div>
 
           {!initialLoading && (
             <div

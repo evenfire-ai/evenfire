@@ -27,15 +27,41 @@ export class ControlUiUserHomeBlock {
     await humanRecordedPause([600, 1200])
   }
 
+  /**
+   * The field shows one line per state, never the raw state word: the home path when it is
+   * ready (and for a bound conflict), "Being created…"/"Still pending" while pending, the
+   * retired line, and a warn status banner for a conflict.
+   */
   async expectState(state: HomeState, path?: string): Promise<void> {
     const home = this.page.getByRole('region', { name: 'Home folder' })
-    await expect(home.getByText(state, { exact: true })).toBeVisible()
+    const banner = home.locator('.cu-banner--warn[role="status"]')
+    if (state === 'ready') {
+      if (path === undefined) throw new Error('A ready home is asserted by its path')
+      // Positive witness first: the path line is on screen, then no conflict banner.
+      await expect(home.getByText(path, { exact: true })).toBeVisible()
+      await expect(banner).toHaveCount(0)
+      return
+    }
+    if (state === 'pending') {
+      await expect(home.getByText(/^(Being created…|Still pending)$/)).toBeVisible()
+      return
+    }
+    if (state === 'retired') {
+      await expect(
+        home.getByText('Retired — files kept for operators', { exact: true })
+      ).toBeVisible()
+      return
+    }
+    await expect(banner).toBeVisible()
     if (path !== undefined) await expect(home.getByText(path, { exact: true })).toBeVisible()
   }
 
   async retryWithName(name: string): Promise<void> {
     const home = this.page.getByRole('region', { name: 'Home folder' })
-    const folderName = home.getByLabel('Folder name')
+    await home.getByRole('button', { name: 'Retry with another name…', exact: true }).click()
+    const dialog = this.page.getByRole('dialog', { name: 'Retry with another name' })
+    await expect(dialog).toBeVisible()
+    const folderName = dialog.getByLabel('Folder name')
     await expect(folderName).toBeEditable()
     await folderName.fill(name)
     const response = this.page.waitForResponse(
@@ -43,11 +69,13 @@ export class ControlUiUserHomeBlock {
         result.request().method() === 'POST' &&
         /\/gfs\/user-homes\/[^/]+\/retry$/.test(new URL(result.url()).pathname)
     )
-    await home.getByRole('button', { name: 'Retry', exact: true }).click()
+    await dialog.getByRole('button', { name: 'Retry', exact: true }).click()
     const result = await response
     expect(result.ok()).toBe(true)
     expect(result.request().postDataJSON()).toEqual({ storageUsername: name })
-    await expect(home.getByText(/^(pending|ready)$/, { exact: true })).toBeVisible()
+    await expect(dialog).toBeHidden()
+    const body = (await result.json()) as { home: { state: HomeState; path: string | null } }
+    await this.expectState(body.home.state, body.home.path ?? undefined)
     await humanRecordedPause([600, 1200])
   }
 
@@ -59,8 +87,11 @@ export class ControlUiUserHomeBlock {
         /\/gfs\/user-homes\/[^/]+\/restore-owner$/.test(new URL(result.url()).pathname)
     )
     await home.getByRole('button', { name: 'Restore owner access', exact: true }).click()
-    expect((await response).ok()).toBe(true)
-    await this.expectState('ready')
+    const result = await response
+    expect(result.ok()).toBe(true)
+    const body = (await result.json()) as { home: { state: HomeState; path: string | null } }
+    expect(body.home.state).toBe('ready')
+    await this.expectState('ready', body.home.path ?? undefined)
     await humanRecordedPause([600, 1200])
   }
 
