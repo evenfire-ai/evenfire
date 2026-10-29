@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - test/pr977-windows-075794e5-20261028-r24m3
+    paths:
+      - .validation/windows/full-suite.trigger
 
 permissions:
   contents: read
@@ -146,6 +148,53 @@ jobs:
           if (-not (Test-Path $reportPath)) { throw 'Full Desktop JSON report is missing' }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           Write-Output "Full Desktop suite: files=$($report.numTotalTestSuites) passedFiles=$($report.numPassedTestSuites) failedFiles=$($report.numFailedTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          function Get-SafeFailureDiagnostic([string[]]$messages) {
+            $joined = $messages -join "`n"
+            $knownCodes = @('E2BIG', 'EACCES', 'EEXIST', 'EIO', 'EINVAL', 'EMFILE', 'ENFILE', 'ENOENT', 'ENOSPC', 'ENOTEMPTY', 'EPERM', 'ETIMEDOUT')
+            $code = $null
+            foreach ($candidate in $knownCodes) {
+              if ($joined -match "(?<![A-Za-z0-9_])$candidate(?![A-Za-z0-9_])") { $code = $candidate; break }
+            }
+            $errorType = $null
+            $typeMatch = [regex]::Match($joined, '(?<![A-Za-z0-9_])(?<type>PrivilegeNotHeldException|UnauthorizedAccessException|PlatformNotSupportedException|DirectoryNotFoundException|FileNotFoundException|Win32Exception|AssertionError|TimeoutError|TypeError|ReferenceError|RangeError)(?![A-Za-z0-9_])')
+            if ($typeMatch.Success) { $errorType = $typeMatch.Groups['type'].Value }
+            $category = 'unclassified'
+            if ($joined -match 'Native Windows ACL fixture failed:') { $category = 'native-fixture' }
+            elseif ($code -eq 'ETIMEDOUT' -or $errorType -eq 'TimeoutError') { $category = 'timeout' }
+            elseif ($code -in @('EACCES', 'EPERM') -or $errorType -eq 'UnauthorizedAccessException') { $category = 'access-denied' }
+            elseif ($errorType -eq 'PrivilegeNotHeldException') { $category = 'privilege-not-held' }
+            elseif ($errorType -eq 'PlatformNotSupportedException') { $category = 'platform-api-unavailable' }
+            elseif ($errorType -eq 'AssertionError') { $category = 'assertion' }
+            elseif ($joined -match 'Windows session authority ACL verification failed') { $category = 'authority-acl-rejected' }
+            $safe = [ordered]@{ category = $category }
+            if ($code) { $safe.code = $code }
+            if ($errorType) { $safe.errorType = $errorType }
+            $fixtureMatch = [regex]::Match($joined, 'Native Windows ACL fixture failed:\s*(?<payload>\{[^\r\n]*\})')
+            if ($fixtureMatch.Success) {
+              try {
+                $raw = $fixtureMatch.Groups['payload'].Value | ConvertFrom-Json
+                $safeFixture = [ordered]@{}
+                $allowedOperations = @('add-everyone-modify', 'add-trusted-installer-modify', 'add-authenticated-users-create-directory', 'add-current-user-inherit-only-ace', 'create-authority-child-junction', 'create-user-data-parent-junction', 'remove-user-data-parent-junction', 'set-allowed-child-owner')
+                if ($raw.operation -in $allowedOperations) { $safeFixture.operation = $raw.operation }
+                foreach ($field in @('processStarted', 'processSignaled', 'stdoutPresent', 'stderrPresent')) {
+                  if ($raw.$field -is [bool]) { $safeFixture[$field] = $raw.$field }
+                }
+                if ($raw.exitStatus -is [int]) { $safeFixture.exitStatus = $raw.exitStatus }
+                if ($raw.processErrorCode -in @('E2BIG', 'EACCES', 'EINVAL', 'ENOENT', 'EPERM', 'ETIMEDOUT', 'OTHER')) { $safeFixture.processErrorCode = $raw.processErrorCode }
+                $allowedCategories = @('privilege-not-held', 'access-denied', 'win32-api-failure', 'argument-rejected', 'platform-api-unavailable', 'fixture-ace-readback-mismatch', 'invalid-cast', 'method-invocation-failed', 'script-parse-failed', 'overload-resolution-failed', 'unclassified-powershell-failure')
+                if ($raw.powershellFailureCategory -in $allowedCategories) { $safeFixture.powershellFailureCategory = $raw.powershellFailureCategory }
+                $allowedTypes = @('ArgumentException', 'DirectoryNotFoundException', 'IOException', 'InvalidOperationException', 'MethodInvocationException', 'PlatformNotSupportedException', 'PrivilegeNotHeldException', 'UnauthorizedAccessException', 'Win32Exception')
+                foreach ($field in @('errorType', 'innerErrorType')) {
+                  if ($raw.$field -in $allowedTypes) { $safeFixture[$field] = $raw.$field }
+                }
+                foreach ($field in @('hresult', 'innerHresult')) {
+                  if ($raw.$field -match '^0x[0-9A-F]{8}$') { $safeFixture[$field] = $raw.$field }
+                }
+                $safe.fixture = $safeFixture
+              } catch { $safe.fixture = @{ parse = 'failed' } }
+            }
+            return ($safe | ConvertTo-Json -Compress -Depth 4)
+          }
           foreach ($result in @($report.testResults)) {
             foreach ($assertion in @($result.assertionResults | Where-Object { $_.status -eq 'failed' })) {
               $file = [System.IO.Path]::GetFileName($result.name)
@@ -164,6 +213,7 @@ jobs:
                 }
               }
               Write-Output "Failed test case: file=$file title=$($assertion.fullName) type=$failureType at=$failureLocation"
+              Write-Output "Safe failure diagnostic: $(Get-SafeFailureDiagnostic @($assertion.failureMessages))"
             }
           }
           foreach ($file in @(
