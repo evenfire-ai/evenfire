@@ -38,7 +38,7 @@ import {
   type GfsShareOptions,
   parseSubjectKey,
 } from './gfs/uriHandler.js'
-import { ApiError, requestJson } from './httpClient.js'
+import { ApiError } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'

@@ -359,7 +359,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         })
       })
       const home = fx.readHome(owner.id)!
-      const homePath = `/Users/${home.storageUsername}`
       await test.step('create a folder and a file through the UI', async () => {
         const view = new DesktopResourceView(page)
         await view.createFolder(folder)
