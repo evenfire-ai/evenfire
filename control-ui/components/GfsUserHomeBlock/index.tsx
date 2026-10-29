@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { SingleValueEditDialog } from '@clerum/frontend-components'
 import { Button, Field, TextInput } from '@components/ui'
 import {
@@ -189,6 +189,14 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
   const [renameOpen, setRenameOpen] = useState(false)
   const [renameError, setRenameError] = useState('')
   const [renameValid, setRenameValid] = useState(true)
+  const statusRef = useRef<HTMLElement>(null)
+  const focusStatusAfterRename = useRef(false)
+
+  useEffect(() => {
+    if (renameOpen || !focusStatusAfterRename.current) return
+    focusStatusAfterRename.current = false
+    statusRef.current?.focus()
+  }, [renameOpen])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -249,7 +257,8 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
           })
           .catch(caught => {
             if (controller.signal.aborted) return
-            setError(errorMessage(caught))
+            if (isHomeNotFound(caught)) showMissing()
+            else setError(errorMessage(caught))
             setPolling(false)
           })
       }, POLL_INTERVAL_MS)
@@ -262,6 +271,14 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
     }
   }, [polling, userId])
 
+  /** The registry has no row for this member: no stale home, conflict or pending line stays. */
+  function showMissing() {
+    setHome(null)
+    setConflictDetail(null)
+    setStillPending(false)
+    setMissing(true)
+  }
+
   async function refresh() {
     setBusy(true)
     setError('')
@@ -270,9 +287,12 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
       setMissing(false)
       setHome(loaded)
       setConflictDetail(loaded.conflictDetail)
-      if (loaded.state !== 'pending') setStillPending(false)
+      setStillPending(false)
+      // A pending home found by Refresh gets a new polling window, so "Being created…"
+      // is only shown while the field is really checking.
+      setPolling(loaded.state === 'pending')
     } catch (caught) {
-      if (isHomeNotFound(caught)) setMissing(true)
+      if (isHomeNotFound(caught)) showMissing()
       else setError(errorMessage(caught))
     } finally {
       setBusy(false)
@@ -315,8 +335,14 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
   async function retryWithName(name: string) {
     setRenameError('')
     const failure = await runRetry(name)
-    if (failure) setRenameError(failure)
-    else setRenameOpen(false)
+    if (failure) {
+      setRenameError(failure)
+      return
+    }
+    // The accepted retry ends the conflict, which removes the button that opened the
+    // dialog, so the dialog cannot return focus to it; the status line takes it instead.
+    focusStatusAfterRename.current = true
+    setRenameOpen(false)
   }
 
   async function restoreOwner() {
@@ -357,20 +383,16 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
       <div className="cu-field__label" id="user-home-title">
         Home folder
       </div>
-      <strong className={loading || missing ? 'cu-muted' : undefined}>{statusLine}</strong>
+      <strong className={loading || missing ? 'cu-muted' : undefined} ref={statusRef} tabIndex={-1}>
+        {statusLine}
+      </strong>
 
       {home?.state === 'conflict' && home.conflictCode ? (
-        <>
-          <p className="cu-banner cu-banner--warn" role="status">
-            {boundPathConflict
-              ? 'The home is not at its reserved path.'
-              : CONFLICT_CAUSES[home.conflictCode]}
-          </p>
-          {home.conflictCode === 'path_conflict' ? (
-            <PathConflictRecovery home={home} detail={conflictDetail} />
-          ) : null}
-          <ConflictDetails detail={conflictDetail} code={home.conflictCode} />
-        </>
+        <p className="cu-banner cu-banner--warn" role="status">
+          {boundPathConflict
+            ? 'The home is not at its reserved path.'
+            : CONFLICT_CAUSES[home.conflictCode]}
+        </p>
       ) : null}
 
       {error ? (
@@ -379,6 +401,8 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
         </p>
       ) : null}
 
+      {/* The actions sit right under the cause so they stay in view; the longer recovery
+          text and the conflict details follow them. */}
       {retryable ||
       ownerConflict ||
       (home?.state === 'pending' && !polling) ||
@@ -414,6 +438,15 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
             </Button>
           ) : null}
         </div>
+      ) : null}
+
+      {home?.state === 'conflict' && home.conflictCode ? (
+        <>
+          {home.conflictCode === 'path_conflict' ? (
+            <PathConflictRecovery home={home} detail={conflictDetail} />
+          ) : null}
+          <ConflictDetails detail={conflictDetail} code={home.conflictCode} />
+        </>
       ) : null}
 
       <SingleValueEditDialog

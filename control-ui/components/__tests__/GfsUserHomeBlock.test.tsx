@@ -32,6 +32,13 @@ function homeField() {
   return screen.getByRole('region', { name: 'Home folder' })
 }
 
+function homeNotFound() {
+  return Object.assign(new Error('404 Not Found - home_not_found'), {
+    code: 'home_not_found',
+    status: 404,
+  })
+}
+
 function renameDialog() {
   return screen.getByRole('dialog', { name: 'Retry with another name' })
 }
@@ -660,6 +667,93 @@ describe('Home folder field', () => {
     expect(getGfsUserHome).toHaveBeenCalledTimes(2)
     expect(screen.getByRole('alert')).toHaveTextContent('Could not read the home folder.')
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+  })
+
+  it('starts a new polling window when Refresh finds a pending home', async () => {
+    vi.mocked(getGfsUserHome)
+      .mockRejectedValueOnce(homeNotFound())
+      .mockResolvedValueOnce({ home: { ...baseHome, state: 'pending' } })
+      .mockResolvedValueOnce({ home: baseHome })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    await screen.findByText('No home folder yet')
+    vi.useFakeTimers()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Refresh' })))
+    expect(screen.getByText('Being created…')).toBeVisible()
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    // Witness: the load, the Refresh and one poll; the poll turned the field ready.
+    expect(getGfsUserHome).toHaveBeenCalledTimes(3)
+    expect(screen.getByText('/Users/member')).toBeVisible()
+  })
+
+  it('replaces a stale pending home with no home folder when Refresh finds no row', async () => {
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: { ...baseHome, state: 'pending' } })
+    vi.useFakeTimers()
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    await act(async () => {})
+    await act(async () => vi.advanceTimersByTimeAsync(60_000))
+    expect(screen.getByText('Still pending')).toBeVisible()
+    vi.mocked(getGfsUserHome).mockRejectedValueOnce(homeNotFound())
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Refresh' })))
+    expect(within(homeField()).getByText('No home folder yet')).toBeVisible()
+    expect(screen.queryByText('Still pending')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows no home folder, not an error, when a poll finds no row', async () => {
+    vi.mocked(getGfsUserHome)
+      .mockResolvedValueOnce({ home: { ...baseHome, state: 'pending' } })
+      .mockRejectedValueOnce(homeNotFound())
+    vi.useFakeTimers()
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    await act(async () => {})
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    expect(getGfsUserHome).toHaveBeenCalledTimes(2)
+    expect(within(homeField()).getByText('No home folder yet')).toBeVisible()
+    expect(screen.queryByText('Being created…')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('puts the recovery actions right under the cause, before the longer guidance', async () => {
+    vi.mocked(getGfsUserHome).mockResolvedValue({
+      home: {
+        ...baseHome,
+        state: 'conflict',
+        path: null,
+        resourceId: null,
+        conflictCode: 'path_conflict',
+        conflictDetail: { code: 'path_conflict', resource: null, access: [] },
+      },
+    })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    const guidance = await screen.findByRole('region', { name: 'Path conflict recovery' })
+    const cause = within(homeField()).getByRole('status')
+    const retry = screen.getByRole('button', { name: 'Retry' })
+    expect(cause.compareDocumentPosition(retry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(retry.compareDocumentPosition(guidance) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('moves focus to the status line when an accepted rename retry removes the opener', async () => {
+    const conflict: GfsUserHomeDetail = {
+      ...baseHome,
+      state: 'conflict',
+      path: null,
+      resourceId: null,
+      conflictCode: 'path_conflict',
+      conflictDetail: { code: 'path_conflict', resource: null, access: [] },
+    }
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: conflict })
+    vi.mocked(retryGfsUserHome).mockResolvedValue({
+      home: { ...conflict, state: 'pending', conflictCode: null },
+    })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry with another name…' }))
+    fireEvent.change(within(renameDialog()).getByLabelText('Folder name'), {
+      target: { value: 'member-new' },
+    })
+    fireEvent.click(within(renameDialog()).getByRole('button', { name: 'Retry' }))
+    const status = await screen.findByText('Being created…')
+    expect(screen.queryByRole('button', { name: 'Retry with another name…' })).toBeNull()
+    expect(document.activeElement).toBe(status)
   })
 
   it('shows the load error and a Refresh that recovers', async () => {

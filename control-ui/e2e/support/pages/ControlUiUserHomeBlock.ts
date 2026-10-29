@@ -4,6 +4,9 @@ import { humanRecordedPause } from '../../../../desktop-app/test/e2e-playwright/
 type HomeState = 'pending' | 'ready' | 'conflict' | 'retired'
 
 export class ControlUiUserHomeBlock {
+  /** State in the last home response the field rendered (the GET on open, or a retry/restore). */
+  private respondedState: HomeState | undefined
+
   constructor(private readonly page: Page) {}
 
   async open(userId: string): Promise<void> {
@@ -23,6 +26,7 @@ export class ControlUiUserHomeBlock {
       this.page.waitForResponse(isHomeResponse),
     ])
     expect(response.ok()).toBe(true)
+    this.respondedState = ((await response.json()) as { home: { state: HomeState } }).home.state
     await expect(this.page.getByRole('region', { name: 'Home folder' })).toBeVisible()
     await humanRecordedPause([600, 1200])
   }
@@ -33,6 +37,8 @@ export class ControlUiUserHomeBlock {
    * retired line, and a warn status banner for a conflict.
    */
   async expectState(state: HomeState, path?: string): Promise<void> {
+    // The response decides the state; the visible line below proves the field rendered it.
+    expect(this.respondedState, 'state in the home response the field rendered').toBe(state)
     const home = this.page.getByRole('region', { name: 'Home folder' })
     const banner = home.locator('.cu-banner--warn[role="status"]')
     if (state === 'ready') {
@@ -75,6 +81,7 @@ export class ControlUiUserHomeBlock {
     expect(result.request().postDataJSON()).toEqual({ storageUsername: name })
     await expect(dialog).toBeHidden()
     const body = (await result.json()) as { home: { state: HomeState; path: string | null } }
+    this.respondedState = body.home.state
     await this.expectState(body.home.state, body.home.path ?? undefined)
     await humanRecordedPause([600, 1200])
   }
@@ -91,6 +98,7 @@ export class ControlUiUserHomeBlock {
     expect(result.ok()).toBe(true)
     const body = (await result.json()) as { home: { state: HomeState; path: string | null } }
     expect(body.home.state).toBe('ready')
+    this.respondedState = body.home.state
     await this.expectState('ready', body.home.path ?? undefined)
     await humanRecordedPause([600, 1200])
   }

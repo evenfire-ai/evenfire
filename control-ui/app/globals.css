@@ -1533,6 +1533,12 @@ body.cu-body {
   margin-bottom: 0;
 }
 
+/* The status line receives focus after an accepted rename retry (the dialog opener is gone). */
+.cu-user-home > strong:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 2px;
+}
+
 .cu-user-home__detail {
   display: flex;
   flex-direction: column;
