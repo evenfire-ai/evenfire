@@ -28,6 +28,11 @@ import {
 } from '../../services/auth/externalSessionIssuance.js'
 import { authenticatePasswordAndIssueSession } from '../../services/auth/passwordSessionAuthentication.js'
 import {
+  externalSessionDatabaseFailure,
+  isExternalSessionBackendUnavailableError,
+  runExternalSessionDatabaseOperation,
+} from '../../services/auth/sessionDatabaseFailure.js'
+import {
   revokeAllUserSessions,
   revokeLegacyUserSession,
   revokeUserSession,
@@ -105,6 +110,26 @@ function sendExternalLoginError(res: Response, error: unknown): Response {
     return res.status(409).json({ error: 'password_not_set' })
   }
   return res.status(403).json({ error: 'membership_not_found' })
+}
+
+/**
+ * Answers 503 `authority_unavailable` only when the failure carries the
+ * repository's database-outage provenance. Every other error keeps the
+ * sanitized 500 path so a programmer or policy failure is never reported as an
+ * outage.
+ */
+function handleExternalAuthorityUnavailable(
+  error: unknown,
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  message: string
+): void {
+  if (!isExternalSessionBackendUnavailableError(error)) {
+    next(error)
+    return
+  }
+  sendPublicApiError(req, res, 503, 'authority_unavailable', message, true)
 }
 
 async function requireLegacyRpcSessionRateLimitContext(
@@ -337,7 +362,10 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
               email,
               teamId,
             },
-            { policy: authentication.policy }
+            {
+              policy: authentication.policy,
+              onDatabaseFailure: externalSessionDatabaseFailure,
+            }
           )
           if (exchange.status === 'invalid_session') {
             sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
@@ -353,8 +381,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           })
         }
 
-        const membership = await pool.query(
-          `SELECT tm.role, u.lifecycle_version
+        const membership = await runExternalSessionDatabaseOperation(() =>
+          pool.query(
+            `SELECT tm.role, u.lifecycle_version
            FROM users u
            JOIN team_members tm ON tm.user_id = u.id
           WHERE u.id = $1
@@ -363,7 +392,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
             AND tm.status = 'active'
             AND u.lifecycle_state = 'active'
           LIMIT 1`,
-          [userId, email, teamId]
+            [userId, email, teamId]
+          )
         )
         const liveRole = (
           membership.rows[0] as
@@ -378,14 +408,13 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           sessionContract: 'v2',
           deprecated: true,
         })
-      } catch {
-        sendPublicApiError(
+      } catch (error) {
+        handleExternalAuthorityUnavailable(
+          error,
           req,
           res,
-          503,
-          'authority_unavailable',
-          'Authorization is temporarily unavailable.',
-          true
+          next,
+          'Authorization is temporarily unavailable.'
         )
       }
     }
@@ -395,7 +424,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     '/external/auth/session/renew',
     requireExternalSessionRateLimitContext({ purpose: 'renew', client: externalSessionClient }),
     requireAuthenticatedExternalUserRateLimitContext,
-    async (req: ExternalAuthedRequest, res) => {
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
         const token = sessionTokenFromRequest(req)
         if (!token || token.length > 4096) {
@@ -406,6 +435,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         const renewal = await renewExternalUserSession(token, {
           client: externalSessionClient(req),
           policy: authentication.policy,
+          onDatabaseFailure: externalSessionDatabaseFailure,
         })
         if (renewal.status === 'upgrade_required') {
           sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
@@ -421,14 +451,13 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           expiresInSeconds: renewal.session.expiresInSeconds,
           absoluteExpiresAt: renewal.session.identity.absoluteExpiresAt.toISOString(),
         })
-      } catch {
-        sendPublicApiError(
+      } catch (error) {
+        handleExternalAuthorityUnavailable(
+          error,
           req,
           res,
-          503,
-          'authority_unavailable',
-          'Session authority is temporarily unavailable.',
-          true
+          next,
+          'Session authority is temporarily unavailable.'
         )
       }
     }
@@ -441,7 +470,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       client: externalSessionClient,
     }),
     requireAuthenticatedExternalUserRateLimitContext,
-    async (req: ExternalAuthedRequest, res) => {
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
         const token = sessionTokenFromRequest(req)
         if (!token || token.length > 4096) {
@@ -456,18 +485,20 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
                 authentication.claims.sid,
                 'logout',
                 undefined,
-                authentication.authorityContext
+                authentication.authorityContext,
+                { onDatabaseFailure: externalSessionDatabaseFailure }
               )
-            : await revokeLegacyUserSession(token, authentication.claims, 'logout')
+            : await revokeLegacyUserSession(token, authentication.claims, 'logout', undefined, {
+                onDatabaseFailure: externalSessionDatabaseFailure,
+              })
         return res.status(200).json({ revoked })
-      } catch {
-        sendPublicApiError(
+      } catch (error) {
+        handleExternalAuthorityUnavailable(
+          error,
           req,
           res,
-          503,
-          'authority_unavailable',
-          'Session authority is temporarily unavailable.',
-          true
+          next,
+          'Session authority is temporarily unavailable.'
         )
       }
     }
@@ -477,7 +508,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     '/external/auth/sessions/revoke-all',
     requireExternalSessionRateLimitContext({ purpose: 'protected', client: externalSessionClient }),
     requireAuthenticatedExternalUserRateLimitContext,
-    async (req: ExternalAuthedRequest, res) => {
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
         const token = sessionTokenFromRequest(req)
         if (!token || token.length > 4096) {
@@ -489,17 +520,18 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           authentication.claims.userId,
           'user_revoked_all',
           undefined,
-          authentication.authorityContext
+          authentication.authorityContext,
+          undefined,
+          { onDatabaseFailure: externalSessionDatabaseFailure }
         )
         return res.status(200).json({ revoked })
-      } catch {
-        sendPublicApiError(
+      } catch (error) {
+        handleExternalAuthorityUnavailable(
+          error,
           req,
           res,
-          503,
-          'authority_unavailable',
-          'Session authority is temporarily unavailable.',
-          true
+          next,
+          'Session authority is temporarily unavailable.'
         )
       }
     }
@@ -513,7 +545,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       requireV2: true,
     }),
     requireAuthenticatedExternalUserRateLimitContext,
-    async (req: ExternalAuthedRequest, res) => {
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
         const authentication = req.externalSessionAuthentication!
         const revoked = await revokeUserSession(
@@ -521,17 +553,17 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           String(req.params.sid || '').trim(),
           'user_revoked',
           undefined,
-          authentication.authorityContext
+          authentication.authorityContext,
+          { onDatabaseFailure: externalSessionDatabaseFailure }
         )
         return res.status(200).json({ revoked })
-      } catch {
-        sendPublicApiError(
+      } catch (error) {
+        handleExternalAuthorityUnavailable(
+          error,
           req,
           res,
-          503,
-          'authority_unavailable',
-          'Session authority is temporarily unavailable.',
-          true
+          next,
+          'Session authority is temporarily unavailable.'
         )
       }
     }
@@ -551,16 +583,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           liveTeam = claims.teamId
             ? await getLiveTeamMembership(claims.userId, claims.teamId, {
                 budget: req.accessExecutionBudget,
+                onDatabaseFailure: externalSessionDatabaseFailure,
               })
             : null
-        } catch {
-          sendPublicApiError(
+        } catch (error) {
+          handleExternalAuthorityUnavailable(
+            error,
             req,
             res,
-            503,
-            'authority_unavailable',
-            'Authorization is temporarily unavailable.',
-            true
+            next,
+            'Authorization is temporarily unavailable.'
           )
           return
         }

@@ -296,7 +296,9 @@ export async function authenticateExternalUserSession(
 
 export async function renewExternalUserSession(
   token: string,
-  options: Omit<AuthenticationOptions, 'purpose'> = {}
+  options: Omit<AuthenticationOptions, 'purpose'> & {
+    onDatabaseFailure?: (error: unknown) => unknown
+  } = {}
 ): Promise<ExternalSessionRenewal> {
   const policy =
     options.policy ?? (await resolveEffectiveUserAccessPolicy({ budget: options.budget }))
@@ -308,7 +310,10 @@ export async function renewExternalUserSession(
   }
   const claims = verifyUserSessionV2Token(token)
   if (!claims) return { status: 'invalid', reason: 'invalid_representation' }
-  const result = await renewUserSession(claims, { budget: options.budget })
+  const result = await renewUserSession(claims, {
+    budget: options.budget,
+    onDatabaseFailure: options.onDatabaseFailure,
+  })
   if (!('token' in result)) {
     if (result.status === 'valid') {
       return { status: 'invalid', reason: 'session_renewal_failed' }

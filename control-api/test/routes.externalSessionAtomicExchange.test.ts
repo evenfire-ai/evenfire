@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
+import { externalSessionDatabaseFailure } from '../src/services/auth/sessionDatabaseFailure.js'
 
 const sessions = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
 const revocations = vi.hoisted(() => ({
@@ -205,7 +206,9 @@ describe('legacy external-session replacement exchange', () => {
       claims.userId,
       'user_revoked_all',
       undefined,
-      authorityContext
+      authorityContext,
+      undefined,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
     )
   })
 
@@ -241,7 +244,8 @@ describe('legacy external-session replacement exchange', () => {
       'target-session',
       'user_revoked',
       undefined,
-      authorityContext
+      authorityContext,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
     )
   })
 
@@ -277,7 +281,8 @@ describe('legacy external-session replacement exchange', () => {
       v2Claims.sid,
       'logout',
       undefined,
-      authorityContext
+      authorityContext,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
     )
   })
 })

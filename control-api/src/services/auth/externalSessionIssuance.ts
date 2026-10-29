@@ -1,4 +1,4 @@
-import { type DbClient, withTransaction } from '../../db.js'
+import { type DbClient, pool, withTransaction } from '../../db.js'
 import type { AuthClaims, TeamRole } from '../../profileTypes.js'
 import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 import {
@@ -154,6 +154,7 @@ export async function exchangeLegacyExternalUserSession(
   options: {
     policy: EffectiveUserAccessPolicy
     transaction?: SessionTransaction
+    onDatabaseFailure?: (error: unknown) => unknown
   }
 ): Promise<LegacyExternalSessionExchange> {
   if (
@@ -162,7 +163,10 @@ export async function exchangeLegacyExternalUserSession(
   ) {
     return { status: 'invalid_session' }
   }
-  const run = options.transaction ?? withTransaction
+  const run =
+    options.transaction ??
+    (<T>(work: (db: DbClient) => Promise<T>) =>
+      withTransaction(work, pool, { onDatabaseFailure: options.onDatabaseFailure }))
   return run(async db => {
     const validation = await validateLegacyUserSession(input.token, input.claims, {
       db,
