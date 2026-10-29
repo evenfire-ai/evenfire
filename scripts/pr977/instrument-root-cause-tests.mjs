@@ -168,35 +168,47 @@ if (kind === 'acl') {
     "    for (const field of ['hresult', 'innerHresult'] as const) {\n      const value = fields[field]\n      if (typeof value === 'string' && /^0x[0-9A-F]{8}$/i.test(value)) output[field] = value\n    }\n    const phaseMatch = stderr.match(/EVENFIRE_OWNER_FIXTURE_PHASE=(read-existing-acl|set-owner|enable-restore-privilege|write-acl|read-back-owner|owner-readback-mismatch)/)\n    if (phaseMatch) output.fixturePhase = phaseMatch[1]\n    const privilegeMatch = stderr.match(/EVENFIRE_OWNER_FIXTURE_PRIVILEGES=restore:(enabled|disabled|not-listed);takeOwnership:(enabled|disabled|not-listed)/)\n    if (privilegeMatch) output.fixturePrivileges = { restore: privilegeMatch[1]!, takeOwnership: privilegeMatch[2]! }\n    return output",
     'ACL phase extraction'
   )
+  result = replaceOnce(
+    result,
+    "$ownerSid = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_OWNER')\n",
+    "$ownerSid = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_OWNER')\n$fixturePhasePath = [Environment]::GetEnvironmentVariable('PR977_DIAGNOSTIC_PHASE_FILE')\nfunction Write-OwnerFixturePhase([string]$value) {\n  if ($value -notin @('read-existing-acl', 'set-owner', 'enable-restore-privilege', 'write-acl', 'read-back-owner', 'owner-readback-mismatch', 'fixture-owner-readback-verified')) { throw 'fixture-phase-not-allowlisted' }\n  if ($fixturePhasePath) { [IO.File]::AppendAllText($fixturePhasePath, $value + [Environment]::NewLine, [Text.UTF8Encoding]::new($false)) }\n}\n",
+    'ACL fixture phase-file helper'
+  )
+  result = replaceOnce(
+    result,
+    "powershellFailureCategory: powershellFailureCategory(result.stderr ?? ''),",
+    "powershellFailureCategory: powershellFailureCategory(result.stderr ?? ''),\n        fixturePhase: (result.stderr ?? '').match(/EVENFIRE_OWNER_FIXTURE_PHASE=(read-existing-acl|set-owner|enable-restore-privilege|write-acl|read-back-owner|owner-readback-mismatch)/)?.[1] ?? null,\n        fixturePrivileges: (() => {\n          const match = (result.stderr ?? '').match(/EVENFIRE_OWNER_FIXTURE_PRIVILEGES=restore:(enabled|disabled|not-listed);takeOwnership:(enabled|disabled|not-listed)/)\n          return match ? { restore: match[1], takeOwnership: match[2] } : null\n        })(),",
+    'sanitized ACL fixture diagnostics'
+  )
   const aclFixtureMarkers = [
     [
-      '$acl = [IO.Directory]::GetAccessControl($target)',
-      "$phase = 'read-existing-acl'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase)\n$acl = [IO.Directory]::GetAccessControl($target)",
+      "  throw 'fixture-owner-not-allowlisted'\n}\n$acl = [IO.Directory]::GetAccessControl($target)",
+      "  throw 'fixture-owner-not-allowlisted'\n}\n$phase = 'read-existing-acl'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase); Write-OwnerFixturePhase $phase\n$acl = [IO.Directory]::GetAccessControl($target)",
       'existing ACL read',
     ],
     [
       '$acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new($ownerSid))',
-      "$phase = 'set-owner'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase)\n$acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new($ownerSid))",
+      "$phase = 'set-owner'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase); Write-OwnerFixturePhase $phase\n$acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new($ownerSid))",
       'owner assignment',
     ],
     [
       'Add-Type -TypeDefinition $privilegeHelper -ErrorAction Stop',
-      "$phase = 'enable-restore-privilege'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase)\nAdd-Type -TypeDefinition $privilegeHelper -ErrorAction Stop",
+      "$phase = 'enable-restore-privilege'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase); Write-OwnerFixturePhase $phase\nAdd-Type -TypeDefinition $privilegeHelper -ErrorAction Stop",
       'restore privilege helper compilation',
     ],
     [
       '  [IO.Directory]::SetAccessControl($target, $acl)\n})',
-      "  $phase = 'write-acl'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase)\n  [IO.Directory]::SetAccessControl($target, $acl)\n})",
+      "  $phase = 'write-acl'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase); Write-OwnerFixturePhase $phase\n  [IO.Directory]::SetAccessControl($target, $acl)\n})",
       'owner ACL write',
     ],
     [
       '$readBack = [IO.Directory]::GetAccessControl($target)',
-      "$phase = 'read-back-owner'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase)\n$readBack = [IO.Directory]::GetAccessControl($target)",
+      "$phase = 'read-back-owner'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase); Write-OwnerFixturePhase $phase\n$readBack = [IO.Directory]::GetAccessControl($target)",
       'owner readback',
     ],
     [
       "if ($actual -ne $ownerSid) { throw 'fixture-owner-readback-mismatch' }",
-      "$phase = 'owner-readback-mismatch'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase)\nif ($actual -ne $ownerSid) { throw 'fixture-owner-readback-mismatch' }",
+      "$phase = 'owner-readback-mismatch'; [Console]::Error.WriteLine('EVENFIRE_OWNER_FIXTURE_PHASE=' + $phase); Write-OwnerFixturePhase $phase\nif ($actual -ne $ownerSid) { throw 'fixture-owner-readback-mismatch' }\nWrite-OwnerFixturePhase 'fixture-owner-readback-verified'",
       'owner equality assertion',
     ],
   ]

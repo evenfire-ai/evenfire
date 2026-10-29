@@ -107,9 +107,11 @@ const phaseAllowlist = new Set([
   'transaction-publish-error',
   'read-existing-acl',
   'set-owner',
+  'enable-restore-privilege',
   'write-acl',
   'read-back-owner',
   'owner-readback-mismatch',
+  'fixture-owner-readback-verified',
 ])
 const phases = existsSync(phasePath)
   ? readFileSync(phasePath, 'utf8')
@@ -174,7 +176,7 @@ if (
 }
 const type = allowlistedTypes.find(value => new RegExp(`\\b${value}\\b`).test(text)) ?? null
 const fixturePhase = text.match(
-  /"fixturePhase":"(read-existing-acl|set-owner|write-acl|read-back-owner|owner-readback-mismatch)"/
+  /"fixturePhase":"(read-existing-acl|set-owner|enable-restore-privilege|write-acl|read-back-owner|owner-readback-mismatch)"/
 )?.[1]
 const fixturePrivilegesMatch = text.match(
   /"fixturePrivileges":\{"restore":"(enabled|disabled|not-listed)","takeOwnership":"(enabled|disabled|not-listed)"\}/
@@ -195,6 +197,16 @@ const categories = [
   'operation-timeout',
   'powerShell-method-invocation',
   'session-authority-acl-rejection',
+  'unclassified-powershell-failure',
+  'access-denied',
+  'argument-rejected',
+  'win32-api-failure',
+  'platform-api-unavailable',
+  'method-invocation-failed',
+  'overload-resolution-failed',
+  'script-parse-failed',
+  'fixture-ace-readback-mismatch',
+  'privilege-not-held',
   'unclassified',
 ]
 const category =
