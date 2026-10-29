@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { Alert, Button as AntButton, Collapse, Flex, Input, Menu, Tag, Typography } from 'antd'
+import { Alert, Button as AntButton, Collapse, Dropdown, Flex, Input, Tag, Typography } from 'antd'
 import type { MenuProps } from 'antd'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
@@ -33,9 +32,7 @@ import {
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
-import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
-import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
 import { formatFileSize } from '@lib/composerFileAdmission'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
@@ -58,7 +55,6 @@ type ComposerPanelProps = {
 const COMPOSER_MAX_TEXT_HEIGHT = 240
 const COMPOSER_MIN_TEXT_HEIGHT = 56
 const COMPOSER_INLINE_MIN_TEXT_HEIGHT = 48
-const COMPOSER_SUBMENU_CLOSE_DELAY_MS = 400
 
 function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']): string {
   if (type === 'plugin') return 'Plugin'
@@ -194,9 +190,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const [composerAttachmentError, setComposerAttachmentError] = useState<string | null>(null)
   const [composerMenuOpen, setComposerMenuOpen] = useState(false)
-  const [composerSubmenu, setComposerSubmenu] = useState<
-    'plugins' | 'connectors' | 'agent-files' | null
-  >(null)
   const [pluginOptions, setPluginOptions] = useState<
     Array<{ id: string; label: string; namespace: string; name: string }>
   >([])
@@ -214,44 +207,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
-  const composerMenuRef = useRef<HTMLSpanElement | null>(null)
-  const composerSubmenuCloseTimerRef = useRef<number | null>(null)
-  // The reference submenu is portaled out of the composer (the drawer's
-  // overflow-clipping ancestors would otherwise crop it), so it needs an anchor
-  // ref per primary item and its own ref for click-outside + positioning.
-  const composerSubmenuRef = useRef<HTMLDivElement | null>(null)
-  const pluginsItemRef = useRef<HTMLElement | null>(null)
-  const connectorsItemRef = useRef<HTMLElement | null>(null)
-  const agentFilesItemRef = useRef<HTMLElement | null>(null)
-  const clearComposerSubmenuCloseTimer = useCallback(() => {
-    const timer = composerSubmenuCloseTimerRef.current
-    if (timer === null) return
-    window.clearTimeout(timer)
-    composerSubmenuCloseTimerRef.current = null
-  }, [])
-  const scheduleComposerSubmenuClose = useCallback(() => {
-    if (composerSubmenuCloseTimerRef.current !== null) return
-    composerSubmenuCloseTimerRef.current = window.setTimeout(() => {
-      composerSubmenuCloseTimerRef.current = null
-      setComposerSubmenu(null)
-    }, COMPOSER_SUBMENU_CLOSE_DELAY_MS)
-  }, [])
-  const openComposerSubmenu = (submenu: NonNullable<typeof composerSubmenu>) => {
-    clearComposerSubmenuCloseTimer()
-    setComposerSubmenu(submenu)
-  }
-  const composerSubmenuAnchorRef =
-    composerSubmenu === 'connectors'
-      ? connectorsItemRef
-      : composerSubmenu === 'agent-files'
-        ? agentFilesItemRef
-        : pluginsItemRef
-  const submenuFlyoutPosition = useFlyoutPosition({
-    anchorRef: composerSubmenuAnchorRef,
-    flyoutRef: composerSubmenuRef,
-    open: composerMenuOpen && composerSubmenu !== null,
-    placement: 'right-of',
-  })
 
   // Issue #654: image capability comes from the host-projected per-model
   // decision shared with the selector and the send path — never from the
@@ -277,17 +232,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   )
   const agentFilesAvailable = Boolean(agentFilesState?.items?.length)
   const agentFilesDisabled = agentFilesLoading || !agentFilesAvailable
-
-  // Both refs: the submenu is portaled to document.body, so a mousedown on a
-  // submenu item is outside `composerMenuRef` and would close the menu before
-  // the item's click fires.
-  useClickOutside([composerMenuRef, composerSubmenuRef], composerMenuOpen, () => {
-    clearComposerSubmenuCloseTimer()
-    setComposerMenuOpen(false)
-    setComposerSubmenu(null)
-  })
-
-  useEffect(() => clearComposerSubmenuCloseTimer, [clearComposerSubmenuCloseTimer])
 
   const resizeComposerInput = useCallback(() => {
     const textarea = composerInputRef.current
@@ -325,7 +269,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   useEffect(() => {
     setComposerAttachmentError(null)
     setComposerMenuOpen(false)
-    setComposerSubmenu(null)
     setPluginsLoaded(false)
     setPluginsLoading(false)
     setPluginOptions([])
@@ -481,7 +424,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     (attachment: ComposerReferenceAttachment) => {
       onAddComposerReferenceAttachments([attachment])
       setComposerMenuOpen(false)
-      setComposerSubmenu(null)
       setComposerAttachmentError(null)
     },
     [onAddComposerReferenceAttachments]
@@ -489,7 +431,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const openUploadPicker = useCallback(() => {
     setComposerMenuOpen(false)
-    setComposerSubmenu(null)
     composerFileInputRef.current?.click()
   }, [])
 
@@ -501,20 +442,122 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     if (!selectedAgentContext || !agentFilesAvailable) {
       setComposerAttachmentError('No Agent Files Available')
       setComposerMenuOpen(false)
-      setComposerSubmenu(null)
       return
     }
     setComposerMenuOpen(false)
-    setComposerSubmenu(null)
     setAgentFilesModalOpen(true)
   }, [agentFilesAvailable, agentFilesLoading, selectedAgentContext])
 
   const openGlobalFilesModal = useCallback(() => {
     setComposerMenuOpen(false)
-    setComposerSubmenu(null)
     setComposerAttachmentError(null)
     setGlobalFilesModalOpen(true)
   }, [])
+
+  const composerReferenceMenuItems = useMemo<NonNullable<MenuProps['items']>>(
+    () => [
+      {
+        key: 'plugins',
+        icon: <AppstoreOutlined aria-hidden="true" width={18} height={18} />,
+        label: 'Plugins',
+        title: 'Plugins',
+        popupClassName: 'composer-reference-submenu',
+        children: pluginsLoading
+          ? [{ key: 'plugins-loading', disabled: true, label: 'Loading plugins...' }]
+          : pluginsError
+            ? [{ key: 'plugins-error', disabled: true, label: pluginsError }]
+            : pluginOptions.length
+              ? pluginOptions.map(plugin => ({
+                  key: `plugin:${plugin.id}`,
+                  label: plugin.label,
+                  onClick: () =>
+                    addComposerReference({
+                      id: plugin.id,
+                      type: 'plugin',
+                      namespace: plugin.namespace,
+                      name: plugin.name,
+                      label: plugin.label,
+                    }),
+                }))
+              : [{ key: 'plugins-empty', disabled: true, label: 'No plugins available' }],
+      },
+      {
+        key: 'connectors',
+        icon: <ApiOutlined aria-hidden="true" width={18} height={18} />,
+        label: 'Connectors',
+        title: 'Connectors',
+        popupClassName: 'composer-reference-submenu',
+        children: connectorOptions.length
+          ? connectorOptions.map(connector => ({
+              key: connector.id,
+              label: connector.label,
+              onClick: () =>
+                addComposerReference({
+                  id: connector.id,
+                  type: 'connector',
+                  name: connector.name,
+                  label: connector.label,
+                }),
+            }))
+          : [{ key: 'connectors-empty', disabled: true, label: 'No connectors available' }],
+      },
+      ...(SHOW_AGENT_FILES_UI
+        ? [
+            agentFilesDisabled
+              ? {
+                  key: 'agent-files',
+                  icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
+                  label: 'Agent Files',
+                  title: 'Agent Files',
+                  popupClassName: 'composer-reference-submenu',
+                  children: [
+                    {
+                      key: agentFilesLoading ? 'agent-files-loading' : 'agent-files-empty',
+                      disabled: true,
+                      label: agentFilesLoading
+                        ? 'Loading Agent Files...'
+                        : 'No Agent Files Available',
+                    },
+                  ],
+                }
+              : {
+                  key: 'agent-files',
+                  icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
+                  label: 'Agent Files',
+                  onClick: openAgentFilesModal,
+                },
+          ]
+        : []),
+      ...(SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM
+        ? [
+            {
+              key: 'even-drive',
+              icon: <PaperClipOutlined aria-hidden="true" width={18} height={18} />,
+              label: 'EvenDrive',
+              onClick: openGlobalFilesModal,
+            },
+          ]
+        : []),
+      {
+        key: 'upload',
+        icon: <UploadOutlined aria-hidden="true" width={18} height={18} />,
+        label: 'Upload Files',
+        onClick: openUploadPicker,
+      },
+    ],
+    [
+      addComposerReference,
+      agentFilesDisabled,
+      agentFilesLoading,
+      connectorOptions,
+      openAgentFilesModal,
+      openGlobalFilesModal,
+      openUploadPicker,
+      pluginOptions,
+      pluginsError,
+      pluginsLoading,
+    ]
+  )
 
   const readFileAsDataUrl = useCallback(
     (file: File) =>
@@ -951,229 +994,44 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         <div className="composer-input-actions">
           {agentSelector && <span className="composer-agent-selector-slot">{agentSelector}</span>}
           <span className="composer-reference-toolbar">
-            <span className="composer-reference-menu" ref={composerMenuRef}>
-              <AntButton
-                htmlType="button"
-                type="text"
-                size="small"
-                icon={<PlusOutlined aria-hidden="true" width={16} height={16} />}
-                disabled={agentSending}
-                aria-label="Add context"
-                aria-haspopup="menu"
-                aria-expanded={composerMenuOpen}
-                onClick={() => {
-                  clearComposerSubmenuCloseTimer()
-                  setComposerMenuOpen(open => !open)
-                  setComposerSubmenu(null)
+            <span className="composer-reference-menu">
+              <Dropdown
+                autoAdjustOverflow
+                autoFocus
+                destroyOnHidden
+                menu={{
+                  items: composerReferenceMenuItems,
+                  className: 'composer-reference-menu-antd',
+                  getPopupContainer: () => document.body,
+                  subMenuOpenDelay: 0,
+                  subMenuCloseDelay: 0.4,
+                  expandIcon: (
+                    <span aria-hidden="true">
+                      <RightOutlined width={18} height={18} />
+                    </span>
+                  ),
+                  'aria-label': 'Add context',
                 }}
-              />
-              {composerMenuOpen ? (
-                <div
-                  className="composer-reference-menu-panel"
-                  onMouseLeave={scheduleComposerSubmenuClose}
-                >
-                  <Menu
-                    items={
-                      [
-                        {
-                          key: 'plugins',
-                          icon: <AppstoreOutlined aria-hidden="true" width={18} height={18} />,
-                          label: (
-                            <span
-                              ref={pluginsItemRef}
-                              aria-expanded={composerSubmenu === 'plugins'}
-                              aria-haspopup="menu"
-                            >
-                              Plugins
-                            </span>
-                          ),
-                          extra: <RightOutlined aria-hidden="true" width={18} height={18} />,
-                          onClick: () => openComposerSubmenu('plugins'),
-                          onMouseEnter: () => openComposerSubmenu('plugins'),
-                          onMouseLeave: scheduleComposerSubmenuClose,
-                        },
-                        {
-                          key: 'connectors',
-                          icon: <ApiOutlined aria-hidden="true" width={18} height={18} />,
-                          label: (
-                            <span
-                              ref={connectorsItemRef}
-                              aria-expanded={composerSubmenu === 'connectors'}
-                              aria-haspopup="menu"
-                            >
-                              Connectors
-                            </span>
-                          ),
-                          extra: <RightOutlined aria-hidden="true" width={18} height={18} />,
-                          onClick: () => openComposerSubmenu('connectors'),
-                          onMouseEnter: () => openComposerSubmenu('connectors'),
-                          onMouseLeave: scheduleComposerSubmenuClose,
-                        },
-                        ...(SHOW_AGENT_FILES_UI
-                          ? [
-                              {
-                                key: 'agent-files',
-                                icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
-                                label: (
-                                  <span
-                                    ref={agentFilesItemRef}
-                                    aria-disabled={agentFilesDisabled || undefined}
-                                    aria-expanded={
-                                      agentFilesDisabled
-                                        ? composerSubmenu === 'agent-files'
-                                        : undefined
-                                    }
-                                    aria-haspopup={agentFilesDisabled ? 'menu' : undefined}
-                                  >
-                                    Agent Files
-                                  </span>
-                                ),
-                                extra: agentFilesDisabled ? (
-                                  <RightOutlined aria-hidden="true" width={18} height={18} />
-                                ) : undefined,
-                                onClick: agentFilesDisabled ? undefined : openAgentFilesModal,
-                                onMouseEnter: () => {
-                                  if (agentFilesDisabled) openComposerSubmenu('agent-files')
-                                  else scheduleComposerSubmenuClose()
-                                },
-                                onMouseLeave: agentFilesDisabled
-                                  ? scheduleComposerSubmenuClose
-                                  : undefined,
-                              },
-                            ]
-                          : []),
-                        ...(SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM
-                          ? [
-                              {
-                                key: 'even-drive',
-                                icon: (
-                                  <PaperClipOutlined aria-hidden="true" width={18} height={18} />
-                                ),
-                                label: 'EvenDrive',
-                                onMouseEnter: scheduleComposerSubmenuClose,
-                                onClick: openGlobalFilesModal,
-                              },
-                            ]
-                          : []),
-                        {
-                          key: 'upload',
-                          icon: <UploadOutlined aria-hidden="true" width={18} height={18} />,
-                          label: 'Upload Files',
-                          onMouseEnter: scheduleComposerSubmenuClose,
-                          onClick: openUploadPicker,
-                        },
-                      ] satisfies NonNullable<MenuProps['items']>
-                    }
-                    mode="vertical"
-                    onFocus={event => {
-                      const target = event.target as HTMLElement
-                      const menuItem = target.closest('[role="menuitem"]')
-                      if (pluginsItemRef.current?.closest('[role="menuitem"]') === menuItem) {
-                        openComposerSubmenu('plugins')
-                      } else if (
-                        connectorsItemRef.current?.closest('[role="menuitem"]') === menuItem
-                      ) {
-                        openComposerSubmenu('connectors')
-                      } else if (
-                        agentFilesItemRef.current?.closest('[role="menuitem"]') === menuItem
-                      ) {
-                        if (agentFilesDisabled) openComposerSubmenu('agent-files')
-                        else scheduleComposerSubmenuClose()
-                      } else {
-                        scheduleComposerSubmenuClose()
-                      }
-                    }}
-                    selectable={false}
-                  />
-                </div>
-              ) : null}
-              {/* The submenu is portaled to document.body and positioned with a
-                  fixed rect confined to the chat drawer. In-flow it was cropped
-                  by the drawer's overflow-clipping ancestors and the native
-                  embed painting over it; see useFlyoutPosition. */}
-              {composerMenuOpen && composerSubmenu !== null
-                ? createPortal(
-                    <div
-                      className="composer-reference-submenu"
-                      ref={composerSubmenuRef}
-                      onMouseEnter={clearComposerSubmenuCloseTimer}
-                      onMouseLeave={scheduleComposerSubmenuClose}
-                      style={{
-                        left: submenuFlyoutPosition?.left ?? 0,
-                        top: submenuFlyoutPosition?.top ?? 0,
-                        // Hidden at the origin until the first layout pass sets a
-                        // real rect, so it never flashes in the top-left corner.
-                        visibility: submenuFlyoutPosition ? undefined : 'hidden',
-                      }}
-                    >
-                      <Menu
-                        aria-label={`${composerSubmenu} choices`}
-                        items={
-                          composerSubmenu === 'plugins'
-                            ? pluginsLoading
-                              ? [{ key: 'loading', disabled: true, label: 'Loading plugins...' }]
-                              : pluginsError
-                                ? [{ key: 'error', disabled: true, label: pluginsError }]
-                                : pluginOptions.length
-                                  ? pluginOptions.map(plugin => ({
-                                      key: plugin.id,
-                                      label: plugin.label,
-                                      onClick: () =>
-                                        addComposerReference({
-                                          id: plugin.id,
-                                          type: 'plugin',
-                                          namespace: plugin.namespace,
-                                          name: plugin.name,
-                                          label: plugin.label,
-                                        }),
-                                    }))
-                                  : [
-                                      {
-                                        key: 'empty',
-                                        disabled: true,
-                                        label: 'No plugins available',
-                                      },
-                                    ]
-                            : composerSubmenu === 'connectors'
-                              ? connectorOptions.length
-                                ? connectorOptions.map(connector => ({
-                                    key: connector.id,
-                                    label: connector.label,
-                                    onClick: () =>
-                                      addComposerReference({
-                                        id: connector.id,
-                                        type: 'connector',
-                                        name: connector.name,
-                                        label: connector.label,
-                                      }),
-                                  }))
-                                : [
-                                    {
-                                      key: 'empty',
-                                      disabled: true,
-                                      label: 'No connectors available',
-                                    },
-                                  ]
-                              : SHOW_AGENT_FILES_UI && composerSubmenu === 'agent-files'
-                                ? [
-                                    {
-                                      key: 'empty',
-                                      disabled: true,
-                                      label: agentFilesLoading
-                                        ? 'Loading Agent Files...'
-                                        : 'No Agent Files Available',
-                                    },
-                                  ]
-                                : []
-                        }
-                        mode="vertical"
-                        onFocus={clearComposerSubmenuCloseTimer}
-                        selectable={false}
-                      />
-                    </div>,
-                    document.body
-                  )
-                : null}
+                classNames={{ root: 'composer-reference-menu-panel' }}
+                getPopupContainer={trigger =>
+                  trigger.closest<HTMLElement>('.composer-reference-menu') ?? document.body
+                }
+                onOpenChange={open => setComposerMenuOpen(open)}
+                open={composerMenuOpen}
+                placement={inline ? 'bottomLeft' : 'topLeft'}
+                trigger={['click']}
+              >
+                <AntButton
+                  htmlType="button"
+                  type="text"
+                  size="small"
+                  icon={<PlusOutlined aria-hidden="true" width={16} height={16} />}
+                  disabled={agentSending}
+                  aria-label="Add context"
+                  aria-haspopup="menu"
+                  aria-expanded={composerMenuOpen}
+                />
+              </Dropdown>
             </span>
             {hasComposerAttachments ? (
               <Flex align="center" data-testid="composer-attachments-list" gap="small" wrap>
