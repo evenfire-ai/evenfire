@@ -330,6 +330,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     () => (isAuthenticated && me ? `${envKey}:${me.id}:${me.teamId ?? ''}` : null),
     [envKey, isAuthenticated, me]
   )
+  const liveSessionScopeRef = useRef(sessionScope)
+  liveSessionScopeRef.current = sessionScope
   const canListAccessibleResources = typeof window.clerum?.gfs?.listAccessible === 'function'
 
   // Session-authority access state, SHARED across every controller mount (the
@@ -673,7 +675,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   /** For imperative flows (openUri, revoke mutations): fail closed on a
    * session-authority rejection; returns true when it did. */
   const handleAuthorityFailure = useCallback(
-    (message: string, surface: 'discovery' | 'operation' = 'operation'): boolean => {
+    (
+      message: string,
+      surface: 'discovery' | 'operation' = 'operation',
+      operationScope?: string | null
+    ): boolean => {
+      if (operationScope !== undefined && operationScope !== liveSessionScopeRef.current) {
+        return isGfsSessionAuthorityFailure(message, surface)
+      }
       if (!isGfsSessionAuthorityFailure(message, surface)) return false
       revokeAccess()
       return true
@@ -1319,10 +1328,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // this mount observed, and a resource opened by URI has ancestors that no
   // children cache ever listed (RP-005).
   const openAncestryDependentResourceIds = useCallback(
-    (movedResourceId: string): string[] => {
-      if (!sessionScope) return []
+    (movedResourceId: string, scope: string | null = sessionScope): string[] => {
+      if (!scope) return []
       return ancestryDependentGfsResourceIds(
-        readGfsOpenLocations(queryClient, sessionScope),
+        readGfsOpenLocations(queryClient, scope),
         movedResourceId
       )
     },
@@ -1353,24 +1362,31 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         newName?: string
         oldParentId?: string | null
       },
-      receipt: { version: number }
+      receipt: { version: number },
+      operationScope?: string | null
     ) => {
-      const movedCrumb = crumbs.find(crumb => crumb.resourceId === input.resourceId)
-      setCrumbs(prev =>
-        prev.map(crumb =>
-          crumb.resourceId === input.resourceId
-            ? {
-                ...crumb,
-                version: receipt.version,
-                ...(input.newName !== undefined ? { name: input.newName } : {}),
-              }
-            : crumb
+      const capturedScope = operationScope === undefined ? sessionScope : operationScope
+      const ownsLiveSession = capturedScope === liveSessionScopeRef.current
+      const movedCrumb = ownsLiveSession
+        ? crumbs.find(crumb => crumb.resourceId === input.resourceId)
+        : undefined
+      if (ownsLiveSession) {
+        setCrumbs(prev =>
+          prev.map(crumb =>
+            crumb.resourceId === input.resourceId
+              ? {
+                  ...crumb,
+                  version: receipt.version,
+                  ...(input.newName !== undefined ? { name: input.newName } : {}),
+                }
+              : crumb
+          )
         )
-      )
-      if (sessionScope) {
+      }
+      if (capturedScope) {
         applyMoveConvergence(
           queryClient,
-          sessionScope,
+          capturedScope,
           DRIVE,
           {
             resourceId: input.resourceId,
@@ -1378,15 +1394,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             newParentId: input.destinationId,
           },
           {
-            ancestryDependentResourceIds: openAncestryDependentResourceIds(input.resourceId),
+            ancestryDependentResourceIds: openAncestryDependentResourceIds(
+              input.resourceId,
+              capturedScope
+            ),
           }
         )
-      } else {
+      } else if (ownsLiveSession) {
         await refreshGfs()
       }
+      if (!ownsLiveSession) return
       if (movedCrumb) await openUri(movedCrumb.gfsUri)
     },
-    [crumbs, openAncestryDependentResourceIds, openUri, queryClient, refreshGfs, sessionScope]
+    [
+      crumbs,
+      liveSessionScopeRef,
+      openAncestryDependentResourceIds,
+      openUri,
+      queryClient,
+      refreshGfs,
+      sessionScope,
+    ]
   )
 
   const moveResourceMutation = useMutation({
@@ -1396,6 +1424,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       ifMatch?: number
       newName?: string
       oldParentId?: string | null
+      operationScope?: string
     }) =>
       window.clerum.gfs.moveResource(
         input.resourceId,
@@ -1405,9 +1434,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         input.newName
       ),
     onSuccess: async (receipt, input) => {
-      await convergeCommittedMove(input, receipt)
+      await convergeCommittedMove(input, receipt, input.operationScope)
     },
-    onError: failClosedOnMutationError,
+    onError: (error, input) =>
+      handleAuthorityFailure(toMessage(error), 'operation', input.operationScope),
   })
 
   /**
@@ -1658,7 +1688,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       destinationId: string,
       ifMatch?: number,
       newName?: string,
-      oldParentId?: string | null
+      oldParentId?: string | null,
+      operationScope?: string
     ) =>
       moveResourceMutation.mutateAsync({
         resourceId,
@@ -1666,6 +1697,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         ifMatch,
         newName,
         oldParentId,
+        operationScope,
       }),
     deleteResource: (resourceId: string, ifMatch?: number) =>
       deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),

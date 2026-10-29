@@ -14,6 +14,7 @@ import {
   gfsRouteFailureMessage,
   listAccessiblePage,
   listChildrenPage,
+  moveResourceReceipt,
   resolveResource,
   resolvedDirectory,
   resolvedFile,
@@ -379,6 +380,218 @@ describe('FilesPage Move permission generation fencing', () => {
     expect(result.textContent).toContain('Archive')
     expect(result.textContent).toContain('changed')
     expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a captured Move result in its original team after a same-principal switch', async () => {
+    const moveReceipt = await moveResourceReceipt('file-src', 'destination-1', 4)
+    const rows = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        path: '/Archive',
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const children = await listChildrenPage([
+      childView('file-src', 'notes.txt', 'file', {
+        parentResourceId: 'source-parent',
+        path: '/Team/notes.txt',
+        version: 3,
+      }),
+    ])
+    const sourceParent = await resolveResource(
+      resolvedDirectory('source-parent', 'Team', { gfsUri: 'gfs://main/source-parent' })
+    )
+    const resolvedSource = await resolveResource(
+      resolvedFile('file-src', 'notes.txt', {
+        parentResourceId: 'source-parent',
+        path: '/Team/notes.txt',
+        version: 3,
+      })
+    )
+    let finishMove!: (value: { resourceId: string; version: number }) => void
+    const moveGate = new Promise<{ resourceId: string; version: number }>(resolve => {
+      finishMove = resolve
+    })
+    const affordances = appServiceAffordanceProducer(async resourceId =>
+      heldPermissionResponse(
+        resourceId === 'source-parent'
+          ? ['read', 'write', 'delete']
+          : resourceId === 'destination-1'
+            ? ['read', 'write']
+            : ['read']
+      )
+    )
+    const moveResource = vi.fn(() => moveGate)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => rows),
+          listChildren: vi.fn(async (resourceId: string) =>
+            resourceId === 'source-parent' ? children : listChildrenPage([])
+          ),
+          affordances,
+          resolve: vi.fn(async (uri: string) =>
+            uri.endsWith('/source-parent') ? sourceParent : resolvedSource
+          ),
+          moveResource,
+        },
+      },
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
+    const teamAScope = ':user-a:team-a'
+    const teamBScope = ':user-a:team-b'
+    const sourceChildrenA = desktopQueryKeys.gfsChildren(teamAScope, 'source-parent', 'main')
+    const destinationChildrenA = desktopQueryKeys.gfsChildren(teamAScope, 'destination-1', 'main')
+    const accessibleA = desktopQueryKeys.gfsAccessible(teamAScope, 'main')
+    const sourceChildrenB = desktopQueryKeys.gfsChildren(teamBScope, 'source-parent', 'main')
+    const destinationChildrenB = desktopQueryKeys.gfsChildren(teamBScope, 'destination-1', 'main')
+    const accessibleB = desktopQueryKeys.gfsAccessible(teamBScope, 'main')
+    const emptyChildren = await listChildrenPage([])
+    queryClient.setQueryData(sourceChildrenA, { pages: [children], pageParams: [undefined] })
+    queryClient.setQueryData(destinationChildrenA, {
+      pages: [emptyChildren],
+      pageParams: [undefined],
+    })
+    queryClient.setQueryData(accessibleA, { pages: [rows], pageParams: [undefined] })
+    const renderPage = (teamId: string) => (
+      <AuthContext.Provider value={authFor(teamId, 'user-a')}>
+        <QueryClientProvider client={queryClient}>
+          <ToastingFilesPage pendingGfsUri="gfs://main/source-parent" />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    const view = render(renderPage('team-a'))
+    try {
+      fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      await waitFor(() =>
+        expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+      )
+
+      view.rerender(renderPage('team-b'))
+      await waitFor(() => expect(queryClient.getQueryData(sourceChildrenB)).toBeDefined())
+      invalidateQueries.mockClear()
+      await act(async () => finishMove(moveReceipt))
+      await waitFor(() => expect(invalidateQueries).toHaveBeenCalled())
+
+      expect(screen.queryByText('Moved notes.txt to Archive')).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.queryByRole('dialog', { name: 'Move file notes.txt' })).toBeNull()
+      const invalidatedKeys = invalidateQueries.mock.calls.map(([filters]) => filters?.queryKey)
+      expect(invalidatedKeys).toContainEqual(sourceChildrenA)
+      expect(invalidatedKeys).toContainEqual(destinationChildrenA)
+      expect(invalidatedKeys).toContainEqual(accessibleA)
+      expect(invalidatedKeys).not.toContainEqual(sourceChildrenB)
+      expect(invalidatedKeys).not.toContainEqual(destinationChildrenB)
+      expect(invalidatedKeys).not.toContainEqual(accessibleB)
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => finishMove(moveReceipt))
+      queryClient.clear()
+    }
+  })
+
+  it('does not revoke the new team when an old Move returns a producer 401', async () => {
+    const unauthorizedMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId: 'file-src', destinationId: 'destination-1', ifMatch: 3 },
+          'fixture-session-token'
+        ),
+      401,
+      { code: 'unauthorized', message: 'the captured session is no longer authorized' }
+    )
+    const rows = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        path: '/Archive',
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const children = await listChildrenPage([
+      childView('file-src', 'notes.txt', 'file', {
+        parentResourceId: 'source-parent',
+        path: '/Team/notes.txt',
+        version: 3,
+      }),
+    ])
+    const sourceParent = await resolveResource(
+      resolvedDirectory('source-parent', 'Team', { gfsUri: 'gfs://main/source-parent' })
+    )
+    const resolvedSource = await resolveResource(
+      resolvedFile('file-src', 'notes.txt', {
+        parentResourceId: 'source-parent',
+        path: '/Team/notes.txt',
+        version: 3,
+      })
+    )
+    let rejectMove!: (error: Error) => void
+    const moveGate = new Promise<{ resourceId: string; version: number }>((_resolve, reject) => {
+      rejectMove = reject
+    })
+    const affordances = appServiceAffordanceProducer(async resourceId =>
+      heldPermissionResponse(
+        resourceId === 'source-parent'
+          ? ['read', 'write', 'delete']
+          : resourceId === 'destination-1'
+            ? ['read', 'write']
+            : ['read']
+      )
+    )
+    const moveResource = vi.fn(() => moveGate)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => rows),
+          listChildren: vi.fn(async (resourceId: string) =>
+            resourceId === 'source-parent' ? children : listChildrenPage([])
+          ),
+          affordances,
+          resolve: vi.fn(async (uri: string) =>
+            uri.endsWith('/source-parent') ? sourceParent : resolvedSource
+          ),
+          moveResource,
+        },
+      },
+    })
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const renderPage = (teamId: string) => (
+      <AuthContext.Provider value={authFor(teamId, 'user-a')}>
+        <QueryClientProvider client={queryClient}>
+          <ToastingFilesPage pendingGfsUri="gfs://main/source-parent" />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    const view = render(renderPage('team-a'))
+    try {
+      fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      await waitFor(() =>
+        expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+      )
+
+      view.rerender(renderPage('team-b'))
+      await act(async () => rejectMove(new Error(unauthorizedMessage)))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+      expect(screen.queryByText('File access is not authorized')).toBeNull()
+      expect(
+        screen.queryByText('Your current Desktop session cannot access this location.')
+      ).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => rejectMove(new Error(unauthorizedMessage)))
+      queryClient.clear()
+    }
   })
 
   it('reports a completed folder Move after its dialog closes in flight', async () => {

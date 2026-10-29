@@ -2095,15 +2095,18 @@ export function FilesPage({
                 destinationId,
                 ifMatch,
                 newName,
-                oldParentId
+                oldParentId,
+                source.scope
               )
             } catch (error) {
               dispatchObserver?.onRejected(error)
               throw error
             }
           },
-          handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
-          convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
+          handleAuthorityFailure: message =>
+            ctrl.handleAuthorityFailure(message, 'operation', source.scope),
+          convergeCommittedMove: (input, receipt) =>
+            ctrl.convergeCommittedMove(input, receipt, source.scope),
           ...(reportOutcomes && pushToast ? { pushToast } : {}),
         },
         {

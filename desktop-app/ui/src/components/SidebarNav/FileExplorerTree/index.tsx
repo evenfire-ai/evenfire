@@ -788,9 +788,18 @@ export function FileExplorerTree({
         return await runGfsMoveCommit(
           {
             moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
-              ctrl.moveResource(resourceId, destinationId, ifMatch, newName, oldParentId),
-            handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
-            convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
+              ctrl.moveResource(
+                resourceId,
+                destinationId,
+                ifMatch,
+                newName,
+                oldParentId,
+                source.scope
+              ),
+            handleAuthorityFailure: message =>
+              ctrl.handleAuthorityFailure(message, 'operation', source.scope),
+            convergeCommittedMove: (input, receipt) =>
+              ctrl.convergeCommittedMove(input, receipt, source.scope),
             pushToast,
           },
           {
