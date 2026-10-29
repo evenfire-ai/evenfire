@@ -4,7 +4,6 @@ metadata:
   name: playwright-server
   namespace: mcp-server
 spec:
-  contextRef: context1
   description: >-
     Playwright MCP Server - browser automation tools for navigation, DOM interaction,
     code execution, and screenshot capture.
@@ -21,9 +20,9 @@ spec:
     - --host
     - 0.0.0.0
     - --port
-    - "8931"
+    - '8931'
     - --allowed-hosts
-    - "*"
+    - '*'
   transport:
     type: streamableHttp
     url: http://playwright-server.mcp-server.svc.cluster.local:8931/mcp
@@ -32,9 +31,9 @@ spec:
     type: none
   resources:
     requests:
-      memory: "512Mi"
-      cpu: "250m"
+      memory: '512Mi'
+      cpu: '250m'
     limits:
-      memory: "1Gi"
-      cpu: "1000m"
+      memory: '1Gi'
+      cpu: '1000m'
   enabled: true
