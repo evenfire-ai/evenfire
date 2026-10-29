@@ -145,20 +145,33 @@ describe('external session route error boundaries and renewal rate limiting', ()
     })
   })
 
-  it.each([
-    ['invalid', 401, 'invalid_session'],
-    ['upgrade_required', 426, 'upgrade_required'],
-  ] as const)(
-    'preserves the %s authentication result',
-    async (status, expectedStatus, expectedCode) => {
-      sessions.authenticateExternalUserSession.mockResolvedValueOnce({ status })
+  it('returns the dev Unauthorized body when the session is invalid', async () => {
+    sessions.authenticateExternalUserSession.mockResolvedValueOnce({ status: 'invalid' })
 
-      const response = await request(app())
-        .post('/external/auth/verify')
-        .send({ token: 'synthetic-session-token' })
+    const response = await request(app())
+      .post('/external/auth/verify')
+      .send({ token: 'synthetic-session-token' })
 
-      expect(response.status).toBe(expectedStatus)
-      expect(response.body.error.code).toBe(expectedCode)
-    }
-  )
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('returns the dev Unauthorized body when the token is missing', async () => {
+    const response = await request(app()).post('/external/auth/verify').send({})
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(sessions.authenticateExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('preserves the upgrade_required envelope for a client below the minimum', async () => {
+    sessions.authenticateExternalUserSession.mockResolvedValueOnce({ status: 'upgrade_required' })
+
+    const response = await request(app())
+      .post('/external/auth/verify')
+      .send({ token: 'synthetic-session-token' })
+
+    expect(response.status).toBe(426)
+    expect(response.body.error.code).toBe('upgrade_required')
+  })
 })

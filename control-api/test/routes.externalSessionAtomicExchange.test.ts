@@ -78,7 +78,7 @@ describe('legacy external-session replacement exchange', () => {
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
       .set('x-user-session-token', 'synthetic-source-token')
-      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
 
     expect(response.status).toBe(401)
     expect(response.body).toMatchObject({ error: { code: 'invalid_session' } })
@@ -100,7 +100,7 @@ describe('legacy external-session replacement exchange', () => {
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
       .set('x-user-session-token', 'synthetic-source-token')
-      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
       .expect(200)
 
     expect(response.body).toEqual({
@@ -119,10 +119,64 @@ describe('legacy external-session replacement exchange', () => {
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
       .set('x-user-session-token', 'synthetic-source-token')
-      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
       .expect(403, { error: 'membership_not_found' })
 
     expect(issuance.issueExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing body role with dev invalid payload and accepts a valid role', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'issued',
+      token: 'synthetic-replacement-token',
+      role: 'admin',
+    })
+    const payload = { userId: claims.userId, email: claims.email, teamId: 'team-new' }
+
+    const missingRole = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send(payload)
+
+    expect(missingRole.status).toBe(400)
+    expect(missingRole.body).toEqual({ error: 'invalid payload' })
+    expect(issuance.exchangeLegacyExternalUserSession).not.toHaveBeenCalled()
+
+    const control = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'admin' })
+
+    expect(control.status).toBe(200)
+  })
+
+  it('rejects an invalid body role with dev invalid payload and accepts a valid role', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'issued',
+      token: 'synthetic-replacement-token',
+      role: 'admin',
+    })
+    const payload = { userId: claims.userId, email: claims.email, teamId: 'team-new' }
+
+    const invalidRole = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'owner' })
+
+    expect(invalidRole.status).toBe(400)
+    expect(invalidRole.body).toEqual({ error: 'invalid payload' })
+    expect(issuance.exchangeLegacyExternalUserSession).not.toHaveBeenCalled()
+
+    const control = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'member' })
+
+    expect(control.status).toBe(200)
   })
 
   it('binds revoke-all to the authenticated actor authority context', async () => {

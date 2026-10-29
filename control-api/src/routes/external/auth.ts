@@ -16,7 +16,7 @@ import {
   validatePasswordLogin,
 } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
-import { RpcScope } from '../../profileTypes.js'
+import { type AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import { authenticateExternalUserSession } from '../../services/auth/externalSessionAuthentication.js'
@@ -75,12 +75,25 @@ function sessionTokenFromRequest(req: {
 }
 
 function requireLegacySessionTokenPayload(req: Request, res: Response, next: NextFunction): void {
-  const body = (req.body ?? {}) as { userId?: unknown; email?: unknown; teamId?: unknown }
+  const body = (req.body ?? {}) as {
+    userId?: unknown
+    email?: unknown
+    teamId?: unknown
+    role?: unknown
+  }
   const userId = String(body.userId || '').trim()
   const email = String(body.email || '').trim()
   const teamId = String(body.teamId || '').trim()
+  const role = String(body.role || '').trim()
   const token = sessionTokenFromRequest(req)
-  if (!userId || !email || !teamId || !token || token.length > 4096) {
+  if (
+    !userId ||
+    !email ||
+    !teamId ||
+    !TEAM_ROLES.includes(role as AuthClaims['role']) ||
+    !token ||
+    token.length > 4096
+  ) {
     res.status(400).json({ error: 'invalid payload' })
     return
   }
@@ -265,10 +278,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post('/external/auth/verify', async (req, res, next) => {
     try {
       const token = String(req.body?.token || '').trim()
-      if (!token || token.length > 4096) {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
-      }
+      if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
       const authentication = await authenticateExternalUserSession(token, {
         purpose: 'verify',
         client: externalSessionClient(req),
@@ -278,8 +288,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return
       }
       if (authentication.status !== 'authenticated') {
-        sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
-        return
+        return res.status(401).json({ error: 'Unauthorized' })
       }
       return res.status(200).json({ claims: authentication.claims })
     } catch (error) {
@@ -299,8 +308,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           .trim()
           .toLowerCase()
         const teamId = String(req.body?.teamId || '').trim()
+        const role = String(req.body?.role || '').trim()
         const currentToken = sessionTokenFromRequest(req)
-        if (!userId || !email || !teamId || !currentToken || currentToken.length > 4096) {
+        if (
+          !userId ||
+          !email ||
+          !teamId ||
+          !TEAM_ROLES.includes(role as AuthClaims['role']) ||
+          !currentToken ||
+          currentToken.length > 4096
+        ) {
           return res.status(400).json({ error: 'invalid payload' })
         }
         const authentication = req.externalSessionAuthentication!
