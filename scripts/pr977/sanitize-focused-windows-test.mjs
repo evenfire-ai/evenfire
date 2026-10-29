@@ -146,6 +146,54 @@ const failureClass = meta.watchdogExpired
                     ? meta.failureClass
                     : 'process-failure'
                   : 'report-or-process-failure'
+const allowedProgressMarkers = new Set([
+  'none',
+  'beforeEach-start',
+  'module-reset-complete',
+  'temp-directory-ready',
+  'app-service-import-start',
+  'app-service-import-complete',
+  'beforeEach-complete',
+  'afterEach-start',
+  'afterEach-complete',
+  'test-1-start',
+  'test-2-start',
+  'test-3-start',
+  'test-4-start',
+  'test-5-start',
+  'test-1-complete',
+  'test-2-complete',
+  'test-3-complete',
+  'test-4-complete',
+  'test-5-complete',
+  'password-a-start',
+  'password-a-complete',
+  'authority-before-start',
+  'authority-before-complete',
+  'password-b-start',
+  'password-b-complete',
+  'authority-after-start',
+  'authority-after-complete',
+  'restart-initialize-start',
+  'restart-initialize-complete',
+  'test-1-complete',
+])
+const overlayValid =
+  target !== 'appService.passwordLoginRollback.regression.test.ts' ||
+  (meta.testOverlay === 'diagnostic-markers-only' &&
+    /^[a-f0-9]{64}$/.test(meta.sourceTestSha256 ?? '') &&
+    /^[a-f0-9]{64}$/.test(meta.overlayTestSha256 ?? ''))
+const progressMarker = allowedProgressMarkers.has(meta.lastProgressMarker)
+  ? meta.lastProgressMarker
+  : 'invalid-marker'
+const progressValid =
+  target !== 'appService.passwordLoginRollback.regression.test.ts' ||
+  (meta.sourceTestBlobMatchesPin === true &&
+    /^[a-f0-9]{40}$/.test(meta.sourceTestGitBlob ?? '') &&
+    Number.isInteger(meta.phaseMarkerCount) &&
+    meta.phaseMarkerCount > 0 &&
+    meta.completedTestCount === 5 &&
+    progressMarker === 'afterEach-complete')
 const success = Boolean(
   meta.exitCode === 0 &&
   !meta.watchdogExpired &&
@@ -162,13 +210,23 @@ const success = Boolean(
   unexpectedSkips.length === 0 &&
   allowedPending === expectedSkipCount &&
   pending + skipped === expectedSkipCount &&
-  reportSuccess
+  reportSuccess &&
+  overlayValid &&
+  progressMarker !== 'invalid-marker' &&
+  progressValid
 )
 const safe = {
   applicationSourceSha: process.env.PR977_SOURCE_SHA ?? null,
   workflowTriggerSha: process.env.GITHUB_SHA ?? null,
   harnessCheckoutSha: process.env.GITHUB_SHA ?? null,
-  testOverlay: 'none; checked-out application test source executed directly',
+  testOverlay: meta.testOverlay ?? 'none',
+  sourceTestSha256: meta.sourceTestSha256 ?? null,
+  overlayTestSha256: meta.overlayTestSha256 ?? null,
+  sourceTestBlobMatchesPin: meta.sourceTestBlobMatchesPin ?? null,
+  sourceTestGitBlob: meta.sourceTestGitBlob ?? null,
+  phaseMarkerCount: Number.isInteger(meta.phaseMarkerCount) ? meta.phaseMarkerCount : null,
+  completedTestCount: Number.isInteger(meta.completedTestCount) ? meta.completedTestCount : null,
+  lastProgressMarker: progressMarker,
   testFile: target,
   reportedSuiteCount: suites.length,
   reportedTotalTests: report?.numTotalTests ?? null,

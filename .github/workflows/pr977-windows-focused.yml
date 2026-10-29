@@ -102,6 +102,7 @@ jobs:
 
           $report = Join-Path $env:RUNNER_TEMP 'focused-report.json'
           $metaPath = Join-Path $env:RUNNER_TEMP 'focused-meta.json'
+          $phaseFile = Join-Path $env:RUNNER_TEMP 'focused-phases.txt'
           $node = (Get-Command node).Source
           $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
           $deadlineSeconds = if ($target -eq 'windowsSessionAuthorityAcl.native.test.ts') { 1800 } else { 300 }
@@ -128,6 +129,49 @@ jobs:
               failureClass = 'source-test-not-found'
             } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
             throw 'The selected source test file is absent'
+          }
+          $sourceCheckoutPath = Join-Path $env:GITHUB_WORKSPACE 'source'
+          $sourceSrcDirectory = Join-Path $startInfo.WorkingDirectory 'src'
+          $sourceItems = @($sourceCheckoutPath, $startInfo.WorkingDirectory, $sourceSrcDirectory, $sourceTestDirectory, $sourceTestPath)
+          foreach ($sourceItemPath in $sourceItems) {
+            $sourceItem = Get-Item -LiteralPath $sourceItemPath -Force
+            if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'The pinned source test path contains a reparse point'
+            }
+          }
+          $sourceRelativePath = 'desktop-app/src/__tests__/' + $target
+          $sourceSpec = '{0}:{1}' -f $env:PR977_SOURCE_SHA, $sourceRelativePath
+          $expectedSourceTestBlob = (git -C source rev-parse $sourceSpec).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned source test blob could not be resolved' }
+          $actualSourceTestBlob = (git -C source hash-object -- $sourceTestPath).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualSourceTestBlob -ne $expectedSourceTestBlob) {
+            [ordered]@{
+              exitCode = $null
+              watchdogExpired = $false
+              elapsedSeconds = 0
+              sourceTestFileExists = $true
+              sourceTestBlobMatchesPin = $false
+              expectedSourceTestBlob = $expectedSourceTestBlob
+              actualSourceTestBlob = $actualSourceTestBlob
+              failureClass = 'source-test-mismatch'
+            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
+            throw 'The selected source test does not match the pinned commit blob'
+          }
+          $testOverlay = 'none'
+          $sourceTestSha256 = $null
+          $overlayTestSha256 = $null
+          if ($target -eq 'appService.passwordLoginRollback.regression.test.ts') {
+            Set-Content -LiteralPath $phaseFile -Value '' -Encoding ascii
+            $overlayText = node validation/scripts/pr977/instrument-windows-password-test.mjs $sourceTestPath
+            if ($LASTEXITCODE -ne 0) { throw 'Password test diagnostic instrumentation failed' }
+            $overlay = $overlayText | ConvertFrom-Json
+            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 28) {
+              throw 'Password test instrumentation did not match its reviewed contract'
+            }
+            $testOverlay = $overlay.mode
+            $sourceTestSha256 = $overlay.sourceSha256
+            $overlayTestSha256 = $overlay.overlayTestSha256
+            $env:PR977_PHASE_FILE = $phaseFile
           }
           foreach ($argument in @(
             $vitest, 'run', '--maxWorkers=1', '--no-file-parallelism',
@@ -157,6 +201,29 @@ jobs:
           $stdoutText = $stdoutTask.GetAwaiter().GetResult()
           $stderrText = $stderrTask.GetAwaiter().GetResult()
           $combinedText = $stdoutText + "`n" + $stderrText
+          $allowedProgressMarkers = @(
+            'beforeEach-start', 'module-reset-complete', 'temp-directory-ready',
+            'app-service-import-start', 'app-service-import-complete', 'beforeEach-complete',
+            'afterEach-start', 'afterEach-complete', 'test-1-start', 'test-2-start',
+            'test-3-start', 'test-4-start', 'test-5-start', 'test-1-complete',
+            'test-2-complete', 'test-3-complete', 'test-4-complete', 'test-5-complete',
+            'password-a-start',
+            'password-a-complete', 'authority-before-start', 'authority-before-complete',
+            'password-b-start', 'password-b-complete', 'authority-after-start',
+            'authority-after-complete', 'restart-initialize-start',
+            'restart-initialize-complete', 'test-1-complete'
+          )
+          $lastProgressMarker = 'none'
+          $phaseLines = @()
+          if (Test-Path -LiteralPath $phaseFile -PathType Leaf) {
+            foreach ($line in (Get-Content -LiteralPath $phaseFile)) {
+              if ($line -in $allowedProgressMarkers) {
+                $lastProgressMarker = $line
+                $phaseLines += $line
+              }
+            }
+          }
+          $completedTestCount = @($phaseLines | Where-Object { $_ -match '^test-[1-5]-complete$' }).Count
           $failureClass = if ($watchdogExpired) { 'watchdog-expired' }
             elseif ($process.ExitCode -eq 0) { 'none' }
             elseif ($combinedText -match 'No test files found') { 'no-test-files' }
@@ -176,6 +243,16 @@ jobs:
             stdoutBytes = [Text.Encoding]::UTF8.GetByteCount($stdoutText)
             stderrBytes = [Text.Encoding]::UTF8.GetByteCount($stderrText)
             sourceTestFileExists = $sourceTestFileExists
+            sourceTestBlobMatchesPin = $true
+            sourceTestGitBlob = $expectedSourceTestBlob
+            phaseMarkerCount = if (Test-Path -LiteralPath $phaseFile -PathType Leaf) {
+              $phaseLines.Count
+            } else { 0 }
+            completedTestCount = $completedTestCount
+            testOverlay = $testOverlay
+            sourceTestSha256 = $sourceTestSha256
+            overlayTestSha256 = $overlayTestSha256
+            lastProgressMarker = $lastProgressMarker
             failureClass = $failureClass
           } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
           $env:PR977_AUTH_TEST_FILE = $target
