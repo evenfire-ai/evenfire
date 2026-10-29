@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { AppService } from './appService.js'
-import { getActiveEnvKey } from './config.js'
+import { getActiveRuntimeConfigOptionId } from './config.js'
 import {
   type DesktopReleaseArchitecture,
   type DesktopReleasePackageType,
@@ -33,6 +33,7 @@ const MINIMUM_UPDATE_VERSION = '0.8.0'
 const STAGING_DIRECTORY = 'desktop-update-staging'
 const PENDING_UPDATE_FILE = 'pending.json'
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/
+const MAX_ENVIRONMENT_BINDING_ID_LENGTH = 256
 
 export type UpdateEvent =
   | { type: 'progress'; progress: DesktopUpdateProgress }
@@ -44,8 +45,7 @@ type UpdateOperation = {
   state: 'downloading' | 'downloaded' | 'installing'
   version: string
   currentVersion: string
-  environmentKey: string
-  releaseId?: string
+  environmentBindingId: string
   platform: DesktopReleasePlatform
   architecture: DesktopReleaseArchitecture
   packageType: DesktopReleasePackageType
@@ -75,7 +75,7 @@ export type DesktopUpdateManagerDependencies = {
   platform?: string
   architecture?: string
   executablePath?: string
-  getEnvironmentKey?: () => string
+  getEnvironmentBindingId?: () => string | null
   resolveAsset?: typeof resolveGitHubReleaseAsset
   downloadAsset?: typeof downloadVerifiedReleaseAsset
   preparePayload?: typeof prepareVerifiedDesktopPayload
@@ -124,9 +124,8 @@ function isUpdateOperation(value: unknown, operationId: string): value is Update
     typeof value.version === 'string' &&
     VERSION_PATTERN.test(value.version) &&
     compareDesktopVersions(value.version, MINIMUM_UPDATE_VERSION) >= 0 &&
-    typeof value.environmentKey === 'string' &&
-    typeof value.releaseId === 'string' &&
-    value.releaseId.length > 0 &&
+    typeof value.environmentBindingId === 'string' &&
+    value.environmentBindingId.length <= MAX_ENVIRONMENT_BINDING_ID_LENGTH &&
     releaseTagValid &&
     ((platform === 'win32' && packageType === 'squirrel') ||
       (platform === 'linux' && ['deb', 'rpm'].includes(String(packageType))) ||
@@ -189,7 +188,7 @@ export class DesktopUpdateManager {
   private readonly platform: string
   private readonly architecture: string
   private readonly executablePath: string
-  private readonly getEnvironmentKey: () => string
+  private readonly getEnvironmentBindingId: () => string | null
   private readonly resolveAsset: typeof resolveGitHubReleaseAsset
   private readonly downloadAsset: typeof downloadVerifiedReleaseAsset
   private readonly preparePayload: typeof prepareVerifiedDesktopPayload
@@ -207,7 +206,8 @@ export class DesktopUpdateManager {
     this.platform = dependencies.platform ?? process.platform
     this.architecture = dependencies.architecture ?? process.arch
     this.executablePath = dependencies.executablePath ?? process.execPath
-    this.getEnvironmentKey = dependencies.getEnvironmentKey ?? getActiveEnvKey
+    this.getEnvironmentBindingId =
+      dependencies.getEnvironmentBindingId ?? getActiveRuntimeConfigOptionId
     this.resolveAsset = dependencies.resolveAsset ?? resolveGitHubReleaseAsset
     this.downloadAsset = dependencies.downloadAsset ?? downloadVerifiedReleaseAsset
     this.preparePayload = dependencies.preparePayload ?? prepareVerifiedDesktopPayload
@@ -231,7 +231,14 @@ export class DesktopUpdateManager {
     const { operationPath, operation } = pending
     if (operation.state === 'installing') return null
 
-    const initialEnvironmentKey = this.getEnvironmentKey()
+    const initialEnvironmentBindingId = this.getEnvironmentBindingId()
+    if (
+      !initialEnvironmentBindingId ||
+      initialEnvironmentBindingId.length > MAX_ENVIRONMENT_BINDING_ID_LENGTH
+    ) {
+      await this.discardOperation(operationPath, operation.id)
+      return null
+    }
     let status: DesktopReleaseStatus
     try {
       status = await this.service.getDesktopReleaseStatus()
@@ -239,16 +246,13 @@ export class DesktopUpdateManager {
       return null
     }
     if (
-      this.getEnvironmentKey() !== initialEnvironmentKey ||
-      operation.environmentKey !== initialEnvironmentKey
+      this.getEnvironmentBindingId() !== initialEnvironmentBindingId ||
+      operation.environmentBindingId !== initialEnvironmentBindingId
     ) {
       await this.discardOperation(operationPath, operation.id)
       return null
     }
-    if (
-      this.statusRecommends(status, operation.version) &&
-      (operation.releaseId === undefined || operation.releaseId === status.releaseId)
-    ) {
+    if (this.statusRecommends(status, operation.version)) {
       return { version: operation.version, updaterCapable: operation.updaterCapable }
     }
     await this.discardOperation(operationPath, operation.id)
@@ -324,11 +328,10 @@ export class DesktopUpdateManager {
     expectedVersion: string,
     signal: AbortSignal
   ): Promise<DownloadResult> {
-    const environmentKey = this.getEnvironmentKey()
+    const environmentBindingId = this.requireEnvironmentBindingId()
     const status = await this.service.getDesktopReleaseStatus()
-    this.assertEnvironmentUnchanged(environmentKey)
+    this.assertEnvironmentUnchanged(environmentBindingId)
     this.assertTargetIsCurrent(status, expectedVersion)
-
     const currentVersion = app.getVersion()
     if (!VERSION_PATTERN.test(currentVersion) || currentVersion === expectedVersion) {
       throw new Error('The selected Desktop update does not differ from the installed version.')
@@ -380,8 +383,7 @@ export class DesktopUpdateManager {
         state: 'downloading',
         version: expectedVersion,
         currentVersion,
-        environmentKey,
-        releaseId: status.releaseId,
+        environmentBindingId,
         platform,
         architecture,
         packageType: packageTypeForInstall(location),
@@ -464,11 +466,8 @@ export class DesktopUpdateManager {
 
       const finalStatus = await this.service.getDesktopReleaseStatus()
       if (signal.aborted) throw new Error('Desktop update download canceled.')
-      this.assertEnvironmentUnchanged(environmentKey)
+      this.assertEnvironmentUnchanged(environmentBindingId)
       this.assertTargetIsCurrent(finalStatus, expectedVersion)
-      if (finalStatus.releaseId !== status.releaseId) {
-        throw new Error('The selected backend release policy changed during the download.')
-      }
 
       const packagePath = path.relative(operationPath, payload.packagePath)
       const appPath = path.relative(operationPath, payload.appPath)
@@ -527,10 +526,10 @@ export class DesktopUpdateManager {
       throw new Error('The selected Desktop update is already being installed.')
     }
 
-    const environmentKey = this.getEnvironmentKey()
+    const environmentBindingId = this.requireEnvironmentBindingId()
     const status = await this.service.getDesktopReleaseStatus()
-    this.assertEnvironmentUnchanged(environmentKey)
-    if (operation.environmentKey !== environmentKey || operation.releaseId !== status.releaseId) {
+    this.assertEnvironmentUnchanged(environmentBindingId)
+    if (operation.environmentBindingId !== environmentBindingId) {
       await this.discardOperation(operationPath, operation.id)
       throw new Error('The selected backend changed. Check for updates again before installing.')
     }
@@ -626,11 +625,8 @@ export class DesktopUpdateManager {
     }
 
     const finalStatus = await this.service.getDesktopReleaseStatus()
-    this.assertEnvironmentUnchanged(environmentKey)
+    this.assertEnvironmentUnchanged(environmentBindingId)
     this.assertTargetIsCurrent(finalStatus, expectedVersion)
-    if (finalStatus.releaseId !== operation.releaseId) {
-      throw new Error('The selected backend release policy changed before installation.')
-    }
     await this.writeOperation(path.join(operationPath, 'operation.json'), {
       ...operation,
       state: 'installing',
@@ -638,12 +634,9 @@ export class DesktopUpdateManager {
     try {
       await this.launchInstallHelper(plan)
       const handoffStatus = await this.service.getDesktopReleaseStatus()
-      this.assertEnvironmentUnchanged(environmentKey)
+      this.assertEnvironmentUnchanged(environmentBindingId)
       this.assertTargetIsCurrent(handoffStatus, expectedVersion)
-      if (
-        handoffStatus.releaseId !== operation.releaseId ||
-        app.getVersion() !== operation.currentVersion
-      ) {
+      if (app.getVersion() !== operation.currentVersion) {
         throw new Error('The selected backend or installed build changed before installation.')
       }
     } catch (error) {
@@ -738,8 +731,7 @@ export class DesktopUpdateManager {
             const status = await this.service.getDesktopReleaseStatus()
             if (
               currentHash === operation.currentAsarSha256 &&
-              operation.environmentKey === this.getEnvironmentKey() &&
-              status.releaseId === operation.releaseId &&
+              operation.environmentBindingId === this.getEnvironmentBindingId() &&
               this.statusRecommends(status, operation.version)
             ) {
               await this.writeOperation(path.join(operationPath, 'operation.json'), {
@@ -887,8 +879,16 @@ export class DesktopUpdateManager {
     }
   }
 
-  private assertEnvironmentUnchanged(expectedEnvironmentKey: string): void {
-    if (this.getEnvironmentKey() !== expectedEnvironmentKey) {
+  private requireEnvironmentBindingId(): string {
+    const environmentBindingId = this.getEnvironmentBindingId()
+    if (!environmentBindingId || environmentBindingId.length > MAX_ENVIRONMENT_BINDING_ID_LENGTH) {
+      throw new Error('Select a saved backend profile before downloading a Desktop update.')
+    }
+    return environmentBindingId
+  }
+
+  private assertEnvironmentUnchanged(expectedEnvironmentBindingId: string): void {
+    if (this.getEnvironmentBindingId() !== expectedEnvironmentBindingId) {
       throw new Error(
         'The selected backend changed during the update. Check again before continuing.'
       )
@@ -915,8 +915,6 @@ export class DesktopUpdateManager {
         `Desktop update releases before v${MINIMUM_UPDATE_VERSION} are not supported.`
       )
     }
-    if (!status.releaseId)
-      throw new Error('The selected backend returned no release policy identity.')
   }
 
   private stagingRoot(): string {

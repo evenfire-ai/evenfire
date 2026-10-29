@@ -66,7 +66,7 @@ function createDependencies(
     downloadAsset?: DesktopUpdateManagerDependencies['downloadAsset']
     preparePayload?: DesktopUpdateManagerDependencies['preparePayload']
     launchInstallHelper?: DesktopUpdateManagerDependencies['launchInstallHelper']
-    envKey?: () => string
+    bindingId?: () => string | null
   } = {}
 ): DesktopUpdateManagerDependencies {
   const appRoot = '/Applications/Evenfire.app'
@@ -131,7 +131,7 @@ function createDependencies(
     platform: 'darwin',
     architecture: 'arm64',
     executablePath: location.executablePath,
-    getEnvironmentKey: options.envKey ?? (() => environment.key),
+    getEnvironmentBindingId: options.bindingId ?? (() => environment.key),
     resolveAsset,
     downloadAsset,
     preparePayload,
@@ -193,9 +193,47 @@ describe('DesktopUpdateManager', () => {
     expect(pending).toEqual({ version: UPDATE_VERSION, updaterCapable: false })
   })
 
+  it('does not persist the backend release identity in the operation journal', async () => {
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+
+    const stageRoot = path.join(userDataPath, 'desktop-update-staging')
+    const operationId = (await fs.readdir(stageRoot)).find(name => name !== 'pending.json')!
+    const operation = JSON.parse(
+      await fs.readFile(path.join(stageRoot, operationId, 'operation.json'), 'utf8')
+    ) as Record<string, unknown>
+
+    expect(operation.releaseId).toBeUndefined()
+    expect(operation.releaseIdentitySha256).toBeUndefined()
+    expect(JSON.stringify(operation)).not.toContain('release-0.12.0')
+  })
+
+  it('keeps a staged target when release metadata changes but remains recommended', async () => {
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+    getDesktopReleasePolicy.mockResolvedValue({
+      ...createReleasePolicy(),
+      releaseId: 'new-release-metadata',
+    })
+
+    await expect(manager.getPendingDesktopUpdate()).resolves.toEqual({
+      version: UPDATE_VERSION,
+      updaterCapable: false,
+    })
+  })
+
   it('rejects stale backend recommendations before resolving an artifact', async () => {
     await expect(manager.downloadDesktopUpdate('0.11.0')).rejects.toThrow(
       'no longer recommends this Desktop update'
+    )
+    expect(dependencies.resolveAsset).not.toHaveBeenCalled()
+    expect(dependencies.downloadAsset).not.toHaveBeenCalled()
+  })
+
+  it('does not stage an update when no stable backend profile is selected', async () => {
+    dependencies = createDependencies({ bindingId: () => null })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+
+    await expect(manager.downloadDesktopUpdate(UPDATE_VERSION)).rejects.toThrow(
+      'Select a saved backend profile'
     )
     expect(dependencies.resolveAsset).not.toHaveBeenCalled()
     expect(dependencies.downloadAsset).not.toHaveBeenCalled()
@@ -309,7 +347,19 @@ describe('DesktopUpdateManager', () => {
     await manager.downloadDesktopUpdate(UPDATE_VERSION)
     getDesktopReleasePolicy.mockResolvedValue(createReleasePolicy('0.13.0'))
 
-    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow('backend changed')
+    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow(
+      'no longer recommends this Desktop update'
+    )
+    expect(dependencies.launchInstallHelper).not.toHaveBeenCalled()
+  })
+
+  it('rejects a staged update after switching the selected backend', async () => {
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+    environment.key = 'dev'
+
+    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow(
+      'selected backend changed'
+    )
     expect(dependencies.launchInstallHelper).not.toHaveBeenCalled()
   })
 
