@@ -1,0 +1,44 @@
+# Redact the query string of the `upstream: "..."` field in NGINX error lines.
+#
+# NGINX writes the upstream URL of a failed request as:
+#
+#   ... upstream: "https://<peer>/<path>?<query>", host: "..."
+#
+# The remote baseUrl query can carry a credential (#1240), and envsubst resolves
+# it inside this container, so the line must never leave the container with it.
+# Everything before the first "?" of that field (scheme, peer IP:port or the
+# upstream block name, path) and the rest of the line stay untouched: the peer
+# classifies a 502 race in the field evidence, and the message text is what the
+# error alerts match.
+#
+# A line truncated at NGX_MAX_ERROR_STR (2047 bytes) has no closing quote, so
+# the redaction runs to the end of the line instead of waiting for one.
+#
+# Only the first occurrence of the field is considered. The only field NGINX
+# logs before `upstream:` is `request:`, and a request target cannot contain the
+# raw space that the sequence needs, so a client cannot shadow the real field.
+#
+# One line per record plus an explicit flush: a block-buffered filter would
+# delay every error line and, once the 64 KiB FIFO filled, block NGINX's
+# workers.
+{
+    start = index($0, "upstream: \"")
+    if (start > 0) {
+        head = substr($0, 1, start + 10)
+        rest = substr($0, start + 11)
+        quote = index(rest, "\"")
+        if (quote > 0) {
+            field = substr(rest, 1, quote - 1)
+            tail = substr(rest, quote)
+        } else {
+            field = rest
+            tail = ""
+        }
+        mark = index(field, "?")
+        if (mark > 0) {
+            $0 = head substr(field, 1, mark) "REDACTED" tail
+        }
+    }
+    print $0
+    fflush()
+}

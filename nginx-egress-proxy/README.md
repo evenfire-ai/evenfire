@@ -30,10 +30,17 @@ For each remote McpServer, host-context-controller:
    cluster hosts (`*.svc`, `*.svc.cluster.local`, `kubernetes.default`) and
    private/link-local/loopback patterns rejected; the URL is reconstructed from
    parsed components so injected characters (e.g. newlines) are stripped.
-2. **Renders a per-server `default.conf.template` ConfigMap** pinning
-   `proxy_pass` to that single external base URL, with TLS to the upstream
-   (`proxy_ssl_verify on`, SNI, system CA bundle), SSE-friendly settings
-   (buffering/cache off, long read timeouts), and a local `/health` endpoint.
+   Query placeholders must be complete `${NAME}` values where `NAME` matches
+   `[A-Z_][A-Z0-9_]*`; bare dollars, malformed braces, backslashes, semicolons,
+   spaces, and control characters are rejected.
+2. **Renders a per-server `default.conf.template` ConfigMap** that resolves and
+   re-resolves the external base URL with NGINX. The resolver comes from the
+   pod's `/etc/resolv.conf`, and the upstream `server ... resolve` directive
+   follows DNS TTL changes without restarting NGINX or opening an upstream
+   keepalive pool. TLS to the upstream remains mandatory
+   (`proxy_ssl_verify on`, SNI, system CA bundle), along with SSE-friendly
+   settings (buffering/cache off, long read timeouts) and a local `/health`
+   endpoint.
 3. **Sanitizes each `spec.remote.authHeaders` entry** (`sanitizeAuthHeader`):
    header names restricted to `[A-Za-z0-9-]`, values capped at 2048 chars,
    CR/LF/NUL rejected (HTTP request smuggling / nginx directive-injection
@@ -41,10 +48,23 @@ For each remote McpServer, host-context-controller:
 4. **Deploys this image as the only container** (`egress-proxy`) of the
    per-server Deployment. The ConfigMap mounts at `/etc/nginx/templates`, so
    `envsubst` resolves `${VAR}` placeholders in auth headers at pod start from
-   env vars sourced from `spec.envSecret` — with `${VAR}` placeholders,
-   credentials never appear in the ConfigMap itself. A literal value inlined in
-   the CRD would be emitted (escaped) into the ConfigMap — always use
-   placeholders.
+   env vars sourced from `spec.envSecret`. Query placeholders use the same
+   runtime mechanism. With placeholders, credentials never appear in the
+   ConfigMap or Deployment; a literal value inlined in the CRD would still be
+   emitted into the ConfigMap — always use placeholders. Secret values consumed
+   by NGINX templates must contain only `[A-Za-z0-9._~-]`; other characters can
+   change the generated NGINX directive or URL after envsubst.
+
+HCC appends `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1` after CRD-provided env,
+`spec.envSecret`, and empty-placeholder backfill. Kubernetes uses the last
+duplicate, so the platform resolver setting cannot be disabled by the CRD. The
+image exports the pod's local nameservers into `NGINX_LOCAL_RESOLVERS`, which
+the generated `resolver` directive uses.
+
+The remote container's readiness probe remains the local `/health` HTTP probe.
+Its liveness probe runs `/usr/local/bin/egress-proxy-liveness <port>`. That
+script checks `/health` and the image's stderr filter process, so a dead filter
+causes a visible container restart instead of silently losing error logs.
 
 ## Configuration
 
@@ -61,6 +81,11 @@ HCC does not rewrite `spec.image` during reconciliation: that field remains
 desired state owned by the CRD author. Deployment rendering always stamps the
 configured platform image for remote egress proxies, so a remote CRD's
 `spec.image` is never what runs.
+
+HCC and this image must be upgraded together. The HCC template requires the
+image's local-resolver entrypoint support and liveness script; the image's
+filter and liveness behavior are coupled to HCC's generated template and probe.
+An older image is expected to fail visibly rather than silently fall back.
 
 ## Ports
 
@@ -87,6 +112,9 @@ builds this image, renders the template through the HCC reconciler, and runs it
 against a local TLS upstream: a trusted chain (direct and with two
 intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
 mismatch, and the test CA without the mounted trust store are rejected.
+The harness also covers the DNS switch (`H7 dns-switch`), query placeholder
+resolution (`H8 query-accept`), stderr query redaction (`H9 redact`), signal
+delivery (`H10 signals`), and filter-death detection (`H11 filter-death`).
 
 ## Updating NGINX
 

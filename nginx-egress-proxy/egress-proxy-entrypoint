@@ -1,0 +1,52 @@
+#!/bin/sh
+# Start wrapper for the Clerum remote MCP egress proxy.
+#
+# NGINX must stay PID 1: the kubelet's STOPSIGNAL (SIGQUIT) and a SIGTERM have
+# to reach the NGINX master directly, and the container's exit code has to be
+# NGINX's. So this wrapper does its two jobs and then execs the official
+# entrypoint, which execs `nginx -g 'daemon off;'`:
+#
+#   1. It keeps the official /docker-entrypoint.sh, so the template envsubst
+#      (20-envsubst-on-templates.sh) and the resolv.conf export used by the
+#      rendered `resolver ${NGINX_LOCAL_RESOLVERS}` line
+#      (15-local-resolvers.envsh) still run, and so the variables they export
+#      reach NGINX through the environment.
+#   2. It routes only NGINX's stderr through the log filter (#1240). The remote
+#      baseUrl query may carry a credential and NGINX prints the full upstream
+#      URL in every upstream error line. stdout keeps the access log unfiltered:
+#      the access log records the client request, which never carries the
+#      remote credential.
+#
+# The filter is a child of NGINX after the exec, so the master reaps it. If it
+# dies, NGINX keeps serving (it ignores SIGPIPE, the FIFO writes fail with
+# EPIPE and no unfiltered line is ever written) and every error line is
+# dropped. /usr/local/bin/egress-proxy-liveness is the exec liveness probe that
+# turns that silent loss into a container restart.
+set -eu
+
+# An empty command would make /docker-entrypoint.sh exec nothing and exit 0,
+# which looks like a clean shutdown instead of a broken image.
+if [ "$#" -eq 0 ]; then
+  echo "egress-proxy-entrypoint: no command to run" >&2
+  exit 1
+fi
+
+FIFO=/tmp/egress-proxy-error.fifo
+FILTER=/usr/local/bin/egress-proxy-log-filter
+
+# A fresh FIFO per container: a stale one from an earlier run would keep a
+# writer blocked on a reader that never comes.
+rm -f "$FIFO"
+mkfifo -m 0600 "$FIFO"
+
+# The filter reads the FIFO and writes the redacted lines to the container's
+# stderr. Its fd 1 is the wrapper's current fd 2, taken before the redirection
+# below replaces fd 2 for the exec'd process, so the access log on stdout is
+# never routed through the filter. The open for reading and the open for
+# writing below rendezvous on the FIFO.
+awk -f "$FILTER" <"$FIFO" >&2 &
+
+# The official entrypoint only runs the /docker-entrypoint.d scripts when the
+# command is nginx; the image CMD is `nginx -g daemon off;`. exec keeps the
+# process as PID 1 and opens the FIFO for writing as NGINX's stderr.
+exec /docker-entrypoint.sh "$@" 2>"$FIFO"
