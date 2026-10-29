@@ -74,16 +74,14 @@ describe('team create Context membership', () => {
     expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('team-1', ['ctx-a'])
   })
 
-  it('does not grant a Context that a padded contextRef only matches after trimming', async () => {
+  it('stores a padded contextRef verbatim instead of normalizing it to another Context name', async () => {
     vi.mocked(api.getHosts).mockResolvedValue({
       items: [{ metadata: { name: 'agent-a' }, spec: { contextRef: 'ctx-a ' } }],
     })
 
     await createTeamWithAgent('agent-a')
 
-    expect(api.updateAdminTeamContexts).not.toHaveBeenCalledWith(
-      'team-1',
-      expect.arrayContaining(['ctx-a'])
-    )
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledTimes(1)
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('team-1', ['ctx-a '])
   })
 })
