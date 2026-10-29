@@ -103,7 +103,10 @@ describe('D34 migration execution policy', () => {
     // covers the runs its DELETE cascade rewrites; RP-12 narrowed the
     // session-revocation ledger to SELECT and INSERT. O1 added the
     // approval-trigger pre-lock that both decision call sites take before they
-    // bump the approval target. The run revision trigger now returns early on
+    // bump the approval target. CR-1 (PR #334 review r2) added the recipe-delete
+    // pre-lock, which the Workflow Recipes runtime executes and which locks the
+    // recipe's grant rows inside the function before any revision. The run
+    // revision trigger now returns early on
     // an UPDATE that changes none of the columns catalog consumers read, so
     // reconciler heartbeats stop bumping team and user revisions; the GFS
     // resource trigger does the same for content saves that keep its identity,
@@ -111,7 +114,7 @@ describe('D34 migration execution policy', () => {
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'e8c0e74cd98063fbd4e19e05a301ee32a421cff7cd1414e9740bb221da8a55c5',
+        '3d40cc6e9d131a86b484c1f5eb9ef047dd00ffff794cd8c0a62b199ecc94dd4b',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',

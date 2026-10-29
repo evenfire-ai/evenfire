@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { Pool, type PoolClient } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
@@ -65,7 +66,8 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
           OR current_setting('application_name') LIKE 'approval-archive-%'
           OR current_setting('application_name') LIKE 'approval-expiry-%'
           OR current_setting('application_name') LIKE 'approval-decision-%'
-          OR current_setting('application_name') LIKE 'approval-approved-run-%' THEN
+          OR current_setting('application_name') LIKE 'approval-approved-run-%'
+          OR current_setting('application_name') LIKE 'recipe-delete-%' THEN
           INSERT INTO archive_delete_revision_observations
             (application_name, revision_table, subject_id, revision)
           VALUES (current_setting('application_name'), TG_TABLE_NAME,
@@ -1396,6 +1398,515 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       { revision_table: 'authorization_team_revisions', subject_id: ids.team },
       { revision_table: 'authorization_user_revisions', subject_id: ids.user },
     ])
+  })
+
+  // The cleanup statements of WorkflowReconciler.reconcileDelete's transaction,
+  // copied verbatim. The first new case below binds this copy to the production
+  // file in the same order, so these tests exercise the real cleanup, not a
+  // divergent local variant.
+  const recipeDeleteStatements = {
+    approvalLock: `SELECT id FROM workflow_approval_requests
+              WHERE recipe_namespace = $1 AND recipe_name = $2
+                AND status IN ('pending', 'approved')
+              ORDER BY id
+                FOR UPDATE`,
+    prelock: 'SELECT authorization_prelock_workflow_recipe_policy_revisions($1, $2)',
+    deleteUserGrants: `DELETE FROM user_workflow_triggers
+              WHERE recipe_namespace = $1 AND recipe_name = $2`,
+    deleteTeamGrants: `DELETE FROM team_workflow_triggers
+              WHERE recipe_namespace = $1 AND recipe_name = $2`,
+    deleteAllowedTeams: `DELETE FROM workflow_recipe_allowed_teams
+              WHERE recipe_namespace = $1 AND recipe_name = $2`,
+    legacyLookup: `SELECT to_regclass('public.workflow_recipe_allowed_users')::text AS "regclass"`,
+    deleteLegacyGrants: `DELETE FROM workflow_recipe_allowed_users
+                WHERE recipe_namespace = $1 AND recipe_name = $2`,
+    cancelApprovals: `UPDATE workflow_approval_requests
+                SET status = 'cancelled',
+                    cancelled_at = COALESCE(cancelled_at, NOW()),
+                    cancelled_by = COALESCE(cancelled_by, 'workflow-recipe-delete')
+              WHERE recipe_namespace = $1
+                AND recipe_name = $2
+                AND status IN ('pending', 'approved')`,
+  } as const
+
+  async function runRecipeDeleteCleanup(
+    client: PoolClient,
+    recipe: { namespace: string; name: string }
+  ): Promise<void> {
+    await client.query(recipeDeleteStatements.approvalLock, [recipe.namespace, recipe.name])
+    await client.query(recipeDeleteStatements.prelock, [recipe.namespace, recipe.name])
+    for (const statement of [
+      recipeDeleteStatements.deleteUserGrants,
+      recipeDeleteStatements.deleteTeamGrants,
+      recipeDeleteStatements.deleteAllowedTeams,
+    ]) {
+      await client.query(statement, [recipe.namespace, recipe.name])
+    }
+    const legacy = await client.query<{ regclass?: string | null }>(
+      recipeDeleteStatements.legacyLookup
+    )
+    if (legacy.rows[0]?.regclass) {
+      await client.query(recipeDeleteStatements.deleteLegacyGrants, [recipe.namespace, recipe.name])
+    }
+    await client.query(recipeDeleteStatements.cancelApprovals, [recipe.namespace, recipe.name])
+  }
+
+  async function recipePolicyWitness(recipe: { namespace: string; name: string }) {
+    const grants = await databasePool.query<{ table_name: string; rows: number }>(
+      `SELECT 'user_workflow_triggers' AS table_name,
+              count(*)::int AS rows
+         FROM user_workflow_triggers
+        WHERE recipe_namespace = $1 AND recipe_name = $2
+        UNION ALL
+       SELECT 'team_workflow_triggers', count(*)::int
+         FROM team_workflow_triggers
+        WHERE recipe_namespace = $1 AND recipe_name = $2
+        UNION ALL
+       SELECT 'workflow_recipe_allowed_teams', count(*)::int
+         FROM workflow_recipe_allowed_teams
+        WHERE recipe_namespace = $1 AND recipe_name = $2
+        ORDER BY table_name`,
+      [recipe.namespace, recipe.name]
+    )
+    const approvals = await databasePool.query<{ status: string; cancelled_by: string | null }>(
+      `SELECT status, cancelled_by FROM workflow_approval_requests
+        WHERE recipe_namespace = $1 AND recipe_name = $2
+        ORDER BY id`,
+      [recipe.namespace, recipe.name]
+    )
+    return { grants: grants.rows, approvals: approvals.rows }
+  }
+
+  async function removeRecipePolicyFixture(
+    recipe: { namespace: string; name: string },
+    fixture: { runRecipes?: string[]; approvals?: string[]; users?: string[]; teams?: string[] }
+  ) {
+    await databasePool.query('TRUNCATE archive_order_barriers')
+    await databasePool.query('DELETE FROM workflow_runs WHERE recipe_name = ANY($1::text[])', [
+      fixture.runRecipes ?? [],
+    ])
+    await databasePool.query('DELETE FROM workflow_approval_requests WHERE id = ANY($1::uuid[])', [
+      fixture.approvals ?? [],
+    ])
+    for (const table of [
+      'user_workflow_triggers',
+      'team_workflow_triggers',
+      'workflow_recipe_allowed_teams',
+    ]) {
+      await databasePool.query(
+        `DELETE FROM ${table} WHERE recipe_namespace = $1 AND recipe_name = $2`,
+        [recipe.namespace, recipe.name]
+      )
+    }
+    await databasePool.query('DELETE FROM users WHERE id = ANY($1::uuid[])', [fixture.users ?? []])
+    await databasePool.query('DELETE FROM teams WHERE id = ANY($1::uuid[])', [fixture.teams ?? []])
+  }
+
+  it('runs the cleanup statements the reconciler executes, in the same order', () => {
+    const source = readFileSync(
+      new URL('../../workflow-recipes/src/workflow/workflowReconciler.ts', import.meta.url),
+      'utf8'
+    )
+    const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+    const normalizedSource = normalize(source)
+    let position = -1
+    for (const statement of [
+      recipeDeleteStatements.approvalLock,
+      recipeDeleteStatements.prelock,
+      recipeDeleteStatements.deleteUserGrants,
+      recipeDeleteStatements.deleteTeamGrants,
+      recipeDeleteStatements.deleteAllowedTeams,
+      recipeDeleteStatements.legacyLookup,
+      recipeDeleteStatements.deleteLegacyGrants,
+      recipeDeleteStatements.cancelApprovals,
+    ]) {
+      const index = normalizedSource.indexOf(normalize(statement), position + 1)
+      expect(index, `missing after the previous statement: ${statement}`).toBeGreaterThan(position)
+      position = index
+    }
+  })
+
+  it('deletes grant rows beside a run INSERT without reversing subject locks', async () => {
+    const recipe = {
+      namespace: 'sandbox-recipes',
+      name: `recipe-delete-grants-${randomBytes(4).toString('hex')}`,
+    }
+    const runRecipe = `recipe-delete-grants-run-${randomBytes(4).toString('hex')}`
+    const user = randomUUID()
+    const team = randomUUID()
+    await databasePool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+      user,
+      `recipe-delete-${user}@example.test`,
+    ])
+    await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Recipe delete grants')", [
+      team,
+    ])
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [user, recipe.namespace, recipe.name]
+    )
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [team, recipe.namespace, recipe.name]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_recipe_allowed_teams(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [team, recipe.namespace, recipe.name]
+    )
+    const cleanupGate = await databasePool.connect()
+    const competitorGate = await databasePool.connect()
+    const cleanup = await databasePool.connect()
+    const competitor = await databasePool.connect()
+    const cleanupPid = await pid(cleanup)
+    const competitorPid = await pid(competitor)
+    const cleanupGatePid = await pid(cleanupGate)
+    const competitorGatePid = await pid(competitorGate)
+    let cleanupOutcome: Promise<Outcome> | undefined
+    let competitorOutcome: Promise<Outcome> | undefined
+    let cleanupSettled = false
+    let outcomes: Outcome[] = []
+    let witness:
+      | {
+          policy: Awaited<ReturnType<typeof recipePolicyWitness>>
+          runs: Array<{ run_id: string }>
+          observed: Array<{ revision_table: string; subject_id: string }>
+        }
+      | undefined
+    try {
+      await configure(cleanup, 'recipe-delete-grants')
+      await configure(competitor, 'recipe-delete-run-insert')
+      await cleanupGate.query('SELECT pg_advisory_lock($1, 41)', [barrierClass])
+      await competitorGate.query('SELECT pg_advisory_lock($1, 42)', [barrierClass])
+      await databasePool.query(
+        `INSERT INTO archive_order_barriers VALUES
+           ('recipe-delete-grants', 'authorization_user_revisions', $1, 41),
+           ('recipe-delete-run-insert', 'authorization_team_revisions', '', 42)`,
+        [user]
+      )
+      await cleanup.query('BEGIN')
+      await cleanup.query('SET LOCAL ROLE workflow_recipes_runtime')
+      cleanupOutcome = observe(runRecipeDeleteCleanup(cleanup, recipe))
+      // The prelock holds the team before the user it pauses on.
+      await waitForBlock(cleanupPid, [cleanupGatePid])
+      await competitor.query('BEGIN')
+      competitorOutcome = observe(
+        createRun(competingRunInsert({ user, team }, runRecipe), competitor)
+      )
+      const competitorBlocker = await waitForBlock(competitorPid, [cleanupPid, competitorGatePid])
+      if (competitorBlocker === competitorGatePid) {
+        // Without the prelock the cleanup holds only the user grant row and the
+        // user revision, so the INSERT takes the team and waits behind the
+        // barrier before asking for that user: a cycle.
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+        await waitForBlock(competitorPid, [cleanupPid])
+        await cleanupGate.query('SELECT pg_advisory_unlock_all()')
+      } else {
+        // With the prelock the cleanup already holds the team, so the INSERT
+        // waits on the cleanup itself.
+        await cleanupGate.query('SELECT pg_advisory_unlock_all()')
+        const settled = await cleanupOutcome
+        await cleanup.query(settled.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+        cleanupSettled = true
+        await waitForBlock(competitorPid, [competitorGatePid])
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      }
+      const cleanupResult = await cleanupOutcome
+      if (!cleanupSettled) {
+        await cleanup.query(cleanupResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+        cleanupSettled = true
+      }
+      const competitorResult = await competitorOutcome
+      await competitor.query(competitorResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      outcomes = [cleanupResult, competitorResult]
+      console.info(
+        'RECIPE_DELETE_GRANTS_OUTCOMES',
+        outcomes.map(result => ({
+          status: result.status,
+          code: result.status === 'rejected' ? result.code : undefined,
+        }))
+      )
+      witness = {
+        policy: await recipePolicyWitness(recipe),
+        runs: (
+          await databasePool.query(
+            `SELECT run_id FROM workflow_runs
+              WHERE recipe_name = $1 AND team_id = $2 AND actor_id = $3`,
+            [runRecipe, team, user]
+          )
+        ).rows,
+        observed: (await observedRevisions('recipe-delete-grants')).slice(0, 2),
+      }
+    } finally {
+      await cleanupGate.query('SELECT pg_advisory_unlock_all()')
+      await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      await Promise.all([cleanupOutcome, competitorOutcome])
+      if (!cleanupSettled) await cleanup.query('ROLLBACK')
+      await competitor.query('ROLLBACK')
+      for (const client of [cleanupGate, competitorGate, cleanup, competitor]) client.release()
+      await removeRecipePolicyFixture(recipe, {
+        runRecipes: [runRecipe],
+        users: [user],
+        teams: [team],
+      })
+    }
+    expect(outcomes.map(result => result.status)).toEqual(['fulfilled', 'fulfilled'])
+    expect(witness.policy).toEqual({
+      grants: [
+        { table_name: 'team_workflow_triggers', rows: 0 },
+        { table_name: 'user_workflow_triggers', rows: 0 },
+        { table_name: 'workflow_recipe_allowed_teams', rows: 0 },
+      ],
+      approvals: [],
+    })
+    expect(witness.runs).toHaveLength(1)
+    // The prelock holds the team first; without it the cleanup's first user
+    // DELETE bumps the user revision first.
+    expect(witness.observed).toEqual([
+      { revision_table: 'authorization_team_revisions', subject_id: team },
+      { revision_table: 'authorization_user_revisions', subject_id: user },
+    ])
+  })
+
+  it('cancels approvals beside a run INSERT without reversing subject locks', async () => {
+    const recipe = {
+      namespace: 'sandbox-recipes',
+      name: `recipe-delete-approvals-${randomBytes(4).toString('hex')}`,
+    }
+    const runRecipe = `recipe-delete-approvals-run-${randomBytes(4).toString('hex')}`
+    const [userApprovalId, teamApprovalId] = [randomUUID(), randomUUID()].sort() as [string, string]
+    const user = randomUUID()
+    const team = randomUUID()
+    await databasePool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+      user,
+      `recipe-delete-approval-${user}@example.test`,
+    ])
+    await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Recipe delete approvals')", [
+      team,
+    ])
+    // The user-targeted approval is first in heap order and lower in id order,
+    // so both a sequential and an index scan reach its subject first.
+    const targets = [
+      [userApprovalId, 'target_user_id', user],
+      [teamApprovalId, 'target_team_id', team],
+    ] as const
+    for (const [id, column, target] of targets) {
+      await databasePool.query(
+        `INSERT INTO workflow_approval_requests(
+           id, recipe_namespace, recipe_name, expires_at, status, ${column},
+           payload, idempotency_key, requested_at
+         ) VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour', 'pending', $4,
+           '{}'::jsonb, $5, NOW())`,
+        [id, recipe.namespace, recipe.name, target, `recipe-delete-approval-${id}`]
+      )
+    }
+    const cleanupGate = await databasePool.connect()
+    const competitorGate = await databasePool.connect()
+    const cleanup = await databasePool.connect()
+    const competitor = await databasePool.connect()
+    const cleanupPid = await pid(cleanup)
+    const competitorPid = await pid(competitor)
+    const cleanupGatePid = await pid(cleanupGate)
+    const competitorGatePid = await pid(competitorGate)
+    let cleanupOutcome: Promise<Outcome> | undefined
+    let competitorOutcome: Promise<Outcome> | undefined
+    let cleanupSettled = false
+    let outcomes: Outcome[] = []
+    let witness:
+      | {
+          policy: Awaited<ReturnType<typeof recipePolicyWitness>>
+          runs: Array<{ run_id: string }>
+          observed: Array<{ revision_table: string; subject_id: string }>
+        }
+      | undefined
+    try {
+      await configure(cleanup, 'recipe-delete-approvals')
+      await configure(competitor, 'recipe-delete-approvals-run')
+      await cleanupGate.query('SELECT pg_advisory_lock($1, 43)', [barrierClass])
+      await competitorGate.query('SELECT pg_advisory_lock($1, 44)', [barrierClass])
+      await databasePool.query(
+        `INSERT INTO archive_order_barriers VALUES
+           ('recipe-delete-approvals', 'authorization_user_revisions', $1, 43),
+           ('recipe-delete-approvals-run', 'authorization_team_revisions', '', 44)`,
+        [user]
+      )
+      await cleanup.query('BEGIN')
+      await cleanup.query('SET LOCAL ROLE workflow_recipes_runtime')
+      cleanupOutcome = observe(runRecipeDeleteCleanup(cleanup, recipe))
+      await waitForBlock(cleanupPid, [cleanupGatePid])
+      await competitor.query('BEGIN')
+      competitorOutcome = observe(
+        createRun(competingRunInsert({ user, team }, runRecipe), competitor)
+      )
+      const competitorBlocker = await waitForBlock(competitorPid, [cleanupPid, competitorGatePid])
+      if (competitorBlocker === competitorGatePid) {
+        // Without the prelock the first cancelled approval is the user-targeted
+        // row, so the cleanup holds the user and the INSERT takes the team
+        // before asking for it: a cycle.
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+        await waitForBlock(competitorPid, [cleanupPid])
+        await cleanupGate.query('SELECT pg_advisory_unlock_all()')
+      } else {
+        await cleanupGate.query('SELECT pg_advisory_unlock_all()')
+        const settled = await cleanupOutcome
+        await cleanup.query(settled.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+        cleanupSettled = true
+        await waitForBlock(competitorPid, [competitorGatePid])
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      }
+      const cleanupResult = await cleanupOutcome
+      if (!cleanupSettled) {
+        await cleanup.query(cleanupResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+        cleanupSettled = true
+      }
+      const competitorResult = await competitorOutcome
+      await competitor.query(competitorResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      outcomes = [cleanupResult, competitorResult]
+      console.info(
+        'RECIPE_DELETE_APPROVALS_OUTCOMES',
+        outcomes.map(result => ({
+          status: result.status,
+          code: result.status === 'rejected' ? result.code : undefined,
+        }))
+      )
+      witness = {
+        policy: await recipePolicyWitness(recipe),
+        runs: (
+          await databasePool.query(
+            `SELECT run_id FROM workflow_runs
+              WHERE recipe_name = $1 AND team_id = $2 AND actor_id = $3`,
+            [runRecipe, team, user]
+          )
+        ).rows,
+        observed: (await observedRevisions('recipe-delete-approvals')).slice(0, 2),
+      }
+    } finally {
+      await cleanupGate.query('SELECT pg_advisory_unlock_all()')
+      await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      await Promise.all([cleanupOutcome, competitorOutcome])
+      if (!cleanupSettled) await cleanup.query('ROLLBACK')
+      await competitor.query('ROLLBACK')
+      for (const client of [cleanupGate, competitorGate, cleanup, competitor]) client.release()
+      await removeRecipePolicyFixture(recipe, {
+        runRecipes: [runRecipe],
+        approvals: [userApprovalId, teamApprovalId],
+        users: [user],
+        teams: [team],
+      })
+    }
+    expect(outcomes.map(result => result.status)).toEqual(['fulfilled', 'fulfilled'])
+    expect(witness.policy).toEqual({
+      grants: [
+        { table_name: 'team_workflow_triggers', rows: 0 },
+        { table_name: 'user_workflow_triggers', rows: 0 },
+        { table_name: 'workflow_recipe_allowed_teams', rows: 0 },
+      ],
+      approvals: [
+        { status: 'cancelled', cancelled_by: 'workflow-recipe-delete' },
+        { status: 'cancelled', cancelled_by: 'workflow-recipe-delete' },
+      ],
+    })
+    expect(witness.runs).toHaveLength(1)
+    expect(witness.observed).toEqual([
+      { revision_table: 'authorization_team_revisions', subject_id: team },
+      { revision_table: 'authorization_user_revisions', subject_id: user },
+    ])
+  })
+
+  it('keeps its grant rows beside an approval-target revoke without reversing locks', async () => {
+    const recipe = {
+      namespace: 'sandbox-recipes',
+      name: `recipe-delete-revoke-${randomBytes(4).toString('hex')}`,
+    }
+    const team = randomUUID()
+    await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Recipe delete revoke')", [
+      team,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [team, recipe.namespace, recipe.name]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_recipe_allowed_teams(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [team, recipe.namespace, recipe.name]
+    )
+    const cleanupGate = await databasePool.connect()
+    const cleanup = await databasePool.connect()
+    const revoke = await databasePool.connect()
+    const cleanupPid = await pid(cleanup)
+    const revokePid = await pid(revoke)
+    const cleanupGatePid = await pid(cleanupGate)
+    let cleanupOutcome: Promise<Outcome> | undefined
+    let revokeOutcome: Promise<Outcome> | undefined
+    let cleanupSettled = false
+    let outcomes: Outcome[] = []
+    let witness: Awaited<ReturnType<typeof recipePolicyWitness>> | undefined
+    try {
+      await configure(cleanup, 'recipe-delete-revoke')
+      await configure(revoke, 'recipe-delete-revoke-grant')
+      await cleanupGate.query('SELECT pg_advisory_lock($1, 45)', [barrierClass])
+      await databasePool.query(
+        `INSERT INTO archive_order_barriers VALUES
+           ('recipe-delete-revoke', 'authorization_team_revisions', $1, 45)`,
+        [team]
+      )
+      await cleanup.query('BEGIN')
+      await cleanup.query('SET LOCAL ROLE workflow_recipes_runtime')
+      cleanupOutcome = observe(runRecipeDeleteCleanup(cleanup, recipe))
+      // The prelock holds the grant row before it bumps the paused team.
+      await waitForBlock(cleanupPid, [cleanupGatePid])
+      await revoke.query('BEGIN')
+      // The production approval-target revoke (workflowGrantManagementService
+      // revokeWorkflowRecipeApprovalTeam) without its audit CTE.
+      revokeOutcome = observe(
+        revoke.query(
+          `DELETE FROM workflow_recipe_allowed_teams
+            WHERE recipe_namespace = $1 AND recipe_name = $2 AND team_id = $3::uuid
+            RETURNING team_id`,
+          [recipe.namespace, recipe.name, team]
+        )
+      )
+      // With the grant-row phase the revoke waits on the cleanup's row lock.
+      // Without it the revoke holds the row and waits on the team revision the
+      // cleanup holds: a cycle.
+      await waitForBlock(revokePid, [cleanupPid])
+      await cleanupGate.query('SELECT pg_advisory_unlock_all()')
+      const cleanupResult = await cleanupOutcome
+      await cleanup.query(cleanupResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      cleanupSettled = true
+      const revokeResult = await revokeOutcome
+      await revoke.query(revokeResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      outcomes = [cleanupResult, revokeResult]
+      console.info(
+        'RECIPE_DELETE_REVOKE_OUTCOMES',
+        outcomes.map(result => ({
+          status: result.status,
+          code: result.status === 'rejected' ? result.code : undefined,
+        }))
+      )
+      expect(revokeResult).toMatchObject({ status: 'fulfilled', value: { rowCount: 0 } })
+      witness = await recipePolicyWitness(recipe)
+    } finally {
+      await cleanupGate.query('SELECT pg_advisory_unlock_all()')
+      await Promise.all([cleanupOutcome, revokeOutcome])
+      if (!cleanupSettled) await cleanup.query('ROLLBACK')
+      await revoke.query('ROLLBACK')
+      for (const client of [cleanupGate, cleanup, revoke]) client.release()
+      await removeRecipePolicyFixture(recipe, { teams: [team] })
+    }
+    expect(outcomes.map(result => result.status)).toEqual(['fulfilled', 'fulfilled'])
+    expect(witness).toEqual({
+      grants: [
+        { table_name: 'team_workflow_triggers', rows: 0 },
+        { table_name: 'user_workflow_triggers', rows: 0 },
+        { table_name: 'workflow_recipe_allowed_teams', rows: 0 },
+      ],
+      approvals: [],
+    })
   })
 
   it.each(['not-a-uuid', 'CONTROL-PLANE-ADMIN-UI'])(

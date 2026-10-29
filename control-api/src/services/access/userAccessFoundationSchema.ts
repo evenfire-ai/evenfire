@@ -489,6 +489,131 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
+    -- Recipe deletion (workflow-recipes workflowReconciler.ts reconcileDelete)
+    -- deletes the recipe's trigger grants and cancels its live approvals in one
+    -- transaction, after its caller locks those approval rows. Its user-grant
+    -- DELETE would take users before the team-grant DELETEs take teams, and its
+    -- multi-row approval UPDATE takes targets in scan order; run INSERTs and the
+    -- other prelocks take teams first. Grant writers lock the grant row before
+    -- its revision (workflowGrants.ts:106-111,238-242;
+    -- workflowGrantManagementService.ts:258-262), so these grant rows are
+    -- locked after their parents and before any revision. A row committed after
+    -- this function's reads is still deleted or cancelled, but its subject is
+    -- taken after the prelocked set (one trailing subject per late row).
+    CREATE OR REPLACE FUNCTION authorization_prelock_workflow_recipe_policy_revisions(
+      target_recipe_namespace TEXT,
+      target_recipe_name TEXT
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- Parent locks must precede grant rows and revisions, matching principal
+      -- deletion's parent-before-cascade order.
+      PERFORM team.id
+        FROM teams AS team
+       WHERE team.id::TEXT IN (
+         SELECT trigger_grant.team_id::TEXT
+           FROM team_workflow_triggers AS trigger_grant
+          WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+            AND trigger_grant.recipe_name = target_recipe_name
+         UNION
+         SELECT approval_target.team_id::TEXT
+           FROM workflow_recipe_allowed_teams AS approval_target
+          WHERE approval_target.recipe_namespace = target_recipe_namespace
+            AND approval_target.recipe_name = target_recipe_name
+         UNION
+         SELECT approval.target_team_id::TEXT
+           FROM workflow_approval_requests AS approval
+          WHERE approval.recipe_namespace = target_recipe_namespace
+            AND approval.recipe_name = target_recipe_name
+            AND approval.status IN ('pending', 'approved')
+       )
+       ORDER BY team.id
+       FOR KEY SHARE;
+
+      PERFORM principal.id
+        FROM users AS principal
+       WHERE principal.id IN (
+         SELECT trigger_grant.user_id
+           FROM user_workflow_triggers AS trigger_grant
+          WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+            AND trigger_grant.recipe_name = target_recipe_name
+         UNION
+         SELECT approval.target_user_id
+           FROM workflow_approval_requests AS approval
+          WHERE approval.recipe_namespace = target_recipe_namespace
+            AND approval.recipe_name = target_recipe_name
+            AND approval.status IN ('pending', 'approved')
+       )
+       ORDER BY principal.id
+       FOR KEY SHARE;
+
+      -- Grant writers take the grant row before its revision, so these rows are
+      -- held now, after their parents. The runtime role cannot lock or read the
+      -- subject columns, so this phase runs as the function owner.
+      PERFORM 1
+        FROM user_workflow_triggers AS trigger_grant
+       WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+         AND trigger_grant.recipe_name = target_recipe_name
+       ORDER BY trigger_grant.user_id
+       FOR UPDATE;
+      PERFORM 1
+        FROM team_workflow_triggers AS trigger_grant
+       WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+         AND trigger_grant.recipe_name = target_recipe_name
+       ORDER BY trigger_grant.team_id
+       FOR UPDATE;
+      PERFORM 1
+        FROM workflow_recipe_allowed_teams AS approval_target
+       WHERE approval_target.recipe_namespace = target_recipe_namespace
+         AND approval_target.recipe_name = target_recipe_name
+       ORDER BY approval_target.team_id
+       FOR UPDATE;
+
+      -- Hold every team before any user, as the other prelocks do. Bumping also
+      -- creates missing rows.
+      FOR revision IN
+        SELECT DISTINCT subject.subject_type, subject.subject_id
+          FROM (
+            SELECT 'team'::TEXT AS subject_type, trigger_grant.team_id::TEXT AS subject_id
+              FROM team_workflow_triggers AS trigger_grant
+             WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+               AND trigger_grant.recipe_name = target_recipe_name
+            UNION ALL
+            SELECT 'team', approval_target.team_id::TEXT
+              FROM workflow_recipe_allowed_teams AS approval_target
+             WHERE approval_target.recipe_namespace = target_recipe_namespace
+               AND approval_target.recipe_name = target_recipe_name
+            UNION ALL
+            SELECT 'user', trigger_grant.user_id::TEXT
+              FROM user_workflow_triggers AS trigger_grant
+             WHERE trigger_grant.recipe_namespace = target_recipe_namespace
+               AND trigger_grant.recipe_name = target_recipe_name
+            UNION ALL
+            SELECT 'team', approval.target_team_id::TEXT
+              FROM workflow_approval_requests AS approval
+             WHERE approval.recipe_namespace = target_recipe_namespace
+               AND approval.recipe_name = target_recipe_name
+               AND approval.status IN ('pending', 'approved')
+            UNION ALL
+            SELECT 'user', approval.target_user_id::TEXT
+              FROM workflow_approval_requests AS approval
+             WHERE approval.recipe_namespace = target_recipe_namespace
+               AND approval.recipe_name = target_recipe_name
+               AND approval.status IN ('pending', 'approved')
+          ) AS subject(subject_type, subject_id)
+         WHERE subject.subject_id IS NOT NULL AND subject.subject_id <> ''
+         ORDER BY subject.subject_type, subject.subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
+    END;
+    $$;
+
     CREATE OR REPLACE FUNCTION authorization_bump_user_row_revision()
     RETURNS TRIGGER
     LANGUAGE plpgsql
@@ -834,6 +959,12 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_trigger_revisions(UUID)
       TO control_api_runtime;
+    -- Recipe deletion runs on the Workflow Recipes pool, so only that runtime
+    -- role may lock its grant rows and bump its subjects first.
+    REVOKE ALL ON FUNCTION authorization_prelock_workflow_recipe_policy_revisions(TEXT, TEXT)
+      FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_recipe_policy_revisions(TEXT, TEXT)
+      TO workflow_recipes_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_workflow_run_revision() FROM PUBLIC;

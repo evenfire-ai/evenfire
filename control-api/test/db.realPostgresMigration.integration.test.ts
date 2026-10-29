@@ -49,6 +49,7 @@ const accessFoundationDefinerSignatures = [
   'authorization_prelock_workflow_run_revisions(pg_catalog.uuid[])',
   'authorization_prelock_workflow_approval_revisions(pg_catalog.uuid[])',
   'authorization_prelock_workflow_approval_trigger_revisions(pg_catalog.uuid)',
+  'authorization_prelock_workflow_recipe_policy_revisions(pg_catalog.text, pg_catalog.text)',
   'authorization_bump_user_row_revision()',
   'authorization_bump_team_row_revision()',
   'authorization_bump_workflow_run_revision()',
@@ -914,7 +915,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          WHERE routine.oid IN (
                  'public.authorization_prelock_workflow_run_revisions(uuid[])'::regprocedure,
                  'public.authorization_prelock_workflow_approval_revisions(uuid[])'::regprocedure,
-                 'public.authorization_prelock_workflow_approval_trigger_revisions(uuid)'::regprocedure
+                 'public.authorization_prelock_workflow_approval_trigger_revisions(uuid)'::regprocedure,
+                 'public.authorization_prelock_workflow_recipe_policy_revisions(text, text)'::regprocedure
                )
            AND privilege.grantee <> routine.proowner
            AND privilege.privilege_type = 'EXECUTE'
@@ -932,6 +934,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         {
           function_name: 'authorization_prelock_workflow_run_revisions',
           grantee: 'control_api_runtime',
+        },
+        {
+          function_name: 'authorization_prelock_workflow_recipe_policy_revisions',
+          grantee: 'workflow_recipes_runtime',
         },
       ])
       expect(
@@ -3010,11 +3016,37 @@ describeRealPostgres('control-api real Postgres migrations', () => {
        VALUES ($1, 'sandbox-recipes', 'runtime-cleanup-test')`,
       [cleanupTeamId]
     )
+    const cleanupApprovalId = randomUUID()
+    await dbPool.query(
+      `INSERT INTO workflow_approval_requests(
+         id, recipe_namespace, recipe_name, expires_at, status, target_user_id,
+         payload, idempotency_key, requested_at
+       ) VALUES ($1, 'sandbox-recipes', 'runtime-cleanup-test', NOW() + INTERVAL '1 hour',
+         'pending', $2, '{}'::jsonb, $3, NOW())`,
+      [cleanupApprovalId, cleanupUserId, `runtime-cleanup-${cleanupApprovalId}`]
+    )
 
     const cleanupClient = await dbPool.connect()
     try {
       await cleanupClient.query('BEGIN')
       await cleanupClient.query('SET LOCAL ROLE workflow_recipes_runtime')
+      // The real cleanup transaction first locks the approval rows it cancels,
+      // then runs the prelock. Both statements need the runtime grants the
+      // deployment pins here; a missing EXECUTE or UPDATE would roll back the
+      // recipe deletion in production and be swallowed there.
+      const approvalLock = await cleanupClient.query(
+        `SELECT id FROM workflow_approval_requests
+          WHERE recipe_namespace = $1 AND recipe_name = $2
+            AND status IN ('pending', 'approved')
+          ORDER BY id
+            FOR UPDATE`,
+        ['sandbox-recipes', 'runtime-cleanup-test']
+      )
+      expect(approvalLock.rowCount).toBe(1)
+      await cleanupClient.query(
+        'SELECT authorization_prelock_workflow_recipe_policy_revisions($1, $2)',
+        ['sandbox-recipes', 'runtime-cleanup-test']
+      )
       for (const table of [
         'user_workflow_triggers',
         'team_workflow_triggers',
@@ -3058,6 +3090,21 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          AND has_function_privilege('workflow_recipes_runtime', routine.oid, 'EXECUTE')
     `)
     expect(functionAccess.rows[0]?.violations).toBe('')
+
+    // The recipe-delete prelock is the only authorization function the Workflow
+    // Recipes runtime may execute; every other one stays owner-only.
+    const recipePolicyFunctionAccess = await dbPool.query<{ function_name: string }>(`
+      SELECT routine.proname AS function_name
+        FROM pg_proc routine
+        JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+       WHERE namespace.nspname = 'public'
+         AND routine.proname LIKE 'authorization_%'
+         AND has_function_privilege('workflow_recipes_runtime', routine.oid, 'EXECUTE')
+       ORDER BY routine.proname
+    `)
+    expect(recipePolicyFunctionAccess.rows).toEqual([
+      { function_name: 'authorization_prelock_workflow_recipe_policy_revisions' },
+    ])
 
     const traceService = new AgentRunEventService({
       transaction: async () => {

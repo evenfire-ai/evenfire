@@ -52,6 +52,30 @@ describe('0134 composable catalog revisions migration', () => {
     expect(sql).toMatch(
       /GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_trigger_revisions\(UUID\)\s+TO control_api_runtime/
     )
+    // Recipe deletion runs on the Workflow Recipes pool: its prelock derives the
+    // recipe's grant and approval subjects, and only that runtime role executes
+    // it. The grant-row phase must sit in the function, because the runtime role
+    // cannot lock or read the subject columns.
+    expect(sql).toContain(
+      'authorization_prelock_workflow_recipe_policy_revisions(\n      target_recipe_namespace TEXT,\n      target_recipe_name TEXT\n    )'
+    )
+    expect(sql).toContain(
+      'REVOKE ALL ON FUNCTION authorization_prelock_workflow_recipe_policy_revisions(TEXT, TEXT)\n      FROM PUBLIC'
+    )
+    expect(sql).toMatch(
+      /GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_recipe_policy_revisions\(TEXT, TEXT\)\s+TO workflow_recipes_runtime/
+    )
+    expect(sql).not.toMatch(
+      /GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_recipe_policy_revisions\(TEXT, TEXT\)\s+TO control_api_runtime/
+    )
+    const recipePolicyFunction = sql.slice(
+      sql.indexOf('FUNCTION authorization_prelock_workflow_recipe_policy_revisions'),
+      sql.indexOf('CREATE OR REPLACE FUNCTION authorization_bump_user_row_revision')
+    )
+    expect(recipePolicyFunction).toContain('ORDER BY trigger_grant.user_id\n       FOR UPDATE')
+    expect(recipePolicyFunction).toContain('ORDER BY trigger_grant.team_id\n       FOR UPDATE')
+    expect(recipePolicyFunction).toContain('ORDER BY approval_target.team_id\n       FOR UPDATE')
+    expect(recipePolicyFunction).not.toContain('workflow_recipe_allowed_users')
     expect(sql).toContain('authorization_bump_workflow_approval_revision')
     expect(sql).toContain('authorization_bump_notification_revision')
     expect(sql).toContain('authorization_bump_gfs_resource_revision')
