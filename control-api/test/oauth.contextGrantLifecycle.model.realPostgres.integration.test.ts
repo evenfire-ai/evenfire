@@ -2168,7 +2168,6 @@ describeRealPostgres(
         m.rows.has(kind === 'shared' ? sharedKey(server, owner) : userKey(server, owner))
 
       for (const userId of users) {
-        const agents = m.userAgents.get(userId) ?? []
         const contexts = m.userContexts.get(userId) ?? []
         const panel = (await rpcAccess(userId, 'mcp-connectors')).agents as Array<{
           name: string

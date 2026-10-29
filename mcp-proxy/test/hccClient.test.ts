@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import http from 'node:http'
 import { HccClient } from '../src/hccClient'
 import { ProxyConfig } from '../src/types'
