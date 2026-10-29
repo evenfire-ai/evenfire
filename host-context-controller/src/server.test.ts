@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Readable } from 'node:stream'
-import { McpServerProvider } from './k8sClient'
+import { DevMcpServerProvider, McpServerProvider } from './k8sClient'
 import { McpApiAuthenticator, type VerifiedMcpHostPrincipal } from './mcpApiAuthentication'
 import {
   type AuthorityContext,
@@ -19,7 +19,7 @@ import {
   resolveReadinessDetailFn,
 } from './readinessGate'
 import { ContextMapperServer, McpHostApiRateLimiter } from './server'
-import type { McpServerInfo } from './types'
+import type { McpServerCRD, McpServerInfo } from './types'
 
 class FakeProvider implements McpServerProvider {
   constructor(private readonly infos: McpServerInfo[] = []) {}
@@ -221,7 +221,6 @@ describe('ContextMapperServer', () => {
         {
           name: 'server-a',
           description: 'must not be exposed by the legacy system inventory',
-          contextRef: 'context-a',
           transport: {
             type: 'streamableHttp',
             url: 'http://server-a/mcp',
@@ -248,6 +247,30 @@ describe('ContextMapperServer', () => {
     expect(response.body).not.toContain('secretKey')
     expect(response.body).not.toContain('nested-secret-must-not-leak')
     expect(response.body).not.toContain('internal status detail')
+  })
+
+  it('omits per-server contextRef from the v1 inventory while keeping the top-level wildcard', async () => {
+    // Real producer with a CR persisted before spec.contextRef left the CRD.
+    const provider = new DevMcpServerProvider()
+    provider.addServer({
+      name: 'server-a',
+      namespace: 'dev',
+      spec: {
+        contextRef: 'context-a',
+        image: 'mcp/server-a:latest',
+        transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 3000 },
+        enabled: true,
+      },
+    } as unknown as McpServerCRD)
+    server = new ContextMapperServer(provider, 0, undefined, undefined, () => true)
+    server.setReady(true)
+
+    const response = await invoke(server, '/api/v1/mcpservers')
+    expect(response.statusCode).toBe(200)
+    const body = JSON.parse(response.body)
+    expect(body.contextRef).toBe('*')
+    expect(body.servers.map((s: { name: string }) => s.name)).toEqual(['server-a'])
+    expect(body.servers[0]).not.toHaveProperty('contextRef')
   })
 
   it.each(['/api/v1/mcpservers/context/context-a', '/api/v1/mcpservers/server-a/auth'])(

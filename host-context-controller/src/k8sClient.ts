@@ -2727,7 +2727,6 @@ export class McpServerWatcher implements McpServerProvider {
     return {
       name: server.name,
       description: server.spec.description,
-      contextRef: server.spec.contextRef,
       transport,
       auth: server.spec.auth,
       // Discovery metadata only: the OAuth block is projected verbatim, but
@@ -5086,7 +5085,9 @@ export class McpServerWatcher implements McpServerProvider {
  * Context-based filtering mirrors production behaviour:
  *   - If CLERUM_CONTEXTS is set, getServerInfosByContext reads those contexts
  *     and returns only the servers listed in the matching context's mcpServers list.
- *   - If CLERUM_CONTEXTS is NOT set, it falls back to matching by contextRef on the server.
+ *   - If CLERUM_CONTEXTS is NOT set, every context resolves to no servers: the
+ *     Context allowlist is the only server-context relation, so dev mode fails
+ *     closed instead of inventing one.
  */
 export class DevMcpServerProvider implements McpServerProvider {
   private servers: Map<string, McpServerCRD> = new Map()
@@ -5101,7 +5102,6 @@ export class DevMcpServerProvider implements McpServerProvider {
     return {
       name: server.name,
       description: server.spec.description,
-      contextRef: server.spec.contextRef,
       transport: server.spec.transport,
       auth: server.spec.auth,
       enabled: server.spec.enabled !== false,
@@ -5116,7 +5116,7 @@ export class DevMcpServerProvider implements McpServerProvider {
   /**
    * Get servers for a context.
    * If CLERUM_CONTEXTS was provided, uses the context's mcpServers allow-list
-   * (mirrors production behaviour). Otherwise falls back to contextRef matching.
+   * (mirrors production behaviour). Otherwise returns no servers.
    */
   async getServerInfosByContext(contextRef: string): Promise<McpServerInfo[]> {
     const context = this.contexts.get(contextRef)
@@ -5133,17 +5133,8 @@ export class DevMcpServerProvider implements McpServerProvider {
         .map(s => this.toServerInfo(s))
     }
 
-    if (this.contexts.size > 0) {
-      // Contexts are loaded but this one doesn't exist — return empty
-      console.warn(`[Dev] Context "${contextRef}" not found — returning no servers`)
-      return []
-    }
-
-    // Fallback: no contexts loaded, filter by contextRef on the server
-    console.log(`[Dev] No CLERUM_CONTEXTS set — falling back to contextRef matching`)
-    return this.getAllServers()
-      .filter(s => s.spec.contextRef === contextRef && s.spec.enabled !== false)
-      .map(s => this.toServerInfo(s))
+    console.warn(`[Dev] Context "${contextRef}" not found — returning no servers`)
+    return []
   }
 
   onChange(callback: () => void): void {
@@ -5160,7 +5151,7 @@ export class DevMcpServerProvider implements McpServerProvider {
         namespace: server.namespace || 'dev',
       }
       this.servers.set(server.name, serverWithNamespace)
-      console.log(`[Dev] Loaded server: ${server.name} (context: ${server.spec.contextRef})`)
+      console.log(`[Dev] Loaded server: ${server.name}`)
     }
 
     console.log(`[Dev] Loaded ${this.servers.size} MCP server(s)`)
@@ -5176,9 +5167,7 @@ export class DevMcpServerProvider implements McpServerProvider {
       }
       console.log(`[Dev] Loaded ${this.contexts.size} Context(s)`)
     } else {
-      console.log(
-        `[Dev] No CLERUM_CONTEXTS set — context filtering will fall back to contextRef matching`
-      )
+      console.log(`[Dev] No CLERUM_CONTEXTS set — every context will resolve to no servers`)
     }
   }
 

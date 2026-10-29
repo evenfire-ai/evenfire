@@ -27,7 +27,7 @@ dev: build
 # Note: image field is required in the CRD but not used in dev mode (no reconciliation)
 dev-example: build
 	CLERUM_DEV_MODE=true \
-	CLERUM_MCP_SERVERS='[{"name":"filesystem","spec":{"contextRef":"dev-context","description":"Filesystem operations","image":"mcp/filesystem:latest","transport":{"type":"sse","url":"http://localhost:3001/sse","port":3001},"enabled":true}},{"name":"github","spec":{"contextRef":"dev-context","description":"GitHub operations","image":"mcp/github:latest","transport":{"type":"sse","url":"http://localhost:3002/sse","port":3002},"auth":{"type":"bearer","secretRef":"github-token"},"enabled":true}}]' \
+	CLERUM_MCP_SERVERS='[{"name":"filesystem","spec":{"description":"Filesystem operations","image":"mcp/filesystem:latest","transport":{"type":"sse","url":"http://localhost:3001/sse","port":3001},"enabled":true}},{"name":"github","spec":{"description":"GitHub operations","image":"mcp/github:latest","transport":{"type":"sse","url":"http://localhost:3002/sse","port":3002},"auth":{"type":"bearer","secretRef":"github-token"},"enabled":true}}]' \
 	CLERUM_CONTEXTS='[{"name":"dev-context","namespace":"dev","spec":{"contextId":"dev-context","description":"Dev context","mcpServers":["filesystem","github"]}}]' \
 	CLERUM_MCP_AUTH='{"github":"ghp_example_token_123"}' \
 	npm start

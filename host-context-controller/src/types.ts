@@ -161,7 +161,6 @@ export interface McpServerSpec {
   // Ownership contract:
   // - managed:true or omitted => HCC owns the runtime.
   // - managed:false => WRC owns the runtime; HCC only exposes discovery/status.
-  contextRef: string
   description?: string
   image: string
   imagePullPolicy?: 'Always' | 'IfNotPresent' | 'Never'
@@ -258,7 +257,11 @@ export interface SharedFileSystemSpec {
 }
 
 export type SharedFileSystemPhase =
-  'Provisioning' | 'Initializing' | 'Ready' | 'Degraded' | 'Failed'
+  | 'Provisioning'
+  | 'Initializing'
+  | 'Ready'
+  | 'Degraded'
+  | 'Failed'
 
 export interface SharedFileSystemCondition {
   type: string
@@ -326,7 +329,11 @@ export interface GlobalFileSystemSpec {
 }
 
 export type GlobalFileSystemPhase =
-  'Provisioning' | 'Initializing' | 'Ready' | 'Degraded' | 'Failed'
+  | 'Provisioning'
+  | 'Initializing'
+  | 'Ready'
+  | 'Degraded'
+  | 'Failed'
 
 export interface GlobalFileSystemCondition {
   type: string
@@ -659,7 +666,6 @@ export interface McpServerStatus {
 export interface McpServerInfo {
   name: string
   description?: string
-  contextRef: string
   transport: McpServerTransport
   auth?: McpServerAuth
   // OAuth broker config; present iff auth.type === 'oauth'. Discovery metadata
@@ -676,6 +682,7 @@ export interface McpServerInfo {
  */
 export interface McpServersResponse {
   servers: McpServerInfo[]
+  // Legacy constant '*' of the v1 route; no consumer reads it. Goes away with that route.
   contextRef: string
   timestamp: string
 }
@@ -740,7 +747,10 @@ export interface LlmHookTarget {
 export type LlmHookLifecyclePoint = 'preCall' | 'moderate' | 'postCallSuccess' | 'onError'
 
 export type LlmHookCapability =
-  'may_deny' | 'may_rewrite' | 'may_substitute_result' | 'may_add_context'
+  | 'may_deny'
+  | 'may_rewrite'
+  | 'may_substitute_result'
+  | 'may_add_context'
 
 export interface LlmHookSpec {
   target: LlmHookTarget
