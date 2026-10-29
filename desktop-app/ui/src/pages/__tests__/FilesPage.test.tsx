@@ -3427,6 +3427,8 @@ describe('FilesPage', () => {
         fetchBytes: vi.fn() as GfsTransport['fetchBytes'],
       })
       const refreshShares = vi.fn(async () => undefined)
+      const refreshGrants = vi.fn(async () => undefined)
+      // The controller only forwards the write; the page reloads the lists.
       const createShare = vi.fn(
         async (
           subjects: string[],
@@ -3444,7 +3446,6 @@ describe('FilesPage', () => {
             },
             randomUUID()
           )
-          await refreshShares()
         }
       )
       hookMock.useGfsBrowserController.mockReturnValue({
@@ -3483,6 +3484,7 @@ describe('FilesPage', () => {
         ],
         createShare,
         refreshShares,
+        refreshGrants,
       })
 
       renderFilesPage()
@@ -3629,8 +3631,12 @@ describe('FilesPage', () => {
     })
     const revokeShare = vi.fn(async () => undefined)
     const createShare = vi.fn(async () => undefined)
+    const refreshGrants = vi.fn(async () => undefined)
+    const refreshShares = vi.fn(async () => undefined)
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
+      refreshGrants,
+      refreshShares,
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder',
@@ -3687,6 +3693,9 @@ describe('FilesPage', () => {
         includeDescendants: true,
       })
     )
+    // The controller no longer refreshes after a write, so the page re-reads both lists.
+    await waitFor(() => expect(refreshShares).toHaveBeenCalledOnce())
+    expect(refreshGrants).toHaveBeenCalledOnce()
   })
 
   it('shows the existing readable error when lowering a share is rejected', async () => {

@@ -3618,10 +3618,12 @@ function ManageProbe() {
         type="button"
         onClick={() =>
           swallow(
-            ctrl.createShare(['user:bob'], {
-              permissions: ['read', 'share'],
-              includeDescendants: false,
-            })
+            ctrl
+              .createShare(['user:bob'], {
+                permissions: ['read', 'share'],
+                includeDescendants: false,
+              })
+              .then(() => ctrl.refreshShares())
           )
         }
       >
@@ -3965,7 +3967,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     await waitFor(() => expect(listShares).toHaveBeenCalledTimes(2))
   })
 
-  it('forwards a lowered share and reloads its list through permission invalidation', async () => {
+  it('forwards a lowered share and reloads its list when the caller refreshes shares', async () => {
     let permissions = ['read', 'write', 'share']
     const listShares = vi.fn(async () => [
       {

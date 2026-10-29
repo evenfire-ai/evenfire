@@ -1420,25 +1420,26 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // the caller surfaces that — never swallow it. `inherit` omitted defaults to
   // `true` on the wire (uriHandler), so user/team panel grants cover folder
   // contents; callers that need a contents-excluding grant pass `false`.
+  // The caller decides what to refresh after a write: FilesPage retires a draft
+  // whose authority was denied while the request ran, and a refresh here would
+  // re-read affordances and grants for a result it must ignore (#1217).
   const grant = useCallback(
-    async (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
-      if (!current) throw new Error('No resource selected')
-      await window.clerum.gfs.grant(current.resourceId, subjectKeys, bits, DRIVE, inherit)
-      await refreshPermissionState()
+    (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
+      if (!current) return Promise.reject(new Error('No resource selected'))
+      return window.clerum.gfs.grant(current.resourceId, subjectKeys, bits, DRIVE, inherit)
     },
-    [current, DRIVE, refreshPermissionState]
+    [current, DRIVE]
   )
 
   const createShare = useCallback(
-    async (
+    (
       subjectKeys: string[],
       options?: { permissions: string[]; includeDescendants: boolean }
     ): Promise<void> => {
-      if (!current) throw new Error('No resource selected')
-      await window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE, options)
-      await refreshPermissionState()
+      if (!current) return Promise.reject(new Error('No resource selected'))
+      return window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE, options)
     },
-    [current, DRIVE, refreshPermissionState]
+    [current, DRIVE]
   )
 
   return {

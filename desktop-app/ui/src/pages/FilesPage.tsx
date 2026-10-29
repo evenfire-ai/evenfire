@@ -832,6 +832,7 @@ export function FilesPage({
         permissions,
         includeDescendants: item.includeDescendants,
       })
+      await Promise.all([ctrl.refreshGrants(), ctrl.refreshShares()])
     } catch (roleError) {
       if (failClosedOnAuthorizationError(roleError)) return
       pushToast?.(describeGfsGrantError(roleError).message, 'error')
