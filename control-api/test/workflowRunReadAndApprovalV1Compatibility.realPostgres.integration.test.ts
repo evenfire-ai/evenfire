@@ -368,10 +368,11 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
     otherRunId = fixture.otherRunId!
     teamlessRunId = fixture.teamlessRunId!
     archiveRunId = fixture.archiveRunId!
-    await databasePool.query(`DELETE FROM team_members WHERE team_id = $1 AND user_id = $2`, [
-      TEAM_ID,
-      OWNER_ID,
-    ])
+    await databasePool.query(
+      `UPDATE team_members SET status = 'deleted'
+        WHERE team_id = $1 AND user_id = $2`,
+      [TEAM_ID, OWNER_ID]
+    )
 
     db = await import('../src/db.js')
     await db.initDb({ connect: () => databasePool.connect() })
@@ -516,21 +517,21 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
       recipeIndex: 3,
       claims: () => v1Claims(OWNER_ID, TEAM_ID),
       expectedKey: `external-rest-api:user:${OWNER_ID}:team:${TEAM_ID}`,
-      membershipDeleted: false,
+      membershipStatus: 'active',
     },
     {
       label: 'teamless V1 session',
       recipeIndex: 4,
       claims: () => v1Claims(OWNER_ID, null),
       expectedKey: `external-rest-api:user:${OWNER_ID}:team:null`,
-      membershipDeleted: false,
+      membershipStatus: null,
     },
     {
       label: 'removed team membership',
       recipeIndex: 5,
       claims: () => v1Claims(OWNER_ID, TEAM_ID),
       expectedKey: `external-rest-api:user:${OWNER_ID}:team:${TEAM_ID}`,
-      membershipDeleted: true,
+      membershipStatus: 'deleted',
     },
   ])('replays a base-produced V1 approval with the base caller key ($label)', async scenario => {
     const recipe = recipes[scenario.recipeIndex]!
@@ -545,12 +546,17 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
       )
     ).rows[0]?.trigger_caller_key
     expect(persistedKey).toBe(scenario.expectedKey)
-    if (scenario.membershipDeleted) {
+    if (scenario.membershipStatus) {
+      await databasePool.query(
+        `UPDATE team_members SET status = $3
+          WHERE team_id = $1 AND user_id = $2`,
+        [TEAM_ID, OWNER_ID, scenario.membershipStatus]
+      )
       const member = await databasePool.query(
-        'SELECT count(*)::int AS count FROM team_members WHERE team_id = $1 AND user_id = $2',
+        'SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2',
         [TEAM_ID, OWNER_ID]
       )
-      expect(member.rows[0]).toEqual({ count: 0 })
+      expect(member.rows[0]).toEqual({ status: scenario.membershipStatus })
     }
 
     const replay = await trigger.triggerWorkflow({
