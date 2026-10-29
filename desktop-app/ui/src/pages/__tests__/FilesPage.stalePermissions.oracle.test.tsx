@@ -692,6 +692,179 @@ describe('FilesPage stale permission action oracle', () => {
     }
   })
 
+  it.each([
+    { missing: 'write', held: ['read', 'delete'] },
+    { missing: 'delete', held: ['read', 'write'] },
+  ])(
+    'does not open Move when fresh source-parent authority lacks $missing',
+    async ({ missing, held }) => {
+      const folder = await resolveResource(
+        resolvedDirectory('folder-active', 'Reports', {
+          gfsUri: FOLDER_URI,
+          parentResourceId: 'source-parent',
+        })
+      )
+      const sourceParent = await resolveResource(
+        resolvedDirectory('source-parent', 'Shared folder')
+      )
+      const children = await listChildrenPage([])
+      const destinations = await listAccessiblePage([
+        accessibleResource('destination-1', 'Archive', 'directory', { permissions: ['read'] }),
+      ])
+      let currentSourceBits = ['read', 'write', 'delete']
+      const produceAffordances = appServiceAffordanceProducer(resourceId =>
+        Promise.resolve(
+          heldPermissionResponse(
+            resourceId === 'source-parent' ? currentSourceBits : ['read', 'write', 'delete']
+          )
+        )
+      )
+      const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+      const moveResource = vi.fn(async () => undefined)
+      const pushToast = vi.fn()
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => destinations),
+            resolve: vi.fn(async (uri: string) => (uri === FOLDER_URI ? folder : sourceParent)),
+            listChildren: vi.fn(async () => children),
+            affordances,
+            moveResource,
+          },
+        },
+      })
+
+      const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+      try {
+        render(<FilesPage pendingGfsUri={FOLDER_URI} pushToast={pushToast} />, {
+          wrapper: wrapper(client),
+        })
+        await screen.findByRole('button', { name: 'Options for Reports' })
+        const sourceParentKey = desktopQueryKeys.gfsAffordances(
+          'test-environment:user-1:team-1',
+          'source-parent',
+          'main'
+        )
+        await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main'))
+        fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+        expect(await screen.findByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+
+        await act(async () => {
+          await client.invalidateQueries({
+            exact: true,
+            queryKey: sourceParentKey,
+            refetchType: 'none',
+          })
+        })
+        currentSourceBits = held
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
+
+        await waitFor(() =>
+          expect(pushToast).toHaveBeenCalledWith(
+            `You do not have ${missing} access to the source folder.`,
+            'error'
+          )
+        )
+        expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
+        expect(moveResource).not.toHaveBeenCalled()
+      } finally {
+        client.clear()
+      }
+    }
+  )
+
+  it('does not grant a role bit removed from fresh authority at submit time', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const children = await listChildrenPage([])
+    let currentHeldBits = ['read', 'write', 'manage_acl']
+    const produceAffordances = appServiceAffordanceProducer(() =>
+      Promise.resolve(heldPermissionResponse(currentHeldBits))
+    )
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    const grant = vi.fn(async () => undefined)
+    const listGrants = vi.fn(async () => [])
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: {
+          listMine: vi.fn(async () => [
+            {
+              name: 'chatllm',
+              contextRef: 'ctx-1',
+              mcpServers: [],
+              gfsSubject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            },
+          ]),
+        },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+          listGrants,
+          listShares: vi.fn(async () => []),
+          listInheritedAccess: vi.fn(async () => ({ items: [], nextCursor: null })),
+          grant,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} pushToast={pushToast} />, {
+        wrapper: wrapper(client),
+      })
+      await screen.findByRole('button', { name: 'Options for Reports' })
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: /^Share$/ }))
+      const shareMenu = await screen.findByRole('menu', { name: 'Share options for Reports' })
+      fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+      await screen.findByRole('dialog', { name: 'Share folder Reports' })
+
+      const picker = await screen.findByRole('combobox', {
+        name: 'Add people, teams, or agents',
+      })
+      fireEvent.focus(picker)
+      fireEvent.click(await screen.findByRole('option', { name: /chatllm/ }))
+      fireEvent.click(screen.getByRole('button', { name: 'Access role for selected recipients' }))
+      fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+      await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
+
+      const permissionKey = desktopQueryKeys.gfsAffordances(
+        'test-environment:user-1:team-1',
+        'folder-active',
+        'main'
+      )
+      await act(async () => {
+        await client.invalidateQueries({
+          exact: true,
+          queryKey: permissionKey,
+          refetchType: 'none',
+        })
+      })
+      currentHeldBits = ['read', 'manage_acl']
+      fireEvent.click(
+        within(screen.getByRole('dialog', { name: 'Share folder Reports' })).getByRole('button', {
+          name: 'Share',
+        })
+      )
+
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith('You can no longer grant write on Reports.', 'error')
+      )
+      expect(grant).not.toHaveBeenCalled()
+      expect(listGrants).toHaveBeenCalledTimes(1)
+      expect(pushToast).not.toHaveBeenCalledWith('Access granted to 1 subject', 'success')
+    } finally {
+      client.clear()
+    }
+  })
+
   it('denies Files Move without destination write even when the source parent permits it', async () => {
     const folder = await resolveResource(
       resolvedDirectory('folder-active', 'Reports', {
