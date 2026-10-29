@@ -783,7 +783,18 @@ export function useFilePreviewResourceActions({
         }
         return
       }
-      if (outcome.status === 'gesture-lost') return
+      if (outcome.status === 'gesture-lost') {
+        if (
+          isActiveMove() &&
+          hasCurrentMovePresentationContext() &&
+          (!isDialogCurrent || isDialogCurrent())
+        ) {
+          throw new Error(
+            'This item changed while you were moving it. Review its current location and try again.'
+          )
+        }
+        return
+      }
       if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
 
       if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {

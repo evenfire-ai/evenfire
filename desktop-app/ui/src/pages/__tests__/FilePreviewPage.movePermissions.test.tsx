@@ -1010,6 +1010,77 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     return dialog
   }
 
+  it('shows safe guidance when the Preview resource changes before PATCH dispatch', async () => {
+    const resolvedAtGesture = await resolveResource({
+      resourceId,
+      rid: resourceId,
+      gfsUri: uri,
+      drive: 'main',
+      parentResourceId: parentId,
+      name: 'diagram.png',
+      kind: 'file',
+      version: 7,
+      bytes: 1,
+    })
+    const newerResource = await resolveResource({
+      ...resolvedAtGesture,
+      version: 8,
+    })
+    let releaseCommitResolve!: (resource: typeof resolvedAtGesture) => void
+    const pendingCommitResolve = new Promise<typeof resolvedAtGesture>(resolve => {
+      releaseCommitResolve = resolve
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { resolve, moveResource } = installGfs({
+      listAccessible: async () => destinationPage,
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    const previewResourceKey = [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', uri]
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      const menu = await openPreviewActions()
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+
+      resolve.mockClear()
+      resolve
+        .mockImplementationOnce(() => pendingCommitResolve)
+        .mockImplementation(async () => newerResource)
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      await waitFor(() => expect(resolve).toHaveBeenCalledOnce())
+
+      await act(async () => {
+        focusManager.setFocused(false)
+        focusManager.setFocused(true)
+      })
+      await waitFor(() =>
+        expect(queryClient.getQueryData(previewResourceKey)).toMatchObject({ version: 8 })
+      )
+      await act(async () => {
+        releaseCommitResolve(resolvedAtGesture)
+        for (let index = 0; index < 10; index += 1) await Promise.resolve()
+      })
+
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(
+        await within(dialog).findByText(
+          'This item changed while you were moving it. Review its current location and try again.'
+        )
+      ).toBeTruthy()
+      expect(screen.getByRole('dialog', { name: 'Move file diagram.png' })).toBeTruthy()
+      expect(moveResource).not.toHaveBeenCalled()
+    } finally {
+      await act(async () => releaseCommitResolve(resolvedAtGesture))
+      queryClient.clear()
+    }
+  })
+
   it('reports one confirmed success after close and invalidates only the captured session cache', async () => {
     let settleMove!: (receipt: MoveReceipt) => void
     const pendingMove = new Promise<MoveReceipt>(resolve => {
