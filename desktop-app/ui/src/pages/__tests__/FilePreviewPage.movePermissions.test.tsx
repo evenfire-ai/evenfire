@@ -599,10 +599,7 @@ describe('FilePreviewPage move permission contract', () => {
       return heldPermissionResponse(['read', 'write', 'delete', 'manage_acl', 'share'])
     })
     const { affordances, moveResource } = installGfs({
-      source: async () => {
-        const result = await produceAffordances(parentId)
-        return delegationAffordances(new Set(result.held), result.isOperator)
-      },
+      source: () => produceAffordances(parentId),
     })
     installController()
     const { queryClient } = renderPreview()
