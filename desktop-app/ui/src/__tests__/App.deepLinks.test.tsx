@@ -1774,9 +1774,14 @@ describe('App deep-link orchestration', () => {
       await new CancelForeignCommand().run(commandModel, commandReal)
     }
     if (!second || !foreign) throw new Error('the App command schedule did not create both links')
+    // The links are assigned by asynchronous command callbacks, which TypeScript's
+    // local control-flow analysis cannot observe. Keep the runtime guard above,
+    // then capture the proven values for the remaining assertions.
+    const secondLink = second as ReturnType<typeof queue.enqueue>
+    const foreignLink = foreign as ReturnType<typeof queue.enqueue>
     schedule.onCommandOrder?.(commandOrder)
 
-    expect(queue.list().map(item => item.id)).toEqual([first.id, second.id])
+    expect(queue.list().map(item => item.id)).toEqual([first.id, secondLink.id])
     expect(getController().getCurrentTeamId()).toBe('team-b')
     expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSecond)
     expect(handle.refreshCatalog.mock.calls.length).toBe(catalogReadsBeforeSecond)
@@ -1800,7 +1805,7 @@ describe('App deep-link orchestration', () => {
     expect(listApps.mock.calls.length).toBe(listCallsBeforeSecond)
     expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond)
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
-    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second.id)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(secondLink.id)
     expect(main.live()).toBeNull()
 
     await act(async () => {
@@ -1816,7 +1821,7 @@ describe('App deep-link orchestration', () => {
     if (schedule.supersedeWithNavigation) {
       await waitFor(() => expect(getController().navItem).toBe(DESKTOP_ROUTES.files))
       await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
-      await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(second.id))
+      await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(secondLink.id))
       expect(main.live()).toBeNull()
       expect(embedState().owner).toBeNull()
       expect(activeWorkspaceTab(getController().workspaceTabs)?.kind).toBe('files')
@@ -1826,7 +1831,7 @@ describe('App deep-link orchestration', () => {
       )
     } else {
       await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
-      await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(second.id))
+      await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(secondLink.id))
       await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond + 1))
       await waitForMounted()
       expect(main.live()).toMatchObject({
@@ -1844,9 +1849,9 @@ describe('App deep-link orchestration', () => {
     const acknowledgedIds = acknowledgeDeepLink.mock.calls.map(([id]) => id)
     expect(new Set(acknowledgedIds).size).toBe(acknowledgedIds.length)
     expect(acknowledgedIds.filter(id => id === first.id)).toHaveLength(1)
-    expect(acknowledgedIds.filter(id => id === second.id)).toHaveLength(1)
-    expect(acknowledgedIds.filter(id => id === foreign.id)).toHaveLength(1)
-    expect(acknowledgedIds).toEqual([foreign.id, first.id, second.id])
+    expect(acknowledgedIds.filter(id => id === secondLink.id)).toHaveLength(1)
+    expect(acknowledgedIds.filter(id => id === foreignLink.id)).toHaveLength(1)
+    expect(acknowledgedIds).toEqual([foreignLink.id, first.id, secondLink.id])
     expect(queue.list()).toEqual([])
     queryClient.clear()
   }
