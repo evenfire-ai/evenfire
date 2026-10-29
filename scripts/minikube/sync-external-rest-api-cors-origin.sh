@@ -3,8 +3,9 @@
 # Profile UI origin.
 #
 # WHY THIS EXISTS
-# The base manifest pins EXTERNAL_REST_API_CORS_ORIGIN to http://localhost:3001
-# (deploy/base/profiles/external-rest-api.yaml) while a branch-owned Minikube
+# The base manifest pins EXTERNAL_REST_API_CORS_ORIGIN to the default local
+# Profile UI origin, port 3001 (deploy/base/profiles/external-rest-api.yaml),
+# while a branch-owned Minikube
 # profile serves Profile UI on a generated port (scripts/minikube-profiles/
 # branch-profile.sh: PROFILE_UI_URL). external-rest-api's browser mutation
 # guard requires the request Origin to be one of the configured origins
