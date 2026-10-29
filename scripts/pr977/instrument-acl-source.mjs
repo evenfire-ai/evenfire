@@ -25,10 +25,19 @@ if (!source.includes(scriptAnchor)) throw new Error('Missing ACL script anchor')
 let result = source.replace(
   scriptAnchor,
   `${scriptAnchor}$script:diagnosticPhasePath = [Environment]::GetEnvironmentVariable('PR977_ACL_PHASE_FILE')
+$script:diagnosticTimingPath = [Environment]::GetEnvironmentVariable('PR977_ACL_TIMING_FILE')
 $script:allowedDiagnosticPhases = @(${allowedPhases.map(value => `'${value}'`).join(', ')})
+$script:diagnosticTimer = [Diagnostics.Stopwatch]::StartNew()
+$script:lastDiagnosticPhaseMs = 0
 function Write-DiagnosticPhase([string]$value) {
   if (-not $script:diagnosticPhasePath) { return }
   if ($value -notin $script:allowedDiagnosticPhases) { throw 'diagnostic-phase-not-allowlisted' }
+  $now = $script:diagnosticTimer.ElapsedMilliseconds
+  if ($script:diagnosticTimingPath) {
+    $elapsed = $now - $script:lastDiagnosticPhaseMs
+    [IO.File]::AppendAllText($script:diagnosticTimingPath, ('acl-phase=' + $value + ';elapsed-ms=' + $elapsed + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+  }
+  $script:lastDiagnosticPhaseMs = $now
   [IO.File]::AppendAllText($script:diagnosticPhasePath, $value + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 }
 `
@@ -50,7 +59,7 @@ const requestEnvAnchor = '[POWERSHELL_REQUEST]: payload,'
 if (!result.includes(requestEnvAnchor)) throw new Error('Missing ACL request environment anchor')
 result = result.replace(
   requestEnvAnchor,
-  `${requestEnvAnchor}\n      PR977_ACL_PHASE_FILE: process.env.PR977_DIAGNOSTIC_PHASE_FILE ?? '',`
+  `${requestEnvAnchor}\n      PR977_ACL_PHASE_FILE: process.env.PR977_DIAGNOSTIC_PHASE_FILE ?? '',\n      PR977_ACL_TIMING_FILE: process.env.PR977_DIAGNOSTIC_TIMING_FILE ?? '',`
 )
 result = result.replace(
   "import path from 'node:path'\n",

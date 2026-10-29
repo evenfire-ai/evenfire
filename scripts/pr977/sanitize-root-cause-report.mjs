@@ -133,6 +133,14 @@ for (const line of timingLines) {
   aclOperationDurationsMs.push(duration)
   unfinishedAclOperationCount = Math.max(0, unfinishedAclOperationCount - 1)
 }
+const aclPhaseDurationsMs = timingLines.flatMap(line => {
+  const match = /^acl-phase=([A-Za-z0-9-]{1,80});elapsed-ms=(\d{1,6})$/.exec(line)
+  if (!match || !phaseAllowlist.has(match[1])) return []
+  const elapsedMs = Number(match[2])
+  return Number.isSafeInteger(elapsedMs) && elapsedMs <= 120000
+    ? [{ phase: match[1], elapsedMs }]
+    : []
+})
 const assertions = (report?.testResults ?? []).flatMap(suite =>
   (suite.assertionResults ?? []).map(assertion => ({
     name: String(assertion.fullName ?? assertion.title ?? ''),
@@ -264,6 +272,7 @@ const safe = {
   watchdogExpired: Boolean(meta.watchdogExpired),
   elapsedSeconds: Number.isFinite(meta.elapsedSeconds) ? meta.elapsedSeconds : null,
   aclOperationDurationsMs,
+  aclPhaseDurationsMs,
   unfinishedAclOperationCount,
   phaseSequence: phases,
   lastPhase: phases.at(-1) ?? null,
