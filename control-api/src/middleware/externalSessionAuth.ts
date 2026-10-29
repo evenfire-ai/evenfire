@@ -15,7 +15,10 @@ import type {
   ExternalSessionIdentityAuthentication,
   ExternalSessionPurpose,
 } from '../services/auth/externalSessionAuthentication.js'
-import { isExternalSessionBackendUnavailableError } from '../services/auth/sessionDatabaseFailure.js'
+import {
+  externalSessionDatabaseFailure,
+  isExternalSessionBackendUnavailableError,
+} from '../services/auth/sessionDatabaseFailure.js'
 
 /** Retry-After sent when an external-session database operation is unavailable. */
 export const SESSION_BACKEND_RETRY_AFTER_SECONDS = 2
@@ -287,6 +290,7 @@ function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
     try {
       const membership = await getLiveTeamMembership(claims.userId, requestedTeamId, {
         budget: req.accessExecutionBudget,
+        onDatabaseFailure: externalSessionDatabaseFailure,
       })
       if (!membership) {
         if (publicErrors) {
@@ -298,7 +302,14 @@ function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
       }
       req.externalTeamAuth = membership
       next()
-    } catch {
+    } catch (error) {
+      // Only the database-outage provenance is an outage. Anything else (an
+      // exhausted access budget, a programmer or policy failure) keeps the
+      // global handler's sanitized 500 path, as the auth routes do.
+      if (!isExternalSessionBackendUnavailableError(error)) {
+        next(error)
+        return
+      }
       if (publicErrors) {
         sendPublicApiError(
           req,

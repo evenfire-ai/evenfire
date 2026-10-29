@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import express from 'express'
+import express, { type NextFunction, type Request, type Response } from 'express'
+import { DatabaseError } from 'pg'
 import request from 'supertest'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import {
   requireExternalRole,
   requireExternalTeamParamMatch,
   requireValidExternalSessionToken,
 } from '../src/middleware/externalSessionAuth.js'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 
 const session = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
 const db = vi.hoisted(() => ({ query: vi.fn() }))
@@ -13,8 +16,22 @@ const db = vi.hoisted(() => ({ query: vi.fn() }))
 vi.mock('../src/services/auth/externalSessionAuthentication.js', () => session)
 vi.mock('../src/db.js', () => ({ pool: db }))
 
-function app() {
+/** A server-side error as pg raises it: a DatabaseError carrying a SQLSTATE. */
+function databaseError(sqlstate: string): DatabaseError {
+  const error = new DatabaseError(`synthetic database failure ${sqlstate}`, 0, 'error')
+  error.code = sqlstate
+  return error
+}
+
+function app(budget?: AccessExecutionBudget) {
   const value = express()
+  if (budget) {
+    value.use((req: Request, _res: Response, next: NextFunction) => {
+      ;(req as Request & { accessExecutionBudget?: AccessExecutionBudget }).accessExecutionBudget =
+        budget
+      next()
+    })
+  }
   value.get(
     '/teams/:teamId',
     requireValidExternalSessionToken,
@@ -22,6 +39,7 @@ function app() {
     requireExternalRole(['admin']),
     (_req, res) => res.status(200).json({ ok: true })
   )
+  value.use(clerumErrorHandler)
   return value
 }
 
@@ -81,7 +99,7 @@ describe('external team authorization', () => {
       .expect(200)
   })
 
-  it('fails unavailable instead of trusting stale claims', async () => {
+  it('classifies a bare pool error as an outage at the database boundary', async () => {
     db.query.mockRejectedValue(new Error('database unavailable'))
 
     await request(app())
@@ -89,5 +107,45 @@ describe('external team authorization', () => {
       .set('x-user-session-token', 'stale-admin-token')
       .expect(503)
       .expect({ error: 'authority_unavailable' })
+
+    // Liveness witness: the live membership query reached the pool, so the
+    // database-outage provenance came from the real boundary.
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining('team_members'), [
+      'user-1',
+      'team-1',
+    ])
+  })
+
+  it('keeps a plain database error on the sanitized 500 path', async () => {
+    db.query.mockRejectedValue(databaseError('42P01'))
+
+    const response = await request(app())
+      .get('/teams/team-1')
+      .set('x-user-session-token', 'stale-admin-token')
+
+    expect(response.status).toBe(500)
+    expect(response.body.error).toBe('Internal Server Error')
+    expect(response.headers['retry-after']).toBeUndefined()
+    // Liveness witness: the live membership query reached the pool.
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining('team_members'), [
+      'user-1',
+      'team-1',
+    ])
+  })
+
+  it('keeps an exhausted access budget on the sanitized 500 path', async () => {
+    const budget = AccessExecutionBudget.create('action', { limits: { producerCalls: 1 } })
+    budget.charge({ kind: 'producerCalls' })
+
+    const response = await request(app(budget))
+      .get('/teams/team-1')
+      .set('x-user-session-token', 'stale-admin-token')
+    budget.close()
+
+    expect(response.status).toBe(500)
+    expect(response.body.error).toBe('Internal Server Error')
+    expect(response.headers['retry-after']).toBeUndefined()
+    // A budget refusal is not a database outage: the query never ran.
+    expect(db.query).not.toHaveBeenCalled()
   })
 })
