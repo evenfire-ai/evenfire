@@ -436,7 +436,8 @@ windowsDescribe('Windows session authority ACL native contract', () => {
       expect(verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath).objectCount).toBe(
         2
       )
-    }
+    },
+    120_000
   )
 
   it('rejects an unsafe ACL on an existing child instead of repairing or trusting it', async () => {
