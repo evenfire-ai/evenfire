@@ -272,9 +272,11 @@ export async function allowedMcpServerNamesForContexts(
  * an agent assigned to the user (`getUserAgents` → a Host the agent directory
  * shows → its `spec.contextRef`). Those are the two sources the flat
  * `/mcp-servers` catalog and the per-agent connectors panel resolve from, so
- * anything either offers the user can be connected. Team membership
- * (`team_contexts`, `team_agents`) does not count: neither catalog reads it
- * for a user, and this path has no trusted team id.
+ * anything either offers the user can be connected. Team access
+ * (`team_contexts`, `team_agents`) is not counted here, even though the broker
+ * and the desktop chat catalog do admit team agents: this path has no trusted
+ * team id. So a user who reaches a server only through a team can be offered
+ * it and still have this consent check reject it — a known gap.
  *
  * Agents are read only when the direct Contexts do not enable the server, so
  * a Host read failure cannot break consent that direct membership already
