@@ -14,6 +14,7 @@ import {
   COMPOSER_MAX_REQUEST_BODY_BYTES,
   COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
 } from '@constants/attachments'
+import { agentErrorText } from '@lib/agentErrorText'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -2579,7 +2580,10 @@ export function useAgentChatController({
         // Loud toast parity with the stream-loss terminal path (SR-7): a durable
         // failure the stream never delivered is still a failed send. Silent on the
         // switch path is not an option — the user asked and it errored.
-        liveDepsRef.current.pushToast(`Message to ${agentRef} failed: ${message}`, 'error')
+        liveDepsRef.current.pushToast(
+          `Message to ${agentRef} failed: ${agentErrorText(errorCode, message)}`,
+          'error'
+        )
         // Distinct outcome so the loud caller paints the stepper red (not green).
         return 'recovered_error'
       }
@@ -3054,7 +3058,10 @@ export function useAgentChatController({
               status: 'error',
               errorMessage: message,
             }))
-            liveDepsRef.current.pushToast(`Message to ${agentRef} failed: ${message}`, 'error')
+            liveDepsRef.current.pushToast(
+              `Message to ${agentRef} failed: ${agentErrorText(errorCode, message)}`,
+              'error'
+            )
             // Settle the session to idle so it can't linger dirty (spinner /
             // "processing") until the next switchToChat — that's exactly the bug
             // this fix targets. Re-check first: a fresh task could have started
@@ -3301,7 +3308,10 @@ export function useAgentChatController({
             errorProvider: result.provider,
           })
           if (!terminalStillAuthorized()) return
-          liveDepsRef.current.pushToast(`Message to ${agentRef} failed: ${result.message}`, 'error')
+          liveDepsRef.current.pushToast(
+            `Message to ${agentRef} failed: ${agentErrorText(result.code, result.message)}`,
+            'error'
+          )
         } else if (result.source === 'result_fetch') {
           await appendAssistantMessage(agentRef, chatId, {
             id: crypto.randomUUID(),
@@ -4090,7 +4100,10 @@ export function useAgentChatController({
               status: 'error',
               errorMessage: failureMessage,
             }))
-            pushToast(`Message to ${sendAgent} failed: ${failureMessage || 'error'}`, 'error')
+            pushToast(
+              `Message to ${sendAgent} failed: ${agentErrorText(errorRecord?.code, failureMessage) || 'error'}`,
+              'error'
+            )
           } else if (filesNotDeliveredMessage) {
             // The Host answered but never received the documents: keep the
             // snapshot (and its files) with the failure instead of releasing it.

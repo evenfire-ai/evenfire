@@ -12,7 +12,10 @@ export const AGENT_ERROR_CODE_LABELS: Record<string, string> = {
   LLM_INSUFFICIENT_QUOTA: 'Out of Credits',
   LLM_RATE_LIMITED: 'Rate Limited',
   LLM_AUTHENTICATION_FAILED: 'Authentication Error',
-  LLM_MODEL_OVERLOADED: 'Model Overloaded',
+  // #1043: the Host reports every provider that cannot serve the request with
+  // this code (any 5xx, 503, 529, `overloaded_error`, and the subscriptions'
+  // `provider_unavailable`), so the title names the outage, not an overload.
+  LLM_MODEL_OVERLOADED: 'Provider Unavailable',
   LLM_CONTROL_PLANE_UNAVAILABLE: 'Control Plane Unavailable',
   LLM_MODEL_NOT_AVAILABLE: 'Model Not Available',
   LLM_CONTENT_FILTERED: 'Content Filtered',
