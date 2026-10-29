@@ -204,7 +204,10 @@ STUB
 chmod +x "$fixture_root/kubectl"
 
 run_fixture() {
-  TEST_MODE="$1" TEST_JOB_CAPTURE="$capture" TEST_KUBECTL_LOG="$log_file" \
+  # The script suffixes the Job name with GITHUB_RUN_ID or MIGRATION_JOB_SUFFIX;
+  # clear both so the fixtures see the same Job name locally and in CI.
+  env -u GITHUB_RUN_ID -u MIGRATION_JOB_SUFFIX \
+    TEST_MODE="$1" TEST_JOB_CAPTURE="$capture" TEST_KUBECTL_LOG="$log_file" \
     PATH="$fixture_root:$PATH" CONTEXT=d34-context ALLOWED_CONTEXTS=d34-context \
     bash "$DEPLOY_FILE" --overlay "$overlay" 2>&1
 }
