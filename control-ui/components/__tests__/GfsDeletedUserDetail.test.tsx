@@ -103,4 +103,23 @@ describe('Retained home of a deleted user', () => {
     expect(screen.getByRole('button', { name: 'Edit' })).toBeVisible()
     expect(screen.getByRole('button', { name: 'Delete account…' })).toBeVisible()
   })
+
+  it('keeps the member 404 when the home is also missing', async () => {
+    vi.mocked(api.getAdminUserContext).mockRejectedValueOnce(
+      Object.assign(new Error('not found'), { status: 404 })
+    )
+    vi.mocked(api.getGfsUserHome).mockRejectedValue(
+      Object.assign(new Error('404 Not Found - home_not_found'), {
+        status: 404,
+        code: 'home_not_found',
+      })
+    )
+    render(<UserDetailsPage />)
+
+    const error = await screen.findByText('not found')
+    expect(error).toHaveAttribute('role', 'alert')
+    expect(error).not.toHaveTextContent('home_not_found')
+    // Witness: the missing-home branch read the home for this member.
+    expect(api.getGfsUserHome).toHaveBeenCalledWith(userId)
+  })
 })

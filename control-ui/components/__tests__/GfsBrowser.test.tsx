@@ -293,6 +293,17 @@ function listedFolder(resourceId: string, name: string, path: string, version: n
   })
 }
 
+const GOVERNED_ROOT_MESSAGE =
+  'The Users folder and home folders cannot be moved, renamed or deleted.'
+
+async function governedRootConflict() {
+  const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+  const text = JSON.stringify({
+    error: { code: 'governed_root_immutable', message: 'governed root is immutable' },
+  })
+  return actualApi.formatApiError(new Response(text, { status: 409, statusText: 'Conflict' }), text)
+}
+
 describe('GfsBrowser', () => {
   beforeEach(() => {
     controlApiProducer.isEntityChangeCursor.mockImplementation((value: string) =>
@@ -2095,6 +2106,44 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
+  it('a move refused with governed_root_immutable makes one PATCH and no numbered retry', async () => {
+    const archive = child('archive', 'directory', 1)
+    const users = child('Users', 'directory', 2)
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (
+        path === '/api/v1/gfs/tree' ||
+        path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children'
+      ) {
+        return {
+          rootResourceId: '11111111-1111-1111-1111-111111111111',
+          items: [archive, users],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    mockApiSend.mockRejectedValue(await governedRootConflict())
+    renderBrowser()
+
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
+    await openResourceMenu('Users')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Users' })
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (archive)' }))
+
+    // Witness: the single PATCH is the refusal; no numbered-name retry ran.
+    const alert = await within(dialog).findByRole('alert')
+    expect(mockApiSend).toHaveBeenCalledTimes(1)
+    expect(mockApiSend).toHaveBeenCalledWith(
+      'PATCH',
+      '/api/v1/gfs/resources/id-2',
+      { drive: 'main', newParentId: 'id-1', ifMatch: 0 },
+      { drive: 'main' }
+    )
+    expect(alert).toHaveTextContent(GOVERNED_ROOT_MESSAGE)
+  })
+
   it('keeps a persisted drag-and-drop session when resumable capabilities are unavailable', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'
@@ -2419,6 +2468,29 @@ describe('GfsBrowser', () => {
       { drive: 'main', newName: 'report-final.txt', ifMatch: 8 },
       { drive: 'main' }
     )
+  })
+
+  it('rename shows a readable message for governed_root_immutable', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('Users', 'directory', 1)],
+      nextCursor: null,
+    })
+    mockApiSend.mockRejectedValueOnce(await governedRootConflict())
+    renderBrowser()
+
+    await openResourceMenu('Users')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const renameDialog = await screen.findByRole('dialog', { name: 'Rename folder' })
+    fireEvent.change(within(renameDialog).getByLabelText('New name'), {
+      target: { value: 'Users-new' },
+    })
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
+
+    const alert = await within(renameDialog).findByRole('alert')
+    // Witness: the readable refusal is on screen and the draft survives it.
+    expect(alert).toHaveTextContent(GOVERNED_ROOT_MESSAGE)
+    expect(alert).not.toHaveTextContent('409 Conflict')
+    expect(within(renameDialog).getByLabelText('New name')).toHaveValue('Users-new')
   })
 
   it('keeps the share dialog focused on sharing without resource actions', async () => {

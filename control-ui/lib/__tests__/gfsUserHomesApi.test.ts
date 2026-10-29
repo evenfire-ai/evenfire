@@ -11,9 +11,16 @@ describe('GFS user-home operator API', () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ items: [], nextCursor: 'cursor', counts: {} }), {
-          status: 200,
-        })
+        new Response(
+          JSON.stringify({
+            items: [],
+            nextCursor: 'cursor',
+            counts: { pending: 0, ready: 0, conflict: 0, retired: 0 },
+          }),
+          {
+            status: 200,
+          }
+        )
       )
       .mockResolvedValueOnce(new Response(JSON.stringify(response), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(response), { status: 202 }))

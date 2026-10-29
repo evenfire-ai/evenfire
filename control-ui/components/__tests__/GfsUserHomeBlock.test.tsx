@@ -206,7 +206,7 @@ describe('Home folder block', () => {
     expect(retryGfsUserHome).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps the existing editable Retry behavior for ancestor access conflicts', async () => {
+  it('keeps the name read-only and retries without a name for a bound ancestor conflict', async () => {
     const conflict: GfsUserHomeDetail = {
       ...baseHome,
       state: 'conflict',
@@ -222,6 +222,54 @@ describe('Home folder block', () => {
       'An inherited grant or share on the drive root or Users folder exposed home folders.'
     )
     const name = screen.getByLabelText('Folder name')
+    expect(name).toHaveValue('member')
+    expect(name).toHaveAttribute('readonly')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('pending', { exact: true })).toBeVisible()
+    expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, undefined)
+  })
+
+  it('explains a stale retry of a bound ancestor conflict without the raw code', async () => {
+    const conflict: GfsUserHomeDetail = {
+      ...baseHome,
+      state: 'conflict',
+      conflictCode: 'ancestor_grant_conflict',
+      conflictDetail: { code: 'ancestor_grant_conflict', entries: [] },
+    }
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: conflict })
+    vi.mocked(retryGfsUserHome).mockRejectedValueOnce(
+      Object.assign(new Error('409 Conflict - home_not_retryable'), {
+        code: 'home_not_retryable',
+        status: 409,
+      })
+    )
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    const error = await screen.findByText(/This home changed since the page loaded/)
+    expect(error).toHaveTextContent(/Refresh to see its current state/)
+    expect(error).not.toHaveTextContent('home_not_retryable')
+    expect(error).not.toHaveTextContent(/database correction/i)
+    expect(retryGfsUserHome).toHaveBeenCalledWith(baseHome.userId, undefined)
+  })
+
+  it('keeps the name editable for an unbound ancestor conflict', async () => {
+    const conflict: GfsUserHomeDetail = {
+      ...baseHome,
+      state: 'conflict',
+      path: null,
+      resourceId: null,
+      conflictCode: 'ancestor_grant_conflict',
+      conflictDetail: { code: 'ancestor_grant_conflict', entries: [] },
+    }
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: conflict })
+    vi.mocked(retryGfsUserHome).mockResolvedValue({
+      home: { ...conflict, state: 'pending', conflictCode: null },
+    })
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    await screen.findByRole('alert')
+    const name = screen.getByLabelText('Folder name')
+    expect(name).toHaveValue('member')
+    expect(name).not.toHaveAttribute('readonly')
     fireEvent.change(name, { target: { value: 'member-new' } })
     expect(name).toHaveValue('member-new')
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
@@ -530,5 +578,37 @@ describe('Home folder block', () => {
     await act(async () => vi.advanceTimersByTimeAsync(5_000))
     expect(screen.getByText('ready', { exact: true })).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  })
+
+  it('stops polling on unmount', async () => {
+    const pending: GfsUserHomeDetail = { ...baseHome, state: 'pending' }
+    vi.mocked(getGfsUserHome).mockResolvedValue({ home: pending })
+    vi.useFakeTimers()
+    const view = render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    await act(async () => {})
+
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    // Witness: the load plus exactly one poll, with the polling status on screen.
+    expect(getGfsUserHome).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('Checking home folder status…')).toBeVisible()
+
+    view.unmount()
+    await act(async () => vi.advanceTimersByTimeAsync(60_000))
+    expect(getGfsUserHome).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows the error and Refresh when a poll fails', async () => {
+    const pending: GfsUserHomeDetail = { ...baseHome, state: 'pending' }
+    vi.mocked(getGfsUserHome)
+      .mockResolvedValueOnce({ home: pending })
+      .mockRejectedValueOnce(new Error('Could not read the home folder.'))
+    vi.useFakeTimers()
+    render(<GfsUserHomeBlock userId={baseHome.userId} />)
+    await act(async () => {})
+
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    expect(getGfsUserHome).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not read the home folder.')
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
   })
 })

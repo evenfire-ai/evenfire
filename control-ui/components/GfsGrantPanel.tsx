@@ -886,7 +886,13 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     /** Partial-failure honesty: state the true outcome, show the server error, reload. */
     const failPartially = async (caught: unknown, summary: string) => {
       if (!isAlreadyMissing(caught)) {
-        setError(caught instanceof Error ? caught.message : 'Failed to update access')
+        setError(
+          isAncestorHomeExposure(caught)
+            ? ANCESTOR_HOME_EXPOSURE_MESSAGE
+            : caught instanceof Error
+              ? caught.message
+              : 'Failed to update access'
+        )
       }
       showToast(summary, { tone: 'error' })
       await reload()

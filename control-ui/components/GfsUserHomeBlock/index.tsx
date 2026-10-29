@@ -30,6 +30,9 @@ function errorMessage(error: unknown): string {
   if (requestError?.code === 'invalid_name') {
     return 'Enter a valid folder name. Use a name accepted by the home folder naming policy.'
   }
+  if (requestError?.code === 'home_not_retryable') {
+    return 'This home changed since the page loaded and cannot be retried as shown. Refresh to see its current state.'
+  }
   return error instanceof Error ? error.message : 'Could not load or update the home folder.'
 }
 
@@ -275,9 +278,7 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
     setError('')
     try {
       const name =
-        boundPathConflict || (home?.storageUsername === null && folderName === '')
-          ? undefined
-          : folderName
+        bound || (home?.storageUsername === null && folderName === '') ? undefined : folderName
       const { home: updated } = await retryGfsUserHome(userId, name)
       setHome(updated)
       setConflictDetail(null)
@@ -286,7 +287,11 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
     } catch (caught) {
       const requestError = caught as ApiRequestError
       if (requestError?.status === 409 && requestError.code === 'home_not_retryable') {
-        setError(`This home could not be retried. If the home is bound: ${BOUND_HOME_RECOVERY}`)
+        setError(
+          boundPathConflict
+            ? `This home could not be retried. If the home is bound: ${BOUND_HOME_RECOVERY}`
+            : errorMessage(caught)
+        )
       } else {
         setError(errorMessage(caught))
       }
@@ -315,6 +320,7 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
     home?.state === 'conflict' &&
     (home.conflictCode === 'path_conflict' || home.conflictCode === 'ancestor_grant_conflict')
   const ownerConflict = home?.state === 'conflict' && home.conflictCode === 'ownership_conflict'
+  const bound = home?.resourceId != null
   const boundPathConflict =
     home?.state === 'conflict' && home.conflictCode === 'path_conflict' && home.resourceId !== null
 
@@ -357,7 +363,7 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
                   id="user-home-folder-name"
                   value={folderName}
                   onChange={event => setFolderName(event.currentTarget.value)}
-                  readOnly={boundPathConflict}
+                  readOnly={bound}
                   disabled={busy}
                 />
                 <button

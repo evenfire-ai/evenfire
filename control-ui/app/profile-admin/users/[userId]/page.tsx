@@ -291,7 +291,14 @@ export default function UserDetailsPage() {
         context = await getAdminUserContext(userId)
       } catch (contextError) {
         if ((contextError as { status?: number })?.status !== 404) throw contextError
-        const { home } = await getGfsUserHome(userId)
+        let home: Awaited<ReturnType<typeof getGfsUserHome>>['home']
+        try {
+          home = (await getGfsUserHome(userId)).home
+        } catch (homeError) {
+          // A missing home must not replace the member 404 that got us here.
+          if ((homeError as { status?: number })?.status === 404) throw contextError
+          throw homeError
+        }
         if (home.state !== 'retired' || home.email !== null || home.name !== null)
           throw contextError
         setDeletedUser(true)
