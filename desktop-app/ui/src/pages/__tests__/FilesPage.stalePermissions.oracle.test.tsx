@@ -1150,7 +1150,7 @@ describe('FilesPage stale permission action oracle', () => {
       }),
     ])
     let deferSourceParentCheck = false
-    let releaseSourceParentCheck: (() => void) | null = null
+    const sourceParentCheckRelease: { current: (() => void) | null } = { current: null }
     let markSourceParentCheckStarted!: () => void
     let markSourceParentCheckFinished!: () => void
     const sourceParentCheckStarted = new Promise<void>(resolve => {
@@ -1160,7 +1160,7 @@ describe('FilesPage stale permission action oracle', () => {
       markSourceParentCheckFinished = resolve
     })
     const sourceParentCheckGate = new Promise<void>(resolve => {
-      releaseSourceParentCheck = resolve
+      sourceParentCheckRelease.current = resolve
     })
     const produceAffordances = appServiceAffordanceProducer(async resourceId => {
       if (resourceId === 'source-parent' && deferSourceParentCheck) {
@@ -1214,7 +1214,7 @@ describe('FilesPage stale permission action oracle', () => {
       expect(await screen.findByRole('dialog', { name: 'Move file report.txt' })).toBeTruthy()
 
       await act(async () => {
-        releaseSourceParentCheck?.()
+        sourceParentCheckRelease.current?.()
         await sourceParentCheckFinished
       })
 
@@ -1222,7 +1222,7 @@ describe('FilesPage stale permission action oracle', () => {
       expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
       expect(moveResource).not.toHaveBeenCalled()
     } finally {
-      releaseSourceParentCheck?.()
+      sourceParentCheckRelease.current?.()
       client.clear()
     }
   })
