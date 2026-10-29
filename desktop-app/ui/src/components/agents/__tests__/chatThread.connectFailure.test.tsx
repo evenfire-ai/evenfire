@@ -154,7 +154,10 @@ describe('ChatThread — connect failure (R4-L1)', () => {
       await Promise.resolve()
     })
 
-    expect(connectMcpServer).toHaveBeenCalledWith('monday', 'agent-x', undefined)
+    expect(connectMcpServer).toHaveBeenCalledTimes(1)
+    const [serverName, agentName, contextId] = connectMcpServer.mock.calls[0] as unknown[]
+    expect([serverName, agentName]).toEqual(['monday', 'agent-x'])
+    expect(contextId).toBeUndefined()
     // The rejection is handled by the ChatThread call-site `.catch` — it does NOT
     // float as an unhandled rejection. Its observable is the error log; revert the
     // `.catch` to `void connectMcpServer(...)` and this assertion goes red.
@@ -199,7 +202,12 @@ describe('ChatThread — Connect sends the agent Host Context', () => {
       await Promise.resolve()
     })
 
-    expect(connectMcpServer).toHaveBeenCalledWith('monday', 'agent-x', undefined)
+    // Positional check on purpose: omitting the third argument is the same wire
+    // request as passing `undefined`, so only a defined contextId must fail here.
+    expect(connectMcpServer).toHaveBeenCalledTimes(1)
+    const [serverName, agentName, contextId] = connectMcpServer.mock.calls[0] as unknown[]
+    expect([serverName, agentName]).toEqual(['monday', 'agent-x'])
+    expect(contextId).toBeUndefined()
   })
 
   it('hands the access catalog context map to the in-flight placeholder', async () => {

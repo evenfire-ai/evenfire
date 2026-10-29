@@ -157,7 +157,10 @@ describe('InFlightAssistantPlaceholder (D.5)', () => {
       await Promise.resolve()
     })
 
-    expect(connectMcpServer).toHaveBeenCalledWith('monday', 'agent-x', undefined)
+    expect(connectMcpServer).toHaveBeenCalledTimes(1)
+    const [serverName, agentName, contextId] = connectMcpServer.mock.calls[0] as unknown[]
+    expect([serverName, agentName]).toEqual(['monday', 'agent-x'])
+    expect(contextId).toBeUndefined()
     // The rejection is handled by the call-site `.catch` — it does NOT float as an
     // unhandled rejection. Its observable is the error log; delete the `.catch`
     // (revert to `void connectMcpServer(...)`) and this assertion goes red.
