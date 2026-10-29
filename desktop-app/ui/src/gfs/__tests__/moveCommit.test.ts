@@ -456,7 +456,9 @@ describe('toastMoveOutcome — unknown outcomes warn, definite negatives error (
       status: 'unconfirmed',
       message: 'Couldn’t confirm the move. Refresh before trying again.',
     })
-    expect(calls).toEqual([['Couldn’t confirm the move. Refresh before trying again.', 'warn']])
+    expect(calls).toEqual([
+      ['report.md → Dest: Couldn’t confirm the move. Refresh before trying again.', 'warn'],
+    ])
   })
 
   it('a rate-limited outcome warns', () => {
@@ -465,14 +467,16 @@ describe('toastMoveOutcome — unknown outcomes warn, definite negatives error (
       message: 'Too many file requests — try again in 7s.',
       retryAfterSeconds: 7,
     })
-    expect(calls).toEqual([['Too many file requests — try again in 7s.', 'warn']])
+    expect(calls).toEqual([['report.md → Dest: Too many file requests — try again in 7s.', 'warn']])
   })
 
   it('definite negatives stay errors and successes stay successes', () => {
     expect(present({ status: 'conflict-stopped', message: 'blocked' })).toEqual([
-      ['blocked', 'error'],
+      ['report.md → Dest: blocked', 'error'],
     ])
-    expect(present({ status: 'target-unavailable', message: 'gone' })).toEqual([['gone', 'error']])
+    expect(present({ status: 'target-unavailable', message: 'gone' })).toEqual([
+      ['report.md → Dest: gone', 'error'],
+    ])
     expect(present({ status: 'committed', version: 8, previousParentId: 'p' })).toEqual([
       ['Moved report.md to Dest', 'success'],
     ])

@@ -266,7 +266,7 @@ describe('FilesPage Move permission generation fencing', () => {
           rejectMove(new Error('Move rejected httpStatus=400'))
         })
         const failureMessage =
-          'The server rejected this destination. Refresh and choose a different folder.'
+          'Projects → Archive: The server rejected this destination. Refresh and choose a different folder.'
         expect(await screen.findByText(failureMessage)).toBeTruthy()
         expect(screen.getAllByText(failureMessage)).toHaveLength(1)
         expect(screen.queryByText('Moved Projects to Archive')).toBeNull()
@@ -376,9 +376,11 @@ describe('FilesPage Move permission generation fencing', () => {
     expect(within(currentDialog).getByText('Backup', { selector: 'strong' })).toBeTruthy()
     expect(within(currentDialog).getByRole('button', { name: 'Move here (Backup)' })).toBeTruthy()
     const result = await screen.findByRole('alert')
-    expect(result.textContent).toContain('notes.txt')
-    expect(result.textContent).toContain('Archive')
-    expect(result.textContent).toContain('changed')
+    expect(
+      within(result).getByText(
+        'notes.txt → Archive: This item changed while you were moving it. Review its current location and try again.'
+      )
+    ).toBeTruthy()
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 
@@ -773,7 +775,7 @@ describe('FilesPage Move permission generation fencing', () => {
     })
 
     expect(pushToast).toHaveBeenCalledWith(
-      'The server rejected this destination. Refresh and choose a different folder.',
+      'notes.txt → Archive: The server rejected this destination. Refresh and choose a different folder.',
       'error'
     )
   })
@@ -883,7 +885,7 @@ describe('FilesPage Move permission generation fencing', () => {
 
     expect(
       await screen.findByText(
-        'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+        'notes.txt → Archive: An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
       )
     ).toBeTruthy()
     expect(moveResource).toHaveBeenCalledTimes(1)

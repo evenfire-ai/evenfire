@@ -386,14 +386,14 @@ export function toastMoveOutcome(
       }
       break
     case 'no-op':
-      pushToast?.(outcome.message, 'info')
+      pushToast?.(`${sourceName} → ${destinationName}: ${outcome.message}`, 'info')
       break
     case 'unconfirmed':
     // The dispatch's outcome is unknown: verify-by-identity already ran and
     // could not settle it. Warn — do not report a failure that was not shown.
     case 'rate-limited':
       // A metered refusal is a "try again" verdict, not a failed move.
-      pushToast?.(outcome.message, 'warn')
+      pushToast?.(`${sourceName} → ${destinationName}: ${outcome.message}`, 'warn')
       break
     case 'session-lost':
     // A superseded gesture never reached the server: there is nothing to
@@ -401,6 +401,6 @@ export function toastMoveOutcome(
     case 'gesture-lost':
       break
     default:
-      pushToast?.(outcome.message, 'error')
+      pushToast?.(`${sourceName} → ${destinationName}: ${outcome.message}`, 'error')
   }
 }

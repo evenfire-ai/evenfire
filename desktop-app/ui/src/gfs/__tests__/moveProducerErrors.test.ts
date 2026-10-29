@@ -127,7 +127,7 @@ describe('real move producer verdicts (R1-M3)', () => {
         )
         const toast = vi.fn()
         toastMoveOutcome(toast, result.outcome, 'report.md', 'Dest', 'file')
-        expect(toast).toHaveBeenCalledWith(result.outcome.message, 'error')
+        expect(toast).toHaveBeenCalledWith(`report.md → Dest: ${result.outcome.message}`, 'error')
       }
     }
   )

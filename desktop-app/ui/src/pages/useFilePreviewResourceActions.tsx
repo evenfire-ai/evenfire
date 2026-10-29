@@ -630,8 +630,6 @@ export function useFilePreviewResourceActions({
       version: resource.version,
     }
     const sourceName = resource.name
-    const pushAttributedOutcome: MoveToast = (message, tone) =>
-      pushToast?.(`${sourceName} → ${destinationName}: ${message}`, tone)
     const isActiveMove = () => moveRequestRef.current === requestId
     // Authorization is tied to the exact source snapshot until dispatch. After
     // dispatch, a competing move may legitimately advance its parent/version;
@@ -800,7 +798,7 @@ export function useFilePreviewResourceActions({
       if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
         throw new Error(outcome.message)
       }
-      toastMoveOutcome(pushAttributedOutcome, outcome, sourceName, destinationName, 'file')
+      toastMoveOutcome(pushToast, outcome, sourceName, destinationName, 'file')
     } catch (error) {
       if (!mutationDispatched) {
         if (!isActiveMove()) return

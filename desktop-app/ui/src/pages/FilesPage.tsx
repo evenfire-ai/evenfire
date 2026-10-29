@@ -2572,15 +2572,7 @@ export function FilesPage({
           isDialogCurrent !== undefined &&
           !isDialogCurrent()
         if (selectionChangedOnOwnedDialog && outcome.status !== 'session-lost') {
-          const pushAttributedOutcome: MoveToast = (message, tone) =>
-            pushToast?.(target.name + ' → ' + destinationName + ': ' + message, tone)
-          toastMoveOutcome(
-            pushAttributedOutcome,
-            outcome,
-            target.name,
-            destinationName,
-            target.kind
-          )
+          toastMoveOutcome(pushToast, outcome, target.name, destinationName, target.kind)
           setMovePermissionStatus(null)
           return
         }
