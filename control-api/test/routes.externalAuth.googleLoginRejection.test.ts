@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import express from 'express'
+import express, { type NextFunction, type Request, type Response } from 'express'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
@@ -34,9 +34,24 @@ vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
   })),
 }))
 
+/**
+ * Stands in for the production request-scoped Pino child that the
+ * correlation-id middleware installs as `req.log`.
+ */
+const requestLog = {
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+  debug: vi.fn(),
+}
+
 function buildApp() {
   const app = express()
   app.use(express.json())
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    ;(req as Request & { log?: typeof requestLog }).log = requestLog
+    next()
+  })
   app.use(createExternalAuthRouter({} as never))
   app.use(clerumErrorHandler)
   return app
@@ -50,6 +65,7 @@ describe('POST /external/auth/google-login credential rejections', () => {
   beforeEach(() => {
     googleVerify.verifyIdToken.mockReset()
     Object.values(directory).forEach(fn => fn.mockReset())
+    Object.values(requestLog).forEach(fn => fn.mockReset())
   })
 
   it('answers 401 Unauthorized when Google has not verified the email', async () => {
@@ -76,15 +92,33 @@ describe('POST /external/auth/google-login credential rejections', () => {
     expect(directory.googleLoginData).not.toHaveBeenCalled()
   })
 
-  it('keeps library verification errors on the sanitized 500 path', async () => {
-    googleVerify.verifyIdToken.mockRejectedValue(new Error('Wrong number of segments in token'))
+  it('keeps library verification errors on the sanitized 500 path without logging or returning the token', async () => {
+    const submittedToken = 'synthetic-id-token'
+    const payloadEmail = 'synthetic-payload@example.invalid'
+    googleVerify.verifyIdToken.mockRejectedValue(
+      new Error(`Wrong number of segments in token: ${submittedToken} ${payloadEmail}`)
+    )
 
-    const response = await googleLogin('malformed-token')
+    const response = await googleLogin(submittedToken)
 
     expect(response.status).toBe(500)
     expect(response.body.error).toBe('Internal Server Error')
     expect(typeof response.body.correlationId).toBe('string')
     expect(directory.googleLoginData).not.toHaveBeenCalled()
+    // Liveness witness: the verifier was called with the submitted token.
+    expect(googleVerify.verifyIdToken).toHaveBeenCalledWith(
+      expect.objectContaining({ idToken: submittedToken })
+    )
+
+    expect(requestLog.error).toHaveBeenCalledTimes(1)
+    const logged = JSON.stringify(requestLog.error.mock.calls[0] ?? [])
+    expect(logged).not.toContain(submittedToken)
+    expect(logged).not.toContain(payloadEmail)
+    expect(logged).toContain('unhandled_error')
+
+    const body = JSON.stringify(response.body)
+    expect(body).not.toContain(submittedToken)
+    expect(body).not.toContain(payloadEmail)
   })
 
   it('does not answer 401 for a verified Google identity', async () => {

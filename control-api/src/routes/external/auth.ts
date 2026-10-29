@@ -176,8 +176,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         google = await verifyGoogleIdToken(idToken)
       } catch (error) {
         // Only the verifier's own identity rejections are a client-facing
-        // credential failure. Library verification errors keep the sanitized
-        // 500 path through the outer catch.
+        // credential failure. Library verification errors arrive as the
+        // verifier's GoogleTokenVerificationError (fixed message, no token or
+        // payload) and keep the sanitized 500 path through the outer catch.
         if (error instanceof GoogleIdentityRejectedError) {
           return res.status(401).json({ error: 'Unauthorized' })
         }
