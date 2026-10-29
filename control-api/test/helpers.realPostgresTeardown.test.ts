@@ -461,16 +461,26 @@ describe('endPoolAndWaitForClients against a real pg Pool and a PG wire stub', (
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const foreign = net.connect(stub.port, '127.0.0.1')
+      let localPort: number | undefined
+      foreign.once('connect', () => {
+        localPort = foreign.localPort
+      })
       foreign.on('error', () => {})
       await new Promise<void>(resolve => foreign.once('close', () => resolve()))
 
       // Witness that the unplanned-connection path ran. Before the fix that path
       // destroyed the socket with an Error and Vitest failed the run with an
       // unhandled error, so this test passing is also the negative check.
-      expect(warn).toHaveBeenCalledTimes(1)
-      expect(String(warn.mock.calls[0]?.[0])).toMatch(
-        /^pg wire stub: closing unplanned connection 0 from 127\.0\.0\.1:\d+$/
-      )
+      expect(localPort).toEqual(expect.any(Number))
+      expect(
+        warn.mock.calls.some(([message]) => {
+          const match =
+            /^pg wire stub: closing unplanned connection \d+ from 127\.0\.0\.1:(\d+)$/.exec(
+              String(message)
+            )
+          return match?.[1] === String(localPort)
+        })
+      ).toBe(true)
       expect(stub.terminates()).toBe(0)
     } finally {
       warn.mockRestore()
