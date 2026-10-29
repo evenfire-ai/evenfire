@@ -15,6 +15,7 @@ import {
   accessibleResource,
   affordancesResult,
   childView,
+  gfsRouteFailureMessage,
   grantsListPage,
   heldAffordances,
   listAccessiblePage,
@@ -2266,6 +2267,54 @@ describe('useGfsBrowserController', () => {
       await new Promise(resolve => globalThis.setTimeout(resolve, 0))
     })
     expect(listAccessible).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not show an infinite loader or empty state for a settled child error without data', async () => {
+    const childrenFailure = await gfsRouteFailureMessage(
+      client => client.listChildren('root', 'main'),
+      503,
+      { code: 'internal', message: 'folder listing unavailable' }
+    )
+    const listChildren = vi.fn(async () => {
+      throw new Error(childrenFailure)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    await waitFor(() => {
+      expect(listChildren).toHaveBeenCalledOnce()
+      expect(lastHarnessQueryClient?.getQueryState(childrenKey)?.status).toBe('error')
+      expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined()
+    })
+    expect(screen.getByTestId('loading').textContent).toBe('idle')
+    expect(screen.getByTestId('loading-current-view').textContent).toBe('idle')
+    expect(screen.getByTestId('children-error').textContent).toContain('503')
+    expect(screen.queryByRole('button', { name: 'child ' })).toBeNull()
   })
 
   it('keeps reporting the children load while discovery is rate limited', async () => {
