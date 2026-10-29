@@ -4799,11 +4799,13 @@ h3 {
   border-radius: var(--radius-sm);
 }
 
-.chat-bubble.assistant .progress-stepper {
+.chat-bubble.assistant .progress-stepper,
+.chat-message-bubble--assistant .progress-stepper {
   margin-top: 0;
 }
 
-.chat-bubble.assistant .progress-stepper.status-completed {
+.chat-bubble.assistant .progress-stepper.status-completed,
+.chat-message-bubble--assistant .progress-stepper.status-completed {
   border: none;
   background: transparent;
   padding: 4px 0 0;
@@ -7319,8 +7321,14 @@ h3 {
   background: transparent;
 }
 
-.chat-bubble.assistant .message-block {
+.chat-bubble.assistant .message-block,
+.chat-message-bubble--assistant .message-block {
   padding-right: 0;
+}
+
+.chat-message-bubble {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .chat-loading-bubble {
@@ -7370,7 +7378,6 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  margin-top: var(--space-1);
 }
 
 /* The user meta-row rides in normal flow at the foot of the band (mirroring the
@@ -7605,7 +7612,8 @@ h3 {
   font-size: var(--font-size-xs);
 }
 
-.chat-bubble pre {
+.chat-bubble pre,
+.chat-message-bubble pre {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
@@ -7766,6 +7774,19 @@ h3 {
 
 .message-copy-button--inline {
   margin-left: auto;
+}
+
+/* Ant Design X owns chat message geometry; these rules only retain Evenfire's
+   hover-revealed message actions and full-width specialized HTML previews. */
+.chat-message-bubble:hover .message-copy-button,
+.chat-message-bubble--assistant .message-copy-button,
+.message-copy-button:focus-visible {
+  opacity: 1;
+}
+
+.chat-message-bubble--wide {
+  width: 100%;
+  max-width: 100%;
 }
 
 .message-copy-button svg {

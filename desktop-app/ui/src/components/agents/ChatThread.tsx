@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { Bubble, Conversations } from '@ant-design/x'
 import {
   type QueuedChatDelete,
   useAgentChatActionsContext,
@@ -17,12 +18,28 @@ import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
-import { Button, Collapse, Dropdown, Input, type InputRef, Modal, Skeleton, Typography } from 'antd'
+import {
+  Alert,
+  Button,
+  Collapse,
+  Dropdown,
+  Flex,
+  Input,
+  type InputRef,
+  Modal,
+  Skeleton,
+  Typography,
+} from 'antd'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
 import { SecureHtmlPreview } from '@components/SecureHtmlPreview'
-import { IconConnectors, IconContexts, IconWorkflows } from '@components/SidebarNav/icons'
+import {
+  IconConnectors,
+  IconContexts,
+  IconMoreVertical,
+  IconWorkflows,
+} from '@components/SidebarNav/icons'
 import { WorkflowRunArtifactActions } from '@components/WorkflowRunArtifactActions'
 import {
   AGENT_ERROR_CODE_LABELS,
@@ -313,7 +330,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
 
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
   const [showAllSessions, setShowAllSessions] = useState(false)
-  const [sessionMenuChatId, setSessionMenuChatId] = useState<string | null>(null)
+  const [openSessionActionId, setOpenSessionActionId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [sessionRenameValue, setSessionRenameValue] = useState('')
   const [pendingDeleteSession, setPendingDeleteSession] = useState<{
@@ -322,7 +339,6 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     title: string
     deletion: QueuedChatDelete
   } | null>(null)
-  const dedicatedSessionsRef = useRef<HTMLDivElement | null>(null)
   const sessionRenameInputRef = useRef<InputRef | null>(null)
   const chatThreadRef = useRef<HTMLDivElement | null>(null)
   const sessionRenameClosedRef = useRef(false)
@@ -415,49 +431,25 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     ) {
       setShowAllSessions(false)
     }
-    if (sessionMenuChatId && !chatList.some(chat => chat.id === sessionMenuChatId)) {
-      setSessionMenuChatId(null)
-    }
     if (renamingSessionId && !chatList.some(chat => chat.id === renamingSessionId)) {
       setRenamingSessionId(null)
       setSessionRenameValue('')
     }
+    if (openSessionActionId && !chatList.some(chat => chat.id === openSessionActionId)) {
+      setOpenSessionActionId(null)
+    }
   }, [
     chatList,
     chatListHasMoreRemoteSessions,
+    openSessionActionId,
     renamingSessionId,
-    sessionMenuChatId,
     showAllSessions,
   ])
-
-  useEffect(() => {
-    if (!sessionMenuChatId) return
-    const handleOutside = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (dedicatedSessionsRef.current?.contains(target)) return
-      if (target instanceof Element && target.closest('[data-session-menu-popup]') !== null) {
-        return
-      }
-      setSessionMenuChatId(null)
-    }
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setSessionMenuChatId(null)
-      }
-    }
-    window.addEventListener('mousedown', handleOutside)
-    window.addEventListener('keydown', handleEscape)
-    return () => {
-      window.removeEventListener('mousedown', handleOutside)
-      window.removeEventListener('keydown', handleEscape)
-    }
-  }, [sessionMenuChatId])
 
   const startSessionRename = useCallback((chatId: string, currentTitle: string) => {
     sessionRenameClosedRef.current = false
     setRenamingSessionId(chatId)
     setSessionRenameValue(currentTitle)
-    setSessionMenuChatId(null)
   }, [])
 
   const cancelSessionRename = useCallback(() => {
@@ -481,7 +473,6 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
 
   const deleteSession = useCallback(
     async (chatId: string, chatTitle: string) => {
-      setSessionMenuChatId(null)
       if (!selectedAgent) return
       try {
         const deletion = await captureChatDeleteFence(selectedAgent)
@@ -780,7 +771,10 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                             null)
                           : null
                       return (
-                        <article
+                        <Flex
+                          component="article"
+                          vertical
+                          align={message.role === 'user' ? 'flex-end' : 'flex-start'}
                           key={message.messageKey}
                           id={chatMessageDomId(message.id)}
                           data-chat-message-id={message.id}
@@ -791,171 +785,197 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                 ? 'user-message'
                                 : undefined
                           }
-                          className={`chat-bubble ${message.role}${message.isError ? ' chat-bubble--error' : ''}${
-                            htmlPreview || hasHtmlArtifactMention ? ' chat-bubble--wide' : ''
-                          }`}
+                          className="chat-message-entry"
                         >
-                          {message.isError ? (
-                            <div className="error-bubble-content">
-                              <div className="error-bubble-icon">✕</div>
-                              <div className="error-bubble-body">
-                                <div className="error-bubble-label">
-                                  {AGENT_ERROR_CODE_LABELS[message.errorCode ?? ''] ?? 'Error'}
-                                  {message.errorProvider
-                                    ? ` · ${message.errorProvider.toUpperCase()}`
-                                    : ''}
-                                </div>
-                                <div className="error-bubble-message">
-                                  {localSearchQuery ? (
-                                    <ChatMarkdownContent
-                                      model={semanticModel}
-                                      query={localSearchQuery}
-                                      activeOccurrence={activeSearchOccurrence}
-                                    />
-                                  ) : message.content.length <= 180 ? (
-                                    message.content
-                                  ) : (
-                                    `${message.content.slice(0, 177)}...`
-                                  )}
-                                </div>
-                                <Collapse
-                                  className="error-bubble-details"
-                                  size="small"
-                                  items={[
-                                    {
-                                      key: 'details',
-                                      label: 'Details',
-                                      forceRender: true,
-                                      children: (
-                                        <pre className="error-bubble-details-text">
-                                          {message.content}
-                                        </pre>
-                                      ),
-                                    },
-                                  ]}
-                                />
-                              </div>
-                            </div>
-                          ) : (
-                            <>
-                              {htmlPreview && (
-                                <SecureHtmlPreview
-                                  html={htmlPreview}
-                                  previewId={message.messageKey}
-                                  title="HTML visualization"
-                                  maxBytes={HTML_PREVIEW_INLINE_MAX_BYTES}
-                                />
-                              )}
-                              {isJson ? (
-                                <pre className="message-block json-content">
-                                  <ChatMarkdownContent
-                                    model={semanticModel}
-                                    query={localSearchQuery}
-                                    activeOccurrence={activeSearchOccurrence}
+                          <Bubble
+                            placement={message.role === 'user' ? 'end' : 'start'}
+                            variant={message.isError ? 'borderless' : 'filled'}
+                            rootClassName={`chat-message-bubble chat-message-bubble--${message.role}${
+                              htmlPreview || hasHtmlArtifactMention
+                                ? ' chat-message-bubble--wide'
+                                : ''
+                            }`}
+                            content={
+                              <>
+                                {message.isError ? (
+                                  <Alert
+                                    type="error"
+                                    showIcon
+                                    message={
+                                      <>
+                                        {AGENT_ERROR_CODE_LABELS[message.errorCode ?? ''] ??
+                                          'Error'}
+                                        {message.errorProvider
+                                          ? ` · ${message.errorProvider.toUpperCase()}`
+                                          : ''}
+                                      </>
+                                    }
+                                    description={
+                                      <>
+                                        <div className="error-bubble-message">
+                                          {localSearchQuery ? (
+                                            <ChatMarkdownContent
+                                              model={semanticModel}
+                                              query={localSearchQuery}
+                                              activeOccurrence={activeSearchOccurrence}
+                                            />
+                                          ) : message.content.length <= 180 ? (
+                                            message.content
+                                          ) : (
+                                            `${message.content.slice(0, 177)}...`
+                                          )}
+                                        </div>
+                                        <Collapse
+                                          className="error-bubble-details"
+                                          size="small"
+                                          items={[
+                                            {
+                                              key: 'details',
+                                              label: 'Details',
+                                              forceRender: true,
+                                              children: (
+                                                <pre className="error-bubble-details-text">
+                                                  {message.content}
+                                                </pre>
+                                              ),
+                                            },
+                                          ]}
+                                        />
+                                      </>
+                                    }
                                   />
-                                </pre>
-                              ) : message.role === 'assistant' ? (
-                                <div className="message-block markdown-content">
-                                  <ChatMarkdownContent
-                                    model={semanticModel}
-                                    query={localSearchQuery}
-                                    activeOccurrence={activeSearchOccurrence}
-                                  />
-                                  {selectedAgent && !hasResponseFileAttachment && (
-                                    <MessageArtifactActions
-                                      hostRef={selectedAgent}
-                                      content={displayContent}
-                                    />
-                                  )}
-                                  {workflowArtifactScopeForAssistant ? (
-                                    <WorkflowRunArtifactActions
-                                      workflow={workflowArtifactScopeForAssistant}
+                                ) : (
+                                  <>
+                                    {htmlPreview && (
+                                      <SecureHtmlPreview
+                                        html={htmlPreview}
+                                        previewId={message.messageKey}
+                                        title="HTML visualization"
+                                        maxBytes={HTML_PREVIEW_INLINE_MAX_BYTES}
+                                      />
+                                    )}
+                                    {isJson ? (
+                                      <pre className="message-block json-content">
+                                        <ChatMarkdownContent
+                                          model={semanticModel}
+                                          query={localSearchQuery}
+                                          activeOccurrence={activeSearchOccurrence}
+                                        />
+                                      </pre>
+                                    ) : message.role === 'assistant' ? (
+                                      <div className="message-block markdown-content">
+                                        <ChatMarkdownContent
+                                          model={semanticModel}
+                                          query={localSearchQuery}
+                                          activeOccurrence={activeSearchOccurrence}
+                                        />
+                                        {selectedAgent && !hasResponseFileAttachment && (
+                                          <MessageArtifactActions
+                                            hostRef={selectedAgent}
+                                            content={displayContent}
+                                          />
+                                        )}
+                                        {workflowArtifactScopeForAssistant ? (
+                                          <WorkflowRunArtifactActions
+                                            workflow={workflowArtifactScopeForAssistant}
+                                          />
+                                        ) : null}
+                                      </div>
+                                    ) : displayContent ? (
+                                      <p className="message-block">
+                                        <ChatMarkdownContent
+                                          model={semanticModel}
+                                          query={localSearchQuery}
+                                          activeOccurrence={activeSearchOccurrence}
+                                        />
+                                      </p>
+                                    ) : null}
+                                  </>
+                                )}
+                                <MessageAttachmentList attachments={displayAttachments} />
+                                {isLastAssistantMessage &&
+                                  prevGroup?.role === 'user' &&
+                                  (() => {
+                                    // Prefer the live progress (keyed by the user message);
+                                    // fall back to the assistant's persisted toolSteps after
+                                    // a reload, when the live map is empty (#582).
+                                    const liveNodes = prevGroup.items
+                                      .map(msg => renderProgressStepper(msg, 'completed'))
+                                      .filter((node): node is ReactElement => node != null)
+                                    if (liveNodes.length > 0) return liveNodes
+                                    return renderHydratedToolSteps(message)
+                                  })()}
+                              </>
+                            }
+                            footer={
+                              showMetaRow ? (
+                                <footer
+                                  className={`chat-message-meta-row ${metaRowRoleClass}`.trim()}
+                                >
+                                  <div className="chat-message-meta-main">
+                                    <span className="chat-time-label">
+                                      {formatChatTimestamp(message.timestamp || Date.now())}
+                                    </span>
+                                    {message.role === 'assistant' && message.tokens && (
+                                      <MessageTokens tokens={message.tokens} />
+                                    )}
+                                  </div>
+                                  {resendSource ? (
+                                    <Button
+                                      htmlType="button"
+                                      type="text"
+                                      size="small"
+                                      shape="circle"
+                                      className="message-resend-button message-copy-button message-copy-button--inline"
+                                      onClick={() => handleResendMessage(resendSource)}
+                                      aria-label={
+                                        message.role === 'user' ? 'Resend message' : 'Resend prompt'
+                                      }
+                                      title={
+                                        message.role === 'user' ? 'Resend message' : 'Resend prompt'
+                                      }
+                                      icon={
+                                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                                          <path fill="none" d="M0 0h24v24H0V0z" />
+                                          <path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z" />
+                                        </svg>
+                                      }
                                     />
                                   ) : null}
-                                </div>
-                              ) : displayContent ? (
-                                <p className="message-block">
-                                  <ChatMarkdownContent
-                                    model={semanticModel}
-                                    query={localSearchQuery}
-                                    activeOccurrence={activeSearchOccurrence}
+                                  <Button
+                                    htmlType="button"
+                                    type="text"
+                                    size="small"
+                                    shape="circle"
+                                    className={`message-copy-button message-copy-button--inline${
+                                      copiedMessageKey === message.messageKey ? ' copied' : ''
+                                    }`}
+                                    onClick={() =>
+                                      void handleCopyMessage(message.messageKey, copyContent)
+                                    }
+                                    aria-label={
+                                      copiedMessageKey === message.messageKey
+                                        ? 'Copied'
+                                        : 'Copy text'
+                                    }
+                                    title={
+                                      copiedMessageKey === message.messageKey
+                                        ? 'Copied!'
+                                        : 'Copy text'
+                                    }
+                                    icon={
+                                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path fill="none" d="M0 0h24v24H0V0z" />
+                                        <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
+                                      </svg>
+                                    }
                                   />
-                                </p>
-                              ) : null}
-                            </>
-                          )}
-                          <MessageAttachmentList attachments={displayAttachments} />
-                          {isLastAssistantMessage &&
-                            prevGroup?.role === 'user' &&
-                            (() => {
-                              // Prefer the live progress (keyed by the user message);
-                              // fall back to the assistant's persisted toolSteps after
-                              // a reload, when the live map is empty (#582).
-                              const liveNodes = prevGroup.items
-                                .map(msg => renderProgressStepper(msg, 'completed'))
-                                .filter((node): node is ReactElement => node != null)
-                              if (liveNodes.length > 0) return liveNodes
-                              return renderHydratedToolSteps(message)
-                            })()}
-                          {showMetaRow && (
-                            <footer className={`chat-message-meta-row ${metaRowRoleClass}`.trim()}>
-                              <div className="chat-message-meta-main">
-                                <span className="chat-time-label">
-                                  {formatChatTimestamp(message.timestamp || Date.now())}
-                                </span>
-                                {message.role === 'assistant' && message.tokens && (
-                                  <MessageTokens tokens={message.tokens} />
-                                )}
-                              </div>
-                              {resendSource ? (
-                                <Button
-                                  htmlType="button"
-                                  type="text"
-                                  size="small"
-                                  shape="circle"
-                                  className="message-resend-button message-copy-button message-copy-button--inline"
-                                  onClick={() => handleResendMessage(resendSource)}
-                                  aria-label={
-                                    message.role === 'user' ? 'Resend message' : 'Resend prompt'
-                                  }
-                                  title={
-                                    message.role === 'user' ? 'Resend message' : 'Resend prompt'
-                                  }
-                                  icon={
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                      <path fill="none" d="M0 0h24v24H0V0z" />
-                                      <path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z" />
-                                    </svg>
-                                  }
-                                />
-                              ) : null}
-                              <Button
-                                htmlType="button"
-                                type="text"
-                                size="small"
-                                shape="circle"
-                                className={`message-copy-button message-copy-button--inline${
-                                  copiedMessageKey === message.messageKey ? ' copied' : ''
-                                }`}
-                                onClick={() =>
-                                  void handleCopyMessage(message.messageKey, copyContent)
-                                }
-                                aria-label={
-                                  copiedMessageKey === message.messageKey ? 'Copied' : 'Copy text'
-                                }
-                                title={
-                                  copiedMessageKey === message.messageKey ? 'Copied!' : 'Copy text'
-                                }
-                                icon={
-                                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                                    <path fill="none" d="M0 0h24v24H0V0z" />
-                                    <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
-                                  </svg>
-                                }
-                              />
-                            </footer>
-                          )}
-                        </article>
+                                </footer>
+                              ) : null
+                            }
+                            footerPlacement="outer-start"
+                          />
+                        </Flex>
                       )
                     })}
                   </section>
@@ -1018,119 +1038,123 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
               No sessions yet. Start a message below to create your first one.
             </p>
           ) : (
-            <div className="agent-dedicated-sessions-list" ref={dedicatedSessionsRef}>
-              {visibleChats.map(chat => {
-                const isMenuOpen = sessionMenuChatId === chat.id
-                const isRenaming = renamingSessionId === chat.id
-                return (
-                  <div
-                    key={chat.id}
-                    data-testid="agent-chat-row"
-                    data-agent-ref={selectedAgent}
-                    data-chat-id={chat.id}
-                    aria-current={chat.id === activeChatId ? 'true' : undefined}
-                    className={`agent-dedicated-session-row${isMenuOpen ? ' menu-open' : ''}`}
-                  >
-                    <span className="agent-dedicated-session-main">
-                      <span className="agent-dedicated-session-icon" aria-hidden="true">
-                        {chat.title.trim() === '?' ? (
-                          '?'
-                        ) : /html|code|dev/i.test(chat.title) ? (
-                          '</>'
-                        ) : (
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path fill="none" d="M0 0h24v24H0V0z" />
-                            <path d="M4 4h16v12H5.17L4 17.17V4m0-2c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2H4z" />
-                          </svg>
-                        )}
-                      </span>
-                      {isRenaming ? (
-                        <Input
-                          ref={sessionRenameInputRef}
-                          className="agent-dedicated-session-rename-input"
-                          aria-label="Rename session"
-                          value={sessionRenameValue}
-                          onChange={event => setSessionRenameValue(event.target.value)}
-                          onKeyDown={event => {
-                            if (event.key === 'Escape') {
-                              event.preventDefault()
-                              cancelSessionRename()
-                            }
-                          }}
-                          onPressEnter={event => {
+            <div className="agent-dedicated-sessions-list">
+              <Conversations
+                activeKey={activeChatId ?? undefined}
+                className="agent-dedicated-conversations"
+                items={visibleChats.map(chat => {
+                  const isRenaming = renamingSessionId === chat.id
+                  const icon =
+                    chat.title.trim() === '?' ? (
+                      '?'
+                    ) : /html|code|dev/i.test(chat.title) ? (
+                      '</>'
+                    ) : (
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path fill="none" d="M0 0h24v24H0V0z" />
+                        <path d="M4 4h16v12H5.17L4 17.17V4m0-2c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2H4z" />
+                      </svg>
+                    )
+
+                  return {
+                    key: chat.id,
+                    title: chat.title,
+                    className: `agent-dedicated-session-row${openSessionActionId === chat.id ? ' menu-open' : ''}`,
+                    'data-testid': 'agent-chat-row',
+                    'data-agent-ref': selectedAgent ?? undefined,
+                    'data-chat-id': chat.id,
+                    'aria-current': chat.id === activeChatId ? 'true' : undefined,
+                    icon: <span className="agent-dedicated-session-icon">{icon}</span>,
+                    label: isRenaming ? (
+                      <Input
+                        ref={sessionRenameInputRef}
+                        className="agent-dedicated-session-rename-input"
+                        aria-label="Rename session"
+                        value={sessionRenameValue}
+                        onClick={event => event.stopPropagation()}
+                        onChange={event => setSessionRenameValue(event.target.value)}
+                        onKeyDown={event => {
+                          if (event.key === 'Escape') {
                             event.preventDefault()
-                            commitSessionRename()
-                          }}
-                          onBlur={commitSessionRename}
-                          maxLength={100}
-                        />
-                      ) : (
+                            cancelSessionRename()
+                          }
+                        }}
+                        onPressEnter={event => {
+                          event.preventDefault()
+                          commitSessionRename()
+                        }}
+                        onBlur={commitSessionRename}
+                        maxLength={100}
+                      />
+                    ) : (
+                      <span className="agent-dedicated-session-main">
                         <Button
                           htmlType="button"
                           block
                           className="agent-dedicated-session-title-btn"
                           type="text"
-                          onClick={() => onSelectChat(chat.id)}
+                          onClick={event => {
+                            event.stopPropagation()
+                            onSelectChat(chat.id)
+                          }}
                           title={chat.title}
                         >
                           <Typography.Text className="agent-dedicated-session-title" ellipsis>
                             {chat.title}
                           </Typography.Text>
                         </Button>
-                      )}
-                    </span>
-                    <span className="agent-dedicated-session-side">
-                      {showAgentLabel && selectedAgent && (
-                        <span className="agent-dedicated-session-agent">{selectedAgent}</span>
-                      )}
-                      <ChatStateBadge
-                        sessionState={sessionStateByChatId[chat.id]}
-                        unreadTerminal={chat.unreadTerminal === true}
-                      />
-                      <span className="agent-dedicated-session-time">
-                        {formatRelativeTime(chat.updatedAt)}
-                      </span>
-                      {!isRenaming && (
-                        <Dropdown
-                          destroyOnHidden
-                          menu={{
-                            items: [
-                              { key: 'rename', label: 'Rename' },
-                              { key: 'delete', label: 'Delete', danger: true },
-                            ],
-                            onClick: ({ key }) => {
-                              if (key === 'rename') startSessionRename(chat.id, chat.title)
-                              if (key === 'delete') void deleteSession(chat.id, chat.title)
-                            },
-                          }}
-                          onOpenChange={open => setSessionMenuChatId(open ? chat.id : null)}
-                          open={isMenuOpen}
-                          placement="bottomRight"
-                          popupRender={menu => <div data-session-menu-popup="true">{menu}</div>}
-                          trigger={['click']}
-                        >
-                          <Button
-                            htmlType="button"
-                            type="text"
-                            size="small"
-                            shape="circle"
-                            className="agent-dedicated-session-menu-btn"
-                            aria-label={`Session actions for ${chat.title}`}
-                            aria-haspopup="menu"
-                            aria-expanded={isMenuOpen}
-                            title={`Session actions for ${chat.title}`}
-                            icon={<span aria-hidden="true">&#8230;</span>}
-                            onClick={event => event.stopPropagation()}
+                        <span className="agent-dedicated-session-side">
+                          {showAgentLabel && selectedAgent && (
+                            <span className="agent-dedicated-session-agent">{selectedAgent}</span>
+                          )}
+                          <ChatStateBadge
+                            sessionState={sessionStateByChatId[chat.id]}
+                            unreadTerminal={chat.unreadTerminal === true}
                           />
-                        </Dropdown>
-                      )}
-                      <span className="agent-dedicated-session-chevron" aria-hidden="true">
-                        ›
+                          <span className="agent-dedicated-session-time">
+                            {formatRelativeTime(chat.updatedAt)}
+                          </span>
+                          {!isRenaming && (
+                            <Dropdown
+                              trigger={['click']}
+                              placement="bottomRight"
+                              open={openSessionActionId === chat.id}
+                              onOpenChange={open => setOpenSessionActionId(open ? chat.id : null)}
+                              menu={{
+                                items: [
+                                  { key: 'rename', label: 'Rename' },
+                                  { key: 'delete', label: 'Delete', danger: true },
+                                ],
+                                onClick: ({ key }) => {
+                                  if (key === 'rename') startSessionRename(chat.id, chat.title)
+                                  if (key === 'delete') void deleteSession(chat.id, chat.title)
+                                },
+                              }}
+                            >
+                              <Button
+                                htmlType="button"
+                                type="text"
+                                size="small"
+                                shape="circle"
+                                className="agent-dedicated-session-menu-btn"
+                                aria-label={`Session actions for ${chat.title}`}
+                                aria-haspopup="menu"
+                                aria-expanded={openSessionActionId === chat.id}
+                                title={`Session actions for ${chat.title}`}
+                                icon={<IconMoreVertical />}
+                                onClick={event => event.stopPropagation()}
+                              />
+                            </Dropdown>
+                          )}
+                        </span>
                       </span>
-                    </span>
-                  </div>
-                )
-              })}
+                    ),
+                  }
+                })}
+                onActiveChange={chatId => {
+                  if (chatId) onSelectChat(chatId)
+                }}
+              />
               <div className="agent-dedicated-sessions-footer">
                 <span className="agent-dedicated-sessions-meta">
                   {sortedChats.length} {sortedChats.length === 1 ? 'session' : 'sessions'}

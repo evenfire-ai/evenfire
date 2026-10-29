@@ -49,6 +49,7 @@
   },
   "dependencies": {
     "@ant-design/icons": "6.3.4",
+    "@ant-design/x": "2.0.1",
     "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
     "@clerum/gfs-interaction-policy": "file:../packages/gfs-interaction-policy",
     "@tanstack/react-query": "5.100.10",

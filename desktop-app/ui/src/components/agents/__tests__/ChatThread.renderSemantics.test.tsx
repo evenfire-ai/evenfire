@@ -99,7 +99,13 @@ describe('ChatThread session actions', () => {
   it('keeps the rename action available through the Ant Design dropdown and input', async () => {
     render(<ChatThread />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Session actions for Existing session' }))
+    const actionButton = screen.getByRole('button', {
+      name: 'Session actions for Existing session',
+    })
+    expect(actionButton.getAttribute('aria-haspopup')).toBe('menu')
+    expect(actionButton.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(actionButton)
+    expect(actionButton.getAttribute('aria-expanded')).toBe('true')
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }))
 
     const input = await screen.findByRole('textbox', { name: 'Rename session' })
@@ -113,7 +119,11 @@ describe('ChatThread session actions', () => {
     actionsValue.captureChatDeleteFence.mockResolvedValueOnce(deletion)
     render(<ChatThread />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Session actions for Existing session' }))
+    const actionButton = screen.getByRole('button', {
+      name: 'Session actions for Existing session',
+    })
+    fireEvent.click(actionButton)
+    expect(actionButton.getAttribute('aria-expanded')).toBe('true')
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
 
     expect(actionsValue.captureChatDeleteFence).toHaveBeenCalledWith('agent-x')
@@ -160,10 +170,10 @@ describe('ChatThread error code labels', () => {
     ]
     const { container } = render(<ChatThread />)
     const response = screen.getByTestId('agent-response')
-    // Liveness witness: the message rendered as an error bubble.
-    expect(response.classList.contains('chat-bubble--error')).toBe(true)
+    // Liveness witness: Ant Design Alert renders the error with alert semantics.
+    expect(screen.getByRole('alert')).toBeTruthy()
     return {
-      label: container.querySelector('.error-bubble-label')?.textContent,
+      label: container.querySelector('.ant-alert-message')?.textContent,
       text: response.textContent,
     }
   }
@@ -273,12 +283,12 @@ it('keeps generated files visible and downloadable on an interrupted error messa
   })
   render(<ChatThread />)
   expect(screen.getByText('Task interrupted', { selector: '.error-bubble-message' })).toBeTruthy()
-  expect(screen.getByTestId('agent-response').classList.contains('chat-bubble--error')).toBe(true)
+  expect(screen.getByRole('alert')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Download' }))
   expect(clicked).toEqual(['report.md'])
   expect(createObjectURL).toHaveBeenCalledWith(
     expect.objectContaining({ size: 8, type: 'text/markdown' })
   )
   expect(revokeObjectURL).toHaveBeenCalledWith('blob:unit-download')
-  expect(screen.getByTestId('agent-response').classList.contains('chat-bubble--error')).toBe(true)
+  expect(screen.getByRole('alert')).toBeTruthy()
 })
