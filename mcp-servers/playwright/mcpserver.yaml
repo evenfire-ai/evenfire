@@ -7,7 +7,7 @@ spec:
   description: >-
     Playwright MCP Server - browser automation tools for navigation, DOM interaction,
     code execution, and screenshot capture.
-  image: mcr.microsoft.com/playwright/mcp@sha256:a9d607e571d70954acc36de7a45e7f424a94cebdfba973b1f404435108c60f3f
+  image: ghcr.io/evenfire-ai/playwright-server@sha256:fc603bbc05d216ca9394940463e5e216d0a48732c24555fb9b67d20775fccf73
   imagePullPolicy: Always
   command:
     - node
