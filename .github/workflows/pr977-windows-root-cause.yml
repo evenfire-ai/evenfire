@@ -124,11 +124,11 @@ jobs:
           $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
           $filter = 'src/__tests__/appService.passwordLoginRollback.regression.test.ts'
           $testName = 'restores the accepted prior source when candidate preparation fails after publication'
-          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '--testTimeout=60000', '--hookTimeout=60000', '--reporter=json', '"--outputFile.json=' + $report + '"', '"' + $filter + '"', '--testNamePattern', '"' + $testName + '"') -join ' '
+          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '--testTimeout=360000', '--hookTimeout=360000', '--reporter=json', '"--outputFile.json=' + $report + '"', '"' + $filter + '"', '--testNamePattern', '"' + $testName + '"') -join ' '
           $started = [DateTime]::UtcNow
           $process = Start-Process -FilePath $node -ArgumentList $argumentLine -WorkingDirectory (Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app') -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           $watchdogExpired = $false
-          $deadline = $started.AddSeconds(150)
+          $deadline = $started.AddSeconds(420)
           while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Seconds 2
             $process.Refresh()
@@ -159,6 +159,7 @@ jobs:
           retention-days: 7
 
   system-owner-fixture-probe:
+    if: ${{ !contains(github.event.head_commit.message, '[auth-only]') }}
     runs-on: windows-2025
     timeout-minutes: 20
     steps:

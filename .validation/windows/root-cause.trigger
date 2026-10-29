@@ -1,1 +1,1 @@
-ACL-only bounded confirmation: 120-second test timeout / 180-second process watchdog
+Auth-only bounded password rollback diagnostic: 360-second test timeout / 420-second watchdog
