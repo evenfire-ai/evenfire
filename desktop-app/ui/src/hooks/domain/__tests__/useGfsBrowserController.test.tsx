@@ -560,7 +560,12 @@ describe('useGfsBrowserController', () => {
         permissions: ['read'],
       }),
     ])
-    const currentEnvironmentPage = await listAccessiblePage([])
+    const currentEnvironmentPage = await listAccessiblePage([
+      accessibleResource('current-environment-file', 'Current environment file', 'file', {
+        sources: ['grant'],
+        permissions: ['read'],
+      }),
+    ])
     const otherDrivePage = await listAccessiblePage([
       accessibleResource('other-drive-file', 'Other drive file', 'file', {
         sources: ['grant'],
@@ -633,7 +638,8 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(2)
       expect(screen.getByTestId('session-scope').textContent).toBe('env-b:user-a:team-a')
-      expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+      expect(screen.getByTestId('accessible-count').textContent).toBe('1')
+      expect(screen.getByRole('button', { name: 'open Current environment file' })).toBeTruthy()
     })
 
     const otherDriveKey = desktopQueryKeys.gfsAccessible('env-b:user-a:team-a', 'secondary')
@@ -650,7 +656,8 @@ describe('useGfsBrowserController', () => {
 
     await act(async () => resolveOldEnvironment(previousEnvironmentPage))
     expect(screen.getByTestId('session-scope').textContent).toBe('env-b:user-a:team-a')
-    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('1')
+    expect(screen.getByRole('button', { name: 'open Current environment file' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'open Old environment file' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'open Other drive file' })).toBeNull()
     expect(lastHarnessQueryClient?.getQueryData(currentMainKey)).toEqual({
@@ -666,7 +673,12 @@ describe('useGfsBrowserController', () => {
         permissions: ['read'],
       }),
     ])
-    const currentTeamPage = await listAccessiblePage([])
+    const currentTeamPage = await listAccessiblePage([
+      accessibleResource('current-team-file', 'Current team file', 'file', {
+        sources: ['grant'],
+        permissions: ['read'],
+      }),
+    ])
     let resolvePreviousTeam!: (page: typeof previousTeamPage) => void
     const previousTeamRequest = new Promise<typeof previousTeamPage>(resolve => {
       resolvePreviousTeam = resolve
@@ -706,11 +718,13 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(2)
       expect(screen.getByTestId('session-scope').textContent).toBe(':user-a:team-b')
-      expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+      expect(screen.getByTestId('accessible-count').textContent).toBe('1')
+      expect(screen.getByRole('button', { name: 'open Current team file' })).toBeTruthy()
     })
 
     await act(async () => resolvePreviousTeam(previousTeamPage))
-    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('1')
+    expect(screen.getByRole('button', { name: 'open Current team file' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'open Previous team file' })).toBeNull()
     expect(lastHarnessQueryClient?.getQueryData(currentTeamKey)).toEqual({
       pages: [currentTeamPage],
