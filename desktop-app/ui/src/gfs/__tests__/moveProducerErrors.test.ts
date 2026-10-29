@@ -14,7 +14,7 @@ import {
   resolvedFile,
 } from '../__fixtures__/gfsProducerFixtures'
 import { commitGfsMove, toastMoveOutcome } from '../moveCommit'
-import type { MoveCommitPlan } from '../moveCommit'
+import type { MoveCommitPlan, MoveCommitSourceSnapshot } from '../moveCommit'
 
 const sourceId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const destinationId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
@@ -217,10 +217,14 @@ describe('real move producer verdicts (R1-M3)', () => {
       const snapshot = await resolveResource(
         resolvedFile(sourceId, 'report.md', { parentResourceId: oldParentId, version: 7 })
       )
+      if (snapshot.kind !== 'file') {
+        throw new Error(`Expected file source snapshot, received ${snapshot.kind}`)
+      }
+      const sourceSnapshot: MoveCommitSourceSnapshot = { ...snapshot, kind: 'file' }
       let resolveCalls = 0
       const resolveSource = vi.fn(async () => {
         resolveCalls += 1
-        if (resolveCalls === 1) return snapshot
+        if (resolveCalls === 1) return sourceSnapshot
         throw new Error(verificationFailure)
       })
       const moveResource = vi.fn(async () => {
