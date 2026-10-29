@@ -1731,7 +1731,8 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       resolve,
       moveResource,
     })
-    const { pushToast } = renderTreeWithSession()
+    const pushToast = vi.fn<NonNullable<Parameters<typeof FileExplorerTree>[0]['pushToast']>>()
+    renderTreeWithSession({ pushToast })
 
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
