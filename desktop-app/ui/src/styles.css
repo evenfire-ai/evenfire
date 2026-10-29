@@ -13735,6 +13735,14 @@ pre {
   overflow: hidden;
 }
 
+/* Keep the conversation rail's motion to a direct horizontal slide. Ant
+   Drawer defaults to transitioning every property, including opacity and size. */
+.chat-drawer .ant-drawer-content-wrapper.ant-drawer-panel-motion-right-enter-active,
+.chat-drawer .ant-drawer-content-wrapper.ant-drawer-panel-motion-right-appear-active,
+.chat-drawer .ant-drawer-content-wrapper.ant-drawer-panel-motion-right-leave-active {
+  transition: transform var(--motion-medium);
+}
+
 /* Open-chats selector in the drawer header — a thin dropdown over chatViewTabs.
    The narrow drawer column can't host a horizontal tab strip, so the switcher
    lists chats vertically with their status badge. */
