@@ -197,7 +197,7 @@ jobs:
           Write-Output "Full Desktop shard $shard command exit code: $testExit"
           if (-not (Test-Path $reportPath)) { throw "Full Desktop shard report is missing: $shard" }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-          Write-Output "Shard $shard: files=$($report.numTotalTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          Write-Output "Shard ${shard}: files=$($report.numTotalTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
           if ($testExit -ne 0 -or -not $report.success -or $report.numTotalTestSuites -le 0 -or $report.numTotalTests -le 0) {
             throw "Full Desktop shard failed or executed no tests: $shard"
           }
