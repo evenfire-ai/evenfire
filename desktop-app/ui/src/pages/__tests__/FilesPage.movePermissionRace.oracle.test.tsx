@@ -20,6 +20,7 @@ import {
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import {
+  affordancesApiError,
   appServiceAffordanceProducer,
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
@@ -106,6 +107,130 @@ afterEach(() => {
 })
 
 describe('FilesPage Move permission generation fencing', () => {
+  it('retries Move authority without dispatching a Move (R4-L2)', async () => {
+    const rows = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        path: '/Archive',
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const children = await listChildrenPage([
+      childView('folder-src', 'Projects', 'directory', {
+        parentResourceId: 'source-parent',
+        path: '/Team/Projects',
+        version: 7,
+      }),
+    ])
+    const sourceParent = await resolveResource(
+      resolvedDirectory('source-parent', 'Team', { gfsUri: 'gfs://main/source-parent' })
+    )
+    const resolvedSource = await resolveResource(
+      resolvedDirectory('folder-src', 'Projects', {
+        parentResourceId: 'source-parent',
+        path: '/Team/Projects',
+        version: 7,
+      })
+    )
+    const resolvedArchive = await resolveResource(
+      resolvedDirectory('destination-1', 'Archive', {
+        parentResourceId: 'source-parent',
+        path: '/Team/Archive',
+        version: 4,
+      })
+    )
+    const temporaryFailure = await affordancesApiError(
+      500,
+      { code: 'upstream_unavailable', message: 'permission service unavailable' },
+      'source-parent'
+    )
+    let failNextSourceParentRead = false
+    let sourceParentReads = 0
+    let destinationReads = 0
+    const produceAffordances = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === 'source-parent') {
+        sourceParentReads += 1
+        if (failNextSourceParentRead) {
+          failNextSourceParentRead = false
+          throw temporaryFailure
+        }
+        return heldPermissionResponse(['read', 'write', 'delete'])
+      }
+      if (resourceId === 'destination-1') {
+        destinationReads += 1
+        return heldPermissionResponse(['read', 'write', 'delete'])
+      }
+      return heldPermissionResponse(['read', 'write'])
+    })
+    const affordances = vi.fn((resourceId: string, drive?: string) =>
+      produceAffordances(resourceId, drive)
+    )
+    const moveReceipt = await moveResourceReceipt('folder-src', 'destination-1', 8)
+    const moveResource = vi.fn(async () => moveReceipt)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => rows),
+          listChildren: vi.fn(async (resourceId: string) =>
+            resourceId === 'source-parent' ? children : listChildrenPage([])
+          ),
+          affordances,
+          resolve: vi.fn(async (uri: string) =>
+            uri.endsWith('/source-parent')
+              ? sourceParent
+              : uri.endsWith('/foldersrc') || uri.endsWith('/folder-src')
+                ? resolvedSource
+                : resolvedArchive
+          ),
+          moveResource,
+        },
+      },
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(
+        <AuthContext.Provider value={authFor('team-a')}>
+          <QueryClientProvider client={queryClient}>
+            <ToastingFilesPage pendingGfsUri="gfs://main/source-parent" />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Options for Projects' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects' })
+      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      const confirmMove = within(dialog).getByRole('button', { name: 'Move here (Archive)' })
+
+      failNextSourceParentRead = true
+      const readsBeforeFailure = sourceParentReads
+      fireEvent.click(confirmMove)
+      await waitFor(() => {
+        expect(sourceParentReads).toBeGreaterThan(readsBeforeFailure)
+        expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+      })
+      expect(moveResource).not.toHaveBeenCalled()
+
+      const readsBeforeRetry = sourceParentReads
+      const destinationsBeforeRetry = destinationReads
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+      await waitFor(() => {
+        expect(
+          within(dialog).queryByText('Permissions verified. Select Move to confirm.') ||
+            moveResource.mock.calls.length > 0 ||
+            !screen.queryByRole('dialog', { name: 'Move folder Projects' })
+        ).toBeTruthy()
+      })
+      expect(sourceParentReads).toBeGreaterThan(readsBeforeRetry)
+      expect(destinationReads).toBeGreaterThan(destinationsBeforeRetry)
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(within(dialog).getByText('Permissions verified. Select Move to confirm.')).toBeTruthy()
+    } finally {
+      queryClient.clear()
+    }
+  })
+
   it.each([
     { dialog: 'closed' as const, outcome: 'success' as const },
     { dialog: 'closed' as const, outcome: 'failure' as const },
