@@ -52,6 +52,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   const handleRemoveComposerReferenceAttachment = useStableCallback(
     vm.handleRemoveComposerReferenceAttachment
   )
+  const handleClearComposerAttachments = useStableCallback(vm.handleClearComposerAttachments)
   const handleSendAgentMessage = useStableCallback(vm.handleSendAgentMessage)
   const handleRetryFailedAgentSend = useStableCallback(vm.handleRetryFailedAgentSend)
   const handleRecoverFailedAgentSend = useStableCallback(vm.handleRecoverFailedAgentSend)
@@ -76,6 +77,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleRemoveComposerFileAttachment,
       handleAddComposerReferenceAttachments,
       handleRemoveComposerReferenceAttachment,
+      handleClearComposerAttachments,
       handleSendAgentMessage,
       handleRetryFailedAgentSend,
       handleRecoverFailedAgentSend,
@@ -99,6 +101,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleRemoveComposerFileAttachment,
       handleAddComposerReferenceAttachments,
       handleRemoveComposerReferenceAttachment,
+      handleClearComposerAttachments,
       handleSendAgentMessage,
       handleRetryFailedAgentSend,
       handleRecoverFailedAgentSend,

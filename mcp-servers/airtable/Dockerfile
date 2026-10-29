@@ -1,5 +1,5 @@
 # --- Build stage ---
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ RUN npm run build
 RUN npm prune --production
 
 # --- Release stage ---
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 
 # Security: run as non-root user
 RUN addgroup -S mcp && adduser -S mcp -G mcp

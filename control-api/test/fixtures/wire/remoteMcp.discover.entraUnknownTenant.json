@@ -1,0 +1,12 @@
+{
+  "status": 424,
+  "body": {
+    "error": "discovery_failed",
+    "detail": {
+      "kind": "fetch_failed",
+      "url": "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0/.well-known/openid-configuration",
+      "status": 400,
+      "detail": "HTTP 400"
+    }
+  }
+}

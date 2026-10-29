@@ -13,6 +13,8 @@ export type GfsResourceMenuProps = {
   onOpenChange?: (open: boolean) => void
   onPreview?: () => void
   onDownload?: () => void
+  /** Recursive folder export as a single zip archive (BUG-175). */
+  onDownloadZip?: () => void
   onRename?: () => void
   onReplace?: (file: File) => void
   /** Open the move-to-folder flow. Move authority is parent-relative and

@@ -36,9 +36,69 @@ jobs:
             exit 1
           fi
 
+  node-runtime-images:
+    name: Node image runtime (${{ matrix.variant.name }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        variant:
+          - name: host-alpine
+            dockerfile: mcp-host/Dockerfile
+            context: .
+            host: true
+          - name: host-slim
+            dockerfile: mcp-host/Dockerfile.slim
+            context: .
+            host: true
+          - name: host-full
+            dockerfile: mcp-host/Dockerfile.full
+            context: .
+            host: true
+          - name: host-desktop
+            dockerfile: mcp-host/Dockerfile.desktop
+            context: .
+            host: true
+          - name: playwright-test
+            dockerfile: mcp-servers/playwright/Dockerfile
+            context: mcp-servers/playwright
+          - name: reference-hook
+            dockerfile: hooks/reference-guardrail-hook/Dockerfile
+            context: hooks/reference-guardrail-hook
+          - name: sandbox-ui
+            dockerfile: workflow-recipes/samples/sandbox-ui-test-harness/Dockerfile
+            context: workflow-recipes/samples/sandbox-ui-test-harness
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the final runtime image
+        run: timeout 2400 docker build --pull -f '${{ matrix.variant.dockerfile }}' -t runtime-smoke '${{ matrix.variant.context }}'
+      - name: Verify the effective Node runtime
+        run: |
+          actual=$(timeout 30 docker run --rm --network none --entrypoint node runtime-smoke -p 'process.versions.node')
+          printf 'NODE_RUNTIME=%s\n' "$actual"
+          test "$actual" = "$(tr -d '[:space:]' < .nvmrc)"
+      - name: Verify Host native modules and default SDK transport
+        if: matrix.variant.host == true
+        run: |
+          timeout 60 docker run --rm -i --network none --entrypoint node --workdir /app/mcp-host runtime-smoke --input-type=commonjs < mcp-host/test/image-runtime-smoke.cjs
+
+      - name: Verify patched test Playwright with a real browser session
+        if: matrix.variant.name == 'playwright-test'
+        run: |
+          docker image inspect runtime-smoke --format '{{.Id}}'
+          timeout 90 docker run --rm -i --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --memory=1g --cpus=1 --entrypoint node --workdir /app runtime-smoke --input-type=commonjs < mcp-servers/playwright/test/runtime-smoke.cjs
+
+      - name: Verify HTTP payloads in the upgraded fixture images
+        if: matrix.variant.name == 'reference-hook' || matrix.variant.name == 'sandbox-ui'
+        run: timeout 45 docker run --rm -i --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --memory=256m --cpus=1 --entrypoint node runtime-smoke --input-type=commonjs - '${{ matrix.variant.name }}' < scripts/tests/http-fixture-image-smoke.cjs
+
   test:
     name: Build / test / typecheck (${{ matrix.service }})
-    runs-on: ubuntu-latest
+    # Pinned: Playwright 1.58 cannot install Chromium on ubuntu-26.04, which
+    # ubuntu-latest moves to from 2026-10-19. Unpin once Playwright supports it.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -99,7 +159,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
 
@@ -287,7 +347,7 @@ jobs:
         timeout-minutes: 10
         run: |
           node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 300 --heartbeat-seconds 20 --kill-grace-seconds 5 --label web-search-ci-image-build -- \
-            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24-alpine -t issue198-ci-image:test .
+            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24.22.1-alpine -t issue198-ci-image:test .
           web_search_image_id="$(node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 10 --heartbeat-seconds 5 --kill-grace-seconds 5 --label web-search-ci-image-inspect -- \
             docker image inspect issue198-ci-image:test --format '{{.Id}}')"
           node test/run-network.mjs --image "$web_search_image_id"
@@ -386,7 +446,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: control-api/package-lock.json
 
@@ -495,6 +555,8 @@ jobs:
             services.adminSubscriptionRateLimitMigration.realPostgres.integration.test.ts \
             pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts \
             entityChangeFeed.realPostgres.integration.test.ts \
+            routes.mcp-host.renewal.realPostgres.integration.test.ts \
+            routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts
 
       - name: Install gfs-controller dependencies
@@ -545,7 +607,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: control-ui/package-lock.json
       - name: Install frontend components dependencies
@@ -560,6 +622,12 @@ jobs:
       - name: Build (next build — typecheck + lint + compile)
         working-directory: control-ui
         run: npm run build
+      - name: Build Control UI image builder stage
+        # The next build above runs in the full checkout, where an import that
+        # leaves the image's Docker context (for example into control-api/)
+        # still resolves. Build & Publish builds the image only after a merge
+        # to dev, so build the same context here to fail the PR instead.
+        run: timeout 900s docker build --target builder -f control-ui/Dockerfile .
 
   e2e-vitest-node-unit:
     name: E2E Vitest node-unit (tests/e2e)
@@ -568,7 +636,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: tests/e2e/package-lock.json
       - name: Run descriptor-bound fixture unit suites
@@ -629,7 +697,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.token_check.outputs.skip != 'true'
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: 'npm'
           cache-dependency-path: |
             workflow-recipes/package-lock.json
@@ -688,7 +756,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
 
       - name: Run bash -n on all .sh files
         run: |
@@ -701,6 +769,9 @@ jobs:
             fi
           done < <(find deploy/scripts scripts -type f -name '*.sh' 2>/dev/null)
           exit $fail
+
+      - name: Verify Node security version policy
+        run: node --test scripts/tests/node-runtime-version.test.mjs
 
       - name: Validate governed tracing operations gate orchestration
         run: bash scripts/tests/test-governed-tracing-operations-gate.sh
@@ -926,10 +997,43 @@ jobs:
   nginx-image-guard:
     name: Validate platform NGINX images
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run NGINX image guard
         run: bash scripts/validate-nginx-images.sh
+      - name: Test NGINX image guard
+        run: bash scripts/tests/test-validate-nginx-images.sh
+      - name: Test NGINX digest verifier
+        run: bash scripts/tests/test-verify-nginx-image-digests.sh
+      - name: Verify pinned NGINX digests against the registry
+        env:
+          NGINX_REGISTRY_MIRROR: mirror.gcr.io
+        run: bash scripts/verify-nginx-image-digests.sh
+
+  # ─── Remote MCP egress proxy TLS contract (native amd64 + arm64) ──────────
+  nginx-egress-proxy-tls:
+    name: Egress proxy TLS (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: host-context-controller/package-lock.json
+      - name: Install host-context-controller dependencies
+        working-directory: host-context-controller
+        run: npm ci
+      - name: Run egress proxy TLS contract
+        env:
+          NGINX_REGISTRY_MIRROR: mirror.gcr.io
+        run: bash scripts/tests/test-nginx-egress-proxy-tls.sh
 
   # ─── Cf-Access header-read guard ──────────────────────────────────────────
   cf-access-header-guard:

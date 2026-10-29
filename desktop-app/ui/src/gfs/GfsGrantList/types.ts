@@ -42,6 +42,8 @@ export interface GfsGrantListProps {
    * claim is suppressed while this is set.
    */
   derivationNotice?: string | null
+  /** Native tooltip explaining the notice in plain language. */
+  derivationNoticeHint?: string | null
   /**
    * Mapped list-load failure. Severity 'quiet' (manage_acl_required) renders an
    * informational banner instead of the list; 'error' renders an error banner.

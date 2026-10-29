@@ -268,3 +268,43 @@ export function describeGfsGrantError(error: unknown): GfsGrantErrorPresentation
     severity: 'error',
   }
 }
+
+const SESSION_AUTHORITY_ERROR_CODES = [
+  'desktop_user_retired',
+  'operator_link_inactive',
+  'operator_link_invalid',
+  'gfs_operator_link_invalid',
+] as const
+
+/**
+ * Only a session/authorization failure may invalidate the browser's
+ * session-local access state. Per-resource policy verdicts such as
+ * `manage_acl_required`, `escalation_rejected`, and `foreign_agent_forbidden`
+ * are expected 403s and must remain local to the attempted operation.
+ *
+ * - `discovery` (listAccessible): the shared-with-me listing is
+ *   permission-derived session state, so a 401/403 there is an authority
+ *   verdict and fails closed.
+ * - `operation` (children/affordances/grants/shares/resolve): a generic 403
+ *   is usually a resource-policy denial and must NOT clear the session; only
+ *   a bare 401 or a typed lifecycle code does.
+ */
+export function isGfsSessionAuthorityFailure(
+  message: string,
+  surface: 'discovery' | 'operation' = 'operation'
+): boolean {
+  const normalized = message.toLowerCase()
+  if (SESSION_AUTHORITY_ERROR_CODES.some(code => normalized.includes(code))) return true
+  if (surface !== 'discovery') {
+    return (
+      /(^|\D)401(\D|$)/.test(normalized) ||
+      normalized.includes('not authenticated') ||
+      normalized.includes('unauthenticated')
+    )
+  }
+  return (
+    /(^|\D)(401|403)(\D|$)/.test(normalized) ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('forbidden')
+  )
+}

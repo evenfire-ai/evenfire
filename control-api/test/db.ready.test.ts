@@ -7,13 +7,33 @@ const CODEX_MULTI_CONNECTION_MIGRATION = '0101_codex_multi_connection'
 
 describe('assertDbReady', () => {
   it('accepts a database that recorded every registered migration', async () => {
-    const query = vi.fn().mockResolvedValue({
-      rows: CONTROL_API_MIGRATIONS.map(migration => ({ version: migration.version })),
-      rowCount: CONTROL_API_MIGRATIONS.length,
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('password_admission_rollout_is_ready')) {
+        return { rows: [{ ready: true }], rowCount: 1 }
+      }
+      return {
+        rows: CONTROL_API_MIGRATIONS.map(migration => ({ version: migration.version })),
+        rowCount: CONTROL_API_MIGRATIONS.length,
+      }
     })
 
     await expect(assertDbReady({ query })).resolves.toBeUndefined()
     expect(query).toHaveBeenCalledWith(expect.stringContaining('schema_migrations'))
+  })
+
+  it('fails closed when the success-admission rollout fence is not ready', async () => {
+    const query = vi.fn(async (sql: string) =>
+      sql.includes('password_admission_rollout_is_ready')
+        ? { rows: [{ ready: false }], rowCount: 1 }
+        : {
+            rows: CONTROL_API_MIGRATIONS.map(migration => ({ version: migration.version })),
+            rowCount: CONTROL_API_MIGRATIONS.length,
+          }
+    )
+
+    await expect(assertDbReady({ query })).rejects.toThrow(
+      'password admission rollout is not ready'
+    )
   })
 
   it('fails closed when the latest migration is absent', async () => {

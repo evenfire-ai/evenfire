@@ -69,7 +69,7 @@ if [ "${#package_dirs[@]}" -gt 0 ]; then
   for package in "${package_dirs[@]}"; do
     # Live Vitest/Playwright E2E is the T2 opt-in lane. T0 is unit/build only.
     case "$package" in
-      tests/e2e|tests/e2e/*)
+      tests/e2e|tests/e2e/*|*/tests/e2e|*/tests/e2e/*)
         printf '[minikube-t0] affected package: %s skipped (live E2E is T2)\n' "$package"
         continue
         ;;

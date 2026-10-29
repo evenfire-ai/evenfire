@@ -15,7 +15,7 @@ function uiPolicyFixture() {
     kind: 'WorkflowRecipe',
     metadata: { name: 'ui-metadata', namespace: config.sandboxNamespace, uid: 'recipe-uid' },
     spec: {
-      workloads: [{ id: 'backend', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+      workloads: [{ id: 'backend', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 8080 }],
       ui: {
         workloadRef: 'backend',
         port: 8080,

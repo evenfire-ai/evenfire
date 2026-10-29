@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { assertNodeVersion } from '../../check-node-version.cjs'
 
 export class RunnerAdmissionError extends Error {
   constructor(code) {
@@ -368,7 +369,11 @@ export function verifyAccount(passwd, uid, gid, home, username) {
 export function observeLinuxRunner() {
   if (process.platform !== 'linux' || !integer(process.getuid?.()) || !integer(process.getgid?.()))
     refuse('NONROOT_LINUX_REQUIRED')
-  if (Number(process.versions.node.split('.')[0]) !== 24) refuse('NODE24_REQUIRED')
+  try {
+    assertNodeVersion(process.versions.node, { major: 24 })
+  } catch {
+    refuse('NODE24_REQUIRED')
+  }
   const user = os.userInfo(),
     home = fs.realpathSync(user.homedir)
   verifyAccount(

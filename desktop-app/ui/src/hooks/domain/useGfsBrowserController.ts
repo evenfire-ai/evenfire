@@ -9,13 +9,26 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
+import { applyMoveConvergence } from '@lib/gfsEntityChangeState'
 import {
   describeGfsReadError,
+  isGfsSessionAuthorityFailure,
   isRateLimited,
   parseHttpStatus,
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
-import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
+import {
+  type GfsOpenLocationRegistry,
+  ancestryDependentGfsResourceIds,
+  nextGfsOpenLocationId,
+  publishGfsOpenLocation,
+  readGfsOpenLocations,
+} from '@lib/gfsOpenLocations'
+import type {
+  GfsGrantListItem,
+  GfsInheritedAccessResult,
+  GfsShareListItem,
+} from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
 import { desktopQueryKeys } from './queryKeys'
 
@@ -257,45 +270,7 @@ function classifyDiscoveryFailure(message: string): GfsDiscoveryFailureKind {
  */
 const UNKNOWN_RATE_LIMIT_PAUSE_MS = 60_000
 
-const SESSION_AUTHORITY_ERROR_CODES = [
-  'desktop_user_retired',
-  'operator_link_inactive',
-  'operator_link_invalid',
-  'gfs_operator_link_invalid',
-] as const
-
-/**
- * Only a session/authorization failure may invalidate the browser's
- * session-local access state. Per-resource policy verdicts such as
- * `manage_acl_required`, `escalation_rejected`, and `foreign_agent_forbidden`
- * are expected 403s and must remain local to the attempted operation.
- *
- * - `discovery` (listAccessible): the shared-with-me listing is
- *   permission-derived session state, so a 401/403 there is an authority
- *   verdict and fails closed.
- * - `operation` (children/affordances/grants/shares/resolve): a generic 403
- *   is usually a resource-policy denial and must NOT clear the session; only
- *   a bare 401 or a typed lifecycle code does.
- */
-export function isGfsSessionAuthorityFailure(
-  message: string,
-  surface: 'discovery' | 'operation' = 'operation'
-): boolean {
-  const normalized = message.toLowerCase()
-  if (SESSION_AUTHORITY_ERROR_CODES.some(code => normalized.includes(code))) return true
-  if (surface !== 'discovery') {
-    return (
-      /(^|\D)401(\D|$)/.test(normalized) ||
-      normalized.includes('not authenticated') ||
-      normalized.includes('unauthenticated')
-    )
-  }
-  return (
-    /(^|\D)(401|403)(\D|$)/.test(normalized) ||
-    normalized.includes('unauthorized') ||
-    normalized.includes('forbidden')
-  )
-}
+export { isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 
 export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
   const { grantsListEnabled = false } = options
@@ -371,6 +346,53 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
     [queryClient, sessionScope]
   )
+
+  // The open location is CLIENT state, not server state: it records which
+  // resource this mount has open and the ancestry this mount observed. It is
+  // published through the query cache so EVERY mount sees it — a move
+  // committed by the sidebar must be able to tell that it changes what the
+  // Files page's open Share/Manage dialog inherits (RP-005).
+  //
+  // The subscription exists only to keep the cache entry alive: an
+  // unobserved entry is garbage-collected while the app is idle, and the
+  // registry would silently empty itself. `notifyOnChangeProps: []` keeps
+  // another mount's publish from re-rendering this one — the registry is
+  // read imperatively, never rendered.
+  useQuery({
+    queryKey: desktopQueryKeys.gfsOpenLocations(sessionScope ?? 'anonymous'),
+    queryFn: async () => ({}) as GfsOpenLocationRegistry,
+    enabled: false,
+    initialData: {} as GfsOpenLocationRegistry,
+    gcTime: Infinity,
+    staleTime: Infinity,
+    notifyOnChangeProps: [],
+  })
+  // One identity per controller mount: the registry holds an entry per
+  // mount, and a mount that navigates replaces only its own entry.
+  const openLocationIdRef = useRef<string | null>(null)
+  if (openLocationIdRef.current === null) openLocationIdRef.current = nextGfsOpenLocationId()
+  const openLocationId = openLocationIdRef.current
+  useEffect(() => {
+    if (!sessionScope) return
+    // The ancestry this mount observed is the trail it loaded. Crumbs are
+    // ROOT-FIRST, so publishing them reverses them into the registry's
+    // NEAREST-FIRST contract — the order the relocation helper slices from
+    // the nearest end. A revoked session has no open location to claim.
+    const location =
+      accessState === 'active' && current
+        ? {
+            resourceId: current.resourceId,
+            ancestorResourceIds: crumbs
+              .slice(0, -1)
+              .map(crumb => crumb.resourceId)
+              .reverse(),
+          }
+        : null
+    publishGfsOpenLocation(queryClient, sessionScope, openLocationId, location)
+    return () => {
+      publishGfsOpenLocation(queryClient, sessionScope, openLocationId, null)
+    }
+  }, [accessState, crumbs, current?.resourceId, openLocationId, queryClient, sessionScope])
 
   useEffect(() => {
     const previous = previousSessionScopeRef.current
@@ -522,11 +544,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
   // Inherited access (ancestor folders' inheriting grants/shares) is derived
-  // client-side because the grants/shares GETs list only direct rows. Only
-  // FILE dialogs consume the derivation — folder dialogs keep their
-  // direct-only behavior. A derivation failure only means no inherited rows
-  // render — the direct grants/shares surfaces keep their own error
-  // reporting. Gated to the Manage dialog like the direct listings.
+  // client-side because the grants/shares GETs list only direct rows. FILES
+  // AND FOLDERS consume the derivation (the walk is kind-agnostic). A stop is
+  // reported as coverage (R1-H3): rows folded before the stop are retained
+  // with `inheritedCoverage` telling the dialog which notice to show; only a
+  // raw session 401 (or a throw the walk cannot classify) reaches
+  // `inheritedAccessError`. Gated to the Manage dialog like the direct
+  // listings.
   const inheritedAccessQuery = useQuery({
     queryKey: desktopQueryKeys.gfsInheritedAccess(
       sessionScope ?? 'anonymous',
@@ -535,10 +559,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     ),
     queryFn: () => deriveGfsInheritedAccess(current!.resourceId, DRIVE),
     enabled:
-      Boolean(sessionScope) &&
-      current?.kind === 'file' &&
-      grantsListEnabled &&
-      accessState === 'active',
+      Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
+    // An 'unavailable' coverage is a FAILED walk, not an observation: a
+    // transient ancestor failure would otherwise be cached forever under the
+    // app's Infinity staleTime and reopening Share would keep showing the
+    // failure as if it were authoritative. Such a result stays stale, so
+    // reopening the dialog retries the walk. A complete observation keeps
+    // the app's normal policy (cached until something invalidates it).
+    staleTime: query =>
+      (query.state.data as GfsInheritedAccessResult | undefined)?.coverage === 'unavailable'
+        ? 0
+        : Infinity,
   })
   const refreshShares = useCallback(async () => {
     const resourceId = current?.resourceId
@@ -843,6 +874,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     sharesQuery.error
       ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
       : null,
+    inheritedAccessQuery.error
+      ? { message: toMessage(inheritedAccessQuery.error), surface: 'operation' as const }
+      : null,
   ]
     .filter(
       (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
@@ -883,9 +917,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [authorityPending, sharesQuery.data]
   )
   const inheritedAccess = useMemo(
-    () => (authorityPending || accessState === 'revoked' ? [] : (inheritedAccessQuery.data ?? [])),
+    () =>
+      authorityPending || accessState === 'revoked' ? [] : (inheritedAccessQuery.data?.items ?? []),
     [accessState, authorityPending, inheritedAccessQuery.data]
   )
+  // R1-H3: coverage of the walk that produced `inheritedAccess` (null while
+  // never loaded). The scope/revoked guard above intentionally does NOT apply:
+  // coverage describes the observation, and a revoked session empties the
+  // rows through that guard instead.
+  const inheritedCoverage = inheritedAccessQuery.data?.coverage ?? null
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
   // The timestamp is a dependency in its own right, not decoration. It is the
   // only thing that distinguishes two consecutive failures carrying the same
@@ -1109,26 +1149,105 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [current?.gfsUri, openUri]
   )
 
-  // Move refreshes the old parent's children, the destination's children,
-  // and the accessible roots in one shot via refreshGfs. The moved resource's
-  // id does not change, but its version does, and when the OPEN folder (or
-  // file) itself moved, its breadcrumb trail is stale: the ancestors above it
+  // The OPEN resource's inherited access is derived from its ANCESTRY. A move
+  // of that resource — or of one of its ancestors — changes what it
+  // inherits, so an open Share/Manage dialog must re-read those rows instead
+  // of showing the pre-move observation.
+  //
+  // The ancestry is read from the SHARED open-location registry, not from
+  // this mount's own crumbs: the dialog that shows those rows can live in
+  // ANOTHER controller (the Files page) while the move is committed by this
+  // one (the sidebar). Controller-local crumbs only ever proved the chain
+  // this mount observed, and a resource opened by URI has ancestors that no
+  // children cache ever listed (RP-005).
+  const openAncestryDependentResourceIds = useCallback(
+    (movedResourceId: string): string[] => {
+      if (!sessionScope) return []
+      return ancestryDependentGfsResourceIds(
+        readGfsOpenLocations(queryClient, sessionScope),
+        movedResourceId
+      )
+    },
+    [queryClient, sessionScope]
+  )
+
+  // Move refreshes through the shared convergence planner (rev-2 §6): the
+  // receipt selectively invalidates the old/new parent children listings and
+  // accessible roots, and marks the moved resource plus its KNOWN cached
+  // descendants' permission data stale-on-entry. The moved resource's id does
+  // not change, but its version does, and when the OPEN folder (or file)
+  // itself moved, its breadcrumb trail is stale: the ancestors above it
   // belong to the old location. Consume the returned version immediately and
   // reconcile navigation to the new location (resolve + ancestor walk) so a
   // follow-up Rename/Delete/Move runs with the post-move version, not the
   // pre-move one (which would 409 on ifMatch).
-  const moveResourceMutation = useMutation({
-    mutationFn: (input: { resourceId: string; destinationId: string; ifMatch?: number }) =>
-      window.clerum.gfs.moveResource(input.resourceId, input.destinationId, DRIVE, input.ifMatch),
-    onSuccess: async (receipt, input) => {
+  //
+  // The convergence is a named step because it has TWO entry points: the
+  // mutation's success path, and the transport-loss path where the PATCH
+  // landed but its response never arrived (the mutation rejected, so its
+  // success path never ran — without this the item kept rendering in the old
+  // folder until the next navigation).
+  const convergeCommittedMove = useCallback(
+    async (
+      input: {
+        resourceId: string
+        destinationId: string
+        newName?: string
+        oldParentId?: string | null
+      },
+      receipt: { version: number }
+    ) => {
       const movedCrumb = crumbs.find(crumb => crumb.resourceId === input.resourceId)
       setCrumbs(prev =>
         prev.map(crumb =>
-          crumb.resourceId === input.resourceId ? { ...crumb, version: receipt.version } : crumb
+          crumb.resourceId === input.resourceId
+            ? {
+                ...crumb,
+                version: receipt.version,
+                ...(input.newName !== undefined ? { name: input.newName } : {}),
+              }
+            : crumb
         )
       )
-      await refreshGfs()
+      if (sessionScope) {
+        applyMoveConvergence(
+          queryClient,
+          sessionScope,
+          DRIVE,
+          {
+            resourceId: input.resourceId,
+            oldParentId: input.oldParentId ?? null,
+            newParentId: input.destinationId,
+          },
+          {
+            ancestryDependentResourceIds: openAncestryDependentResourceIds(input.resourceId),
+          }
+        )
+      } else {
+        await refreshGfs()
+      }
       if (movedCrumb) await openUri(movedCrumb.gfsUri)
+    },
+    [crumbs, openAncestryDependentResourceIds, openUri, queryClient, refreshGfs, sessionScope]
+  )
+
+  const moveResourceMutation = useMutation({
+    mutationFn: (input: {
+      resourceId: string
+      destinationId: string
+      ifMatch?: number
+      newName?: string
+      oldParentId?: string | null
+    }) =>
+      window.clerum.gfs.moveResource(
+        input.resourceId,
+        input.destinationId,
+        DRIVE,
+        input.ifMatch,
+        input.newName
+      ),
+    onSuccess: async (receipt, input) => {
+      await convergeCommittedMove(input, receipt)
     },
     onError: failClosedOnMutationError,
   })
@@ -1334,16 +1453,18 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     sharesError: sharesQuery.error,
     loadingShares: sharesQuery.isFetching,
     refreshShares,
-    // Client-derived ancestor access for FILE Manage dialogs: normal-looking
-    // toggleable rows whose edits route through the parent-folder
-    // confirmation. Per-ancestor failures inside the derivation stay silent;
-    // a total failure is reported through inheritedAccessError.
+    // Client-derived ancestor access for FILE AND FOLDER Manage dialogs:
+    // normal-looking toggleable rows whose edits route through the
+    // parent-folder confirmation. Rows folded before a walk stop are always
+    // retained (R1-H3); the stop itself is reported through
+    // inheritedCoverage/inheritedAccessError.
     inheritedAccess,
+    inheritedCoverage,
     loadingInheritedAccess: inheritedAccessQuery.isFetching,
-    // A TOTAL derivation failure surfaces as this message; the Share dialog
-    // renders a quiet notice because "no inherited rows" would silently read
-    // as "no one else has access". Per-ancestor best-effort skipping stays
-    // silent by design.
+    // Only an UNCLASSIFIED throw (today: a raw session 401) surfaces here; the
+    // dialog renders a quiet notice because "no inherited rows" would silently
+    // read as "no one else has access". Walk stops with classified coverage
+    // are reported through inheritedCoverage instead.
     inheritedAccessError: inheritedAccessQuery.error ? toMessage(inheritedAccessQuery.error) : null,
     refreshInheritedAccess,
     revokeShare: (shareId: string) => revokeShareMutation.mutateAsync(shareId),
@@ -1360,10 +1481,28 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       replaceFileFromPathMutation.mutateAsync({ resourceId, filePath, ifMatch }),
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
-    moveResource: (resourceId: string, destinationId: string, ifMatch?: number) =>
-      moveResourceMutation.mutateAsync({ resourceId, destinationId, ifMatch }),
+    moveResource: (
+      resourceId: string,
+      destinationId: string,
+      ifMatch?: number,
+      newName?: string,
+      oldParentId?: string | null
+    ) =>
+      moveResourceMutation.mutateAsync({
+        resourceId,
+        destinationId,
+        ifMatch,
+        newName,
+        oldParentId,
+      }),
     deleteResource: (resourceId: string, ifMatch?: number) =>
       deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),
+    /**
+     * Convergence for a move that landed without a receipt (transport loss):
+     * the mutation rejected, so its success path never ran, and the item would
+     * otherwise keep rendering in the old folder until the next navigation.
+     */
+    convergeCommittedMove,
     mutating:
       createFolderMutation.isPending ||
       createFileMutation.isPending ||

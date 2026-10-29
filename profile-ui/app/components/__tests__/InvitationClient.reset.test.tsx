@@ -95,6 +95,23 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('InvitationClient verified password recovery', () => {
+  it('omits the expiry notice when the invitation timestamp is invalid', () => {
+    render(
+      <InvitationClient
+        invitationToken="invalid-expiry-proof"
+        initialInvitation={{
+          ...passwordReset,
+          purpose: 'member_invitation',
+          expiresAt: 'not-a-date',
+        }}
+        initialError=""
+      />
+    )
+
+    expect(screen.queryByText('This invitation will expire in 48 hours.')).toBeNull()
+    expect(screen.queryByText('This invitation will expire in .')).toBeNull()
+  })
+
   it('navigates to the authenticated home after reset completes', async () => {
     render(
       <InvitationClient

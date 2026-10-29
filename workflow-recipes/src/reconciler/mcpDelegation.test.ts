@@ -223,7 +223,7 @@ describe('buildMcpServerManifest', () => {
   it('6.3a — returns null for non-transport workload', () => {
     const recipe = makeRecipe({
       spec: {
-        workloads: [{ id: 'nginx', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 80 }],
+        workloads: [{ id: 'nginx', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 80 }],
       },
     })
     const manifest = buildMcpServerManifest(recipe.spec.workloads![0], recipe, 'mcp-server')
@@ -577,7 +577,7 @@ describe('buildTransportService', () => {
   it('6.3b — returns null for non-transport workload', () => {
     const recipe = makeRecipe({
       spec: {
-        workloads: [{ id: 'nginx', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 80 }],
+        workloads: [{ id: 'nginx', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 80 }],
       },
     })
     const svc = buildTransportService(recipe.spec.workloads![0], recipe, 'mcp-server')

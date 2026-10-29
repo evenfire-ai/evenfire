@@ -1,6 +1,7 @@
 import type { DbClient } from '../db.js'
 import type { PinnedTransport } from '../http/pinnedFetch.js'
 import type { DnsResolver } from '../http/validateMcpServerSpec.js'
+import { remoteWireForProfile } from './asProfiles.js'
 import {
   type OAuthClientDecl,
   RecipeNotFoundError,
@@ -316,7 +317,10 @@ async function refreshRemoteGrant(
       clientId: credResult.cred.clientId,
       clientSecret: credResult.cred.clientSecret,
     },
-    remote.resource
+    remote.resource,
+    // Entra's refresh token is valid for every consented API, so without `scope` the
+    // refreshed token's audience would not be pinned to this server.
+    remoteWireForProfile(remote.asProfile).scopeOnTokenRequests ? decl.scopes : undefined
   )
   const posted = await postRemoteTokenForm(
     remote.tokenEndpoint,

@@ -14,7 +14,7 @@ native tool, guardrails or an MCP server.
 
 ## Run mcp-host locally
 
-You need Node.js 24 and an API key for one
+You need Node.js 24.22.1 or later in the Node 24 line and an API key for one
 [supported provider](../llm-providers/README.md).
 
 mcp-host has no setting to bind only to localhost, and with

@@ -174,7 +174,7 @@ spec:
   workloads:
     - id: app
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
       port: 8080
       envSecret:
         name: ${2}
@@ -233,7 +233,7 @@ spec:
         keys: [{ secretKey: api-key, envVar: TOKEN }]
     - id: app
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
       port: 8080
       envSecret:
         name: ${2}
@@ -262,7 +262,7 @@ spec:
   workloads:
     - id: app
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
       port: 8080
       envSecret:
         name: ${2}

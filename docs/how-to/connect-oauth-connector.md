@@ -83,9 +83,13 @@ Context they belong to. Otherwise the request fails with
    the **Context** to attach the server to. Click **Detect**.
    control-api runs RFC 9728/8414 discovery and probes the MCP endpoint. If the
    endpoint is unreachable, the wizard stays on this step and may suggest the
-   correct URL.
-3. **Configure**: review the detected issuer, endpoints, scopes, and
-   **Registration mode**. The mode is picked in this order:
+   correct URL. If the server signs in through Microsoft Entra ID, the wizard
+   asks for your tenant ID first; see
+   [Microsoft 365 / Entra ID](#microsoft-365--entra-id).
+3. **Configure**: review the detected issuer, endpoints, and
+   **Registration mode**. **Scopes** starts with the scopes the server
+   advertises; edit the space-separated list if needed, or clear it to go back
+   to the advertised ones. The mode is picked in this order:
    - **Client ID Metadata Document (public client)**: no credentials. Picked
      automatically when the server supports RFC 9207 `iss`, advertises CIMD,
      and accepts public clients. The client ID is a URL on your callback
@@ -121,6 +125,244 @@ McpServer runs the platform egress proxy image (`clerum/nginx-egress-proxy`)
 with an exact-host egress binding to port 443 of the remote host. API
 equivalents: `POST /api/v1/admin/mcp-servers/remote/discover` (dry run) and
 `POST /api/v1/admin/mcp-servers/remote`.
+
+## Microsoft 365 / Entra ID
+
+Microsoft 365 MCP servers sign users in with Microsoft Entra ID. You add them
+with the same **Add remote server** wizard, but Entra needs a tenant ID, a
+pre-registered app, and scopes that name the server's own API. This section
+covers [Work IQ](#work-iq-recommended), which is the recommended server, and
+the [Agent 365](#agent-365-legacy-not-verified) per-app servers, which
+Microsoft marks as legacy.
+
+> **Pending end-to-end verification.** This flow is covered by automated
+> tests built from metadata captured from Microsoft's servers, but it has not
+> yet been run end to end against a real tenant. Which scope form Work IQ
+> accepts is not settled yet, and Agent 365 is **not verified**.
+
+### What changes with Entra ID
+
+- **Tenant ID.** These servers advertise Entra's multi-tenant authority
+  (`https://login.microsoftonline.com/organizations/v2.0`), whose metadata
+  cannot be matched to a single issuer. After **Detect**, the wizard asks for
+  the **Microsoft Entra tenant ID**: the **Directory (tenant) ID** on the
+  Microsoft Entra admin center overview. Enter it as a GUID. A domain name
+  such as `contoso.com` is refused, because Entra reports the issuer with the
+  GUID and a domain could never match it. The wizard lowercases the GUID and
+  detects again against `https://login.microsoftonline.com/<tenant-id>/v2.0`.
+  A tenant Entra does not know shows "Microsoft Entra ID did not recognize
+  this tenant ID". The override is accepted only for Entra: control-api
+  rejects a tenant authority for a server that does not advertise Entra's
+  multi-tenant authority, and any other authorization server address.
+- **One install per tenant.** The tenant is pinned at install, and users sign
+  in against it. To serve several tenants, install the server once per tenant,
+  each with its own server name and app registration.
+- **Authorization server profile.** The Configure step shows
+  **Authorization server: Microsoft Entra ID**, and the McpServer is
+  installed with `spec.oauth.asProfile: entra-v2`. With this profile,
+  control-api:
+  - uses PKCE (S256) and refresh tokens. Entra supports both but does not
+    advertise them in its metadata;
+  - always adds `offline_access`, because Entra only issues a refresh token
+    when it is requested. You do not need to type it;
+  - does not send the RFC 8707 `resource` parameter, because Entra picks the
+    token's audience from the scopes and rejects a `resource` that disagrees.
+    The wizard shows the resource as "(not sent to Microsoft Entra ID)";
+  - sends the installed scopes on the code exchange and on every refresh, so
+    the installed scopes, not the authorize URL that passes through the
+    browser, decide which API the token is for.
+- **Pre-registered client.** Entra offers neither dynamic registration nor a
+  client ID metadata document, so the mode is **Pre-registered client
+  required**. Use a client secret. Certificate credentials are not supported.
+- **Grant scope.** Use **Per user** for Microsoft 365, so each user's agents
+  act with that user's own mailbox, files, and permissions.
+
+### App registration: one per server
+
+In the Microsoft Entra admin center, under **App registrations**, create a
+separate app registration for each MCP server (Work IQ, Agent 365 Mail,
+Agent 365 Calendar, and so on):
+
+1. **Platform: Web.** Add the redirect URI the wizard shows, exactly:
+   `<CONTROL_API_OAUTH_CALLBACK_BASE_URL>/api/v1/oauth-callback/remote/<serverName>`.
+   Entra accepts an `http` redirect URI only with `localhost`, so on a local
+   cluster use `http://localhost:<port>` as the callback base.
+2. **Client secret.** Create one under **Certificates & secrets**, and paste
+   it with the **Application (client) ID** into the wizard.
+3. **API permissions.** Remove the Microsoft Graph `User.Read` permission that
+   Entra adds by default. Add only the delegated permission of this server,
+   then **Grant admin consent**.
+4. **Block user consent for the app.** Entra lets users consent at sign-in to
+   permissions the app registration does not list, so the permission list is
+   not a ceiling on its own. It becomes one when users cannot consent: set
+   the tenant's user consent setting to **Do not allow user consent**
+   (Enterprise applications > Consent and permissions > User consent
+   settings), or use an app consent policy that excludes this app. Then the only permission a token can carry is the one
+   an administrator consented to.
+
+control-api refuses to install a second server with the same client ID
+(`409 oauth_client_id_in_use`), so reusing one app registration across servers
+is not possible.
+
+### Scopes and audience
+
+Because the `resource` parameter is not sent, the scopes alone decide which
+API a token is issued for, and mcp-host sends that token to the MCP server.
+control-api therefore checks every scope against the host of the server URL
+before it installs anything. The scopes come from the server's metadata or
+from you, and both are checked the same way.
+
+| Scope                                                                                                                                                                                                                                                                                              | Result                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `openid`, `profile`, `email`, `offline_access`                                                                                                                                                                                                                                                     | Allowed, but not enough on their own (see below).                    |
+| `https://<server-host>/...` or `api://<server-host>/...`, where `<server-host>` is exactly the host of the server URL                                                                                                                                                                              | Accepted.                                                            |
+| GUID form (`<guid>/<permission>` or `api://<guid>/<permission>`, lower-case GUID) of a Microsoft MCP API on its own host: Work IQ `fdcc1f02-fc51-4226-8753-f668596af7f7` on `workiq.svc.cloud.microsoft`, Agent 365 Tools `05879165-0320-489e-b644-f72b33f3edf0` on `agent365.svc.cloud.microsoft` | Accepted.                                                            |
+| GUID form of a blocked Microsoft API (list below)                                                                                                                                                                                                                                                  | Always rejected (`scope_audience_mismatch`), even if you confirm it. |
+| GUID form of one of those two Microsoft MCP APIs on any other host                                                                                                                                                                                                                                 | Always rejected (`scope_audience_mismatch`), even if you confirm it. |
+| Any other GUID form (an API the platform does not know)                                                                                                                                                                                                                                            | Accepted only after you confirm it (`scope_audience_unverified`).    |
+| Anything else: a bare permission such as `Mail.Read` (Entra reads it as Microsoft Graph), a URL on another host, or a URL with a user name or port                                                                                                                                                 | Rejected (`scope_audience_mismatch`).                                |
+
+**Blocked APIs.** Microsoft Graph, SharePoint Online, Exchange Online, Azure
+Service Management, Azure AD Graph, Azure Key Vault, Azure Storage, Office 365
+Management APIs, Microsoft Intune, Microsoft Defender for Endpoint
+(WindowsDefenderATP), Skype for Business Online, Dynamics CRM, Azure SQL
+Database, Log Analytics API, Skype and Teams Tenant Admin API, and Microsoft
+Teams Services. These are high-impact Microsoft APIs, and a GUID form names no
+host, so a confirmed one would let a token for them reach any MCP server. Only
+the GUID form is blocked: a Microsoft MCP server whose audience is on its own
+host (for example Dataverse at `<org>.crm.dynamics.com/api/mcp`) is connected
+with a URL-form scope on that host, which is accepted as usual.
+
+Azure DevOps and Power BI are deliberately not on this list. Their URL-form
+audience lives on a host other than their MCP server, so their GUID form (for
+example `00000009-0000-0000-c000-000000000000/.default` for Power BI) is the
+only way to connect them; it is accepted after you confirm it, like any other
+unknown API. That path is allowed by the audience policy but has not been
+verified end to end against either server (see **Not supported** below).
+
+**The server's own scope is required.** At least one scope must name the
+server's API (a URL on its host, or a GUID form that is accepted or
+confirmed). With sign-in scopes only, Entra issues a Microsoft Graph token,
+so the install is rejected with `scope_audience_missing`. If the advertised
+scopes break a rule, the Configure step shows a warning so you can fix the
+list before installing.
+
+**Confirming an unverified scope.** When a GUID scope names an API the
+platform cannot tie to the server, the Confirm step lists those exact scopes
+with the check box **I confirm these scopes belong to this server's own API**.
+The confirmation covers exactly the strings listed: if you go back and change
+the scopes, the wizard asks again. Through the API, send each one, as the
+exact string, in `confirmedUnverifiedScopes`. control-api logs each
+confirmation as the audit event `remote_install_unverified_scopes_confirmed`,
+with the confirming admin and the scopes.
+
+**Editing the McpServer later.** Writing the McpServer directly
+(`PUT /api/v1/admin/mcp-servers/<name>` or `kubectl`) counts as confirming its
+unverified GUID scopes: whoever can write the resource can already change its
+server URL. It does not bypass the other rules. On every authorization,
+callback, token use, and refresh, control-api checks the scopes again against
+the current `spec.remote.baseUrl`. A blocked API, a known Microsoft MCP API's
+GUID off its own host, a URL on another host, a bare permission, or a missing
+server scope is refused with
+`409 remote_oauth_spec_incoherent` (reason `scope_audience_mismatch`), and
+existing grants stop being served until the resource is fixed.
+
+> **Limit with unknown GUID scopes.** The GUID of an API the platform does not
+> know is not tied to a host, so if only `spec.remote.baseUrl` changes, the
+> platform cannot tell that the token now goes to a different server. Prefer the
+> URL form (`api://<server-host>/...`) when the server accepts it. The Work IQ
+> and Agent 365 Tools GUIDs are tied to their hosts, so that change is detected
+> for them.
+
+Ask for scopes of one API only. Entra issues each token for a single
+resource, so mixing scopes of different APIs, or `.default` with specific
+scopes, fails when the user connects.
+
+**Not supported:**
+
+- Verified support for MCP servers whose scope lives on a different host than
+  the server, such as Power BI (`api.fabric.microsoft.com/v1/mcp/powerbi`, with
+  scopes on `analysis.windows.net`) or Azure DevOps (`mcp.dev.azure.com`). The
+  URL form is rejected; the GUID form is accepted after confirmation, but has
+  not been verified end to end.
+- National clouds (`login.microsoftonline.us`, `login.partner.microsoftonline.cn`),
+  personal Microsoft accounts (`consumers`), and the v1 authority
+  (`sts.windows.net`).
+- A tenant given as a domain name, and certificate client credentials.
+
+### Work IQ (recommended)
+
+Server URL: `https://workiq.svc.cloud.microsoft/mcp`.
+
+**Tenant prerequisites:**
+
+- The Work IQ service principal. Create it once if your tenant does not have
+  it: `az ad sp create --id fdcc1f02-fc51-4226-8753-f668596af7f7`.
+- Microsoft's billing requirements in
+  [Enable Work IQ](https://learn.microsoft.com/microsoft-365/copilot/extensibility/work-iq/enable-work-iq):
+  a pay-as-you-go billing plan backed by an Azure subscription, with the users
+  who will connect assigned to that plan. Check that page for the current
+  terms.
+
+**App registration:** only the delegated permission `WorkIQAgent.Ask` of the
+Work IQ API, with admin consent.
+
+**Scopes.** Both forms are accepted without confirmation:
+
+| Scope                                                  | Notes                                                                                                                                         |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask`     | The form Microsoft's quickstarts use. **Try this one first**: it is tied to the host, so a later change of `spec.remote.baseUrl` is detected. |
+| `fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask` | The form the server advertises, and the one the wizard prefills.                                                                              |
+
+Replace the prefilled scope with the `api://` form, then install.
+`offline_access` is added for you.
+
+> **Pending end-to-end verification.** It is not yet confirmed which of the
+> two forms Work IQ accepts. If the user connects but tool calls fail with
+> `401`, delete the server and install it again with the GUID form.
+
+### Agent 365 (legacy, not verified)
+
+Microsoft states that the Agent 365 tooling servers are "only intended for
+backward compatibility purposes and shouldn't be used in production
+environments or new projects"
+([Agent 365 tooling servers](https://learn.microsoft.com/microsoft-agent-365/tooling-servers-overview)).
+Use [Work IQ](#work-iq-recommended) for new work.
+
+> **Not verified.** This setup has not been run end to end. It is also not
+> confirmed that Agent 365 accepts tokens issued to a regular app
+> registration.
+
+Server URL, for example Mail:
+`https://agent365.svc.cloud.microsoft/agents/tenants/<tenant-id>/servers/mcp_MailTools`.
+
+**Tenant prerequisites:**
+
+- Agent 365 enabled in the tenant, and the server listed in the Microsoft 365
+  admin center under **Agents > Tools**.
+- The Agent 365 Tools service principal, created once per tenant by a Global
+  Administrator with the `New-Agent365ToolsServicePrincipalProdPublic.ps1`
+  script from the `microsoft/Agent365-devTools` repository.
+
+**App registration:** one per Agent 365 server (Mail, Calendar, Teams, and so
+on), each with only that server's delegated permission from the Agent 365
+Tools app (`05879165-0320-489e-b644-f72b33f3edf0`), for example
+`McpServers.Mail.All` for Mail. See
+[Agent 365 tooling for developers](https://learn.microsoft.com/microsoft-agent-365/developer/tooling).
+
+**Scopes.** control-api accepts these three forms without confirmation. Try
+them in this order and keep the first one whose tool calls succeed:
+
+1. The advertised scope, which the wizard prefills:
+   `https://agent365.svc.cloud.microsoft/agents/tenants/<tenant-id>/servers/mcp_MailTools/.default`.
+   Every Agent 365 server and tenant shares this host, so the host check does
+   not tell Mail from Calendar.
+2. The form in Microsoft's manifest:
+   `api://05879165-0320-489e-b644-f72b33f3edf0/McpServers.Mail.All`.
+3. The bare GUID form: `05879165-0320-489e-b644-f72b33f3edf0/McpServers.Mail.All`.
+
+Forms 2 and 3 are not interchangeable: depending on how a token is requested,
+its audience can be the application ID URI or the application ID.
 
 ## Operator: built-in or generic provider (YAML)
 
@@ -263,6 +505,14 @@ out too, but the screen only tracks the current one.
 | Users must authorize again after a reinstall                                        | Grants are bound to the old McpServer UID                                                                      | Expected                                                                                                 |
 | Connector shows **Missing Secret**                                                  | `SecretResolved=False`                                                                                         | Use **Set credentials** on the **Credentials** tab                                                       |
 | Rotation restarted other connectors                                                 | They share the same `envSecret`                                                                                | Expected. Check `affectedConnectors`.                                                                    |
+| **Detect** asks for a Microsoft Entra tenant ID                                     | The server signs in through Entra's multi-tenant authority (`tenant_required`)                                 | Enter the Directory (tenant) ID as a GUID                                                                |
+| "Microsoft Entra ID did not recognize this tenant ID"                               | The GUID is not a tenant Entra knows                                                                           | Copy the Directory (tenant) ID from the Microsoft Entra admin center overview                            |
+| Install returns `scope_audience_mismatch`                                           | A scope names another API: a blocked Microsoft API, a URL on another host, or a bare permission                | Use the server's own scope. See [Scopes and audience](#scopes-and-audience)                              |
+| Install returns `scope_audience_missing`                                            | Only sign-in scopes (`openid`, `profile`, `email`, `offline_access`)                                           | Add the server's own scope                                                                               |
+| Install asks to confirm scopes (`scope_audience_unverified`)                        | A GUID scope names an API the platform cannot tie to the server                                                | Confirm only if that API belongs to the server; otherwise change the scope                               |
+| `409 oauth_client_id_in_use`                                                        | The app registration is already used by another server                                                         | Create a separate app registration for each server                                                       |
+| Connect or token requests fail with `409 remote_oauth_spec_incoherent`              | The McpServer was edited and breaks a rule (reason `scope_audience_mismatch` or `as_profile_issuer_mismatch`)  | Fix `spec.oauth.scopes` or `spec.remote.baseUrl`, or reinstall the server                                |
+| Install returns `409 mcpserver_crd_outdated`                                        | The cluster's McpServer CRD predates `spec.oauth.asProfile`, so Kubernetes dropped it                          | Apply the latest clerum-crds, then install again                                                         |
 
 ## Related
 

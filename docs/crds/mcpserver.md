@@ -81,6 +81,7 @@ after creation:
 | `oauth.authorizationEndpoint`, `tokenEndpoint`, `resource` | remote, generic | Pinned endpoints; `resource` is the RFC 8707 resource indicator. |
 | `oauth.registrationEndpoint`, `issuer`, `issForCallback` | remote | Dynamic client registration URL, issuer, and the RFC 9207 `iss` validated on callback. |
 | `oauth.bearerInBody`, `supportsRefresh` | remote (`supportsRefresh` also generic) | Pinned at install. `bearerInBody` must be `false`. |
+| `oauth.asProfile` | remote | Optional. Closed authorization-server profile, set at install when the pinned issuer is recognised. Only value: `entra-v2` (Microsoft Entra ID v2, tenant authority): the RFC 8707 `resource` is not sent, `offline_access` is always requested, and the scopes are sent on the code exchange and on refresh. Requires a Microsoft Entra tenant issuer (see the AS-PROFILE-ISSUER rule below). With `entra-v2`, control-api also checks `oauth.scopes` against the host of `spec.remote.baseUrl` at install and at runtime; see [Scopes and audience](../how-to/connect-oauth-connector.md#scopes-and-audience). Immutable. |
 | `oauth.tokenRequestFormat`, `tokenAuthMethod`, `scopeSeparator`, `sendScope`, `usePkce`, `includeResponseType`, `refreshEndpoint`, `extraAuthorizeParams` | generic | Wire options for non-standard authorization servers. |
 
 **Redirect URI to register** with the provider:
@@ -247,6 +248,18 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 - Each egress binding must have exactly one of `dns` or `cidr` (not both, not neither).
 - A `cidr` must be a canonical public IPv4 range; ranges overlapping private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges (including `0.0.0.0/0` and RFC1918 ranges such as `10.0.0.0/8`) are rejected.
 - An McpServer with `spec.remote` must declare at least one `egressBinding`.
+- `spec.oauth.asProfile` is remote-only: built-in (no `source`) and `generic` servers must not set it.
+- On a `remote` server, `spec.oauth.asProfile` is immutable like the other pinned fields: it cannot be added, removed, or changed after creation. Delete and recreate the server to change it.
+- **AS-PROFILE-ISSUER:** when `spec.oauth.asProfile` is set, `spec.oauth.issuer` must be a Microsoft Entra ID tenant authority, matching `^https://login[.]microsoftonline[.]com/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/v2[.]0$` (lower-case tenant GUID, no trailing slash). Otherwise the write is rejected with `spec.oauth.asProfile entra-v2 requires spec.oauth.issuer to be a Microsoft Entra ID tenant authority`. A profile stops sending the RFC 8707 `resource`, so it must stay on the issuer it was recognised from. control-api applies the same check at runtime and refuses an object written before the rule was in the cluster (`409 remote_oauth_spec_incoherent`, reason `as_profile_issuer_mismatch`).
+
+> **Apply the CRD before control-api.** An apiserver whose McpServer CRD does not
+> declare `asProfile` drops the field on write and still answers 200. The install
+> route detects this, removes what it created and answers `409 mcpserver_crd_outdated`.
+> An object written another way (`kubectl`, GitOps) keeps the Entra issuer without
+> the profile; control-api refuses it at runtime (`409 remote_oauth_spec_incoherent`,
+> reason `as_profile_issuer_mismatch`), and because the profile cannot be added after
+> creation it must be deleted and recreated once the CRD is applied. See
+> [Deploy order for additive schema fields](../../charts/clerum-crds/README.md#deploy-order-for-additive-schema-fields).
 
 ## Example
 

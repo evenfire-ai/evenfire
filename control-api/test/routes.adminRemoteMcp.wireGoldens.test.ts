@@ -15,6 +15,11 @@ import {
   ATLASSIAN_V2_PILOT,
   DCR_PUBLIC_REGISTRATION_RESPONSE,
   DROPBOX_PILOT,
+  ENTRA_EMPTY_SCOPE_PILOT,
+  ENTRA_NO_SCOPES_PILOT,
+  ENTRA_SHAREPOINT_SCOPE_PILOT,
+  ENTRA_UNKNOWN_GUID_PILOT,
+  ENTRA_WORKIQ_PILOT,
   PILOTS,
   type PilotFixture,
   dcrPilot,
@@ -50,6 +55,8 @@ vi.mock('node:crypto', async importOriginal => {
 })
 
 const ORIGIN = 'https://control.example.com'
+const ENTRA_TENANT_AUTHORITY =
+  'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
 const PUBLIC_IP = async () => ['93.184.216.34']
 const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
 const WIRE_DIR = new URL('./fixtures/wire/', import.meta.url)
@@ -101,10 +108,13 @@ function gatewayWithContext(): MockGateway {
   return gw
 }
 
-async function discover(pilot: PilotFixture): Promise<WireCapture> {
+async function discover(
+  pilot: PilotFixture,
+  extraBody: Record<string, unknown> = {}
+): Promise<WireCapture> {
   const res = await request(appFor(pilot, gatewayWithContext()))
     .post('/admin/mcp-servers/remote/discover')
-    .send({ baseUrl: pilot.mcpUrl })
+    .send({ baseUrl: pilot.mcpUrl, ...extraBody })
   return { status: res.status, body: res.body }
 }
 
@@ -205,6 +215,35 @@ describe('remote MCP wire goldens — POST /discover', () => {
     })
   }
 
+  const ENTRA_CASES: Array<{ name: string; pilot: () => PilotFixture }> = [
+    { name: 'discover.workiq', pilot: () => ENTRA_WORKIQ_PILOT },
+    { name: 'discover.entraUnknownGuid', pilot: () => ENTRA_UNKNOWN_GUID_PILOT },
+    { name: 'discover.entraNoScopes', pilot: () => ENTRA_NO_SCOPES_PILOT },
+    { name: 'discover.entraEmptyScope', pilot: () => ENTRA_EMPTY_SCOPE_PILOT },
+  ]
+  for (const c of ENTRA_CASES) {
+    it(`${c.name}: with the Entra tenant authority → 200`, async () => {
+      const actual = await discover(c.pilot(), { authorizationServer: ENTRA_TENANT_AUTHORITY })
+      expect(actual.status).toBe(200)
+      expect(actual).toEqual(golden(c.name, actual))
+    })
+  }
+
+  it('discover.workiqTenantRequired: Work IQ without a tenant → 400 tenant_required', async () => {
+    const actual = await discover(ENTRA_WORKIQ_PILOT)
+    expect(actual.status).toBe(400)
+    expect(actual).toEqual(golden('discover.workiqTenantRequired', actual))
+  })
+
+  it('discover.entraUnknownTenant: a tenant Entra does not know → 424 fetch_failed', async () => {
+    const actual = await discover(ENTRA_WORKIQ_PILOT, {
+      authorizationServer:
+        'https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0',
+    })
+    expect(actual.status).toBe(424)
+    expect(actual).toEqual(golden('discover.entraUnknownTenant', actual))
+  })
+
   it('discover.issuerPublicSuffix: issuer on a public suffix, no RFC 9207 → 400', async () => {
     const actual = await discover(ISSUER_ON_PUBLIC_SUFFIX_PILOT)
     expect(actual.status).toBe(400)
@@ -227,6 +266,77 @@ describe('remote MCP wire goldens — POST / (install)', () => {
     )
     expect(actual.status).toBe(201)
     expect(actual).toEqual(golden('install.atlassian', actual))
+  })
+
+  it('install.workiq: Entra tenant, pre-registered per-server 201', async () => {
+    const { db } = makeInMemoryDynamicClientsDb()
+    const actual = await install(
+      ENTRA_WORKIQ_PILOT,
+      {
+        serverName: 'workiq',
+        mode: 'pre-registered',
+        clientId: '11111111-2222-3333-4444-555555555555',
+        clientSecret: 'test-secret',
+        authorizationServer: ENTRA_TENANT_AUTHORITY,
+        scopes: ['api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask'],
+      },
+      { deps: { db } }
+    )
+    expect(actual.status).toBe(201)
+    expect(actual).toEqual(golden('install.workiq', actual))
+  })
+
+  const ENTRA_INSTALL_REJECTIONS: Array<{
+    name: string
+    pilot: () => PilotFixture
+    scopes: string[]
+  }> = [
+    {
+      name: 'install.scopeAudienceUnverified',
+      pilot: () => ENTRA_UNKNOWN_GUID_PILOT,
+      scopes: ['11111111-2222-3333-4444-555555555555/Tools.Read'],
+    },
+    {
+      name: 'install.scopeAudienceMismatch',
+      pilot: () => ENTRA_SHAREPOINT_SCOPE_PILOT,
+      scopes: ['00000003-0000-0ff1-ce00-000000000000/AllSites.Read'],
+    },
+    {
+      name: 'install.scopeAudienceMissing',
+      pilot: () => ENTRA_NO_SCOPES_PILOT,
+      scopes: ['offline_access'],
+    },
+  ]
+  for (const c of ENTRA_INSTALL_REJECTIONS) {
+    it(`${c.name}: Entra install rejected before any write → 400`, async () => {
+      const actual = await install(c.pilot(), {
+        serverName: 'workiq',
+        mode: 'pre-registered',
+        clientId: '11111111-2222-3333-4444-555555555555',
+        clientSecret: 'test-secret',
+        authorizationServer: ENTRA_TENANT_AUTHORITY,
+        scopes: c.scopes,
+      })
+      expect(actual.status).toBe(400)
+      expect(actual).toEqual(golden(c.name, actual))
+    })
+  }
+
+  it('install.scopeLimitExceeded: 128 scopes plus the profile offline_access → 400', async () => {
+    const scopes = Array.from(
+      { length: 128 },
+      (_, i) => `api://workiq.svc.cloud.microsoft/Scope${i}`
+    )
+    const actual = await install(ENTRA_WORKIQ_PILOT, {
+      serverName: 'workiq',
+      mode: 'pre-registered',
+      clientId: '11111111-2222-3333-4444-555555555555',
+      clientSecret: 'test-secret',
+      authorizationServer: ENTRA_TENANT_AUTHORITY,
+      scopes,
+    })
+    expect(actual.status).toBe(400)
+    expect(actual).toEqual(golden('install.scopeLimitExceeded', actual))
   })
 
   it('install.linear: shared CIMD 201', async () => {

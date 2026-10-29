@@ -3,12 +3,17 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
+import { mcpHostJwtReissueTotal } from '../src/observability/metrics.js'
 import {
   MCP_HOST_CREDENTIAL_CAPABILITY,
   MCP_HOST_HCC_AUDIENCE,
   MCP_HOST_WORKFLOW_AUDIENCE,
+  type McpHostControlScope,
   issueMcpHostAccessJwt,
+  issueMcpHostRefreshJwt,
+  verifyMcpHostControlJwt,
 } from '../src/utils/auth/mcpHostJwtToken.js'
+import { captureRequestLogs } from './helpers/requestLogCapture.js'
 import { MockGateway } from './mockGateway.js'
 
 // Preserve the real mcpHostJwtToken helpers — we want the full RS256 sign
@@ -131,8 +136,36 @@ function issueExpiredRefreshToken(
   )
 }
 
+/**
+ * Mint an already-expired refresh token through the real producer by moving
+ * the signing clock back past the refresh TTL.
+ */
+async function reissueCount(result: string): Promise<number> {
+  const metric = await mcpHostJwtReissueTotal.get()
+  return metric.values.find(v => v.labels.result === result)?.value ?? 0
+}
+
+function issueExpiredRefreshFromProducer(
+  ns: string,
+  recipe: string,
+  hostRefs: string[] | undefined,
+  options: Parameters<typeof issueMcpHostRefreshJwt>[3],
+  expiredSeconds = 60
+): string {
+  const realNow = Date.now()
+  const clock = vi
+    .spyOn(Date, 'now')
+    .mockReturnValue(realNow - (config.mcpHostJwtRefreshTtlSec + expiredSeconds) * 1000)
+  try {
+    return issueMcpHostRefreshJwt(ns, recipe, hostRefs, options).token
+  } finally {
+    clock.mockRestore()
+  }
+}
+
 describe('POST /api/v1/workflow-auth/reissue', () => {
   let app: ReturnType<typeof createApp>
+  let gateway: MockGateway
 
   afterEach(() => vi.restoreAllMocks())
 
@@ -143,8 +176,28 @@ describe('POST /api/v1/workflow-auth/reissue', () => {
     consumedJtis.clear()
     conflictOnInsertJtis.clear()
     throwOnConsumeInsert = false
-    app = createApp(new MockGateway('mcp-server') as never)
+    gateway = new MockGateway('mcp-server')
+    app = createApp(gateway as never)
   })
+
+  async function seedHost(name = HOST_REF): Promise<string> {
+    const created = (await gateway.createResource(
+      'hosts',
+      { metadata: { name }, spec: { host: name, contextRef: 'ctx-a', secretRef: `${name}-llm` } },
+      config.hostsNamespace
+    )) as { metadata: { uid: string } }
+    return created.metadata.uid
+  }
+
+  function issueExpiredHccRefresh(
+    hostUid: string,
+    workflowControlScopes: McpHostControlScope[] = ['workflow:list']
+  ): string {
+    return issueExpiredRefreshFromProducer(HOST_NS, STANDALONE_RECIPE, [HOST_REF], {
+      workflowControlScopes,
+      hccCredential: { hostUid },
+    })
+  }
 
   it('mints a fresh pair for a valid-but-expired refresh token', async () => {
     const token = issueExpiredRefreshToken()
@@ -175,7 +228,8 @@ describe('POST /api/v1/workflow-auth/reissue', () => {
   })
 
   it('mints a fresh pair for an HCC standalone host using host_ref binding', async () => {
-    const token = issueExpiredRefreshToken(HOST_NS, STANDALONE_RECIPE, 60, [HOST_REF])
+    const hostUid = await seedHost()
+    const token = issueExpiredHccRefresh(hostUid)
     const res = await request(app)
       .post('/api/v1/workflow-auth/reissue')
       .set('Authorization', `Bearer ${token}`)
@@ -190,7 +244,8 @@ describe('POST /api/v1/workflow-auth/reissue', () => {
   })
 
   it('also accepts camelCase hostRef field for HCC standalone reissue', async () => {
-    const token = issueExpiredRefreshToken(HOST_NS, STANDALONE_RECIPE, 60, [HOST_REF])
+    const hostUid = await seedHost()
+    const token = issueExpiredHccRefresh(hostUid)
     const res = await request(app)
       .post('/api/v1/workflow-auth/reissue')
       .set('Authorization', `Bearer ${token}`)
@@ -199,15 +254,29 @@ describe('POST /api/v1/workflow-auth/reissue', () => {
     expect(res.status).toBe(200)
   })
 
-  it('preserves HCC audience, Host UID, and capability through bounded reissue', async () => {
-    const token = issueExpiredRefreshToken(
-      HOST_NS,
-      STANDALONE_RECIPE,
-      60,
-      [HOST_REF],
-      ['workflow:list'],
-      { hostUid: 'signed-host-uid' }
-    )
+  it('F2e: rejects a hosts-namespace standalone refresh that lacks the HCC audience', async () => {
+    await seedHost()
+    // Pre-host_uid chain shape: the producer still emits it without an HCC credential.
+    const token = issueExpiredRefreshFromProducer(HOST_NS, STANDALONE_RECIPE, [HOST_REF], {
+      workflowControlScopes: ['workflow:list'],
+    })
+    const lineageBefore = await reissueCount('lineage_without_audience')
+    const mismatchBefore = await reissueCount('host_mismatch')
+    const res = await request(app)
+      .post('/api/v1/workflow-auth/reissue')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ host_ref: HOST_REF })
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(consumedJtis.size).toBe(0)
+    expect(await reissueCount('lineage_without_audience')).toBe(lineageBefore + 1)
+    expect(await reissueCount('host_mismatch')).toBe(mismatchBefore)
+  })
+
+  it('preserves HCC audience, Host UID, and capability through bounded reissue (F2b)', async () => {
+    const hostUid = await seedHost()
+    const token = issueExpiredHccRefresh(hostUid)
     const res = await request(app)
       .post('/api/v1/workflow-auth/reissue')
       .set('Authorization', `Bearer ${token}`)
@@ -221,9 +290,95 @@ describe('POST /api/v1/workflow-auth/reissue', () => {
     for (const encoded of [res.body.accessToken, res.body.refreshToken]) {
       const claims = jwt.decode(encoded) as Record<string, unknown>
       expect(claims.aud).toEqual([MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE])
-      expect(claims.host_uid).toBe('signed-host-uid')
+      expect(claims.host_uid).toBe(hostUid)
       expect(claims.mcpCapabilities).toEqual([MCP_HOST_CREDENTIAL_CAPABILITY])
     }
+    const control = jwt.decode(res.body.mcpHostControlToken) as Record<string, unknown>
+    expect(control.host_uid).toBe(hostUid)
+    expect(control.mcpCapabilities).toBeUndefined()
+    expect(verifyMcpHostControlJwt(res.body.mcpHostControlToken)?.host_uid).toBe(hostUid)
+  })
+
+  it('F2c: rejects an HCC reissue whose Host no longer exists, without consuming the jti', async () => {
+    const hostUid = await seedHost()
+    const token = issueExpiredHccRefresh(hostUid)
+    await gateway.deleteResource('hosts', HOST_REF, config.hostsNamespace)
+    const mismatchBefore = await reissueCount('host_mismatch')
+
+    const res = await request(app)
+      .post('/api/v1/workflow-auth/reissue')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ host_ref: HOST_REF })
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(consumedJtis.size).toBe(0)
+    expect(await reissueCount('host_mismatch')).toBe(mismatchBefore + 1)
+  })
+
+  it('F2c: rejects an HCC reissue after the Host was recreated under the same name', async () => {
+    const oldUid = await seedHost()
+    const token = issueExpiredHccRefresh(oldUid)
+    await gateway.deleteResource('hosts', HOST_REF, config.hostsNamespace)
+    expect(await seedHost()).not.toBe(oldUid)
+
+    const res = await request(app)
+      .post('/api/v1/workflow-auth/reissue')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ host_ref: HOST_REF })
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('answers 503 on a transient Host read error and leaves the expired refresh reusable', async () => {
+    const hostUid = await seedHost()
+    const token = issueExpiredHccRefresh(hostUid)
+    gateway.failGetResource(
+      'hosts',
+      Object.assign(new Error('apiserver down'), { statusCode: 503 })
+    )
+
+    const failed = await request(app)
+      .post('/api/v1/workflow-auth/reissue')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ host_ref: HOST_REF })
+    expect(failed.status).toBe(503)
+    expect(failed.body).toEqual({ error: 'host_state_unavailable' })
+    expect(consumedJtis.size).toBe(0)
+
+    const retried = await request(app)
+      .post('/api/v1/workflow-auth/reissue')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ host_ref: HOST_REF })
+    expect(retried.status).toBe(200)
+  })
+
+  it('E2: strips oauth:user-token from the control token of a reissued WRC chain and logs it', async () => {
+    const token = issueExpiredRefreshFromProducer(NS, RECIPE, undefined, {
+      workflowControlScopes: ['workflow:list', 'oauth:user-token'],
+    })
+    const logs = captureRequestLogs()
+    let res: request.Response
+    try {
+      res = await request(app)
+        .post('/api/v1/workflow-auth/reissue')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ recipe_name: RECIPE })
+    } finally {
+      logs.restore()
+    }
+
+    expect(res.status).toBe(200)
+    expect(verifyMcpHostControlJwt(res.body.mcpHostControlToken)?.scopes).toEqual(['workflow:list'])
+    for (const encoded of [res.body.accessToken, res.body.refreshToken]) {
+      const claims = jwt.decode(encoded) as Record<string, unknown>
+      expect(claims.workflowControlScopes).toEqual(['workflow:list', 'oauth:user-token'])
+    }
+    expect(logs.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'oauth_user_token_scope_stripped', route: 'reissue' }),
+      expect.any(String)
+    )
   })
 
   it('returns 401 when the Authorization header is missing', async () => {

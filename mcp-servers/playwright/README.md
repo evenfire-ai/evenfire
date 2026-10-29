@@ -43,4 +43,21 @@ See [`mcpserver.yaml`](./mcpserver.yaml) for the full CRD spec. Key fields:
 
 ## Status
 
-Available; deployable via the makefile. No test suite in this directory (unlike `airtable/` and `mongodb/`). Referenced by `docs/crds/context.md` and `charts/clerum-crds/examples/context1.yaml` (a `Context` listing `playwright-server`), and by the `deploy-playwright` target in [`../makefile`](../makefile).
+Available; deployable via the makefile. The container runtime smoke test is described below. Referenced by `docs/crds/context.md` and `charts/clerum-crds/examples/context1.yaml` (a `Context` listing `playwright-server`), and by the `deploy-playwright` target in [`../makefile`](../makefile).
+
+## Temporary Node security patch for tests (2026-10-22)
+
+The pinned official image declares Node 22.22.0. The latest official release
+`v0.0.83` and the previous two stable tags declare Node 24.21.0 on amd64 and
+arm64, below the current security floor.
+
+For the test image, the Dockerfile keeps the pinned official application and
+browser dependencies and replaces only Node with the official digest-pinned
+24.22.1 glibc binary. This is temporary until a patched official Playwright
+image is available. The deployment manifest retains its upstream digest.
+
+`test/runtime-smoke.cjs` runs inside the isolated Linux container. It starts the
+real MCP HTTP server and Chromium, navigates to a loopback fixture, clicks the
+button through MCP, checks the updated page and verifies an actual PNG capture.
+CI runs the image and this browser check on amd64 and arm64. CLI loading alone
+is not a successful browser validation.

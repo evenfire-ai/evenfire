@@ -938,7 +938,7 @@ fi
 header "Route guards"
 
 # 401: a request without the workload token is rejected by the SDK server.
-# The caller image is node:24-alpine (no curl); use the in-pod node + fetch.
+# The caller image is node:24.22.1-alpine (no curl); use the in-pod node + fetch.
 unauth_status="$(kctl exec "$caller_pod" -n "$SANDBOX_NS" -- node -e '
 fetch(process.env.PLUGIN_WORKLOAD_SDK_ENDPOINT + "/v1/prompt-bridge", {
   method: "POST",

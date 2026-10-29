@@ -289,6 +289,16 @@ spec:
                         REMOTE and GENERIC (D-8), fail-closed. false ⇒ never attempt refresh.
                         No default (required-by-CEL for remote). Immutable (pinned at
                         install; runtime never re-derives).
+                    asProfile:
+                      type: string
+                      maxLength: 32
+                      enum: [entra-v2]
+                      description: >-
+                        REMOTE only, optional. Closed authorization-server profile recognised at
+                        install from the pinned issuer. entra-v2 (Microsoft Entra ID v2, tenant
+                        authority): RFC 8707 resource is not sent, offline_access is always
+                        requested and the scopes are sent on refresh. Requires a Microsoft Entra
+                        tenant issuer. Immutable.
                     tokenRequestFormat:
                       type: string
                       enum: [form, json]
@@ -686,7 +696,7 @@ spec:
                 # BAKED-FORBID-REMOTE-FIELDS: baked must not carry remote-only fields.
                 # The forbidden set is extended with the generic knobs + refreshEndpoint
                 # so baked (source absent) rejects both remote-only and generic-only shape.
-                - rule: "!has(self.oauth) || has(self.oauth.source) || (!has(self.oauth.clientMode) && !has(self.oauth.authorizationEndpoint) && !has(self.oauth.tokenEndpoint) && !has(self.oauth.registrationEndpoint) && !has(self.oauth.issuer) && !has(self.oauth.resource) && !has(self.oauth.issForCallback) && !has(self.oauth.bearerInBody) && !has(self.oauth.supportsRefresh) && !has(self.oauth.tokenRequestFormat) && !has(self.oauth.tokenAuthMethod) && !has(self.oauth.scopeSeparator) && !has(self.oauth.sendScope) && !has(self.oauth.usePkce) && !has(self.oauth.includeResponseType) && !has(self.oauth.refreshEndpoint) && !has(self.oauth.extraAuthorizeParams))"
+                - rule: "!has(self.oauth) || has(self.oauth.source) || (!has(self.oauth.clientMode) && !has(self.oauth.authorizationEndpoint) && !has(self.oauth.tokenEndpoint) && !has(self.oauth.registrationEndpoint) && !has(self.oauth.issuer) && !has(self.oauth.resource) && !has(self.oauth.issForCallback) && !has(self.oauth.bearerInBody) && !has(self.oauth.supportsRefresh) && !has(self.oauth.asProfile) && !has(self.oauth.tokenRequestFormat) && !has(self.oauth.tokenAuthMethod) && !has(self.oauth.scopeSeparator) && !has(self.oauth.sendScope) && !has(self.oauth.usePkce) && !has(self.oauth.includeResponseType) && !has(self.oauth.refreshEndpoint) && !has(self.oauth.extraAuthorizeParams))"
                   message: "baked spec.oauth (no source) must not set remote-only fields"
                 # IMM-3: id presence is immutable — closes the drop/re-add two-step
                 # that would otherwise let an UPDATE add or remove id under a
@@ -708,13 +718,14 @@ spec:
                 # REMOTE-REQ then guarantees clientMode/endpoints/issuer/resource/
                 # bearerInBody/supportsRefresh are present, so those accesses cannot
                 # CEL-error. registrationEndpoint/issForCallback are optional even on
-                # remote → presence-pinned + guarded value-equality.
+                # remote → presence-pinned + guarded value-equality. asProfile is
+                # optional → presence-pinned + guarded value-equality, like issForCallback.
                 # Double-source-VALUE-guarded (source != 'remote' short-circuits on
                 # BOTH revisions) so the remote value-block only dereferences remote-only
                 # fields when BOTH revisions are remote; a generic→generic UPDATE
                 # short-circuits before touching clientMode/issuer/... and cannot CEL-ERROR.
-                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || oldSelf.oauth.source != 'remote' || !has(self.oauth.source) || self.oauth.source != 'remote' || (oldSelf.oauth.clientMode == self.oauth.clientMode && oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint && oldSelf.oauth.tokenEndpoint == self.oauth.tokenEndpoint && oldSelf.oauth.issuer == self.oauth.issuer && oldSelf.oauth.resource == self.oauth.resource && oldSelf.oauth.bearerInBody == self.oauth.bearerInBody && oldSelf.oauth.supportsRefresh == self.oauth.supportsRefresh && (has(oldSelf.oauth.registrationEndpoint) == has(self.oauth.registrationEndpoint)) && (!has(oldSelf.oauth.registrationEndpoint) || oldSelf.oauth.registrationEndpoint == self.oauth.registrationEndpoint) && (has(oldSelf.oauth.issForCallback) == has(self.oauth.issForCallback)) && (!has(oldSelf.oauth.issForCallback) || oldSelf.oauth.issForCallback == self.oauth.issForCallback))"
-                  message: "remote spec.oauth pinned endpoints/clientMode/quirks are immutable; delete and recreate to change them"
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || oldSelf.oauth.source != 'remote' || !has(self.oauth.source) || self.oauth.source != 'remote' || (oldSelf.oauth.clientMode == self.oauth.clientMode && oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint && oldSelf.oauth.tokenEndpoint == self.oauth.tokenEndpoint && oldSelf.oauth.issuer == self.oauth.issuer && oldSelf.oauth.resource == self.oauth.resource && oldSelf.oauth.bearerInBody == self.oauth.bearerInBody && oldSelf.oauth.supportsRefresh == self.oauth.supportsRefresh && (has(oldSelf.oauth.registrationEndpoint) == has(self.oauth.registrationEndpoint)) && (!has(oldSelf.oauth.registrationEndpoint) || oldSelf.oauth.registrationEndpoint == self.oauth.registrationEndpoint) && (has(oldSelf.oauth.issForCallback) == has(self.oauth.issForCallback)) && (!has(oldSelf.oauth.issForCallback) || oldSelf.oauth.issForCallback == self.oauth.issForCallback) && (has(oldSelf.oauth.asProfile) == has(self.oauth.asProfile)) && (!has(oldSelf.oauth.asProfile) || oldSelf.oauth.asProfile == self.oauth.asProfile))"
+                  message: "remote spec.oauth pinned endpoints/clientMode/quirks/asProfile are immutable; delete and recreate to change them"
                 # GENERIC-REQ: generic requires id (its client_id), both endpoints and
                 # the required wire knobs. usePkce/includeResponseType/sendScope/
                 # supportsRefresh are booleans → required-by-CEL (has() presence), the
@@ -723,8 +734,8 @@ spec:
                   message: "generic spec.oauth requires id, authorizationEndpoint, tokenEndpoint, tokenRequestFormat, tokenAuthMethod, scopeSeparator, sendScope, supportsRefresh, usePkce and includeResponseType"
                 # GENERIC-FORBID-REMOTE-FIELDS: generic reuses endpoints/resource/
                 # supportsRefresh but must not carry the remote-only discovery fields.
-                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'generic' || (!has(self.oauth.clientMode) && !has(self.oauth.issuer) && !has(self.oauth.registrationEndpoint) && !has(self.oauth.issForCallback) && !has(self.oauth.bearerInBody))"
-                  message: "generic spec.oauth must not set remote-only fields (clientMode, issuer, registrationEndpoint, issForCallback, bearerInBody)"
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'generic' || (!has(self.oauth.clientMode) && !has(self.oauth.issuer) && !has(self.oauth.registrationEndpoint) && !has(self.oauth.issForCallback) && !has(self.oauth.bearerInBody) && !has(self.oauth.asProfile))"
+                  message: "generic spec.oauth must not set remote-only fields (clientMode, issuer, registrationEndpoint, issForCallback, bearerInBody, asProfile)"
                 # REMOTE-FORBID-GENERIC-KNOBS: remote must not carry the generic wire knobs.
                 - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || (!has(self.oauth.tokenRequestFormat) && !has(self.oauth.tokenAuthMethod) && !has(self.oauth.scopeSeparator) && !has(self.oauth.sendScope) && !has(self.oauth.usePkce) && !has(self.oauth.includeResponseType) && !has(self.oauth.refreshEndpoint) && !has(self.oauth.extraAuthorizeParams))"
                   message: "remote spec.oauth must not set generic-only knobs"
@@ -747,6 +758,11 @@ spec:
                 # false is admissible.
                 - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || !has(self.oauth.bearerInBody) || self.oauth.bearerInBody == false"
                   message: "remote spec.oauth.bearerInBody must be false; the access token is only sent in the Authorization header"
+                # AS-PROFILE-ISSUER: a profile changes the wire (no RFC 8707 resource), so it is
+                # only legal on the issuer it was recognised from — a Microsoft Entra ID tenant
+                # authority. [.] instead of \. keeps the pattern free of YAML/CEL escapes.
+                - rule: "!has(self.oauth) || !has(self.oauth.asProfile) || (has(self.oauth.issuer) && self.oauth.issuer.matches('^https://login[.]microsoftonline[.]com/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/v2[.]0$'))"
+                  message: "spec.oauth.asProfile entra-v2 requires spec.oauth.issuer to be a Microsoft Entra ID tenant authority"
                 # SOURCE-VALUE-IMM: IMM-5 pins source PRESENCE; this pins the VALUE so a
                 # generic⇄remote flip in place is rejected even though both keep source set.
                 - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || !has(self.oauth.source) || oldSelf.oauth.source == self.oauth.source"

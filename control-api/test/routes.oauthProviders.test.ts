@@ -114,7 +114,7 @@ describe('POST /admin/oauth/discover (E-19.5)', () => {
     expect(res.body.suggested.supportsRefresh).toBe(true)
   })
 
-  it('maps a transport failure to 502 (discoveryHttpStatus)', async () => {
+  it('maps a transport failure to 424 (discoveryHttpStatus)', async () => {
     const discover: AdminOauthProvidersDeps['discover'] = async () => ({
       ok: false,
       error: { kind: 'fetch_failed', url: 'https://mcp.notion.com', detail: 'boom' },
@@ -122,7 +122,7 @@ describe('POST /admin/oauth/discover (E-19.5)', () => {
     const res = await request(makeApp({ discover }))
       .post('/admin/oauth/discover')
       .send({ url: 'https://mcp.notion.com' })
-      .expect(502)
+      .expect(424)
     expect(res.body.error).toBe('discovery_failed')
     expect(res.body.detail.kind).toBe('fetch_failed')
   })
