@@ -31,6 +31,7 @@ import {
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
+import { toastMoveOutcome } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
@@ -783,7 +784,8 @@ export function FileExplorerTree({
       destination: { resourceId: string; name: string },
       allowNumberedRename: boolean,
       isCurrent?: () => boolean,
-      isPresentationCurrent?: () => boolean
+      isPresentationCurrent?: () => boolean,
+      reportOutcomes = true
     ) => {
       movingResourceIdRef.current = source.resourceId
       setMovingResourceId(source.resourceId)
@@ -804,9 +806,15 @@ export function FileExplorerTree({
               ctrl.handleAuthorityFailure(message, 'operation', source.scope),
             convergeCommittedMove: (input, receipt) =>
               ctrl.convergeCommittedMove(input, receipt, source.scope),
-            pushToast: (message, tone) => {
-              if (!isPresentationCurrent || isPresentationCurrent()) pushToast(message, tone)
-            },
+            ...(reportOutcomes
+              ? {
+                  pushToast: (message, tone) => {
+                    if (!isPresentationCurrent || isPresentationCurrent()) {
+                      pushToast(message, tone)
+                    }
+                  },
+                }
+              : {}),
           },
           {
             source,
@@ -1216,14 +1224,20 @@ export function FileExplorerTree({
               { resourceId: destinationId, name: destinationName },
               false,
               isCurrent,
-              isPresentationCurrent
+              isPresentationCurrent,
+              false
             )
             if (outcome.status === 'gesture-lost') return
             if (outcome.status === 'session-lost') {
               if (moveDialogTargetRef.current === target) closeMoveDialog()
               return
             }
-            if (!isCurrent()) return
+            if (!isCurrent()) {
+              if (isPresentationCurrent()) {
+                toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
+              }
+              return
+            }
             if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
               if (
                 moveDialogTargetRef.current === target &&
@@ -1234,6 +1248,7 @@ export function FileExplorerTree({
               }
               throw new Error(outcome.message)
             }
+            toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
             if (moveDialogTargetRef.current === target) closeMoveDialog()
           }}
           onRetryPermissionCheck={handleRetryMovePermission}

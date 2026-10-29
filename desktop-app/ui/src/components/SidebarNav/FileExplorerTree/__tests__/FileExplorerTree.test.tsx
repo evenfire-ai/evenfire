@@ -1132,6 +1132,51 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     }
   })
 
+  it('presents a current Sidebar Move failure inline without a duplicate toast', async () => {
+    const moveFailure = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          {
+            resourceId: sourceResourceId,
+            destinationId: destinationAId,
+            drive: 'main',
+            ifMatch: 4,
+          },
+          'fixture-session-token'
+        ),
+      412,
+      { code: 'precondition_failed', message: 'version changed' }
+    )
+    const moveResource = vi.fn(async () => {
+      throw new Error(moveFailure)
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve: vi.fn(async () => resolveSource()),
+      moveResource,
+    })
+    const { pushToast, queryClient } = renderTreeWithSession()
+
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+
+      expect(
+        await within(dialog).findByText(
+          'This item changed while you were moving it. Review its current location and try again.'
+        )
+      ).toBeTruthy()
+      expect(pushToast).not.toHaveBeenCalled()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      queryClient.clear()
+    }
+  })
+
   it('freshly checks the source parent and destination without dispatching another Move', async () => {
     let sourcePermissions = ['read']
     let sourceParentReads = 0
@@ -1220,7 +1265,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     expect(affordances).toHaveBeenCalledWith(destinationAId, 'main')
     expect(affordances).toHaveBeenCalledTimes(4)
     expect(moveResource).toHaveBeenCalledTimes(1)
-    expect(pushToast).toHaveBeenCalledWith(expect.any(String), 'warn')
+    expect(pushToast).not.toHaveBeenCalled()
   })
 
   it('does not apply an Archive A retry result after selection changes to Archive B', async () => {
