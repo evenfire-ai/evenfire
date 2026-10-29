@@ -757,6 +757,21 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
+      -- Catalog producers, hydration and the live resolver read only this
+      -- resource's identity, name, parent and tombstone
+      -- (catalogProducerSql.ts:340-352, catalogHydrationSql.ts:654-655,692,697-701,
+      -- databaseAuthorityCandidates.ts:142-158). A content save rewrites only
+      -- version, bytes, blob_key, content_sha256 and updated_at
+      -- (gfs-controller/src/db/writeStore.ts:400-405) and a descendant rename
+      -- rewrites path_cache, so neither needs a revision bump. Same in-function
+      -- TG_OP idiom as the run guard above.
+      IF TG_OP = 'UPDATE' AND (
+        OLD.resource_id, OLD.name, OLD.parent_resource_id, OLD.deleted_at
+      ) IS NOT DISTINCT FROM (
+        NEW.resource_id, NEW.name, NEW.parent_resource_id, NEW.deleted_at
+      ) THEN
+        RETURN NEW;
+      END IF;
       IF TG_OP <> 'DELETE' THEN
         PERFORM authorization_bump_gfs_resource_component(NEW.resource_id);
         PERFORM authorization_bump_gfs_resource_subjects(NEW.resource_id);

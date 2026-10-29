@@ -578,6 +578,66 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     )
   })
 
+  it('leaves GFS resource revisions unchanged on content writes and bumps them on a rename', async () => {
+    const resourceId = randomUUID()
+    const drive = `r6-${randomBytes(4).toString('hex')}`
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       VALUES ($1, $2, 'content-resource', 'file')`,
+      [resourceId, drive]
+    )
+    await databasePool.query(
+      `INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
+       VALUES ($3, $1, 'user', $2, ARRAY['read']::text[])`,
+      [resourceId, userIds[0], drive]
+    )
+    const beforeResource = await resourceRevision(resourceId)
+    const beforeUser = await userRevision(userIds[0])
+
+    const blobKey = `${resourceId.replaceAll('-', '')}/${randomUUID()}`
+    const contentSha = 'a'.repeat(64)
+    // The gfs-controller content save: version, bytes, blob_key, content_sha256.
+    await databasePool.query(
+      `UPDATE gfs_resources
+          SET version = version + 1,
+              bytes = 4096,
+              blob_key = $2,
+              content_sha256 = $3,
+              updated_at = clock_timestamp()
+        WHERE resource_id = $1`,
+      [resourceId, blobKey, contentSha]
+    )
+    // Write witness: the content save really changed the row.
+    expect(
+      (
+        await databasePool.query(
+          `SELECT version, bytes::text AS bytes, blob_key, content_sha256
+             FROM gfs_resources WHERE resource_id = $1`,
+          [resourceId]
+        )
+      ).rows
+    ).toEqual([
+      {
+        version: 1,
+        bytes: '4096',
+        blob_key: blobKey,
+        content_sha256: contentSha,
+      },
+    ])
+    // Negative witness: a content save is not a catalog change, neither for the
+    // resource component nor for its direct grant subjects.
+    expect(await resourceRevision(resourceId)).toBe(beforeResource)
+    expect(await userRevision(userIds[0])).toBe(beforeUser)
+
+    // Liveness witness in the same test: a rename still bumps both.
+    await databasePool.query(
+      `UPDATE gfs_resources SET name = 'content-resource-renamed' WHERE resource_id = $1`,
+      [resourceId]
+    )
+    expect(await resourceRevision(resourceId)).toBe(beforeResource + 1)
+    expect(await userRevision(userIds[0])).toBe(beforeUser + 1)
+  })
+
   it('preserves concurrent GFS invalidation increments on one resource component', async () => {
     const resourceId = randomUUID()
     const drive = `r6-${randomBytes(4).toString('hex')}`

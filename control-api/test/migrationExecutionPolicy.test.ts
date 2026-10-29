@@ -105,11 +105,13 @@ describe('D34 migration execution policy', () => {
     // approval-trigger pre-lock that both decision call sites take before they
     // bump the approval target. The run revision trigger now returns early on
     // an UPDATE that changes none of the columns catalog consumers read, so
-    // reconciler heartbeats stop bumping team and user revisions.
+    // reconciler heartbeats stop bumping team and user revisions; the GFS
+    // resource trigger does the same for content saves that keep its identity,
+    // name, parent and tombstone.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'ba1f0dd29f325759a1a32650b1140afdfcde1e60a14807651b04a1ac735ffb19',
+        'e8c0e74cd98063fbd4e19e05a301ee32a421cff7cd1414e9740bb221da8a55c5',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',
