@@ -401,6 +401,17 @@ describe('pending sandbox UI deep-link state', () => {
     expect(pending[0]?.retryCount).toBe(0)
   })
 
+  it('shows a new failure after a dismissed failure is replaced', () => {
+    let pending = enqueuePendingSandboxUiDeepLink([], { id: 1, appRef: 'ns/app' }, null, 'user-a')
+    pending = failPendingSandboxUiDeepLink(pending, 1, 'first failure')
+    pending = dismissPendingSandboxUiDeepLinkFailure(pending, 1)
+
+    pending = failPendingSandboxUiDeepLink(pending, 1, 'replacement failure')
+
+    expect(pending[0]?.failedMessage).toBe('replacement failure')
+    expect(pending[0]?.failedMessageDismissed).toBe(false)
+  })
+
   it('matches the retention model for arbitrary producer-backed interleavings', () => {
     fc.assert(
       fc.property(producerBackedInterleavingsArb(), operations => {

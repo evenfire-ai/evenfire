@@ -2101,12 +2101,22 @@ describe('App deep-link orchestration', () => {
     queryClient.clear()
   })
 
-  it('acknowledges a dismissed terminal link after rollback when no successor is queued', async () => {
+  async function exerciseDismissedTerminalLinkAfterRollback(failWorkspaceRestore: boolean) {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const actualControllerModule =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    let workspaceRestoreAttempted = false
     vi.mocked(useAppController).mockImplementation(() => {
-      realController = actualControllerModule.useAppController()
+      const controller = actualControllerModule.useAppController()
+      const restoreWorkspaceNavigation = controller.restoreWorkspaceNavigation
+      controller.restoreWorkspaceNavigation = (...args) => {
+        if (failWorkspaceRestore) {
+          workspaceRestoreAttempted = true
+          throw new Error('origin workspace restore rejected')
+        }
+        return restoreWorkspaceNavigation(...args)
+      }
+      realController = controller
       return realController
     })
     const appBridge = window.clerum
@@ -2262,6 +2272,7 @@ describe('App deep-link orchestration', () => {
     })
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
     await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-a'))
+    if (failWorkspaceRestore) expect(workspaceRestoreAttempted).toBe(true)
     expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === first.id)).toHaveLength(1)
     expect(queue.list()).toEqual([])
     expect(
@@ -2304,6 +2315,14 @@ describe('App deep-link orchestration', () => {
     expect(handle.switchTeam.mock.calls.length).toBeGreaterThan(switchesBeforeLaterLink)
     expect(queue.list()).toEqual([])
     queryClient.clear()
+  }
+
+  it('acknowledges a dismissed terminal link after rollback when no successor is queued', async () => {
+    await exerciseDismissedTerminalLinkAfterRollback(false)
+  })
+
+  it('acknowledges a dismissed terminal link when workspace restoration throws', async () => {
+    await exerciseDismissedTerminalLinkAfterRollback(true)
   })
 
   it('releases the exact app-link owner after workspace capture throws', async () => {
