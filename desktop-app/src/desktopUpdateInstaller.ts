@@ -40,6 +40,13 @@ root="$1"; stage="$2"; id="$3"; app="$4"; staged="$5"; fresh="$6"; old="$7"
 version="$8"; digest="$9"; capable="@@ARG10@@"; parent="@@ARG11@@"; uid="@@ARG12@@"; pending="@@ARG13@@"
 log="$stage/install.log"
 fail() { printf '%s\n' "$1" >> "$log"; exit 1; }
+verify_target() {
+  target_path="$1"
+  /usr/bin/codesign --verify --deep --strict "$target_path" || return 1
+  signer=$(/usr/bin/codesign -dv --verbose=4 "$target_path" 2>&1 | /usr/bin/grep '^TeamIdentifier=' || true)
+  [ "$signer" = 'TeamIdentifier=XV6G8QZD5D' ] || return 1
+  /usr/sbin/spctl --assess --type execute "$target_path"
+}
 case "$id" in *[!0-9a-f-]*|'') fail 'invalid operation id';; esac
 [ "$stage" = "$root/$id" ] && [ "$pending" = "$root/pending.json" ] || fail 'staging path mismatch'
 [ ! -L "$stage" ] && [ -f "$stage/operation.json" ] || fail 'staging record missing'
@@ -60,12 +67,15 @@ actual=$(/usr/bin/shasum -a 256 "$fresh/Contents/Resources/app.asar" | /usr/bin/
 bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$fresh/Contents/Info.plist")
 actualVersion=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$fresh/Contents/Info.plist")
 [ "$bundle" = ai.evenfire.desktop ] && [ "$actualVersion" = "$version" ] || fail 'app identity mismatch'
-/usr/bin/codesign --verify --deep --strict "$fresh" || fail 'OS signature verification failed'
-signer=$(/usr/bin/codesign -dv --verbose=4 "$fresh" 2>&1 | /usr/bin/grep TeamIdentifier= || true)
-case "$signer" in *TeamIdentifier=XV6G8QZD5D*) ;; *) fail 'unexpected app signer';; esac
-/usr/sbin/spctl --assess --type execute "$fresh" || fail 'OS trust assessment failed'
+verify_target "$fresh" || fail 'downloaded macOS target signature or trust verification failed'
 /bin/mv "$app" "$old" || fail 'could not preserve previous app'
 if ! /bin/mv "$fresh" "$app"; then /bin/mv "$old" "$app" || fail 'rollback failed'; fail 'install failed'; fi
+if ! verify_target "$app"; then
+  /bin/mv "$app" "$fresh" || fail 'could not preserve rejected installed target for recovery'
+  /bin/mv "$old" "$app" || fail 'rollback failed after installed target verification'
+  /bin/rm -rf "$fresh"
+  fail 'installed macOS target signature or trust verification failed; previous app restored'
+fi
 installedVersion=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
 actual=$(/usr/bin/shasum -a 256 "$app/Contents/Resources/app.asar" | /usr/bin/awk '{print $1}')
 if [ "$installedVersion" != "$version" ] || [ "$actual" != "$digest" ]; then

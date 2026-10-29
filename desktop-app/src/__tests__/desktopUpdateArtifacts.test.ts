@@ -386,7 +386,7 @@ describe('published macOS v0.12.0 artifact', () => {
       })
 
       await expect(verifyAppTree(payload.appPath, '0.11.9', 'darwin', 'arm64')).rejects.toThrow(
-        'The downloaded Desktop app is 0.12.0; expected 0.11.9.'
+        'The Desktop app is 0.12.0; expected 0.11.9.'
       )
     }
   )

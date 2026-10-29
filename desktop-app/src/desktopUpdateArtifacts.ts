@@ -663,9 +663,7 @@ export async function verifyAppTree(
   const asarPath = getAppArchivePath(appPath, platform)
   const manifest = readPackagedAppManifest(asarPath)
   if (manifest.version !== expectedVersion) {
-    throw new Error(
-      `The downloaded Desktop app is ${manifest.version}; expected ${expectedVersion}.`
-    )
+    throw new Error(`The Desktop app is ${manifest.version}; expected ${expectedVersion}.`)
   }
 
   const executable =
@@ -683,7 +681,7 @@ export async function verifyAppTree(
   }
   assertExecutableArchitecture(header, platform, architecture)
   if (platform !== 'win32' && (executableFile.mode & 0o111) === 0) {
-    throw new Error('The downloaded application is missing executable permissions.')
+    throw new Error('The Desktop application is missing executable permissions.')
   }
 
   let appId = 'ai.evenfire.desktop'
@@ -691,9 +689,8 @@ export async function verifyAppTree(
     appId = readMacBundleValue(appPath, 'CFBundleIdentifier')
     const bundleVersion = readMacBundleValue(appPath, 'CFBundleShortVersionString')
     if (appId !== 'ai.evenfire.desktop' || bundleVersion !== expectedVersion) {
-      throw new Error('The downloaded macOS app bundle has an unexpected identity or version.')
+      throw new Error('The macOS app bundle has an unexpected identity or version.')
     }
-    verifyMacSignature(appPath)
   } else if (platform === 'win32') {
     verifyWindowsAuthenticodeIfSigned(executable)
   }
@@ -718,7 +715,7 @@ function assertExecutableArchitecture(
       const count = littleEndian ? header.readUInt32LE(4) : header.readUInt32BE(4)
       const entryBytes = magic === 0xcafebabf || magic === 0xbfbafeca ? 32 : 20
       if (count > 32 || header.length < 8 + count * entryBytes) {
-        throw new Error('The downloaded macOS executable has an invalid universal header.')
+        throw new Error('The macOS executable has an invalid universal header.')
       }
       const hasArchitecture = Array.from({ length: count }).some(
         (_, index) =>
@@ -726,76 +723,84 @@ function assertExecutableArchitecture(
             ? header.readUInt32LE(8 + index * entryBytes)
             : header.readUInt32BE(8 + index * entryBytes)) === expectedCpuType
       )
-      if (!hasArchitecture) throw new Error('The downloaded macOS app has the wrong architecture.')
+      if (!hasArchitecture) throw new Error('The macOS app has the wrong architecture.')
       return
     }
     const littleEndian = [0xcefaedfe, 0xcffaedfe].includes(magic)
     if (!littleEndian && magic !== 0xfeedface && magic !== 0xfeedfacf) {
-      throw new Error('The downloaded macOS application is not a Mach-O executable.')
+      throw new Error('The macOS application is not a Mach-O executable.')
     }
     const cpuType = littleEndian ? header.readInt32LE(4) : header.readInt32BE(4)
-    if (cpuType !== expectedCpuType)
-      throw new Error('The downloaded macOS app has the wrong architecture.')
+    if (cpuType !== expectedCpuType) throw new Error('The macOS app has the wrong architecture.')
     return
   }
   if (platform === 'win32') {
     if (header.length < 64 || header.toString('ascii', 0, 2) !== 'MZ') {
-      throw new Error('The downloaded Windows application is not a PE executable.')
+      throw new Error('The Windows application is not a PE executable.')
     }
     const peOffset = header.readUInt32LE(0x3c)
     if (
       peOffset + 6 > header.length ||
       header.toString('ascii', peOffset, peOffset + 4) !== 'PE\0\0'
     ) {
-      throw new Error('The downloaded Windows application has an invalid PE header.')
+      throw new Error('The Windows application has an invalid PE header.')
     }
     const machine = header.readUInt16LE(peOffset + 4)
     const expectedMachine = architecture === 'x64' ? 0x8664 : 0xaa64
-    if (machine !== expectedMachine)
-      throw new Error('The downloaded Windows app has the wrong architecture.')
+    if (machine !== expectedMachine) throw new Error('The Windows app has the wrong architecture.')
     return
   }
   if (header.length < 20 || !header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) {
-    throw new Error('The downloaded Linux application is not an ELF executable.')
+    throw new Error('The Linux application is not an ELF executable.')
   }
   if (header[4] !== 2 || ![1, 2].includes(header[5]!)) {
-    throw new Error('The downloaded Linux application has an unsupported ELF class or byte order.')
+    throw new Error('The Linux application has an unsupported ELF class or byte order.')
   }
   const littleEndian = header[5] === 1
   const machine = littleEndian ? header.readUInt16LE(18) : header.readUInt16BE(18)
   const expectedMachine = architecture === 'x64' ? 62 : 183
-  if (machine !== expectedMachine)
-    throw new Error('The downloaded Linux app has the wrong architecture.')
+  if (machine !== expectedMachine) throw new Error('The Linux app has the wrong architecture.')
 }
 
-function runNativeTool(command: string, args: string[]): string {
+function runNativeTool(
+  command: string,
+  args: string[],
+  failureMessage = 'The operating system could not verify the Desktop artifact.'
+): string {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 30_000 })
   if (result.error || result.status !== 0) {
-    throw new Error(
-      `The operating system rejected the downloaded Desktop application (${command}).`
-    )
+    throw new Error(failureMessage)
   }
   return `${result.stdout ?? ''}${result.stderr ?? ''}`
 }
 
 function readMacBundleValue(appPath: string, key: string): string {
-  return runNativeTool('/usr/bin/plutil', [
-    '-extract',
-    key,
-    'raw',
-    '-o',
-    '-',
-    path.join(appPath, 'Contents', 'Info.plist'),
-  ]).trim()
+  return runNativeTool(
+    '/usr/bin/plutil',
+    ['-extract', key, 'raw', '-o', '-', path.join(appPath, 'Contents', 'Info.plist')],
+    'The macOS application metadata could not be read.'
+  ).trim()
 }
 
-function verifyMacSignature(appPath: string): void {
-  runNativeTool('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath])
-  const details = runNativeTool('/usr/bin/codesign', ['-dv', '--verbose=4', appPath])
+function verifyMacReleaseSignature(appPath: string): void {
+  runNativeTool(
+    '/usr/bin/codesign',
+    ['--verify', '--deep', '--strict', '--verbose=2', appPath],
+    'The downloaded macOS target failed signature verification.'
+  )
+  const details = runNativeTool(
+    '/usr/bin/codesign',
+    ['-dv', '--verbose=4', appPath],
+    'The downloaded macOS target signature could not be inspected.'
+  )
   if (!/TeamIdentifier=XV6G8QZD5D(?:\r?\n|$)/.test(details)) {
-    throw new Error('The downloaded macOS app is signed by an unexpected developer team.')
+    throw new Error('The downloaded macOS target is signed by an unexpected developer team.')
   }
-  runNativeTool('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=2', appPath])
+  runNativeTool(
+    '/usr/sbin/spctl',
+    ['--assess', '--type', 'execute', '--verbose=2', appPath],
+    'The downloaded macOS target failed macOS trust assessment.'
+  )
 }
 
 function verifyWindowsAuthenticodeIfSigned(executable: string): void {
@@ -877,6 +882,7 @@ export async function prepareVerifiedDesktopPayload(args: {
   }
 
   const verified = await verifyAppTree(appPath, version, platform, architecture)
+  if (platform === 'darwin') verifyMacReleaseSignature(appPath)
   if (packageType === 'squirrel') verifyWindowsAuthenticodeIfSigned(packagePath)
   return {
     packageType,
