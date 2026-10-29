@@ -3318,8 +3318,19 @@ describe('App deep-link orchestration', () => {
     const actual =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
     const realController: { current: AppController | null } = { current: null }
+    let restoredOriginChatCalls = 0
     vi.mocked(useAppController).mockImplementation(() => {
-      realController.current = actual.useAppController()
+      const controller = actual.useAppController()
+      realController.current = {
+        ...controller,
+        handleSelectChatAgent: (...args) => {
+          const options = args[1]
+          if (options?.chatId === 'origin-chat' && options.navigationIntentAlreadyStarted) {
+            restoredOriginChatCalls += 1
+          }
+          return controller.handleSelectChatAgent(...args)
+        },
+      }
       return realController.current
     })
     const queue = new SandboxUiDeepLinkQueue()
@@ -3372,6 +3383,7 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     expect(openSandboxUi).not.toHaveBeenCalled()
     expect(realController.current?.navigationIntentSequence).toBe((originIntent ?? 0) + 1)
+    expect(restoredOriginChatCalls).toBe(0)
 
     ready = true
     await act(async () => {
@@ -3386,6 +3398,7 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
     expect(openSandboxUi).toHaveBeenCalledOnce()
     expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('app')
+    expect(restoredOriginChatCalls).toBe(0)
 
     act(() => realController.current?.handleNavSelect(DESKTOP_ROUTES.chat))
     await waitFor(() =>
