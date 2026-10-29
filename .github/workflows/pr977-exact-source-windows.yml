@@ -1,0 +1,315 @@
+name: PR 977 exact-source Windows validation
+
+on:
+  push:
+    branches:
+      - test/pr977-windows-075794e5-20261028-r24m3
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr977-windows-075794e5-r24m3
+  cancel-in-progress: false
+
+jobs:
+  desktop-windows:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      PR977_SOURCE_SHA: 075794e5606a65c30f4626a15f17718447393ec5
+
+    steps:
+      - name: Check out exact PR application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out validation harness commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify and report source and workflow revisions
+        id: source
+        shell: pwsh
+        run: |
+          $triggerSha = $env:GITHUB_SHA
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nvmrc = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $triggerSha"
+          Write-Output "Validation harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          Write-Output "Repository-pinned Node version: $nvmrc"
+          if ($triggerSha -ne $harnessSha) { throw 'Harness checkout does not match trigger SHA' }
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source SHA mismatch' }
+          if ($nvmrc -ne '24.22.1') { throw 'Repository Node pin is not 24.22.1' }
+          "source_sha=$sourceSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "harness_sha=$harnessSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Set up repository-pinned Node
+        id: setup_node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            source/desktop-app/package-lock.json
+            source/mcp-host/package-lock.json
+
+      - name: Record hosted Windows runtime
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Output "Runner image: $env:ImageOS $env:ImageVersion ($env:RUNNER_ARCH)"
+          Write-Output "Windows: $($os.Caption) $($os.Version)"
+          Write-Output "Node: $(node --version)"
+          Write-Output "npm: $(npm --version)"
+          if ((node --version) -ne 'v24.22.1') { throw 'Unexpected Node runtime' }
+
+      - name: Overlay durability test from validation harness
+        id: overlay
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source changed before overlay' }
+          $committedAcl = 'source/desktop-app/src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
+          if (-not (Test-Path $committedAcl)) { throw 'Committed native ACL suite is missing' }
+          $name = 'windowsSessionAuthorityDurableFileOps.native.test.ts'
+          $target = Join-Path 'source/desktop-app/src/__tests__' $name
+          if (Test-Path $target) { throw 'Refusing to replace a source-controlled test' }
+          $inputFile = Join-Path 'validation/.validation/windows' $name
+          if (-not (Test-Path $inputFile)) { throw 'Missing native durability test overlay' }
+          Copy-Item -LiteralPath $inputFile -Destination $target
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputFile).Hash.ToLowerInvariant()
+          Write-Output "Validation-only durability test overlay: $name SHA256=$hash"
+          if ((git -C source rev-parse HEAD).Trim() -ne $env:PR977_SOURCE_SHA) {
+            throw 'Application source SHA changed during test overlay'
+          }
+
+      - name: Install Host fixture dependencies
+        id: install_host
+        working-directory: source/mcp-host
+        run: npm ci
+
+      - name: Install Desktop dependencies
+        id: install_desktop
+        working-directory: source/desktop-app
+        run: npm ci
+
+      - name: Build Desktop main and renderer
+        id: build
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          npm run build
+          $code = $LASTEXITCODE
+          Write-Output "Desktop build exit code: $code"
+          if ($code -ne 0) { exit $code }
+
+      - name: Verify Electron runtime
+        id: electron
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          npm run verify:electron
+          $code = $LASTEXITCODE
+          Write-Output "Electron verification exit code: $code"
+          if ($code -ne 0) { exit $code }
+
+      - name: Run required native and producer-backed Windows suites
+        id: focused
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP 'pr977-focused-windows.json'
+          $files = @(
+            'src/__tests__/windowsSessionAuthorityAcl.native.test.ts',
+            'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts',
+            'src/__tests__/windowsSessionAuthorityAcl.launch.test.ts',
+            'src/__tests__/windowsSessionAuthorityFileOps.launch.test.ts',
+            'src/__tests__/appService.pendingExternalLogoutKeytarUnavailable.test.ts',
+            'src/__tests__/appService.persistenceMutation.contract.test.ts',
+            'src/__tests__/appService.passwordLoginRollback.regression.test.ts'
+          )
+          & npm test -- --testTimeout=120000 --hookTimeout=120000 --reporter=json "--outputFile.json=$reportPath" @files
+          $testExit = $LASTEXITCODE
+          Write-Output "Focused Windows test command exit code: $testExit"
+          if (-not (Test-Path $reportPath)) { throw 'Focused Windows JSON report is missing' }
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          Write-Output "Focused tests: total=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          $testResults = @($report.testResults)
+          $requiredNative = @(
+            'windowsSessionAuthorityAcl.native.test.ts',
+            'windowsSessionAuthorityDurableFileOps.native.test.ts',
+            'windowsSessionAuthorityAcl.launch.test.ts',
+            'windowsSessionAuthorityFileOps.launch.test.ts'
+          )
+          foreach ($file in $requiredNative) {
+            $matchingResults = @($testResults | Where-Object { $_.name -like "*$file" })
+            if ($matchingResults.Count -ne 1) { throw "Required Windows test file did not execute exactly once: $file" }
+            $assertions = @($matchingResults[0].assertionResults)
+            if ($assertions.Count -eq 0) { throw "Required Windows test file executed no cases: $file" }
+            $notPassed = @($assertions | Where-Object { $_.status -ne 'passed' })
+            if ($notPassed.Count -gt 0) {
+              $states = $notPassed | Group-Object status | ForEach-Object { "$($_.Name)=$($_.Count)" }
+              Write-Output "Required Windows test file has non-passing cases: $file $($states -join ',')"
+              throw "Required Windows test file failed, skipped, or reported todo cases: $file"
+            }
+            Write-Output "Required Windows test file passed: $file assertions=$($assertions.Count)"
+          }
+          $producerFiles = @(
+            'appService.pendingExternalLogoutKeytarUnavailable.test.ts',
+            'appService.persistenceMutation.contract.test.ts',
+            'appService.passwordLoginRollback.regression.test.ts'
+          )
+          $linuxSkipTitle = 'uses memory-only mode when Linux safeStorage selects the basic_text backend'
+          foreach ($file in $producerFiles) {
+            $matchingResults = @($testResults | Where-Object { $_.name -like "*$file" })
+            if ($matchingResults.Count -ne 1) { throw "Producer-backed suite did not execute exactly once: $file" }
+            $assertions = @($matchingResults[0].assertionResults)
+            $passed = @($assertions | Where-Object { $_.status -eq 'passed' })
+            if ($passed.Count -eq 0) { throw "Producer-backed suite executed no passing cases: $file" }
+            $expectedLinuxSkip = @()
+            if ($file -eq 'appService.pendingExternalLogoutKeytarUnavailable.test.ts') {
+              $expectedLinuxSkip = @($assertions | Where-Object {
+                $_.title -eq $linuxSkipTitle -and $_.status -eq 'skipped'
+              })
+              if ($expectedLinuxSkip.Count -ne 1) { throw 'Expected exactly one named Linux-only Windows skip' }
+            }
+            $unexpected = @($assertions | Where-Object {
+              $_.status -ne 'passed' -and
+              -not ($file -eq 'appService.pendingExternalLogoutKeytarUnavailable.test.ts' -and
+                $_.title -eq $linuxSkipTitle -and $_.status -eq 'skipped')
+            })
+            if ($unexpected.Count -gt 0) { throw "Producer-backed suite failed or unexpectedly skipped cases: $file" }
+            Write-Output "Producer-backed suite passed: $file passed=$($passed.Count) namedLinuxSkip=$($expectedLinuxSkip.Count)"
+          }
+          foreach ($result in $testResults) {
+            foreach ($assertion in @($result.assertionResults | Where-Object { $_.status -eq 'failed' })) {
+              Write-Output "Failed test: $($result.name) :: $($assertion.fullName)"
+            }
+          }
+          if ($testExit -ne 0 -or -not $report.success -or $report.numFailedTests -ne 0) {
+            throw 'Focused Windows tests failed; see file-level results above.'
+          }
+
+      - name: Run full Desktop suite on Windows
+        id: full_suite
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP 'pr977-full-desktop-windows.json'
+          npm test -- --reporter=json "--outputFile.json=$reportPath"
+          $testExit = $LASTEXITCODE
+          Write-Output "Full Desktop test command exit code: $testExit"
+          if (-not (Test-Path $reportPath)) { throw 'Full Desktop JSON report is missing' }
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          Write-Output "Full Desktop suite: files=$($report.numTotalTestSuites) passedFiles=$($report.numPassedTestSuites) failedFiles=$($report.numFailedTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          foreach ($result in @($report.testResults)) {
+            foreach ($assertion in @($result.assertionResults | Where-Object { $_.status -eq 'failed' })) {
+              Write-Output "Failed test: $($result.name) :: $($assertion.fullName)"
+            }
+          }
+          foreach ($file in @(
+            'windowsSessionAuthorityAcl.native.test.ts',
+            'windowsSessionAuthorityDurableFileOps.native.test.ts'
+          )) {
+            $matchingResults = @($report.testResults | Where-Object { $_.name -like "*$file" })
+            if ($matchingResults.Count -ne 1) { throw "Required native Windows suite missing from full run: $file" }
+            $assertions = @($matchingResults[0].assertionResults)
+            if ($assertions.Count -eq 0) { throw "Required native Windows suite ran no cases: $file" }
+            $notPassed = @($assertions | Where-Object { $_.status -ne 'passed' })
+            if ($notPassed.Count -gt 0) { throw "Required native Windows suite failed or skipped cases: $file" }
+          }
+          $producerFiles = @(
+            'appService.pendingExternalLogoutKeytarUnavailable.test.ts',
+            'appService.persistenceMutation.contract.test.ts',
+            'appService.passwordLoginRollback.regression.test.ts'
+          )
+          $linuxSkipTitle = 'uses memory-only mode when Linux safeStorage selects the basic_text backend'
+          foreach ($file in $producerFiles) {
+            $matchingResults = @($report.testResults | Where-Object { $_.name -like "*$file" })
+            if ($matchingResults.Count -ne 1) { throw "Producer-backed suite missing from full run: $file" }
+            $assertions = @($matchingResults[0].assertionResults)
+            $passed = @($assertions | Where-Object { $_.status -eq 'passed' })
+            if ($passed.Count -eq 0) { throw "Producer-backed suite executed no passing cases: $file" }
+            $expectedLinuxSkip = @()
+            if ($file -eq 'appService.pendingExternalLogoutKeytarUnavailable.test.ts') {
+              $expectedLinuxSkip = @($assertions | Where-Object {
+                $_.title -eq $linuxSkipTitle -and $_.status -eq 'skipped'
+              })
+              if ($expectedLinuxSkip.Count -ne 1) { throw 'Expected exactly one named Linux-only Windows skip' }
+            }
+            $unexpected = @($assertions | Where-Object {
+              $_.status -ne 'passed' -and
+              -not ($file -eq 'appService.pendingExternalLogoutKeytarUnavailable.test.ts' -and
+                $_.title -eq $linuxSkipTitle -and $_.status -eq 'skipped')
+            })
+            if ($unexpected.Count -gt 0) { throw "Producer-backed suite failed or unexpectedly skipped cases: $file" }
+            Write-Output "Producer-backed suite passed: $file passed=$($passed.Count) namedLinuxSkip=$($expectedLinuxSkip.Count)"
+          }
+          if ($testExit -ne 0 -or -not $report.success -or $report.numFailedTests -ne 0) {
+            throw 'Full Desktop Windows suite failed; see file-level results above.'
+          }
+
+      - name: Aggregate exact-source Windows gate
+        if: always()
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          HARNESS_SHA: ${{ steps.source.outputs.harness_sha }}
+          SOURCE_STEP: ${{ steps.source.outcome }}
+          NODE_STEP: ${{ steps.setup_node.outcome }}
+          OVERLAY_STEP: ${{ steps.overlay.outcome }}
+          HOST_INSTALL_STEP: ${{ steps.install_host.outcome }}
+          DESKTOP_INSTALL_STEP: ${{ steps.install_desktop.outcome }}
+          BUILD_STEP: ${{ steps.build.outcome }}
+          ELECTRON_STEP: ${{ steps.electron.outcome }}
+          FOCUSED_STEP: ${{ steps.focused.outcome }}
+          FULL_SUITE_STEP: ${{ steps.full_suite.outcome }}
+        run: |
+          "# PR 977 exact-source Windows validation" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "Application source SHA: $env:SOURCE_SHA" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "Workflow trigger and harness SHA: $env:HARNESS_SHA" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "Runner Node version: $(node --version)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $rows = @(
+            "Source revision verification: $env:SOURCE_STEP",
+            "Repository-pinned Node setup: $env:NODE_STEP",
+            "Native test overlay: $env:OVERLAY_STEP",
+            "Host dependency install: $env:HOST_INSTALL_STEP",
+            "Desktop dependency install: $env:DESKTOP_INSTALL_STEP",
+            "Desktop build: $env:BUILD_STEP",
+            "Electron verification: $env:ELECTRON_STEP",
+            "Focused native and producer tests: $env:FOCUSED_STEP",
+            "Full Desktop suite: $env:FULL_SUITE_STEP"
+          )
+          foreach ($row in $rows) {
+            Write-Output $row
+            $row | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          $outcomes = @(
+            $env:SOURCE_STEP, $env:NODE_STEP, $env:OVERLAY_STEP, $env:HOST_INSTALL_STEP,
+            $env:DESKTOP_INSTALL_STEP, $env:BUILD_STEP, $env:ELECTRON_STEP,
+            $env:FOCUSED_STEP, $env:FULL_SUITE_STEP
+          )
+          if (@($outcomes | Where-Object { $_ -ne 'success' }).Count -gt 0) {
+            throw 'The exact-source Windows validation gate did not pass.'
+          }
