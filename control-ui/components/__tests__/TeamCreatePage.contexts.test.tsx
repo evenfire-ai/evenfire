@@ -74,7 +74,7 @@ describe('team create Context membership', () => {
     expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('team-1', ['ctx-a'])
   })
 
-  it('stores a padded contextRef verbatim instead of normalizing it to another Context name', async () => {
+  it('sends the Host contextRef to the API unnormalized', async () => {
     vi.mocked(api.getHosts).mockResolvedValue({
       items: [{ metadata: { name: 'agent-a' }, spec: { contextRef: 'ctx-a ' } }],
     })
