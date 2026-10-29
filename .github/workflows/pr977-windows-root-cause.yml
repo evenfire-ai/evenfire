@@ -1,0 +1,233 @@
+name: PR 977 bounded Windows root-cause diagnostics
+
+on:
+  push:
+    branches:
+      - test/pr977-windows-075794e5-20261028-r24m3
+    paths:
+      - .validation/windows/root-cause.trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr977-windows-root-cause-075794e5
+  cancel-in-progress: false
+
+env:
+  PR977_SOURCE_SHA: 075794e5606a65c30f4626a15f17718447393ec5
+
+jobs:
+  authentication-phase-probe:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out diagnostic harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact revisions and Node pin
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nodePin = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $env:GITHUB_SHA"
+          Write-Output "Diagnostic harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA -or $harnessSha -ne $env:GITHUB_SHA) { throw 'Source or harness SHA mismatch' }
+          if ($nodePin -ne '24.22.1') { throw 'Unexpected repository Node pin' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            source/desktop-app/package-lock.json
+            source/mcp-host/package-lock.json
+
+      - name: Install declared project dependencies
+        shell: pwsh
+        run: |
+          npm --prefix source/mcp-host ci
+          if ($LASTEXITCODE -ne 0) { throw 'Host dependency installation failed' }
+          npm --prefix source/desktop-app ci
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed' }
+
+      - name: Instrument only the selected regression test
+        shell: pwsh
+        run: |
+          $test = 'source/desktop-app/src/__tests__/appService.passwordLoginRollback.regression.test.ts'
+          node validation/scripts/pr977/instrument-root-cause-tests.mjs auth $test
+          if ($LASTEXITCODE -ne 0) { throw 'Authentication phase instrumentation failed' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $test).Hash.ToLowerInvariant()
+          Write-Output "Validation-only test overlay SHA256=$hash"
+          if ((git -C source rev-parse HEAD).Trim() -ne $env:PR977_SOURCE_SHA) { throw 'Application checkout changed' }
+
+      - name: Run selected case with an external process-tree watchdog
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'auth-report.json'
+          $phase = Join-Path $env:RUNNER_TEMP 'auth-phases.txt'
+          $metaPath = Join-Path $env:RUNNER_TEMP 'auth-meta.json'
+          $stdout = Join-Path $env:RUNNER_TEMP 'auth-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'auth-stderr.log'
+          $env:PR977_DIAGNOSTIC_PHASE_FILE = $phase
+          $node = (Get-Command node).Source
+          $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
+          $filter = 'src/__tests__/appService.passwordLoginRollback.regression.test.ts'
+          $testName = 'restores the accepted prior source when candidate preparation fails after publication'
+          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '--testTimeout=60000', '--hookTimeout=60000', '--reporter=json', '"--outputFile.json=' + $report + '"', '"' + $filter + '"', '--testNamePattern', '"' + $testName + '"') -join ' '
+          $started = [DateTime]::UtcNow
+          $process = Start-Process -FilePath $node -ArgumentList $argumentLine -WorkingDirectory (Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app') -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $watchdogExpired = $false
+          $deadline = $started.AddSeconds(150)
+          while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Seconds 2
+            $process.Refresh()
+          }
+          if (-not $process.HasExited) {
+            $watchdogExpired = $true
+            Write-Output 'External watchdog expired; terminating only the diagnostic Vitest process tree.'
+            & taskkill.exe /PID $process.Id /T /F *> $null
+            $process.WaitForExit()
+          }
+          $process.Refresh()
+          $meta = [ordered]@{ exitCode = if ($watchdogExpired) { $null } else { $process.ExitCode }; watchdogExpired = $watchdogExpired; elapsedSeconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 1) }
+          $meta | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
+          node validation/scripts/pr977/sanitize-root-cause-report.mjs auth $report $phase $metaPath
+          if ($LASTEXITCODE -ne 0) { throw 'Authentication diagnostic sanitization failed' }
+
+      - name: Preserve allowlisted authentication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr977-windows-auth-root-cause
+          path: |
+            ${{ runner.temp }}/pr977-auth-root-cause.safe.json
+            ${{ runner.temp }}/auth-phases.txt
+            ${{ runner.temp }}/auth-meta.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  system-owner-fixture-probe:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out diagnostic harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact revisions and Node pin
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nodePin = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $env:GITHUB_SHA"
+          Write-Output "Diagnostic harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA -or $harnessSha -ne $env:GITHUB_SHA) { throw 'Source or harness SHA mismatch' }
+          if ($nodePin -ne '24.22.1') { throw 'Unexpected repository Node pin' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            source/desktop-app/package-lock.json
+            source/mcp-host/package-lock.json
+
+      - name: Install declared project dependencies
+        shell: pwsh
+        run: |
+          npm --prefix source/mcp-host ci
+          if ($LASTEXITCODE -ne 0) { throw 'Host dependency installation failed' }
+          npm --prefix source/desktop-app ci
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed' }
+
+      - name: Instrument only the SYSTEM-owner fixture
+        shell: pwsh
+        run: |
+          $test = 'source/desktop-app/src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
+          node validation/scripts/pr977/instrument-root-cause-tests.mjs acl $test
+          if ($LASTEXITCODE -ne 0) { throw 'ACL fixture instrumentation failed' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $test).Hash.ToLowerInvariant()
+          Write-Output "Validation-only test overlay SHA256=$hash"
+          if ((git -C source rev-parse HEAD).Trim() -ne $env:PR977_SOURCE_SHA) { throw 'Application checkout changed' }
+
+      - name: Run only the SYSTEM-owner fixture with an external watchdog
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'acl-report.json'
+          $phase = Join-Path $env:RUNNER_TEMP 'acl-phases.txt'
+          $metaPath = Join-Path $env:RUNNER_TEMP 'acl-meta.json'
+          $stdout = Join-Path $env:RUNNER_TEMP 'acl-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'acl-stderr.log'
+          $env:PR977_DIAGNOSTIC_PHASE_FILE = $phase
+          $node = (Get-Command node).Source
+          $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
+          $filter = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
+          $testName = 'accepts a child owned by the allowlisted SYSTEM principal with current-user access intact'
+          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '--testTimeout=60000', '--hookTimeout=60000', '--reporter=json', '"--outputFile.json=' + $report + '"', '"' + $filter + '"', '--testNamePattern', '"' + $testName + '"') -join ' '
+          $started = [DateTime]::UtcNow
+          $process = Start-Process -FilePath $node -ArgumentList $argumentLine -WorkingDirectory (Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app') -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $watchdogExpired = $false
+          $deadline = $started.AddSeconds(150)
+          while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Seconds 2
+            $process.Refresh()
+          }
+          if (-not $process.HasExited) {
+            $watchdogExpired = $true
+            Write-Output 'External watchdog expired; terminating only the diagnostic Vitest process tree.'
+            & taskkill.exe /PID $process.Id /T /F *> $null
+            $process.WaitForExit()
+          }
+          $process.Refresh()
+          $meta = [ordered]@{ exitCode = if ($watchdogExpired) { $null } else { $process.ExitCode }; watchdogExpired = $watchdogExpired; elapsedSeconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 1) }
+          $meta | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
+          node validation/scripts/pr977/sanitize-root-cause-report.mjs acl $report $phase $metaPath
+          if ($LASTEXITCODE -ne 0) { throw 'ACL fixture diagnostic sanitization failed' }
+
+      - name: Preserve allowlisted ACL fixture evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr977-windows-system-owner-fixture-root-cause
+          path: |
+            ${{ runner.temp }}/pr977-acl-root-cause.safe.json
+            ${{ runner.temp }}/acl-phases.txt
+            ${{ runner.temp }}/acl-meta.json
+          if-no-files-found: warn
+          retention-days: 7
