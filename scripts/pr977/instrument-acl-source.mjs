@@ -18,7 +18,7 @@ const allowedPhases = [
   'validate-published-authority-identity',
   'revalidate-user-data-root',
 ]
-const source = readFileSync(sourcePath, 'utf8')
+const source = readFileSync(sourcePath, 'utf8').replace(/\r\n/g, '\n')
 const scriptAnchor = 'const SCRIPT = String.raw`\n'
 if (!source.includes(scriptAnchor)) throw new Error('Missing ACL script anchor')
 
