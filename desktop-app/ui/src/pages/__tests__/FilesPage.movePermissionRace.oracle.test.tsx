@@ -279,6 +279,108 @@ describe('FilesPage Move permission generation fencing', () => {
     }
   )
 
+  it('preserves a newly selected destination when the captured Move returns 412 (R8-L4)', async () => {
+    const staleVersionError = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          {
+            resourceId: 'file-src',
+            destinationId: 'destination-1',
+            ifMatch: 3,
+          },
+          'fixture-session-token'
+        ),
+      412,
+      { code: 'precondition_failed', message: 'the resource version changed' }
+    )
+    const rows = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        path: '/Archive',
+        permissions: ['read', 'write'],
+      }),
+      accessibleResource('destination-2', 'Backup', 'directory', {
+        path: '/Backup',
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const children = await listChildrenPage([
+      childView('file-src', 'notes.txt', 'file', {
+        parentResourceId: 'source-parent',
+        path: '/Team/notes.txt',
+        version: 3,
+      }),
+    ])
+    const sourceParent = await resolveResource(
+      resolvedDirectory('source-parent', 'Team', { gfsUri: 'gfs://main/source-parent' })
+    )
+    const resolvedSource = await resolveResource(
+      resolvedFile('file-src', 'notes.txt', {
+        parentResourceId: 'source-parent',
+        path: '/Team/notes.txt',
+        version: 3,
+      })
+    )
+    let rejectMove!: (error: Error) => void
+    const moveGate = new Promise<{ resourceId: string; version: number }>((_resolve, reject) => {
+      rejectMove = reject
+    })
+    const affordances = appServiceAffordanceProducer(async resourceId =>
+      heldPermissionResponse(
+        resourceId === 'source-parent' ? ['read', 'write', 'delete'] : ['read', 'write']
+      )
+    )
+    const moveResource = vi.fn(() => moveGate)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => rows),
+          listChildren: vi.fn(async (resourceId: string) =>
+            resourceId === 'source-parent' ? children : listChildrenPage([])
+          ),
+          affordances,
+          resolve: vi.fn(async (uri: string) =>
+            uri.endsWith('/source-parent') ? sourceParent : resolvedSource
+          ),
+          moveResource,
+        },
+      },
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(
+      <AuthContext.Provider value={authFor('team-a')}>
+        <QueryClientProvider client={queryClient}>
+          <ToastingFilesPage pendingGfsUri="gfs://main/source-parent" />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Options for notes.txt' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith('file-src', 'destination-1', 'main', 3, undefined)
+    )
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Backup' }))
+    expect(within(dialog).getByText('Backup', { selector: 'strong' })).toBeTruthy()
+    await act(async () => {
+      rejectMove(new Error(staleVersionError))
+    })
+
+    const currentDialog = screen.getByRole('dialog', { name: 'Move file notes.txt' })
+    expect(within(currentDialog).getByText('Backup', { selector: 'strong' })).toBeTruthy()
+    expect(within(currentDialog).getByRole('button', { name: 'Move here (Backup)' })).toBeTruthy()
+    const result = await screen.findByRole('alert')
+    expect(result.textContent).toContain('notes.txt')
+    expect(result.textContent).toContain('Archive')
+    expect(result.textContent).toContain('changed')
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
   it('reports a completed folder Move after its dialog closes in flight', async () => {
     const rows = await listAccessiblePage([
       accessibleResource('destination-1', 'Archive', 'directory', {

@@ -96,7 +96,11 @@ import {
 } from '@/gfs/dropVerdict'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { suggestNumberedMoveName, toastMoveOutcome } from '@/gfs/moveCommit'
-import type { MoveCommitExpectedSourceSnapshot, MoveCommitOutcome } from '@/gfs/moveCommit'
+import type {
+  MoveCommitExpectedSourceSnapshot,
+  MoveCommitOutcome,
+  MoveToast,
+} from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
@@ -2595,9 +2599,27 @@ export function FilesPage({
         return
       }
       if (!contextStillMatches() || !ownsDialog()) {
-        // After dispatch, the operation owns its outcome independently of the
-        // current folder and dialog. A same-session route change cannot erase
-        // completion feedback; the generation check keeps newer dialogs safe.
+        const selectionChangedOnOwnedDialog =
+          contextStillMatches() &&
+          ownsDialogGeneration() &&
+          isDialogCurrent !== undefined &&
+          !isDialogCurrent()
+        if (selectionChangedOnOwnedDialog && visibleOutcome.status !== 'session-lost') {
+          const pushAttributedOutcome: MoveToast = (message, tone) =>
+            pushToast?.(target.name + ' → ' + destinationName + ': ' + message, tone)
+          toastMoveOutcome(
+            pushAttributedOutcome,
+            visibleOutcome,
+            target.name,
+            destinationName,
+            target.kind
+          )
+          setMovePermissionStatus(null)
+          return
+        }
+        // After dispatch, the operation owns its captured result. A changed
+        // destination selection keeps its dialog; route/session changes and a
+        // closed dialog still use the page-owned toast and generation fence.
         toastMoveOutcome(pushToast, visibleOutcome, target.name, destinationName, target.kind)
         closeOwnedDialog()
         return
