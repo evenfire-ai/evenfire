@@ -118,9 +118,46 @@ export async function callReasoningForIteration(
       }
     }
 
-    // Latency attribution — one event per reasoning roundtrip (covers the
-    // single transport retry above when it fires). Consumed by the
-    // TaskExecutor [TurnTiming] recorder; with no subscriber this is a no-op.
+    // #1043 — a failure that would leave a resumable checkpoint retries this
+    // model step, inside the same heartbeat window, before the loop can settle
+    // the checkpoint. The gate is the recorder's own settle predicate, so a
+    // retry can only happen where a manual Retry model step would have been
+    // offered. The counter is per model step and consumes no loop iteration.
+    const checkpointRecorder = config.modelStepCheckpointRecorder
+    let modelStepRetries = 0
+    let retryCause: Error | undefined
+    while (
+      result.type === 'error' &&
+      modelStepRetries < (config.modelStepAutoRetries ?? 0) &&
+      checkpointRecorder !== undefined &&
+      checkpointRecorder.canResume(result.error) &&
+      !config.abortSignal?.aborted
+    ) {
+      modelStepRetries++
+      // F6: the first failure of this step is the one that keeps the checkpoint
+      // resumable when the retries end on another error.
+      retryCause ??= result.error
+      logger.warn(
+        {
+          iteration,
+          attempt: modelStepRetries,
+          limit: config.modelStepAutoRetries,
+          checkpointId: checkpointRecorder.checkpointId,
+        },
+        'Retrying model step after provider_unavailable'
+      )
+      await delay(LLM_TRANSPORT_RETRY_DELAY_MS, config.abortSignal)
+      if (config.abortSignal?.aborted) break
+      result = await callReasoning()
+    }
+    if (retryCause !== undefined && result.type === 'error') {
+      checkpointRecorder?.noteModelStepRetry(retryCause, result.error)
+    }
+
+    // Latency attribution — one event per reasoning roundtrip. It covers the
+    // single transport retry and every automatic model-step retry above, since
+    // both stay inside this call. Consumed by the TaskExecutor [TurnTiming]
+    // recorder; with no subscriber this is a no-op.
     config.events.emit({
       type: 'llm:completed',
       data: { iteration, durationMs: Date.now() - callStartedAt },

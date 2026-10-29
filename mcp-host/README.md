@@ -126,6 +126,7 @@ env.
 | `CLERUM_BUDGETS_ENABLED`            | `false`    | CM `true`     | Enforce token budgets. See [Track usage and set token budgets](../docs/how-to/token-budgets-and-usage.md).                                                                                                                                                      |
 | `CLERUM_ENABLE_NUDGE`               | `false`    | -             | _No effect_ in the current code.                                                                                                                                                                                                                                |
 | `CLERUM_NUDGE_MAX_ITERATIONS`       | `3`        | -             | _No effect_ in the current code.                                                                                                                                                                                                                                |
+| `CLERUM_MODEL_STEP_AUTO_RETRIES`    | `1`        | -             | How many times one failed model step is retried automatically when the failure would leave a resumable checkpoint. `0` disables it; 0–5. Any other value stops the Host. See [Model-step checkpoint wire contract](../docs/contracts/model-step-checkpoint.md). |
 
 #### Tools
 

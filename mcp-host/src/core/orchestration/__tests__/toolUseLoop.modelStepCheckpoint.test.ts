@@ -17,6 +17,12 @@ import type { ModelStepCheckpointEntryRow } from '../../../db/worker/modelStepCh
 import type { ModelStepCheckpointAttachmentRow } from '../../../db/worker/modelStepCheckpointOps'
 import type { ModelStepCheckpointAttachmentInput } from '../../../db/worker/modelStepCheckpointOps'
 import type { ModelStepCheckpointFence } from '../../../db/worker/modelStepCheckpointOps'
+import { CodexProxyError } from '../../../llm/codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../../../llm/codexSubscription'
+import { GrokProxyError } from '../../../llm/grokLlmProxyClient'
+import { GrokSubscriptionProvider } from '../../../llm/grokSubscription'
+import { CodexAuthorizeError } from '../../../llm/providerAttemptAuthorizer'
+import type { ClassifiedError } from '../../../llm/types'
 import { logger } from '../../../logger'
 import {
   type InProcessWorkerHandle,
@@ -246,7 +252,11 @@ function withRecorder(
   tools: Tool[],
   recorder: ModelStepCheckpointRecorder,
   maxIterations = 4,
-  overrides: { events?: AgentEventEmitter; abortSignal?: AbortSignal } = {}
+  overrides: {
+    events?: AgentEventEmitter
+    abortSignal?: AbortSignal
+    modelStepAutoRetries?: number
+  } = {}
 ) {
   return {
     ...buildTestConfig(reasoning, tools),
@@ -330,6 +340,83 @@ const outage = () =>
     503,
     'provider_unavailable'
   )
+
+/**
+ * The `LlmError` the loop receives for a provider failure: the production
+ * conversion in `LlmPortAdapter.handleProviderError`
+ * (`src/core/adapters/llmPortAdapter.ts:768-790`) wraps the output of the
+ * provider's own `classifyError`. The classifier reads only the thrown error,
+ * so the provider deps below are never reached.
+ */
+function loopErrorFromClassifier(
+  providerName: string,
+  cause: Error,
+  classify: (error: unknown) => ClassifiedError
+): LlmError {
+  const classified = classify(cause)
+  return new LlmError(
+    classified.message,
+    providerName,
+    classified.code,
+    classified.retryable,
+    cause,
+    classified.httpStatus,
+    classified.providerCode
+  )
+}
+
+const codexClassifier = new CodexSubscriptionProvider('gpt-5.5', {
+  authorizer: { authorize: vi.fn() },
+  proxy: { stream: vi.fn() },
+  attemptContext: vi.fn(),
+} as never)
+const grokClassifier = new GrokSubscriptionProvider('grok-4', {
+  authorizer: { authorize: vi.fn() },
+  proxy: { stream: vi.fn() },
+  attemptContext: vi.fn(),
+} as never)
+
+/** What the Codex proxy client reports for an upstream 503. */
+function codexUnavailable(): LlmError {
+  return loopErrorFromClassifier(
+    'codex-subscription',
+    new CodexProxyError(
+      'provider_unavailable',
+      'proxy stream failed with 503 (provider_unavailable)'
+    ),
+    error => codexClassifier.classifyError(error)
+  )
+}
+
+/** The same outage through the Grok classifier. */
+function grokUnavailable(): LlmError {
+  return loopErrorFromClassifier(
+    'grok-subscription',
+    new GrokProxyError(
+      'provider_unavailable',
+      'proxy stream failed with 503 (provider_unavailable)'
+    ),
+    error => grokClassifier.classifyError(error)
+  )
+}
+
+/** A control-plane connection failure: not checkpoint-eligible. */
+function codexConnectionUnavailable(): LlmError {
+  return loopErrorFromClassifier(
+    'codex-subscription',
+    new CodexAuthorizeError('connection_unavailable', 'catalog down'),
+    error => codexClassifier.classifyError(error)
+  )
+}
+
+/** An upstream 429: retryable, but not checkpoint-eligible. */
+function codexRateLimited(): LlmError {
+  return loopErrorFromClassifier(
+    'codex-subscription',
+    new CodexProxyError('rate_limited', 'upstream 429'),
+    error => codexClassifier.classifyError(error)
+  )
+}
 
 const user: ChatMessage = { role: 'user', content: 'Inspect the repository files.' }
 const SOURCE_MESSAGE = JSON.stringify({
@@ -1599,4 +1686,461 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       `[model-step checkpoint volume] baseline=${baselineMs.toFixed(1)}ms recorded=${recordedMs.toFixed(1)}ms overhead=${(((recordedMs - baselineMs) / baselineMs) * 100).toFixed(1)}%`
     )
   }, 120_000)
+})
+
+/**
+ * #1043 §2.1 — the automatic model-step retry. One failed model step is
+ * retried, in place, when the recorder says the failure would leave a
+ * resumable checkpoint. Every provider case below feeds the loop the output of
+ * the real Codex/Grok classifier.
+ */
+/**
+ * #1043 §2.1 — the automatic model-step retry. One failed model step is
+ * retried, in place, when the recorder says the failure would leave a
+ * resumable checkpoint. Every provider case below feeds the loop the output of
+ * the real Codex/Grok classifier, dispatched as in production.
+ */
+describe('automatic model-step retry (#1043 §2.1)', () => {
+  const transitionsTo =
+    (to: string) =>
+    (transition: { mock: { calls: unknown[][] } }): unknown[][] =>
+      transition.mock.calls.filter(call => (call[2] as { to?: string } | undefined)?.to === to)
+  const resumableTransitions = transitionsTo('resumable')
+  const abandonedTransitions = transitionsTo('abandoned')
+  const RETRY_WARNING = 'Retrying model step after provider_unavailable'
+
+  function retryWarnings(warn: { mock: { calls: unknown[][] } }): unknown[][] {
+    return warn.mock.calls.filter(call => call[1] === RETRY_WARNING)
+  }
+
+  it('H1: a dispatched Codex provider_unavailable after a confirmed tool retries the step and answers', async () => {
+    const { worker, store, recorder } = harness()
+    const settle = vi.spyOn(recorder, 'settle')
+    const transition = vi.spyOn(store, 'transition')
+    const tool = createMockTool('read_file')
+    const reasoning = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'tc_h1', name: 'read_file', arguments: {} }] },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'text', content: 'answer after the automatic retry' },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 1 }),
+      [user]
+    )
+
+    expect(result).toMatchObject({ type: 'response', content: 'answer after the automatic retry' })
+    // Two calls for the failed step; the tool ran once.
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+    expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+    expect(tool.execute).toHaveBeenCalledTimes(1)
+    // Negative witness: the answered turn settled once as `abandoned` and the
+    // response is what the caller received — never a `resumable` transition.
+    expect(settle).toHaveBeenCalledTimes(1)
+    await expect(settle.mock.results[0]!.value).resolves.toBeUndefined()
+    expect(resumableTransitions(transition)).toHaveLength(0)
+    expect(abandonedTransitions(transition)).toHaveLength(1)
+  })
+
+  it('H2: the same dispatched outage through the Grok classifier also retries', async () => {
+    const { worker, store, recorder } = harness()
+    const settle = vi.spyOn(recorder, 'settle')
+    const transition = vi.spyOn(store, 'transition')
+    const tool = createMockTool('read_file')
+    const reasoning = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'tc_h2', name: 'read_file', arguments: {} }] },
+      { type: 'error', error: grokUnavailable() },
+      { type: 'text', content: 'grok answer after the automatic retry' },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 1 }),
+      [user]
+    )
+
+    expect(result).toMatchObject({
+      type: 'response',
+      content: 'grok answer after the automatic retry',
+    })
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+    expect(tool.execute).toHaveBeenCalledTimes(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    await expect(settle.mock.results[0]!.value).resolves.toBeUndefined()
+    expect(resumableTransitions(transition)).toHaveLength(0)
+    expect(abandonedTransitions(transition)).toHaveLength(1)
+  })
+
+  it.each([
+    { retries: 1, calls: 2 },
+    { retries: 2, calls: 3 },
+  ])(
+    'H3: $retries retries make $calls calls for the step and leave one resumable checkpoint',
+    async ({ retries, calls }) => {
+      const { worker, store, recorder } = harness()
+      const transition = vi.spyOn(store, 'transition')
+      const tool = createMockTool('read_file')
+      const reasoning = createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'tc_h3', name: 'read_file', arguments: {} }] },
+        { type: 'error', error: codexUnavailable() },
+        { type: 'error', error: codexUnavailable() },
+        { type: 'error', error: codexUnavailable() },
+      ])
+
+      const result = await runToolUseLoop(
+        withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: retries }),
+        [user]
+      )
+
+      expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+      expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(calls)
+      expect(tool.execute).toHaveBeenCalledTimes(1)
+      expect(resumableTransitions(transition)).toHaveLength(1)
+      expect(header(worker)).toMatchObject({ status: 'resumable' })
+    }
+  )
+
+  it('H3b (F6): an eligible failure whose retry ends on a 429 keeps the checkpoint resumable', async () => {
+    const { worker, store, recorder } = harness()
+    const transition = vi.spyOn(store, 'transition')
+    const tool = createMockTool('read_file')
+    const rateLimited = codexRateLimited()
+    const reasoning = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'tc_h3b', name: 'read_file', arguments: {} }] },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'error', error: rateLimited },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 1 }),
+      [user]
+    )
+
+    // The user gets the last error, and the checkpoint still offers Retry.
+    expect(result.type).toBe('error')
+    if (result.type !== 'error') throw new Error(`expected an error, got ${result.type}`)
+    expect(result.error).toBe(rateLimited)
+    expect(result).toMatchObject({ checkpointId: 'cp-loop' })
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+    // Witness: the resumable transition, and no abandonment.
+    expect(resumableTransitions(transition)).toHaveLength(1)
+    expect(abandonedTransitions(transition)).toHaveLength(0)
+    expect(header(worker)).toMatchObject({ status: 'resumable' })
+  })
+
+  it('H3c (R2-2): a later 429 is not masked by the previous step retried failure', async () => {
+    const { worker, store, recorder } = harness()
+    const transition = vi.spyOn(store, 'transition')
+    const tool = createMockTool('read_file')
+    const rateLimited = codexRateLimited()
+    const emptyResponse = new LlmError(
+      'LLM produced empty response (no text, no tool calls)',
+      'codex-subscription',
+      LlmErrorCode.InvalidResponse,
+      false
+    )
+    const reasoning = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'tc_h3c', name: 'read_file', arguments: {} }] },
+      // The step's first failure: eligible, so it starts the automatic retry.
+      { type: 'error', error: codexUnavailable() },
+      // The retry returns the port's empty response; the loop recovers with
+      // `continue` instead of settling.
+      { type: 'error', error: emptyResponse },
+      // The next step hits a 429, which is not checkpoint-eligible on its own.
+      { type: 'error', error: rateLimited },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 1 }),
+      [user]
+    )
+
+    expect(result.type).toBe('error')
+    if (result.type !== 'error') throw new Error(`expected an error, got ${result.type}`)
+    expect(result.error).toBe(rateLimited)
+    expect(result).not.toHaveProperty('checkpointId')
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+    expect(reasoning.respondWithTools).toHaveBeenCalledTimes(2)
+    // Witness: the checkpoint was abandoned exactly once; the earlier step's
+    // memory never made this failure resumable.
+    expect(resumableTransitions(transition)).toHaveLength(0)
+    expect(abandonedTransitions(transition)).toHaveLength(1)
+    expect(header(worker)).toBeUndefined()
+  })
+
+  it('H4: zero retries keeps the original call count and the resumable checkpoint', async () => {
+    const { worker, store, recorder } = harness()
+    const transition = vi.spyOn(store, 'transition')
+    const tool = createMockTool('read_file')
+    const reasoning = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'tc_h4', name: 'read_file', arguments: {} }] },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'text', content: 'must never be requested' },
+    ])
+
+    const result = await runToolUseLoop(
+      withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 0 }),
+      [user]
+    )
+
+    expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(1)
+    // Witness: the transition happened, exactly once.
+    expect(resumableTransitions(transition)).toHaveLength(1)
+    expect(header(worker)).toMatchObject({ status: 'resumable' })
+  })
+
+  describe('H5 (N=1): a failure that cannot leave a resumable checkpoint is not retried', () => {
+    it('no recorder at all (memory store or a non-rpc channel)', async () => {
+      const tool = createMockTool('read_file')
+      const reasoning = createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'tc_h5a', name: 'read_file', arguments: {} }] },
+        { type: 'error', error: codexUnavailable() },
+      ])
+
+      const result = await runToolUseLoop(
+        { ...buildTestConfig(reasoning, [tool]), modelStepAutoRetries: 1 },
+        [user]
+      )
+
+      expect(result.type).toBe('error')
+      expect(result).not.toHaveProperty('checkpointId')
+      expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(1)
+      expect(tool.execute).toHaveBeenCalledTimes(1)
+    })
+
+    it('no confirmed tool in the turn', async () => {
+      const { worker, recorder } = harness()
+      const reasoning = createMockReasoning([
+        { type: 'error', error: codexUnavailable() },
+        { type: 'text', content: 'must never be requested' },
+      ])
+
+      const result = await runToolUseLoop(
+        withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+          modelStepAutoRetries: 1,
+        }),
+        [user]
+      )
+
+      expect(result.type).toBe('error')
+      expect(result).not.toHaveProperty('checkpointId')
+      expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+      expect(reasoning.continueWithToolResults).not.toHaveBeenCalled()
+      expect(header(worker)).toBeUndefined()
+    })
+
+    it('connection_unavailable after a confirmed tool', async () => {
+      const { worker, recorder } = harness()
+      const settlement = observeSettlement(worker, recorder)
+      const error = codexConnectionUnavailable()
+      const tool = createMockTool('read_file')
+      const reasoning = createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'tc_h5b', name: 'read_file', arguments: {} }] },
+        { type: 'error', error },
+      ])
+
+      const result = await runToolUseLoop(
+        withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 1 }),
+        [user]
+      )
+
+      expect(result.type).toBe('error')
+      if (result.type !== 'error') throw new Error(`expected an error, got ${result.type}`)
+      expect(result.error).toBe(error)
+      expect(result).not.toHaveProperty('checkpointId')
+      expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(1)
+      // Witness: the checkpoint existed and had confirmed the tool.
+      expect(settlement.entries.filter(row => row.kind === 'tool_result')).toHaveLength(1)
+      expect(header(worker)).toBeUndefined()
+    })
+
+    it('a poisoned recorder', async () => {
+      const { worker, store, recorder } = harness()
+      const call = { id: 'tc_h5c', name: 'read_file', arguments: {} }
+      await recorder.begin([user])
+      await recorder.recordDispatch(call)
+      await recorder.recordResult(call, {
+        tool_call_id: call.id,
+        name: call.name,
+        content: 'read',
+        is_error: false,
+      })
+      vi.spyOn(store, 'append').mockRejectedValueOnce(new Error('SQLITE_IOERR'))
+      await recorder.syncMessages([user, { role: 'assistant', content: 'unrecorded' }])
+      expect(recorder.poisoned).toBe(true)
+
+      const error = codexUnavailable()
+      const reasoning = createMockReasoning([{ type: 'error', error }])
+
+      const result = await runToolUseLoop(
+        withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+          modelStepAutoRetries: 1,
+        }),
+        [user]
+      )
+
+      expect(result.type).toBe('error')
+      if (result.type !== 'error') throw new Error(`expected an error, got ${result.type}`)
+      expect(result.error).toBe(error)
+      expect(result).not.toHaveProperty('checkpointId')
+      expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+      expect(header(worker)).toBeUndefined()
+    })
+
+    it('a 429 after a confirmed tool', async () => {
+      const { worker, recorder } = harness()
+      const error = codexRateLimited()
+      const tool = createMockTool('read_file')
+      const reasoning = createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'tc_h5d', name: 'read_file', arguments: {} }] },
+        { type: 'error', error },
+      ])
+
+      const result = await runToolUseLoop(
+        withRecorder(reasoning, [tool], recorder, 4, { modelStepAutoRetries: 1 }),
+        [user]
+      )
+
+      expect(result.type).toBe('error')
+      if (result.type !== 'error') throw new Error(`expected an error, got ${result.type}`)
+      expect(result.error).toBe(error)
+      expect(result).not.toHaveProperty('checkpointId')
+      expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(1)
+      expect(tool.execute).toHaveBeenCalledTimes(1)
+      expect(header(worker)).toBeUndefined()
+    })
+  })
+
+  it('H6a: an abort during the first failing call cancels without a retry', async () => {
+    const { recorder } = harness()
+    const controller = new AbortController()
+    const tool = createMockTool('read_file')
+    const scripted = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'tc_h6a', name: 'read_file', arguments: {} }] },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'text', content: 'must never be requested' },
+    ])
+    const continueWithToolResults = vi.fn(
+      async (...args: Parameters<ReasoningPort['continueWithToolResults']>) => {
+        const modelResult = await scripted.continueWithToolResults(...args)
+        // The user cancels while the failing call is in flight.
+        if (modelResult.type === 'error') controller.abort()
+        return modelResult
+      }
+    )
+    const reasoning: ReasoningPort = {
+      respondWithTools: scripted.respondWithTools,
+      continueWithToolResults,
+    }
+    const info = vi.spyOn(logger, 'info')
+    const warn = vi.spyOn(logger, 'warn')
+    try {
+      const result = await runToolUseLoop(
+        withRecorder(reasoning, [tool], recorder, 4, {
+          abortSignal: controller.signal,
+          modelStepAutoRetries: 1,
+        }),
+        [user]
+      )
+
+      expect(result).toEqual({ type: 'cancelled', reason: 'signal_aborted' })
+      expect(continueWithToolResults).toHaveBeenCalledTimes(1)
+      expect(tool.execute).toHaveBeenCalledTimes(1)
+      // The retry branch never ran.
+      expect(retryWarnings(warn)).toHaveLength(0)
+      // Witness: the same logger recorded the loop that owns the retry.
+      expect(info.mock.calls.some(call => call[1] === 'Loop started')).toBe(true)
+    } finally {
+      info.mockRestore()
+      warn.mockRestore()
+    }
+  })
+
+  it('H6b: an abort during the retry delay cancels without a second call', async () => {
+    const { recorder } = harness()
+    const controller = new AbortController()
+    const tool = createMockTool('read_file')
+    const scripted = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'tc_h6b', name: 'read_file', arguments: {} }] },
+      { type: 'error', error: codexUnavailable() },
+      { type: 'text', content: 'must never be requested' },
+    ])
+    const continueWithToolResults = vi.fn(
+      async (...args: Parameters<ReasoningPort['continueWithToolResults']>) => {
+        const modelResult = await scripted.continueWithToolResults(...args)
+        if (modelResult.type === 'error') {
+          // The user cancels while the retry waits out its delay (350 ms).
+          setTimeout(() => controller.abort(), 50)
+        }
+        return modelResult
+      }
+    )
+    const reasoning: ReasoningPort = {
+      respondWithTools: scripted.respondWithTools,
+      continueWithToolResults,
+    }
+    const warn = vi.spyOn(logger, 'warn')
+    try {
+      const result = await runToolUseLoop(
+        withRecorder(reasoning, [tool], recorder, 4, {
+          abortSignal: controller.signal,
+          modelStepAutoRetries: 1,
+        }),
+        [user]
+      )
+
+      expect(result).toEqual({ type: 'cancelled', reason: 'signal_aborted' })
+      expect(continueWithToolResults).toHaveBeenCalledTimes(1)
+      // Witness: the retry was announced and then stopped by the abort.
+      expect(retryWarnings(warn)).toHaveLength(1)
+      expect(controller.signal.aborted).toBe(true)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('H9: canResume is true exactly when settle returns a checkpoint id', async () => {
+    for (const eligible of [true, false]) {
+      for (const confirmed of [false, true]) {
+        for (const poisoned of [false, true]) {
+          const { store, recorder } = harness()
+          const call = { id: 'tc_h9', name: 'read_file', arguments: {} }
+          await recorder.begin([user])
+          await recorder.recordDispatch(call)
+          if (confirmed) {
+            await recorder.recordResult(call, {
+              tool_call_id: call.id,
+              name: call.name,
+              content: 'read',
+              is_error: false,
+            })
+          }
+          if (poisoned) {
+            vi.spyOn(store, 'append').mockRejectedValueOnce(new Error('SQLITE_IOERR'))
+            await recorder.syncMessages([user, { role: 'assistant', content: 'unrecorded' }])
+            expect(recorder.poisoned).toBe(true)
+          }
+
+          const error = eligible ? codexUnavailable() : codexRateLimited()
+          const canResume = recorder.canResume(error)
+          const settlement = await recorder.settle({ type: 'error', error })
+          const expected = eligible && confirmed && !poisoned
+
+          expect({
+            eligible,
+            confirmed,
+            poisoned,
+            canResume,
+            settledWithCheckpointId: settlement === 'cp-loop',
+          }).toEqual({
+            eligible,
+            confirmed,
+            poisoned,
+            canResume: expected,
+            settledWithCheckpointId: expected,
+          })
+        }
+      }
+    }
+  })
 })

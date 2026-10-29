@@ -14,6 +14,8 @@ import {
   type ToolCall,
 } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { CodexProxyError } from '../../llm/codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../../llm/codexSubscription'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
 import type { SingleTurnProvider } from '../../llm/types'
@@ -26,6 +28,15 @@ import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
 const NOW = 1_700_000_000_000
 const SESSION_KEY = 'identity-user:rpc:identity-channel:default'
 const usage = { input_tokens: 1, output_tokens: 1, total_tokens: 2 }
+/**
+ * The real Codex classifier the production adapter applies to a proxy failure;
+ * classifyError reads the thrown error alone, so the provider deps are unused.
+ */
+const codexClassifier = new CodexSubscriptionProvider('primary-model', {
+  authorizer: { authorize: vi.fn() },
+  proxy: { stream: vi.fn() },
+  attemptContext: vi.fn(),
+} as never)
 const savedConfig = {
   enableApproval: appConfig.enableApproval,
   dynamicToolsEnabled: appConfig.dynamicToolsEnabled,
@@ -45,19 +56,17 @@ function provider(
     calls: () => count,
     requests,
     getProviderType: () => kind as never,
-    classifyError: error => ({
-      code:
-        error instanceof Error && error.message === 'upstream 503'
-          ? LlmErrorCode.ModelOverloaded
-          : LlmErrorCode.ApiCallFailed,
-      retryable: error instanceof Error && error.message === 'upstream 503',
-      message: error instanceof Error ? error.message : String(error),
-      httpStatus: error instanceof Error && error.message === 'upstream 503' ? 503 : undefined,
-      providerCode:
-        error instanceof Error && error.message === 'upstream 503'
-          ? 'provider_unavailable'
-          : undefined,
-    }),
+    classifyError: error =>
+      // The 503 arm is the production failure shape: the real Codex classifier
+      // decides the class, the retryability and the provider-native code, as
+      // LlmPortAdapter.handleProviderError does (#1043 §2.1).
+      error instanceof Error && error.message === 'upstream 503'
+        ? codexClassifier.classifyError(new CodexProxyError('provider_unavailable', error.message))
+        : {
+            code: LlmErrorCode.ApiCallFailed,
+            retryable: false,
+            message: error instanceof Error ? error.message : String(error),
+          },
     completeSingleTurn: async () => {
       throw new Error('Unexpected tool-less completion')
     },
@@ -193,7 +202,7 @@ async function continueTurn(
 
 async function waitingOrigin(
   withConfirmed = true,
-  afterApproval: Reply = { error: new Error('upstream 503') }
+  afterApproval: Reply | ((call: number) => Reply) = { error: new Error('upstream 503') }
 ) {
   Object.assign(appConfig, {
     enableApproval: true,
@@ -222,7 +231,9 @@ async function waitingOrigin(
             { id: 'approved-write', name: 'server__write', arguments: {} },
           ],
         }
-      : afterApproval
+      : typeof afterApproval === 'function'
+        ? afterApproval(call)
+        : afterApproval
   )
   const original = task('approval-origin')
   const originalDeps = deps(handle, llm, manager)
@@ -670,7 +681,8 @@ describe('real-producer checkpoint identity regressions', () => {
         originalDeps.taskLifecycle.register(original)
         await new TaskExecutor(original, originalDeps).run()
         await handle.persistQueue.drain()
-        expect(llm.calls()).toBe(2)
+        // The 503 is retried once automatically before it settles (N=1).
+        expect(llm.calls()).toBe(3)
         expect(execution).toHaveBeenCalledTimes(1)
         expect(header(handle).status).toBe('resumable')
         if (removed) tools.length = 0
@@ -718,7 +730,8 @@ describe('real-producer checkpoint identity regressions', () => {
       originalDeps.taskLifecycle.register(original)
       await new TaskExecutor(original, originalDeps).run()
       await handle.persistQueue.drain()
-      expect(llm.calls()).toBe(2)
+      // The 503 is retried once automatically before it settles (N=1).
+      expect(llm.calls()).toBe(3)
       expect(header(handle).status).toBe('resumable')
       const resumed = provider('openai', () => ({ content: 'native result accepted' }))
       const verdict = await continueTurn(handle, original, originalDeps, resumed)
@@ -814,7 +827,8 @@ describe('real-producer checkpoint identity regressions', () => {
       await new TaskExecutor(original, originalDeps).run()
       await handle.persistQueue.drain()
       expect(primary.calls()).toBe(1)
-      expect(fallback.calls()).toBe(2)
+      // Two fallback calls plus the automatic retry of the failed step (N=1).
+      expect(fallback.calls()).toBe(3)
       expect(header(handle)).toMatchObject({
         status: 'resumable',
         provider: 'claude',
@@ -834,7 +848,8 @@ describe('real-producer checkpoint identity regressions', () => {
         await f.executor.resumeAfterApproval(false)
         await f.handle.persistQueue.drain()
         expect(f.execute).toHaveBeenCalledTimes(1)
-        expect(f.llm.calls()).toBe(2)
+        // The post-approval 503 is retried once automatically (N=1).
+        expect(f.llm.calls()).toBe(3)
         expect(f.llm.requests[1]!.filter(m => m.tool_call_id === 'approved-write')).toEqual([
           expect.objectContaining({
             tool_call_id: 'approved-write',
@@ -901,6 +916,42 @@ describe('real-producer checkpoint identity regressions', () => {
     }
   )
 
+  // #1043 §2.1 (F11) — the production shape: the warm-approval origin keeps the
+  // approved result, its model step fails once, and the automatic retry answers
+  // inside the same task without executing the approved tool again.
+  it('H7: a warm-approval origin survives a dispatched 503 through the automatic retry', async () => {
+    const f = await waitingOrigin(true, call =>
+      call === 2 ? { error: new Error('upstream 503') } : { content: 'answer after the retry' }
+    )
+    try {
+      await f.executor.resumeAfterApproval(true)
+      await f.handle.persistQueue.drain()
+
+      // Three calls: the approval request, the failed step and its retry.
+      expect(f.llm.calls()).toBe(3)
+      expect(f.originalDeps.onComplete).toHaveBeenCalledTimes(1)
+      expect(f.originalDeps.onFail).not.toHaveBeenCalled()
+      expect(f.execute).toHaveBeenCalledTimes(1)
+      // The retry reuses the approved result instead of re-running the tool.
+      expect(
+        f.llm.requests[2]!.filter(message => message.tool_call_id === 'approved-write')
+      ).toEqual([
+        expect.objectContaining({
+          tool_call_id: 'approved-write',
+          content: expect.stringContaining('approved effect completed'),
+        }),
+      ])
+      // The answered origin turn is persisted and its checkpoint purged, so no
+      // resumable row is left behind.
+      expect(
+        f.handle.worker.db.prepare("SELECT content FROM messages WHERE role = 'assistant'").all()
+      ).toEqual([{ content: 'answer after the retry' }])
+      expect(header(f.handle)).toBeUndefined()
+    } finally {
+      await f.handle.shutdown()
+    }
+  })
+
   it('C-5: boot abandons an open approval checkpoint and cold resume offers no Retry', async () => {
     const f = await waitingOrigin()
     try {
@@ -952,7 +1003,8 @@ describe('real-producer checkpoint identity regressions', () => {
       })
       originalDeps.taskLifecycle.register(original)
       await new TaskExecutor(original, originalDeps).run()
-      expect(llm.calls()).toBe(2)
+      // The 503 is retried once automatically before settlement (N=1).
+      expect(llm.calls()).toBe(3)
       expect(llm.requests[1]!.filter(m => m.role === 'tool')).toHaveLength(1)
       expect(originalDeps.onFail).toHaveBeenCalledWith(
         original,
@@ -1003,7 +1055,8 @@ describe('real-producer checkpoint identity regressions', () => {
         const warning = vi.spyOn(logger, 'warn')
         originalDeps.taskLifecycle.register(original)
         await new TaskExecutor(original, originalDeps).run()
-        expect(llm.calls()).toBe(2)
+        // The 503 is retried once automatically before settlement (N=1).
+        expect(llm.calls()).toBe(3)
         expect(llm.requests[1]!.some(m => m.tool_call_id === 'confirmed-tool')).toBe(true)
         expect(writes).toHaveBeenCalledTimes(2)
         expect(warning).toHaveBeenCalledWith(
@@ -1053,7 +1106,8 @@ describe('real-producer checkpoint identity regressions', () => {
       originalDeps.taskLifecycle.register(original)
       await new TaskExecutor(original, originalDeps).run()
       expect(execute).toHaveBeenCalledTimes(1)
-      expect(llm.calls()).toBe(2)
+      // The 503 is retried once automatically before it settles (N=1).
+      expect(llm.calls()).toBe(3)
       const checkpoints = originalDeps.modelStepCheckpoints!.store
       const row = header(handle)
       expect(row.status).toBe('resumable')

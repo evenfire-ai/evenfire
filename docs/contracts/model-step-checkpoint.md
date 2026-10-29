@@ -12,14 +12,37 @@ It is distinct from Resend, which re-sends the user's original message.
 
 Codex/Grok subscription providers retry a transient `provider_unavailable` before
 failover, for at most 3 attempts total (backoffs of about 1 s and 3 s, with jitter).
-Each attempt uses fresh authorization and a fresh attempt index. Automatic retry
-is allowed only when the failed attempt is known not to have reached the
+Each attempt uses fresh authorization and a fresh attempt index. This provider-level
+retry is allowed only when the failed attempt is known not to have reached the
 provider (`providerDispatched === false`, for example a failed authorization)
-and no output has streamed. An attempt that may have been dispatched, such as a
-proxy timeout, is not retried, because a second call could be billed twice.
-Only after these attempts end can that failure leave a resumable checkpoint.
+and no output has streamed. A dispatched attempt, such as a proxy timeout, is not
+retried by the provider layer, because a second call could be billed twice.
+Only after these provider attempts end does the failure reach the tool-use loop.
 Sources: [retry guard](../../mcp-host/src/llm/rateLimitRetry.ts#L52),
 [dispatch flag](../../mcp-host/src/llm/types.ts#L61).
+
+The loop then retries the failed model step
+`CLERUM_MODEL_STEP_AUTO_RETRIES` times (default `1`, valid `0`–`5`; `0` disables
+the retry) when that failure would leave a resumable checkpoint: an eligible
+`provider_unavailable` after at least one confirmed tool result. The retry runs
+inside the running task, so the task id, the progress stream and the claim do not
+change, `llm_in_progress` heartbeats continue, and no loop iteration is consumed.
+A model-step retry is a dispatched call and can be billed, and it re-runs the
+whole provider chain, including any configured failover fallbacks; "at most `N`
+extra calls" per failing step therefore holds only when no failover is
+configured. The worst case per step is `N + 1` times the attempt time.
+
+If the retries also fail, the returned `TaskError` is the last error. When the
+step's first failure was eligible and the retries ended on a different,
+non-eligible error (a 429, a connection failure, an auth failure or the stream
+cap), the checkpoint still becomes `resumable`: the Host remembers the eligible
+failure that started the step's retries, so the turn is not thrown away and the
+confirmed tools are not re-executed. That memory is per model step and is bound
+to the exact error the retries ended on, so a later step's failure never inherits
+it. Sources:
+[retry loop](../../mcp-host/src/core/orchestration/toolUseLoopRuntime.ts),
+[settle gate](../../mcp-host/src/core/orchestration/modelStepCheckpointRecorder.ts),
+[bounded knob](../../mcp-host/src/config.ts).
 
 Retry remains available after an approval resume while the Host stays up. If the
 Host restarts while a turn waits for approval, that turn's checkpoint is abandoned
