@@ -164,6 +164,7 @@ export function AuthPage() {
                     <Input
                       disabled={busy}
                       id="email-input"
+                      size="middle"
                       type="email"
                       placeholder="you@evenfire.com"
                       value={email}
@@ -176,6 +177,7 @@ export function AuthPage() {
                       disabled={busy}
                       id="password-input"
                       ref={passwordInputRef}
+                      size="middle"
                       type="password"
                       placeholder="Your password"
                       value={password}
@@ -186,6 +188,7 @@ export function AuthPage() {
                     block
                     disabled={!hasPasswordLoginCredentials || busy}
                     htmlType="submit"
+                    size="middle"
                     type="primary"
                   >
                     {authTransitioning ? (
@@ -208,15 +211,17 @@ export function AuthPage() {
                       Signing in...
                     </span>
                   ) : null}
-                  <Button
-                    block
-                    disabled={busy || forgotPasswordBusy}
-                    htmlType="button"
-                    onClick={() => void handleForgotPasswordClick()}
-                    type="text"
-                  >
-                    <Typography.Text type="secondary">Forgot password</Typography.Text>
-                  </Button>
+                  <Flex align="flex-start">
+                    <Button
+                      disabled={busy || forgotPasswordBusy}
+                      htmlType="button"
+                      onClick={() => void handleForgotPasswordClick()}
+                      size="middle"
+                      type="text"
+                    >
+                      <Typography.Text type="secondary">Forgot password</Typography.Text>
+                    </Button>
+                  </Flex>
                   {backendSwitchHint ? (
                     <Alert
                       description={
@@ -231,6 +236,7 @@ export function AuthPage() {
                             disabled={busy}
                             htmlType="button"
                             onClick={handleSwitchLoginBackendClick}
+                            size="middle"
                           >
                             {`Switch to ${backendSwitchHint.targetLabel} & retry`}
                           </Button>
