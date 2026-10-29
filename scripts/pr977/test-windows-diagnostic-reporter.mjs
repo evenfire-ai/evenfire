@@ -53,7 +53,7 @@ describe('producer-backed diagnostics', () => {
     path.join(directory, 'passing.test.ts'),
     `
 import { describe, it, expect } from 'vitest'
-describe('outer', () => { describe('inner', () => { it('passes', () => expect(1).toBe(1)) }) })
+describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => { expect(task.timeout).toBe(150000); expect(1).toBe(1) }) }) })
 `
   )
   const vitest = path.join(dependencyRoot, 'node_modules/vitest/vitest.mjs')
@@ -65,7 +65,16 @@ describe('outer', () => { describe('inner', () => { it('passes', () => expect(1)
     const output = path.join(directory, `${name}.json`)
     const processResult = spawnSync(
       process.execPath,
-      [vitest, 'run', '--root', directory, `--reporter=${reporter}`, `--outputFile=${output}`],
+      [
+        vitest,
+        'run',
+        '--root',
+        directory,
+        '--testTimeout=150000',
+        '--hookTimeout=30000',
+        `--reporter=${reporter}`,
+        `--outputFile=${output}`,
+      ],
       {
         encoding: 'utf8',
         timeout: 30000,
@@ -116,6 +125,8 @@ describe('outer', () => { describe('inner', () => { it('passes', () => expect(1)
   const cases = new Map(
     report.testResults.flatMap(file => file.assertionResults).map(test => [test.title, test])
   )
+  assert.equal(cases.get('passes').status, 'passed')
+  assert.equal(report.numFailedTests, 5)
   assert.equal(cases.get('verifier rejection').failure.category, 'native-verifier')
   assert.equal(cases.get('verifier rejection').failure.diagnostic.verifierHresult, '0x80070005')
   assert.equal(cases.get('test timeout').failure.category, 'timeout')

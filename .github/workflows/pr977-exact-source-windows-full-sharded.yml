@@ -142,10 +142,12 @@ jobs:
           EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
           EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
         run: |
+          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
+          $reporter = Join-Path $env:GITHUB_WORKSPACE 'validation/scripts/pr977/windows-diagnostic-reporter.mjs'
           $rawReportPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority-raw.json'
           $reportPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority.json'
           $logPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority.log'
-          npm test -- 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' --reporter=json "--outputFile.json=$rawReportPath" *> $logPath
+          npm test -- 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' --testTimeout=150000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism "--reporter=$reporter" "--outputFile.json=$rawReportPath" *> $logPath
           $testExit = $LASTEXITCODE
           Write-Output "Native Windows ACL/durability command exit code: $testExit"
           if (-not (Test-Path $rawReportPath)) { throw 'Native Windows suites did not produce a JSON report.' }
@@ -157,6 +159,14 @@ jobs:
           $requiredNativeNames = @('windowsSessionAuthorityAcl.native.test.ts', 'windowsSessionAuthorityDurableFileOps.native.test.ts')
           $missingNativeNames = @($requiredNativeNames | Where-Object { $nativeNames -notcontains $_ })
           $nativeNamesMatch = $nativeNames.Count -eq 2 -and $missingNativeNames.Count -eq 0
+          $requiredCases = @{ 'windowsSessionAuthorityAcl.native.test.ts' = 13; 'windowsSessionAuthorityDurableFileOps.native.test.ts' = 4 }
+          foreach ($file in @($report.testResults)) {
+            $name = [System.IO.Path]::GetFileName($file.name)
+            $cases = @($file.assertionResults)
+            if (-not $requiredCases.ContainsKey($name) -or $cases.Count -ne $requiredCases[$name] -or @($cases | Where-Object { $_.status -ne 'passed' }).Count -ne 0) {
+              throw 'Required native cases did not all execute and pass.'
+            }
+          }
           if ($testExit -ne 0 -or -not $report.success -or $report.numTestFiles -ne 2 -or $report.testResults.Count -ne 2 -or -not $nativeNamesMatch -or $report.numTotalTests -le 0 -or $report.numFailedTests -ne 0 -or $report.numPendingTests -ne 0) {
             throw 'Native Windows ACL or durability validation failed.'
           }
