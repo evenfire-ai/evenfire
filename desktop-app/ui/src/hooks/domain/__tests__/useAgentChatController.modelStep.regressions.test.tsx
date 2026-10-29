@@ -9,7 +9,9 @@ import {
   CHECKPOINT_ID,
   CONTINUATION_TASK_ID,
   FAILED_TERMINAL,
+  NEXT_RESUMABLE_VERSION,
   ORIGIN_PROMPT,
+  RESUMABLE_VERSION,
   checkpointView,
   continueAnswer,
   sendAndFail,
@@ -192,7 +194,7 @@ describe('model-step Retry operation identity (#1048 H1/H2)', () => {
     const { result, answer, retry } = await pendingRetry()
     clerum.rpc.loadSessionMessages.mockResolvedValue(
       sessionWith(
-        { ...checkpointView('session-view.resumable.json'), version: 2 },
+        { ...checkpointView('session-view.resumable.json'), version: NEXT_RESUMABLE_VERSION },
         result.current.activeChatId!
       )
     )
@@ -201,7 +203,7 @@ describe('model-step Retry operation identity (#1048 H1/H2)', () => {
         reason: 'checkpoint_updated',
       })
     })
-    expect(result.current.modelStepCheckpoint?.version).toBe(2)
+    expect(result.current.modelStepCheckpoint?.version).toBe(NEXT_RESUMABLE_VERSION)
     const readsBefore = clerum.rpc.loadSessionMessages.mock.calls.length
     await act(async () => {
       answer.resolve(continueAnswer('continue-response.claimed.json'))
@@ -386,7 +388,7 @@ describe('safe Retry notice and acknowledged sends (#1048 M3/M4/L1)', () => {
       'agent-x',
       result.current.activeChatId,
       CHECKPOINT_ID,
-      1
+      RESUMABLE_VERSION
     )
     expect(clerum.hasProgressHandler(CONTINUATION_TASK_ID)).toBe(true)
   })
@@ -444,7 +446,10 @@ describe('safe Retry notice and acknowledged sends (#1048 M3/M4/L1)', () => {
       await result.current.handleRetryModelStep()
     })
     clerum.rpc.loadSessionMessages.mockResolvedValue(
-      sessionWith({ ...checkpointView('session-view.resumable.json'), version: 2 })
+      sessionWith({
+        ...checkpointView('session-view.resumable.json'),
+        version: NEXT_RESUMABLE_VERSION,
+      })
     )
     await act(async () => {
       clerum.emitTaskProgress(CONTINUATION_TASK_ID, {
@@ -455,7 +460,9 @@ describe('safe Retry notice and acknowledged sends (#1048 M3/M4/L1)', () => {
         },
       })
     })
-    await waitFor(() => expect(result.current.modelStepCheckpoint?.version).toBe(2))
+    await waitFor(() =>
+      expect(result.current.modelStepCheckpoint?.version).toBe(NEXT_RESUMABLE_VERSION)
+    )
     render(
       <ModelStepRetryNotice
         checkpoint={result.current.modelStepCheckpoint}

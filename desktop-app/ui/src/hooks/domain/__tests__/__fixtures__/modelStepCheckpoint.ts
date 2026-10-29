@@ -41,6 +41,10 @@ export function checkpointView(name: string): ModelStepCheckpointView {
   return parseModelStepCheckpointView(modelStepFixture(name))
 }
 
+/** The version of the resumable C0 view, and the one a later transition gives it. */
+export const RESUMABLE_VERSION = checkpointView('session-view.resumable.json').version
+export const NEXT_RESUMABLE_VERSION = RESUMABLE_VERSION + 1
+
 export function continueAnswer(name: string): ModelStepContinueResult {
   const { httpStatus, body } = modelStepFixture(name) as { httpStatus: number; body: unknown }
   const parsed = parseModelStepContinueResponse(httpStatus, body, CHECKPOINT_ID)

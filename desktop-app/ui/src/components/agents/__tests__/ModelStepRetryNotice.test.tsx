@@ -15,6 +15,7 @@ import {
 import {
   CHECKPOINT_ID,
   CONTINUATION_TASK_ID,
+  RESUMABLE_VERSION,
   checkpointView,
   continueAnswer,
   modelStepFixture,
@@ -190,7 +191,7 @@ describe('Retry model step wired to the controller (#1044)', () => {
       'agent-x',
       result.current.activeChatId,
       CHECKPOINT_ID,
-      1
+      RESUMABLE_VERSION
     )
     // Resend would re-send the user message; only the original send went out.
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)

@@ -16,8 +16,10 @@ import {
   CHECKPOINT_ID,
   CONTINUATION_TASK_ID,
   FAILED_TERMINAL,
+  NEXT_RESUMABLE_VERSION,
   ORIGIN_PROMPT,
   ORIGIN_TASK_ID,
+  RESUMABLE_VERSION,
   checkpointReads,
   continueAnswer,
   sendAndFail as sendAndFailWith,
@@ -60,7 +62,7 @@ describe('model-step checkpoint in the controller (#1044)', () => {
       checkpointId: CHECKPOINT_ID,
       status: 'resumable',
       retryAvailable: true,
-      version: 1,
+      version: RESUMABLE_VERSION,
     })
     expect(result.current.failedAgentSend).toBeNull()
     expect(result.current.agentError).toBeNull()
@@ -147,7 +149,7 @@ describe('model-step checkpoint in the controller (#1044)', () => {
       'agent-x',
       chatId,
       CHECKPOINT_ID,
-      1
+      RESUMABLE_VERSION
     )
     await waitFor(() => expect(clerum.hasProgressHandler(CONTINUATION_TASK_ID)).toBe(true))
     expect(result.current.modelStepCheckpoint).toMatchObject({
@@ -227,7 +229,7 @@ describe('model-step checkpoint in the controller (#1044)', () => {
     // The Host keeps the same checkpoint resumable at the next version.
     const readsBefore = checkpointReads(clerum).length
     clerum.rpc.loadSessionMessages.mockResolvedValue(
-      sessionWith({ ...view('session-view.resumable.json'), version: 2 })
+      sessionWith({ ...view('session-view.resumable.json'), version: NEXT_RESUMABLE_VERSION })
     )
     await act(async () => {
       clerum.emitTaskProgress(CONTINUATION_TASK_ID, FAILED_TERMINAL)
@@ -238,7 +240,7 @@ describe('model-step checkpoint in the controller (#1044)', () => {
         checkpointId: CHECKPOINT_ID,
         status: 'resumable',
         retryAvailable: true,
-        version: 2,
+        version: NEXT_RESUMABLE_VERSION,
       })
     )
     // Witness: the notice came from a fresh session read, not the stale view.
@@ -263,7 +265,7 @@ describe('model-step checkpoint in the controller (#1044)', () => {
       'agent-x',
       result.current.activeChatId,
       CHECKPOINT_ID,
-      2
+      NEXT_RESUMABLE_VERSION
     )
     // Still a continuation, never Resend.
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
