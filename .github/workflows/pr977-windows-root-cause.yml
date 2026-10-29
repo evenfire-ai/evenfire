@@ -86,6 +86,16 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'source/desktop-app/src/windowsSessionAuthorityAcl.ts').Hash.ToLowerInvariant()
           Write-Output "Validation-only ACL source overlay SHA256=$hash"
 
+      - name: Instrument legacy recovery boundaries
+        shell: pwsh
+        run: |
+          $source = 'source/desktop-app/src/sessionAuthorityAcceptance.ts'
+          node validation/scripts/pr977/instrument-legacy-recovery-source.mjs $source
+          if ($LASTEXITCODE -ne 0) { throw 'Legacy recovery phase instrumentation failed' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash.ToLowerInvariant()
+          Write-Output "Validation-only legacy recovery source overlay SHA256=$hash"
+          if ((git -C source rev-parse HEAD).Trim() -ne $env:PR977_SOURCE_SHA) { throw 'Application checkout changed' }
+
       - name: Instrument only the selected regression test
         shell: pwsh
         run: |
