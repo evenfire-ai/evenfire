@@ -672,6 +672,10 @@ h3 {
   gap: var(--space-1);
 }
 
+#global-search-results .ant-listy-item > .ant-btn-variant-text:hover:not(:disabled) {
+  background-color: transparent;
+}
+
 .search-result-item {
   display: flex;
   align-items: center;
