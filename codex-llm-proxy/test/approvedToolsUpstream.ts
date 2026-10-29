@@ -425,7 +425,7 @@ export function createApprovedToolsUpstream() {
   const modelStepTurns = new Map<
     string,
     {
-      kind: 'probe' | 'twice' | 'zero' | 'approval' | 'receipt'
+      kind: 'probe' | 'twice' | 'zero' | 'approval' | 'receipt' | 'absorbed'
       callId: string | null
       stage:
         | 'searched'
