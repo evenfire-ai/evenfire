@@ -51,10 +51,11 @@ The pinned official image declares Node 22.22.0. The latest official release
 `v0.0.83` and the previous two stable tags declare Node 24.21.0 on amd64 and
 arm64, below the current security floor.
 
-For the published image, the Dockerfile keeps the pinned official application and
-browser dependencies and replaces only Node with the official digest-pinned
-24.22.1 glibc binary. This is temporary until a patched official Playwright
-image is available. The deployment manifest pins the published build by digest.
+For the published image, the Dockerfile keeps the pinned upstream application and
+system dependencies, replaces Node with the official digest-pinned 24.22.1 glibc
+binary, and installs Chromium at build time using the bundled Playwright CLI.
+This is temporary until a patched official Playwright image is available. The
+deployment manifest pins the published build by digest.
 
 `test/runtime-smoke.cjs` runs inside the isolated Linux container. It starts the
 real MCP HTTP server and Chromium, navigates to a loopback fixture, clicks the
