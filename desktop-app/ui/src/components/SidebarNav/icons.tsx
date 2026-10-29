@@ -3,6 +3,8 @@ import React from 'react'
 type IconProps = React.SVGProps<SVGSVGElement>
 
 const BASE_STROKE_PROPS = {
+  width: '1em',
+  height: '1em',
   fill: 'none',
   stroke: 'currentColor',
   strokeWidth: 2,
@@ -26,6 +28,8 @@ export function IconAgents(props: IconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
+      width="1em"
+      height="1em"
       aria-hidden="true"
       fill="currentColor"
       stroke="currentColor"
@@ -75,6 +79,8 @@ export function IconContexts(props: IconProps) {
       fill="currentColor"
       strokeWidth="0"
       viewBox="0 0 512 512"
+      width="1em"
+      height="1em"
       aria-hidden="true"
       data-solid="true"
       {...props}
@@ -119,6 +125,8 @@ export function IconCopy(props: IconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
+      width="1em"
+      height="1em"
       fill="currentColor"
       stroke="currentColor"
       strokeWidth="0"
@@ -199,6 +207,8 @@ export function IconSandboxUi(props: IconProps) {
   return (
     <svg
       viewBox="0 0 1024 1024"
+      width="1em"
+      height="1em"
       aria-hidden="true"
       fill="currentColor"
       stroke="currentColor"
@@ -415,6 +425,8 @@ export function IconEye(props: IconProps) {
   return (
     <svg
       viewBox="0 0 512 512"
+      width="1em"
+      height="1em"
       aria-hidden="true"
       fill="currentColor"
       stroke="currentColor"
@@ -431,6 +443,8 @@ export function IconImage(props: IconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
+      width="1em"
+      height="1em"
       aria-hidden="true"
       fill="currentColor"
       stroke="currentColor"
@@ -450,6 +464,8 @@ export function IconVideo(props: IconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
+      width="1em"
+      height="1em"
       aria-hidden="true"
       fill="currentColor"
       stroke="currentColor"
@@ -468,6 +484,8 @@ export function IconDocumentText(props: IconProps) {
   return (
     <svg
       viewBox="0 0 512 512"
+      width="1em"
+      height="1em"
       aria-hidden="true"
       fill="currentColor"
       stroke="currentColor"

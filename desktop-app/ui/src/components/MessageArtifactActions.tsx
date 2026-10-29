@@ -1,10 +1,48 @@
 import { useEffect, useMemo, useState } from 'react'
-import { DownloadOutlined, FileTextOutlined } from '@ant-design/icons'
 import { Alert, Button, Card, Flex, Modal, Spin, Tag, Typography } from 'antd'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { HTML_PREVIEW_ARTIFACT_MAX_BYTES } from '@constants/htmlPreview'
 import { extractArtifactNames } from '@lib/artifacts'
+
+function ArtifactFileIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={14}
+      height={14}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4.5 2.5h4.2L12 5.8v7.7H4.5z" />
+      <path d="M8.7 2.5v3.3H12" />
+    </svg>
+  )
+}
+
+function ArtifactDownloadIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={14}
+      height={14}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 2.5v7" />
+      <path d="m4.8 6.6 3.2 3.2 3.2-3.2" />
+      <path d="M3.5 12.5h9" />
+    </svg>
+  )
+}
 
 type MessageArtifactActionsProps = {
   hostRef: string
@@ -298,7 +336,7 @@ export function MessageArtifactActions({ hostRef, content }: MessageArtifactActi
           size="small"
           title={
             <Flex align="center" gap="small">
-              <FileTextOutlined />
+              <ArtifactFileIcon />
               Generated files
             </Flex>
           }
@@ -308,10 +346,10 @@ export function MessageArtifactActions({ hostRef, content }: MessageArtifactActi
                 type="link"
                 loading={downloadingAll}
                 disabled={Boolean(downloadingFile)}
-                icon={<DownloadOutlined aria-hidden="true" />}
                 onClick={() => void handleDownloadAll()}
               >
-                Download all
+                <span>Download all</span>
+                <ArtifactDownloadIcon />
               </Button>
             ) : null
           }
@@ -343,13 +381,13 @@ export function MessageArtifactActions({ hostRef, content }: MessageArtifactActi
                   )}
                   <Button
                     type="primary"
-                    icon={<DownloadOutlined aria-hidden="true" />}
                     loading={downloadingFile === artifact.name}
                     onClick={() => void handleDownload(artifact.name)}
                     disabled={downloadingFile === artifact.name || downloadingAll}
                     aria-label={`Download ${artifact.name}`}
                   >
-                    Download
+                    <span>Download</span>
+                    <ArtifactDownloadIcon />
                   </Button>
                 </Flex>
               </Flex>

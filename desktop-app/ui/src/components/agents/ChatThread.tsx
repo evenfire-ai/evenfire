@@ -8,16 +8,6 @@ import {
   useState,
 } from 'react'
 import {
-  ApiOutlined,
-  AppstoreOutlined,
-  CodeOutlined,
-  CopyOutlined,
-  FolderOutlined,
-  MessageOutlined,
-  MoreOutlined,
-  SendOutlined,
-} from '@ant-design/icons'
-import {
   type QueuedChatDelete,
   useAgentChatActionsContext,
 } from '@contexts/AgentChatActionsContext'
@@ -32,6 +22,7 @@ import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
 import { SecureHtmlPreview } from '@components/SecureHtmlPreview'
+import { IconConnectors, IconContexts, IconWorkflows } from '@components/SidebarNav/icons'
 import { WorkflowRunArtifactActions } from '@components/WorkflowRunArtifactActions'
 import {
   AGENT_ERROR_CODE_LABELS,
@@ -147,9 +138,9 @@ function extractWorkflowArtifactScopeFromProgress(
 }
 
 function getChatMessageAttachmentIcon(attachment: ChatMessageAttachment) {
-  if (attachment.type === 'plugin') return <AppstoreOutlined aria-hidden="true" />
-  if (attachment.type === 'connector') return <ApiOutlined aria-hidden="true" />
-  if (attachment.type === 'agent_file') return <FolderOutlined aria-hidden="true" />
+  if (attachment.type === 'plugin') return <IconWorkflows aria-hidden="true" />
+  if (attachment.type === 'connector') return <IconConnectors aria-hidden="true" />
+  if (attachment.type === 'agent_file') return <IconContexts aria-hidden="true" />
   return <GfsFileIcon name={attachment.filename || attachment.label} />
 }
 
@@ -930,7 +921,12 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                   title={
                                     message.role === 'user' ? 'Resend message' : 'Resend prompt'
                                   }
-                                  icon={<SendOutlined aria-hidden="true" />}
+                                  icon={
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                      <path fill="none" d="M0 0h24v24H0V0z" />
+                                      <path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z" />
+                                    </svg>
+                                  }
                                 />
                               ) : null}
                               <Button
@@ -950,7 +946,12 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                 title={
                                   copiedMessageKey === message.messageKey ? 'Copied!' : 'Copy text'
                                 }
-                                icon={<CopyOutlined aria-hidden="true" />}
+                                icon={
+                                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path fill="none" d="M0 0h24v24H0V0z" />
+                                    <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
+                                  </svg>
+                                }
                               />
                             </footer>
                           )}
@@ -1035,9 +1036,12 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                         {chat.title.trim() === '?' ? (
                           '?'
                         ) : /html|code|dev/i.test(chat.title) ? (
-                          <CodeOutlined />
+                          '</>'
                         ) : (
-                          <MessageOutlined />
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path fill="none" d="M0 0h24v24H0V0z" />
+                            <path d="M4 4h16v12H5.17L4 17.17V4m0-2c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2H4z" />
+                          </svg>
                         )}
                       </span>
                       {isRenaming ? (
@@ -1115,7 +1119,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                             aria-haspopup="menu"
                             aria-expanded={isMenuOpen}
                             title={`Session actions for ${chat.title}`}
-                            icon={<MoreOutlined aria-hidden="true" />}
+                            icon={<span aria-hidden="true">&#8230;</span>}
                             onClick={event => event.stopPropagation()}
                           />
                         </Dropdown>

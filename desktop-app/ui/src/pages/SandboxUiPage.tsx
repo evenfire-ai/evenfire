@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AppstoreOutlined, CopyOutlined, ReloadOutlined } from '@ant-design/icons'
 import {
   Alert,
   Button,
@@ -15,6 +14,7 @@ import {
   Tag,
   Typography,
 } from 'antd'
+import { IconCopy, IconRefresh, IconSandboxUi } from '@components/SidebarNav/icons'
 import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
 import { embedFailureMessage, embedViewState, httpStatusOf } from '@lib/embedOwnershipView'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
@@ -200,6 +200,7 @@ function TitlebarLeadingAction({
 }) {
   return (
     <Button
+      className="titlebar-leading-action__btn"
       type="text"
       size="small"
       icon={icon}
@@ -471,12 +472,12 @@ export function SandboxUiPage({
               <div className="window-titlebar__leading-actions">
                 <TitlebarLeadingAction
                   label="Refresh app content"
-                  icon={<ReloadOutlined />}
+                  icon={<IconRefresh aria-hidden="true" width={16} height={16} />}
                   onClick={() => onRefresh?.()}
                 />
                 <TitlebarLeadingAction
                   label="Copy current app link"
-                  icon={<CopyOutlined />}
+                  icon={<IconCopy aria-hidden="true" width={16} height={16} />}
                   onClick={() => void onCopyDeepLink()}
                 />
               </div>,
@@ -571,7 +572,7 @@ export function SandboxUiPage({
         {failureBanner}
         {pageHeader}
         <Empty
-          image={<AppstoreOutlined />}
+          image={<IconSandboxUi aria-hidden="true" />}
           description={
             <Flex vertical>
               <Typography.Text>No available apps yet</Typography.Text>
@@ -586,7 +587,7 @@ export function SandboxUiPage({
   }
 
   const appIcon = (app: SandboxUiAppListing) =>
-    app.icon ? <img src={app.icon} alt="" width={20} height={20} /> : <AppstoreOutlined />
+    app.icon ? <img src={app.icon} alt="" width={20} height={20} /> : <IconSandboxUi />
 
   const appStatusTag = (app: SandboxUiAppListing) => {
     const status = phasePill(app.phase ?? null)

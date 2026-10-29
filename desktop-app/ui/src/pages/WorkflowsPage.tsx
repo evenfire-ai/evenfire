@@ -1,5 +1,4 @@
 import { useCallback, useState } from 'react'
-import { AppstoreOutlined } from '@ant-design/icons'
 import {
   Alert,
   Button as AntButton,
@@ -13,6 +12,7 @@ import {
   Typography,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
+import { IconWorkflows } from '@components/SidebarNav/icons'
 import type { WorkflowRunArtifact, WorkflowRunListItem } from '../../../src/types'
 import { InputContractForm } from '../components/InputContractForm'
 import { useAuthContext } from '../contexts/AuthContext'
@@ -228,7 +228,7 @@ export function WorkflowsPage() {
       key: 'name',
       render: (_value, wf) => (
         <Flex align="center" gap="small">
-          <AppstoreOutlined aria-hidden="true" />
+          <IconWorkflows aria-hidden="true" />
           <Typography.Text strong>{wf.name}</Typography.Text>
         </Flex>
       ),

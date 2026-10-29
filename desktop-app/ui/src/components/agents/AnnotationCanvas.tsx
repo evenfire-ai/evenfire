@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { CloseOutlined, CopyOutlined, EditOutlined } from '@ant-design/icons'
 import { Alert, Button, Flex, Input, Modal, Slider, Typography } from 'antd'
+import { IconCopy, IconEdit } from '@components/SidebarNav/icons'
 import { copyImageBlobToClipboard } from '@lib/imageClipboard'
 import type { ComposerImageAttachment } from '../../uiTypes'
 
@@ -240,11 +240,7 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
       footer={null}
       onCancel={onClose}
       width="90vw"
-      closeIcon={
-        <span aria-label="Close image preview">
-          <CloseOutlined />
-        </span>
-      }
+      closeIcon={<span aria-label="Close image preview">×</span>}
     >
       <Flex vertical gap="small">
         <Flex align="center" gap="small" wrap>
@@ -255,7 +251,7 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
                   setAnnotationError(null)
                   setPreviewIsAnnotating(true)
                 }}
-                icon={<EditOutlined aria-hidden="true" />}
+                icon={<IconEdit aria-hidden="true" width={16} height={16} />}
               >
                 Annotate
               </Button>
@@ -270,7 +266,7 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
                 loading={copyBusy}
                 disabled={copyBusy}
                 onClick={() => void handleCopyImage()}
-                icon={<CopyOutlined aria-hidden="true" />}
+                icon={<IconCopy aria-hidden="true" width={16} height={16} />}
               >
                 <span aria-live="polite">
                   {copyState === 'copied'

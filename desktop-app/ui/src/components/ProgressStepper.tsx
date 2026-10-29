@@ -1,10 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import {
-  CheckCircleOutlined,
-  DownOutlined,
-  ExclamationCircleOutlined,
-  StopOutlined,
-} from '@ant-design/icons'
 import { Alert, Button, Card, Divider, Flex, Spin, Steps, Tag, Tooltip, Typography } from 'antd'
 import type { StepsProps } from 'antd'
 import { extractArtifactNames } from '@lib/artifacts'
@@ -58,6 +52,12 @@ function formatElapsed(ms: number): string {
   const minutes = Math.floor(totalSec / 60)
   const seconds = totalSec % 60
   return `${minutes}m${seconds}s`
+}
+
+function stepIcon(state: 'running' | 'completed' | 'error'): string {
+  if (state === 'completed') return '\u2713'
+  if (state === 'running') return '\u25CF'
+  return '\u2717'
 }
 
 function toolFunctionName(step: { displayName: string; toolName: string }): string | null {
@@ -195,6 +195,14 @@ function StepList({ steps }: { steps: TaskProgress['steps'] }) {
       >
         {step.displayName}
         {fnName ? <Typography.Text type="secondary"> {fnName}</Typography.Text> : null}
+        {canExpand ? (
+          <span
+            className={`stepper-step-chevron${isExpanded ? ' stepper-step-chevron--open' : ''}`}
+            aria-hidden="true"
+          >
+            {'\u25B8'}
+          </span>
+        ) : null}
       </Button>
     ) : (
       <Flex align="center" gap="small" data-testid={`step-row-${step.toolCallId}`}>
@@ -252,6 +260,7 @@ function StepList({ steps }: { steps: TaskProgress['steps'] }) {
     return {
       key: step.toolCallId,
       status: step.state === 'completed' ? 'finish' : step.state === 'error' ? 'error' : 'process',
+      icon: <span className={`stepper-step-icon state-${step.state}`}>{stepIcon(step.state)}</span>,
       title,
       description,
     }
@@ -320,7 +329,11 @@ export function ProgressStepper({
         <Flex align="center" justify="space-between" wrap gap="small">
           <Flex align="center" gap="small" wrap>
             <Tag
-              icon={errorCount > 0 ? <ExclamationCircleOutlined /> : <CheckCircleOutlined />}
+              icon={
+                <span className="stepper-completed-icon stepper-details-toggle-icon">
+                  {errorCount > 0 ? '\u26A0' : '\u2713'}
+                </span>
+              }
               color={errorCount > 0 ? 'error' : 'success'}
             >
               {errorCount > 0 ? 'Completed with errors' : 'Completed'}
@@ -336,7 +349,14 @@ export function ProgressStepper({
             data-testid="progress-expand-btn"
             onClick={() => setExpanded(previous => !previous)}
             aria-expanded={expanded}
-            icon={<DownOutlined rotate={expanded ? 180 : 0} />}
+            icon={
+              <span
+                className={`stepper-details-chevron${expanded ? ' stepper-details-chevron--open' : ''}`}
+                aria-hidden="true"
+              >
+                ›
+              </span>
+            }
           >
             {expanded ? 'Hide details' : 'More details'}
           </Button>
@@ -364,7 +384,14 @@ export function ProgressStepper({
               type="text"
               onClick={() => setExpanded(prev => !prev)}
               aria-expanded={expanded}
-              icon={<DownOutlined rotate={expanded ? 180 : 0} />}
+              icon={
+                <span
+                  className={`stepper-details-chevron${expanded ? ' stepper-details-chevron--open' : ''}`}
+                  aria-hidden="true"
+                >
+                  ›
+                </span>
+              }
             >
               <span>{expanded ? 'Hide details' : 'More details'}</span>
             </Button>
@@ -388,7 +415,11 @@ export function ProgressStepper({
             size="small"
             title={stopAgentAriaLabel}
             type="text"
-            icon={<StopOutlined />}
+            icon={
+              <span className="stepper-stop-symbol" aria-hidden="true">
+                ■
+              </span>
+            }
           />
         ) : null}
       </Flex>
@@ -431,7 +462,16 @@ export function ProgressStepper({
     )
     return (
       <Flex vertical gap="small" data-testid="progress-stepper">
-        <Alert type="warning" showIcon title={statusLabel} />
+        <Alert
+          type="warning"
+          showIcon
+          icon={
+            <span className="stepper-suspended-icon" aria-hidden="true">
+              &#9888;
+            </span>
+          }
+          title={statusLabel}
+        />
         {onCancel ? (
           <Button
             data-testid="progress-cancel-btn"
@@ -441,7 +481,11 @@ export function ProgressStepper({
             size="small"
             title={stopAgentAriaLabel}
             type="text"
-            icon={<StopOutlined />}
+            icon={
+              <span className="stepper-stop-symbol" aria-hidden="true">
+                ■
+              </span>
+            }
           />
         ) : null}
         {info?.inputPreview && !isConnect && (
@@ -507,7 +551,14 @@ export function ProgressStepper({
               type="text"
               onClick={() => setExpanded(prev => !prev)}
               aria-expanded={expanded}
-              icon={<DownOutlined rotate={expanded ? 180 : 0} />}
+              icon={
+                <span
+                  className={`stepper-details-chevron${expanded ? ' stepper-details-chevron--open' : ''}`}
+                  aria-hidden="true"
+                >
+                  ›
+                </span>
+              }
             >
               <span>{expanded ? 'Hide details' : 'More details'}</span>
             </Button>
@@ -533,7 +584,11 @@ export function ProgressStepper({
             size="small"
             title={stopAgentAriaLabel}
             type="text"
-            icon={<StopOutlined />}
+            icon={
+              <span className="stepper-stop-symbol" aria-hidden="true">
+                ■
+              </span>
+            }
           />
         ) : null}
       </Flex>
@@ -543,7 +598,14 @@ export function ProgressStepper({
             type="text"
             onClick={() => setExpanded(prev => !prev)}
             aria-expanded={expanded}
-            icon={<DownOutlined rotate={expanded ? 180 : 0} />}
+            icon={
+              <span
+                className={`stepper-details-chevron${expanded ? ' stepper-details-chevron--open' : ''}`}
+                aria-hidden="true"
+              >
+                ›
+              </span>
+            }
           >
             <span>{expanded ? 'Hide details' : 'More details'}</span>
           </Button>

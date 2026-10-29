@@ -1,18 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import {
-  ApiOutlined,
-  AppstoreOutlined,
-  CloseOutlined,
-  FileTextOutlined,
-  FolderOutlined,
-  PaperClipOutlined,
-  PictureOutlined,
-  PlusOutlined,
-  RightOutlined,
-  SendOutlined,
-  UploadOutlined,
-} from '@ant-design/icons'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -20,6 +7,18 @@ import { useNavigationContext } from '@contexts/NavigationContext'
 import { Alert, Button as AntButton, Collapse, Flex, Input, Menu, Tag, Typography } from 'antd'
 import type { MenuProps } from 'antd'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import {
+  IconConnectors as ApiOutlined,
+  IconWorkflows as AppstoreOutlined,
+  IconClose as CloseOutlined,
+  IconAttachFile as FileTextOutlined,
+  IconContexts as FolderOutlined,
+  IconAttachFile as PaperClipOutlined,
+  IconAttachFile as PictureOutlined,
+  IconPlus as PlusOutlined,
+  IconChevronRight as RightOutlined,
+  IconUpload as UploadOutlined,
+} from '@components/SidebarNav/icons'
 import {
   SHOW_AGENT_FILES_UI,
   SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM,
@@ -126,10 +125,12 @@ function composerPerImageLimitMessage(
 }
 
 function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
-  if (attachment.type === 'plugin') return <AppstoreOutlined />
-  if (attachment.type === 'connector') return <ApiOutlined />
-  if (attachment.type === 'global_file') return <GfsFileIcon name={attachment.label} />
-  return <FolderOutlined />
+  if (attachment.type === 'plugin') return <AppstoreOutlined width={14} height={14} />
+  if (attachment.type === 'connector') return <ApiOutlined width={14} height={14} />
+  if (attachment.type === 'global_file') {
+    return <GfsFileIcon name={attachment.label} width={14} height={14} />
+  }
+  return <FolderOutlined width={14} height={14} />
 }
 
 /** Status line of a document chip: what the user needs to know before sending. */
@@ -955,7 +956,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 htmlType="button"
                 type="text"
                 size="small"
-                icon={<PlusOutlined aria-hidden="true" />}
+                icon={<PlusOutlined aria-hidden="true" width={16} height={16} />}
                 disabled={agentSending}
                 aria-label="Add context"
                 aria-haspopup="menu"
@@ -976,7 +977,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       [
                         {
                           key: 'plugins',
-                          icon: <AppstoreOutlined aria-hidden="true" />,
+                          icon: <AppstoreOutlined aria-hidden="true" width={18} height={18} />,
                           label: (
                             <span
                               ref={pluginsItemRef}
@@ -986,14 +987,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                               Plugins
                             </span>
                           ),
-                          extra: <RightOutlined aria-hidden="true" />,
+                          extra: <RightOutlined aria-hidden="true" width={18} height={18} />,
                           onClick: () => openComposerSubmenu('plugins'),
                           onMouseEnter: () => openComposerSubmenu('plugins'),
                           onMouseLeave: scheduleComposerSubmenuClose,
                         },
                         {
                           key: 'connectors',
-                          icon: <ApiOutlined aria-hidden="true" />,
+                          icon: <ApiOutlined aria-hidden="true" width={18} height={18} />,
                           label: (
                             <span
                               ref={connectorsItemRef}
@@ -1003,7 +1004,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                               Connectors
                             </span>
                           ),
-                          extra: <RightOutlined aria-hidden="true" />,
+                          extra: <RightOutlined aria-hidden="true" width={18} height={18} />,
                           onClick: () => openComposerSubmenu('connectors'),
                           onMouseEnter: () => openComposerSubmenu('connectors'),
                           onMouseLeave: scheduleComposerSubmenuClose,
@@ -1012,7 +1013,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           ? [
                               {
                                 key: 'agent-files',
-                                icon: <FolderOutlined aria-hidden="true" />,
+                                icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
                                 label: (
                                   <span
                                     ref={agentFilesItemRef}
@@ -1028,7 +1029,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                                   </span>
                                 ),
                                 extra: agentFilesDisabled ? (
-                                  <RightOutlined aria-hidden="true" />
+                                  <RightOutlined aria-hidden="true" width={18} height={18} />
                                 ) : undefined,
                                 onClick: agentFilesDisabled ? undefined : openAgentFilesModal,
                                 onMouseEnter: () => {
@@ -1045,7 +1046,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           ? [
                               {
                                 key: 'even-drive',
-                                icon: <PaperClipOutlined aria-hidden="true" />,
+                                icon: (
+                                  <PaperClipOutlined aria-hidden="true" width={18} height={18} />
+                                ),
                                 label: 'EvenDrive',
                                 onMouseEnter: scheduleComposerSubmenuClose,
                                 onClick: openGlobalFilesModal,
@@ -1054,7 +1057,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           : []),
                         {
                           key: 'upload',
-                          icon: <UploadOutlined aria-hidden="true" />,
+                          icon: <UploadOutlined aria-hidden="true" width={18} height={18} />,
                           label: 'Upload Files',
                           onMouseEnter: scheduleComposerSubmenuClose,
                           onClick: openUploadPicker,
@@ -1192,7 +1195,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           type="text"
                           size="small"
                           shape="circle"
-                          icon={<CloseOutlined aria-hidden="true" />}
+                          icon={<CloseOutlined aria-hidden="true" width={16} height={16} />}
                           onClick={() => onRemoveComposerReferenceAttachment(attachment.id)}
                           aria-label={`Remove ${attachment.label}`}
                         />
@@ -1211,7 +1214,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         data-file-status={attachment.status}
                         title={`${attachment.filename} - ${meta}`}
                       >
-                        <Tag icon={<FileTextOutlined aria-hidden="true" />}>
+                        <Tag icon={<FileTextOutlined aria-hidden="true" width={14} height={14} />}>
                           <Flex vertical>
                             <Typography.Text>{attachment.filename}</Typography.Text>
                             <Typography.Text type="secondary">{meta}</Typography.Text>
@@ -1222,7 +1225,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                           type="text"
                           size="small"
                           shape="circle"
-                          icon={<CloseOutlined aria-hidden="true" />}
+                          icon={<CloseOutlined aria-hidden="true" width={16} height={16} />}
                           onClick={() => onRemoveComposerFileAttachment(attachment.id)}
                           aria-label={`Remove ${attachment.filename}`}
                         />
@@ -1233,7 +1236,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                   const tooltip = getComposerImageTooltip(attachment)
                   return (
                     <Flex align="center" gap="small" key={item.id} title={tooltip}>
-                      <Tag icon={<PictureOutlined aria-hidden="true" />}>
+                      <Tag icon={<PictureOutlined aria-hidden="true" width={14} height={14} />}>
                         <AntButton
                           htmlType="button"
                           type="link"
@@ -1249,7 +1252,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         type="text"
                         size="small"
                         shape="circle"
-                        icon={<CloseOutlined aria-hidden="true" />}
+                        icon={<CloseOutlined aria-hidden="true" width={16} height={16} />}
                         onClick={() => onRemoveComposerImageAttachment(attachment.id)}
                         aria-label={`Remove ${attachment.name}`}
                       />
@@ -1296,7 +1299,22 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               loading={agentSending}
               title={agentSending ? 'Sending...' : 'Send message'}
               type="primary"
-              icon={<SendOutlined aria-hidden="true" />}
+              icon={
+                <svg
+                  viewBox="0 0 20 20"
+                  width={22}
+                  height={22}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.9}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M10 5v9.1" />
+                  <path d="M6.7 8.3 10 5l3.3 3.3" />
+                </svg>
+              }
             ></AntButton>
           </span>
         </div>

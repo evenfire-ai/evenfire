@@ -476,7 +476,8 @@ h3 {
 /* Ghost affordance matching the title-bar bell / chat-drawer IconButtons:
    no border or fill at rest, accent border + neutral fill on hover or when
    the toggle is pressed. */
-.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button {
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button,
+.window-titlebar__leading .titlebar-leading-action__btn.ant-btn {
   width: 30px;
   height: 30px;
   min-height: 30px;
@@ -490,13 +491,16 @@ h3 {
   -webkit-app-region: no-drag;
 }
 
-.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button svg {
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button svg,
+.window-titlebar__leading .titlebar-leading-action__btn.ant-btn svg {
   width: 16px;
   height: 16px;
 }
 
 .window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button:hover:enabled,
-.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button[aria-pressed='true'] {
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button[aria-pressed='true'],
+.window-titlebar__leading .titlebar-leading-action__btn.ant-btn:hover:enabled,
+.window-titlebar__leading .titlebar-leading-action__btn.ant-btn[aria-pressed='true'] {
   border-color: rgba(var(--accent-rgb), 0.42);
   background: var(--surface-hover);
   color: var(--text);
@@ -2668,6 +2672,12 @@ h3 {
   color: var(--text);
 }
 
+.sidebar-settings-antd-menu .ant-menu-item-selected .nav-icon,
+.sidebar-settings-antd-menu .ant-menu-item:hover .nav-icon,
+.sidebar-settings-antd-menu .ant-menu-item:focus-visible .nav-icon {
+  color: var(--text);
+}
+
 .nav-link:hover:enabled {
   background: var(--list-item-hover-bg);
   transform: none;
@@ -4442,7 +4452,8 @@ h3 {
   z-index: calc(var(--layer-dropdown) + 90);
 }
 
-.agent-workspace-agent-route-trigger.ui-icon-button {
+.agent-workspace-agent-route-trigger.ui-icon-button,
+.agent-workspace-agent-route-trigger.ant-btn {
   width: 28px;
   height: 28px;
   min-height: 28px;
@@ -4450,11 +4461,19 @@ h3 {
 }
 
 .agent-workspace-agent-route-trigger.ui-icon-button:hover:enabled,
-.agent-workspace-agent-route-trigger.ui-icon-button:focus-visible {
+.agent-workspace-agent-route-trigger.ant-btn:hover:enabled,
+.agent-workspace-agent-route-trigger.ui-icon-button:focus-visible,
+.agent-workspace-agent-route-trigger.ant-btn:focus-visible {
   color: var(--text);
 }
 
 .agent-workspace-agent-route-trigger.ui-icon-button svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.agent-workspace-agent-route-trigger.ant-btn svg {
   width: 16px;
   height: 16px;
   fill: currentColor;
@@ -5036,6 +5055,7 @@ h3 {
 
 /* Keep the new-chat title and selector identical to the origin/dev greeting
  * row while retaining the current composer and sessions layout below it. */
+.agent-workspace-greeting-row .agent-title-selector-trigger.ant-btn,
 .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button,
 .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--sm {
   font-size: var(--font-size-2xl);
@@ -5044,6 +5064,7 @@ h3 {
   min-height: 0;
 }
 
+.agent-workspace-greeting-row .agent-title-selector-trigger.ant-btn,
 .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--text.ui-button--transparent {
   color: var(--brand-deep-blue);
   background: transparent;
@@ -5055,6 +5076,9 @@ h3 {
   transition: color 120ms ease;
 }
 
+.agent-workspace-greeting-row .agent-title-selector-trigger.ant-btn:hover,
+.agent-workspace-greeting-row .agent-title-selector-trigger.ant-btn:focus-visible,
+.agent-workspace-greeting-row .agent-title-selector-trigger.ant-btn[aria-expanded='true'],
 .agent-workspace-greeting-row
   .agent-title-selector-trigger.ui-button--text.ui-button--transparent:hover,
 .agent-workspace-greeting-row
@@ -5082,6 +5106,28 @@ h3 {
 }
 
 .agent-title-selector-trigger:focus-visible {
+  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.26);
+}
+
+.agent-title-selector-trigger.ant-btn,
+.agent-title-selector-row-dots.ant-btn {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-title-selector-trigger.ant-btn:hover,
+.agent-title-selector-row-dots.ant-btn:hover,
+.agent-title-selector-row-dots.ant-btn:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-title-selector-trigger.ant-btn:focus-visible,
+.agent-title-selector-row-dots.ant-btn:focus-visible {
+  border-color: transparent;
+  background: transparent;
   box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.26);
 }
 
@@ -9033,7 +9079,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   align-items: center;
 }
 
-.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button {
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button,
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ant-btn {
   min-height: 26px;
   display: inline-flex;
   align-items: center;
@@ -9047,7 +9094,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   cursor: pointer;
 }
 
-.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button svg {
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button svg,
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ant-btn svg {
   width: 14px;
   height: 14px;
   fill: none;
@@ -9059,12 +9107,16 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button:hover:enabled,
-.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button:focus-visible {
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ant-btn:hover:enabled,
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button:focus-visible,
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ant-btn:focus-visible {
   color: var(--text);
 }
 
 .resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button:hover:enabled svg,
-.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button:focus-visible svg {
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ant-btn:hover:enabled svg,
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ui-button:focus-visible svg,
+.resource-breadcrumb-switcher .resource-breadcrumb-trigger.ant-btn:focus-visible svg {
   color: var(--text);
 }
 
@@ -15826,7 +15878,8 @@ pre {
   z-index: calc(var(--layer-dropdown) + 20);
 }
 
-.da-gfs-resource-menu__trigger.ui-icon-button {
+.da-gfs-resource-menu__trigger.ui-icon-button,
+.da-gfs-resource-menu__trigger.ant-btn {
   width: 32px;
   height: 32px;
   min-width: 32px;
@@ -15835,12 +15888,15 @@ pre {
 }
 
 .da-gfs-resource-menu__trigger.ui-icon-button:hover:enabled,
-.da-gfs-resource-menu__trigger.ui-icon-button:focus-visible {
+.da-gfs-resource-menu__trigger.ui-icon-button:focus-visible,
+.da-gfs-resource-menu__trigger.ant-btn:hover:enabled,
+.da-gfs-resource-menu__trigger.ant-btn:focus-visible {
   background: rgba(var(--accent-rgb), 0.12);
   color: var(--text);
 }
 
-.da-gfs-resource-menu__trigger svg {
+.da-gfs-resource-menu__trigger.ui-icon-button svg,
+.da-gfs-resource-menu__trigger.ant-btn svg {
   width: var(--space-4);
   height: var(--space-4);
 }
@@ -15912,6 +15968,19 @@ pre {
 .da-gfs-resource-menu__submenu .ui-menu-item__icon svg {
   width: 18px;
   height: 18px;
+}
+
+.gfs-resource-menu-antd .ant-menu-item-icon {
+  color: var(--text-dim);
+}
+
+.gfs-resource-menu-antd .ant-menu-item:hover .ant-menu-item-icon,
+.gfs-resource-menu-antd .ant-menu-item:focus-visible .ant-menu-item-icon {
+  color: var(--text);
+}
+
+.gfs-resource-menu-antd .ant-menu-item-danger .ant-menu-item-icon {
+  color: var(--danger);
 }
 
 .da-gfs-resource-menu__panel .ui-menu-item__trailing {

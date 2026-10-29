@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import { FileTextOutlined } from '@ant-design/icons'
 import { Alert, Button, Card, Flex, Tag, Typography } from 'antd'
 
 interface ArtifactInfo {
@@ -122,7 +121,7 @@ export function ArtifactsBadge({ hostRef, artifactNames }: ArtifactsBadgeProps) 
         aria-expanded={expanded}
         aria-controls="generated-artifacts-list"
       >
-        <FileTextOutlined />
+        <span aria-hidden="true">&#128196;</span>
         {artifacts.length} artifact{artifacts.length > 1 ? 's' : ''} generated
       </Button>
       {expanded && (

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { DownOutlined, MoreOutlined } from '@ant-design/icons'
 import { Button, Dropdown, Flex } from 'antd'
 import type { MenuProps } from 'antd'
 import type { AgentWorkspaceRoute } from '../../uiTypes'
@@ -109,12 +108,26 @@ export function AgentTitleSelector({
                         if (node) sectionTriggerRefs.current.set(option.id, node)
                         else sectionTriggerRefs.current.delete(option.id)
                       }}
+                      className="agent-title-selector-row-dots"
                       type="text"
                       htmlType="button"
                       aria-label={`Open ${option.label} sections`}
                       aria-haspopup="menu"
                       aria-expanded={openAgent === option.id}
-                      icon={<MoreOutlined />}
+                      icon={
+                        <svg
+                          viewBox="0 0 16 16"
+                          width={16}
+                          height={16}
+                          fill="currentColor"
+                          aria-hidden="true"
+                          focusable="false"
+                        >
+                          <circle cx="3.5" cy="8" r="1.2" />
+                          <circle cx="8" cy="8" r="1.2" />
+                          <circle cx="12.5" cy="8" r="1.2" />
+                        </svg>
+                      }
                       onClick={event => event.stopPropagation()}
                     />
                   </Dropdown>
@@ -141,6 +154,7 @@ export function AgentTitleSelector({
     >
       <Button
         ref={triggerRef}
+        className="agent-title-selector-trigger"
         type="text"
         htmlType="button"
         size="small"
@@ -150,7 +164,20 @@ export function AgentTitleSelector({
         onClick={() => setOpenAgent(null)}
       >
         {selectedLabel}
-        <DownOutlined />
+        <svg
+          viewBox="0 0 16 16"
+          width={16}
+          height={16}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path d={open ? 'm4.5 10 3.5-3.5L11.5 10' : 'm4.5 6 3.5 3.5L11.5 6'} />
+        </svg>
       </Button>
     </Dropdown>
   )

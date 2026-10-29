@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AppstoreOutlined, RobotOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons'
 import { Alert, Avatar, Empty, Flex, Listy, Select, Spin, Tooltip, Typography } from 'antd'
+import {
+  IconAgents,
+  IconContexts,
+  IconTeams,
+  IconUser,
+  IconWorkflows,
+} from '@components/SidebarNav/icons'
 import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
@@ -31,11 +37,11 @@ function subjectKind(
 }
 
 function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
-  if (kind === 'agent') return <RobotOutlined />
-  if (kind === 'context') return <AppstoreOutlined />
-  if (kind === 'team') return <TeamOutlined />
-  if (kind === 'workflow') return <AppstoreOutlined />
-  return <UserOutlined />
+  if (kind === 'agent') return <IconAgents />
+  if (kind === 'context') return <IconContexts />
+  if (kind === 'team') return <IconTeams />
+  if (kind === 'workflow') return <IconWorkflows />
+  return <IconUser />
 }
 
 /**
@@ -317,8 +323,10 @@ export function GfsGrantList({
                     <Flex align="center" gap="small">
                       <Avatar
                         aria-hidden="true"
+                        className={`da-gfs-grant-list__avatar da-gfs-grant-list__avatar--${kind}`}
                         data-subject-kind={kind}
                         icon={<AccessSubjectIcon kind={kind} />}
+                        size={30}
                       />
                       <Typography.Text>{row.label}</Typography.Text>
                     </Flex>

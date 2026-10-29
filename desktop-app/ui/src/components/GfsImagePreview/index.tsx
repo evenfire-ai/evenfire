@@ -1,6 +1,6 @@
 import { useId, useRef } from 'react'
-import { CloseOutlined } from '@ant-design/icons'
 import { Modal, Result, Typography } from 'antd'
+import { IconClose } from '@components/SidebarNav/icons'
 import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { GfsImagePreviewBody } from './Body'
 import type { GfsImagePreviewProps } from './types'
@@ -41,7 +41,7 @@ export function GfsImagePreview({
       }}
       closable={{
         'aria-label': 'Close image preview',
-        closeIcon: <CloseOutlined aria-hidden="true" />,
+        closeIcon: <IconClose aria-hidden="true" width={18} height={18} />,
       }}
       destroyOnHidden
       footer={null}

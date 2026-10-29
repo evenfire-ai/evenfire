@@ -1,5 +1,4 @@
 import { useContext, useLayoutEffect, useRef, useState } from 'react'
-import { CloseOutlined } from '@ant-design/icons'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListContext } from '@contexts/ChatListContext'
 import { Tabs, type TabsRef, Typography } from 'antd'
@@ -175,7 +174,7 @@ export function WorkspaceTabStrip({
           return {
             key: tab.id,
             closable: true,
-            closeIcon: <CloseOutlined aria-hidden="true" />,
+            closeIcon: <span aria-hidden="true">×</span>,
             label: (
               <span
                 aria-label={tab.title}

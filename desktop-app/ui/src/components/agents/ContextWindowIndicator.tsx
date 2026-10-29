@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { PieChartOutlined } from '@ant-design/icons'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { Button, Flex, Listy, Popover, Progress, Spin, Typography } from 'antd'
 import type { ContextBreakdownLite } from '../../hooks/useChatStore'
@@ -178,7 +177,13 @@ export function ContextWindowIndicator({
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-label={fillLabel ? `Context window — ${fillLabel}` : 'Context window — loading'}
-        icon={fillLabel ? <PieChartOutlined aria-hidden="true" /> : <Spin size="small" />}
+        icon={
+          fillLabel ? (
+            <span className="context-window-chip-glyph" aria-hidden="true" />
+          ) : (
+            <Spin size="small" />
+          )
+        }
         size="small"
         type="text"
       >

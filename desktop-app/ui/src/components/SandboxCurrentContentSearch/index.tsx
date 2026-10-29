@@ -1,5 +1,4 @@
 import { useLayoutEffect, useRef } from 'react'
-import { ArrowDownOutlined, ArrowUpOutlined, CloseOutlined } from '@ant-design/icons'
 import { Button, Flex, Input, Typography } from 'antd'
 import type { InputRef } from 'antd'
 import type { SandboxCurrentContentSearchProps } from './types'
@@ -55,16 +54,20 @@ export default function SandboxCurrentContentSearch({
       <Button
         aria-label="Previous app match"
         disabled={state.status !== 'results'}
-        icon={<ArrowUpOutlined />}
         onClick={() => onMove('previous')}
-      />
+      >
+        ↑
+      </Button>
       <Button
         aria-label="Next app match"
         disabled={state.status !== 'results'}
-        icon={<ArrowDownOutlined />}
         onClick={() => onMove('next')}
-      />
-      <Button aria-label="Close current app search" icon={<CloseOutlined />} onClick={onClose} />
+      >
+        ↓
+      </Button>
+      <Button aria-label="Close current app search" onClick={onClose}>
+        ×
+      </Button>
     </Flex>
   )
 }

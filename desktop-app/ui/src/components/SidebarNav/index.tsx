@@ -1,19 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ApiOutlined,
-  AppstoreOutlined,
-  DeploymentUnitOutlined,
-  DownOutlined,
-  HddOutlined,
-  LeftOutlined,
-  LogoutOutlined,
-  MessageOutlined,
-  MoreOutlined,
-  PlusOutlined,
-  RightOutlined,
-  SettingOutlined,
-} from '@ant-design/icons'
-import {
   type QueuedChatDelete,
   useAgentChatActionsContext,
 } from '@contexts/AgentChatActionsContext'
@@ -38,6 +24,18 @@ import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import type { NavItem } from '@/uiTypes'
 import { FileExplorerTree } from './FileExplorerTree'
+import {
+  IconAgents,
+  IconChat,
+  IconChevronRight,
+  IconConnectors,
+  IconHardDrive,
+  IconMoreHorizontal,
+  IconNewChat,
+  IconSandboxUi,
+  IconSettings,
+  IconWorkflows,
+} from './icons'
 import type { SidebarNavProps } from './types'
 
 const MOBILE_SIDEBAR_QUERY = '(max-width: 900px)'
@@ -179,13 +177,21 @@ export function SidebarNav({
           id: DESKTOP_ROUTES.chat,
           label: 'Chat',
           testId: 'nav-chat',
-          icon: <MessageOutlined aria-hidden="true" />,
+          icon: (
+            <span className="nav-icon">
+              <IconChat aria-hidden="true" width={16} height={16} />
+            </span>
+          ),
         },
         {
           id: DESKTOP_ROUTES.apps,
           label: 'Apps',
           testId: 'nav-sandbox-ui',
-          icon: <AppstoreOutlined aria-hidden="true" />,
+          icon: (
+            <span className="nav-icon">
+              <IconSandboxUi aria-hidden="true" width={16} height={16} />
+            </span>
+          ),
         },
       ],
       []
@@ -202,19 +208,31 @@ export function SidebarNav({
         id: DESKTOP_ROUTES.agents,
         label: 'Agents',
         testId: 'nav-agents',
-        icon: <DeploymentUnitOutlined aria-hidden="true" />,
+        icon: (
+          <span className="nav-icon">
+            <IconAgents aria-hidden="true" width={16} height={16} />
+          </span>
+        ),
       },
       {
         id: DESKTOP_ROUTES.connectors,
         label: 'Connectors',
         testId: 'nav-mcp-servers',
-        icon: <ApiOutlined aria-hidden="true" />,
+        icon: (
+          <span className="nav-icon">
+            <IconConnectors aria-hidden="true" width={16} height={16} />
+          </span>
+        ),
       },
       {
         id: DESKTOP_ROUTES.plugins,
         label: 'Plugins',
         testId: 'nav-workflows',
-        icon: <AppstoreOutlined aria-hidden="true" />,
+        icon: (
+          <span className="nav-icon">
+            <IconWorkflows aria-hidden="true" width={16} height={16} />
+          </span>
+        ),
       },
     ],
     []
@@ -306,14 +324,43 @@ export function SidebarNav({
     {
       key: DESKTOP_ROUTES.settings,
       label: 'Settings',
-      icon: <SettingOutlined aria-hidden="true" />,
+      icon: (
+        <span className="nav-icon">
+          <IconSettings aria-hidden="true" width={16} height={16} />
+        </span>
+      ),
       'data-testid': 'nav-settings',
     },
     { type: 'divider', key: 'account-actions-divider' },
     {
       key: 'logout',
       label: 'Logout',
-      icon: <LogoutOutlined aria-hidden="true" />,
+      icon: (
+        <svg
+          className="logout-icon"
+          width="16"
+          height="16"
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path
+            d="M5.5 3H10.5C11.3284 3 12 3.67157 12 4.5V11.5C12 12.3284 11.3284 13 10.5 13H5.5"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path d="M8 8L12 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          <path
+            d="M6.5 6L4 8L6.5 10"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ),
       danger: true,
       disabled: busy,
       'data-testid': 'logout-btn',
@@ -371,7 +418,9 @@ export function SidebarNav({
               alt="Evenfire"
             />
             <span className="sidebar-mobile-menu-indicator" aria-hidden="true">
-              <DownOutlined />
+              <svg viewBox="0 0 16 16">
+                <path d="m4.5 6 3.5 3.5L11.5 6" />
+              </svg>
             </span>
           </Button>
           <Button
@@ -383,7 +432,13 @@ export function SidebarNav({
             aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             icon={
-              collapsed ? <RightOutlined aria-hidden="true" /> : <LeftOutlined aria-hidden="true" />
+              <svg
+                className={`sidebar-collapse-icon${collapsed ? ' expanded' : ''}`}
+                viewBox="0 0 16 16"
+                aria-hidden="true"
+              >
+                <path d="m10 3-5 5 5 5" />
+              </svg>
             }
             onClick={() => onCollapsedChange(!collapsed)}
           />
@@ -424,7 +479,7 @@ export function SidebarNav({
                       aria-label="New chat"
                       title="New chat"
                       data-testid="nav-new-chat"
-                      icon={<PlusOutlined aria-hidden="true" />}
+                      icon={<IconNewChat aria-hidden="true" width={16} height={16} />}
                       onClick={event => {
                         event.stopPropagation()
                         onNewChat()
@@ -457,10 +512,12 @@ export function SidebarNav({
                           : 'Expand apps'
                     }
                     icon={
-                      <RightOutlined
+                      <IconChevronRight
                         aria-hidden="true"
-                        rotate={
-                          (item.id === DESKTOP_ROUTES.chat ? chatSessionsOpen : appsOpen) ? 90 : 0
+                        className={
+                          (item.id === DESKTOP_ROUTES.chat ? chatSessionsOpen : appsOpen)
+                            ? 'expanded'
+                            : ''
                         }
                       />
                     }
@@ -599,7 +656,7 @@ export function SidebarNav({
                                     aria-haspopup="menu"
                                     aria-expanded={isMenuOpen}
                                     title={`Session options for ${session.title}`}
-                                    icon={<MoreOutlined aria-hidden="true" />}
+                                    icon={<IconMoreHorizontal aria-hidden="true" />}
                                     onClick={event => event.stopPropagation()}
                                   />
                                 </Dropdown>
@@ -670,7 +727,11 @@ export function SidebarNav({
                 aria-label="Files"
                 aria-current={navItem === DESKTOP_ROUTES.files ? 'page' : undefined}
                 title={collapsed ? 'EvenDrive' : undefined}
-                icon={<HddOutlined aria-hidden="true" />}
+                icon={
+                  <span className="nav-icon">
+                    <IconHardDrive aria-hidden="true" width={16} height={16} />
+                  </span>
+                }
               >
                 {collapsed ? null : 'EvenDrive'}
               </Button>
@@ -684,7 +745,12 @@ export function SidebarNav({
                 aria-expanded={filesExplorerOpen}
                 title={filesExplorerOpen ? 'Collapse file explorer' : 'Expand file explorer'}
                 data-testid="nav-files-explorer-toggle"
-                icon={<RightOutlined aria-hidden="true" rotate={filesExplorerOpen ? 90 : 0} />}
+                icon={
+                  <IconChevronRight
+                    aria-hidden="true"
+                    className={filesExplorerOpen ? 'expanded' : ''}
+                  />
+                }
                 onClick={event => {
                   event.stopPropagation()
                   setFilesExplorerOpen(open => !open)
@@ -714,6 +780,7 @@ export function SidebarNav({
                 getPopupContainer={() => settingsMenuRef.current ?? document.body}
                 menu={{
                   items: settingsMenuItems,
+                  className: 'sidebar-settings-antd-menu',
                   onClick: handleSettingsMenuClick,
                   selectable: true,
                   selectedKeys: [navItem],
@@ -763,11 +830,17 @@ export function SidebarNav({
                   aria-expanded={settingsMenuOpen}
                   title={collapsed ? 'Settings' : undefined}
                   data-tooltip="Settings"
-                  icon={<SettingOutlined aria-hidden="true" />}
+                  icon={
+                    <span className="nav-icon">
+                      <IconSettings aria-hidden="true" width={16} height={16} />
+                    </span>
+                  }
                 >
                   <span className="nav-link-label">Settings</span>
                   <span className="sidebar-settings-chevron" aria-hidden="true">
-                    <RightOutlined rotate={settingsMenuOpen ? 90 : 0} />
+                    <svg viewBox="0 0 16 16">
+                      <path d="m4.5 6 3.5 3.5L11.5 6" />
+                    </svg>
                   </span>
                 </Button>
               </Dropdown>

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowUpOutlined, FolderOpenOutlined } from '@ant-design/icons'
+import { FolderOpenOutlined } from '@ant-design/icons'
 import { Alert, Breadcrumb, Button, Empty, Spin, Table, Typography } from 'antd'
 import { useContextsDataController } from '../hooks/domain/useContextsDataController'
 import type {
@@ -233,9 +233,7 @@ export function SharedFilesTab({ contextId }: Props) {
         {dirError ? <Alert type="error" showIcon title={dirError} /> : null}
         {downloadError ? <Alert type="error" showIcon title={downloadError} /> : null}
 
-        <Button onClick={goUp} icon={<ArrowUpOutlined />}>
-          Up
-        </Button>
+        <Button onClick={goUp}>← Up</Button>
 
         {loadingDir ? (
           <Spin description="Loading…" />

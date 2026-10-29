@@ -1,6 +1,5 @@
 import type { HTMLAttributes } from 'react'
 import { useMemo, useState } from 'react'
-import { ReloadOutlined } from '@ant-design/icons'
 import { Button as AntButton, Collapse, Empty, Flex, Table, Tag, Typography } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { formatMcpServerDisplayName } from '@lib/format'
@@ -38,6 +37,17 @@ const REASON_HINT: Record<string, string> = {
 }
 
 const ATTENTION_LABELS: ReadonlySet<McpServerUiLabel> = new Set(['failed', 'degraded', 'stale'])
+
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width={13} height={13} aria-hidden="true" focusable="false">
+      <path
+        d="M8 3V1L5 4l3 3V5c2.21 0 4 1.79 4 4 0 .68-.17 1.32-.47 1.88l1.09 1.09C13.5 11.14 14 10.13 14 9c0-3.31-2.69-6-6-6zm0 10c-2.21 0-4-1.79-4-4 0-.68.17-1.32.47-1.88L3.38 6.03C2.5 6.86 2 7.87 2 9c0 3.31 2.69 6 6 6v2l3-3-3-3v2z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
 
 function statusColor(label: McpServerUiLabel): string | undefined {
   if (label === 'running') return 'green'
@@ -169,17 +179,17 @@ export function McpServerHealthTable({
 
   const refreshButton = onRefresh ? (
     <AntButton
+      className={`mcp-health-refresh${refreshing ? ' is-refreshing' : ''}`}
       htmlType="button"
       type="text"
       size="small"
-      icon={<ReloadOutlined aria-hidden="true" />}
+      icon={<RefreshIcon />}
       onClick={event => {
         // Refresh remains independent from the Collapse header toggle.
         event.stopPropagation()
         void onRefresh()
       }}
       disabled={refreshing}
-      loading={refreshing}
       aria-label="Refresh connector status"
       title="Refresh connector status"
       data-testid="mcp-health-refresh"
@@ -226,6 +236,23 @@ export function McpServerHealthTable({
           destroyOnHidden
           activeKey={isExpanded ? ['connectors'] : []}
           onChange={keys => setExpanded(keys.length > 0)}
+          expandIcon={({ isActive }) => (
+            <svg
+              className={`mcp-health-caret${isActive ? ' is-expanded' : ''}`}
+              viewBox="0 0 12 12"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path
+                d="M4 2l4 4-4 4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          )}
           items={[
             {
               key: 'connectors',

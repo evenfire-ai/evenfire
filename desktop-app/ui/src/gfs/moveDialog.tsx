@@ -7,10 +7,10 @@ import {
   useRef,
   useState,
 } from 'react'
-import { CaretDownOutlined, CheckOutlined, FolderOutlined } from '@ant-design/icons'
 import { type InfiniteData, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Empty, Flex, Modal, Spin, Tree, Typography } from 'antd'
 import type { DataNode } from 'antd/es/tree'
+import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
@@ -443,10 +443,12 @@ export function GfsMoveDialog({
       folder,
       title: (
         <Flex align="center" gap="small" data-resource-id={folder.resourceId}>
-          <FolderOutlined aria-hidden="true" />
+          <span className="da-gfs-move-dialog__tree-folder-icon" aria-hidden="true">
+            <IconContexts aria-hidden="true" width={18} height={18} />
+          </span>
           <Typography.Text>{folder.name}</Typography.Text>
           {selectedDestination?.resourceId === folder.resourceId ? (
-            <CheckOutlined aria-label="Selected destination" />
+            <IconCheck aria-label="Selected destination" width={16} height={16} />
           ) : null}
         </Flex>
       ),
@@ -492,10 +494,11 @@ export function GfsMoveDialog({
         </Flex>
       }
       onCancel={onClose}
+      closeIcon={<IconClose aria-hidden="true" width={18} height={18} />}
       open
       title={
         <Flex align="center" gap="small">
-          <FolderOutlined aria-hidden="true" />
+          <IconContexts aria-hidden="true" width={16} height={16} />
           <Typography.Title
             aria-label={`Move ${target.kind === 'directory' ? 'folder' : 'file'} ${target.name}`}
             level={4}
@@ -517,7 +520,7 @@ export function GfsMoveDialog({
         <Flex align="center" gap="small">
           <Typography.Text>Current location:</Typography.Text>
           <Typography.Text strong>
-            <FolderOutlined aria-hidden="true" />{' '}
+            <IconContexts aria-hidden="true" width={16} height={16} />{' '}
             {currentParentName ?? (currentParentId ? 'another shared folder' : 'Shared with me')}
           </Typography.Text>
         </Flex>
@@ -548,7 +551,7 @@ export function GfsMoveDialog({
               virtual={false}
               expandedKeys={[...expandedFolderIds]}
               selectedKeys={selectedDestination ? [selectedDestination.resourceId] : []}
-              switcherIcon={<CaretDownOutlined aria-hidden="true" />}
+              switcherIcon={<IconChevronRight aria-hidden="true" width={14} height={14} />}
               onExpand={keys => setExpandedFolderIds(new Set(keys.map(String)))}
               onSelect={(_keys, info) => {
                 const folder = foldersByIdRef.current.get(String(info.node.key))

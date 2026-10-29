@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useId, useMemo, useState } from 'react'
-import { ReloadOutlined, RobotOutlined } from '@ant-design/icons'
 import { Alert, Button, Empty, Flex, Select, Tag, Tooltip } from 'antd'
 import type { HostModelOption } from '@hooks/useChatStore'
 import { useHostModels } from '@hooks/useHostModels'
@@ -115,7 +114,7 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
       <Button
         aria-label="Models unavailable — retry loading the model list"
         title={loadError ?? 'The model list could not be loaded. Retry.'}
-        icon={<ReloadOutlined />}
+        icon={<span className="model-selector-chip-glyph" aria-hidden="true" />}
         onClick={() => void refresh()}
       >
         Models unavailable
@@ -128,6 +127,8 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   if (!data) return null
 
   const placementValue = placement === 'up' ? 'topLeft' : 'bottomLeft'
+  const caretPointsUp = placement === 'up' ? !open : open
+  const caretPath = caretPointsUp ? 'm4.5 10 3.5-3.5L11.5 10' : 'm4.5 6 3.5 3.5L11.5 6'
   const selectControl = (
     <Select
       aria-describedby={data.degraded ? unavailableHintId : imageHint ? imageHintId : undefined}
@@ -140,6 +141,16 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
       data-testid="selected-chat-model"
       disabled={data.degraded}
       loading={saving}
+      menuItemSelectedIcon={
+        <svg
+          className="model-selector-item-check"
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path d="m3.5 8.5 3 3 6-6" />
+        </svg>
+      }
       notFoundContent={
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -158,6 +169,16 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
       placement={placementValue}
       popupMatchSelectWidth={false}
       placeholder={effectiveLabel || SELECT_MODEL_LABEL}
+      suffixIcon={
+        <svg
+          className="model-selector-chip-caret"
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path d={caretPath} />
+        </svg>
+      }
       popupRender={menu => (
         <>
           {data.sessionModelBlocked ? (
@@ -192,7 +213,7 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
 
   return (
     <Flex align="center" gap="small" data-testid={`model-selector-${placement}`}>
-      <RobotOutlined aria-hidden="true" />
+      <span className="model-selector-chip-glyph" aria-hidden="true" />
       {imageHint ? (
         <span id={imageHintId} hidden>
           {imageHint}

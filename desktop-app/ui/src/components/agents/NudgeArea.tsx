@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { CloseOutlined } from '@ant-design/icons'
 import { type TaskState, makeTaskKey, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
 import { Alert, Button, Flex, Typography } from 'antd'
+import { IconClose } from '@components/SidebarNav/icons'
 import { useBrowserWindowState } from '@hooks/useBrowserWindowState'
 import { useTaskTier } from '@hooks/useTaskTier'
 import type { ProgressStep } from '../../uiTypes'
@@ -96,7 +96,7 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
       type="text"
       aria-label="Dismiss this suggestion"
       title="Dismiss this suggestion"
-      icon={<CloseOutlined />}
+      icon={<IconClose aria-hidden="true" width={16} height={16} />}
       onClick={() => dismissNudge(taskIdentity)}
     />
   )

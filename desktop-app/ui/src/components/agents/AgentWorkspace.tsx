@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
-import { DownOutlined, MoreOutlined, RobotOutlined } from '@ant-design/icons'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
@@ -10,6 +9,7 @@ import { Alert, Button, Dropdown, Empty, Spin, Table } from 'antd'
 import { PageBreadcrumb } from '@components/PageBreadcrumb'
 import type { PageBreadcrumbItem } from '@components/PageBreadcrumb/types'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
+import { IconAgents } from '@components/SidebarNav/icons'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import {
   type ConnectorActionInput,
@@ -56,7 +56,7 @@ function AgentHero({
   return (
     <div className="agent-details-hero agent-details-hero--flush">
       <span className="agent-details-avatar" aria-hidden="true">
-        <RobotOutlined />
+        <IconAgents />
       </span>
       <div className="agent-details-identity">
         <strong className="agent-details-name">{agentName || 'Agent'}</strong>
@@ -344,12 +344,26 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
       }}
     >
       <Button
+        className="agent-workspace-agent-route-trigger"
         type="text"
         htmlType="button"
         aria-label={`Open ${selectedAgent} options`}
         aria-haspopup="menu"
         aria-expanded={chatAgentRouteMenuOpen}
-        icon={<MoreOutlined />}
+        icon={
+          <svg
+            viewBox="0 0 16 16"
+            width={16}
+            height={16}
+            fill="currentColor"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <circle cx="3.5" cy="8" r="1.2" />
+            <circle cx="8" cy="8" r="1.2" />
+            <circle cx="12.5" cy="8" r="1.2" />
+          </svg>
+        }
       />
     </Dropdown>
   )
@@ -587,8 +601,24 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                     onClick={scrollChatToBottom}
                     type="primary"
                     shape="circle"
-                    icon={<DownOutlined />}
-                  ></Button>
+                    icon={
+                      <svg
+                        viewBox="0 0 24 24"
+                        width={18}
+                        height={18}
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                        focusable="false"
+                      >
+                        <path d="M12 4v14" />
+                        <path d="m6 12 6 6 6-6" />
+                      </svg>
+                    }
+                  />
                 </div>
               )}
             </div>

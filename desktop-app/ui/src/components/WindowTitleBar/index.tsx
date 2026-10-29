@@ -1,11 +1,5 @@
 import React from 'react'
 import { createPortal } from 'react-dom'
-import {
-  BorderOutlined,
-  CloseOutlined,
-  FullscreenExitOutlined,
-  MinusOutlined,
-} from '@ant-design/icons'
 import { Button, Flex } from 'antd'
 import type {
   TitlebarActionsPortalProps,
@@ -34,12 +28,6 @@ function controlLabel(action: WindowControlAction, state: WindowControlsState): 
   if (action === 'close') return 'Close window'
   if (action === 'minimize') return 'Minimize window'
   return state.fullscreen || state.maximized ? 'Restore window' : 'Maximize window'
-}
-
-function controlIcon(action: WindowControlAction, state: WindowControlsState) {
-  if (action === 'close') return <CloseOutlined />
-  if (action === 'minimize') return <MinusOutlined />
-  return state.fullscreen || state.maximized ? <FullscreenExitOutlined /> : <BorderOutlined />
 }
 
 function getWindowControlsApi() {
@@ -138,11 +126,19 @@ export function WindowTitleBar({ actions, actionsRef, leadingRef }: WindowTitleB
             aria-label={controlLabel(action, controlsState)}
             className={`window-control-button window-control-button--${action}`}
             htmlType="button"
-            icon={controlIcon(action, controlsState)}
             onClick={() => runControl(action)}
             size="small"
             type="text"
-          ></Button>
+          >
+            <span
+              aria-hidden="true"
+              className={`window-control-icon window-control-icon--${action}${
+                action === 'toggleMaximize' && (controlsState.fullscreen || controlsState.maximized)
+                  ? ' window-control-icon--restore'
+                  : ''
+              }`}
+            />
+          </Button>
         ))}
       </Flex>
       <Flex className="window-titlebar__leading" ref={leadingRef} />

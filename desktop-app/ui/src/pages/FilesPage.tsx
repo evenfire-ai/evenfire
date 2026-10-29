@@ -10,17 +10,6 @@ import {
   useRef,
   useState,
 } from 'react'
-import {
-  CheckOutlined,
-  CloseOutlined,
-  DownloadOutlined,
-  EditOutlined,
-  FolderAddOutlined,
-  FolderOutlined,
-  RightOutlined,
-  ShareAltOutlined,
-  UploadOutlined,
-} from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
@@ -49,6 +38,17 @@ import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
+import {
+  IconCheck,
+  IconChevronRight,
+  IconClose,
+  IconContexts,
+  IconDownload,
+  IconEdit,
+  IconPlus,
+  IconShare,
+  IconUpload,
+} from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
@@ -297,7 +297,7 @@ function GfsInlineRename({
           disabled={!value.trim()}
           loading={busy}
           htmlType="submit"
-          icon={<CheckOutlined aria-hidden="true" />}
+          icon={<IconCheck aria-hidden="true" width={16} height={16} />}
           size="small"
         />
         <AntButton
@@ -305,7 +305,7 @@ function GfsInlineRename({
           title="Cancel rename"
           disabled={busy}
           htmlType="button"
-          icon={<CloseOutlined aria-hidden="true" />}
+          icon={<IconClose aria-hidden="true" width={16} height={16} />}
           size="small"
           onClick={onCancel}
         />
@@ -2105,9 +2105,9 @@ export function FilesPage({
       title: '',
       width: 48,
       render: (_value, resource) => (
-        <span data-testid="gfs-resource-icon" aria-hidden="true">
+        <span className="da-gfs-list__icon" data-testid="gfs-resource-icon" aria-hidden="true">
           {resource.kind === 'directory' ? (
-            <FolderOutlined />
+            <IconContexts aria-hidden="true" />
           ) : (
             <GfsFileIcon name={resource.name} />
           )}
@@ -2161,7 +2161,7 @@ export function FilesPage({
               htmlType="button"
               type="text"
               size="small"
-              icon={<ShareAltOutlined aria-hidden="true" />}
+              icon={<IconShare aria-hidden="true" width={16} height={16} />}
               aria-label={`Share ${resource.name || resource.drive}`}
               onClick={() => openManage(resource)}
             />
@@ -2171,7 +2171,7 @@ export function FilesPage({
               htmlType="button"
               type="text"
               size="small"
-              icon={<DownloadOutlined aria-hidden="true" />}
+              icon={<IconDownload aria-hidden="true" width={16} height={16} />}
               aria-label={`Download ${resource.name}`}
               onClick={() => void handleDownload(resource.gfsUri, resource.name)}
               disabled={resource.readable === false}
@@ -2182,7 +2182,7 @@ export function FilesPage({
               htmlType="button"
               type="text"
               size="small"
-              icon={<EditOutlined aria-hidden="true" />}
+              icon={<IconEdit aria-hidden="true" width={16} height={16} />}
               aria-label={`Rename ${resource.name || resource.drive}`}
               onClick={() => openRenameTarget(resource)}
             />
@@ -2263,7 +2263,7 @@ export function FilesPage({
               <Flex data-testid="gfs-title-row" align="center" gap="small" wrap>
                 <nav aria-label="File location">
                   <Breadcrumb
-                    separator={<RightOutlined aria-hidden="true" />}
+                    separator={<IconChevronRight aria-hidden="true" width={14} height={14} />}
                     styles={{
                       item: { display: 'flex', alignItems: 'center' },
                       separator: { display: 'flex', alignItems: 'center' },
@@ -2370,7 +2370,7 @@ export function FilesPage({
                   <AntButton
                     htmlType="button"
                     disabled={ctrl.mutating}
-                    icon={<FolderAddOutlined aria-hidden="true" />}
+                    icon={<IconPlus aria-hidden="true" width={16} height={16} />}
                     onClick={openCreateFolder}
                     size="small"
                     type="primary"
@@ -2380,7 +2380,7 @@ export function FilesPage({
                   <AntButton
                     htmlType="button"
                     disabled={ctrl.mutating}
-                    icon={<UploadOutlined aria-hidden="true" />}
+                    icon={<IconUpload aria-hidden="true" width={16} height={16} />}
                     onClick={() => uploadInputRef.current?.click()}
                     size="small"
                   >
@@ -2530,7 +2530,7 @@ export function FilesPage({
             </Flex>
           ) : currentIsFile ? (
             <Flex align="start" gap="middle">
-              <span aria-hidden="true">
+              <span className="da-gfs-current-file__icon" aria-hidden="true">
                 <GfsFileIcon name={current.name} />
               </span>
               <Flex vertical gap="small">
@@ -2748,11 +2748,11 @@ export function FilesPage({
         title={
           <Flex align="center" gap="middle" justify="space-between">
             <Flex align="center" gap="small">
-              <span aria-hidden="true">
+              <span aria-hidden="true" style={{ width: 16, height: 16, display: 'inline-flex' }}>
                 {currentIsFolder ? (
-                  <FolderOutlined />
+                  <IconContexts aria-hidden="true" width={16} height={16} />
                 ) : current ? (
-                  <GfsFileIcon name={current.name} />
+                  <GfsFileIcon name={current.name} width={16} height={16} />
                 ) : null}
               </span>
               {renameOpen ? (
@@ -2796,7 +2796,7 @@ export function FilesPage({
               aria-label="Close share dialog"
               title="Close share dialog"
               htmlType="button"
-              icon={<CloseOutlined aria-hidden="true" />}
+              icon={<IconClose aria-hidden="true" width={16} height={16} />}
               onClick={closeManage}
               size="small"
               type="text"

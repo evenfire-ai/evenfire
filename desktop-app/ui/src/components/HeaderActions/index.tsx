@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BellOutlined, DeleteOutlined, MessageOutlined, SearchOutlined } from '@ant-design/icons'
+import { SearchOutlined } from '@ant-design/icons'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import {
@@ -20,6 +20,7 @@ import {
 } from 'antd'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { IconChat } from '@components/SidebarNav/icons'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -655,6 +656,9 @@ export const HeaderActions = React.memo(function HeaderActions({
       title={null}
     >
       <Button
+        className={`notification-bell${titlebarPlacement ? ' notification-bell--titlebar' : ''}${
+          totalAttentionCount > 0 ? ' has-attention' : ''
+        }`}
         htmlType="button"
         shape="circle"
         size="small"
@@ -669,7 +673,22 @@ export const HeaderActions = React.memo(function HeaderActions({
           setSearchOpen(false)
         }}
       >
-        <BellOutlined aria-hidden="true" />
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          width={titlebarPlacement ? 16 : 18}
+          height={titlebarPlacement ? 16 : 18}
+          strokeWidth={titlebarPlacement ? '2.25' : '2'}
+          aria-hidden="true"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+          />
+        </svg>
       </Button>
     </Badge>
   )
@@ -832,15 +851,30 @@ export const HeaderActions = React.memo(function HeaderActions({
                       <Space wrap>
                         <Button
                           aria-label="Delete notification"
-                          danger
+                          className="notification-delete-btn"
                           htmlType="button"
                           onClick={() => onRemoveNotification(notification.id)}
-                          shape="circle"
                           size="small"
                           title="Delete notification"
                           type="text"
                         >
-                          <DeleteOutlined aria-hidden="true" />
+                          <svg
+                            viewBox="0 0 16 16"
+                            width={13}
+                            height={13}
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth={1.4}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M3.5 4.5h9" />
+                            <path d="M6 4.5V3.6c0-.6.5-1.1 1.1-1.1h1.8c.6 0 1.1.5 1.1 1.1v.9" />
+                            <path d="M5 4.5v8.1c0 .7.6 1.4 1.4 1.4h3.2c.8 0 1.4-.7 1.4-1.4V4.5" />
+                            <path d="M7 7v4.5" />
+                            <path d="M9 7v4.5" />
+                          </svg>
                         </Button>
                         {clickable && (
                           <Button
@@ -998,7 +1032,7 @@ export const HeaderActions = React.memo(function HeaderActions({
             title={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
             onClick={onToggleChatDrawer}
           >
-            <MessageOutlined aria-hidden="true" />
+            <IconChat aria-hidden="true" />
           </Button>
         ) : (
           <Button

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { CopyOutlined } from '@ant-design/icons'
 import { Alert, Button, Flex, Typography } from 'antd'
+import { IconCopy } from '@components/SidebarNav/icons'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { estimateBase64DecodedLength } from '@lib/base64Size'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
@@ -142,7 +142,7 @@ export function GfsImagePreviewBody({
               copyState === 'copied' ? 'Copied image to clipboard' : 'Copy image to clipboard'
             }
             disabled={!sourceBlob}
-            icon={<CopyOutlined aria-hidden="true" />}
+            icon={<IconCopy aria-hidden="true" width={18} height={18} />}
             onClick={() => void copyImageToClipboard()}
             size="small"
             type="text"

@@ -1,13 +1,4 @@
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
-import {
-  ApiOutlined,
-  AudioMutedOutlined,
-  BellOutlined,
-  DesktopOutlined,
-  SettingOutlined,
-  SoundOutlined,
-  SunOutlined,
-} from '@ant-design/icons'
 import { useAuthContext } from '@contexts/AuthContext'
 import {
   Alert,
@@ -26,6 +17,15 @@ import {
   Typography,
 } from 'antd'
 import { PluginPermissions } from '@components/PluginPermissions'
+import {
+  IconBell,
+  IconConnectors,
+  IconDesktopNotifications,
+  IconSettings,
+  IconThemeSun,
+  IconVolume,
+  IconVolumeOff,
+} from '@components/SidebarNav/icons'
 import { NOTIFICATION_PREFERENCE_OPTIONS } from '@constants/notificationSettings'
 import {
   LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
@@ -222,7 +222,13 @@ function NotificationSoundVolumeField({
         aria-label={volume === 0 ? 'Notification sounds muted' : 'Mute notification sounds'}
         aria-pressed={volume === 0}
         htmlType="button"
-        icon={volume === 0 ? <AudioMutedOutlined /> : <SoundOutlined />}
+        icon={
+          volume === 0 ? (
+            <IconVolumeOff aria-hidden="true" width={16} height={16} />
+          ) : (
+            <IconVolume aria-hidden="true" width={16} height={16} />
+          )
+        }
         onClick={() => onChange(0)}
       />
       <Flex flex={1}>
@@ -505,7 +511,9 @@ export function SettingsPage({
         <Card
           title={
             <Flex align="center" gap="small">
-              <SettingOutlined aria-hidden="true" />
+              <span className="settings-card-title-icon" aria-hidden="true">
+                <IconSettings aria-hidden="true" width={16} height={16} />
+              </span>
               <Typography.Title id="settings-shortcuts-heading" level={3}>
                 Keyboard shortcuts
               </Typography.Title>
@@ -550,7 +558,9 @@ export function SettingsPage({
         <Card
           title={
             <Flex align="center" gap="small">
-              <SettingOutlined aria-hidden="true" />
+              <span className="settings-card-title-icon" aria-hidden="true">
+                <IconSettings aria-hidden="true" width={16} height={16} />
+              </span>
               <Typography.Title id="settings-account-heading" level={3}>
                 Account
               </Typography.Title>
@@ -598,7 +608,9 @@ export function SettingsPage({
         <Card
           title={
             <Flex align="center" gap="small">
-              <SunOutlined aria-hidden="true" />
+              <span className="settings-card-title-icon" aria-hidden="true">
+                <IconThemeSun aria-hidden="true" width={16} height={16} />
+              </span>
               <Typography.Title id="settings-theme-heading" level={3}>
                 Theme
               </Typography.Title>
@@ -629,7 +641,9 @@ export function SettingsPage({
             <Card
               title={
                 <Flex align="center" gap="small">
-                  <BellOutlined aria-hidden="true" />
+                  <span className="settings-card-title-icon" aria-hidden="true">
+                    <IconBell aria-hidden="true" width={16} height={16} />
+                  </span>
                   <Typography.Title id="settings-in-app-heading" level={3}>
                     In App Notifications
                   </Typography.Title>
@@ -659,7 +673,9 @@ export function SettingsPage({
             <Card
               title={
                 <Flex align="center" gap="small">
-                  <DesktopOutlined aria-hidden="true" />
+                  <span className="settings-card-title-icon" aria-hidden="true">
+                    <IconDesktopNotifications aria-hidden="true" width={16} height={16} />
+                  </span>
                   <Typography.Title id="settings-desktop-heading" level={3}>
                     Desktop notifications
                   </Typography.Title>
@@ -686,7 +702,9 @@ export function SettingsPage({
           <Card
             title={
               <Flex align="center" gap="small">
-                <BellOutlined aria-hidden="true" />
+                <span className="settings-card-title-icon" aria-hidden="true">
+                  <IconBell aria-hidden="true" width={16} height={16} />
+                </span>
                 <Typography.Title id="settings-channel-fallback-heading" level={3}>
                   Channel fallback
                 </Typography.Title>
@@ -760,7 +778,9 @@ export function SettingsPage({
             className="settings-notification-sound-card"
             title={
               <Flex align="center" gap="small">
-                <SoundOutlined aria-hidden="true" />
+                <span className="settings-card-title-icon" aria-hidden="true">
+                  <IconVolume aria-hidden="true" width={16} height={16} />
+                </span>
                 <Typography.Title id="settings-notification-sound-heading" level={3}>
                   Notification sound
                 </Typography.Title>
@@ -920,7 +940,9 @@ export function SettingsPage({
         <Card
           title={
             <Flex align="center" gap="small">
-              <ApiOutlined aria-hidden="true" />
+              <span className="settings-card-title-icon" aria-hidden="true">
+                <IconConnectors aria-hidden="true" width={16} height={16} />
+              </span>
               <Typography.Title id="settings-social-channels-heading" level={3}>
                 Social channels
               </Typography.Title>

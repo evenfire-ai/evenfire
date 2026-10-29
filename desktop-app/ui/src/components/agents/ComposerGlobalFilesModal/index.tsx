@@ -1,5 +1,4 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { CloseOutlined, FolderOutlined, RightOutlined } from '@ant-design/icons'
 import {
   Alert,
   Breadcrumb,
@@ -16,6 +15,11 @@ import {
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
+import {
+  IconClose as CloseOutlined,
+  IconContexts as FolderOutlined,
+  IconChevronRight as RightOutlined,
+} from '@components/SidebarNav/icons'
 import {
   type GfsDiscoveryFailure,
   useGfsBrowserController,
@@ -133,7 +137,7 @@ export function ComposerGlobalFilesModal({
       <Button
         ref={closeButtonRef}
         aria-label="Close global file picker"
-        icon={<CloseOutlined />}
+        icon={<CloseOutlined width={16} height={16} />}
         onClick={onClose}
         type="text"
       />
@@ -244,7 +248,7 @@ export function ComposerGlobalFilesModal({
                       <Button
                         aria-label={`Open folder ${entry.name}`}
                         block
-                        icon={<FolderOutlined />}
+                        icon={<FolderOutlined width={17} height={17} />}
                         onClick={() =>
                           ctrl.current ? ctrl.openChild(entry) : ctrl.openResource(entry)
                         }
@@ -252,7 +256,7 @@ export function ComposerGlobalFilesModal({
                       >
                         <Flex align="center" justify="space-between" flex={1}>
                           <span>{entry.name}</span>
-                          <RightOutlined aria-hidden="true" />
+                          <RightOutlined aria-hidden="true" width={14} height={14} />
                         </Flex>
                       </Button>
                     </div>
@@ -280,7 +284,7 @@ export function ComposerGlobalFilesModal({
                         disabled={isAttached || (!checked && selectedFiles.length >= capacity)}
                         onChange={() => toggleFile(file)}
                       />
-                      <GfsFileIcon name={entry.name} />
+                      <GfsFileIcon name={entry.name} width={17} height={17} />
                       <Flex vertical>
                         <Typography.Text>{entry.name}</Typography.Text>
                         <Typography.Text type="secondary">

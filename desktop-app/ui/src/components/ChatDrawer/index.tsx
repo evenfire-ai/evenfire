@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { FullscreenOutlined, PlusOutlined, RightOutlined } from '@ant-design/icons'
 import { Button, Drawer, Flex } from 'antd'
+import { IconMaximize, IconNewChat, IconPanelRightClose } from '@components/SidebarNav/icons'
 import { CHAT_DRAWER_MAX_ABSOLUTE, CHAT_DRAWER_MIN_WIDTH } from '@hooks/useChatDrawerResize'
 import type { ChatDrawerProps } from './types'
 
@@ -70,7 +70,7 @@ export function ChatDrawer({
             <Button
               aria-label="New chat"
               htmlType="button"
-              icon={<PlusOutlined aria-hidden="true" />}
+              icon={<IconNewChat aria-hidden="true" width={16} height={16} />}
               size="small"
               type="text"
               title="New chat"
@@ -79,7 +79,7 @@ export function ChatDrawer({
             <Button
               aria-label="Open chat in full screen"
               htmlType="button"
-              icon={<FullscreenOutlined aria-hidden="true" />}
+              icon={<IconMaximize aria-hidden="true" width={16} height={16} />}
               size="small"
               type="text"
               title="Open chat in full screen"
@@ -88,7 +88,7 @@ export function ChatDrawer({
             <Button
               aria-label="Collapse chat drawer"
               htmlType="button"
-              icon={<RightOutlined aria-hidden="true" />}
+              icon={<IconPanelRightClose aria-hidden="true" width={16} height={16} />}
               size="small"
               type="text"
               title="Collapse chat drawer"

@@ -1,20 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
-import {
-  CopyOutlined,
-  DeleteOutlined,
-  DownloadOutlined,
-  EditOutlined,
-  EllipsisOutlined,
-  EyeOutlined,
-  FolderAddOutlined,
-  FolderOutlined,
-  LinkOutlined,
-  RightOutlined,
-  ShareAltOutlined,
-  UploadOutlined,
-} from '@ant-design/icons'
 import { Button, Dropdown } from 'antd'
 import type { MenuProps } from 'antd'
+import {
+  IconCopy as CopyOutlined,
+  IconTrash as DeleteOutlined,
+  IconDownload as DownloadOutlined,
+  IconEdit as EditOutlined,
+  IconMoreVertical as EllipsisOutlined,
+  IconEye as EyeOutlined,
+  IconPlus as FolderAddOutlined,
+  IconContexts as FolderOutlined,
+  IconConnectors as LinkOutlined,
+  IconChevronRight as RightOutlined,
+  IconShare as ShareAltOutlined,
+  IconUpload as UploadOutlined,
+} from '@components/SidebarNav/icons'
 import type { GfsResourceMenuProps } from './types'
 
 export function GfsResourceMenu({
@@ -102,19 +102,19 @@ export function GfsResourceMenu({
             {
               key: 'share',
               label: 'Share',
-              icon: <ShareAltOutlined aria-hidden="true" />,
+              icon: <ShareAltOutlined aria-hidden="true" width={18} height={18} />,
               children: [
                 {
                   key: 'share-access',
                   label: 'Share',
-                  icon: <ShareAltOutlined aria-hidden="true" />,
+                  icon: <ShareAltOutlined aria-hidden="true" width={18} height={18} />,
                 },
                 ...(onCopyLink
                   ? [
                       {
                         key: 'copy-link',
                         label: 'Copy link',
-                        icon: <CopyOutlined aria-hidden="true" />,
+                        icon: <CopyOutlined aria-hidden="true" width={18} height={18} />,
                       },
                     ]
                   : []),
@@ -126,7 +126,7 @@ export function GfsResourceMenu({
               {
                 key: 'copy-link',
                 label: 'Copy link',
-                icon: <CopyOutlined aria-hidden="true" />,
+                icon: <CopyOutlined aria-hidden="true" width={18} height={18} />,
               },
             ]
           : []),
@@ -135,7 +135,7 @@ export function GfsResourceMenu({
             {
               key: 'open-folder',
               label: 'Open folder',
-              icon: <FolderOutlined aria-hidden="true" />,
+              icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
             },
           ]
         : []),
@@ -144,12 +144,18 @@ export function GfsResourceMenu({
             {
               key: 'open-gfs-link',
               label: 'Open EvenDrive link',
-              icon: <LinkOutlined aria-hidden="true" />,
+              icon: <LinkOutlined aria-hidden="true" width={18} height={18} />,
             },
           ]
         : []),
       ...(onPreview
-        ? [{ key: 'preview', label: 'Preview', icon: <EyeOutlined aria-hidden="true" /> }]
+        ? [
+            {
+              key: 'preview',
+              label: 'Preview',
+              icon: <EyeOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
         : []),
     ],
     [
@@ -158,32 +164,56 @@ export function GfsResourceMenu({
             {
               key: 'new-folder',
               label: 'New folder',
-              icon: <FolderAddOutlined aria-hidden="true" />,
+              icon: <FolderAddOutlined aria-hidden="true" width={18} height={18} />,
             },
           ]
         : []),
       ...(onRename
-        ? [{ key: 'rename', label: 'Rename', icon: <EditOutlined aria-hidden="true" /> }]
+        ? [
+            {
+              key: 'rename',
+              label: 'Rename',
+              icon: <EditOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
         : []),
       ...(onMove
-        ? [{ key: 'move', label: 'Move to…', icon: <FolderOutlined aria-hidden="true" /> }]
+        ? [
+            {
+              key: 'move',
+              label: 'Move to…',
+              icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
         : []),
     ],
     [
       ...(onDownload
-        ? [{ key: 'download', label: 'Download', icon: <DownloadOutlined aria-hidden="true" /> }]
+        ? [
+            {
+              key: 'download',
+              label: 'Download',
+              icon: <DownloadOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
         : []),
       ...(onDownloadZip
         ? [
             {
               key: 'download-zip',
               label: 'Download as zip',
-              icon: <DownloadOutlined aria-hidden="true" />,
+              icon: <DownloadOutlined aria-hidden="true" width={18} height={18} />,
             },
           ]
         : []),
       ...(onReplace
-        ? [{ key: 'replace', label: 'Replace file', icon: <UploadOutlined aria-hidden="true" /> }]
+        ? [
+            {
+              key: 'replace',
+              label: 'Replace file',
+              icon: <UploadOutlined aria-hidden="true" width={18} height={18} />,
+            },
+          ]
         : []),
     ],
     [
@@ -192,7 +222,7 @@ export function GfsResourceMenu({
             {
               key: 'delete',
               label: 'Delete',
-              icon: <DeleteOutlined aria-hidden="true" />,
+              icon: <DeleteOutlined aria-hidden="true" width={18} height={18} />,
               danger: true,
             },
           ]
@@ -247,11 +277,12 @@ export function GfsResourceMenu({
         onOpenChange={handleDropdownOpenChange}
         menu={{
           items,
+          className: 'gfs-resource-menu-antd',
           onClick: handleMenuClick,
           onKeyDown: handleMenuKeyDown,
           expandIcon: (
             <span aria-hidden="true">
-              <RightOutlined />
+              <RightOutlined width={18} height={18} />
             </span>
           ),
           'aria-label': `Actions for ${resourceName}`,
@@ -270,7 +301,8 @@ export function GfsResourceMenu({
           aria-expanded={open}
           title={`Options for ${resourceName}`}
           htmlType="button"
-          icon={<EllipsisOutlined aria-hidden="true" />}
+          className="da-gfs-resource-menu__trigger"
+          icon={<EllipsisOutlined aria-hidden="true" width={16} height={16} />}
           onClick={event => event.stopPropagation()}
           ref={triggerRef}
           size="small"

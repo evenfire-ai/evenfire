@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { EllipsisOutlined } from '@ant-design/icons'
 import { Button, Dropdown } from 'antd'
 import type { MenuProps } from 'antd'
+import { IconMoreVertical } from '@components/SidebarNav/icons'
 
 type AccessRowMenuProps = {
   disabled?: boolean
@@ -65,7 +65,7 @@ export function AccessRowMenu({ disabled = false, label, onRemove }: AccessRowMe
         aria-haspopup="menu"
         aria-label={`Actions for ${label}`}
         disabled={disabled}
-        icon={<EllipsisOutlined aria-hidden="true" />}
+        icon={<IconMoreVertical aria-hidden="true" />}
         ref={triggerRef}
         size="small"
         type="text"

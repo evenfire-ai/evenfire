@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
-import { AppstoreOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons'
 import { Select, Space, Spin, Tag, Typography } from 'antd'
+import { IconAgents, IconClose, IconTeams, IconUser } from '@components/SidebarNav/icons'
 import type { GfsDelegationSubjectOption } from '@/gfs/delegation.types'
 import type { GfsSubjectPickerProps } from './types'
 
@@ -9,9 +9,22 @@ function subjectKey(subject: GfsDelegationSubjectOption): string {
 }
 
 function subjectIcon(subject: GfsDelegationSubjectOption) {
-  if (subject.type === 'team') return <TeamOutlined aria-hidden="true" />
-  if (subject.type === 'host') return <AppstoreOutlined aria-hidden="true" />
-  return <UserOutlined aria-hidden="true" />
+  const icon =
+    subject.type === 'team' ? (
+      <IconTeams aria-hidden="true" />
+    ) : subject.type === 'host' ? (
+      <IconAgents aria-hidden="true" />
+    ) : (
+      <IconUser aria-hidden="true" />
+    )
+  return (
+    <span
+      className={`da-gfs-subject-picker__avatar da-gfs-subject-picker__avatar--${subject.type}`}
+      aria-hidden="true"
+    >
+      {icon}
+    </span>
+  )
 }
 
 function matchesQuery(subject: GfsDelegationSubjectOption, query: string): boolean {
@@ -57,6 +70,7 @@ export function GfsSubjectPicker({
       }}
       loading={loading}
       mode="multiple"
+      removeIcon={<IconClose aria-hidden="true" width={16} height={16} />}
       notFoundContent={
         loading ? (
           <Spin size="small" />

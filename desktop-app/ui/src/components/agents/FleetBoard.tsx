@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { EllipsisOutlined, RobotOutlined } from '@ant-design/icons'
 import { useAgentActivityContext } from '@contexts/AgentActivityContext'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { Button as AntButton, Dropdown, Empty, Flex, Select, Table, Tag, Typography } from 'antd'
 import type { MenuProps, TableColumnsType } from 'antd'
+import { IconAgents } from '@components/SidebarNav/icons'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
@@ -225,7 +225,9 @@ export function FleetBoard() {
       title: 'Agent name',
       render: (_value, row) => (
         <Flex align="center" gap="small" className="agent-row-main">
-          <RobotOutlined aria-hidden="true" />
+          <span className="agent-row-icon" aria-hidden="true">
+            <IconAgents width={15} height={15} />
+          </span>
           <Flex vertical className="agent-row-main-copy">
             <Typography.Text strong>{row.display}</Typography.Text>
             {row.display !== row.agent ? (
@@ -342,13 +344,14 @@ export function FleetBoard() {
             htmlType="button"
             type="text"
             size="small"
-            icon={<EllipsisOutlined aria-hidden="true" />}
             onClick={event => event.stopPropagation()}
             onKeyDown={event => event.stopPropagation()}
             aria-label={`More actions for ${row.display}`}
             aria-haspopup="menu"
             aria-expanded={fleetMenuAgent === row.agent}
-          />
+          >
+            ...
+          </AntButton>
         </Dropdown>
       ),
     },

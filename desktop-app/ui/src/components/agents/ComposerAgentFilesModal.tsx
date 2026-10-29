@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowLeftOutlined, FolderOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined } from '@ant-design/icons'
 import { Alert, Button, Checkbox, Empty, Flex, Listy, Modal, Spin, Tag, Typography } from 'antd'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import { IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { formatSharedFileSize, getSharedFileParentPath, joinSharedFilePath } from '@lib/sharedFiles'
 import type { ComposerAgentFileReference } from '../../uiTypes'
 
@@ -164,6 +165,7 @@ export function ComposerAgentFilesModal({
         </Flex>
       }
       onCancel={onClose}
+      closeIcon={<IconClose aria-hidden="true" width={18} height={18} />}
       open
       title={
         <Flex vertical>
@@ -189,7 +191,7 @@ export function ComposerAgentFilesModal({
                 <Button
                   aria-label={`Open ${filesystem.name}`}
                   block
-                  icon={<FolderOutlined />}
+                  icon={<IconContexts aria-hidden="true" width={14} height={14} />}
                   onClick={() => {
                     setSelectedFilesystem(filesystem.name)
                     setCurrentPath('/')
@@ -246,7 +248,7 @@ export function ComposerAgentFilesModal({
                           <Button
                             aria-label={`Open folder ${entry.name}`}
                             block
-                            icon={<FolderOutlined />}
+                            icon={<IconContexts aria-hidden="true" width={14} height={14} />}
                             onClick={() => setCurrentPath(fullPath)}
                             type="text"
                           >
@@ -274,7 +276,7 @@ export function ComposerAgentFilesModal({
                           checked={checked}
                           onChange={() => toggleAgentFileReference(fullPath, 'file')}
                         />
-                        <GfsFileIcon name={entry.name} />
+                        <GfsFileIcon name={entry.name} width={14} height={14} />
                         <Flex vertical>
                           <Typography.Text>{entry.name}</Typography.Text>
                           <Typography.Text type="secondary">

@@ -9,11 +9,11 @@
 // http(s):/mailto:/# fragments; code blocks render as plain `pre` > `code`.
 // Covered by the GfsMarkdownPreview and GfsMarkdownPreviewBody suites.
 import { useEffect, useId, useRef, useState } from 'react'
-import { CopyOutlined } from '@ant-design/icons'
 import { Alert, Button, Flex, Spin, Typography } from 'antd'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { IconCopy } from '@components/SidebarNav/icons'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
@@ -188,7 +188,7 @@ export function GfsMarkdownPreviewBody({
               : 'Copy preview contents to clipboard'
           }
           disabled={source === null}
-          icon={<CopyOutlined aria-hidden="true" />}
+          icon={<IconCopy aria-hidden="true" width={18} height={18} />}
           onClick={() => void copySourceToClipboard()}
           size="small"
           type="text"

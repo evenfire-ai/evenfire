@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { CaretDownOutlined, FolderOutlined, HolderOutlined } from '@ant-design/icons'
+import { HolderOutlined } from '@ant-design/icons'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import type { InfiniteData } from '@tanstack/react-query'
 import { Alert, Button, Empty, Flex, Spin, Tag, Tree, Typography } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import { IconChevronRight, IconContexts } from '@components/SidebarNav/icons'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
   GFS_DRIVE_MAIN,
@@ -385,7 +386,9 @@ function FileExplorerNodeTitle({
       data-drop-reason={dropReason}
       title={dropReasonTooltip ?? (canDrag ? `Drag ${label} into a folder to move it` : undefined)}
     >
-      {isDirectory ? <FolderOutlined aria-hidden="true" /> : <GfsFileIcon name={node.name} />}
+      <span className="da-file-explorer__icon" aria-hidden="true">
+        {isDirectory ? <IconContexts aria-hidden="true" /> : <GfsFileIcon name={node.name} />}
+      </span>
       <Typography.Text>{label}</Typography.Text>
       {isUnreadable ? <Tag>No access</Tag> : null}
       {status ? <Tag color={status.color}>{status.label}</Tag> : null}
@@ -1323,7 +1326,7 @@ export function FileExplorerTree({
             expandedKeys={[...expandedIds]}
             selectedKeys={selectedId ? [selectedId] : []}
             styles={FILE_EXPLORER_TREE_STYLES}
-            switcherIcon={<CaretDownOutlined aria-hidden="true" />}
+            switcherIcon={<IconChevronRight aria-hidden="true" width={14} height={14} />}
             draggable={{
               icon: <HolderOutlined aria-hidden="true" />,
               nodeDraggable: data => metadataForTreeNode(data)?.dragEnabled === true,
