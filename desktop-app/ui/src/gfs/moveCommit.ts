@@ -92,6 +92,9 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+const CONFLICT_STOPPED_MESSAGE =
+  'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+
 /**
  * A name conflict is a 409 and nothing else.
  *
@@ -181,7 +184,15 @@ export async function commitGfsMove(
     // attempt — was in flight. A PATCH dispatched after that would move the
     // item under a session the user no longer owns, so the gesture is
     // re-validated at the dispatch boundary instead of only at admission.
-    if (deps.isCurrent?.() === false) return { status: 'gesture-lost' }
+    if (deps.isCurrent?.() === false) {
+      // Every later attempt is a numbered retry after a dispatched 409. Keep
+      // that server outcome when the owner disappears instead of erasing it
+      // as a generic gesture loss; the surface still gates presentation.
+      if (attempt > 0) {
+        return { status: 'conflict-stopped', message: CONFLICT_STOPPED_MESSAGE }
+      }
+      return { status: 'gesture-lost' }
+    }
     let error: unknown
     try {
       const receipt = await deps.moveResource(
@@ -293,8 +304,7 @@ export async function commitGfsMove(
     if (!plan.allowNumberedRename) {
       return {
         status: 'conflict-stopped',
-        message:
-          'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.',
+        message: CONFLICT_STOPPED_MESSAGE,
       }
     }
     occupied.add(moveName)

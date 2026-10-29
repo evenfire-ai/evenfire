@@ -375,7 +375,10 @@ describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
       }),
       plan({ allowNumberedRename: true })
     )
-    expect(outcome).toEqual({ status: 'gesture-lost' })
+    expect(outcome.status).toBe('conflict-stopped')
+    if (outcome.status === 'conflict-stopped') {
+      expect(outcome.message).toContain('already exists')
+    }
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 

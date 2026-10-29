@@ -53,7 +53,7 @@ async function wireFailure(
   )
   return { text, error: captured }
 }
-async function run(text: string, approveRename = false, landed = false) {
+async function run(text: string, approveRename = false, landed = false, isCurrent?: () => boolean) {
   const snapshot = await resolveResource(
     resolvedFile(sourceId, 'report.md', { parentResourceId: oldParentId, version: 7 })
   )
@@ -74,6 +74,7 @@ async function run(text: string, approveRename = false, landed = false) {
       resolveSource,
       moveResource,
       isSessionAuthorityFailure: error => isGfsSessionAuthorityFailure(String(error), 'operation'),
+      ...(isCurrent ? { isCurrent } : {}),
     },
     { ...plan, allowNumberedRename: approveRename }
   )
@@ -156,6 +157,20 @@ describe('real move producer verdicts (R1-M3)', () => {
       'report (1).md',
       'report (2).md',
     ])
+  })
+
+  it('retains a produced 409 when the owner is lost before its numbered retry', async () => {
+    const { text } = await wireFailure(409)
+    const isCurrent = vi.fn().mockReturnValueOnce(true).mockReturnValue(false)
+    const result = await run(text, true, false, isCurrent)
+    const outcome = result.outcome
+
+    expect(outcome.status).toBe('conflict-stopped')
+    if (outcome.status === 'conflict-stopped') {
+      expect(outcome.message).toContain('already exists')
+    }
+    expect(isCurrent).toHaveBeenCalledTimes(2)
+    expect(result.moveResource).toHaveBeenCalledTimes(1)
   })
 
   it.each([false, true])(

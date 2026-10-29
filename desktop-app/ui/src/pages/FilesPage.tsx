@@ -2076,33 +2076,22 @@ export function FilesPage({
     allowNumberedRename: boolean,
     isCurrent?: () => boolean,
     expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot,
-    reportOutcomes = true,
-    dispatchObserver?: {
-      onDispatch: () => void
-      onRejected: (error: unknown) => void
-    }
+    reportOutcomes = true
   ): Promise<MoveCommitOutcome> => {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
     try {
       return await runGfsMoveCommit(
         {
-          moveResource: async (resourceId, destinationId, ifMatch, newName, oldParentId) => {
-            dispatchObserver?.onDispatch()
-            try {
-              return await ctrl.moveResource(
-                resourceId,
-                destinationId,
-                ifMatch,
-                newName,
-                oldParentId,
-                source.scope
-              )
-            } catch (error) {
-              dispatchObserver?.onRejected(error)
-              throw error
-            }
-          },
+          moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
+            ctrl.moveResource(
+              resourceId,
+              destinationId,
+              ifMatch,
+              newName,
+              oldParentId,
+              source.scope
+            ),
           handleAuthorityFailure: message =>
             ctrl.handleAuthorityFailure(message, 'operation', source.scope),
           convergeCommittedMove: (input, receipt) =>
@@ -2563,39 +2552,14 @@ export function FilesPage({
         version: target.version,
         parentResourceId: sourceParentId,
       }
-      const dispatchedMove = {
-        count: 0,
-        lastRejectedStatus: null as number | null,
-      }
       const outcome = await runMoveCommit(
         moveSource,
         { resourceId: destinationId, name: destinationName },
         allowNumberedRename,
         () => pageActiveRef.current && ownsDialog() && contextStillMatches(),
         expectedSourceSnapshot,
-        false,
-        {
-          onDispatch: () => {
-            dispatchedMove.count += 1
-            dispatchedMove.lastRejectedStatus = null
-          },
-          onRejected: error => {
-            dispatchedMove.lastRejectedStatus = parseHttpStatus(
-              error instanceof Error ? error.message : String(error)
-            )
-          },
-        }
+        false
       )
-      const visibleOutcome: MoveCommitOutcome =
-        outcome.status === 'gesture-lost' &&
-        dispatchedMove.count > 0 &&
-        dispatchedMove.lastRejectedStatus === 409
-          ? {
-              status: 'conflict-stopped',
-              message:
-                'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.',
-            }
-          : outcome
       if (!pageActiveRef.current) return
       if (!sessionStillMatches()) {
         closeOwnedDialog()
@@ -2607,12 +2571,12 @@ export function FilesPage({
           ownsDialogGeneration() &&
           isDialogCurrent !== undefined &&
           !isDialogCurrent()
-        if (selectionChangedOnOwnedDialog && visibleOutcome.status !== 'session-lost') {
+        if (selectionChangedOnOwnedDialog && outcome.status !== 'session-lost') {
           const pushAttributedOutcome: MoveToast = (message, tone) =>
             pushToast?.(target.name + ' → ' + destinationName + ': ' + message, tone)
           toastMoveOutcome(
             pushAttributedOutcome,
-            visibleOutcome,
+            outcome,
             target.name,
             destinationName,
             target.kind
@@ -2623,19 +2587,19 @@ export function FilesPage({
         // After dispatch, the operation owns its captured result. A changed
         // destination selection keeps its dialog; route/session changes and a
         // closed dialog still use the page-owned toast and generation fence.
-        toastMoveOutcome(pushToast, visibleOutcome, target.name, destinationName, target.kind)
+        toastMoveOutcome(pushToast, outcome, target.name, destinationName, target.kind)
         closeOwnedDialog()
         return
       }
-      if (visibleOutcome.status === 'session-lost' || visibleOutcome.status === 'gesture-lost') {
-        if (visibleOutcome.status === 'session-lost') closeOwnedDialog()
+      if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
+        if (outcome.status === 'session-lost') closeOwnedDialog()
         else setMovePermissionStatus(null)
         return
       }
-      if (visibleOutcome.status !== 'committed' && visibleOutcome.status !== 'no-op') {
-        throw new Error(visibleOutcome.message)
+      if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
+        throw new Error(outcome.message)
       }
-      toastMoveOutcome(pushToast, visibleOutcome, target.name, destinationName, target.kind)
+      toastMoveOutcome(pushToast, outcome, target.name, destinationName, target.kind)
     } catch (moveError) {
       if (!pageActiveRef.current) return
       if (!ownsDialogGeneration()) return
