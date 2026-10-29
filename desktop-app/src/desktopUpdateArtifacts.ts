@@ -1,13 +1,20 @@
 import { extractFile } from '@electron/asar'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { createReadStream, createWriteStream } from 'node:fs'
-import { lstat, mkdir, readFile, realpath, symlink, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import yauzl, { type Entry, type ZipFile } from 'yauzl'
-import { openRegularFileNoFollow } from './desktopUpdateFileSystem.js'
+import {
+  openRegularFileNoFollow,
+  readFileSha256,
+  updaterFileSystem,
+} from './desktopUpdateFileSystem.js'
+
+export { readFileSha256 } from './desktopUpdateFileSystem.js'
+
+const { createReadStream, createWriteStream } = updaterFileSystem
+const { lstat, mkdir, readFile, realpath, symlink, unlink } = updaterFileSystem.promises
 
 const GITHUB_REPOSITORY = 'evenfire-ai/evenfire'
 const GITHUB_API_BASE = `https://api.github.com/repos/${GITHUB_REPOSITORY}`
@@ -1001,13 +1008,6 @@ function verifyLinuxPackage(
       'The downloaded RPM package has an unexpected identity, version, or architecture.'
     )
   }
-}
-
-export async function readFileSha256(filePath: string): Promise<string> {
-  const hash = createHash('sha256')
-  const stream = createReadStream(filePath)
-  for await (const chunk of stream) hash.update(chunk as Buffer)
-  return hash.digest('hex')
 }
 
 export async function verifyRecordedOperationDirectory(

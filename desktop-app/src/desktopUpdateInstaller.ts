@@ -1,6 +1,4 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { constants } from 'node:fs'
-import { access, lstat, realpath, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import type {
@@ -9,6 +7,10 @@ import type {
   DesktopReleasePlatform,
   VerifiedDesktopPayload,
 } from './desktopUpdateArtifacts.js'
+import { readFileSha256, updaterFileSystem } from './desktopUpdateFileSystem.js'
+
+const { constants } = updaterFileSystem
+const { access, lstat, realpath, unlink } = updaterFileSystem.promises
 
 export type DesktopInstallLocation = {
   platform: DesktopReleasePlatform
@@ -614,14 +616,6 @@ async function isRegularFile(filePath: string): Promise<boolean> {
   }
 }
 
-async function sha256(filePath: string): Promise<string> {
-  const { createHash } = await import('node:crypto')
-  const { createReadStream } = await import('node:fs')
-  const hash = createHash('sha256')
-  for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer)
-  return hash.digest('hex')
-}
-
 async function verifyStage(plan: DesktopInstallPlan): Promise<void> {
   if (
     path.resolve(plan.operationPath) !== path.resolve(path.join(plan.stageRoot, plan.operationId))
@@ -671,7 +665,7 @@ async function launchDirectoryInstall(plan: DesktopInstallPlan): Promise<void> {
     payload.appPath,
     location.platform === 'darwin' ? 'Contents/Resources/app.asar' : 'resources/app.asar'
   )
-  const digest = await sha256(asar)
+  const digest = await readFileSha256(asar)
   if (location.platform === 'darwin') {
     const args = [
       stageRoot,
@@ -742,7 +736,7 @@ async function launchDirectoryInstall(plan: DesktopInstallPlan): Promise<void> {
 async function launchSquirrelInstall(plan: DesktopInstallPlan): Promise<void> {
   const { location, operationId, operationPath, stageRoot, pendingPath, payload } = plan
   if (!location.updateExecutablePath) throw new Error('The Squirrel updater executable is missing.')
-  const targetAsar = await sha256(path.join(payload.appPath, 'resources', 'app.asar'))
+  const targetAsar = await readFileSha256(path.join(payload.appPath, 'resources', 'app.asar'))
   const encoded = Buffer.from(WINDOWS_BODY, 'utf16le').toString('base64')
   const installPlan = JSON.stringify({
     stageRoot,
@@ -774,7 +768,7 @@ async function launchLinuxPackageInstall(plan: DesktopInstallPlan): Promise<void
     )
   }
   const { location, operationId, operationPath, stageRoot, pendingPath, payload } = plan
-  const targetAsar = await sha256(path.join(payload.appPath, 'resources', 'app.asar'))
+  const targetAsar = await readFileSha256(path.join(payload.appPath, 'resources', 'app.asar'))
   const rootScript = Buffer.from(LINUX_ROOT_SCRIPT).toString('base64')
   const args = [
     stageRoot,

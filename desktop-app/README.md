@@ -252,3 +252,27 @@ npm run test:e2e:all          # Phase 1 + Phase 2
   - `contextIsolation: true`
   - `nodeIntegration: false`
 - API access is exposed via preload IPC only (`window.clerum.*`).
+
+## Updater physical filesystem regression
+
+Updater archive bytes use the physical filesystem (`original-fs` in Electron), while
+`@electron/asar` inspects logical archive contents. Do not set `process.noAsar` globally.
+
+After `npm run build:main`, run the native regression on macOS arm64 with Node 24.22.1 or later:
+
+```sh
+EVENFIRE_DESKTOP_UNSIGNED_SOURCE_APP=/Applications/Evenfire.app \
+EVENFIRE_DESKTOP_RELEASE_FIXTURE_DIR=/path/to/verified-release-fixtures \
+node --test scripts/tests/updater-physical-filesystem.test.mjs
+```
+
+Set `CODEX_SCRATCH_ROOT` to a writable scratch directory outside the repository. The fixture directory
+must contain the official `mac-v0.12.0.zip`; its SHA-256 is checked against the recorded GitHub
+release metadata. Use an actual Forge source app with a version different from `0.12.0`.
+The test runs Node and real Electron without windows, reads the source app, verifies the signed
+target, stages it, and invalidates the staged backend binding to verify permanent cleanup. It also
+checks wrong-digest and cancellation cleanup and rejects ASAR symlinks. It never launches an
+installer or changes the source app/session. Missing native fixtures are reported as skipped;
+these tests do not qualify replacement, restart, or native rollback.
+Set `EVENFIRE_DESKTOP_LIVE_RELEASE=1` to additionally stage directly from the public GitHub release
+instead of replaying its recorded metadata and verified fixture bytes.

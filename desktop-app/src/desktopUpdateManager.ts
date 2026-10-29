@@ -1,6 +1,5 @@
 import { BrowserWindow, app } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { AppService } from './appService.js'
 import { getActiveRuntimeConfigOptionId } from './config.js'
@@ -20,7 +19,7 @@ import {
   verifyAppTree,
   verifyRecordedOperationDirectory,
 } from './desktopUpdateArtifacts.js'
-import { readRegularFileNoFollow } from './desktopUpdateFileSystem.js'
+import { readRegularFileNoFollow, updaterFileSystem } from './desktopUpdateFileSystem.js'
 import {
   type DesktopInstallLocation,
   type DesktopInstallPlan,
@@ -28,6 +27,8 @@ import {
   launchDesktopInstallHelper,
 } from './desktopUpdateInstaller.js'
 import type { DesktopReleaseStatus, DesktopUpdateProgress, PendingDesktopUpdate } from './types.js'
+
+const { lstat, mkdir, readdir, rename, rm, unlink, writeFile } = updaterFileSystem.promises
 
 const MINIMUM_UPDATE_VERSION = '0.8.0'
 const STAGING_DIRECTORY = 'desktop-update-staging'

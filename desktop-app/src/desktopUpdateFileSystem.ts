@@ -1,5 +1,26 @@
-import { constants } from 'node:fs'
-import { type FileHandle, lstat, open } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import * as fs from 'node:fs'
+import * as promises from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
+
+type PhysicalFileSystem = Pick<
+  typeof fs,
+  'constants' | 'createReadStream' | 'createWriteStream'
+> & { promises: typeof promises }
+
+// Updater paths describe physical files, including the app.asar container itself.
+// Logical ASAR entries are inspected separately through @electron/asar.
+export const updaterFileSystem: PhysicalFileSystem = process.versions.electron
+  ? (require('original-fs') as PhysicalFileSystem)
+  : {
+      constants: fs.constants,
+      createReadStream: fs.createReadStream,
+      createWriteStream: fs.createWriteStream,
+      promises,
+    }
+
+const { constants } = updaterFileSystem
+const { lstat, open } = updaterFileSystem.promises
 
 export type OpenedRegularFile = {
   handle: FileHandle
@@ -54,6 +75,19 @@ export async function readRegularFileNoFollow(filePath: string, maximumBytes: nu
     }
     if (offset > maximumBytes) throw new Error('The updater metadata file exceeds its size limit.')
     return bytes.subarray(0, offset)
+  } finally {
+    await opened.handle.close()
+  }
+}
+
+export async function readFileSha256(filePath: string): Promise<string> {
+  const opened = await openRegularFileNoFollow(filePath)
+  try {
+    const hash = createHash('sha256')
+    for await (const chunk of opened.handle.createReadStream({ autoClose: false })) {
+      hash.update(chunk as Buffer)
+    }
+    return hash.digest('hex')
   } finally {
     await opened.handle.close()
   }
