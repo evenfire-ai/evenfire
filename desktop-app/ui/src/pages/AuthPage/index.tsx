@@ -166,7 +166,7 @@ export function AuthPage() {
               </form>
             ) : (
               <form onSubmit={handlePasswordSubmit}>
-                <Flex vertical gap="large">
+                <Flex vertical gap="middle">
                   <Flex vertical gap="small">
                     <label htmlFor="email-input">Email</label>
                     <Input
