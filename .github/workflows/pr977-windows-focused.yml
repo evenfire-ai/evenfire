@@ -114,7 +114,19 @@ jobs:
           $startInfo.RedirectStandardError = $true
           $sourceTestPath = Join-Path $startInfo.WorkingDirectory ('src/__tests/' + $target)
           $sourceTestFileExists = Test-Path -LiteralPath $sourceTestPath -PathType Leaf
-          if (-not $sourceTestFileExists) { throw 'The selected source test file is absent' }
+          if (-not $sourceTestFileExists) {
+            [ordered]@{
+              exitCode = $null
+              watchdogExpired = $false
+              elapsedSeconds = 0
+              sourceCheckoutExists = Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'source') -PathType Container
+              desktopPackageExists = Test-Path -LiteralPath $startInfo.WorkingDirectory -PathType Container
+              testDirectoryExists = Test-Path -LiteralPath (Join-Path $startInfo.WorkingDirectory 'src/__tests__') -PathType Container
+              sourceTestFileExists = $false
+              failureClass = 'source-test-not-found'
+            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
+            throw 'The selected source test file is absent'
+          }
           foreach ($argument in @(
             $vitest, 'run', '--maxWorkers=1', '--no-file-parallelism',
             '--testTimeout=120000', '--hookTimeout=120000', '--reporter=json',

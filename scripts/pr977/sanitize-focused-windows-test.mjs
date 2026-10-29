@@ -113,6 +113,7 @@ const allowedProcessFailureClasses = new Set([
   'invalid-option',
   'test-failure',
   'unclassified-process-failure',
+  'source-test-not-found',
 ])
 const failureDetails = matchingSuites
   .map(suite => suite.message ?? '')
