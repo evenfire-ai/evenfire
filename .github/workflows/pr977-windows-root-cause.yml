@@ -78,6 +78,14 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant()
           Write-Output "Native helper prepared from checked-out source; SHA256=$hash"
 
+      - name: Instrument allowlisted ACL phase markers
+        shell: pwsh
+        run: |
+          node validation/scripts/pr977/instrument-acl-source.mjs source/desktop-app/src/windowsSessionAuthorityAcl.ts
+          if ($LASTEXITCODE -ne 0) { throw 'ACL phase instrumentation failed' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'source/desktop-app/src/windowsSessionAuthorityAcl.ts').Hash.ToLowerInvariant()
+          Write-Output "Validation-only ACL source overlay SHA256=$hash"
+
       - name: Instrument only the selected regression test
         shell: pwsh
         run: |
