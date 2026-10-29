@@ -33,10 +33,11 @@ const imageDigests = {
 const kinds = { McpServer: 'mcpservers' }
 
 class ProbeFailure extends Error {
-  constructor(code, stage) {
+  constructor(code, stage, detail) {
     super(code)
     this.code = code
     this.stage = stage
+    this.detail = detail
   }
 }
 
@@ -233,7 +234,12 @@ export async function runOwnedProbe({
     for (const resource of resources) {
       const entry = { ...identity(resource, runId), status: 'creation-pending' }
       journal.resources.push(entry)
-      await save()
+      try {
+        await save()
+      } catch (error) {
+        journal.resources.pop()
+        throw error
+      }
       if (await shouldStop()) {
         journal.resources.pop()
         await save()
@@ -251,12 +257,7 @@ export async function runOwnedProbe({
       entry.uid = created.metadata.uid
       entry.resourceVersion = created.metadata.resourceVersion
       entry.status = 'created'
-      try {
-        await save()
-      } catch (error) {
-        entry.status = 'creation-pending'
-        throw error
-      }
+      await save()
       if (await shouldStop()) fail('PROBE_INTERRUPTED')
     }
     result = await run()
@@ -264,6 +265,7 @@ export async function runOwnedProbe({
   } catch (error) {
     failure = error
     journal.failure = error instanceof ProbeFailure ? error.code : 'LOCAL_ERROR'
+    if (error instanceof ProbeFailure && error.detail) journal.failureDetail = error.detail
     try {
       await save()
     } catch {
@@ -297,6 +299,7 @@ export async function runOwnedProbe({
     }
   } catch (error) {
     journal.cleanupFailure = error instanceof ProbeFailure ? error.code : 'LOCAL_ERROR'
+    if (error instanceof ProbeFailure && error.detail) journal.cleanupDetail = error.detail
     try {
       await save()
     } catch {
@@ -375,8 +378,12 @@ export function runtimeReport(raw) {
   return report
 }
 
-function command(executable, args, { input, timeout = 30_000, code = 'COMMAND_FAILED' } = {}) {
-  const result = spawnSync(executable, args, {
+export function command(
+  executable,
+  args,
+  { input, timeout = 30_000, code = 'COMMAND_FAILED', spawn = spawnSync } = {}
+) {
+  const result = spawn(executable, args, {
     cwd: root,
     input,
     encoding: 'utf8',
@@ -384,7 +391,30 @@ function command(executable, args, { input, timeout = 30_000, code = 'COMMAND_FA
     killSignal: 'SIGKILL',
     maxBuffer: 8 * 1024 * 1024,
   })
-  if (result.error || result.signal || result.status !== 0) fail(code)
+  if (result.error || result.signal || result.status !== 0) {
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGKILL', 'SIGQUIT']
+    const errors = [
+      'EACCES',
+      'EAGAIN',
+      'ENOENT',
+      'EPERM',
+      'ETIMEDOUT',
+      'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+    ]
+    const failureCode = ['SIGINT', 'SIGTERM'].includes(result.signal) ? 'PROBE_INTERRUPTED' : code
+    throw new ProbeFailure(failureCode, undefined, {
+      status:
+        Number.isInteger(result.status) && result.status >= 0 && result.status <= 255
+          ? result.status
+          : null,
+      signal: signals.includes(result.signal) ? result.signal : null,
+      error: errors.includes(result.error?.code)
+        ? result.error.code
+        : result.error
+          ? 'OTHER'
+          : null,
+    })
+  }
   return result.stdout
 }
 
@@ -448,9 +478,14 @@ export function assertDeployment(deployment, manifest, serverName, serverUid) {
 async function inspectPod(kubectl, server, manifest, serverUid, shouldStop) {
   const checkedKubectl = async (...args) => {
     if (await shouldStop()) fail('PROBE_INTERRUPTED')
-    const output = kubectl(...args)
-    if (await shouldStop()) fail('PROBE_INTERRUPTED')
-    return output
+    try {
+      const output = kubectl(...args)
+      if (await shouldStop()) fail('PROBE_INTERRUPTED')
+      return output
+    } catch (error) {
+      if (await shouldStop()) fail('PROBE_INTERRUPTED')
+      throw error
+    }
   }
   await checkedKubectl(
     ['-n', 'mcp-server', 'wait', '--for=create', `deployment/${server}`, '--timeout=180s'],
@@ -669,6 +704,7 @@ async function main() {
   } catch (error) {
     if (journal && save && !journal.failure) {
       journal.failure = error instanceof ProbeFailure ? error.code : 'LOCAL_ERROR'
+      if (error instanceof ProbeFailure && error.detail) journal.failureDetail = error.detail
       try {
         await save()
       } catch {
@@ -684,5 +720,14 @@ async function main() {
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]))
-  await main()
+function invokedAsMain() {
+  if (!process.argv[1]) return false
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])
+  } catch (error) {
+    if (error.code === 'ENOENT') return false
+    throw error
+  }
+}
+
+if (invokedAsMain()) await main()

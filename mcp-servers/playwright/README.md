@@ -22,6 +22,8 @@ docker build -t playwright-mcp-server:latest .
 - `.github/workflows/build-publish.yml` publishes it to `ghcr.io/evenfire-ai/playwright-server` on changes under `mcp-servers/playwright/`.
 
 The in-tree `mcpserver.yaml` pins the multi-architecture image published from this Dockerfile by digest.
+Later builds can publish a new digest and update `latest`; they do not change the
+manifest's pin. Validate a new image before updating that pin.
 
 ## Kubernetes Deployment
 
@@ -38,6 +40,10 @@ See [`mcpserver.yaml`](./mcpserver.yaml) for the full CRD spec. Key fields:
 - **Namespace**: `mcp-server`
 - **Transport**: StreamableHTTP at `http://playwright-server.mcp-server.svc.cluster.local:8931/mcp`
 - **Resources**: 512Mi/250m request, 1Gi/1000m limit
+
+Before deploying, verify that the effective HCC image policy permits
+`ghcr.io/evenfire-ai/` or that an approved mirror is used. The base deployment
+allows this prefix; other environments can use different policies.
 
 [`networkpolicy.yaml`](./networkpolicy.yaml) is a template-only policy (egress to TCP 80/443) — do not `kubectl apply` it directly; `make deploy-playwright` renders it through `deploy/scripts/render-public-egress-exceptions.rb` so it receives the canonical public-egress CIDR exclusions.
 
@@ -79,3 +85,12 @@ The probe creates a temporary McpServer and checks the image, Node, MCP and
 Chromium through loopback inside its pod. It does not exercise the Kubernetes
 Service, DNS, NetworkPolicy, mcp-host or Desktop. The policy cleanup check looks
 for residue; this fixture does not create a Context or egress bindings.
+
+If the probe reports `RESOURCE_CREATION_AMBIGUOUS` or `CLEANUP_FAILED`, inspect
+the journal in the printed evidence directory and verify the profile, context,
+run labels and resource identity before recovery. If the journal could not be
+written after creation, it can show `creation-pending` without a UID even though
+the server exists. An unknown UID is not proof that a resource belongs to the
+run. Do not delete all resources with the suite
+label; any authorized deletion must preserve UID and resourceVersion
+preconditions under the profile's mutation lease.
