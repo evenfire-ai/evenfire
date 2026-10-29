@@ -898,8 +898,12 @@ export function FileExplorerTree({
           })
           return
         }
-        await commitMove(source, { resourceId: node.resourceId, name: node.name }, false, () =>
-          ownsDrop(source, epoch, sessionGeneration)
+        await commitMove(
+          source,
+          { resourceId: node.resourceId, name: node.name },
+          false,
+          () => ownsDrop(source, epoch, sessionGeneration),
+          () => mountedRef.current && liveDragScopeRef.current === source.scope
         )
       } finally {
         finishNodeDropCleanup(source, epoch, sessionGeneration)
@@ -1179,8 +1183,13 @@ export function FileExplorerTree({
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void commitMove(pending.source, pending.destination, false, () =>
-                ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
+              void commitMove(
+                pending.source,
+                pending.destination,
+                false,
+                () =>
+                  ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration),
+                () => mountedRef.current && liveDragScopeRef.current === pending.source.scope
               )
             }
           }}

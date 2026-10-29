@@ -2804,3 +2804,169 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     expect(await screen.findByRole('dialog', { name: 'Move folder A' })).toBeTruthy()
   })
 })
+
+describe('FileExplorerTree — drag Move presentation lifetime', () => {
+  const sessionScope = 'test:user-1:team-1'
+
+  it('suppresses a file-drop result after unmount while captured cache convergence completes', async () => {
+    let finishMove!: () => void
+    let markMoveStarted!: () => void
+    const moveStarted = new Promise<void>(resolve => {
+      markMoveStarted = resolve
+    })
+    const moveGate = new Promise<void>(resolve => {
+      finishMove = resolve
+    })
+    const moveResource = vi.fn(async () => {
+      markMoveStarted()
+      await moveGate
+      return moveResourceReceipt('file-1', 'folderb', 8)
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      if (id === 'file-1') {
+        return resolveResource(
+          resolvedFile('file-1', 'report.txt', { parentResourceId: 'foldera', version: 7 })
+        )
+      }
+      if (id === 'foldera') {
+        return resolveResource(resolvedDirectory('foldera', 'A', { parentResourceId: 'grand' }))
+      }
+      if (id === 'folderb') {
+        return resolveResource(resolvedDirectory('folderb', 'B', { parentResourceId: 'grand' }))
+      }
+      return resolveResource(resolvedDirectory('grand', 'Grand', { parentResourceId: null }))
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory'),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      listChildren: vi.fn(async (resourceId: string) =>
+        resourceId === 'foldera'
+          ? listChildrenPage([
+              childView('file-1', 'report.txt', 'file', {
+                parentResourceId: 'foldera',
+                version: 7,
+              }),
+            ])
+          : listChildrenPage([])
+      ),
+      affordances: appServiceAffordanceProducer(async resourceId =>
+        resourceId === 'folderb'
+          ? heldPermissionResponse(['read', 'write'])
+          : heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve,
+      moveResource,
+    })
+    const { pushToast, queryClient, unmount } = renderTreeWithSession()
+    const sourceCache = desktopQueryKeys.gfsChildren(sessionScope, 'foldera', 'main')
+
+    try {
+      await act(async () => {
+        fireEvent.click(await screen.findByRole('button', { name: 'Expand A' }))
+      })
+      const source = await screen.findByRole('button', { name: 'report.txt' })
+      expect(queryClient.getQueryData(sourceCache)).toBeDefined()
+      const destination = await screen.findByRole('button', { name: 'B' })
+      const destinationRow = destination
+        .closest('[role="treeitem"]')!
+        .querySelector('.da-file-explorer__row')!
+      const dataTransfer = dragTypes()
+      fireEvent.dragStart(source, { dataTransfer })
+      fireEvent.dragOver(destinationRow, { dataTransfer })
+      fireEvent.drop(destinationRow, { dataTransfer })
+      await moveStarted
+
+      unmount()
+      await act(async () => {
+        finishMove()
+        await moveGate
+      })
+
+      await waitFor(() => expect(queryClient.getQueryState(sourceCache)?.isInvalidated).toBe(true))
+      expect(pushToast).not.toHaveBeenCalled()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(moveResource).toHaveBeenCalledWith('file-1', 'folderb', 'main', 7, undefined)
+    } finally {
+      queryClient.clear()
+    }
+  })
+
+  it('suppresses a confirmed folder result after unmount while captured cache convergence completes', async () => {
+    let finishMove!: () => void
+    let markMoveStarted!: () => void
+    const moveStarted = new Promise<void>(resolve => {
+      markMoveStarted = resolve
+    })
+    const moveGate = new Promise<void>(resolve => {
+      finishMove = resolve
+    })
+    const moveResource = vi.fn(async () => {
+      markMoveStarted()
+      await moveGate
+      return moveResourceReceipt('foldera', 'folderb', 9)
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      if (id === 'foldera') {
+        return resolveResource(
+          resolvedDirectory('foldera', 'A', { parentResourceId: 'grand', version: 4 })
+        )
+      }
+      if (id === 'folderb') {
+        return resolveResource(resolvedDirectory('folderb', 'B', { parentResourceId: 'grand' }))
+      }
+      return resolveResource(resolvedDirectory('grand', 'Grand', { parentResourceId: null }))
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      affordances: appServiceAffordanceProducer(async resourceId =>
+        resourceId === 'folderb'
+          ? heldPermissionResponse(['read', 'write'])
+          : heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve,
+      moveResource,
+    })
+    const { pushToast, queryClient, unmount } = renderTreeWithSession()
+    const sourceCache = desktopQueryKeys.gfsAccessible(sessionScope, 'main')
+
+    try {
+      const source = await screen.findByRole('button', { name: 'A' })
+      const destination = await screen.findByRole('button', { name: 'B' })
+      const dataTransfer = dragTypes()
+      const destinationRow = destination
+        .closest('[role="treeitem"]')!
+        .querySelector('.da-file-explorer__row')!
+      fireEvent.dragStart(source, { dataTransfer })
+      fireEvent.dragOver(destinationRow, { dataTransfer })
+      fireEvent.drop(destinationRow, { dataTransfer })
+
+      const dialog = await screen.findByRole('dialog', { name: 'Move folder A to B' })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+      await moveStarted
+
+      unmount()
+      await act(async () => {
+        finishMove()
+        await moveGate
+      })
+
+      await waitFor(() => expect(queryClient.getQueryState(sourceCache)?.isInvalidated).toBe(true))
+      expect(pushToast).not.toHaveBeenCalled()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined)
+    } finally {
+      queryClient.clear()
+    }
+  })
+})
