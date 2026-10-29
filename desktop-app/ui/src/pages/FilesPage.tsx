@@ -2264,6 +2264,10 @@ export function FilesPage({
                 <nav aria-label="File location">
                   <Breadcrumb
                     separator={<RightOutlined aria-hidden="true" />}
+                    styles={{
+                      item: { display: 'flex', alignItems: 'center' },
+                      separator: { display: 'flex', alignItems: 'center' },
+                    }}
                     items={[
                       {
                         key: 'root',
