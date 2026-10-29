@@ -65,6 +65,22 @@ const markers = [
   'restart-initialize-start',
   'restart-initialize-complete',
   'test-1-complete',
+  'transaction-reconcile-start',
+  'transaction-reconcile-end',
+  'transaction-plan-start',
+  'transaction-plan-end',
+  'transaction-begin-start',
+  'transaction-begin-end',
+  'transaction-prior-source-start',
+  'transaction-prior-source-end',
+  'transaction-publish-verify-start',
+  'transaction-publish-verify-end',
+  'transaction-execute-start',
+  'transaction-execute-end',
+  'acl-powershell-start',
+  'acl-powershell-fast',
+  'acl-powershell-slow',
+  'acl-powershell-timeout',
 ]
 
 function replaceOnce(before, after) {
@@ -83,11 +99,37 @@ function replaceFirst(before, after) {
 replaceOnce(
   "import path from 'node:path'\n",
   "import path from 'node:path'\n\n" +
+    "import childProcess from 'node:child_process'\n" +
+    "import { syncBuiltinESMExports } from 'node:module'\n" +
     'const pr977Mark = (phase: string) => {\n' +
     '  const markerPath = process.env.PR977_PHASE_FILE\n' +
     '  if (!markerPath) return\n' +
     '  try { fsSync.appendFileSync(markerPath, `${phase}\\n`) } catch { /* diagnostic only */ }\n' +
     '}\n'
+)
+replaceOnce(
+  '  try { fsSync.appendFileSync(markerPath, `${phase}\\n`) } catch { /* diagnostic only */ }\n' +
+    '}\n',
+  '  try { fsSync.appendFileSync(markerPath, `${phase}\\n`) } catch { /* diagnostic only */ }\n' +
+    '}\n' +
+    'const pr977Marked = new Set<string>()\n' +
+    'const pr977MarkOnce = (phase: string) => {\n' +
+    '  if (pr977Marked.has(phase)) return\n' +
+    '  pr977Marked.add(phase)\n' +
+    '  pr977Mark(phase)\n' +
+    '}\n' +
+    'const pr977OriginalSpawnSync = childProcess.spawnSync\n' +
+    'childProcess.spawnSync = ((command: string, ...args: unknown[]) => {\n' +
+    '  if (!/powershell\\.exe$/i.test(String(command))) return pr977OriginalSpawnSync(command, ...args as never[])\n' +
+    "  pr977Mark('acl-powershell-start')\n" +
+    '  const started = Date.now()\n' +
+    '  const result = pr977OriginalSpawnSync(command, ...args as never[])\n' +
+    "  if ((result as { error?: { code?: string } }).error?.code === 'ETIMEDOUT') pr977Mark('acl-powershell-timeout')\n" +
+    "  else if (Date.now() - started >= 10000) pr977Mark('acl-powershell-slow')\n" +
+    "  else pr977Mark('acl-powershell-fast')\n" +
+    '  return result\n' +
+    '}) as typeof childProcess.spawnSync\n' +
+    'syncBuiltinESMExports()\n'
 )
 replaceOnce(
   '  beforeEach(async () => {\n',
@@ -139,7 +181,7 @@ replaceOnce(
     "    pr977Mark('afterEach-fixture-clear-complete')\n" +
     '    vi.resetModules()\n' +
     "    pr977Mark('afterEach-modules-reset-complete')\n" +
-    "  })\n\n  function createService"
+    '  })\n\n  function createService'
 )
 replaceOnce(
   "  it('restores the accepted prior source when candidate preparation fails after publication', async () => {\n",
@@ -149,6 +191,23 @@ replaceOnce(
 replaceFirst(
   '    const service = createService()\n',
   '    const service = createService()\n' +
+    "    const transactionModule = await import('../sessionAuthorityAcceptance.js')\n" +
+    '    const transactionClass = transactionModule.SessionAuthorityAcceptanceTransaction as unknown as Record<string, unknown>\n' +
+    '    const instancePrototype = transactionModule.SessionAuthorityAcceptanceTransaction.prototype as unknown as Record<string, unknown>\n' +
+    '    const wrapDiagnostic = (target: Record<string, unknown>, method: string, start: string, end: string) => {\n' +
+    '      const original = target[method] as (...args: unknown[]) => unknown\n' +
+    '      target[method] = async function (...args: unknown[]) {\n' +
+    '        pr977MarkOnce(start)\n' +
+    '        try { return await original.apply(this, args) } finally { pr977MarkOnce(end) }\n' +
+    '      }\n' +
+    '    }\n' +
+    "    wrapDiagnostic(transactionClass, 'reconcilePendingAcceptanceProjection', 'transaction-reconcile-start', 'transaction-reconcile-end')\n" +
+    "    wrapDiagnostic(transactionClass, 'begin', 'transaction-begin-start', 'transaction-begin-end')\n" +
+    "    wrapDiagnostic(instancePrototype, 'preparePriorSource', 'transaction-prior-source-start', 'transaction-prior-source-end')\n" +
+    "    wrapDiagnostic(instancePrototype, 'publishAndVerify', 'transaction-publish-verify-start', 'transaction-publish-verify-end')\n" +
+    "    wrapDiagnostic(instancePrototype, 'execute', 'transaction-execute-start', 'transaction-execute-end')\n" +
+    '    const coordinator = (service as unknown as { sessionAuthority: Record<string, unknown> }).sessionAuthority\n' +
+    "    wrapDiagnostic(coordinator, 'planFreshSessionAcceptance', 'transaction-plan-start', 'transaction-plan-end')\n" +
     '    const diagnosticReceiver = service as unknown as Record<\n' +
     '      string,\n' +
     '      (...args: unknown[]) => Promise<unknown>\n' +
@@ -180,7 +239,7 @@ replaceFirst(
 )
 replaceFirst(
   "        return new Response(JSON.stringify(result), {\n          status: 200,\n          headers: { 'content-type': 'application/json' },\n        })\n",
-  "        const response = new Response(JSON.stringify(result), {\n" +
+  '        const response = new Response(JSON.stringify(result), {\n' +
     "          status: 200,\n          headers: { 'content-type': 'application/json' },\n" +
     "        })\n        pr977Mark('password-login-http-response')\n        return response\n"
 )
@@ -190,7 +249,7 @@ replaceFirst(
 )
 replaceFirst(
   "        return new Response(JSON.stringify(me), {\n          status: me ? 200 : 401,\n          headers: { 'content-type': 'application/json' },\n        })\n",
-  "        const response = new Response(JSON.stringify(me), {\n" +
+  '        const response = new Response(JSON.stringify(me), {\n' +
     "          status: me ? 200 : 401,\n          headers: { 'content-type': 'application/json' },\n" +
     "        })\n        pr977Mark('me-http-response')\n        return response\n"
 )

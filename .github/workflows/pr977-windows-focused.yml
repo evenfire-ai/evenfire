@@ -165,7 +165,7 @@ jobs:
             $overlayText = node validation/scripts/pr977/instrument-windows-password-test.mjs $sourceTestPath
             if ($LASTEXITCODE -ne 0) { throw 'Password test diagnostic instrumentation failed' }
             $overlay = $overlayText | ConvertFrom-Json
-            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 50) {
+            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 66) {
               throw 'Password test instrumentation did not match its reviewed contract'
             }
             $testOverlay = $overlay.mode
@@ -227,7 +227,15 @@ jobs:
             'password-a-complete', 'authority-before-start', 'authority-before-complete',
             'password-b-start', 'password-b-complete', 'authority-after-start',
             'authority-after-complete', 'restart-initialize-start',
-            'restart-initialize-complete', 'test-1-complete'
+            'restart-initialize-complete', 'test-1-complete',
+            'transaction-reconcile-start', 'transaction-reconcile-end',
+            'transaction-plan-start', 'transaction-plan-end',
+            'transaction-begin-start', 'transaction-begin-end',
+            'transaction-prior-source-start', 'transaction-prior-source-end',
+            'transaction-publish-verify-start', 'transaction-publish-verify-end',
+            'transaction-execute-start', 'transaction-execute-end',
+            'acl-powershell-start', 'acl-powershell-fast',
+            'acl-powershell-slow', 'acl-powershell-timeout'
           )
           $lastProgressMarker = 'none'
           $phaseLines = @()

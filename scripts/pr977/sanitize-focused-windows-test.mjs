@@ -199,6 +199,22 @@ const allowedProgressMarkers = new Set([
   'restart-initialize-start',
   'restart-initialize-complete',
   'test-1-complete',
+  'transaction-reconcile-start',
+  'transaction-reconcile-end',
+  'transaction-plan-start',
+  'transaction-plan-end',
+  'transaction-begin-start',
+  'transaction-begin-end',
+  'transaction-prior-source-start',
+  'transaction-prior-source-end',
+  'transaction-publish-verify-start',
+  'transaction-publish-verify-end',
+  'transaction-execute-start',
+  'transaction-execute-end',
+  'acl-powershell-start',
+  'acl-powershell-fast',
+  'acl-powershell-slow',
+  'acl-powershell-timeout',
 ])
 const overlayValid =
   target !== 'appService.passwordLoginRollback.regression.test.ts' ||
@@ -210,8 +226,8 @@ const progressMarker = allowedProgressMarkers.has(meta.lastProgressMarker)
   : 'invalid-marker'
 const phaseMarkersValid =
   Array.isArray(meta.phaseMarkers) &&
-  meta.phaseMarkers.length <= 64 &&
-  meta.phaseMarkers.every((marker) => allowedProgressMarkers.has(marker))
+  meta.phaseMarkers.length <= 128 &&
+  meta.phaseMarkers.every(marker => allowedProgressMarkers.has(marker))
 const progressValid =
   target !== 'appService.passwordLoginRollback.regression.test.ts' ||
   (meta.sourceTestBlobMatchesPin === true &&
@@ -259,9 +275,10 @@ const safe = {
   completedTestCount: Number.isInteger(meta.completedTestCount) ? meta.completedTestCount : null,
   lastProgressMarker: progressMarker,
   phaseMarkers: phaseMarkersValid ? meta.phaseMarkers : [],
-  diagnosticScope: meta.diagnosticScope === 'password-login-test-1-only'
-    ? 'password-login-test-1-only'
-    : 'full-file',
+  diagnosticScope:
+    meta.diagnosticScope === 'password-login-test-1-only'
+      ? 'password-login-test-1-only'
+      : 'full-file',
   testFile: target,
   reportedSuiteCount: suites.length,
   reportedTotalTests: report?.numTotalTests ?? null,
