@@ -24,6 +24,7 @@ import {
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
 import { delegationAffordances } from '../../../../src/gfs/delegation'
+import type { TeamDirectoryResult } from '../../../../src/types'
 import { FilesPage } from '../FilesPage'
 
 const SESSION_SCOPE = ':user-a:team-a'
@@ -55,7 +56,10 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-async function createPage(grant: ReturnType<typeof vi.fn>) {
+async function createPage(
+  grant: ReturnType<typeof vi.fn>,
+  options: { heldPermissions?: string[]; teamDirectory?: TeamDirectoryResult } = {}
+) {
   const rootPage = await listAccessiblePage([
     accessibleResource('folder-a', 'Folder A', 'directory', {
       sources: ['grant'],
@@ -66,7 +70,7 @@ async function createPage(grant: ReturnType<typeof vi.fn>) {
   const emptyChildrenPage = await listChildrenPage([])
   const resolvedFolder = await resolveResource(resolvedDirectory('folder-a', 'Folder A'))
   const heldPositive = await affordancesResult(
-    heldAffordances(['read', 'write', 'manage_acl', 'share'])
+    heldAffordances(options.heldPermissions ?? ['read', 'write', 'manage_acl', 'share'])
   )
   const heldDenied = await affordancesResult(heldAffordances(['read']))
   const freshPositive = delegationAffordances(new Set(heldPositive.held), heldPositive.isOperator)
@@ -102,7 +106,11 @@ async function createPage(grant: ReturnType<typeof vi.fn>) {
           },
         ]),
       },
-      team: { directory: vi.fn(async () => ({ currentTeamId: 'team-a', items: [] })) },
+      team: {
+        directory: vi.fn(
+          async () => options.teamDirectory ?? { currentTeamId: 'team-a', items: [] }
+        ),
+      },
     },
   })
 
@@ -172,6 +180,110 @@ afterEach(() => {
 })
 
 describe('FilesPage delegation request lifecycle', () => {
+  it('requires an explicit role after positive authority removes Editor', async () => {
+    const grant = vi.fn().mockResolvedValue(undefined)
+    const { dialog, freshPositive, queryClient, setNextPermissionRefresh } = await createPage(grant)
+    const reducedHeld = await affordancesResult(heldAffordances(['read', 'manage_acl']))
+    const reducedPositive = delegationAffordances(new Set(reducedHeld.held), reducedHeld.isOperator)
+
+    await selectAgent(dialog)
+    const role = await setEditorRole(dialog)
+    expect(role.textContent).toContain('Editor')
+
+    const reducedPermission = deferred<typeof freshPositive>()
+    setNextPermissionRefresh(reducedPermission.promise)
+    await startPermissionRefresh(queryClient)
+    await act(async () => reducedPermission.resolve(reducedPositive))
+    await waitFor(() => expect(queryClient.getQueryData(AFFORDANCES_KEY)).toEqual(reducedPositive))
+
+    const share = within(dialog).getByRole('button', { name: 'Share' }) as HTMLButtonElement
+    expect(role.textContent).not.toContain('Editor')
+    fireEvent.click(share)
+    expect(grant).not.toHaveBeenCalled()
+    expect(within(dialog).getByText('Choose an available role before sharing.')).toBeTruthy()
+    expect(share.disabled).toBe(true)
+    expect(within(dialog).getByText('chatllm')).toBeTruthy()
+    expect(
+      within(dialog).getByRole('checkbox', { name: 'Include contents of this folder' })
+    ).toHaveProperty('checked', true)
+
+    fireEvent.click(role)
+    fireEvent.click(await within(dialog).findByRole('option', { name: 'Read' }))
+    expect(role.textContent).toContain('Read')
+    expect(within(dialog).queryByText('Choose an available role before sharing.')).toBeNull()
+    expect(share.disabled).toBe(false)
+    fireEvent.click(share)
+    await waitFor(() => expect(grant).toHaveBeenCalledOnce())
+    expect(grant).toHaveBeenCalledWith(
+      'folder-a',
+      ['host:1st:mcp-host/chatllm'],
+      ['read'],
+      'main',
+      true
+    )
+  })
+
+  it('invalidates Editor when selected subject types remove that role option', async () => {
+    const grant = vi.fn().mockResolvedValue(undefined)
+    const teamDirectory: TeamDirectoryResult = {
+      currentTeamId: 'team-a',
+      items: [
+        {
+          team: { id: 'team-a', name: 'Team A', role: 'member' },
+          members: [
+            {
+              id: 'user-b',
+              email: 'b@example.test',
+              name: 'User B',
+              role: 'member',
+              status: 'active',
+            },
+          ],
+          contextIds: [],
+          agentNames: [],
+        },
+      ],
+    }
+    const { dialog } = await createPage(grant, {
+      heldPermissions: ['read', 'delete', 'manage_acl'],
+      teamDirectory,
+    })
+
+    const picker = within(dialog).getByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
+    fireEvent.focus(picker)
+    fireEvent.change(picker, { target: { value: 'User B' } })
+    fireEvent.click(await within(dialog).findByRole('option', { name: /User B/ }))
+    const role = await setEditorRole(dialog)
+    expect(role.textContent).toContain('Editor')
+
+    fireEvent.focus(picker)
+    fireEvent.change(picker, { target: { value: 'chatllm' } })
+    fireEvent.click(await within(dialog).findByRole('option', { name: /chatllm/ }))
+
+    const share = within(dialog).getByRole('button', { name: 'Share' }) as HTMLButtonElement
+    expect(role.textContent).not.toContain('Editor')
+    expect(within(dialog).getByText('Choose an available role before sharing.')).toBeTruthy()
+    expect(share.disabled).toBe(true)
+    expect(within(dialog).getByText('User B')).toBeTruthy()
+    expect(within(dialog).getByText('chatllm')).toBeTruthy()
+    fireEvent.click(share)
+    expect(grant).not.toHaveBeenCalled()
+
+    fireEvent.click(role)
+    fireEvent.click(await within(dialog).findByRole('option', { name: 'Read' }))
+    fireEvent.click(share)
+    await waitFor(() => expect(grant).toHaveBeenCalledOnce())
+    expect(grant).toHaveBeenCalledWith(
+      'folder-a',
+      ['user:user-b', 'host:1st:mcp-host/chatllm'],
+      ['read'],
+      'main',
+      true
+    )
+  })
+
   it('does not restore a retired Share failure after positive authority returns', async () => {
     const oldGrant = deferred<void>()
     const grant = vi.fn().mockImplementationOnce(() => oldGrant.promise)
