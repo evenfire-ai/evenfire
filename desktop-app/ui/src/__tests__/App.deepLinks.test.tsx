@@ -1807,7 +1807,7 @@ describe('App deep-link orchestration', () => {
     )
   }, 120_000)
 
-  it('keeps a dismissed terminal link owner through origin rollback before opening the next link', async () => {
+  it('acknowledges a dismissed terminal link after rollback when no successor is queued', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const actualControllerModule =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
@@ -1937,9 +1937,9 @@ describe('App deep-link orchestration', () => {
     )
     expect(getController().getCurrentTeamId()).toBe('team-b')
     expect(main.live()).toBeNull()
-    const listCallsBeforeSecond = listApps.mock.calls.length
-    const opensBeforeSecond = openSandboxUi().mock.calls.length
-    const switchesBeforeSecond = handle.switchTeam.mock.calls.length
+    const listCallsBeforeSettlement = listApps.mock.calls.length
+    const opensBeforeSettlement = openSandboxUi().mock.calls.length
+    const switchesBeforeSettlement = handle.switchTeam.mock.calls.length
 
     // Dismiss only hides the terminal failure. It cannot acknowledge the
     // transaction or release its slot while the team rollback is unresolved.
@@ -1949,31 +1949,12 @@ describe('App deep-link orchestration', () => {
     })
     await waitFor(() => expect(confirmDialogHarness.mountedCount).toBe(0))
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
-
-    const secondTarget = parseSandboxUiDeepLink(
-      buildSandboxUiDeepLink({
-        recipeNs: 'ns',
-        recipeName: 'ready-team-b-app',
-        path: '/second-link',
-        teamId: 'team-b',
-      })
-    )
-    if (!secondTarget) throw new Error('the production parser rejected the second Team B link')
-    const second = queue.enqueue(secondTarget)
-    act(() => emitDeepLink?.(second))
-    await confirmPendingAppLink()
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-      await new Promise<void>(resolve => setImmediate(resolve))
-    })
-
+    expect(queue.list().map(item => item.id)).toEqual([first.id])
     expect(getController().getCurrentTeamId()).toBe('team-b')
-    expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSecond)
-    expect(listApps.mock.calls.length).toBe(listCallsBeforeSecond)
-    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond)
+    expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSettlement)
+    expect(listApps.mock.calls.length).toBe(listCallsBeforeSettlement)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSettlement)
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
-    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second.id)
     expect(main.live()).toBeNull()
 
     await act(async () => {
@@ -1982,22 +1963,45 @@ describe('App deep-link orchestration', () => {
       await new Promise<void>(resolve => setImmediate(resolve))
     })
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(first.id))
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-a'))
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === first.id)).toHaveLength(1)
+    expect(queue.list()).toEqual([])
+
+    const listCallsBeforeLaterLink = listApps.mock.calls.length
+    const opensBeforeLaterLink = openSandboxUi().mock.calls.length
+    const switchesBeforeLaterLink = handle.switchTeam.mock.calls.length
+    const laterTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'ready-team-b-app',
+        path: '/later-independent-link',
+        teamId: 'team-b',
+      })
+    )
+    if (!laterTarget) throw new Error('the production parser rejected the later Team B link')
+    const later = queue.enqueue(laterTarget)
+    act(() => emitDeepLink?.(later))
+    await confirmPendingAppLink()
     await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-b'))
-    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond + 1))
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeLaterLink + 1))
     await waitForMounted()
 
     expect(main.live()).toMatchObject({
       appRef: 'ns/ready-team-b-app',
-      routePath: '/second-link',
+      routePath: '/later-independent-link',
     })
     expect(embedState().owner).toBe(main.live()?.launchId)
     expect(activeWorkspaceTab(getController().workspaceTabs)).toMatchObject({
       kind: 'app',
       app: { appRef: 'ns/ready-team-b-app' },
     })
-    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(second.id))
-    expect(acknowledgeDeepLink.mock.calls.map(([id]) => id)).toEqual([first.id, second.id])
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(later.id))
+    expect(acknowledgeDeepLink.mock.calls.map(([id]) => id)).toEqual([first.id, later.id])
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === later.id)).toHaveLength(1)
     expect(getController().getCurrentTeamId()).toBe('team-b')
+    expect(listApps.mock.calls.length).toBeGreaterThan(listCallsBeforeLaterLink)
+    expect(handle.switchTeam.mock.calls.length).toBeGreaterThan(switchesBeforeLaterLink)
+    expect(queue.list()).toEqual([])
     queryClient.clear()
   })
 
