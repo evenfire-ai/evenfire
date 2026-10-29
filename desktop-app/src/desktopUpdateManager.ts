@@ -317,11 +317,12 @@ export class DesktopUpdateManager {
     }
 
     const operation = this.installDownloadedUpdateOnce(expectedVersion)
-    this.activeInstall = { version: expectedVersion, promise: operation }
+    const activeInstall = { version: expectedVersion, promise: operation }
+    this.activeInstall = activeInstall
     try {
       return await operation
     } finally {
-      if (this.activeInstall?.promise === operation) this.activeInstall = null
+      if (this.activeInstall === activeInstall) this.activeInstall = null
     }
   }
 
