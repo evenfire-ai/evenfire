@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  type ButtonHTMLAttributes,
   type ChangeEventHandler,
   type ReactElement,
   type MouseEvent as ReactMouseEvent,
@@ -423,7 +424,9 @@ vi.mock('@components/Common', async () => {
         aria-describedby={props['aria-describedby'] as string | undefined}
         aria-label={(props['aria-label'] ?? props.label) as string | undefined}
         aria-expanded={props['aria-expanded'] as boolean | undefined}
-        aria-haspopup={props['aria-haspopup'] as string | undefined}
+        aria-haspopup={
+          props['aria-haspopup'] as ButtonHTMLAttributes<HTMLButtonElement>['aria-haspopup']
+        }
         className={props.className as string | undefined}
         disabled={props.disabled as boolean | undefined}
         onClick={props.onClick as ((event: ReactMouseEvent<HTMLButtonElement>) => void) | undefined}
@@ -460,7 +463,9 @@ vi.mock('@components/Common', async () => {
       <button
         aria-label={props['aria-label'] as string | undefined}
         aria-expanded={props['aria-expanded'] as boolean | undefined}
-        aria-haspopup={props['aria-haspopup'] as string | undefined}
+        aria-haspopup={
+          props['aria-haspopup'] as ButtonHTMLAttributes<HTMLButtonElement>['aria-haspopup']
+        }
         disabled={props.disabled as boolean | undefined}
         data-gfs-action={props['data-gfs-action'] as string | undefined}
         onClick={props.onClick as (() => void) | undefined}
