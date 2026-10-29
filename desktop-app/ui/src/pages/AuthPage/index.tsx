@@ -108,7 +108,15 @@ export function AuthPage() {
   return (
     <main tabIndex={-1}>
       <Flex align="center" justify="center" style={{ minHeight: authPageMinHeight }}>
-        <Card style={{ width: authCardWidth }} styles={{ body: { padding: authCardBodyPadding } }}>
+        <Card
+          style={{ width: authCardWidth }}
+          styles={{
+            body: {
+              paddingBlock: authCardBodyPadding,
+              paddingInline: authCardBodyPadding / 2,
+            },
+          }}
+        >
           <Flex vertical gap="large">
             <AuthBrand />
 
