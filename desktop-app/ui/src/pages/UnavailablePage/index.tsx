@@ -1,6 +1,6 @@
 import { useAuthContext } from '@contexts/AuthContext'
 import { Button, Card, Descriptions, Flex, Typography } from 'antd'
-import { authCardWidth, authPageMinHeight } from '@constants/authLayout'
+import { authCardBodyPadding, authCardWidth, authPageMinHeight } from '@constants/authLayout'
 
 export function UnavailablePage() {
   const { busy, dependencyHealth, setBooting, setStatus, loadSession } = useAuthContext()
@@ -21,6 +21,10 @@ export function UnavailablePage() {
       <Flex align="center" justify="center" style={{ minHeight: authPageMinHeight }}>
         <Card
           style={{ width: authCardWidth }}
+          styles={{
+            body: { padding: authCardBodyPadding },
+            header: { paddingInline: authCardBodyPadding },
+          }}
           title={<Typography.Title level={1}>Services Unavailable</Typography.Title>}
         >
           <Flex vertical gap="middle">

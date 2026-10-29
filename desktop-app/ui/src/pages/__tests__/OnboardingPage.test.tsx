@@ -100,6 +100,13 @@ function renderOnboarding(auth?: Partial<AuthContextValue>) {
 }
 
 describe('OnboardingPage', () => {
+  it('gives the welcome card the same inner spacing as sign-in', () => {
+    renderOnboarding()
+
+    const cardBody = document.querySelector('.ant-card-body') as HTMLElement
+    expect(cardBody.style.padding).toBe('32px')
+  })
+
   it('opens on Q1 with the three origin answers', () => {
     renderOnboarding()
 

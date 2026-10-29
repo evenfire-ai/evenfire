@@ -48,6 +48,15 @@ const renderUnavailablePage = (overrides: Partial<AuthContextValue> = {}) => {
 }
 
 describe('UnavailablePage', () => {
+  it('uses the same inner spacing as the other centered pre-auth cards', () => {
+    renderUnavailablePage()
+
+    const cardHeader = document.querySelector('.ant-card-head') as HTMLElement
+    const cardBody = document.querySelector('.ant-card-body') as HTMLElement
+    expect(cardHeader.style.paddingInline).toBe('32px')
+    expect(cardBody.style.padding).toBe('32px')
+  })
+
   it('shows the title, explanation, labeled dependency health and retry action', () => {
     renderUnavailablePage()
 

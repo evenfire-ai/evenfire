@@ -5,7 +5,7 @@ import { Alert, Button, Card, Flex, Input, Spin, Typography } from 'antd'
 import type { InputRef } from 'antd'
 import { AuthBrand } from '@components/AuthBrand'
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
-import { authCardWidth, authPageMinHeight } from '@constants/authLayout'
+import { authCardBodyPadding, authCardWidth, authPageMinHeight } from '@constants/authLayout'
 
 /**
  * Sign-in for a configured environment.
@@ -108,7 +108,7 @@ export function AuthPage() {
   return (
     <main tabIndex={-1}>
       <Flex align="center" justify="center" style={{ minHeight: authPageMinHeight }}>
-        <Card style={{ width: authCardWidth }}>
+        <Card style={{ width: authCardWidth }} styles={{ body: { padding: authCardBodyPadding } }}>
           <Flex vertical gap="large">
             <AuthBrand />
 

@@ -117,6 +117,13 @@ async function openEnvironmentSetup(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('AuthPage', () => {
+  it('gives the sign-in card consistent inner spacing', () => {
+    renderAuthPage()
+
+    const cardBody = document.querySelector('.ant-card-body') as HTMLElement
+    expect(cardBody.style.padding).toBe('32px')
+  })
+
   // The invitation email form moved to onboarding's invited step.
   // AuthPage has one mode again, and must keep it even if it is somehow
   // rendered without an environment — the unauthenticated branch routes that

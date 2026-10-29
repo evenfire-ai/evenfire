@@ -1,7 +1,7 @@
 import { Button, Card, Divider, Flex } from 'antd'
 import { AuthBrand } from '@components/AuthBrand'
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
-import { authCardWidth, authPageMinHeight } from '@constants/authLayout'
+import { authCardBodyPadding, authCardWidth, authPageMinHeight } from '@constants/authLayout'
 import { CompareRunStyles } from './steps/CompareRunStyles'
 import { Hosted } from './steps/Hosted'
 import { InvitedMember } from './steps/InvitedMember'
@@ -27,7 +27,7 @@ export function OnboardingPage({ onboarding }: OnboardingPageProps) {
   return (
     <main tabIndex={-1}>
       <Flex align="center" justify="center" style={{ minHeight: authPageMinHeight }}>
-        <Card style={{ width: authCardWidth }}>
+        <Card style={{ width: authCardWidth }} styles={{ body: { padding: authCardBodyPadding } }}>
           <Flex vertical gap="large">
             <AuthBrand />
             <Divider />

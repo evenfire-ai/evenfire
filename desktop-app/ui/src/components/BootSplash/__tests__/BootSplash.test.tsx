@@ -38,4 +38,11 @@ describe('BootSplash', () => {
 
     expect(markup).toContain(`style="width:${authCardWidth}"`)
   })
+
+  it('uses the same inner card spacing as the login page', () => {
+    const view = render(<BootSplash loading />)
+
+    const cardBody = view.container.querySelector('.ant-card-body') as HTMLElement
+    expect(cardBody.style.padding).toBe('32px')
+  })
 })
