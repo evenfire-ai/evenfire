@@ -258,6 +258,22 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(conf).toContain('server mcp.sentry.io:443 resolve;')
       expect(conf).toContain('proxy_pass https://remote_upstream/sse;')
       expect(conf).not.toContain('proxy_pass https://mcp.sentry.io')
+      // A second upstream server, resolver, TLS name or redirect would change
+      // where or how the proxy connects while every check above stays true, so
+      // the upstream block is exact and each directive appears once.
+      expect(conf).toContain(
+        'upstream remote_upstream {\n    zone remote_upstream 64k;\n    server mcp.sentry.io:443 resolve;\n}'
+      )
+      for (const directive of [
+        'upstream',
+        'resolver',
+        'proxy_pass',
+        'proxy_redirect',
+        'proxy_ssl_verify',
+        'proxy_ssl_name',
+      ]) {
+        expect(conf.match(new RegExp(`^\\s*${directive} `, 'gm')) ?? []).toHaveLength(1)
+      }
       expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
     })
 
@@ -339,32 +355,32 @@ describe('McpServerReconciler remote egress proxy', () => {
       expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
     })
 
-    it('appends the baseUrl query to proxy_pass and keeps proxy_redirect path-only (U5)', () => {
+    it('appends the baseUrl query to proxy_pass and to the proxy_redirect match (U5)', () => {
       const server = cloneServer(REMOTE_SERVER, {
         remote: { baseUrl: 'https://api.example.com/mcp?a=1&b=2' },
       })
       const conf = remoteConfig(reconciler, server)
-      const redirect = conf.match(/^\s*proxy_redirect .*;$/m)
 
       expect(conf).toContain('proxy_pass https://remote_upstream/mcp?a=1&b=2;')
-      expect(redirect).not.toBeNull()
-      expect(redirect![0]).not.toContain('?')
+      // Same prefix NGINX's implicit `proxy_redirect default` used with the old
+      // literal proxy_pass: a Location echoing the configured query (and any
+      // credential in it) is rewritten back to the bare location path.
+      expect(conf).toContain('proxy_redirect https://api.example.com/mcp?a=1&b=2 /mcp;')
       expectRemoteLivenessWitness(reconciler, server)
     })
 
-    it('keeps a query placeholder in proxy_pass and out of proxy_redirect (Q1)', () => {
+    it('keeps a query placeholder, never a value, in proxy_pass and proxy_redirect (Q1)', () => {
       const queryName = ['api', 'key'].join('')
       const placeholder = '$' + '{ALPHA_KEY}'
       const server = cloneServer(REMOTE_SERVER, {
         remote: { baseUrl: `https://api.example.com/mcp?${queryName}=${placeholder}` },
       })
       const conf = remoteConfig(reconciler, server)
-      const redirect = conf.match(/^\s*proxy_redirect .*;$/m)
 
       expect(conf).toContain(`proxy_pass https://remote_upstream/mcp?${queryName}=${placeholder};`)
-      expect(redirect).not.toBeNull()
-      expect(redirect![0]).not.toContain('$' + '{')
-      expect(redirect![0]).not.toContain('?')
+      expect(conf).toContain(
+        `proxy_redirect https://api.example.com/mcp?${queryName}=${placeholder} /mcp;`
+      )
       expectRemoteLivenessWitness(reconciler, server)
     })
 
@@ -840,8 +856,20 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('appends the platform resolver env after CRD and secret env (U6)', () => {
+      // The resolver name arrives from both CRD sources (spec.env and a Secret
+      // mapping), and a query placeholder adds a backfilled entry after them.
+      // The platform entry must still come last.
+      const placeholder = '$' + '{QUERY_ONLY}'
       const server = cloneServer(REMOTE_SERVER, {
         env: [{ name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS', value: '' }],
+        remote: { baseUrl: `https://mcp.sentry.io/sse?k=${placeholder}` },
+        envSecret: {
+          name: 'sentry-credentials',
+          keys: [
+            { secretKey: 'SENTRY_AUTH_TOKEN', envVar: 'SENTRY_AUTH_TOKEN' },
+            { secretKey: 'resolver', envVar: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS' },
+          ],
+        },
       })
       const deployment = (reconciler as any).buildDeployment(server)
       const containers = deployment.spec.template.spec.containers
@@ -853,10 +881,11 @@ describe('McpServerReconciler remote egress proxy', () => {
         name: 'sentry-credentials',
         key: 'SENTRY_AUTH_TOKEN',
       })
-      const resolverEntries = egressContainer.env.filter(
-        (e: any) => e.name === 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS'
-      )
-      expect(resolverEntries[resolverEntries.length - 1]).toEqual({
+      // Witnesses that both CRD sources and the backfill produced an entry.
+      const names = egressContainer.env.map((e: any) => e.name)
+      expect(names.filter((n: string) => n === 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS')).toHaveLength(3)
+      expect(egressContainer.env).toContainEqual({ name: 'QUERY_ONLY', value: '' })
+      expect(egressContainer.env.at(-1)).toEqual({
         name: 'NGINX_ENTRYPOINT_LOCAL_RESOLVERS',
         value: '1',
       })
@@ -951,6 +980,13 @@ describe('McpServerReconciler remote egress proxy', () => {
       )
 
       expect(mappedEntries).toEqual([])
+      // Witness for the negative above: the mapped Secret entry is the only one.
+      expect(mappedContainer.env.filter((e: any) => e.name === 'ALPHA_KEY')).toEqual([
+        {
+          name: 'ALPHA_KEY',
+          valueFrom: { secretKeyRef: { name: 'query-credentials', key: 'alpha' } },
+        },
+      ])
       expectRemoteLivenessWitness(reconciler, mappedServer)
     })
   })
@@ -1564,6 +1600,8 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(message).toMatch(/invalid placeholder|forbidden character/)
       expect(message).toMatch(/\[A-Z_\]\[A-Z0-9_\]\*/)
       expect(message).not.toContain(query)
+      // The value alone must not be echoed either (it may be the credential).
+      expect(message).not.toContain(query.slice(query.indexOf('=') + 1))
       expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
     })
 

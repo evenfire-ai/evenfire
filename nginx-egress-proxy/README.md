@@ -3,9 +3,10 @@
 Hardened nginx image that serves as the pinned egress path for **remote** MCP
 servers (McpServer CRDs with `spec.remote.baseUrl`).
 
-**This directory contains only a Dockerfile — there is no application code
-here.** All proxy logic (config generation, URL/header sanitization, deployment)
-lives in [host-context-controller](../host-context-controller/) (`src/reconciler.ts`).
+**This directory contains the Dockerfile and three small runtime scripts**
+(`egress-proxy-entrypoint`, `egress-proxy-log-filter`, `egress-proxy-liveness`).
+All proxy logic (config generation, URL/header sanitization, deployment) lives
+in [host-context-controller](../host-context-controller/) (`src/reconciler.ts`).
 
 ## The image
 
@@ -31,8 +32,9 @@ For each remote McpServer, host-context-controller:
    private/link-local/loopback patterns rejected; the URL is reconstructed from
    parsed components so injected characters (e.g. newlines) are stripped.
    Query placeholders must be complete `${NAME}` values where `NAME` matches
-   `[A-Z_][A-Z0-9_]*`; bare dollars, malformed braces, backslashes, semicolons,
-   spaces, and control characters are rejected.
+   `[A-Z_][A-Z0-9_]*`; bare dollars, malformed braces, backslashes, and
+   semicolons are rejected. The URL parser strips TAB/CR/LF and percent-encodes
+   other control characters and spaces before that check.
 2. **Renders a per-server `default.conf.template` ConfigMap** that resolves and
    re-resolves the external base URL with NGINX. The resolver comes from the
    pod's `/etc/resolv.conf`, and the upstream `server ... resolve` directive
@@ -61,10 +63,20 @@ duplicate, so the platform resolver setting cannot be disabled by the CRD. The
 image exports the pod's local nameservers into `NGINX_LOCAL_RESOLVERS`, which
 the generated `resolver` directive uses.
 
+NGINX's stderr (the error log) goes through `egress-proxy-log-filter`, which
+replaces the query of every `upstream: "..."` field with `?REDACTED` and keeps
+the scheme, peer, path and message text. It redacts only that field: if an
+upstream echoes a credential back in other message text (for example a response
+header NGINX quotes), that text is not redacted. stdout (the access log) is not
+filtered.
+
 The remote container's readiness probe remains the local `/health` HTTP probe.
 Its liveness probe runs `/usr/local/bin/egress-proxy-liveness <port>`. That
-script checks `/health` and the image's stderr filter process, so a dead filter
-causes a visible container restart instead of silently losing error logs.
+script checks `/health` and that the stderr filter process is alive and not a
+zombie, so a dead filter causes a visible container restart (after about
+5 s + 3 × 15 s) instead of silently losing error logs. It does not measure
+whether the filter keeps reading: a filter that stays alive but stops reading
+blocks NGINX's error-log writes once the 64 KiB FIFO is full.
 
 ## Configuration
 
@@ -82,10 +94,12 @@ desired state owned by the CRD author. Deployment rendering always stamps the
 configured platform image for remote egress proxies, so a remote CRD's
 `spec.image` is never what runs.
 
-HCC and this image must be upgraded together. The HCC template requires the
-image's local-resolver entrypoint support and liveness script; the image's
-filter and liveness behavior are coupled to HCC's generated template and probe.
-An older image is expected to fail visibly rather than silently fall back.
+HCC and this image must be upgraded together. The HCC template needs
+`server ... resolve` (NGINX ≥ 1.27.3) and the base image's
+`15-local-resolvers.envsh`, both provided by the pinned base; the HCC liveness
+probe needs this layer's `egress-proxy-liveness` script, and the stderr filter
+exists only in this layer. An older image is expected to fail visibly (the
+exec probe fails and the container restarts) rather than silently fall back.
 
 ## Ports
 

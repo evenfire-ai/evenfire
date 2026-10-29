@@ -32,8 +32,9 @@ wget -q -T 2 -O /dev/null "http://127.0.0.1:${port}/health" || exit 1
 pid="$(pgrep -f '[e]gress-proxy-log-filter' 2>/dev/null | head -n 1)"
 [ -n "$pid" ] || exit 1
 
-# Field 3 of /proc/<pid>/stat is the process state. A zombie still shows up in
-# pgrep but cannot filter anything.
+# Field 3 of /proc/<pid>/stat is the process state. pgrep -f does not list a
+# zombie (its cmdline is empty), so a dead filter normally fails the check
+# above; this one covers a filter that exits between pgrep and this read.
 state="$(sed -e 's/^[^)]*) //' -e 's/ .*$//' "/proc/${pid}/stat" 2>/dev/null)" || exit 1
 [ -n "$state" ] || exit 1
 [ "$state" != "Z" ] || exit 1

@@ -11,34 +11,51 @@
 # classifies a 502 race in the field evidence, and the message text is what the
 # error alerts match.
 #
-# A line truncated at NGX_MAX_ERROR_STR (2047 bytes) has no closing quote, so
-# the redaction runs to the end of the line instead of waiting for one.
+# The field ends at the closing quote NGINX writes before the next context
+# field it appends, `, host: "` or `, referrer: "`, not at the first quote: a
+# quote inside the substituted value must not end the redaction early. A line
+# with neither field (no Host header, or cut at NGX_MAX_ERROR_STR, 2047 bytes)
+# is redacted to the end of the line, keeping a final closing quote.
 #
-# Only the first occurrence of the field is considered. The only field NGINX
-# logs before `upstream:` is `request:`, and a request target cannot contain the
-# raw space that the sequence needs, so a client cannot shadow the real field.
+# Every `upstream: "` on the line is processed, not only the first. The message
+# text before the real field can quote bytes the upstream sent (for example
+# `upstream sent duplicate header line: "<name>: <value>"`), so an upstream can
+# put a fake field, or a fake `", host: "`, ahead of the real one.
 #
 # One line per record plus an explicit flush: a block-buffered filter would
 # delay every error line and, once the 64 KiB FIFO filled, block NGINX's
 # workers.
+BEGIN {
+    FIELD = "upstream: \""
+    NEXT_HOST = "\", host: \""
+    NEXT_REFERRER = "\", referrer: \""
+}
+
+# Length of the field value at the start of s, which begins right after the
+# field's opening quote.
+function field_length(s,    n, i) {
+    n = length(s)
+    if (n > 0 && substr(s, n) == "\"") n = n - 1
+    i = index(s, NEXT_HOST)
+    if (i > 0 && i - 1 < n) n = i - 1
+    i = index(s, NEXT_REFERRER)
+    if (i > 0 && i - 1 < n) n = i - 1
+    return n
+}
+
 {
-    start = index($0, "upstream: \"")
-    if (start > 0) {
-        head = substr($0, 1, start + 10)
-        rest = substr($0, start + 11)
-        quote = index(rest, "\"")
-        if (quote > 0) {
-            field = substr(rest, 1, quote - 1)
-            tail = substr(rest, quote)
-        } else {
-            field = rest
-            tail = ""
-        }
-        mark = index(field, "?")
+    out = ""
+    rest = $0
+    while ((start = index(rest, FIELD)) > 0) {
+        out = out substr(rest, 1, start + length(FIELD) - 1)
+        rest = substr(rest, start + length(FIELD))
+        len = field_length(rest)
+        mark = index(substr(rest, 1, len), "?")
         if (mark > 0) {
-            $0 = head substr(field, 1, mark) "REDACTED" tail
+            out = out substr(rest, 1, mark) "REDACTED"
+            rest = substr(rest, len + 1)
         }
     }
-    print $0
+    print out rest
     fflush()
 }

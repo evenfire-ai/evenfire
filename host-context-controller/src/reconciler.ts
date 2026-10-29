@@ -988,9 +988,11 @@ export class McpServerReconciler {
       throw new Error(`remote.baseUrl must not point to private/reserved IP ranges: ${host}`)
     }
     // Defense in depth for the generated NGINX directive: only complete,
-    // uppercase placeholders may remain dynamic. The URL parser strips TAB/CR/LF,
-    // but every other control character, whitespace, directive separator, escape,
-    // brace, or bare dollar must be rejected here.
+    // uppercase placeholders may remain dynamic. The URL parser already strips
+    // TAB/CR/LF and percent-encodes the other control characters and spaces, so
+    // what this check rejects in practice is a directive separator, escape,
+    // brace, or bare dollar; the control range stays in the class so the
+    // directive never depends on that encoding.
     const queryWithoutPlaceholders = parsed.search.replace(QUERY_PLACEHOLDER_RE, '')
     if (/[\\;{}$\u0000-\u0020]/.test(queryWithoutPlaceholders)) {
       throw new Error(
@@ -1152,7 +1154,7 @@ server {
     # the remote endpoint path exactly once.
     location ${upstreamPath} {
         proxy_pass https://remote_upstream${upstreamPath}${upstreamSearch};
-        proxy_redirect https://${upstreamHost}${upstreamPath} ${upstreamPath};
+        proxy_redirect https://${upstreamHost}${upstreamPath}${upstreamSearch} ${upstreamPath};
         proxy_set_header Host ${upstreamHost};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

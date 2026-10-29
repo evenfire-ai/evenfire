@@ -9,19 +9,23 @@
 #   1. It keeps the official /docker-entrypoint.sh, so the template envsubst
 #      (20-envsubst-on-templates.sh) and the resolv.conf export used by the
 #      rendered `resolver ${NGINX_LOCAL_RESOLVERS}` line
-#      (15-local-resolvers.envsh) still run, and so the variables they export
-#      reach NGINX through the environment.
+#      (15-local-resolvers.envsh) still run. The export only reaches the
+#      entrypoint's script loop, which is where envsubst reads it; the NGINX
+#      process does not need it and does not have it.
 #   2. It routes only NGINX's stderr through the log filter (#1240). The remote
 #      baseUrl query may carry a credential and NGINX prints the full upstream
 #      URL in every upstream error line. stdout keeps the access log unfiltered:
-#      the access log records the client request, which never carries the
-#      remote credential.
+#      it records the client's request line, to which the proxy never adds the
+#      remote query.
 #
 # The filter is a child of NGINX after the exec, so the master reaps it. If it
-# dies, NGINX keeps serving (it ignores SIGPIPE, the FIFO writes fail with
-# EPIPE and no unfiltered line is ever written) and every error line is
-# dropped. /usr/local/bin/egress-proxy-liveness is the exec liveness probe that
-# turns that silent loss into a container restart.
+# dies after NGINX has opened its error log, NGINX keeps serving (it ignores
+# SIGPIPE, the FIFO writes fail with EPIPE and no unfiltered line is ever
+# written) and every error line is dropped. If it dies before that, NGINX
+# blocks opening the FIFO: no listener, so readiness fails, and the filter's
+# own error is on the container stderr. In both cases
+# /usr/local/bin/egress-proxy-liveness, the exec liveness probe, fails and the
+# kubelet restarts the container.
 set -eu
 
 # An empty command would make /docker-entrypoint.sh exec nothing and exit 0,

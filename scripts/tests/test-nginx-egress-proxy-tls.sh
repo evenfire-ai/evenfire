@@ -35,8 +35,10 @@
 #   query-accept   a ${VAR} query placeholder is resolved by envsubst inside the
 #                  container and reaches the upstream (#1240)
 #   redact         an upstream error line never carries the remote query, in the
-#                  IP form, the upstream-group form and a line truncated at
-#                  NGINX's 2047-byte error cap (#1240)
+#                  IP form, the upstream-group form, a line truncated at
+#                  NGINX's 2047-byte error cap, and a line where upstream bytes
+#                  quoted in the message put a fake field ahead of the real one
+#                  while the value itself holds a quote (#1240)
 #   signals        QUIT and TERM reach the NGINX master, which is PID 1
 #   filter-death   the exec liveness script fails once the stderr filter dies,
 #                  and no unfiltered error line reaches the logs
@@ -47,12 +49,14 @@
 # image from an edited copy, to prove the cases detect a broken build. A mutated
 # run is expected to fail:
 #
-#   verify-off            proxy_ssl_verify off               -> valid, chain2 red
+#   verify-off            proxy_ssl_verify off               -> untrusted, expired, wrongsan, nobundle red
 #   depth-1               proxy_ssl_verify_depth 1           -> chain2 red
 #   no-resolve            drops ` resolve` (dns-switch only) -> dns-switch red
 #   no-ssl-name           drops proxy_ssl_name               -> valid, chain2, wrongsan red
 #   no-redact             runs the proxy without its filter  -> redact, filter-death red
 #   liveness-health-only  liveness script checks /health only -> filter-death red
+#   redact-first-only     filter redacts only the first field -> redact (req4) red
+#   redact-first-quote    filter ends the field at the first quote -> redact (req4) red
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -89,7 +93,8 @@ if [ ! -f "$HCC_DIR/node_modules/ts-node/dist/bin.js" ]; then
   exit 1
 fi
 case "$MUTATION" in
-  "" | verify-off | depth-1 | no-resolve | no-ssl-name | no-redact | liveness-health-only) ;;
+  "" | verify-off | depth-1 | no-resolve | no-ssl-name | no-redact | liveness-health-only | \
+    redact-first-only | redact-first-quote) ;;
   *) echo "FAIL: unknown NGINX_TLS_TEST_MUTATION '$MUTATION'" >&2; exit 1 ;;
 esac
 
@@ -111,6 +116,21 @@ trap cleanup EXIT
 fail() {
   echo "FAIL: $*" >&2
   failures=$((failures + 1))
+}
+
+# Replaces the one literal occurrence of <from> with <to> in a file under
+# $WORK (a rendered template or a copy of the build context). Any other count
+# stops the run, so a mutation can never silently match nothing.
+mutate() {
+  local file="$1" from="$2" to="$3" count content
+  count="$(grep -cF -- "$from" "$file" || true)"
+  if [ "$count" != "1" ]; then
+    echo "FAIL: mutation expected one '$from' in $file, found $count" >&2
+    exit 1
+  fi
+  content="$(cat "$file"; printf x)"
+  content="${content%x}"
+  printf '%s' "${content/"$from"/"$to"}" >"$file"
 }
 
 # ─── Images ──────────────────────────────────────────────────────────────────
@@ -141,6 +161,18 @@ wget -q -T 2 -O /dev/null "http://127.0.0.1:${1:?}/health"
 LIVENESS
   chmod 0755 "$build_context/egress-proxy-liveness"
 fi
+case "$MUTATION" in
+  redact-first-only | redact-first-quote)
+    build_context="$WORK/image-mutation"
+    cp -R "$DOCKERFILE_DIR" "$build_context"
+    if [ "$MUTATION" = "redact-first-only" ]; then
+      mutate "$build_context/egress-proxy-log-filter" \
+        'while ((start = index(rest, FIELD)) > 0) {' 'if ((start = index(rest, FIELD)) > 0) {'
+    else
+      mutate "$build_context/egress-proxy-log-filter" 'NEXT_HOST = "\", host: \""' 'NEXT_HOST = "\""'
+    fi
+    ;;
+esac
 
 if [ -n "$MIRROR" ]; then
   case "$BASE_IMAGE" in
@@ -300,6 +332,12 @@ server {
     ssl_certificate /fixtures/$cert.chain.pem;
     ssl_certificate_key /fixtures/$cert.key;
     access_log /var/log/nginx/access.log tlstest;
+    # A second Content-Length makes the proxy log "upstream sent duplicate
+    # header line" with the raw header value, ahead of the real upstream field.
+    location = /shadow {
+        add_header Content-Length 'upstream: "a", host: "b' always;
+        return 200 'ok';
+    }
     location / {
         default_type text/plain;
         return 200 "echo token=\$http_x_test_token\n";
@@ -381,14 +419,25 @@ container_log() {
 
 # stdout only: the access log. nginx writes it through the wrapper's untouched
 # stdout, so it is the witness that the filter never sees access lines.
+# Same contract as container_log: returns 2 when the log cannot be read.
 container_stdout() {
-  docker logs "$1" 2>/dev/null
+  local out
+  if ! out="$(docker logs "$1" 2>/dev/null)"; then
+    echo "FAIL: could not read the stdout log of $1" >&2
+    return 2
+  fi
+  printf '%s\n' "$out"
 }
 
-# stderr only: the filtered error log.
+# stderr only: the filtered error log. Returns 2 when the log cannot be read.
 container_stderr() {
+  local out
   # shellcheck disable=SC2069 # the order is the point: stderr to the pipe, stdout dropped
-  docker logs "$1" 2>&1 >/dev/null
+  if ! out="$(docker logs "$1" 2>&1 >/dev/null)"; then
+    echo "FAIL: could not read the stderr log of $1" >&2
+    return 2
+  fi
+  printf '%s\n' "$out"
 }
 
 # Waits up to LOG_SECONDS for a fixed string in a container log. nginx writes a
@@ -547,6 +596,7 @@ render("dns-switch", "https://upstream.test:8446/mcp")
 render("query-accept", "https://upstream.test:8441/mcp?apikey=${UPSTREAM_QUERY_KEY}")
 render("redact", "https://upstream.test:8443/mcp?apikey=${UPSTREAM_QUERY_KEY}")
 render("redact-group", "https://unresolvable.test:8443/mcp?apikey=${UPSTREAM_QUERY_KEY}")
+render("redact-shadow", "https://upstream.test:8441/shadow?apikey=${UPSTREAM_QUERY_KEY}")
 
 const deployment = (reconciler as any).buildDeployment(server("https://upstream.test:8441/mcp"))
 const proxies = deployment.spec.template.spec.containers.filter((c: any) => c.name === "egress-proxy")
@@ -656,16 +706,6 @@ echo "proxy env: $PROXY_ENV_ENTRY"
 echo "proxy liveness: $LIVENESS_BIN $LIVENESS_PORT"
 echo "proxy memory limit: ${PROXY_MEMORY_KIB}KiB"
 
-mutate() {
-  local file="$1" from="$2" to="$3" count
-  count="$(grep -cF -- "$from" "$file" || true)"
-  if [ "$count" != "1" ]; then
-    echo "FAIL: mutation expected one '$from' in $file, found $count" >&2
-    exit 1
-  fi
-  sed "s/$from/$to/" "$file" >"$file.new" && mv "$file.new" "$file"
-}
-
 assert_count() {
   local file="$1" text="$2" want="$3" count
   count="$(grep -cF -- "$text" "$file" || true)"
@@ -686,7 +726,7 @@ for port in 8441 8442 8443 8444 8445; do
   assert_count "$t" "server upstream.test:$port resolve;" 1
   assert_count "$t" "proxy_pass https://remote_upstream/mcp;" 1
 done
-for template in dns-switch query-accept redact redact-group; do
+for template in dns-switch query-accept redact redact-group redact-shadow; do
   t="$WORK/templates/$template/default.conf.template"
   # shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
   assert_count "$t" 'resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off;' 1
@@ -914,7 +954,7 @@ dns_query_count() {
 
 expect_dns_switch() {
   local case_name="dns-switch" container="$NAME-proxy-dns-switch" template="$WORK/templates/dns-switch/default.conf.template"
-  local token code proxy_ip q0 q1 pid_before pid_after started_before started_after restarts_before restarts_after
+  local token code proxy_ip q0 q1 pid_before pid_after started_before started_after restarts_before restarts_after seen_x
   local deadline last="" flip_token="" flipped=0
   cases=$((cases + 1))
 
@@ -984,7 +1024,9 @@ expect_dns_switch() {
     fail "$case_name: still not id=Y within ${DNS_FLIP_SECONDS}s (last: $last, DNS queries ${q0}->${q1})"
   elif ! wait_log "$UPSTREAM_Y" "token=$flip_token "; then
     fail "$case_name: upstream Y did not log the flip token within ${LOG_SECONDS}s"
-  elif [ -n "$(upstream_log_line "$UPSTREAM_X" "$flip_token")" ]; then
+  elif ! seen_x="$(upstream_log_line "$UPSTREAM_X" "$flip_token")"; then
+    fail "$case_name: could not read the log of upstream X"
+  elif [ -n "$seen_x" ]; then
     fail "$case_name: upstream X logged the flip token; the request did not follow the record"
   elif [ "${q1:-0}" -le "${q0:-0}" ]; then
     fail "$case_name: the proxy's DNS query count did not grow after the switch (${q0}->${q1})"
@@ -1061,7 +1103,8 @@ upstream_lines_grew() {
 
 expect_redact() {
   local case_name="redact" container="$NAME-proxy-redact" group="$NAME-proxy-redact-group" raw="$NAME-proxy-redact-raw"
-  local token="tok-$case_name-$RUN_ID" after code line lines good offset n q failures_before
+  local shadow="$NAME-proxy-redact-shadow"
+  local token="tok-$case_name-$RUN_ID" after code line lines good offset n q failures_before seen log
   local marker_prefix="${QUERY_MARKER:0:8}"
   cases=$((cases + 1))
   failures_before=$failures
@@ -1076,7 +1119,9 @@ expect_redact() {
     fail "$case_name: req1 produced no '(21:unable to verify the first certificate)' within ${LOG_SECONDS}s: $(container_log "$container" | tail -n 5)"
   elif [ "$(upstream_handshake 8443 "$after")" != "200" ] || ! wait_log "$UPSTREAM" "token=$after "; then
     fail "$case_name: the upstream did not log the direct request sent after req1"
-  elif [ -n "$(upstream_log_line "$UPSTREAM" "$token")" ]; then
+  elif ! seen="$(upstream_log_line "$UPSTREAM" "$token")"; then
+    fail "$case_name: could not read the upstream log"
+  elif [ -n "$seen" ]; then
     fail "$case_name: req1's token reached the upstream"
   else
     echo "PASS: $case_name req1 -> 502, TLS verification failed, token not forwarded"
@@ -1148,7 +1193,11 @@ expect_redact() {
   # complete line.
   start_proxy redact-raw redact-group yes off -e "UPSTREAM_QUERY_KEY=$QUERY_MARKER"
   code="$(proxy_request "$raw" "tok-$case_name-raw-warm-$RUN_ID")"
-  line="$(container_stderr "$raw" | grep -F 'upstream: "' | tail -n 1)"
+  # nginx writes the error line after it answers; wait for it before reading.
+  line=""
+  if wait_log "$raw" 'upstream: "'; then
+    line="$(container_stderr "$raw" | grep -F 'upstream: "' | tail -n 1)"
+  fi
   offset="$(upstream_field_query_offset "$line")"
   if [ "$code" != "502" ] || [ -z "$offset" ]; then
     fail "$case_name: the raw control container did not log a complete upstream line"
@@ -1167,6 +1216,8 @@ expect_redact() {
         fail "$case_name: the raw control line is $(printf '%s' "$line" | wc -c | tr -d ' ') bytes, expected the 2047-byte NGINX error cap"
       elif ! printf '%s' "$line" | grep -qF "upstream: \"https://remote_upstream/mcp?apikey=$marker_prefix"; then
         fail "$case_name: the raw control line was not cut inside the marker: ${line:0:200}..."
+      elif printf '%s' "$line" | grep -qF -- "$QUERY_MARKER"; then
+        fail "$case_name: the raw control line holds the whole marker, so the cut is not inside it: ${line:0:200}..."
       elif printf '%s' "$line" | grep -qF 'host: "'; then
         fail "$case_name: the raw control line still carries the host field; it was not truncated: ${line:0:200}..."
       else
@@ -1175,33 +1226,72 @@ expect_redact() {
     fi
   fi
 
-  # Global negatives, after the positives, on both filtered containers.
-  local scanned=0
-  for c in "$container" "$group"; do
-    scanned=$((scanned + $(container_log "$c" | grep -cF -- "$QUERY_MARKER" || true)))
-    scanned=$((scanned + $(container_log "$c" | grep -cF -- "$marker_prefix" || true)))
+  # req4: the upstream answers with a second Content-Length whose value is
+  # `upstream: "a", host: "b`. NGINX quotes that raw value in the message text
+  # ahead of the real field, so the line holds a fake field and a fake host
+  # delimiter before the real one. The substituted value also holds a raw
+  # quote, which must not end the redaction early. Two markers, one on each
+  # side of that quote.
+  local shadow_head shadow_tail
+  shadow_head="sq1-$RUN_ID-$(openssl rand -hex 16)"
+  shadow_tail="sq2-$(openssl rand -hex 16)"
+  start_proxy redact-shadow redact-shadow yes "$REDACT_FILTER" -e "UPSTREAM_QUERY_KEY=$shadow_head\"$shadow_tail"
+  code="$(proxy_request "$shadow" "tok-$case_name-shadow-$RUN_ID" /shadow)"
+  if [ "$code" != "502" ]; then
+    fail "$case_name: req4 expected 502, got $code"
+  elif ! wait_log "$shadow" 'upstream sent duplicate header line: "Content-Length: upstream: "a", host: "b"'; then
+    fail "$case_name: req4 produced no duplicate-header line quoting the fake field within ${LOG_SECONDS}s: $(container_log "$shadow" | tail -n 3)"
+  elif ! log="$(container_log "$shadow")"; then
+    fail "$case_name: could not read the req4 log"
+  elif printf '%s\n' "$log" | grep -qF -e "$shadow_head" -e "$shadow_tail"; then
+    fail "$case_name: req4 leaked the value on one side of its quote"
+  elif ! printf '%s\n' "$log" | grep -F 'duplicate header line' |
+    grep -qE 'upstream: "https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:8441/shadow\?REDACTED", host: "'; then
+    fail "$case_name: req4's real field is not 'https://<ipv4>:8441/shadow?REDACTED': $(printf '%s\n' "$log" | grep -F 'duplicate header line' | tail -n 1)"
+  else
+    echo "PASS: $case_name req4 -> the real field is redacted behind a fake field and a quote in the value"
+  fi
+
+  # Global negatives, after the positives, on every filtered container. Each
+  # log is read once and its read status checked, so an unreadable log can
+  # never count as "marker absent".
+  local scanned=0 redacted_total=0
+  for c in "$container" "$group" "$shadow"; do
+    if ! log="$(container_log "$c")"; then
+      fail "$case_name: could not read the log of $c for the marker scan"
+      continue
+    fi
+    scanned=$((scanned + $(printf '%s\n' "$log" | grep -cF -e "$QUERY_MARKER" -e "$marker_prefix" || true)))
   done
   if [ "$scanned" -ne 0 ]; then
-    fail "$case_name: the marker (or its first 8 characters) appears $scanned time(s) in the filtered logs"
+    fail "$case_name: the marker (or its first 8 characters) appears on $scanned line(s) of the filtered logs"
   fi
-  local redacted_total
-  redacted_total=$(( $(container_stderr "$container" | grep -cF '?REDACTED' || true) + $(container_stderr "$group" | grep -cF '?REDACTED' || true) ))
-  if [ "${redacted_total:-0}" -lt 3 ]; then
+  for c in "$container" "$group"; do
+    if ! log="$(container_stderr "$c")"; then
+      fail "$case_name: could not read the stderr log of $c"
+      continue
+    fi
+    redacted_total=$((redacted_total + $(printf '%s\n' "$log" | grep -cF '?REDACTED' || true)))
+  done
+  if [ "$redacted_total" -lt 3 ]; then
     fail "$case_name: only ${redacted_total} '?REDACTED' occurrence(s) across req1/req2/req3"
   fi
 
-  # stdout keeps the access log, unfiltered: it records the client request,
-  # which never carries the remote credential.
-  if ! container_stdout "$container" | grep -qF '"GET /mcp HTTP/1.1" 502'; then
+  # stdout keeps the access log, unfiltered: it records the client request
+  # line, to which the proxy never adds the remote query. One read serves the
+  # positive and the negative check.
+  if ! log="$(container_stdout "$container")"; then
+    fail "$case_name: could not read the stdout log of $container"
+  elif ! printf '%s\n' "$log" | grep -qF '"GET /mcp HTTP/1.1" 502'; then
     fail "$case_name: the access log on stdout has no 502 line for req1"
-  elif container_stdout "$container" | grep -qF '?REDACTED'; then
+  elif printf '%s\n' "$log" | grep -qF '?REDACTED'; then
     fail "$case_name: stdout carries a filtered line; the wrapper routed stdout through the filter"
   fi
 
   if [ "$failures" -eq "$failures_before" ]; then
-    echo "PASS: $case_name -> marker absent from both filtered streams, ${redacted_total} ?REDACTED lines, stdout untouched"
+    echo "PASS: $case_name -> marker absent from every filtered stream, ${redacted_total} ?REDACTED lines, stdout untouched"
   fi
-  docker rm -f "$container" "$group" "$raw" >/dev/null 2>&1 || true
+  docker rm -f "$container" "$group" "$raw" "$shadow" >/dev/null 2>&1 || true
 }
 
 # ─── H10: signals reach the NGINX master (PID 1) ─────────────────────────────
@@ -1261,7 +1351,7 @@ container_stopped() {
 
 expect_filter_death() {
   local case_name="filter-death" container="$NAME-proxy-filter-death"
-  local pids count before after code failures_before
+  local pids count before after code failures_before log
   cases=$((cases + 1))
   failures_before=$failures
 
@@ -1291,7 +1381,14 @@ expect_filter_death() {
     echo "PASS: $case_name -> the liveness script exits 0 with the filter alive and non-zero after killing it"
   fi
 
-  before="$(container_stderr "$container" | wc -l | tr -d ' ')"
+  # Each count below comes from a log read whose status is checked, so two
+  # failed reads can never compare equal as "no new line".
+  if ! log="$(container_stderr "$container")"; then
+    fail "$case_name: could not read the stderr log before the post-kill request"
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    return
+  fi
+  before="$(printf '%s\n' "$log" | wc -l | tr -d ' ')"
   code="$(proxy_request "$container" "tok-$case_name-after-$RUN_ID" "/mcp?post-kill")"
   if [ "$code" != "502" ]; then
     fail "$case_name: the post-kill request expected 502, got $code"
@@ -1300,10 +1397,13 @@ expect_filter_death() {
   fi
   # The access log line above proves the request completed, so a filter that
   # was still alive would have written its error line by now.
-  after="$(container_stderr "$container" | wc -l | tr -d ' ')"
-  if [ "$after" != "$before" ]; then
+  if ! log="$(container_stderr "$container")"; then
+    fail "$case_name: could not read the stderr log after the post-kill request"
+  elif after="$(printf '%s\n' "$log" | wc -l | tr -d ' ')" && [ "$after" != "$before" ]; then
     fail "$case_name: $((after - before)) error line(s) reached the log after the filter died"
-  elif container_log "$container" | grep -qF -- "$QUERY_MARKER"; then
+  elif ! log="$(container_log "$container")"; then
+    fail "$case_name: could not read the log for the marker scan"
+  elif printf '%s\n' "$log" | grep -qF -- "$QUERY_MARKER"; then
     fail "$case_name: the marker reached the log after the filter died"
   else
     echo "PASS: $case_name -> after the filter died no error line reached the log and the marker never appeared"

@@ -582,11 +582,11 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('should log WRC-owned ownership when managed: false', async () => {
-    const consoleSpy = vi.spyOn(console, 'log')
+    const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => undefined)
     const server = makeServer({ name: 'workflow-recipes', managed: false })
     await reconciler.reconcile(server)
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('WRC-owned'))
-    consoleSpy.mockRestore()
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('WRC-owned'), expect.anything())
+    info.mockRestore()
   })
 
   it('should accept managed?: boolean field on McpServerSpec', () => {
@@ -2336,7 +2336,7 @@ describe('full reconciliation inventory authority', () => {
   })
 
   it('defaults to fail-closed orphan cleanup until an authority source is wired', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => undefined)
     appsApi.listNamespacedDeployment.mockResolvedValueOnce({
       items: [
         {
@@ -2352,7 +2352,10 @@ describe('full reconciliation inventory authority', () => {
 
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('inventory authority'))
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('inventory authority'),
+      expect.anything()
+    )
     warn.mockRestore()
   })
 
@@ -2360,7 +2363,7 @@ describe('full reconciliation inventory authority', () => {
     let authority = { known: true, generation: 7 }
     reconciler.setInventoryAuthority(() => authority)
     const desired = makeServer({ name: 'desired-server' })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => undefined)
     const reconcile = vi.spyOn(reconciler, 'reconcile').mockImplementation(async () => {
       authority = { known: false, generation: 8 }
     })
@@ -2383,14 +2386,17 @@ describe('full reconciliation inventory authority', () => {
     })
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('inventory authority'))
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('inventory authority'),
+      expect.anything()
+    )
     warn.mockRestore()
   })
 
   it('skips orphan cleanup if the authoritative inventory generation changes mid-pass', async () => {
     let authority = { known: true, generation: 11 }
     reconciler.setInventoryAuthority(() => authority)
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => undefined)
     vi.spyOn(reconciler, 'reconcile').mockImplementation(async () => {
       authority = { known: true, generation: 12 }
     })
@@ -2409,7 +2415,10 @@ describe('full reconciliation inventory authority', () => {
 
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('inventory authority'))
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('inventory authority'),
+      expect.anything()
+    )
     warn.mockRestore()
   })
 
@@ -2879,14 +2888,14 @@ describe('updateStatusConditions', () => {
     expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
 
     customApi.getNamespacedCustomObjectStatus.mockClear()
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => undefined)
     try {
       await updateStatusConditions(server, true)
       expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
-      expect(log.mock.calls.flat().join('\n')).not.toContain('Updated status conditions')
+      expect(info.mock.calls.map(call => call[0])).not.toContain('Updated status conditions')
     } finally {
-      log.mockRestore()
+      info.mockRestore()
     }
   })
 
@@ -2904,14 +2913,14 @@ describe('updateStatusConditions', () => {
 
     customApi.patchNamespacedCustomObjectStatus.mockClear()
     customApi.getNamespacedCustomObjectStatus.mockClear()
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => undefined)
     try {
       await updateStatusConditions(server, true)
       expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
-      expect(log.mock.calls.flat().join('\n')).not.toContain('Updated status conditions')
+      expect(info.mock.calls.map(call => call[0])).not.toContain('Updated status conditions')
     } finally {
-      log.mockRestore()
+      info.mockRestore()
     }
   })
 
