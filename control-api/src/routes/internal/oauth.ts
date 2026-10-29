@@ -40,6 +40,13 @@ import {
   remoteCallbackVariant,
 } from '../../oauth/remoteCallback.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
+// `isValidK8sName` (DNS-1123 subdomain) rejects a malformed name up front, so it
+// becomes a 400 rather than a non-404 apiserver error surfacing as a 500. It is
+// deliberately wider than the per-server callback segment (an RFC 1123 label):
+// these routes serve every OAuth lane, and only a per-server remote server needs
+// its name to fit in a URL segment — that narrower rule is applied where its
+// redirect URI is built.
+import { isValidK8sName } from '../../services/access/brokerHostBinding.js'
 import {
   userHasContextEnablingMcpServer,
   userReachesContext,
@@ -50,17 +57,6 @@ import {
   normalizeConfiguredOrigin,
   resolveCallbackOrigin,
 } from '../external/oauthCallback.js'
-
-// DNS-1123 subdomain — the shape a k8s resource name takes. Reject anything else
-// up front so a malformed `mcpServerName` becomes a 400 rather than surfacing a
-// non-404 apiserver error as a 500. (Mirrors routes/mcpOauth.ts.) Deliberately wider
-// than the per-server callback segment (an RFC 1123 label): these routes serve every
-// OAuth lane, and only a per-server remote server needs its name to fit in a URL
-// segment — that narrower rule is applied where its redirect URI is built.
-const K8S_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
-function isValidK8sName(name: string): boolean {
-  return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
-}
 
 /** McpServer shape used to read `spec.auth.type` for the OAuth gate. */
 interface McpServerAuthResource extends McpServerOAuthSpecInput {
