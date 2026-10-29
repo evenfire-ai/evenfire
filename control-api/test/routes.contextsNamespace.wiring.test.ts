@@ -24,7 +24,8 @@ import { MockGateway } from './mockGateway.js'
  * namespace. Here the two differ and the Contexts exist ONLY in the contexts
  * namespace, so a route wired to the mcp-servers namespace finds no Context and
  * its observable answer changes: the invocable list, the connectors panel, both
- * session catalogs, the per-user consent mint and the context-scope callback.
+ * session catalogs, the per-user consent mint, the context-scope callback and
+ * the context-scope grant disconnect.
  *
  * Real middleware and routers; membership, session currency and grants answer
  * from the mocked pool.
@@ -218,6 +219,15 @@ describe('Context allowlists are read from the configured contexts namespace', (
       .set('x-service-token', 'rpc-proxy')
       .send({ mcpServerName: PERSONAL, userId: USER })
     expect(res.status, res.text).toBe(200)
+  })
+
+  it('context-scope grant disconnect admits a member of the named Context', async () => {
+    const res = await request(createApp(gateway as never))
+      .delete('/api/v1/internal/mcp-oauth/grant')
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: SHARED, userId: USER, contextId: CONTEXT })
+    expect(res.status, res.text).toBe(204)
   })
 
   describe('consent callback wiring', () => {
