@@ -1429,6 +1429,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       newName?: string
       oldParentId?: string | null
       operationScope?: string
+      authorityHandledByCaller?: boolean
     }) =>
       window.clerum.gfs.moveResource(
         input.resourceId,
@@ -1440,8 +1441,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onSuccess: async (receipt, input) => {
       await convergeCommittedMove(input, receipt, input.operationScope)
     },
-    onError: (error, input) =>
-      handleAuthorityFailure(toMessage(error), 'operation', input.operationScope),
+    onError: (error, input) => {
+      if (!input.authorityHandledByCaller) {
+        handleAuthorityFailure(toMessage(error), 'operation', input.operationScope)
+      }
+    },
   })
 
   /**
@@ -1695,7 +1699,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       ifMatch?: number,
       newName?: string,
       oldParentId?: string | null,
-      operationScope?: string
+      operationScope?: string,
+      authorityHandledByCaller?: boolean
     ) =>
       moveResourceMutation.mutateAsync({
         resourceId,
@@ -1704,6 +1709,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         newName,
         oldParentId,
         operationScope,
+        authorityHandledByCaller,
       }),
     deleteResource: (resourceId: string, ifMatch?: number) =>
       deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),

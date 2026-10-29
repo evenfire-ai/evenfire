@@ -255,6 +255,7 @@ export async function commitGfsMove(
           message: 'This folder is no longer available.',
         }
       } catch (resolveError) {
+        if (deps.isSessionAuthorityFailure(resolveError)) return { status: 'session-lost' }
         const resolveStatus = parseHttpStatus(messageOf(resolveError))
         if (resolveStatus === 404 || resolveStatus === 410) {
           return {
@@ -329,7 +330,7 @@ async function verifyOutcomeByResolve(
   deps: MoveCommitDeps,
   plan: MoveCommitPlan,
   before: MoveCommitSourceSnapshot
-): Promise<MoveCommitOutcome | null> {
+): Promise<Extract<MoveCommitOutcome, { status: 'committed' | 'session-lost' }> | null> {
   try {
     const resolved = await deps.resolveSource(plan.source.gfsUri)
     if (resolved.parentResourceId === plan.destination.resourceId) {
@@ -344,7 +345,8 @@ async function verifyOutcomeByResolve(
       }
     }
     return null
-  } catch {
+  } catch (error) {
+    if (deps.isSessionAuthorityFailure(error)) return { status: 'session-lost' }
     return null
   }
 }

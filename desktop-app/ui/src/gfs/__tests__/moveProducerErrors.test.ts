@@ -174,6 +174,46 @@ describe('real move producer verdicts (R1-M3)', () => {
     expect(result.moveResource).toHaveBeenCalledTimes(1)
   })
 
+  it.each([404, 500] as const)(
+    'routes a verification-time 401 after PATCH %i through the session authority classifier',
+    async patchStatus => {
+      const patchFailure = await wireFailure(patchStatus)
+      const verificationFailure = await gfsRouteFailureMessage(
+        client => client.resolveUri(plan.source.gfsUri, 'fixture-session-token'),
+        401,
+        { code: 'unauthorized', message: 'verification session expired' }
+      )
+      const snapshot = await resolveResource(
+        resolvedFile(sourceId, 'report.md', { parentResourceId: oldParentId, version: 7 })
+      )
+      let resolveCalls = 0
+      const resolveSource = vi.fn(async () => {
+        resolveCalls += 1
+        if (resolveCalls === 1) return snapshot
+        throw new Error(verificationFailure)
+      })
+      const moveResource = vi.fn(async () => {
+        throw new Error(patchFailure.text)
+      })
+      const isSessionAuthorityFailure = vi.fn((error: unknown) =>
+        isGfsSessionAuthorityFailure(String(error), 'operation')
+      )
+
+      const outcome = await commitGfsMove(
+        { resolveSource, moveResource, isSessionAuthorityFailure },
+        plan
+      )
+
+      expect(outcome.status).toBe('session-lost')
+      expect(resolveSource).toHaveBeenCalledTimes(2)
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(isSessionAuthorityFailure).toHaveBeenCalledTimes(2)
+      const verificationError = isSessionAuthorityFailure.mock.calls.at(-1)?.[0]
+      expect(verificationError).toBeInstanceOf(Error)
+      expect((verificationError as Error).message).toBe(verificationFailure)
+    }
+  )
+
   it('keeps the approved 409 numbered-name attempts bounded', async () => {
     const { text } = await wireFailure(409)
     const result = await run(text, true)

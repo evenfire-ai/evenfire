@@ -791,7 +791,8 @@ export function FileExplorerTree({
                 ifMatch,
                 newName,
                 oldParentId,
-                source.scope
+                source.scope,
+                true
               ),
             handleAuthorityFailure: message =>
               ctrl.handleAuthorityFailure(message, 'operation', source.scope),
