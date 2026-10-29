@@ -1021,13 +1021,16 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
       external_user_sessions,
       external_user_session_security_epochs,
-      external_v1_session_revocations,
       operational_catalog_source_state,
       operational_resource_index,
       operational_resource_relationships,
       operational_resource_index_staging,
       operational_relationships_staging
       TO control_api_runtime;
+
+    -- Append-only ledger: the runtime records a revocation but never rewrites or
+    -- erases one. The user-deletion cascade runs as the table owner.
+    GRANT SELECT, INSERT ON TABLE external_v1_session_revocations TO control_api_runtime;
 
     -- Revision rows are written only by the SECURITY DEFINER bump functions.
     GRANT SELECT ON TABLE

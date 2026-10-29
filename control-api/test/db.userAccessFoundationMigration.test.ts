@@ -145,7 +145,7 @@ describe('user-access foundation migration', () => {
       ['authorization_user_revisions', 'read'],
       ['external_user_session_security_epochs', 'legacy_dml'],
       ['external_user_sessions', 'legacy_dml'],
-      ['external_v1_session_revocations', 'legacy_dml'],
+      ['external_v1_session_revocations', 'append'],
       ['operational_catalog_source_state', 'legacy_dml'],
       ['operational_relationships_staging', 'legacy_dml'],
       ['operational_resource_index', 'legacy_dml'],

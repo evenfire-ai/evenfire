@@ -848,6 +848,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     ]) {
       expectPrivileges([...privileges[relation]], ['SELECT'])
     }
+    // RP-12: the session-revocation ledger is append-only for the runtime.
+    expectPrivileges([...privileges.external_v1_session_revocations], ['SELECT', 'INSERT'])
     const runtimeClient = await dbPool.connect()
     try {
       await runtimeClient.query('BEGIN')
@@ -957,6 +959,53 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await dbPool.query('DROP TABLE IF EXISTS runtime_access_contract_probe')
     }
     expect(await violations(relationQuery)).toBe(0)
+  }, 60_000)
+
+  it('lets the runtime append session revocations but never rewrite them', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+    const user = randomUUID()
+    const tokenHash = randomBytes(32).toString('hex')
+    await dbPool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+      user,
+      `session-revocation-${user}@example.test`,
+    ])
+    const runtime = await dbPool.connect()
+    try {
+      await runtime.query('BEGIN')
+      await runtime.query('SET LOCAL ROLE control_api_runtime')
+      // Liveness witness: the runtime's only writer is this append
+      // (userSessionService), and it needs INSERT plus SELECT.
+      const appended = await runtime.query(
+        `INSERT INTO external_v1_session_revocations(
+           token_hash, user_id, expires_at, revoked_at, reason
+         )
+         VALUES ($1, $2, NOW() + INTERVAL '1 hour', NOW(), 'access_contract_witness')
+         ON CONFLICT (token_hash) DO NOTHING
+         RETURNING token_hash`,
+        [tokenHash, user]
+      )
+      expect(appended.rows).toEqual([{ token_hash: tokenHash }])
+      // Each refusal aborts the transaction, so fence them with savepoints.
+      await runtime.query('SAVEPOINT rp12_update')
+      await expect(
+        runtime.query(
+          `UPDATE external_v1_session_revocations SET reason = 'rewritten' WHERE token_hash = $1`,
+          [tokenHash]
+        )
+      ).rejects.toMatchObject({ code: '42501' })
+      await runtime.query('ROLLBACK TO SAVEPOINT rp12_update')
+      await runtime.query('SAVEPOINT rp12_delete')
+      await expect(
+        runtime.query('DELETE FROM external_v1_session_revocations WHERE token_hash = $1', [
+          tokenHash,
+        ])
+      ).rejects.toMatchObject({ code: '42501' })
+      await runtime.query('ROLLBACK TO SAVEPOINT rp12_delete')
+      await runtime.query('ROLLBACK')
+    } finally {
+      runtime.release()
+    }
   }, 60_000)
 
   it('requires the owner stage and preserves history through a staged legacy admission upgrade', async () => {

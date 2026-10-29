@@ -100,11 +100,12 @@ describe('D34 migration execution policy', () => {
     // kept the Admin UI attribution sentinel, added three revision triggers and
     // a pre-lock for archive batches, now locking parents before revisions.
     // RP-3 (PR #334 review r2) added the approval-batch pre-lock, which also
-    // covers the runs its DELETE cascade rewrites.
+    // covers the runs its DELETE cascade rewrites; RP-12 narrowed the
+    // session-revocation ledger to SELECT and INSERT.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'af67426f87cdfd442499b394f12421b267cc97bdc9e15fb54c9db86102bb2013',
+        'dd6619f59ed1dc86d701ef55e1fcf2405c62437fcb7fd78b72ce28c96dc7a7ac',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',
