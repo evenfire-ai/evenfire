@@ -12,6 +12,7 @@ import {
   resolveResource,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import {
+  affordancesApiError,
   appServiceAffordanceProducer,
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
@@ -578,6 +579,58 @@ describe('FilePreviewPage move permission contract', () => {
         )
       ).toBeTruthy()
     )
+  })
+
+  it('fails closed for Move after a transient source-parent refetch error with cached permissions (R3-L2)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const temporaryFailure = await affordancesApiError(
+      500,
+      { code: 'upstream_unavailable', message: 'permission service unavailable' },
+      parentId
+    )
+    let sourceReads = 0
+    const produceAffordances = appServiceAffordanceProducer(async targetResourceId => {
+      if (targetResourceId === parentId) {
+        sourceReads += 1
+        if (sourceReads > 1) throw temporaryFailure
+        return heldPermissionResponse(['read', 'write', 'delete'])
+      }
+      return heldPermissionResponse(['read', 'write', 'delete', 'manage_acl', 'share'])
+    })
+    const { affordances, moveResource } = installGfs({
+      source: async () => {
+        const result = await produceAffordances(parentId)
+        return delegationAffordances(new Set(result.held), result.isOperator)
+      },
+    })
+    installController()
+    const { queryClient } = renderPreview()
+    const sourceKey = desktopQueryKeys.gfsAffordances('preview-test-user:main', parentId, 'main')
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      await waitFor(() => expect(sourceReads).toBe(1))
+      const menu = await openPreviewActions()
+      expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      expect(queryClient.getQueryData(sourceKey)).toBeTruthy()
+
+      vi.setSystemTime(Date.now() + 16_000)
+      await act(async () => {
+        focusManager.setFocused(false)
+        focusManager.setFocused(true)
+      })
+      await waitFor(() => {
+        expect(sourceReads).toBe(2)
+        expect(queryClient.getQueryState(sourceKey)?.status).toBe('error')
+      })
+
+      expect(queryClient.getQueryData(sourceKey)).toBeTruthy()
+      expect(affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+      expect(moveResource).not.toHaveBeenCalled()
+    } finally {
+      focusManager.setFocused(undefined)
+      queryClient.clear()
+    }
   })
 
   it('keeps server destination authorization authoritative and reports a denied destination', async () => {
