@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import {
+  type ChangeEventHandler,
   type ReactElement,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useEffect,
   useLayoutEffect,
@@ -18,6 +20,7 @@ import {
   render as renderWithoutQueryClient,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-app-links'
@@ -59,6 +62,7 @@ import {
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
+import { delegationAffordances } from '../../../src/gfs/delegation.js'
 import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
 import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
 import type { AccessCatalog, WorkflowNotificationStreamEvent } from '../../../src/types'
@@ -305,6 +309,8 @@ const filesPageHarness = vi.hoisted(() => ({
   },
 }))
 const previewPageHarness = vi.hoisted(() => ({
+  renderActualPage: false,
+  actualPage: null as unknown,
   props: null as null | {
     gfsUri?: string
     onOpenRoute?: () => void
@@ -403,55 +409,79 @@ vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/ChatDrawer', () => ({
   ChatDrawer: ({ children }: { children: ReactNode }) => <>{children}</>,
 }))
-vi.mock('@components/Common', () => ({
-  StatusBanner: (props: { tone: string; text?: string; children?: ReactNode }) => (
-    <div role="status" data-tone={props.tone}>
-      {props.text ?? props.children}
-    </div>
-  ),
-  Button: (props: Record<string, unknown>) => (
-    <button
-      aria-controls={props['aria-controls'] as string | undefined}
-      aria-label={props['aria-label'] as string | undefined}
-      aria-busy={props['aria-busy'] as boolean | undefined}
-      aria-pressed={props['aria-pressed'] as boolean | undefined}
-      className={props.className as string | undefined}
-      disabled={props.disabled as boolean | undefined}
-      onClick={props.onClick as (() => void) | undefined}
-      title={props.title as string | undefined}
-      type="button"
-    >
-      {props.children as ReactNode}
-    </button>
-  ),
-  IconButton: (props: Record<string, unknown>) => {
-    if (!composerPanelHarness.renderSendButton || props['data-testid'] !== 'send-button')
+vi.mock('@components/Common', async () => {
+  const React = await import('react')
+  const IconButton = React.forwardRef<HTMLButtonElement, Record<string, unknown>>((props, ref) => {
+    if (
+      !previewPageHarness.renderActualPage &&
+      (!composerPanelHarness.renderSendButton || props['data-testid'] !== 'send-button')
+    )
       return null
     return (
       <button
+        ref={ref}
         aria-describedby={props['aria-describedby'] as string | undefined}
-        aria-label={props['aria-label'] as string | undefined}
+        aria-label={(props['aria-label'] ?? props.label) as string | undefined}
+        aria-expanded={props['aria-expanded'] as boolean | undefined}
+        aria-haspopup={props['aria-haspopup'] as string | undefined}
+        className={props.className as string | undefined}
         disabled={props.disabled as boolean | undefined}
-        onClick={props.onClick as (() => void) | undefined}
+        onClick={props.onClick as ((event: ReactMouseEvent<HTMLButtonElement>) => void) | undefined}
         data-testid={props['data-testid'] as string | undefined}
         type="button"
       >
         {props.children as ReactNode}
       </button>
     )
-  },
-  MenuItem: (props: Record<string, unknown>) => (
-    <button
-      aria-label={props['aria-label'] as string | undefined}
-      disabled={props.disabled as boolean | undefined}
-      onClick={props.onClick as (() => void) | undefined}
-      type="button"
-    >
-      {props.children as ReactNode}
-    </button>
-  ),
-  ToastStack: () => null,
-}))
+  })
+  return {
+    StatusBanner: (props: { tone: string; text?: string; children?: ReactNode }) => (
+      <div role="status" data-tone={props.tone}>
+        {props.text ?? props.children}
+      </div>
+    ),
+    Button: (props: Record<string, unknown>) => (
+      <button
+        aria-controls={props['aria-controls'] as string | undefined}
+        aria-label={props['aria-label'] as string | undefined}
+        aria-busy={props['aria-busy'] as boolean | undefined}
+        aria-pressed={props['aria-pressed'] as boolean | undefined}
+        className={props.className as string | undefined}
+        disabled={props.disabled as boolean | undefined}
+        onClick={props.onClick as (() => void) | undefined}
+        title={props.title as string | undefined}
+        type={(props.type as 'button' | 'submit' | 'reset' | undefined) ?? 'button'}
+      >
+        {props.children as ReactNode}
+      </button>
+    ),
+    IconButton,
+    MenuItem: (props: Record<string, unknown>) => (
+      <button
+        aria-label={props['aria-label'] as string | undefined}
+        aria-expanded={props['aria-expanded'] as boolean | undefined}
+        aria-haspopup={props['aria-haspopup'] as string | undefined}
+        disabled={props.disabled as boolean | undefined}
+        data-gfs-action={props['data-gfs-action'] as string | undefined}
+        onClick={props.onClick as (() => void) | undefined}
+        role={props.role as string | undefined}
+        type="button"
+      >
+        {props.children as ReactNode}
+      </button>
+    ),
+    TextInput: (props: Record<string, unknown>) => (
+      <input
+        aria-label={props['aria-label'] as string | undefined}
+        autoFocus={props.autoFocus as boolean | undefined}
+        disabled={props.disabled as boolean | undefined}
+        onChange={props.onChange as ChangeEventHandler<HTMLInputElement> | undefined}
+        value={props.value as string | number | readonly string[] | undefined}
+      />
+    ),
+    ToastStack: () => null,
+  }
+})
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
     title: string
@@ -478,12 +508,21 @@ vi.mock('@components/SidebarNav', () => ({
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
-vi.mock('@pages/FilePreviewPage', () => ({
-  FilePreviewPage: (props: NonNullable<typeof previewPageHarness.props>) => {
-    previewPageHarness.props = props
-    return null
-  },
-}))
+vi.mock('@pages/FilePreviewPage', async () => {
+  const React = await import('react')
+  return {
+    FilePreviewPage: (props: NonNullable<typeof previewPageHarness.props>) => {
+      previewPageHarness.props = props
+      if (previewPageHarness.renderActualPage && previewPageHarness.actualPage) {
+        return React.createElement(
+          previewPageHarness.actualPage as React.ComponentType<Record<string, unknown>>,
+          props
+        )
+      }
+      return null
+    },
+  }
+})
 vi.mock('@pages/ChatPage', async () => {
   const { useEffect, useRef } = await import('react')
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
@@ -1096,6 +1135,8 @@ describe('App deep-link orchestration', () => {
     filesPageHarness.resolveRequests = []
     filesPageHarness.props = null
     previewPageHarness.props = null
+    previewPageHarness.renderActualPage = false
+    previewPageHarness.actualPage = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
@@ -2147,42 +2188,117 @@ describe('App deep-link orchestration', () => {
     expect(openFilesSection).toHaveBeenCalledTimes(2)
   })
 
-  it("wires Preview rename through App's canonical-URI metadata refresh", async () => {
-    const resource = await resolveResource(
-      resolvedFile('77777777777777777777777777777777', 'renamed-report.md')
+  it('wires Preview rename through App and the real workspace controller', async () => {
+    const resourceId = '77777777777777777777777777777777'
+    const resourceUri = `gfs://main/${resourceId}`
+    let serverName = 'report.png'
+    let serverVersion = 1
+    resolveGfsResource.mockImplementation(async (requestedUri: string) =>
+      resolveResource(
+        resolvedFile(resourceId, serverName, {
+          gfsUri: requestedUri,
+          parentResourceId: 'source-parent',
+          version: serverVersion,
+        })
+      )
     )
-    const workspaceTabs = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
-      id: 'preview-rename-owner',
-      title: 'report.md',
-      gfsUri: resource.gfsUri,
-      fileKind: 'markdown',
-      byteLength: 4,
-      resourceVersion: 0,
+    const existingBridge = window.clerum
+    const { clerum } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
-    resolveGfsResource.mockResolvedValue(resource)
-    currentController = makeController({
-      initialExperienceLoading: false,
-      workspaceTabs,
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      sandboxUi: existingBridge.sandboxUi,
+      gfs: Object.assign(existingBridge.gfs, {
+        affordances: vi.fn(async () =>
+          delegationAffordances(new Set(['read', 'write', 'delete', 'manage_acl', 'share']), false)
+        ),
+        renameResource: vi.fn(async (_id: string, name: string) => {
+          serverName = name
+          serverVersion += 1
+        }),
+        downloadPreview: vi.fn(async () => ({
+          bytes: new Uint8Array([137, 80, 78, 71]).buffer,
+        })),
+      }),
     })
-    render(<App />)
 
-    await waitFor(() => expect(previewPageHarness.props?.onRenameCommitted).toBeTypeOf('function'))
-    await act(async () => {
-      previewPageHarness.props?.onRenameCommitted?.(resource.gfsUri)
-      await Promise.resolve()
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const actualPreviewModule =
+      await vi.importActual<typeof import('@pages/FilePreviewPage')>('@pages/FilePreviewPage')
+    previewPageHarness.actualPage = actualPreviewModule.FilePreviewPage
+    previewPageHarness.renderActualPage = true
+    const realController: { current: AppController | null } = { current: null }
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actualControllerModule.useAppController()
+      return realController.current
     })
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    const workspaceTabs = openPreviewTab(realController.current!.workspaceTabs, {
+      id: 'preview-rename-owner',
+      title: 'report.png',
+      gfsUri: resourceUri,
+      fileKind: 'image',
+      byteLength: 4,
+      resourceVersion: 1,
+    })
+    act(() => realController.current?.setWorkspaceTabs(workspaceTabs))
+
+    await screen.findByAltText('Preview of report.png')
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
+    const titleRow = screen
+      .getByRole('heading', { name: 'report.png', level: 2 })
+      .closest('.da-gfs-preview-title-row')
+    if (!titleRow) throw new Error('Preview title actions were not rendered')
+    fireEvent.click(
+      within(titleRow as HTMLElement).getByRole('button', { name: 'Options for report.png' })
+    )
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Actions for report.png' })).getByRole('menuitem', {
+        name: 'Rename',
+      })
+    )
+    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    fireEvent.change(within(dialog).getByLabelText('New name'), {
+      target: { value: 'renamed-report.png' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(window.clerum.gfs.renameResource).toHaveBeenCalledTimes(1))
 
     await waitFor(() =>
       expect(
-        currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-rename-owner')?.title
-      ).toBe('renamed-report.md')
+        realController.current?.workspaceTabs.tabs.find(tab => tab.id === 'preview-rename-owner')
+          ?.title
+      ).toBe('renamed-report.png')
     )
-    expect(resolveGfsResource).toHaveBeenCalledWith(resource.gfsUri)
-    expect(currentController.workspaceTabs.activeTabId).toBe('preview-rename-owner')
+    expect(window.clerum.gfs.renameResource).toHaveBeenCalledWith(
+      resourceId,
+      'renamed-report.png',
+      'main',
+      1
+    )
+    expect(resolveGfsResource).toHaveBeenCalledWith(resourceUri)
+    expect(realController.current?.workspaceTabs.activeTabId).toBe('preview-rename-owner')
     expect(
-      currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-rename-owner')?.preview
-        ?.gfsUri
-    ).toBe(resource.gfsUri)
+      realController.current?.workspaceTabs.tabs.find(tab => tab.id === 'preview-rename-owner')
+        ?.preview?.gfsUri
+    ).toBe(resourceUri)
+    queryClient.clear()
   })
 
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so

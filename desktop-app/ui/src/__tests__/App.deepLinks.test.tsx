@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
-import fc from 'fast-check'
+import fc, { type AsyncCommand } from 'fast-check'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import type { WorkspaceTabStripProps } from '@components/WorkspaceTabStrip/types'
@@ -1502,10 +1502,47 @@ describe('App deep-link orchestration', () => {
     queryClient.clear()
   })
 
+  type RollbackCommandModel = { successorQueued: boolean; foreignCanceled: boolean }
+  type RollbackCommandReal = {
+    enqueueSuccessor: () => Promise<void>
+    cancelForeign: () => Promise<void>
+  }
+  class EnqueueSuccessorCommand implements AsyncCommand<RollbackCommandModel, RollbackCommandReal> {
+    check(model: RollbackCommandModel) {
+      return !model.successorQueued
+    }
+
+    async run(model: RollbackCommandModel, real: RollbackCommandReal) {
+      await real.enqueueSuccessor()
+      model.successorQueued = true
+    }
+
+    toString() {
+      return 'enqueue successor'
+    }
+  }
+  class CancelForeignCommand implements AsyncCommand<RollbackCommandModel, RollbackCommandReal> {
+    check(model: RollbackCommandModel) {
+      return !model.foreignCanceled
+    }
+
+    async run(model: RollbackCommandModel, real: RollbackCommandReal) {
+      await real.cancelForeign()
+      model.foreignCanceled = true
+    }
+
+    toString() {
+      return 'cancel foreign link'
+    }
+  }
+
   async function exerciseGeneratedRollbackSchedule(schedule: {
     rollbackRejects: boolean
     supersedeWithNavigation: boolean
     repeatDismiss: boolean
+    scheduler?: fc.Scheduler
+    commands?: Iterable<AsyncCommand<RollbackCommandModel, RollbackCommandReal>>
+    onCommandOrder?: (order: readonly string[]) => void
   }): Promise<void> {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const actualControllerModule =
@@ -1529,10 +1566,10 @@ describe('App deep-link orchestration', () => {
     let activeTeamId = 'team-a'
     let rollbackStarted = false
     let releaseOriginRollback!: () => void
-    let rejectOriginRollback!: (error: Error) => void
-    const originRollback = new Promise<void>((resolve, reject) => {
+    let scheduledOriginRollback: Promise<void> | null = null
+    const scheduler = schedule.scheduler
+    const originRollback = new Promise<void>(resolve => {
       releaseOriginRollback = resolve
-      rejectOriginRollback = reject
     })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as
       | ((teamId: string) => Promise<unknown>)
@@ -1553,7 +1590,10 @@ describe('App deep-link orchestration', () => {
     handle.switchTeam.mockImplementation(async teamId => {
       if (teamId === 'team-a' && activeTeamId === 'team-b') {
         rollbackStarted = true
-        await originRollback
+        scheduledOriginRollback ??= scheduler
+          ? scheduler.schedule(originRollback, 'origin-team rollback')
+          : originRollback
+        await scheduledOriginRollback
         if (schedule.rollbackRejects) throw new Error('origin rollback rejected')
       }
       activeTeamId = teamId
@@ -1666,24 +1706,6 @@ describe('App deep-link orchestration', () => {
       })
     )
     if (!secondTarget) throw new Error('the production parser rejected the second Team B link')
-    const second = queue.enqueue(secondTarget)
-    act(() => emitDeepLink?.(second))
-    await confirmPendingAppLink()
-
-    await act(async () => {
-      await Promise.resolve()
-      await new Promise<void>(resolve => setImmediate(resolve))
-    })
-    expect(getController().getCurrentTeamId()).toBe('team-b')
-    expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSecond)
-    expect(handle.refreshCatalog.mock.calls.length).toBe(catalogReadsBeforeSecond)
-    expect(handle.teamDirectory.mock.calls.length).toBe(teamDirectoryReadsBeforeSecond)
-    expect(listApps.mock.calls.length).toBe(listCallsBeforeSecond)
-    expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond)
-    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
-    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second.id)
-    expect(main.live()).toBeNull()
-
     // Independent review diagnostic: cancellation of a different pending
     // queue item must never release the unsettled first transaction.
     const foreignTarget = parseSandboxUiDeepLink(
@@ -1695,23 +1717,66 @@ describe('App deep-link orchestration', () => {
       })
     )
     if (!foreignTarget) throw new Error('producer rejected the foreign cancellation link')
-    const foreign = queue.enqueue(foreignTarget)
-    act(() => emitDeepLink?.(foreign))
-    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
-    await act(async () => {
-      confirmDialogHarness.props?.onCancel()
-      await Promise.resolve()
-      await new Promise<void>(resolve => setImmediate(resolve))
-    })
-    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(foreign.id))
-    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === foreign.id)).toHaveLength(1)
-    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
-    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second.id)
+    let second: ReturnType<typeof queue.enqueue> | null = null
+    let foreign: ReturnType<typeof queue.enqueue> | null = null
+    const commandModel: RollbackCommandModel = { successorQueued: false, foreignCanceled: false }
+    const commandOrder: string[] = []
+    const commandReal: RollbackCommandReal = {
+      enqueueSuccessor: async () => {
+        if (second) return
+        commandOrder.push('successor')
+        second = queue.enqueue(secondTarget)
+        act(() => emitDeepLink?.(second!))
+        await confirmPendingAppLink()
+        await act(async () => {
+          await Promise.resolve()
+          await new Promise<void>(resolve => setImmediate(resolve))
+        })
+        expect(getController().getCurrentTeamId()).toBe('team-b')
+        expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSecond)
+        expect(handle.refreshCatalog.mock.calls.length).toBe(catalogReadsBeforeSecond)
+        expect(handle.teamDirectory.mock.calls.length).toBe(teamDirectoryReadsBeforeSecond)
+        expect(listApps.mock.calls.length).toBe(listCallsBeforeSecond)
+        expect(openSandboxUi()).toHaveBeenCalledTimes(opensBeforeSecond)
+        expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+        expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second!.id)
+        expect(main.live()).toBeNull()
+      },
+      cancelForeign: async () => {
+        if (foreign) return
+        commandOrder.push('foreign')
+        foreign = queue.enqueue(foreignTarget)
+        act(() => emitDeepLink?.(foreign!))
+        await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+        await act(async () => {
+          confirmDialogHarness.props?.onCancel()
+          await Promise.resolve()
+          await new Promise<void>(resolve => setImmediate(resolve))
+        })
+        await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(foreign!.id))
+        expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === foreign!.id)).toHaveLength(1)
+        expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+        if (second) expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(second.id)
+        expect(queue.list().map(item => item.id)).toEqual([
+          first.id,
+          ...(second ? [second.id] : []),
+        ])
+      },
+    }
+    await fc.asyncModelRun(
+      () => ({ model: commandModel, real: commandReal }),
+      schedule.commands ?? [new EnqueueSuccessorCommand(), new CancelForeignCommand()]
+    )
+    if (!commandModel.successorQueued) {
+      await new EnqueueSuccessorCommand().run(commandModel, commandReal)
+    }
+    if (!commandModel.foreignCanceled) {
+      await new CancelForeignCommand().run(commandModel, commandReal)
+    }
+    if (!second || !foreign) throw new Error('the App command schedule did not create both links')
+    schedule.onCommandOrder?.(commandOrder)
+
     expect(queue.list().map(item => item.id)).toEqual([first.id, second.id])
-    await act(async () => {
-      await Promise.resolve()
-      await new Promise<void>(resolve => setImmediate(resolve))
-    })
     expect(getController().getCurrentTeamId()).toBe('team-b')
     expect(handle.switchTeam.mock.calls.length).toBe(switchesBeforeSecond)
     expect(handle.refreshCatalog.mock.calls.length).toBe(catalogReadsBeforeSecond)
@@ -1739,8 +1804,11 @@ describe('App deep-link orchestration', () => {
     expect(main.live()).toBeNull()
 
     await act(async () => {
-      if (schedule.rollbackRejects) rejectOriginRollback(new Error('origin rollback rejected'))
-      else releaseOriginRollback()
+      releaseOriginRollback()
+      if (!scheduledOriginRollback)
+        throw new Error('the rollback was not captured by the scheduler')
+      if (scheduler) await scheduler.waitFor(scheduledOriginRollback)
+      else await scheduledOriginRollback
       await Promise.resolve()
       await new Promise<void>(resolve => setImmediate(resolve))
     })
@@ -1805,6 +1873,38 @@ describe('App deep-link orchestration', () => {
       ),
       { numRuns: 1, seed: 281028 }
     )
+  }, 120_000)
+
+  it('runs generated rollback commands through the real App under scheduled rollback settlement', async () => {
+    let firstScenario = true
+    const observedOrders = new Set<string>()
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands(
+          [fc.constant(new EnqueueSuccessorCommand()), fc.constant(new CancelForeignCommand())],
+          { maxCommands: 2, size: '+1' }
+        ),
+        fc.boolean(),
+        async (scheduler, commands, rollbackRejects) => {
+          if (!firstScenario) {
+            await cleanupAppDeepLinkSuite()
+            resetAppDeepLinkHarness()
+          }
+          firstScenario = false
+          await exerciseGeneratedRollbackSchedule({
+            rollbackRejects,
+            supersedeWithNavigation: false,
+            repeatDismiss: false,
+            scheduler,
+            commands,
+            onCommandOrder: order => observedOrders.add(order.join(',')),
+          })
+        }
+      ),
+      { numRuns: 12, seed: 281028 }
+    )
+    expect(observedOrders).toEqual(new Set(['successor,foreign', 'foreign,successor']))
   }, 120_000)
 
   it('keeps a successor blocked while a dismissed terminal link rollback is held', async () => {
