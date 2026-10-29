@@ -389,6 +389,102 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
+    -- Deciding an approval takes the target's revision before the run INSERT
+    -- takes the run's team, so both call sites hold this subject set first.
+    -- The set mirrors the run INSERT expressions exactly
+    -- (userApprovalRequestService.ts:723,727,1255 and
+    -- workflowRunService.ts:299,300).
+    --
+    -- Premise 1: at decision time the decision_maker column is still NULL
+    -- when this function reads it. Both deciders either pass the approval's own
+    -- target team or omit the team (decisions.routes.ts:130,
+    -- workflowApprovalProviderDecisionService.ts:177,192), so the fallback is
+    -- the same value at decision and INSERT time.
+    -- Premise 2: an approval without a run intent reaches an INSERT only
+    -- through createApprovedRun, which is always mcp-host-control with a null
+    -- team, null usage team and 'autonomous' actor
+    -- (workflowTriggerService.ts:84-104,297-305); its subjects then come from
+    -- the approval alone. Approvals without run intents are still created when
+    -- the request carries no workflowTriggerRunIntent
+    -- (user-approval-requests.routes.ts:651 versus :715-729).
+    CREATE OR REPLACE FUNCTION authorization_prelock_workflow_approval_trigger_revisions(
+      target_request_id UUID
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+    AS $$
+    DECLARE revision RECORD;
+    BEGIN
+      -- Parent locks must precede revisions and the bumped rows' FK checks,
+      -- matching principal deletion's parent-before-cascade order.
+      PERFORM team.id
+        FROM teams AS team
+       WHERE team.id::TEXT IN (
+         SELECT lower(subject.subject_id)
+           FROM workflow_approval_requests AS war
+           LEFT JOIN workflow_approval_trigger_run_intents AS watri
+             ON watri.approval_request_id = war.id
+           CROSS JOIN LATERAL (VALUES
+             ('team', war.target_team_id::TEXT),
+             ('team', COALESCE(
+               watri.team_id::TEXT, war.target_team_id::TEXT, war.decision_maker->>'teamId'
+             )),
+             ('team', NULLIF(COALESCE(
+               watri.usage_team_id, watri.team_id::TEXT,
+               war.target_team_id::TEXT, war.decision_maker->>'teamId'
+             ), 'control-plane-admin-ui'))
+           ) AS subject(subject_type, subject_id)
+          WHERE war.id = target_request_id
+            AND subject.subject_type = 'team'
+            AND subject.subject_id IS NOT NULL AND subject.subject_id <> ''
+       )
+       ORDER BY team.id
+       FOR KEY SHARE;
+
+      PERFORM principal.id
+        FROM users AS principal
+       WHERE principal.id IN (
+         SELECT war.target_user_id
+           FROM workflow_approval_requests AS war
+          WHERE war.id = target_request_id
+         UNION
+         SELECT watri.actor_id
+           FROM workflow_approval_trigger_run_intents AS watri
+          WHERE watri.approval_request_id = target_request_id
+            AND watri.actor_type = 'user'
+       )
+       ORDER BY principal.id
+       FOR KEY SHARE;
+
+      -- Hold every team before any user. Bumping also creates missing rows.
+      FOR revision IN
+        SELECT DISTINCT subject.subject_type, subject.subject_id
+          FROM workflow_approval_requests AS war
+          LEFT JOIN workflow_approval_trigger_run_intents AS watri
+            ON watri.approval_request_id = war.id
+          CROSS JOIN LATERAL (VALUES
+            ('team', war.target_team_id::TEXT),
+            ('team', COALESCE(
+              watri.team_id::TEXT, war.target_team_id::TEXT, war.decision_maker->>'teamId'
+            )),
+            ('team', NULLIF(COALESCE(
+              watri.usage_team_id, watri.team_id::TEXT,
+              war.target_team_id::TEXT, war.decision_maker->>'teamId'
+            ), 'control-plane-admin-ui')),
+            ('user', war.target_user_id::TEXT),
+            ('user', CASE WHEN watri.actor_type = 'user' THEN watri.actor_id::TEXT END)
+          ) AS subject(subject_type, subject_id)
+         WHERE war.id = target_request_id
+           AND subject.subject_id IS NOT NULL AND subject.subject_id <> ''
+         ORDER BY subject.subject_type, subject.subject_id
+      LOOP
+        PERFORM authorization_bump_subject_revision(revision.subject_type, revision.subject_id);
+      END LOOP;
+    END;
+    $$;
+
     CREATE OR REPLACE FUNCTION authorization_bump_user_row_revision()
     RETURNS TRIGGER
     LANGUAGE plpgsql
@@ -699,6 +795,10 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       TO control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[]) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[])
+      TO control_api_runtime;
+    REVOKE ALL ON FUNCTION authorization_prelock_workflow_approval_trigger_revisions(UUID)
+      FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_trigger_revisions(UUID)
       TO control_api_runtime;
     REVOKE ALL ON FUNCTION authorization_bump_user_row_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_row_revision() FROM PUBLIC;

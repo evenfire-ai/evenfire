@@ -48,6 +48,7 @@ const accessFoundationDefinerSignatures = [
   'authorization_bump_subject_revision(pg_catalog.text, pg_catalog.text)',
   'authorization_prelock_workflow_run_revisions(pg_catalog.uuid[])',
   'authorization_prelock_workflow_approval_revisions(pg_catalog.uuid[])',
+  'authorization_prelock_workflow_approval_trigger_revisions(pg_catalog.uuid)',
   'authorization_bump_user_row_revision()',
   'authorization_bump_team_row_revision()',
   'authorization_bump_workflow_run_revision()',
@@ -903,6 +904,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       `)
       expect(revisionExecute.rows).toEqual([
         { function_name: 'authorization_prelock_workflow_approval_revisions' },
+        { function_name: 'authorization_prelock_workflow_approval_trigger_revisions' },
         { function_name: 'authorization_prelock_workflow_run_revisions' },
       ])
       const prelockGrants = await runtimeClient.query<{ grantee: string }>(`
@@ -911,7 +913,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           CROSS JOIN LATERAL aclexplode(routine.proacl) privilege
          WHERE routine.oid IN (
                  'public.authorization_prelock_workflow_run_revisions(uuid[])'::regprocedure,
-                 'public.authorization_prelock_workflow_approval_revisions(uuid[])'::regprocedure
+                 'public.authorization_prelock_workflow_approval_revisions(uuid[])'::regprocedure,
+                 'public.authorization_prelock_workflow_approval_trigger_revisions(uuid)'::regprocedure
                )
            AND privilege.grantee <> routine.proowner
            AND privilege.privilege_type = 'EXECUTE'
@@ -920,6 +923,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       expect(prelockGrants.rows).toEqual([
         {
           function_name: 'authorization_prelock_workflow_approval_revisions',
+          grantee: 'control_api_runtime',
+        },
+        {
+          function_name: 'authorization_prelock_workflow_approval_trigger_revisions',
           grantee: 'control_api_runtime',
         },
         {

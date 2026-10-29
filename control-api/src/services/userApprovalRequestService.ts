@@ -825,6 +825,16 @@ export async function recordDecision(
       return { ok: false, error: 'approval_requester_mismatch' }
     }
 
+    if (decision === 'approve') {
+      // The `approved` UPDATE below bumps the approval target's revision, and
+      // the run INSERT it can trigger takes the run's team before its user, so
+      // deciding first would hold the user while asking for the team. Take the
+      // same subject set the INSERT will bump, teams before users, first.
+      await db.query('SELECT authorization_prelock_workflow_approval_trigger_revisions($1::uuid)', [
+        id,
+      ])
+    }
+
     const decidedAt = new Date()
     const decidedAtIso = decidedAt.toISOString()
     await db.query(
@@ -1188,6 +1198,14 @@ export async function consumeApprovalForTrigger(
       row.status
     )
   }
+
+  // The approval row is locked and every check passed. Take the revision
+  // subjects, teams before users, before the consume UPDATE bumps the target:
+  // the run INSERT that follows takes the run's team first, so consuming first
+  // would hold the target user while asking for that team.
+  await dbTx.query('SELECT authorization_prelock_workflow_approval_trigger_revisions($1::uuid)', [
+    params.approvalRequestId,
+  ])
 
   const consumed = await dbTx.query(
     `UPDATE workflow_approval_requests war

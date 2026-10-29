@@ -4,8 +4,11 @@ import { Pool, type PoolClient } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
 import { archiveTerminalApprovals } from '../src/services/userApprovalRequestArchiveService.js'
-import { expirePendingRequests } from '../src/services/userApprovalRequestService.js'
-import { updateRunPhase } from '../src/services/workflowRunService.js'
+import {
+  expirePendingRequests,
+  recordDecision,
+} from '../src/services/userApprovalRequestService.js'
+import { createApprovedRun, createRun, updateRunPhase } from '../src/services/workflowRunService.js'
 import { archiveTerminalRuns } from '../src/services/workflowRunsArchiveService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -60,7 +63,9 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
         IF current_setting('application_name') LIKE 'archive-delete-%'
           OR current_setting('application_name') LIKE 'delete-principal-%'
           OR current_setting('application_name') LIKE 'approval-archive-%'
-          OR current_setting('application_name') LIKE 'approval-expiry-%' THEN
+          OR current_setting('application_name') LIKE 'approval-expiry-%'
+          OR current_setting('application_name') LIKE 'approval-decision-%'
+          OR current_setting('application_name') LIKE 'approval-approved-run-%' THEN
           INSERT INTO archive_delete_revision_observations
             (application_name, revision_table, subject_id, revision)
           VALUES (current_setting('application_name'), TG_TABLE_NAME,
@@ -975,6 +980,320 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       await databasePool.query('DELETE FROM users WHERE id = $1', [ids.user])
       await databasePool.query('DELETE FROM teams WHERE id = $1', [ids.team])
     }
+  })
+
+  // A user-targeted approval whose stored run intent is team T, usage team T
+  // and actor U, plus the trigger grant the approved-trigger paths require.
+  async function triggerApprovalFixture(decision: 'pending' | 'approved') {
+    const approvalId = randomUUID()
+    const user = randomUUID()
+    const team = randomUUID()
+    const recipeName = `approval-trigger-${randomBytes(4).toString('hex')}`
+    const idempotencyKey = `approval-trigger-${randomUUID()}`
+    await databasePool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+      user,
+      `approval-trigger-${user}@example.test`,
+    ])
+    await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Approval trigger')", [team])
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, 'revision', $2)`,
+      [user, recipeName]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_approval_requests(
+         id, recipe_namespace, recipe_name, expires_at, status, target_user_id,
+         payload, idempotency_key, requested_at, decided_at, decided_by_user_id
+       ) VALUES ($1, 'revision', $2, NOW() + INTERVAL '1 hour', $3, $4::uuid, '{}'::jsonb, $5,
+         NOW(), CASE WHEN $3 = 'approved' THEN NOW() END,
+         CASE WHEN $3 = 'approved' THEN $4::uuid::text END)`,
+      [approvalId, recipeName, decision, user, idempotencyKey]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_approval_trigger_intents(
+         approval_request_id, trigger_namespace, trigger_name, trigger_caller_key
+       ) VALUES ($1, 'revision', $2, 'revision/' || $2)`,
+      [approvalId, recipeName]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_approval_trigger_run_intents(
+         approval_request_id, actor_type, actor_id, team_id, usage_team_id,
+         trigger_source, idempotency_key, idempotency_payload_hash,
+         ttl_seconds_after_finished
+       ) VALUES ($1, 'user', $2, $3, $4, 'onDemand', $5, 'hash-approval-trigger', 2592000)`,
+      [approvalId, user, team, team, idempotencyKey]
+    )
+    return { approvalId, user, team, recipeName, idempotencyKey }
+  }
+
+  async function observedRevisions(application: string) {
+    return (
+      await databasePool.query(
+        `SELECT revision_table, subject_id FROM archive_delete_revision_observations
+          WHERE application_name = $1 ORDER BY position`,
+        [application]
+      )
+    ).rows
+  }
+
+  async function triggerApprovalCleanup(ids: { approvalId: string; user: string; team: string }) {
+    await databasePool.query('DELETE FROM workflow_runs WHERE approval_request_id = $1', [
+      ids.approvalId,
+    ])
+    await databasePool.query('DELETE FROM workflow_approval_requests WHERE id = $1', [
+      ids.approvalId,
+    ])
+    await databasePool.query('DELETE FROM user_workflow_triggers WHERE user_id = $1', [ids.user])
+    await databasePool.query('DELETE FROM users WHERE id = $1', [ids.user])
+    await databasePool.query('DELETE FROM teams WHERE id = $1', [ids.team])
+  }
+
+  // Returns the witness rows so the caller can assert them before cleanup.
+  async function triggerApprovalWitness(ids: { approvalId: string; user: string; team: string }) {
+    const runs = (
+      await databasePool.query(
+        `SELECT run_id, phase, approval_request_id, team_id, usage_team_id, actor_id
+           FROM workflow_runs WHERE approval_request_id = $1`,
+        [ids.approvalId]
+      )
+    ).rows
+    const approval = (
+      await databasePool.query('SELECT status FROM workflow_approval_requests WHERE id = $1', [
+        ids.approvalId,
+      ])
+    ).rows
+    return { runs, approval }
+  }
+
+  // A phase-only UPDATE no longer bumps the run's subjects, so the competing
+  // writer is a run INSERT of the same team, usage team and actor: it takes the
+  // team before the user, exactly as the approved-trigger paths do.
+  function competingRunInsert(
+    ids: { user: string; team: string },
+    recipeName: string
+  ): Parameters<typeof createRun>[0] {
+    return {
+      recipe_namespace: 'revision',
+      recipe_name: recipeName,
+      actor_type: 'user',
+      team_id: ids.team,
+      usage_team_id: ids.team,
+      actor_id: ids.user,
+      idempotency_key: null,
+      trigger_source: 'onDemand',
+      ttl_seconds_after_finished: 2_592_000,
+    }
+  }
+
+  it('decides a user-targeted approval beside a run INSERT without reversing subject locks', async () => {
+    const ids = await triggerApprovalFixture('pending')
+    const decisionGate = await databasePool.connect()
+    const competitorGate = await databasePool.connect()
+    const decision = await databasePool.connect()
+    const competitor = await databasePool.connect()
+    const decisionPid = await pid(decision)
+    const competitorPid = await pid(competitor)
+    const decisionGatePid = await pid(decisionGate)
+    const competitorGatePid = await pid(competitorGate)
+    let decisionOutcome: Promise<Outcome> | undefined
+    let competitorOutcome: Promise<Outcome> | undefined
+    let decisionSettled = false
+    let outcomes: Outcome[] = []
+    let witness: Awaited<ReturnType<typeof triggerApprovalWitness>> | undefined
+    try {
+      await configure(decision, 'approval-decision-order')
+      await configure(competitor, 'approval-create-run')
+      await decisionGate.query('SELECT pg_advisory_lock($1, 31)', [barrierClass])
+      await competitorGate.query('SELECT pg_advisory_lock($1, 32)', [barrierClass])
+      await databasePool.query(
+        `INSERT INTO archive_order_barriers VALUES
+           ('approval-decision-order', 'authorization_user_revisions', $1, 31),
+           ('approval-create-run', 'authorization_team_revisions', '', 32)`,
+        [ids.user]
+      )
+      await decision.query('BEGIN')
+      decisionOutcome = observe(
+        recordDecision(
+          ids.approvalId,
+          'approve',
+          { userId: ids.user },
+          undefined,
+          undefined,
+          decision
+        )
+      )
+      // The decision locks the approval row and then its subjects; it pauses on
+      // the user only after the team bump.
+      await waitForBlock(decisionPid, [decisionGatePid])
+      await competitor.query('BEGIN')
+      competitorOutcome = observe(
+        createRun(competingRunInsert(ids, 'approval-decision-competitor'), competitor)
+      )
+      const competitorBlocker = await waitForBlock(competitorPid, [decisionPid, competitorGatePid])
+      if (competitorBlocker === competitorGatePid) {
+        // Without the prelock the decision holds only the user, so the INSERT
+        // takes the team and waits behind the barrier before asking for it.
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+        await waitForBlock(competitorPid, [decisionPid])
+        await decisionGate.query('SELECT pg_advisory_unlock_all()')
+      } else {
+        // With the prelock the decision already holds the team, so the INSERT
+        // waits on the decision itself.
+        await decisionGate.query('SELECT pg_advisory_unlock_all()')
+        const decisionResult = await decisionOutcome
+        await decision.query(decisionResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+        decisionSettled = true
+        await waitForBlock(competitorPid, [competitorGatePid])
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      }
+      const decisionResult = await decisionOutcome
+      if (!decisionSettled) {
+        await decision.query(decisionResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+        decisionSettled = true
+      }
+      const competitorResult = await competitorOutcome
+      await competitor.query(competitorResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      outcomes = [decisionResult, competitorResult]
+      console.info(
+        'APPROVAL_TRIGGER_DECISION_OUTCOMES',
+        outcomes.map(result => ({
+          status: result.status,
+          code: result.status === 'rejected' ? result.code : undefined,
+        }))
+      )
+      witness = await triggerApprovalWitness(ids)
+    } finally {
+      await decisionGate.query('SELECT pg_advisory_unlock_all()')
+      await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      await Promise.all([decisionOutcome, competitorOutcome])
+      if (!decisionSettled) await decision.query('ROLLBACK')
+      await competitor.query('ROLLBACK')
+      for (const client of [decisionGate, competitorGate, decision, competitor]) client.release()
+      await databasePool.query('TRUNCATE archive_order_barriers')
+      await triggerApprovalCleanup(ids)
+    }
+    expect(outcomes.map(result => result.status)).toEqual(['fulfilled', 'fulfilled'])
+    expect(witness).toEqual({
+      runs: [
+        {
+          run_id: expect.any(String),
+          phase: 'Pending',
+          approval_request_id: ids.approvalId,
+          team_id: ids.team,
+          usage_team_id: ids.team,
+          actor_id: ids.user,
+        },
+      ],
+      approval: [{ status: 'consumed' }],
+    })
+    // The prelock holds the team before the user it pauses on; without it the
+    // first subject is the approval target and this list starts with the user.
+    const observed = await observedRevisions('approval-decision-order')
+    expect(observed.slice(0, 2)).toEqual([
+      { revision_table: 'authorization_team_revisions', subject_id: ids.team },
+      { revision_table: 'authorization_user_revisions', subject_id: ids.user },
+    ])
+  })
+
+  it('creates an approved run beside a run INSERT without reversing subject locks', async () => {
+    const ids = await triggerApprovalFixture('approved')
+    const approvedGate = await databasePool.connect()
+    const competitorGate = await databasePool.connect()
+    const approved = await databasePool.connect()
+    const competitor = await databasePool.connect()
+    const approvedPid = await pid(approved)
+    const competitorPid = await pid(competitor)
+    const approvedGatePid = await pid(approvedGate)
+    const competitorGatePid = await pid(competitorGate)
+    let approvedOutcome: Promise<Outcome> | undefined
+    let competitorOutcome: Promise<Outcome> | undefined
+    let outcomes: Outcome[] = []
+    let witness: Awaited<ReturnType<typeof triggerApprovalWitness>> | undefined
+    const connect = vi.spyOn(pool, 'connect').mockResolvedValue(approved)
+    try {
+      await configure(approved, 'approval-approved-run-order')
+      await configure(competitor, 'approval-create-run')
+      await approvedGate.query('SELECT pg_advisory_lock($1, 33)', [barrierClass])
+      await competitorGate.query('SELECT pg_advisory_lock($1, 34)', [barrierClass])
+      await databasePool.query(
+        `INSERT INTO archive_order_barriers VALUES
+           ('approval-approved-run-order', 'authorization_user_revisions', $1, 33),
+           ('approval-create-run', 'authorization_team_revisions', '', 34)`,
+        [ids.user]
+      )
+      approvedOutcome = observe(
+        createApprovedRun({
+          ...competingRunInsert(ids, ids.recipeName),
+          idempotency_key: ids.idempotencyKey,
+          approval_request_id: ids.approvalId,
+          idempotency_payload_hash: 'hash-approval-trigger',
+          approval_caller_key: `revision/${ids.recipeName}`,
+          correlation_id: 'approval-approved-run-order',
+        })
+      )
+      // The consume prelock takes the team before the user it pauses on.
+      await waitForBlock(approvedPid, [approvedGatePid])
+      await competitor.query('BEGIN')
+      competitorOutcome = observe(
+        createRun(competingRunInsert(ids, 'approval-approved-run-competitor'), competitor)
+      )
+      const competitorBlocker = await waitForBlock(competitorPid, [approvedPid, competitorGatePid])
+      if (competitorBlocker === competitorGatePid) {
+        // Without the prelock the consumer holds only the user, so the INSERT
+        // takes the team and waits behind the barrier before asking for it.
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+        await waitForBlock(competitorPid, [approvedPid])
+        await approvedGate.query('SELECT pg_advisory_unlock_all()')
+      } else {
+        await approvedGate.query('SELECT pg_advisory_unlock_all()')
+        await approvedOutcome
+        await waitForBlock(competitorPid, [competitorGatePid])
+        await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      }
+      const approvedResult = await approvedOutcome
+      const competitorResult = await competitorOutcome
+      await competitor.query(competitorResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      outcomes = [approvedResult, competitorResult]
+      console.info(
+        'APPROVAL_TRIGGER_APPROVED_RUN_OUTCOMES',
+        outcomes.map(result => ({
+          status: result.status,
+          code: result.status === 'rejected' ? result.code : undefined,
+        }))
+      )
+      witness = await triggerApprovalWitness(ids)
+    } finally {
+      await approvedGate.query('SELECT pg_advisory_unlock_all()')
+      await competitorGate.query('SELECT pg_advisory_unlock_all()')
+      await Promise.all([approvedOutcome, competitorOutcome])
+      await competitor.query('ROLLBACK')
+      connect.mockRestore()
+      // The pool spy hands this client to createApprovedRun, which releases it
+      // in its own finally; release it only when the call never started.
+      if (!approvedOutcome) approved.release()
+      for (const client of [approvedGate, competitorGate, competitor]) client.release()
+      await databasePool.query('TRUNCATE archive_order_barriers')
+      await triggerApprovalCleanup(ids)
+    }
+    expect(outcomes.map(result => result.status)).toEqual(['fulfilled', 'fulfilled'])
+    expect(witness).toEqual({
+      runs: [
+        {
+          run_id: expect.any(String),
+          phase: 'Pending',
+          approval_request_id: ids.approvalId,
+          team_id: ids.team,
+          usage_team_id: ids.team,
+          actor_id: ids.user,
+        },
+      ],
+      approval: [{ status: 'consumed' }],
+    })
+    const observed = await observedRevisions('approval-approved-run-order')
+    expect(observed.slice(0, 2)).toEqual([
+      { revision_table: 'authorization_team_revisions', subject_id: ids.team },
+      { revision_table: 'authorization_user_revisions', subject_id: ids.user },
+    ])
   })
 
   it.each(['not-a-uuid', 'CONTROL-PLANE-ADMIN-UI'])(

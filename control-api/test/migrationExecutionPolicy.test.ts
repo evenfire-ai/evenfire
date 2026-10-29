@@ -101,11 +101,13 @@ describe('D34 migration execution policy', () => {
     // a pre-lock for archive batches, now locking parents before revisions.
     // RP-3 (PR #334 review r2) added the approval-batch pre-lock, which also
     // covers the runs its DELETE cascade rewrites; RP-12 narrowed the
-    // session-revocation ledger to SELECT and INSERT.
+    // session-revocation ledger to SELECT and INSERT. O1 added the
+    // approval-trigger pre-lock that both decision call sites take before they
+    // bump the approval target.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'dd6619f59ed1dc86d701ef55e1fcf2405c62437fcb7fd78b72ce28c96dc7a7ac',
+        '90e72c677c32dbe68326885f54cca09e43350fcc1ef0b3df2ab30fc675701503',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',
