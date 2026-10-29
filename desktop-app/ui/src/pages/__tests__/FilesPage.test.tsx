@@ -754,8 +754,8 @@ describe('FilesPage', () => {
     })
 
     expect(createFolder).toHaveBeenCalledWith('new-folder')
-    expect(renameResource).toHaveBeenCalledWith('folder-1', 'renamed', 7)
-    expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
+    expect(renameResource).toHaveBeenCalledWith('folder-1', 'renamed', 'main', 7)
+    expect(deleteResource).toHaveBeenCalledWith('folder-1', 'main', 7)
   })
 
   it('shows top-right create and upload actions for the open writable folder', async () => {
@@ -1335,7 +1335,7 @@ describe('FilesPage', () => {
       await Promise.resolve()
     })
 
-    expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
+    expect(deleteResource).toHaveBeenCalledWith('folder-1', 'main', 7)
     expect(pushToast).toHaveBeenCalledWith('not_empty: folder has children', 'error')
     expect(screen.queryByRole('dialog', { name: 'Delete Team folder?' })).toBeNull()
   })
@@ -1395,7 +1395,7 @@ describe('FilesPage', () => {
     })
 
     expect(replaceFileFromPath).toHaveBeenCalledWith('file-1', '/tmp/report.txt', 7)
-    expect(renameResource).toHaveBeenCalledWith('file-1', 'report-renamed.txt', 7)
+    expect(renameResource).toHaveBeenCalledWith('file-1', 'report-renamed.txt', 'main', 7)
     expect(pushToast).toHaveBeenCalledWith('precondition_failed: stale file version', 'error')
     expect(pushToast).toHaveBeenCalledWith('precondition_failed: stale resource version', 'error')
   })
@@ -1579,7 +1579,7 @@ describe('FilesPage', () => {
     fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
 
     await waitFor(() =>
-      expect(renameResource).toHaveBeenCalledWith('file-1', 'report-renamed.txt', 7)
+      expect(renameResource).toHaveBeenCalledWith('file-1', 'report-renamed.txt', 'main', 7)
     )
     expect(pushToast).toHaveBeenCalledWith('Renamed to report-renamed.txt', 'success')
   })
@@ -4675,7 +4675,7 @@ describe('FilesPage', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
     })
 
-    expect(deleteResource).toHaveBeenCalledWith('child-1', 3)
+    expect(deleteResource).toHaveBeenCalledWith('child-1', 'main', 3)
     expect(pushToast).toHaveBeenCalledWith('Deleted notes.txt', 'success')
     expect(screen.queryByRole('dialog')).toBeNull()
   })
@@ -4795,7 +4795,7 @@ describe('FilesPage', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Subfolder)' }))
     })
 
-    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 3, undefined, 'folder-1')
+    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 'main', 3, undefined, 'folder-1')
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
   })
@@ -4899,7 +4899,14 @@ describe('FilesPage', () => {
     fireEvent.drop(destinationRow, { dataTransfer })
 
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('file-1', 'archive-1', 3, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'file-1',
+        'archive-1',
+        'main',
+        3,
+        undefined,
+        'folder-1'
+      )
       expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Archive', 'success')
     })
   })
@@ -5239,12 +5246,8 @@ describe('FilesPage', () => {
         canCreateShare: false,
       })
     })
-    expect(moveResource).not.toHaveBeenCalledWith(
-      'file-1',
-      'dest-1',
-      expect.anything(),
-      expect.anything()
-    )
+    // A's admission was superseded: no dispatch ever carried A's file.
+    expect(moveResource.mock.calls.some(call => call[0] === 'file-1')).toBe(false)
     // B’s hover state survived A’s stale cleanup.
     expect(destinationRow.getAttribute('data-drop-state')).toBe('checking')
 
@@ -5896,7 +5899,7 @@ describe('FilesPage', () => {
       fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
     })
 
-    expect(renameResource).toHaveBeenCalledWith('child-1', 'renamed-notes.txt', 3)
+    expect(renameResource).toHaveBeenCalledWith('child-1', 'renamed-notes.txt', 'main', 3)
     expect(pushToast).toHaveBeenCalledWith('Renamed to renamed-notes.txt', 'success')
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
   })
@@ -5959,7 +5962,7 @@ describe('FilesPage', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
     })
 
-    expect(deleteResource).toHaveBeenCalledWith('shared-1', 2)
+    expect(deleteResource).toHaveBeenCalledWith('shared-1', 'main', 2)
     expect(pushToast).toHaveBeenCalledWith('Deleted shared-report.txt', 'success')
   })
 
@@ -7090,6 +7093,211 @@ describe('FilesPage', () => {
     // Still surfaced, as the banner — and presented, not as the IPC wrapper.
     expect(screen.getByText(/Too many file requests — try again in 7s\./)).toBeTruthy()
   })
+
+  it("renames, deletes and moves a Shared-with-me row with the row's drive while the home is pending", async () => {
+    const pushToast = vi.fn()
+    const renameResource = vi.fn(async () => ({ version: 2 }))
+    const deleteResource = vi.fn(async () => ({}))
+    const moveResource = vi.fn(async () => ({ version: 3 }))
+    const destination = {
+      resourceId: 'dest-1',
+      rid: 'dest-1',
+      gfsUri: 'gfs://main/dest-1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Destination',
+      kind: 'directory',
+      path: '/Destination',
+      version: 1,
+      bytes: 0,
+    }
+    const listAccessible = vi.fn(async () => ({ items: [destination], nextCursor: null }))
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'f1',
+      parentResourceId: null,
+      rid: 'f1',
+      gfsUri: 'gfs://main/f1',
+      name: 'notes.md',
+      kind: 'file',
+      pathCache: '/notes.md',
+      version: 1,
+      bytes: 12,
+    }))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listAccessible, listChildren, resolve, affordances } },
+    })
+
+    const row = {
+      resourceId: 'f1',
+      rid: 'f1',
+      gfsUri: 'gfs://main/f1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'notes.md',
+      kind: 'file' as const,
+      path: '/notes.md',
+      version: 1,
+      bytes: 12,
+      permissions: ['read', 'write', 'delete'],
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      // The home is still being prepared, so the open location has NO drive:
+      // only the row's own drive can route these actions.
+      drive: '',
+      home: { state: 'pending', drive: null, resourceId: null },
+      accessibleResources: [row],
+      renameResource,
+      deleteResource,
+      moveResource,
+    })
+
+    renderFilesPage(pushToast)
+
+    await chooseResourceAction('notes.md', 'Rename')
+    const renameForm = screen.getByRole('form', { name: 'Rename resource' })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('New name'), { target: { value: 'x.md' } })
+      fireEvent.click(renameForm.querySelector('button[type="submit"]')!)
+      await Promise.resolve()
+    })
+    expect(renameResource).toHaveBeenCalledWith('f1', 'x.md', 'main', 1)
+
+    await chooseResourceAction('notes.md', 'Delete')
+    const deleteDialog = screen.getByRole('dialog', { name: 'Delete notes.md?' })
+    await act(async () => {
+      fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
+      await Promise.resolve()
+    })
+    expect(deleteResource).toHaveBeenCalledWith('f1', 'main', 1)
+
+    await chooseResourceAction('notes.md', 'Move to…')
+    const moveDialog = await screen.findByRole('dialog', { name: 'Move file notes.md' })
+    expect(await within(moveDialog).findByRole('button', { name: 'Destination' })).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(within(moveDialog).getByRole('button', { name: 'Destination' }))
+    })
+    await act(async () => {
+      fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (Destination)' }))
+    })
+
+    expect(moveResource).toHaveBeenCalledWith('f1', 'dest-1', 'main', 1, undefined, null)
+  })
+
+  it('the home root row and its breadcrumb menu offer no Rename, Move or Delete', async () => {
+    const ownerBits = {
+      held: ['read', 'write', 'delete', 'manage_acl'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }
+    const homeRow = {
+      resourceId: 'home-1',
+      rid: 'home-1',
+      gfsUri: 'gfs://main/home-1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'My home',
+      kind: 'directory' as const,
+      path: '/Users/me',
+      version: 4,
+      bytes: 0,
+      permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+    }
+    const siblingRow = {
+      ...homeRow,
+      resourceId: 'sibling-1',
+      rid: 'sibling-1',
+      gfsUri: 'gfs://main/sibling-1',
+      name: 'Team folder',
+      path: '/Team folder',
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+      accessibleResources: [homeRow, siblingRow],
+    })
+    renderFilesPage()
+
+    // The row itself: no inline Rename and no drag source on the home root,
+    // while the sibling with the same owner bits keeps both.
+    expect(screen.queryByRole('button', { name: 'Rename My home' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Rename Team folder' })).toBeTruthy()
+    expect(screen.getByTitle('Drag Team folder into a folder to move it')).toBeTruthy()
+    expect(screen.queryByTitle('Drag My home into a folder to move it')).toBeNull()
+
+    // Root row menu: the governed home root offers none of the three.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for My home' }))
+    })
+    const homeItems = screen.getAllByRole('menuitem').map(item => item.textContent)
+    expect(homeItems).not.toContain('Rename')
+    expect(homeItems).not.toContain('Move to…')
+    expect(homeItems).not.toContain('Delete')
+    // Witness: the same menu is alive and still offers its other actions.
+    expect(homeItems).toContain('Share')
+    expect(homeItems).toContain('Open EvenDrive link')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    })
+    expect(
+      within(screen.getByRole('menu', { name: 'Share options for My home' })).getByRole(
+        'menuitem',
+        {
+          name: 'Copy link',
+        }
+      )
+    ).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for My home' }))
+    })
+
+    // A sibling row with the SAME owner bits keeps Rename: the gate is the
+    // governed root, not the permission set.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Team folder' }))
+    })
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toContain('Rename')
+    cleanup()
+
+    // Breadcrumb menu for the same governed root.
+    const homeCrumb = {
+      resourceId: 'home-1',
+      gfsUri: 'gfs://main/home-1',
+      name: 'My home',
+      kind: 'directory' as const,
+      version: 4,
+      bytes: 0,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+      current: homeCrumb,
+      crumbs: [homeCrumb],
+      affordances: ownerBits,
+    })
+    renderFilesPage()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for My home' }))
+    })
+    const crumbItems = screen.getAllByRole('menuitem').map(item => item.textContent)
+    expect(crumbItems).not.toContain('Rename')
+    expect(crumbItems).not.toContain('Move to…')
+    expect(crumbItems).not.toContain('Delete')
+    // Witness: the breadcrumb menu itself is rendered with its other actions.
+    expect(crumbItems).toContain('Share')
+    expect(crumbItems).toContain('Download as zip')
+  })
 })
 
 // ── folder drag moves + conflict parity (rev-2 D1) ───────────────────────────
@@ -7231,7 +7439,14 @@ describe('FilesPage — folder drag-and-drop', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
     })
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('folder-src', 'archive-1', 4, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'archive-1',
+        'main',
+        4,
+        undefined,
+        'folder-1'
+      )
     })
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Moved Projects to Archive', 'success')
@@ -7423,7 +7638,14 @@ describe('FilesPage — folder drag-and-drop', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
     })
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('folder-src', 'folder-0', 4, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'folder-0',
+        'main',
+        4,
+        undefined,
+        'folder-1'
+      )
     })
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Moved Projects to Product', 'success')
@@ -7503,13 +7725,15 @@ describe('FilesPage — folder drag-and-drop', () => {
   it('a file conflict resolves with a numbered whole-resource rename (CU parity)', async () => {
     const pushToast = vi.fn()
     let conflicted = false
-    const moveResource = vi.fn(async (_id: string, _dest: string, _v: number, newName?: string) => {
-      if (newName === undefined && !conflicted) {
-        conflicted = true
-        throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
+    const moveResource = vi.fn(
+      async (_id: string, _dest: string, _drive: string, _v: number, newName?: string) => {
+        if (newName === undefined && !conflicted) {
+          conflicted = true
+          throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
+        }
+        return { resourceId: 'file-1', version: 6 }
       }
-      return { resourceId: 'file-1', version: 6 }
-    })
+    )
     const affordances = vi.fn(async (resourceId: string) => {
       if (resourceId === 'folder-1') return { held: ['read', 'write', 'delete'] }
       return { held: ['read', 'write'] }
@@ -7590,6 +7814,7 @@ describe('FilesPage — folder drag-and-drop', () => {
     expect(moveResource).toHaveBeenLastCalledWith(
       'file-1',
       'archive-1',
+      'main',
       3,
       'notes (1).txt',
       'folder-1'

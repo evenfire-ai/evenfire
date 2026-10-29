@@ -77,6 +77,7 @@ function FileExplorerNode({
   level,
   scope,
   accessActive,
+  homeResourceId,
   expandedIds,
   selectedId,
   movingResourceId,
@@ -107,6 +108,10 @@ function FileExplorerNode({
   // refuse it with a toast instead of a later download/preview 403. Absent
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
+  // The home root is governed: the server refuses to move it, so the row is
+  // never a drag source and offers no Move action. A sibling row with the same
+  // owner bits still drags.
+  const isHomeRoot = homeResourceId != null && node.resourceId === homeResourceId
 
   const childQueryKey = desktopQueryKeys.gfsChildren(scope, node.resourceId, node.drive)
   const childQuery = useInfiniteQuery({
@@ -195,13 +200,15 @@ function FileExplorerNode({
       }
       // Shift+F10 opens the Move dialog for the focused row — the keyboard
       // path after the visible per-row Move button was rejected as clutter.
+      // A governed home root has no Move action to offer.
       if (event.shiftKey && event.key === 'F10') {
+        if (isHomeRoot) return
         event.preventDefault()
         clearClickTimer()
         onRequestMove(node, ancestorCrumbs)
       }
     },
-    [ancestorCrumbs, clearClickTimer, node, onRequestMove, runActivate]
+    [ancestorCrumbs, clearClickTimer, isHomeRoot, node, onRequestMove, runActivate]
   )
 
   const handleDragStart = useCallback(
@@ -214,7 +221,7 @@ function FileExplorerNode({
   )
 
   const isDirectoryRow = isDirectory
-  const canDrag = isUnreadable !== true && movingResourceId == null
+  const canDrag = isUnreadable !== true && movingResourceId == null && !isHomeRoot
 
   // Hover a collapsed directory for FOLDER_HOVER_EXPAND_DELAY_MS to expand it
   // through its existing loader (rev-2 §4.1). The timer is owned here so a
@@ -394,6 +401,7 @@ function FileExplorerNode({
               dropState={dropStatesByResourceId[child.resourceId]}
               dropStatesByResourceId={dropStatesByResourceId}
               expandedIds={expandedIds}
+              homeResourceId={homeResourceId}
               key={child.resourceId}
               level={level + 1}
               movingResourceId={movingResourceId}
@@ -458,7 +466,6 @@ export function FileExplorerTree({
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
     scope: ctrl.sessionScope,
-    drive: ctrl.drive,
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
@@ -545,17 +552,18 @@ export function FileExplorerTree({
   const roots = useMemo(() => sortTreeItems(ctrl.accessibleResources), [ctrl.accessibleResources])
 
   /** Cached destination names for the numbered-name ladder and suggestion —
-   * the same shared children cache the Files page seeds its commit from. */
+   * the same shared children cache the Files page seeds its commit from, keyed
+   * by the destination node's own drive. */
   const cachedDestinationNames = useCallback(
-    (destinationId: string): Set<string> => {
+    (destinationId: string, drive: string): Set<string> => {
       const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsBrowserChild[] }> }>(
-        desktopQueryKeys.gfsChildren(ctrl.sessionScope ?? 'anonymous', destinationId, ctrl.drive)
+        desktopQueryKeys.gfsChildren(ctrl.sessionScope ?? 'anonymous', destinationId, drive)
       )
       return new Set(
         (cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? [])
       )
     },
-    [ctrl.drive, ctrl.sessionScope, queryClient]
+    [ctrl.sessionScope, queryClient]
   )
 
   const handleToggle = useCallback((resourceId: string) => {
@@ -663,15 +671,14 @@ export function FileExplorerTree({
     [adjudication, dragSession, treeDragSourceFrom]
   )
 
+  /** A provider owns transport identity; the drive is checked per destination
+   * row, never against the controller's open location (the tree's root rows
+   * carry their own drive and no folder need be open). */
   const resolveActiveSource = useCallback((): GfsDragSource | null => {
     if (!dragSession) return draggingSourceRef.current
     const source = dragSession.activeSource()
-    return source &&
-      dragSession.matchesScope(ctrl.sessionScope ?? 'anonymous') &&
-      source.drive === ctrl.drive
-      ? source
-      : null
-  }, [ctrl.drive, ctrl.sessionScope, dragSession])
+    return source && dragSession.matchesScope(ctrl.sessionScope ?? 'anonymous') ? source : null
+  }, [ctrl.sessionScope, dragSession])
 
   const handleNodeDragOver = useCallback(
     (
@@ -684,8 +691,9 @@ export function FileExplorerTree({
       // Self-hover is NO longer skipped: dropping an item onto itself paints
       // the denied verdict with its `self` reason, so the release can explain
       // itself instead of looking dead (UX matrix §5.3). Admission still
-      // refuses the mutation.
-      if (!source || node.kind !== 'directory') return
+      // refuses the mutation. Cross-drive targeting is refused for the same
+      // reason admission refuses it: the destination row owns the drive.
+      if (!source || node.kind !== 'directory' || source.drive !== node.drive) return
       event.preventDefault()
       event.stopPropagation()
       hoverOwnerRef.current = source
@@ -714,6 +722,7 @@ export function FileExplorerTree({
       if (verdict.state === 'checking') {
         adjudication.scheduleColdCheck(
           { resourceId: node.resourceId, name: node.name, kind: node.kind, ancestorIds },
+          node.drive,
           source.parentKnown ? source.parentResourceId : null,
           () => {
             if (hoverOwnerRef.current !== source) return
@@ -766,17 +775,27 @@ export function FileExplorerTree({
       try {
         return await runGfsMoveCommit(
           {
+            // The move runs on the dragged row's drive: admission compared it
+            // with the destination node's, and the convergence must key it.
             moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
-              ctrl.moveResource(resourceId, destinationId, ifMatch, newName, oldParentId),
+              ctrl.moveResource(
+                resourceId,
+                destinationId,
+                source.drive,
+                ifMatch,
+                newName,
+                oldParentId
+              ),
             handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
-            convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
+            convergeCommittedMove: (input, receipt) =>
+              ctrl.convergeCommittedMove({ ...input, drive: source.drive }, receipt),
             pushToast,
           },
           {
             source,
             destination,
             allowNumberedRename,
-            occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+            occupiedDestinationNames: cachedDestinationNames(destination.resourceId, source.drive),
             ...(isCurrent ? { isCurrent } : {}),
           }
         )
@@ -800,7 +819,14 @@ export function FileExplorerTree({
       setDropStatesByResourceId({})
       setDropVerdictAnnouncement('')
       const source = resolveActiveSource()
-      if (!source || node.kind !== 'directory' || movingResourceIdRef.current) return
+      if (
+        !source ||
+        node.kind !== 'directory' ||
+        // The destination row owns the drive: a root drop needs no open folder.
+        source.drive !== node.drive ||
+        movingResourceIdRef.current
+      )
+        return
       const epoch = dragSessionEpochRef.current
       const sessionGeneration = dragSession?.currentGeneration() ?? null
       const scopeAtDrop = liveDragScopeRef.current
@@ -846,7 +872,7 @@ export function FileExplorerTree({
           return
         }
         if (source.kind === 'directory') {
-          const occupied = cachedDestinationNames(node.resourceId)
+          const occupied = cachedDestinationNames(node.resourceId, node.drive)
           const suggested = suggestNumberedMoveName(source.name, occupied)
           setPendingFolderMove({
             source,
@@ -1054,6 +1080,7 @@ export function FileExplorerTree({
               dropState={dropStatesByResourceId[node.resourceId]}
               dropStatesByResourceId={dropStatesByResourceId}
               expandedIds={expandedIds}
+              homeResourceId={ctrl.home?.resourceId ?? null}
               key={node.resourceId}
               level={1}
               movingResourceId={movingResourceId}
@@ -1121,7 +1148,10 @@ export function FileExplorerTree({
           onClose={() => setMoveDialogTarget(null)}
           onMove={async (destinationId, destinationName) => {
             const target = moveDialogTarget
-            const allowNumberedRename = await adjudication.probeSourceWrite(target.node.resourceId)
+            const allowNumberedRename = await adjudication.probeSourceWrite(
+              target.node.resourceId,
+              target.node.drive
+            )
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,

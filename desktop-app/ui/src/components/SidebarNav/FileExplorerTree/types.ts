@@ -27,6 +27,10 @@ export interface FileExplorerNodeProps {
   /** Session access is live: gates the per-node children fetch the same way the
    *  controller gates its own children query — a revoked session fetches nothing. */
   accessActive: boolean
+  /** The caller's home root, when one exists. It is a governed root: the server
+   *  refuses to move or rename it, so its row is never a drag source and offers
+   *  no Move action. */
+  homeResourceId: string | null
   expandedIds: ReadonlySet<string>
   selectedId: string | null
   /** Resource id currently being moved (freezes drag starts), when a move the

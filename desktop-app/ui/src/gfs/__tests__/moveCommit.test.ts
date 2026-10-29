@@ -166,6 +166,33 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
     }
     expect(moveResource).toHaveBeenCalledTimes(3)
   })
+
+  it('stops on governed_root_immutable without a numbered retry', async () => {
+    // A home root is governed: the server answers 409 with this code and
+    // retrying "Name (2)" can only repeat the same refusal.
+    const moveResource = vi.fn(
+      async (
+        _id: string,
+        _dest: string,
+        _ifMatch: number,
+        _newName?: string,
+        _oldParentId?: string | null
+      ) => {
+        throw new Error(
+          '409 Conflict: {"ok":false,"error":{"code":"governed_root_immutable","message":"governed root is immutable"}} httpStatus=409'
+        )
+      }
+    )
+    const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
+
+    expect(outcome).toEqual({
+      status: 'refused',
+      message: 'This folder is managed by Evenfire and cannot be moved or renamed.',
+    })
+    // Witness: one dispatch only, and never a numbered newName.
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(moveResource.mock.calls[0]![3]).toBeUndefined()
+  })
 })
 
 describe('commitGfsMove — server verdicts', () => {

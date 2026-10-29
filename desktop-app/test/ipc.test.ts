@@ -707,25 +707,53 @@ describe('ipc host status stream handlers', () => {
     ).rejects.toThrow('Invalid read share options')
   })
 
-  it.each([{ permissions: ['share'] }, { permissions: [] }])(
-    'forwards the exact read-role intersection $permissions',
-    async ({ permissions }) => {
-      const { event } = makeTrustedEvent()
-      const handler = testState.handlers.get('gfs:createShare')
-      await Promise.resolve(
-        handler?.(event, {
-          resourceId: 'resource-1',
-          subjectKeys: ['user:user-1'],
-          drive: 'main',
-          options: { permissions, includeDescendants: false },
-        })
-      )
-      expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
-        permissions,
-        includeDescendants: false,
+  it('forwards a share-only read role', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    await Promise.resolve(
+      handler?.(event, {
+        resourceId: 'resource-1',
+        subjectKeys: ['user:user-1'],
+        drive: 'main',
+        options: { permissions: ['share'], includeDescendants: false },
       })
+    )
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['share'],
+      includeDescendants: false,
+    })
+  })
+
+  it('rejects an empty read-role intersection before creating the share', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    const payload = {
+      resourceId: 'resource-1',
+      subjectKeys: ['user:user-1'],
+      drive: 'main',
+      options: { permissions: [], includeDescendants: false },
     }
-  )
+    // The server refuses an empty permission set (`permissions_invalid`), so
+    // the IPC boundary must not dispatch it.
+    await expect(Promise.resolve(handler?.(event, payload))).rejects.toThrow(
+      'Invalid read share options'
+    )
+    expect(service.createGfsShare).not.toHaveBeenCalled()
+
+    // Witness: the same handler and service accept the neighbouring read role,
+    // so the refusal above is the empty set and not a broken call path.
+    await Promise.resolve(
+      handler?.(event, {
+        ...payload,
+        options: { permissions: ['read'], includeDescendants: false },
+      })
+    )
+    expect(service.createGfsShare).toHaveBeenCalledTimes(1)
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['read'],
+      includeDescendants: false,
+    })
+  })
 
   it('rejects an empty or non-array subjectKeys payload before calling AppService', async () => {
     const { event } = makeTrustedEvent()

@@ -219,6 +219,7 @@ function Probe() {
                 ctrl.renameResource(
                   ctrl.current.resourceId,
                   'Renamed report.md',
+                  ctrl.drive,
                   ctrl.current.version
                 )
               )
@@ -258,7 +259,12 @@ function Probe() {
         onClick={() =>
           ctrl.current
             ? swallow(
-                ctrl.moveResource(ctrl.current.resourceId, 'destination-1', ctrl.current.version)
+                ctrl.moveResource(
+                  ctrl.current.resourceId,
+                  'destination-1',
+                  ctrl.drive,
+                  ctrl.current.version
+                )
               )
             : undefined
         }
@@ -270,6 +276,49 @@ function Probe() {
       </button>
       <button type="button" onClick={() => swallow(ctrl.retryDiscovery())}>
         retry discovery
+      </button>
+    </>
+  )
+}
+
+/** Row mutations called with an explicit drive, as the Files page and the
+ *  sidebar do — no open location is needed to name the drive. */
+function DriveMutationProbe() {
+  const ctrl = useGfsBrowserController()
+  return (
+    <>
+      <div data-testid="drive">{ctrl.drive}</div>
+      <div data-testid="home-state">{ctrl.home?.state ?? 'none'}</div>
+      <button type="button" onClick={() => swallow(ctrl.renameResource('f1', 'x.md', 'main', 1))}>
+        rename row
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.deleteResource('f1', 'main', 1))}>
+        delete row
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.moveResource('f1', 'dest-1', 'main', 1))}>
+        move row
+      </button>
+    </>
+  )
+}
+
+/** Root-vs-folder gate for the selected-row affordances observer. */
+function RowAffordancesProbe() {
+  const ctrl = useGfsBrowserController()
+  return (
+    <>
+      <div data-testid="drive">{ctrl.drive}</div>
+      <div data-testid="row-affordances">{ctrl.rowAffordances?.held.join(',') ?? 'none'}</div>
+      {ctrl.accessibleResources.map(resource => (
+        <div data-testid={`root-${resource.resourceId}`} key={resource.resourceId}>
+          {resource.name}
+        </div>
+      ))}
+      <button type="button" onClick={() => ctrl.setRowAffordancesResourceId('f1')}>
+        select root row
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/folder-1'))}>
+        open folder
       </button>
     </>
   )
@@ -375,6 +424,113 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('pending'))
     expect(getHome).toHaveBeenCalledTimes(2)
     expect(listAccessible).toHaveBeenCalledTimes(2)
+  })
+
+  it("sends the caller's drive on rename/delete/move while the home is pending", async () => {
+    const renameResource = vi.fn(async () => ({ resourceId: 'f1', version: 2 }))
+    const deleteResource = vi.fn(async () => ({}))
+    const moveResource = vi.fn(async () => ({ resourceId: 'f1', version: 3 }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () =>
+            homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+          ),
+          listAccessible: vi.fn(async () => listAccessiblePage([])),
+          renameResource,
+          deleteResource,
+          moveResource,
+        },
+      },
+    })
+    render(<DriveMutationProbe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('pending'))
+    // The open location has no drive at all, so the caller's argument is the
+    // only drive the IPC call may carry.
+    expect(screen.getByTestId('drive').textContent).toBe('')
+
+    await act(async () => screen.getByRole('button', { name: 'rename row' }).click())
+    await act(async () => screen.getByRole('button', { name: 'delete row' }).click())
+    await act(async () => screen.getByRole('button', { name: 'move row' }).click())
+
+    await waitFor(() => expect(renameResource).toHaveBeenCalledWith('f1', 'x.md', 'main', 1))
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith('f1', 'main', 1))
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith('f1', 'dest-1', 'main', 1, undefined)
+    )
+  })
+
+  it("sends the caller's drive on rename/delete/move when the home is missing", async () => {
+    const renameResource = vi.fn(async () => ({ resourceId: 'f1', version: 2 }))
+    const deleteResource = vi.fn(async () => ({}))
+    const moveResource = vi.fn(async () => ({ resourceId: 'f1', version: 3 }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () => {
+            throw new Error('404 Not Found: home_not_found')
+          }),
+          listAccessible: vi.fn(async () => listAccessiblePage([])),
+          renameResource,
+          deleteResource,
+          moveResource,
+        },
+      },
+    })
+    render(<DriveMutationProbe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('none'))
+    expect(screen.getByTestId('drive').textContent).toBe('')
+
+    await act(async () => screen.getByRole('button', { name: 'rename row' }).click())
+    await act(async () => screen.getByRole('button', { name: 'delete row' }).click())
+    await act(async () => screen.getByRole('button', { name: 'move row' }).click())
+
+    await waitFor(() => expect(renameResource).toHaveBeenCalledWith('f1', 'x.md', 'main', 1))
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith('f1', 'main', 1))
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith('f1', 'dest-1', 'main', 1, undefined)
+    )
+  })
+
+  it('does not request selected-row affordances at the root', async () => {
+    const affordances = vi.fn(async () => heldAffordances(['read', 'write']))
+    const listAccessible = vi.fn(async () =>
+      listAccessiblePage([accessibleResource('f1', 'Shared folder', 'directory')])
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getHome: vi.fn(async () =>
+            homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+          ),
+          listAccessible,
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances,
+          resolve: vi.fn(async () => resolveResource(resolvedDirectory('folder-1', 'Folder'))),
+        },
+      },
+    })
+    render(<RowAffordancesProbe />, { wrapper: Harness })
+
+    // Witness: discovery landed and the root row is rendered.
+    await waitFor(() => expect(screen.getByTestId('root-f1').textContent).toBe('Shared folder'))
+    expect(listAccessible).toHaveBeenCalled()
+    expect(screen.getByTestId('drive').textContent).toBe('')
+
+    await act(async () => screen.getByRole('button', { name: 'select root row' }).click())
+    expect(screen.getByTestId('row-affordances').textContent).toBe('none')
+    // No folder is open, so the root row never asks for per-row bits.
+    expect(affordances).not.toHaveBeenCalled()
+
+    // The SAME selection inside an open folder DOES request them, so the
+    // assertion above is a gate, not a query that can never run.
+    await act(async () => screen.getByRole('button', { name: 'open folder' }).click())
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('f1', 'main'))
   })
 
   it('keeps a known home drive on discovery requests', async () => {
@@ -3005,6 +3161,7 @@ function ManageProbe() {
               {
                 resourceId: ctrl.crumbs[0]?.resourceId ?? '',
                 destinationId: 'destination-1',
+                drive: 'main',
                 oldParentId: null,
               },
               { version: 2 }
@@ -3853,6 +4010,7 @@ function TwoSurfaceProbe() {
               {
                 resourceId: 'ancestor-1',
                 destinationId: 'destination-1',
+                drive: 'main',
                 oldParentId: null,
               },
               { version: 2 }

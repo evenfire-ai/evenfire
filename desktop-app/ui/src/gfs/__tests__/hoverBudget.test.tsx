@@ -62,8 +62,8 @@ async function setup(provider = true) {
   const hook = renderHook(
     () => {
       const session = useGfsDragSession()
-      const first = useGfsDragAdjudication({ scope, drive: 'main', resolve: vi.fn() })
-      const second = useGfsDragAdjudication({ scope, drive: 'main', resolve: vi.fn() })
+      const first = useGfsDragAdjudication({ scope, resolve: vi.fn() })
+      const second = useGfsDragAdjudication({ scope, resolve: vi.fn() })
       return { session, first, second }
     },
     { wrapper }
@@ -102,14 +102,14 @@ describe('gesture-owned hover budget (R1-M2)', () => {
       const h = await setup(provider)
       const done = vi.fn()
       for (let i = 0; i < 20; i++)
-        h.result.current.first.scheduleColdCheck(target(`canceled-${i}`), null, done)
+        h.result.current.first.scheduleColdCheck(target(`canceled-${i}`), 'main', null, done)
       await h.dwell()
       expect(h.affordances.mock.calls.map(call => call[0])).toEqual(['canceled-19'])
       for (let i = 1; i < DRAG_COLD_CHECK_BUDGET; i++) {
-        h.result.current.first.scheduleColdCheck(target(`next-${i}`), null, done)
+        h.result.current.first.scheduleColdCheck(target(`next-${i}`), 'main', null, done)
         await h.dwell()
       }
-      h.result.current.first.scheduleColdCheck(target('over-budget'), null, done)
+      h.result.current.first.scheduleColdCheck(target('over-budget'), 'main', null, done)
       await h.dwell()
       expect(h.affordances).toHaveBeenCalledTimes(DRAG_COLD_CHECK_BUDGET)
       expect(done).toHaveBeenCalledTimes(DRAG_COLD_CHECK_BUDGET)
@@ -122,6 +122,7 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     for (let i = 0; i <= DRAG_COLD_CHECK_BUDGET; i++) {
       h.result.current[i % 2 ? 'second' : 'first'].scheduleColdCheck(
         target(`target-${i}`),
+        'main',
         null,
         done
       )
@@ -130,7 +131,7 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     expect(h.affordances).toHaveBeenCalledTimes(DRAG_COLD_CHECK_BUDGET)
     expect(done).toHaveBeenCalledTimes(DRAG_COLD_CHECK_BUDGET)
     // Cached verdicts consume no budget even after all cold leases are spent.
-    h.result.current.second.scheduleColdCheck(target('target-0'), null, done)
+    h.result.current.second.scheduleColdCheck(target('target-0'), 'main', null, done)
     await h.dwell()
     expect(done).toHaveBeenCalledTimes(DRAG_COLD_CHECK_BUDGET + 1)
     expect(h.affordances).toHaveBeenCalledTimes(DRAG_COLD_CHECK_BUDGET)
@@ -145,15 +146,15 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     const h = await setup()
     h.block('a')
     h.block('b')
-    h.result.current.first.scheduleColdCheck(target('a'), null, vi.fn())
+    h.result.current.first.scheduleColdCheck(target('a'), 'main', null, vi.fn())
     await h.dwell()
-    h.result.current.second.scheduleColdCheck(target('b'), null, vi.fn())
+    h.result.current.second.scheduleColdCheck(target('b'), 'main', null, vi.fn())
     await h.dwell()
-    h.result.current.first.scheduleColdCheck(target('c'), null, vi.fn())
+    h.result.current.first.scheduleColdCheck(target('c'), 'main', null, vi.fn())
     await h.dwell()
     expect(h.affordances.mock.calls.map(call => call[0])).toEqual(['a', 'b'])
     await h.complete('a')
-    h.result.current.first.scheduleColdCheck(target('c'), null, vi.fn())
+    h.result.current.first.scheduleColdCheck(target('c'), 'main', null, vi.fn())
     await h.dwell()
     expect(h.affordances.mock.calls.map(call => call[0])).toEqual(['a', 'b', 'c'])
     await h.complete('b')
@@ -166,13 +167,13 @@ describe('gesture-owned hover budget (R1-M2)', () => {
       const stale = vi.fn()
       if (warm)
         h.queryClient.setQueryData(desktopQueryKeys.gfsAffordances(scope, 'old', 'main'), h.bits)
-      h.result.current.first.scheduleColdCheck(target('old'), null, stale)
+      h.result.current.first.scheduleColdCheck(target('old'), 'main', null, stale)
       h.begin('new', 'second')
       await h.dwell()
       expect(h.affordances).not.toHaveBeenCalled()
       expect(stale).not.toHaveBeenCalled()
       for (let i = 0; i < DRAG_COLD_CHECK_BUDGET; i++) {
-        h.result.current.second.scheduleColdCheck(target(`new-${i}`), null, vi.fn())
+        h.result.current.second.scheduleColdCheck(target(`new-${i}`), 'main', null, vi.fn())
         await h.dwell()
       }
       expect(h.affordances).toHaveBeenCalledTimes(DRAG_COLD_CHECK_BUDGET)
@@ -184,7 +185,7 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     if (warm)
       h.queryClient.setQueryData(desktopQueryKeys.gfsAffordances(scope, 'ended', 'main'), h.bits)
     const done = vi.fn()
-    h.result.current.second.scheduleColdCheck(target('ended'), null, done)
+    h.result.current.second.scheduleColdCheck(target('ended'), 'main', null, done)
     h.result.current.session!.endDrag()
     await h.dwell()
     expect(h.affordances).not.toHaveBeenCalled()
@@ -195,7 +196,7 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     const h = await setup()
     h.block('a')
     const done = vi.fn()
-    h.result.current.first.scheduleColdCheck(target('a'), 'parent', done)
+    h.result.current.first.scheduleColdCheck(target('a'), 'main', 'parent', done)
     await h.dwell()
     expect(h.affordances).toHaveBeenCalledTimes(1)
     h.begin('b', 'second')
@@ -205,11 +206,11 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     // Late A completion cannot reduce/inflate B's in-flight ledger.
     h.block('b1')
     h.block('b2')
-    h.result.current.first.scheduleColdCheck(target('b1'), null, vi.fn())
+    h.result.current.first.scheduleColdCheck(target('b1'), 'main', null, vi.fn())
     await h.dwell()
-    h.result.current.second.scheduleColdCheck(target('b2'), null, vi.fn())
+    h.result.current.second.scheduleColdCheck(target('b2'), 'main', null, vi.fn())
     await h.dwell()
-    h.result.current.first.scheduleColdCheck(target('b3'), null, vi.fn())
+    h.result.current.first.scheduleColdCheck(target('b3'), 'main', null, vi.fn())
     await h.dwell()
     expect(h.affordances.mock.calls.map(call => call[0])).toEqual(['a', 'b1', 'b2'])
     await h.complete('b1')
@@ -220,7 +221,7 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     const h = await setup()
     h.block('a')
     const done = vi.fn()
-    h.result.current.second.scheduleColdCheck(target('a'), 'parent', done)
+    h.result.current.second.scheduleColdCheck(target('a'), 'main', 'parent', done)
     await h.dwell()
     h.result.current.session!.endDrag()
     await h.complete('a')
@@ -245,14 +246,14 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     })
     const done = vi.fn()
     for (let i = 0; i < DRAG_COLD_CHECK_BUDGET; i++) {
-      h.result.current.first.scheduleColdCheck(target('bad'), null, done)
+      h.result.current.first.scheduleColdCheck(target('bad'), 'main', null, done)
       await h.dwell()
     }
     // The failing target was probed once; the budget still has room for the
     // targets that answer.
     expect(h.affordances.mock.calls.map(call => call[0])).toEqual(['bad'])
 
-    h.result.current.first.scheduleColdCheck(target('good'), null, done)
+    h.result.current.first.scheduleColdCheck(target('good'), 'main', null, done)
     await h.dwell()
     expect(h.affordances.mock.calls.map(call => call[0])).toContain('good')
   })
@@ -260,7 +261,7 @@ describe('gesture-owned hover budget (R1-M2)', () => {
   it('cancels a pending dwell when its hook unmounts', async () => {
     const h = await setup()
     const done = vi.fn()
-    h.result.current.first.scheduleColdCheck(target('unmounted'), null, done)
+    h.result.current.first.scheduleColdCheck(target('unmounted'), 'main', null, done)
     h.unmount()
     await h.dwell()
     expect(h.affordances).not.toHaveBeenCalled()

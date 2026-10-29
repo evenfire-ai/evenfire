@@ -567,14 +567,19 @@ export class GfsClient {
     opts?: { drive?: string; cursor?: string; signal?: AbortSignal }
   ): Promise<GfsChildrenPage> {
     const q = new URLSearchParams()
-    q.set('drive', requireDrive(opts?.drive))
+    // `drive` is optional in the documented SDK contract: an absent drive lets
+    // the server apply its own default, while an explicitly empty one is still a
+    // caller error. Same rule as `listAccessible` below.
+    if (opts?.drive !== undefined) q.set('drive', requireDrive(opts.drive))
     if (opts?.cursor) q.set('cursor', opts.cursor)
+    const query = q.toString()
     try {
       const payload = await this.transport.requestJson<GfsEnvelope<GfsChildrenPage>>(
         'GET',
         joinUrl(
           this.transport.baseUrl,
-          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children?${q.toString()}`
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children` +
+            (query ? `?${query}` : '')
         ),
         { token, signal: opts?.signal }
       )

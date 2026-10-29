@@ -32,7 +32,6 @@ interface ResolvedLike {
 
 export interface GfsDragAdjudicationDeps {
   scope: string | null
-  drive: string
   /** Resolve by stable URI (read plane; 403/404/429 throw). */
   resolve: (gfsUri: string) => Promise<ResolvedLike>
   /**
@@ -145,24 +144,24 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
   )
 
   const readCachedAffordances = useCallback(
-    (resourceId: string): HeldAffordances | null => {
+    (resourceId: string, drive: string): HeldAffordances | null => {
       if (!deps.scope) return null
       return (
         queryClient.getQueryData<HeldAffordances>(
-          desktopQueryKeys.gfsAffordances(deps.scope, resourceId, deps.drive)
+          desktopQueryKeys.gfsAffordances(deps.scope, resourceId, drive)
         ) ?? null
       )
     },
-    [deps.drive, deps.scope, queryClient]
+    [deps.scope, queryClient]
   )
 
   const fetchAffordances = useCallback(
-    async (resourceId: string, staleTime: number): Promise<AffordancesProbe> => {
+    async (resourceId: string, drive: string, staleTime: number): Promise<AffordancesProbe> => {
       if (!deps.scope) return { ok: false, error: new Error('No active session scope') }
       try {
         const held = await queryClient.fetchQuery({
-          queryKey: desktopQueryKeys.gfsAffordances(deps.scope, resourceId, deps.drive),
-          queryFn: () => window.clerum.gfs.affordances(resourceId, deps.drive),
+          queryKey: desktopQueryKeys.gfsAffordances(deps.scope, resourceId, drive),
+          queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
           staleTime,
         })
         return { ok: true, held: held.held }
@@ -173,7 +172,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         return { ok: false, error }
       }
     },
-    [deps.drive, deps.scope, queryClient, reportAuthorityFailure]
+    [deps.scope, queryClient, reportAuthorityFailure]
   )
 
   /** Warm hover verdict: cached structure + cached bits; ZERO network reads. */
@@ -195,10 +194,10 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       if (structure.kind === 'deny') {
         return { state: 'denied', reason: structure.reason }
       }
-      const destinationHeld = readCachedAffordances(target.resourceId)
+      const destinationHeld = readCachedAffordances(target.resourceId, source.drive)
       const sourceParentHeld = source.parentKnown
         ? source.parentResourceId !== null
-          ? readCachedAffordances(source.parentResourceId)
+          ? readCachedAffordances(source.parentResourceId, source.drive)
           : null
         : null
       if (destinationHeld === null || (source.parentKnown && sourceParentHeld === null)) {
@@ -220,7 +219,12 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
   /** A dwell belongs to its schedule-time gesture. Canceled/warm checks are
    * free; a cold chain acquires one shared slot only when it dispatches. */
   const scheduleColdCheck = useCallback(
-    (target: GfsDropTargetFact, sourceParentId: string | null, onComplete: () => void) => {
+    (
+      target: GfsDropTargetFact,
+      drive: string,
+      sourceParentId: string | null,
+      onComplete: () => void
+    ) => {
       const localGeneration = localGestureRef.current.generation
       const expectedGeneration = session?.currentGeneration() ?? localGeneration
       const isCurrent = () =>
@@ -240,8 +244,8 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         // another budget slot and still answer nothing (RP-022).
         if (failedColdTargetsRef.current.ids.has(target.resourceId)) return
         const warm =
-          readCachedAffordances(target.resourceId) !== null &&
-          (sourceParentId === null || readCachedAffordances(sourceParentId) !== null)
+          readCachedAffordances(target.resourceId, drive) !== null &&
+          (sourceParentId === null || readCachedAffordances(sourceParentId, drive) !== null)
         if (warm) {
           if (isCurrent()) onComplete()
           return
@@ -257,8 +261,12 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         void (async () => {
           try {
             if (!isCurrent()) return
-            if (readCachedAffordances(target.resourceId) === null) {
-              const probe = await fetchAffordances(target.resourceId, AFFORDANCES_HOVER_STALE_MS)
+            if (readCachedAffordances(target.resourceId, drive) === null) {
+              const probe = await fetchAffordances(
+                target.resourceId,
+                drive,
+                AFFORDANCES_HOVER_STALE_MS
+              )
               if (!probe.ok) {
                 // The target answered nothing: remember it for this gesture
                 // and stop — the source-parent probe cannot produce a verdict
@@ -268,8 +276,8 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
               }
             }
             if (!isCurrent()) return
-            if (sourceParentId !== null && readCachedAffordances(sourceParentId) === null) {
-              await fetchAffordances(sourceParentId, AFFORDANCES_HOVER_STALE_MS)
+            if (sourceParentId !== null && readCachedAffordances(sourceParentId, drive) === null) {
+              await fetchAffordances(sourceParentId, drive, AFFORDANCES_HOVER_STALE_MS)
             }
             if (isCurrent()) onComplete()
           } finally {
@@ -428,6 +436,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
 
       const destinationProbe = await fetchAffordances(
         target.resourceId,
+        source.drive,
         AFFORDANCES_MUTATION_STALE_MS
       )
       if (!destinationProbe.ok) {
@@ -435,6 +444,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       }
       const sourceParentProbe = await fetchAffordances(
         sourceParentForProbe,
+        source.drive,
         AFFORDANCES_MUTATION_STALE_MS
       )
       if (!sourceParentProbe.ok) {
@@ -465,7 +475,11 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       // dispatched into a dead session. The probe itself already reported the
       // failure to the surface (which revoked the session), so this only
       // CLASSIFIES it.
-      const sourceProbe = await fetchAffordances(source.resourceId, AFFORDANCES_MUTATION_STALE_MS)
+      const sourceProbe = await fetchAffordances(
+        source.resourceId,
+        source.drive,
+        AFFORDANCES_MUTATION_STALE_MS
+      )
       if (!sourceProbe.ok) {
         const message =
           sourceProbe.error instanceof Error ? sourceProbe.error.message : String(sourceProbe.error)
@@ -496,8 +510,8 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
    * freshness window the mutation probes use (RP-023).
    */
   const probeSourceWrite = useCallback(
-    async (resourceId: string): Promise<boolean> => {
-      const fresh = await fetchAffordances(resourceId, AFFORDANCES_MUTATION_STALE_MS)
+    async (resourceId: string, drive: string): Promise<boolean> => {
+      const fresh = await fetchAffordances(resourceId, drive, AFFORDANCES_MUTATION_STALE_MS)
       return fresh.ok && fresh.held.includes('write')
     },
     [fetchAffordances]

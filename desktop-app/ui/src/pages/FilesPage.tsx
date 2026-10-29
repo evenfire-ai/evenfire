@@ -231,16 +231,17 @@ function mergeErrorMessages(...errors: unknown[]): string | null {
 }
 
 /** A drop destination the drag pipeline can move INTO: a grid folder row or a
- *  breadcrumb crumb. Only the identity fields admission and the commit need. */
-type GfsFolderDropTarget = Pick<GfsDriveResource, 'resourceId' | 'name'> & {
+ *  breadcrumb crumb. Carries the destination's own drive, so admission never
+ *  compares against the open location (a root drop has no folder open). */
+type GfsFolderDropTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'drive'> & {
   kind: 'directory'
 }
 
 /** Any row/header action target — a listing row (GfsDriveResource) or the
  * current breadcrumb (GfsCrumb); both carry the identity fields the delete /
  *  rename / move calls need (kind also powers dialog titles + the move cycle
- *  guard). */
-type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'version'> & {
+ *  guard), and the row's own drive routes the mutation. */
+type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'drive' | 'version'> & {
   kind: 'file' | 'directory'
   /** Present on list rows (GfsBrowserChild) — the move dialog uses it to
    * refuse a no-op move into the folder that already contains the target. */
@@ -453,7 +454,6 @@ export function FilesPage({
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
     scope: sessionScope,
-    drive: ctrl.drive,
     resolve: useCallback((uri: string) => window.clerum.gfs.resolve(uri), []),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
@@ -1414,12 +1414,18 @@ export function FilesPage({
   }
 
   /** A provider owns transport identity; local refs are only a provider-absent fallback. */
-  const resolveActiveSource = (): GfsDragSource | null => {
-    if (!dragSession) return draggingSourceRef.current
+  const resolveActiveSource = (destinationDrive: string): GfsDragSource | null => {
+    if (!dragSession) {
+      const local = draggingSourceRef.current
+      return local && local.drive === destinationDrive ? local : null
+    }
     const source = dragSession.activeSource()
     return source &&
       dragSession.matchesScope(sessionScope ?? 'anonymous') &&
-      source.drive === ctrl.drive
+      // Admission compares against the DESTINATION's drive, never the open
+      // location: a root listing has no folder open, so the controller's
+      // current drive is empty while every row still carries its own.
+      source.drive === destinationDrive
       ? source
       : null
   }
@@ -1485,7 +1491,7 @@ export function FilesPage({
 
   const handleFolderDragOver = (event: ReactDragEvent<HTMLElement>, folder: GfsDriveResource) => {
     if (!hasDraggedGfsResource(event)) return
-    const source = resolveActiveSource()
+    const source = resolveActiveSource(folder.drive)
     // Self-hover is NO longer skipped: dropping an item onto itself paints the
     // denied verdict with its `self` reason, so the release can explain itself
     // instead of looking dead (UX matrix §5.3). Admission still refuses.
@@ -1521,6 +1527,7 @@ export function FilesPage({
     if (verdict.state === 'checking') {
       adjudication.scheduleColdCheck(
         target,
+        folder.drive,
         source.parentKnown ? source.parentResourceId : null,
         () => {
           if (hoverOwnerRef.current !== source || hoveredFolderRef.current !== folder.resourceId)
@@ -1565,7 +1572,7 @@ export function FilesPage({
     index: number
   ) => {
     if (!hasDraggedGfsResource(event)) return
-    const source = resolveActiveSource()
+    const source = resolveActiveSource(ctrl.drive)
     if (!source) return
     event.preventDefault()
     event.stopPropagation()
@@ -1588,6 +1595,7 @@ export function FilesPage({
     if (verdict.state === 'checking') {
       adjudication.scheduleColdCheck(
         target,
+        ctrl.drive,
         source.parentKnown ? source.parentResourceId : null,
         () => {
           if (hoverOwnerRef.current !== source || hoveredFolderRef.current !== crumb.resourceId)
@@ -1603,10 +1611,11 @@ export function FilesPage({
     }
   }
 
-  /** Cached destination names for the suggested numbered-name candidate. */
-  const cachedDestinationNames = (destinationId: string): Set<string> => {
+  /** Cached destination names for the suggested numbered-name candidate, keyed
+   * by the DESTINATION's drive (a root drop has no open folder to borrow it). */
+  const cachedDestinationNames = (destinationId: string, drive: string): Set<string> => {
     const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsDriveResource[] }> }>(
-      desktopQueryKeys.gfsChildren(sessionScope ?? 'anonymous', destinationId, ctrl.drive)
+      desktopQueryKeys.gfsChildren(sessionScope ?? 'anonymous', destinationId, drive)
     )
     return new Set((cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? []))
   }
@@ -1629,17 +1638,27 @@ export function FilesPage({
     try {
       return await runGfsMoveCommit(
         {
+          // The move runs on the source row's drive, never the open location's:
+          // the shared commit's convergence must key the same drive.
           moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
-            ctrl.moveResource(resourceId, destinationId, ifMatch, newName, oldParentId),
+            ctrl.moveResource(
+              resourceId,
+              destinationId,
+              source.drive,
+              ifMatch,
+              newName,
+              oldParentId
+            ),
           handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
-          convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
+          convergeCommittedMove: (input, receipt) =>
+            ctrl.convergeCommittedMove({ ...input, drive: source.drive }, receipt),
           ...(pushToast ? { pushToast } : {}),
         },
         {
           source,
           destination,
           allowNumberedRename,
-          occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+          occupiedDestinationNames: cachedDestinationNames(destination.resourceId, source.drive),
           ...(isCurrent ? { isCurrent } : {}),
         }
       )
@@ -1660,7 +1679,7 @@ export function FilesPage({
     setDragOverFolderId(null)
     setDropStatesById({})
     setDropVerdictAnnouncement('')
-    const source = resolveActiveSource()
+    const source = resolveActiveSource(destination.drive)
     if (!source || destination.kind !== 'directory' || movingResourceRef.current) return
 
     const dragGeneration = dragSessionRef.current
@@ -1710,7 +1729,7 @@ export function FilesPage({
       if (source.kind === 'directory') {
         // The ONE folder confirmation (rev-2 §1): impact + naming policy in a
         // single dialog; dispatch happens on explicit Move.
-        const occupied = cachedDestinationNames(destination.resourceId)
+        const occupied = cachedDestinationNames(destination.resourceId, destination.drive)
         const suggested = suggestNumberedMoveName(source.name, occupied)
         setPendingFolderMove({
           source,
@@ -1810,7 +1829,7 @@ export function FilesPage({
         setRenameOpen(false)
         return
       }
-      await ctrl.renameResource(current.resourceId, name, current.version)
+      await ctrl.renameResource(current.resourceId, name, ctrl.drive, current.version)
       setRenameOpen(false)
       pushToast?.(`Renamed to ${name}`, 'success')
     } catch (renameError) {
@@ -1822,7 +1841,7 @@ export function FilesPage({
   const handleDeleteCurrent = async () => {
     if (!current) return
     try {
-      await ctrl.deleteResource(current.resourceId, current.version)
+      await ctrl.deleteResource(current.resourceId, ctrl.drive, current.version)
       setDeleteOpen(false)
       closeManage()
       pushToast?.(`Deleted ${current.name}`, 'success')
@@ -1834,7 +1853,7 @@ export function FilesPage({
 
   const handleDeleteResource = async (resource: GfsActionTarget) => {
     try {
-      await ctrl.deleteResource(resource.resourceId, resource.version)
+      await ctrl.deleteResource(resource.resourceId, resource.drive, resource.version)
       pushToast?.(`Deleted ${resource.name}`, 'success')
     } catch (deleteError) {
       if (!failClosedOnAuthorizationError(deleteError)) {
@@ -1862,15 +1881,24 @@ export function FilesPage({
     )
   }
 
+  /**
+   * The home root is managed: the server answers `governed_root_immutable` for
+   * a rename, move or delete of it, so the page must not offer those controls.
+   */
+  const isHomeRoot = (resourceId: string): boolean =>
+    ctrl.home?.resourceId != null && resourceId === ctrl.home.resourceId
+
   /** Delete gate for list rows. Shared-with-me rows carry their permission
    * bits directly; child rows use their own server-computed affordances. */
   const rowCanDelete = (resource: GfsDriveResource): boolean => {
+    if (isHomeRoot(resource.resourceId)) return false
     if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'delete')
     return Boolean(resource.permissions?.includes('delete'))
   }
 
   /** Rename needs `write` on the resource itself. */
   const rowCanRename = (resource: GfsDriveResource): boolean => {
+    if (isHomeRoot(resource.resourceId)) return false
     if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'write')
     return Boolean(resource.permissions?.includes('write'))
   }
@@ -1891,8 +1919,8 @@ export function FilesPage({
     const target = moveTarget
     const source: GfsDragSource = {
       resourceId: target.resourceId,
-      gfsUri: `gfs://${ctrl.drive}/${target.resourceId.replace(/-/g, '').toLowerCase()}`,
-      drive: ctrl.drive,
+      gfsUri: `gfs://${target.drive}/${target.resourceId.replace(/-/g, '').toLowerCase()}`,
+      drive: target.drive,
       kind: target.kind,
       name: target.name,
       ...(Number.isSafeInteger(target.version) ? { version: target.version } : {}),
@@ -1905,7 +1933,7 @@ export function FilesPage({
     }
     // Files and explicit dialog moves may use numbered names when the source
     // resource is writable (rev-2 §5).
-    const allowNumberedRename = await adjudication.probeSourceWrite(target.resourceId)
+    const allowNumberedRename = await adjudication.probeSourceWrite(target.resourceId, target.drive)
     const outcome = await runMoveCommit(
       source,
       { resourceId: destinationId, name: destinationName },
@@ -1921,8 +1949,22 @@ export function FilesPage({
     setMoveTarget(null)
   }
 
+  /** The open location as a row-action target. A crumb carries no drive of its
+   * own — the open location's drive is the controller's current drive. */
+  const currentActionTarget = (): GfsActionTarget | null =>
+    current ? { ...current, drive: ctrl.drive } : null
+
   const requestMoveCurrent = () => {
-    if (current) setMoveTarget(current)
+    const target = currentActionTarget()
+    if (target) setMoveTarget(target)
+  }
+  const requestRenameCurrent = () => {
+    const target = currentActionTarget()
+    if (target) openRenameTarget(target)
+  }
+  const requestDeleteCurrent = () => {
+    const target = currentActionTarget()
+    if (target) setDeleteTarget(target)
   }
 
   /** Page-level rename works inline for any row or the current resource; the
@@ -1939,7 +1981,7 @@ export function FilesPage({
         setRenameTarget(null)
         return
       }
-      await ctrl.renameResource(target.resourceId, name, target.version)
+      await ctrl.renameResource(target.resourceId, name, target.drive, target.version)
       setRenameTarget(null)
       pushToast?.(`Renamed to ${name}`, 'success')
     } catch (renameError) {
@@ -1972,28 +2014,32 @@ export function FilesPage({
   /** Single construction path for a FOLDER's ⋯ menu. The parent-view row menu
    *  and the active folder's breadcrumb menu both build their props here, so
    *  their option lists cannot drift apart; only the gates (permission source)
-   *  and the open-navigation action differ per surface. */
+   *  and the open-navigation action differ per surface. The governed home root
+   *  offers neither rename, move nor delete on either surface. */
   const folderMenuPropsFor = (
     folder: GfsDriveResource,
     gates: { canManage: boolean; canRename: boolean; canDelete: boolean },
     actions: { onOpen?: () => void; onOpenChange?: (open: boolean) => void } = {}
-  ) => ({
-    resourceName: folder.name,
-    onManage: gates.canManage ? () => openManage(folder) : undefined,
-    onCopyLink: () => void handleCopyLink(folder.gfsUri),
-    onOpen: actions.onOpen,
-    onOpenGfsLink: () => setOpenLinkOpen(true),
-    onOpenChange: actions.onOpenChange,
-    onRename: gates.canRename ? () => openRenameTarget(folder) : undefined,
-    onMove: () => setMoveTarget(folder),
-    onDelete: gates.canDelete ? () => setDeleteTarget(folder) : undefined,
-    onDownloadZip:
-      folder.readable === false
-        ? undefined
-        : () => {
-            void handleFolderZipDownload(folder)
-          },
-  })
+  ) => {
+    const governedRoot = isHomeRoot(folder.resourceId)
+    return {
+      resourceName: folder.name,
+      onManage: gates.canManage ? () => openManage(folder) : undefined,
+      onCopyLink: () => void handleCopyLink(folder.gfsUri),
+      onOpen: actions.onOpen,
+      onOpenGfsLink: () => setOpenLinkOpen(true),
+      onOpenChange: actions.onOpenChange,
+      onRename: gates.canRename && !governedRoot ? () => openRenameTarget(folder) : undefined,
+      onMove: governedRoot ? undefined : () => setMoveTarget(folder),
+      onDelete: gates.canDelete && !governedRoot ? () => setDeleteTarget(folder) : undefined,
+      onDownloadZip:
+        folder.readable === false
+          ? undefined
+          : () => {
+              void handleFolderZipDownload(folder)
+            },
+    }
+  }
 
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
     const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
@@ -2203,6 +2249,9 @@ export function FilesPage({
                           void handleFolderDrop(event, {
                             resourceId: crumb.resourceId,
                             name: crumb.name,
+                            // A crumb is an ancestor of the open location, so it
+                            // lives on the open location's own drive.
+                            drive: ctrl.drive,
                             kind: 'directory',
                           })
                         }
@@ -2396,11 +2445,11 @@ export function FilesPage({
                             : undefined
                         }
                         onCopyLink={() => void handleCopyLink(current.gfsUri)}
-                        onDelete={canDeleteCurrent ? () => setDeleteTarget(current) : undefined}
+                        onDelete={canDeleteCurrent ? requestDeleteCurrent : undefined}
                         onReplace={
                           canWriteCurrent ? file => void handleReplaceCurrentFile(file) : undefined
                         }
-                        onRename={canWriteCurrent ? () => openRenameTarget(current) : undefined}
+                        onRename={canWriteCurrent ? requestRenameCurrent : undefined}
                         onMove={requestMoveCurrent}
                         onPreview={
                           currentPreviewAvailable ? () => void openFilePreview(current) : undefined
@@ -2478,8 +2527,12 @@ export function FilesPage({
                           dragSourceName ?? undefined
                         )
                       : undefined
+                  // The governed home root never moves; it stays a drop destination.
                   const canDragResource =
-                    resource.readable !== false && movingResourceId === null && !ctrl.mutating
+                    resource.readable !== false &&
+                    movingResourceId === null &&
+                    !ctrl.mutating &&
+                    !isHomeRoot(resource.resourceId)
                   return (
                     <div
                       className="da-grid__row da-grid__row--clickable da-grid__row--compact"
@@ -2537,6 +2590,7 @@ export function FilesPage({
                               void handleFolderDrop(event, {
                                 resourceId: resource.resourceId,
                                 name: resource.name,
+                                drive: resource.drive,
                                 kind: 'directory',
                               })
                           : undefined
@@ -3012,7 +3066,7 @@ export function FilesPage({
           onMove={handleMoveTarget}
           onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
           sessionScope={sessionScope}
-          drive={ctrl.drive}
+          drive={moveTarget.drive}
           target={moveTarget}
         />
       ) : null}

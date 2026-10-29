@@ -828,7 +828,7 @@ function installDndClerum(producers: DndProducers) {
     configurable: true,
     value: {
       gfs: {
-        getHome: vi.fn(async () => homeView()),
+        getHome: producers.getHome ?? vi.fn(async () => homeView()),
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
         listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
         download:
@@ -1929,5 +1929,92 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       })
     })
     expect(await screen.findByRole('dialog', { name: 'Move folder A' })).toBeTruthy()
+  })
+
+  it('drops a folder onto another folder while the home is pending', async () => {
+    // The tree's roots carry their own drive; a pending home means the open
+    // location has none, and the drop must still be admitted on the rows'.
+    const moveResource = vi.fn(async () => ({ resourceId: 'foldera', version: 9 }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folderb') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      const name = id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : 'Grand'
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: id === 'grand' ? null : 'grand',
+        name,
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      getHome: async () =>
+        homeView({ state: 'pending', drive: null, path: null, resourceId: null }),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const dataTransfer = dragTypes()
+    const bTreeItem = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragEnter(bTreeItem, { dataTransfer })
+    fireEvent.dragOver(bTreeItem, { dataTransfer })
+    fireEvent.drop(bTreeItem, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder A to B' })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+
+    await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
+    expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined)
+  })
+
+  it('never offers the governed home root as a drag source or a Move', async () => {
+    const home = await homeView({ resourceId: 'home-1', path: '/Users/me' })
+    installDndClerum({
+      getHome: async () => home,
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('home-1', 'Home root', 'directory'),
+          accessibleResource('sibling-1', 'Team folder', 'directory'),
+        ])
+      ),
+    })
+    renderTreeWithSession()
+
+    const homeRow = await screen.findByRole('button', { name: 'Home root' })
+    expect(homeRow.getAttribute('draggable')).toBe('false')
+    expect(homeRow.getAttribute('title')).toBeNull()
+
+    // Witness: a sibling row with the same owner bits is still a drag source.
+    const siblingRow = screen.getByRole('button', { name: 'Team folder' })
+    expect(siblingRow.getAttribute('draggable')).toBe('true')
+
+    // The keyboard Move path follows the same gate: the sibling opens the
+    // dialog, the governed root does not.
+    await act(async () => {
+      fireEvent.keyDown(homeRow, { key: 'F10', shiftKey: true })
+    })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await act(async () => {
+      fireEvent.keyDown(siblingRow, { key: 'F10', shiftKey: true })
+    })
+    expect(await screen.findByRole('dialog', { name: 'Move folder Team folder' })).toBeTruthy()
   })
 })

@@ -540,7 +540,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       DRIVE
     ),
     queryFn: () => window.clerum.gfs.affordances(rowAffordancesResourceId!, DRIVE),
-    enabled: Boolean(sessionScope) && Boolean(rowAffordancesResourceId) && accessState === 'active',
+    // Root rows have no drive to ask about: without an open folder the only
+    // rows are "Shared with me" entries whose bits come from their own
+    // server-computed permissions, never from this observer.
+    enabled:
+      Boolean(sessionScope) &&
+      Boolean(rowAffordancesResourceId) &&
+      Boolean(current) &&
+      accessState === 'active',
   })
   // The grants listing is the revoke-id source (the grant PUT returns no ids),
   // so writes must refetch it. Enabled only while the Manage dialog is open.
@@ -790,8 +797,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onError: failClosedOnMutationError,
   })
   const renameResourceMutation = useMutation({
-    mutationFn: (input: { resourceId: string; name: string; ifMatch?: number }) =>
-      window.clerum.gfs.renameResource(input.resourceId, input.name, DRIVE, input.ifMatch),
+    mutationFn: (input: { resourceId: string; name: string; drive: string; ifMatch?: number }) =>
+      window.clerum.gfs.renameResource(input.resourceId, input.name, input.drive, input.ifMatch),
     onSuccess: async (resource, input) => {
       setCrumbs(prev =>
         prev.map(crumb =>
@@ -805,8 +812,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onError: failClosedOnMutationError,
   })
   const deleteResourceMutation = useMutation({
-    mutationFn: (input: { resourceId: string; ifMatch?: number }) =>
-      window.clerum.gfs.deleteResource(input.resourceId, DRIVE, input.ifMatch),
+    mutationFn: (input: { resourceId: string; drive: string; ifMatch?: number }) =>
+      window.clerum.gfs.deleteResource(input.resourceId, input.drive, input.ifMatch),
     onSuccess: async (_data, input) => {
       setCrumbs(prev => prev.filter(crumb => crumb.resourceId !== input.resourceId))
       await refreshGfs()
@@ -1234,6 +1241,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       input: {
         resourceId: string
         destinationId: string
+        drive: string
         newName?: string
         oldParentId?: string | null
       },
@@ -1255,7 +1263,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         applyMoveConvergence(
           queryClient,
           sessionScope,
-          DRIVE,
+          // The moved row's own drive, not the open location's: a move from a
+          // surface without a folder open still converges the right cache.
+          input.drive,
           {
             resourceId: input.resourceId,
             oldParentId: input.oldParentId ?? null,
@@ -1270,21 +1280,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       if (movedCrumb) await openUri(movedCrumb.gfsUri)
     },
-    [
-      crumbs,
-      DRIVE,
-      openAncestryDependentResourceIds,
-      openUri,
-      queryClient,
-      refreshGfs,
-      sessionScope,
-    ]
+    [crumbs, openAncestryDependentResourceIds, openUri, queryClient, refreshGfs, sessionScope]
   )
 
   const moveResourceMutation = useMutation({
     mutationFn: (input: {
       resourceId: string
       destinationId: string
+      drive: string
       ifMatch?: number
       newName?: string
       oldParentId?: string | null
@@ -1292,7 +1295,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       window.clerum.gfs.moveResource(
         input.resourceId,
         input.destinationId,
-        DRIVE,
+        input.drive,
         input.ifMatch,
         input.newName
       ),
@@ -1539,11 +1542,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
     replaceFileFromPath: (resourceId: string, filePath: string, ifMatch?: number) =>
       replaceFileFromPathMutation.mutateAsync({ resourceId, filePath, ifMatch }),
-    renameResource: (resourceId: string, name: string, ifMatch?: number) =>
-      renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
+    renameResource: (resourceId: string, name: string, drive: string, ifMatch?: number) =>
+      renameResourceMutation.mutateAsync({ resourceId, name, drive, ifMatch }),
     moveResource: (
       resourceId: string,
       destinationId: string,
+      drive: string,
       ifMatch?: number,
       newName?: string,
       oldParentId?: string | null
@@ -1551,12 +1555,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       moveResourceMutation.mutateAsync({
         resourceId,
         destinationId,
+        drive,
         ifMatch,
         newName,
         oldParentId,
       }),
-    deleteResource: (resourceId: string, ifMatch?: number) =>
-      deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),
+    deleteResource: (resourceId: string, drive: string, ifMatch?: number) =>
+      deleteResourceMutation.mutateAsync({ resourceId, drive, ifMatch }),
     /**
      * Convergence for a move that landed without a receipt (transport loss):
      * the mutation rejected, so its success path never ran, and the item would

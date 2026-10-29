@@ -1096,7 +1096,12 @@ export function registerIpcHandlers(service: AppService): void {
           throw new Error('Invalid read share options')
         }
         const permissions = payload.options.permissions.map(sanitizeString)
-        if (permissions.some(permission => permission !== 'read' && permission !== 'share')) {
+        // An empty permission set is not a read share: the server refuses it
+        // (`permissions_invalid`), so refuse it here before the call.
+        if (
+          permissions.length === 0 ||
+          permissions.some(permission => permission !== 'read' && permission !== 'share')
+        ) {
           throw new Error('Invalid read share options')
         }
         options = { permissions, includeDescendants: payload.options.includeDescendants }

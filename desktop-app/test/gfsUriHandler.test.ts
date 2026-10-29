@@ -158,6 +158,28 @@ describe('GfsClient.listChildren', () => {
     expect(out.items[0]?.updatedAt).toBe('2026-06-01T12:00:00.000Z')
     expect(out.items[1]?.updatedAt).toBeUndefined()
   })
+
+  it('omits the drive query when none is given and still refuses an empty drive', async () => {
+    // `drive` is documented as optional (docs/reference/plugin-ui-sdk.md): the
+    // server applies its own default, exactly as `listAccessible` already does.
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { items: [CHILD], nextCursor: null },
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
+
+    await expect(client.listChildren(RID, 'tok', {})).resolves.toEqual({
+      items: [CHILD],
+      nextCursor: null,
+    })
+    const [, url] = (requestJson as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(url).toBe(`https://api.example/api/v1/me/gfs/resources/${RID}/children`)
+    expect(url).not.toContain('drive=')
+
+    // An explicitly empty drive is still a caller error, never "no drive".
+    await expect(client.listChildren(RID, 'tok', { drive: '' })).rejects.toThrow('drive_required')
+    expect(requestJson).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('GfsClient.listAccessible', () => {

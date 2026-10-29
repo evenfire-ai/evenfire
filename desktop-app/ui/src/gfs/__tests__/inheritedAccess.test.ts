@@ -53,6 +53,13 @@ function installClerumGfs(
 }
 
 describe('deriveGfsInheritedAccess', () => {
+  // The producer only emits profile entries for UUID subjects: non-UUID user and
+  // team subjects are rejected on the write path (control-api grants.ts), so the
+  // fixture ids must be UUIDs to describe a response the server can produce.
+  const OUTSIDE_USER_ID = '11111111-1111-4111-8111-111111111111'
+  const OTHER_USER_ID = '22222222-2222-4222-8222-222222222222'
+  const OUTSIDE_TEAM_ID = '33333333-3333-4333-8333-333333333333'
+
   afterEach(() => {
     vi.restoreAllMocks()
   })
@@ -113,7 +120,7 @@ describe('deriveGfsInheritedAccess', () => {
                   id: 'profiled-user',
                   drive: 'main',
                   resourceId,
-                  subject: { type: 'user', id: 'outside-user' },
+                  subject: { type: 'user', id: OUTSIDE_USER_ID },
                   subjectProfile: { name: 'Outside User', email: 'outside@example.test' },
                   permissions: ['read'],
                   inherit: true,
@@ -122,7 +129,7 @@ describe('deriveGfsInheritedAccess', () => {
                   id: 'unprofiled-user',
                   drive: 'main',
                   resourceId,
-                  subject: { type: 'user', id: 'other-user' },
+                  subject: { type: 'user', id: OTHER_USER_ID },
                   permissions: ['read'],
                   inherit: true,
                 },
@@ -132,7 +139,7 @@ describe('deriveGfsInheritedAccess', () => {
                   id: 'ancestor-grant',
                   drive: 'main',
                   resourceId,
-                  subject: { type: 'user', id: 'outside-user' },
+                  subject: { type: 'user', id: OUTSIDE_USER_ID },
                   permissions: ['read'],
                   inherit: true,
                 },
@@ -146,7 +153,7 @@ describe('deriveGfsInheritedAccess', () => {
                   id: 'profiled-team',
                   drive: 'main',
                   resourceId,
-                  subject: { type: 'team', id: 'outside-team' },
+                  subject: { type: 'team', id: OUTSIDE_TEAM_ID },
                   subjectProfile: { name: 'Outside Team' },
                   permissions: ['read'],
                   includeDescendants: true,
@@ -159,15 +166,15 @@ describe('deriveGfsInheritedAccess', () => {
     const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
 
     expect(result.coverage).toBe('complete')
-    expect(result.items.find(item => item.subject.id === 'outside-user')?.subjectProfile).toEqual({
+    expect(result.items.find(item => item.subject.id === OUTSIDE_USER_ID)?.subjectProfile).toEqual({
       name: 'Outside User',
       email: 'outside@example.test',
     })
-    expect(result.items.find(item => item.subject.id === 'outside-team')?.subjectProfile).toEqual({
+    expect(result.items.find(item => item.subject.id === OUTSIDE_TEAM_ID)?.subjectProfile).toEqual({
       name: 'Outside Team',
     })
     expect(
-      result.items.find(item => item.subject.id === 'other-user')?.subjectProfile
+      result.items.find(item => item.subject.id === OTHER_USER_ID)?.subjectProfile
     ).toBeUndefined()
   })
 
