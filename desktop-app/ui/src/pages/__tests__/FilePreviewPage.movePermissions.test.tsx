@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ToastStack } from '@components/Common/ToastStack'
@@ -158,11 +159,16 @@ function renderPreviewWithToastStack(props: { gfsUri?: string; fileName?: string
   return { ...view, queryClient }
 }
 
-function installController(sessionScope = 'preview-test-user:main', principalScope = sessionScope) {
+function installController(
+  sessionScope = 'preview-test-user:main',
+  principalScope = sessionScope,
+  sessionGeneration = 1
+) {
   const handleAuthorityFailure = vi.fn(() => false)
   hookMock.useGfsBrowserController.mockReturnValue({
     accessState: 'active',
     sessionScope,
+    sessionGeneration,
     principalScope,
     authorityPending: false,
     handleAuthorityFailure,
@@ -607,7 +613,7 @@ describe('FilePreviewPage move permission contract', () => {
     })
     installController()
     const { queryClient } = renderPreview()
-    const sourceKey = desktopQueryKeys.gfsAffordances('preview-test-user:main', parentId, 'main')
+    const sourceKey = desktopQueryKeys.gfsAffordances('preview-test-user:main', parentId, 'main', 1)
     try {
       await screen.findByAltText('Preview of diagram.png')
       await waitFor(() => expect(sourceReads).toBe(1))
@@ -681,7 +687,7 @@ describe('FilePreviewPage move permission contract', () => {
     installController()
     const { queryClient } = renderPreview()
     queryClient.setQueryData(
-      desktopQueryKeys.gfsAffordances('preview-test-user:main', 'destination-1', 'main'),
+      desktopQueryKeys.gfsAffordances('preview-test-user:main', 'destination-1', 'main', 1),
       fullAccess
     )
 
@@ -1100,7 +1106,13 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     })
     installController(sessionScope)
     const { queryClient } = renderPreviewWithToastStack()
-    const previewResourceKey = [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', uri]
+    const previewResourceKey = [
+      ...desktopQueryKeys.gfsRoot,
+      sessionScope,
+      'preview-resource',
+      uri,
+      { sessionGeneration: 1 },
+    ]
     try {
       await screen.findByAltText('Preview of diagram.png')
       const menu = await openPreviewActions()
@@ -1169,8 +1181,8 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     })
     installController(sessionScope)
     const { queryClient } = renderPreviewWithToastStack()
-    const capturedSessionCache = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main')
-    const otherSessionCache = desktopQueryKeys.gfsChildren('other-user:main', parentId, 'main')
+    const capturedSessionCache = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main', 1)
+    const otherSessionCache = desktopQueryKeys.gfsChildren('other-user:main', parentId, 'main', 1)
     queryClient.setQueryDefaults(capturedSessionCache, { gcTime: 60_000 })
     queryClient.setQueryDefaults(otherSessionCache, { gcTime: 60_000 })
     try {
@@ -1206,6 +1218,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
           sessionScope,
           'preview-resource',
           uri,
+          { sessionGeneration: 1 },
         ])
       ).toEqual(movedResource)
       expect(queryClient.getQueryState(capturedSessionCache)?.isInvalidated).toBe(true)
@@ -1213,6 +1226,133 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
       await act(async () => settleMove(successfulMoveReceipt))
+      queryClient.clear()
+    }
+  })
+
+  it('keeps a new generation rename busy when an old Move settles', async () => {
+    const realController = await vi.importActual<
+      typeof import('@hooks/domain/useGfsBrowserController')
+    >('@hooks/domain/useGfsBrowserController')
+    let settleMove!: (receipt: MoveReceipt) => void
+    let settleRename!: () => void
+    let settleNewDiscovery!: (page: Awaited<ReturnType<typeof listAccessiblePage>>) => void
+    let liveGeneration = 1
+    let discoveryHeld = false
+    let latestAuthorityPending = false
+    const pendingMove = new Promise<MoveReceipt>(resolve => {
+      settleMove = resolve
+    })
+    const pendingRename = new Promise<void>(resolve => {
+      settleRename = resolve
+    })
+    const resources = await listAccessiblePage([
+      accessibleResource(resourceId, 'diagram.png', 'file', {
+        gfsUri: uri,
+        parentResourceId: parentId,
+        version: 7,
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+      }),
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const pendingDiscovery = new Promise<typeof resources>(resolve => {
+      settleNewDiscovery = resolve
+    })
+    const listAccessible = vi.fn(async () => (discoveryHeld ? pendingDiscovery : resources))
+    const { moveResource, renameResource } = installGfs({
+      destination: async () => fullAccess,
+      listAccessible,
+      move: () => pendingMove,
+      rename: () => pendingRename,
+      sessionGeneration: async () => liveGeneration,
+    })
+    hookMock.useGfsBrowserController.mockImplementation(() => {
+      const controller = realController.useGfsBrowserController()
+      latestAuthorityPending = controller.authorityPending
+      return controller
+    })
+    const authValue = (sessionGeneration: number): AuthContextValue =>
+      ({
+        isAuthenticated: true,
+        sessionGeneration,
+        me: {
+          id: 'preview-test-user',
+          email: 'preview@example.test',
+          name: 'Preview User',
+          picture: null,
+          teamId: 'main',
+          teamName: 'Main',
+          role: 'member',
+        },
+        runtimeConfigState: null,
+      }) as unknown as AuthContextValue
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    })
+    const renderGeneration = (sessionGeneration: number) => (
+      <AuthContext.Provider value={authValue(sessionGeneration)}>
+        <QueryClientProvider client={queryClient}>
+          <ToastingPreview />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    const view = render(renderGeneration(1))
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(latestAuthorityPending).toBe(false))
+      await dispatchArchiveMove()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+
+      const readsBeforeGenerationChange = listAccessible.mock.calls.length
+      discoveryHeld = true
+      liveGeneration = 2
+      view.rerender(renderGeneration(2))
+      await waitFor(() =>
+        expect(listAccessible.mock.calls.length).toBeGreaterThan(readsBeforeGenerationChange)
+      )
+      await waitFor(() => expect(latestAuthorityPending).toBe(true))
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+      )
+
+      await act(async () => settleNewDiscovery(resources))
+      await waitFor(() => expect(latestAuthorityPending).toBe(false))
+      await screen.findByAltText('Preview of diagram.png')
+      const menu = await openPreviewActions()
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
+      const renameDialog = await screen.findByRole('dialog', { name: 'Rename file' })
+      fireEvent.change(within(renameDialog).getByLabelText('New name'), {
+        target: { value: 'renamed.png' },
+      })
+      fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save' }))
+      await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
+
+      const save = within(renameDialog).getByRole('button', { name: 'Save' })
+      const cancel = within(renameDialog).getByRole('button', { name: 'Cancel' })
+      const close = within(renameDialog).getByRole('button', { name: 'Close rename dialog' })
+      expect((save as HTMLButtonElement).disabled).toBe(true)
+      expect((cancel as HTMLButtonElement).disabled).toBe(true)
+      expect((close as HTMLButtonElement).disabled).toBe(true)
+
+      await act(async () => settleMove(successfulMoveReceipt))
+
+      expect((save as HTMLButtonElement).disabled).toBe(true)
+      expect((cancel as HTMLButtonElement).disabled).toBe(true)
+      expect((close as HTMLButtonElement).disabled).toBe(true)
+      expect(renameResource).toHaveBeenCalledTimes(1)
+
+      await act(async () => settleRename())
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull())
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => {
+        settleMove(successfulMoveReceipt)
+        settleRename()
+        settleNewDiscovery(resources)
+      })
       queryClient.clear()
     }
   })
@@ -1448,7 +1588,13 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     })
     installController(sessionScope)
     const { queryClient } = renderPreviewWithToastStack()
-    const previewResourceKey = [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', uri]
+    const previewResourceKey = [
+      ...desktopQueryKeys.gfsRoot,
+      sessionScope,
+      'preview-resource',
+      uri,
+      { sessionGeneration: 1 },
+    ]
     try {
       const dialog = await dispatchArchiveMove()
       fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
@@ -1609,8 +1755,8 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         version: 2,
         bytes: 1,
       })
-      const currentCache = desktopQueryKeys.gfsChildren(currentScope, parentId, 'main')
-      const capturedSessionCache = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main')
+      const currentCache = desktopQueryKeys.gfsChildren(currentScope, parentId, 'main', 1)
+      const capturedSessionCache = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main', 1)
       queryClient.setQueryDefaults(currentCache, { gcTime: 60_000 })
       queryClient.setQueryDefaults(capturedSessionCache, { gcTime: 60_000 })
       queryClient.setQueryData(capturedSessionCache, { items: [], nextCursor: null })
@@ -1674,8 +1820,8 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const newTeamScope = 'preview-test-user:team-b'
     installController(capturedScope, 'preview-test-user')
     const { queryClient, rerender } = renderPreviewWithToastStack()
-    const capturedTeamCache = desktopQueryKeys.gfsChildren(capturedScope, parentId, 'main')
-    const newTeamCache = desktopQueryKeys.gfsChildren(newTeamScope, parentId, 'main')
+    const capturedTeamCache = desktopQueryKeys.gfsChildren(capturedScope, parentId, 'main', 1)
+    const newTeamCache = desktopQueryKeys.gfsChildren(newTeamScope, parentId, 'main', 1)
     for (const key of [capturedTeamCache, newTeamCache]) {
       queryClient.setQueryDefaults(key, { gcTime: 60_000 })
       queryClient.setQueryData(key, { items: [], nextCursor: null })
@@ -2007,7 +2153,13 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     })
     installController(sessionScope)
     const { queryClient } = renderPreviewWithToastStack()
-    const previewResourceKey = [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', uri]
+    const previewResourceKey = [
+      ...desktopQueryKeys.gfsRoot,
+      sessionScope,
+      'preview-resource',
+      uri,
+      { sessionGeneration: 1 },
+    ]
     try {
       const archiveDialog = await dispatchArchiveMove()
       fireEvent.click(within(archiveDialog).getByRole('button', { name: 'Close move dialog' }))
@@ -2128,6 +2280,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
             sessionScope,
             'preview-resource',
             uri,
+            { sessionGeneration: 1 },
           ])
         ).toEqual(movedResource)
       )
@@ -2187,7 +2340,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     })
     installController(sessionScope)
     const { queryClient } = renderPreviewWithToastStack()
-    const sourceChildrenKey = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main')
+    const sourceChildrenKey = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main', 1)
     queryClient.setQueryDefaults(sourceChildrenKey, { gcTime: 60_000 })
     queryClient.setQueryData(sourceChildrenKey, { items: [], nextCursor: null })
     try {
@@ -2289,7 +2442,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     })
     installController(sessionScope)
     const { queryClient, rerender } = renderPreviewWithToastStack()
-    const cacheKey = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main')
+    const cacheKey = desktopQueryKeys.gfsChildren(sessionScope, parentId, 'main', 1)
     queryClient.setQueryDefaults(cacheKey, { gcTime: 60_000 })
     try {
       await dispatchArchiveMove()
@@ -2331,7 +2484,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       move: () => pendingMove,
       sessionGeneration: async () => generation,
     })
-    installController(sessionScope)
+    installController(sessionScope, sessionScope, 4)
     const { queryClient } = renderPreviewWithToastStack()
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
     try {
@@ -2383,7 +2536,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
         move: () => pendingMove,
         sessionGeneration: async () => generation,
       })
-      const authorityFailure = installController(sessionScope)
+      const authorityFailure = installController(sessionScope, sessionScope, 12)
       const { queryClient } = renderPreviewWithToastStack()
       try {
         await dispatchArchiveMove()
@@ -2432,7 +2585,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       move: () => pendingMove,
       sessionGeneration: async () => generation,
     })
-    installController(sessionScope)
+    installController(sessionScope, sessionScope, 20)
     const { queryClient } = renderPreviewWithToastStack()
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
     try {

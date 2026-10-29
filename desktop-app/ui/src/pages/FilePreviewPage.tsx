@@ -6,7 +6,11 @@ import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
@@ -77,15 +81,31 @@ export function FilePreviewPage({
   const [copyContentReady, setCopyContentReady] = useState(false)
   const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
   const accessRevoked = ctrl.accessState === 'revoked'
+  const liveAuthorityRef = useRef({
+    sessionScope: ctrl.sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
+  })
+  const refreshRequestRef = useRef(0)
+  liveAuthorityRef.current = {
+    sessionScope: ctrl.sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
+  }
+  const capturedSessionScope = ctrl.sessionScope
+  const capturedSessionGeneration = ctrl.sessionGeneration
   const handlePreviewAuthorityFailure = useCallback(
-    (message: string) => ctrl.handleAuthorityFailure(message, 'operation'),
-    [ctrl.handleAuthorityFailure]
+    (
+      message: string,
+      scope: string | null = capturedSessionScope,
+      generation: number | null = capturedSessionGeneration
+    ) => ctrl.handleAuthorityFailure(message, 'operation', scope, generation),
+    [ctrl.handleAuthorityFailure, capturedSessionGeneration, capturedSessionScope]
   )
 
   const previewResourceActions = useFilePreviewResourceActions({
     gfsUri,
     fileName,
     sessionScope: ctrl.sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
     principalScope: ctrl.principalScope,
     canResolve: !denied && !unavailable && !accessRevoked && !ctrl.authorityPending,
     onAuthorityFailure: handlePreviewAuthorityFailure,
@@ -110,34 +130,94 @@ export function FilePreviewPage({
     if (accessRevoked) setReloadToken(token => token + 1)
   }, [accessRevoked])
 
+  useEffect(() => {
+    refreshRequestRef.current += 1
+    setRefreshing(false)
+  }, [capturedSessionGeneration, capturedSessionScope, gfsUri])
+
   const handleDownloadError = useCallback(
     (error: unknown) => {
-      ctrl.handleAuthorityFailure(toMessage(error), 'operation')
+      if (
+        !isGfsSessionAuthorityCurrent(
+          capturedSessionScope,
+          capturedSessionGeneration,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
+      ctrl.handleAuthorityFailure(
+        toMessage(error),
+        'operation',
+        capturedSessionScope,
+        capturedSessionGeneration
+      )
     },
-    [ctrl]
+    [capturedSessionGeneration, capturedSessionScope, ctrl.handleAuthorityFailure]
   )
 
   const handleRefresh = useCallback(async () => {
-    if (refreshing || denied || unavailable || accessRevoked) return
+    const scope = capturedSessionScope
+    const generation = capturedSessionGeneration
+    if (refreshing || denied || unavailable || accessRevoked || !isGfsSessionGeneration(generation))
+      return
+    const requestId = ++refreshRequestRef.current
     setRefreshing(true)
     try {
       await window.clerum.gfs.resolve(gfsUri)
+      if (
+        !isGfsSessionAuthorityCurrent(
+          scope,
+          generation,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
       setDenied(null)
       setReloadToken(token => token + 1)
       pushToast?.('EvenDrive refreshed', 'success')
     } catch (error) {
       const message = toMessage(error)
       if (
-        !ctrl.handleAuthorityFailure(message, 'operation') &&
+        !isGfsSessionAuthorityCurrent(
+          scope,
+          generation,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
+      if (
+        !ctrl.handleAuthorityFailure(message, 'operation', scope, generation) &&
         isPerResourceAccessDenial(message)
       ) {
         setDenied(message)
       }
       pushToast?.(`Could not refresh EvenDrive: ${message}`, 'error')
     } finally {
-      setRefreshing(false)
+      if (
+        refreshRequestRef.current === requestId &&
+        isGfsSessionAuthorityCurrent(
+          scope,
+          generation,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        setRefreshing(false)
     }
-  }, [accessRevoked, ctrl, denied, gfsUri, pushToast, refreshing, unavailable])
+  }, [
+    accessRevoked,
+    capturedSessionGeneration,
+    capturedSessionScope,
+    ctrl,
+    denied,
+    gfsUri,
+    pushToast,
+    refreshing,
+    unavailable,
+  ])
 
   const handleCopyLink = useCallback(async () => {
     try {
@@ -205,12 +285,15 @@ export function FilePreviewPage({
   )
 
   const revalidateAccess = useCallback(async () => {
-    if (denied || accessRevoked) return
+    if (denied || accessRevoked || !isGfsSessionGeneration(ctrl.sessionGeneration)) return
+    const capturedScope = ctrl.sessionScope
+    const capturedGeneration = ctrl.sessionGeneration
     const resourceQueryKey = [
       ...desktopQueryKeys.gfsRoot,
       ctrl.sessionScope,
       'preview-resource',
       gfsUri,
+      { sessionGeneration: ctrl.sessionGeneration },
     ] as const
     try {
       // Use the mounted resource query so React Query's own focus refetch and
@@ -219,15 +302,42 @@ export function FilePreviewPage({
         { queryKey: resourceQueryKey, exact: true },
         { throwOnError: true }
       )
+      if (
+        !isGfsSessionAuthorityCurrent(
+          capturedScope,
+          capturedGeneration,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
     } catch (error) {
       const message = toMessage(error)
+      if (
+        !isGfsSessionAuthorityCurrent(
+          capturedScope,
+          capturedGeneration,
+          liveAuthorityRef.current.sessionScope,
+          liveAuthorityRef.current.sessionGeneration
+        )
+      )
+        return
       // A session-authority failure revokes the shared session (H2 path); the
       // body then remounts and fails closed. A per-resource 403 is local to this
       // preview — drop its bytes here without touching the session.
-      if (ctrl.handleAuthorityFailure(message, 'operation')) return
+      if (ctrl.handleAuthorityFailure(message, 'operation', capturedScope, capturedGeneration))
+        return
       if (isPerResourceAccessDenial(message)) setDenied(message)
     }
-  }, [accessRevoked, ctrl, denied, gfsUri, queryClient])
+  }, [
+    accessRevoked,
+    ctrl.handleAuthorityFailure,
+    ctrl.sessionGeneration,
+    ctrl.sessionScope,
+    denied,
+    gfsUri,
+    queryClient,
+  ])
 
   useEffect(() => {
     const onFocus = () => {

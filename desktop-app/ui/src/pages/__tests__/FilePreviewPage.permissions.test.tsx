@@ -30,6 +30,7 @@ function controller() {
   return {
     accessState: 'active' as const,
     sessionScope: 'preview-test-user:main',
+    sessionGeneration: 1,
     authorityPending: false,
     handleAuthorityFailure: vi.fn(() => false),
   }
@@ -39,6 +40,7 @@ function renderWithPermissions(resourceBits: string[], parentBits: string[]) {
   hookMock.useGfsBrowserController.mockReturnValue({
     accessState: 'active',
     sessionScope: 'preview-permissions-user:main',
+    sessionGeneration: 1,
     authorityPending: false,
     handleAuthorityFailure: vi.fn(() => false),
   })
@@ -65,6 +67,7 @@ function renderWithPermissions(resourceBits: string[], parentBits: string[]) {
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
+      auth: { getSessionGeneration: vi.fn(async () => 1) },
       gfs: {
         downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
         resolve,
@@ -114,6 +117,7 @@ async function openShareDialogWithInheritedAccess(producers: InheritedAccessProd
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
+      auth: { getSessionGeneration: vi.fn(async () => 1) },
       gfs: {
         downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
         resolve,

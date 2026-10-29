@@ -6,7 +6,12 @@ import { Button, IconButton, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { IconClose, IconShare } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  hasGfsSessionGeneration,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import { httpErrorStatus } from '@lib/format'
 import {
   GFS_AUTHORITY_STALE_TIME_MS,
@@ -40,9 +45,14 @@ type FilePreviewResourceActionsProps = {
   gfsUri: string
   fileName: string
   sessionScope: string
+  sessionGeneration: number | null
   principalScope: string | null
   canResolve: boolean
-  onAuthorityFailure: (message: string) => boolean
+  onAuthorityFailure: (
+    message: string,
+    scope?: string | null,
+    generation?: number | null
+  ) => boolean
   onDeleted: () => void
   onRenameCommitted?: (gfsUri: string) => void
   pushToast?: MoveToast
@@ -121,6 +131,7 @@ export function useFilePreviewResourceActions({
   gfsUri,
   fileName,
   sessionScope,
+  sessionGeneration,
   principalScope,
   canResolve,
   onAuthorityFailure,
@@ -143,6 +154,7 @@ export function useFilePreviewResourceActions({
   const deletePendingRef = useRef(false)
   const renamePendingRef = useRef(false)
   const moveRequestRef = useRef(0)
+  const busyRequestRef = useRef(0)
   const previewMountedRef = useRef(true)
 
   useEffect(() => {
@@ -154,9 +166,20 @@ export function useFilePreviewResourceActions({
   }, [])
 
   const resourceQuery = useQuery({
-    queryKey: [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', gfsUri],
+    queryKey: [
+      ...desktopQueryKeys.gfsRoot,
+      sessionScope,
+      'preview-resource',
+      gfsUri,
+      { sessionGeneration },
+    ],
     queryFn: () => window.clerum.gfs.resolve(gfsUri),
-    enabled: Boolean(canResolve && sessionScope && sessionScope !== 'anonymous'),
+    enabled: Boolean(
+      canResolve &&
+      sessionScope &&
+      sessionScope !== 'anonymous' &&
+      isGfsSessionGeneration(sessionGeneration)
+    ),
     refetchOnMount: 'always',
     refetchOnWindowFocus: 'always',
   })
@@ -164,9 +187,19 @@ export function useFilePreviewResourceActions({
   const resourceId = resource?.resourceId ?? ''
   const drive = resource?.drive ?? GFS_DRIVE_MAIN
   const affordancesQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive),
+    queryKey: desktopQueryKeys.gfsAffordances(
+      sessionScope,
+      resourceId || gfsUri,
+      drive,
+      sessionGeneration
+    ),
     queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
-    enabled: Boolean(canResolve && resourceId && resource?.kind === 'file'),
+    enabled: Boolean(
+      canResolve &&
+      resourceId &&
+      resource?.kind === 'file' &&
+      isGfsSessionGeneration(sessionGeneration)
+    ),
     ...gfsAuthorityQueryPolicy,
   })
   const affordances: ResourceAffordances | undefined =
@@ -178,6 +211,7 @@ export function useFilePreviewResourceActions({
   const moveContextRef = useRef({
     gfsUri,
     sessionScope,
+    sessionGeneration,
     principalScope,
     resourceId: resource?.resourceId ?? null,
     parentResourceId: sourceParentId,
@@ -187,6 +221,7 @@ export function useFilePreviewResourceActions({
   moveContextRef.current = {
     gfsUri,
     sessionScope,
+    sessionGeneration,
     principalScope,
     resourceId: resource?.resourceId ?? null,
     parentResourceId: sourceParentId,
@@ -194,9 +229,19 @@ export function useFilePreviewResourceActions({
     version: resource?.version ?? null,
   }
   const sourceParentAffordancesQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId ?? gfsUri, drive),
+    queryKey: desktopQueryKeys.gfsAffordances(
+      sessionScope,
+      sourceParentId ?? gfsUri,
+      drive,
+      sessionGeneration
+    ),
     queryFn: () => window.clerum.gfs.affordances(sourceParentId!, drive),
-    enabled: Boolean(canResolve && resource?.kind === 'file' && sourceParentId),
+    enabled: Boolean(
+      canResolve &&
+      resource?.kind === 'file' &&
+      sourceParentId &&
+      isGfsSessionGeneration(sessionGeneration)
+    ),
     ...gfsAuthorityQueryPolicy,
   })
   const sourceParentAffordances: ResourceAffordances | undefined =
@@ -226,11 +271,35 @@ export function useFilePreviewResourceActions({
     queryKey: QueryKey,
     refetch: () => Promise<{ isError: boolean; error: unknown }>
   ) => {
+    const captured = moveContextRef.current
+    if (
+      !isGfsSessionGeneration(captured.sessionGeneration) ||
+      !hasGfsSessionGeneration(queryKey, captured.sessionGeneration)
+    )
+      return
     try {
       assertGfsAuthorityRetryAllowed(queryClient, queryKey)
       const result = await refetch()
       if (result.isError) throw result.error
+      if (
+        !isGfsSessionAuthorityCurrent(
+          captured.sessionScope,
+          captured.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
     } catch (error) {
+      if (
+        !isGfsSessionAuthorityCurrent(
+          captured.sessionScope,
+          captured.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       pushToast?.(describeGfsReadError(error).message, 'error')
     }
   }
@@ -242,7 +311,12 @@ export function useFilePreviewResourceActions({
           pending: true,
           retry: () =>
             retryPermissionCheck(
-              desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive),
+              desktopQueryKeys.gfsAffordances(
+                sessionScope,
+                resourceId || gfsUri,
+                drive,
+                sessionGeneration
+              ),
               () => affordancesQuery.refetch()
             ),
         }
@@ -253,7 +327,12 @@ export function useFilePreviewResourceActions({
             pending: false,
             retry: () =>
               retryPermissionCheck(
-                desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive),
+                desktopQueryKeys.gfsAffordances(
+                  sessionScope,
+                  resourceId || gfsUri,
+                  drive,
+                  sessionGeneration
+                ),
                 () => affordancesQuery.refetch()
               ),
           }
@@ -266,7 +345,12 @@ export function useFilePreviewResourceActions({
             pending: true,
             retry: () =>
               retryPermissionCheck(
-                desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive),
+                desktopQueryKeys.gfsAffordances(
+                  sessionScope,
+                  sourceParentId,
+                  drive,
+                  sessionGeneration
+                ),
                 () => sourceParentAffordancesQuery.refetch()
               ),
           }
@@ -277,7 +361,12 @@ export function useFilePreviewResourceActions({
               pending: false,
               retry: () =>
                 retryPermissionCheck(
-                  desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive),
+                  desktopQueryKeys.gfsAffordances(
+                    sessionScope,
+                    sourceParentId,
+                    drive,
+                    sessionGeneration
+                  ),
                   () => sourceParentAffordancesQuery.refetch()
                 ),
             }
@@ -286,19 +375,40 @@ export function useFilePreviewResourceActions({
   ].filter((notice): notice is NonNullable<typeof notice> => notice !== null)
 
   const grantsQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsGrants(sessionScope, resourceId || gfsUri, drive),
+    queryKey: desktopQueryKeys.gfsGrants(
+      sessionScope,
+      resourceId || gfsUri,
+      drive,
+      sessionGeneration
+    ),
     queryFn: () => window.clerum.gfs.listGrants(resourceId, drive),
-    enabled: Boolean(canResolve && shareOpen && canShare && resourceId),
+    enabled: Boolean(
+      canResolve && shareOpen && canShare && resourceId && isGfsSessionGeneration(sessionGeneration)
+    ),
   })
   const sharesQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsShares(sessionScope, resourceId || gfsUri, drive),
+    queryKey: desktopQueryKeys.gfsShares(
+      sessionScope,
+      resourceId || gfsUri,
+      drive,
+      sessionGeneration
+    ),
     queryFn: () => window.clerum.gfs.listShares(resourceId, drive),
-    enabled: Boolean(canResolve && shareOpen && canShare && resourceId),
+    enabled: Boolean(
+      canResolve && shareOpen && canShare && resourceId && isGfsSessionGeneration(sessionGeneration)
+    ),
   })
   const inheritedQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsInheritedAccess(sessionScope, resourceId || gfsUri, drive),
+    queryKey: desktopQueryKeys.gfsInheritedAccess(
+      sessionScope,
+      resourceId || gfsUri,
+      drive,
+      sessionGeneration
+    ),
     queryFn: () => deriveGfsInheritedAccess(resourceId, drive),
-    enabled: Boolean(canResolve && shareOpen && canShare && resourceId),
+    enabled: Boolean(
+      canResolve && shareOpen && canShare && resourceId && isGfsSessionGeneration(sessionGeneration)
+    ),
   })
   const inheritedAccessNotice = inheritedQuery.error
     ? INHERITED_ACCESS_ERROR_NOTICE
@@ -333,34 +443,80 @@ export function useFilePreviewResourceActions({
     [agentsQuery.data]
   )
   const shareSubjects = useMemo(() => subjectOptions(teams, agents), [agents, teams])
-  const invalidateResource = useCallback(async () => {
-    await queryClient.invalidateQueries({ queryKey: desktopQueryKeys.gfsRoot })
-  }, [queryClient])
   const invalidateResourceForSession = useCallback(
-    async (scope: string) => {
+    async (scope: string, generation: number) => {
       await queryClient.invalidateQueries({
-        queryKey: [...desktopQueryKeys.gfsRoot, scope],
+        predicate: query =>
+          query.queryKey[0] === desktopQueryKeys.gfsRoot[0] &&
+          query.queryKey[1] === desktopQueryKeys.gfsRoot[1] &&
+          query.queryKey[2] === scope &&
+          hasGfsSessionGeneration(query.queryKey, generation),
       })
     },
     [queryClient]
   )
 
   useEffect(() => {
-    if (resourceQuery.error) onAuthorityFailure(errorMessage(resourceQuery.error))
-  }, [onAuthorityFailure, resourceQuery.error])
+    if (
+      resourceQuery.error &&
+      isGfsSessionAuthorityCurrent(
+        sessionScope,
+        sessionGeneration,
+        moveContextRef.current.sessionScope,
+        moveContextRef.current.sessionGeneration
+      )
+    )
+      onAuthorityFailure(errorMessage(resourceQuery.error), sessionScope, sessionGeneration)
+  }, [onAuthorityFailure, resourceQuery.error, sessionGeneration, sessionScope])
   useEffect(() => {
-    if (affordancesQuery.error) onAuthorityFailure(errorMessage(affordancesQuery.error))
-  }, [affordancesQuery.error, onAuthorityFailure])
+    if (
+      affordancesQuery.error &&
+      isGfsSessionAuthorityCurrent(
+        sessionScope,
+        sessionGeneration,
+        moveContextRef.current.sessionScope,
+        moveContextRef.current.sessionGeneration
+      )
+    )
+      onAuthorityFailure(errorMessage(affordancesQuery.error), sessionScope, sessionGeneration)
+  }, [affordancesQuery.error, onAuthorityFailure, sessionGeneration, sessionScope])
   useEffect(() => {
-    if (sourceParentAffordancesQuery.error) {
-      onAuthorityFailure(errorMessage(sourceParentAffordancesQuery.error))
-    }
-  }, [onAuthorityFailure, sourceParentAffordancesQuery.error])
+    if (
+      sourceParentAffordancesQuery.error &&
+      isGfsSessionAuthorityCurrent(
+        sessionScope,
+        sessionGeneration,
+        moveContextRef.current.sessionScope,
+        moveContextRef.current.sessionGeneration
+      )
+    )
+      onAuthorityFailure(
+        errorMessage(sourceParentAffordancesQuery.error),
+        sessionScope,
+        sessionGeneration
+      )
+  }, [onAuthorityFailure, sessionGeneration, sessionScope, sourceParentAffordancesQuery.error])
   useEffect(() => {
+    if (
+      !isGfsSessionAuthorityCurrent(
+        sessionScope,
+        sessionGeneration,
+        moveContextRef.current.sessionScope,
+        moveContextRef.current.sessionGeneration
+      )
+    )
+      return
     for (const error of [grantsQuery.error, sharesQuery.error, inheritedQuery.error]) {
-      if (error) onAuthorityFailure(errorMessage(error))
+      if (error) onAuthorityFailure(errorMessage(error), sessionScope, sessionGeneration)
     }
-  }, [grantsQuery.error, inheritedQuery.error, onAuthorityFailure, sharesQuery.error])
+  }, [
+    grantsQuery.error,
+    inheritedQuery.error,
+    onAuthorityFailure,
+    sessionGeneration,
+    sessionScope,
+    sharesQuery.error,
+  ])
 
   useEffect(() => {
     moveRequestRef.current += 1
@@ -385,6 +541,21 @@ export function useFilePreviewResourceActions({
     setMoveOpen(false)
   }, [moveRequestAtRender, sessionScope])
 
+  const previousBusyAuthorityRef = useRef({ sessionScope, sessionGeneration })
+  useEffect(() => {
+    const previous = previousBusyAuthorityRef.current
+    if (previous.sessionScope === sessionScope && previous.sessionGeneration === sessionGeneration)
+      return
+    previousBusyAuthorityRef.current = { sessionScope, sessionGeneration }
+    moveRequestRef.current += 1
+    busyRequestRef.current += 1
+    renamePendingRef.current = false
+    deletePendingRef.current = false
+    setRevokingGrantId(null)
+    setRevokingShareId(null)
+    setMutationPending(false)
+  }, [sessionGeneration, sessionScope])
+
   useEffect(() => {
     if (canResolve) return
     setShareOpen(false)
@@ -406,22 +577,67 @@ export function useFilePreviewResourceActions({
 
   const runMutation = useCallback(
     async (operation: () => Promise<void>, successMessage: string, failurePrefix: string) => {
+      const captured = moveContextRef.current
+      if (!isGfsSessionGeneration(captured.sessionGeneration)) return false
+      const busyRequest = busyRequestRef.current
       setMutationPending(true)
       try {
         await operation()
-        await invalidateResource()
+        if (
+          !isGfsSessionAuthorityCurrent(
+            captured.sessionScope,
+            captured.sessionGeneration,
+            moveContextRef.current.sessionScope,
+            moveContextRef.current.sessionGeneration
+          )
+        )
+          return false
+        await invalidateResourceForSession(captured.sessionScope, captured.sessionGeneration)
+        if (
+          !isGfsSessionAuthorityCurrent(
+            captured.sessionScope,
+            captured.sessionGeneration,
+            moveContextRef.current.sessionScope,
+            moveContextRef.current.sessionGeneration
+          )
+        )
+          return false
         pushToast?.(successMessage, 'success')
         return true
       } catch (error) {
-        if (!onAuthorityFailure(errorMessage(error))) {
+        if (
+          !isGfsSessionAuthorityCurrent(
+            captured.sessionScope,
+            captured.sessionGeneration,
+            moveContextRef.current.sessionScope,
+            moveContextRef.current.sessionGeneration
+          )
+        )
+          return false
+        if (
+          !onAuthorityFailure(
+            errorMessage(error),
+            captured.sessionScope,
+            captured.sessionGeneration
+          )
+        ) {
           pushToast?.(`${failurePrefix}: ${describeGfsReadError(error).message}`, 'error')
         }
         return false
       } finally {
-        setMutationPending(false)
+        if (
+          busyRequestRef.current === busyRequest &&
+          isGfsSessionAuthorityCurrent(
+            captured.sessionScope,
+            captured.sessionGeneration,
+            moveContextRef.current.sessionScope,
+            moveContextRef.current.sessionGeneration
+          )
+        )
+          setMutationPending(false)
       }
     },
-    [invalidateResource, onAuthorityFailure, pushToast]
+    [invalidateResourceForSession, onAuthorityFailure, pushToast]
   )
 
   const requireAffordancePermissions = async (
@@ -434,7 +650,13 @@ export function useFilePreviewResourceActions({
   ) => {
     if (!sessionScope || !targetResourceId) return false
     const requestedContext = moveContextRef.current
-    const queryKey = desktopQueryKeys.gfsAffordances(sessionScope, targetResourceId, drive)
+    if (!isGfsSessionGeneration(requestedContext.sessionGeneration)) return false
+    const queryKey = desktopQueryKeys.gfsAffordances(
+      requestedContext.sessionScope,
+      targetResourceId,
+      drive,
+      requestedContext.sessionGeneration
+    )
     const queryState = queryClient.getQueryState(queryKey)
     const cachedAuthority = queryState?.data as ResourceAffordances | undefined
     const cachedAuthorityIsFresh = Boolean(
@@ -453,7 +675,22 @@ export function useFilePreviewResourceActions({
         authority = await refetch()
       }
     } catch (error) {
-      if (!onAuthorityFailure(errorMessage(error))) {
+      if (
+        !isGfsSessionAuthorityCurrent(
+          requestedContext.sessionScope,
+          requestedContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return false
+      if (
+        !onAuthorityFailure(
+          errorMessage(error),
+          requestedContext.sessionScope,
+          requestedContext.sessionGeneration ?? null
+        )
+      ) {
         pushToast?.(
           `Could not verify permissions for ${targetName}: ${describeGfsReadError(error).message}`,
           'error'
@@ -466,6 +703,7 @@ export function useFilePreviewResourceActions({
     if (
       currentContext.gfsUri !== requestedContext.gfsUri ||
       currentContext.sessionScope !== requestedContext.sessionScope ||
+      currentContext.sessionGeneration !== requestedContext.sessionGeneration ||
       currentContext.resourceId !== requestedContext.resourceId ||
       currentContext.parentResourceId !== requestedContext.parentResourceId ||
       currentContext.drive !== requestedContext.drive ||
@@ -475,6 +713,15 @@ export function useFilePreviewResourceActions({
       return false
     }
 
+    if (
+      !isGfsSessionAuthorityCurrent(
+        requestedContext.sessionScope,
+        requestedContext.sessionGeneration,
+        moveContextRef.current.sessionScope,
+        moveContextRef.current.sessionGeneration
+      )
+    )
+      return false
     const missingBits = requiredBits.filter(bit => !authority.held.includes(bit))
     if (missingBits.length > 0 || (canPerform && !canPerform(authority))) {
       const labels = missingBits.map(bit => (bit === 'manage_acl' ? 'manage' : bit))
@@ -552,10 +799,37 @@ export function useFilePreviewResourceActions({
       },
       download: () => {
         if (resource?.kind !== 'file' || !canResolve) return
+        const captured = moveContextRef.current
+        if (!isGfsSessionGeneration(captured.sessionGeneration)) return
         void saveGfsFileToDisk(gfsUri, resource.name)
-          .then(() => pushToast?.(`Downloaded ${resource.name}`, 'success'))
+          .then(() => {
+            if (
+              isGfsSessionAuthorityCurrent(
+                captured.sessionScope,
+                captured.sessionGeneration,
+                moveContextRef.current.sessionScope,
+                moveContextRef.current.sessionGeneration
+              )
+            )
+              pushToast?.(`Downloaded ${resource.name}`, 'success')
+          })
           .catch(error => {
-            if (!onAuthorityFailure(errorMessage(error))) {
+            if (
+              !isGfsSessionAuthorityCurrent(
+                captured.sessionScope,
+                captured.sessionGeneration,
+                moveContextRef.current.sessionScope,
+                moveContextRef.current.sessionGeneration
+              )
+            )
+              return
+            if (
+              !onAuthorityFailure(
+                errorMessage(error),
+                captured.sessionScope,
+                captured.sessionGeneration
+              )
+            ) {
               pushToast?.(
                 `Could not download the file: ${describeGfsReadError(error).message}`,
                 'error'
@@ -585,15 +859,39 @@ export function useFilePreviewResourceActions({
 
   const handleRename = async () => {
     if (!resource || renamePendingRef.current) return
+    const operationContext = moveContextRef.current
+    if (!isGfsSessionGeneration(operationContext.sessionGeneration)) return
+    const busyRequest = ++busyRequestRef.current
     renamePendingRef.current = true
     setMutationPending(true)
     try {
       const name = await normalizeGfsResourceName(renameName.trim())
+      if (
+        busyRequestRef.current !== busyRequest ||
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       if (name === resource.name) {
         setRenameOpen(false)
         return
       }
-      if (!(await requireResourcePermissions(['write']))) return
+      const hasPermission = await requireResourcePermissions(['write'])
+      if (
+        busyRequestRef.current !== busyRequest ||
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        ) ||
+        !hasPermission
+      )
+        return
       const renamed = await runMutation(
         () =>
           window.clerum.gfs
@@ -607,12 +905,38 @@ export function useFilePreviewResourceActions({
         onRenameCommitted?.(gfsUri)
       }
     } catch (error) {
-      if (!onAuthorityFailure(errorMessage(error))) {
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
+      if (
+        !onAuthorityFailure(
+          errorMessage(error),
+          operationContext.sessionScope,
+          operationContext.sessionGeneration
+        )
+      ) {
         pushToast?.(`Could not rename the file: ${describeGfsReadError(error).message}`, 'error')
       }
     } finally {
-      renamePendingRef.current = false
-      setMutationPending(false)
+      if (busyRequestRef.current === busyRequest) {
+        renamePendingRef.current = false
+      }
+      if (
+        busyRequestRef.current === busyRequest &&
+        isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        setMutationPending(false)
     }
   }
 
@@ -633,6 +957,7 @@ export function useFilePreviewResourceActions({
       parentResourceId: sourceParentId,
       drive: resource.drive,
       version: resource.version,
+      sessionGeneration,
     }
     const sourceName = resource.name
     const isActiveMove = () => moveRequestRef.current === requestId
@@ -641,11 +966,16 @@ export function useFilePreviewResourceActions({
       setMovePermissionStatus(null)
       if (!isDialogCurrent || isDialogCurrent()) setMoveOpen(false)
     }
-    let sessionGeneration: number | null = null
     const isCurrentSessionGeneration = async () => {
-      if (sessionGeneration === null) return false
+      if (
+        !isGfsSessionGeneration(moveContext.sessionGeneration) ||
+        !isGfsSessionGeneration(moveContextRef.current.sessionGeneration) ||
+        moveContextRef.current.sessionGeneration !== moveContext.sessionGeneration ||
+        moveContextRef.current.principalScope !== moveContext.principalScope
+      )
+        return false
       try {
-        return (await window.clerum.auth.getSessionGeneration()) === sessionGeneration
+        return (await window.clerum.auth.getSessionGeneration()) === moveContext.sessionGeneration
       } catch {
         return false
       }
@@ -658,6 +988,7 @@ export function useFilePreviewResourceActions({
       return (
         current.gfsUri === moveContext.gfsUri &&
         current.sessionScope === moveContext.sessionScope &&
+        current.sessionGeneration === moveContext.sessionGeneration &&
         current.resourceId === moveContext.resourceId &&
         current.parentResourceId === moveContext.parentResourceId &&
         current.drive === moveContext.drive &&
@@ -667,30 +998,44 @@ export function useFilePreviewResourceActions({
     const hasCurrentMovePresentationContext = () => {
       const current = moveContextRef.current
       return (
-        current.gfsUri === moveContext.gfsUri && current.sessionScope === moveContext.sessionScope
+        current.gfsUri === moveContext.gfsUri &&
+        current.sessionScope === moveContext.sessionScope &&
+        current.sessionGeneration === moveContext.sessionGeneration
       )
     }
     setMovePermissionStatus('checking')
     setMutationPending(true)
     let mutationDispatched = false
     let permissionsChecked = false
+    let capturedSessionGeneration: number | null = null
     try {
-      const capturedSessionGeneration = await window.clerum.auth.getSessionGeneration()
-      if (!Number.isSafeInteger(capturedSessionGeneration) || capturedSessionGeneration < 0) {
+      if (!isGfsSessionGeneration(moveContext.sessionGeneration)) {
         throw new Error('invalid_session_generation')
       }
-      sessionGeneration = capturedSessionGeneration
+      capturedSessionGeneration = await window.clerum.auth.getSessionGeneration()
+      if (
+        !isGfsSessionGeneration(capturedSessionGeneration) ||
+        capturedSessionGeneration !== moveContext.sessionGeneration
+      ) {
+        return
+      }
       assertGfsAuthorityRetryAllowed(
         queryClient,
         desktopQueryKeys.gfsAffordances(
           moveContext.sessionScope,
           moveContext.parentResourceId,
-          moveContext.drive
+          moveContext.drive,
+          moveContext.sessionGeneration
         )
       )
       assertGfsAuthorityRetryAllowed(
         queryClient,
-        desktopQueryKeys.gfsAffordances(moveContext.sessionScope, destinationId, moveContext.drive)
+        desktopQueryKeys.gfsAffordances(
+          moveContext.sessionScope,
+          destinationId,
+          moveContext.drive,
+          moveContext.sessionGeneration
+        )
       )
       const sourceCheck = await sourceParentAffordancesQuery.refetch({ cancelRefetch: false })
       if (!(await isCurrentSessionGeneration())) {
@@ -717,7 +1062,8 @@ export function useFilePreviewResourceActions({
         queryKey: desktopQueryKeys.gfsAffordances(
           moveContext.sessionScope,
           destinationId,
-          moveContext.drive
+          moveContext.drive,
+          moveContext.sessionGeneration
         ),
         queryFn: () => window.clerum.gfs.affordances(destinationId, moveContext.drive),
         staleTime: 0,
@@ -766,7 +1112,7 @@ export function useFilePreviewResourceActions({
               moveContext.drive,
               ifMatch,
               undefined,
-              capturedSessionGeneration
+              capturedSessionGeneration as number
             )
           },
           isSessionAuthorityFailure: error => {
@@ -774,7 +1120,7 @@ export function useFilePreviewResourceActions({
             if (moveContextRef.current.sessionScope !== moveContext.sessionScope) {
               return isGfsSessionAuthorityFailure(message, 'operation')
             }
-            return onAuthorityFailure(message)
+            return onAuthorityFailure(message, moveContext.sessionScope, capturedSessionGeneration)
           },
           isSessionGenerationCurrent: isCurrentSessionGeneration,
           isCurrent: () =>
@@ -810,7 +1156,10 @@ export function useFilePreviewResourceActions({
           moveContextRef.current.principalScope === moveContext.principalScope
         ) {
           try {
-            await invalidateResourceForSession(moveContext.sessionScope)
+            await invalidateResourceForSession(
+              moveContext.sessionScope,
+              moveContext.sessionGeneration
+            )
           } catch {
             // A failed follow-up read cannot downgrade the confirmed Move.
           }
@@ -861,7 +1210,13 @@ export function useFilePreviewResourceActions({
           setMovePermissionStatus(null)
           return
         }
-        if (onAuthorityFailure(errorMessage(error))) {
+        if (
+          onAuthorityFailure(
+            errorMessage(error),
+            moveContext.sessionScope,
+            capturedSessionGeneration
+          )
+        ) {
           setMoveOpen(false)
           setMovePermissionStatus(null)
         } else {
@@ -871,7 +1226,9 @@ export function useFilePreviewResourceActions({
         return
       }
       if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
-      if (onAuthorityFailure(errorMessage(error))) {
+      if (
+        onAuthorityFailure(errorMessage(error), moveContext.sessionScope, capturedSessionGeneration)
+      ) {
         if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
           setMoveOpen(false)
           setMovePermissionStatus(null)
@@ -894,10 +1251,24 @@ export function useFilePreviewResourceActions({
 
   const handleDelete = async () => {
     if (!resource || deletePendingRef.current) return
+    const operationContext = moveContextRef.current
+    if (!isGfsSessionGeneration(operationContext.sessionGeneration)) return
+    const busyRequest = ++busyRequestRef.current
     deletePendingRef.current = true
     setMutationPending(true)
     try {
-      if (!(await requireResourcePermissions(['delete']))) return
+      const hasPermission = await requireResourcePermissions(['delete'])
+      if (
+        busyRequestRef.current !== busyRequest ||
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        ) ||
+        !hasPermission
+      )
+        return
       const deleted = await runMutation(
         () =>
           window.clerum.gfs
@@ -911,12 +1282,24 @@ export function useFilePreviewResourceActions({
         onDeleted()
       }
     } finally {
-      deletePendingRef.current = false
-      setMutationPending(false)
+      if (busyRequestRef.current === busyRequest) {
+        deletePendingRef.current = false
+        if (
+          isGfsSessionAuthorityCurrent(
+            operationContext.sessionScope,
+            operationContext.sessionGeneration,
+            moveContextRef.current.sessionScope,
+            moveContextRef.current.sessionGeneration
+          )
+        )
+          setMutationPending(false)
+      }
     }
   }
 
   const handleGrant = async (subjectKeys: string[], bits: string[]) => {
+    const operationContext = moveContextRef.current
+    if (!isGfsSessionGeneration(operationContext.sessionGeneration)) return
     if (
       !resource ||
       !affordances ||
@@ -928,13 +1311,46 @@ export function useFilePreviewResourceActions({
     }
     try {
       await window.clerum.gfs.grant(resource.resourceId, subjectKeys, bits, resource.drive, false)
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       await Promise.all([grantsQuery.refetch(), sharesQuery.refetch(), inheritedQuery.refetch()])
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       pushToast?.(
         `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
         'success'
       )
     } catch (error) {
-      if (!onAuthorityFailure(errorMessage(error))) {
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
+      if (
+        !onAuthorityFailure(
+          errorMessage(error),
+          operationContext.sessionScope,
+          operationContext.sessionGeneration
+        )
+      ) {
         pushToast?.(describeGfsGrantError(error).message, 'error')
       }
       throw error
@@ -942,32 +1358,118 @@ export function useFilePreviewResourceActions({
   }
 
   const handleRevokeGrant = async (item: GfsGrantListItem, label: string) => {
+    const operationContext = moveContextRef.current
+    if (!isGfsSessionGeneration(operationContext.sessionGeneration)) return
     setRevokingGrantId(item.id)
     try {
       await window.clerum.gfs.revokeGrant(item.id)
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       await grantsQuery.refetch()
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       pushToast?.(`Access revoked for ${label}`, 'success')
     } catch (error) {
-      if (!onAuthorityFailure(errorMessage(error))) {
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
+      if (
+        !onAuthorityFailure(
+          errorMessage(error),
+          operationContext.sessionScope,
+          operationContext.sessionGeneration
+        )
+      ) {
         pushToast?.(describeGfsGrantError(error).message, 'error')
       }
     } finally {
-      setRevokingGrantId(null)
+      if (
+        isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        setRevokingGrantId(null)
     }
   }
 
   const handleRevokeShare = async (item: GfsShareListItem, label: string) => {
+    const operationContext = moveContextRef.current
+    if (!isGfsSessionGeneration(operationContext.sessionGeneration)) return
     setRevokingShareId(item.id)
     try {
       await window.clerum.gfs.revokeShare(item.id)
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       await sharesQuery.refetch()
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       pushToast?.(`Shared access revoked for ${label}`, 'success')
     } catch (error) {
-      if (!onAuthorityFailure(errorMessage(error))) {
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
+      if (
+        !onAuthorityFailure(
+          errorMessage(error),
+          operationContext.sessionScope,
+          operationContext.sessionGeneration
+        )
+      ) {
         pushToast?.(describeGfsGrantError(error).message, 'error')
       }
     } finally {
-      setRevokingShareId(null)
+      if (
+        isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        setRevokingShareId(null)
     }
   }
 
@@ -977,6 +1479,8 @@ export function useFilePreviewResourceActions({
     role: GfsAccessRole
   ) => {
     if (!resource || !affordances) return
+    const operationContext = moveContextRef.current
+    if (!isGfsSessionGeneration(operationContext.sessionGeneration)) return
     const host = item.subject.type === 'host'
     const requestedBits =
       role === 'editor'
@@ -999,10 +1503,43 @@ export function useFilePreviewResourceActions({
         resource.drive,
         item.inherit
       )
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       await Promise.all([grantsQuery.refetch(), sharesQuery.refetch(), inheritedQuery.refetch()])
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
       pushToast?.(`${label} is now ${role === 'editor' ? 'an Editor' : 'Read-only'}`, 'success')
     } catch (error) {
-      if (!onAuthorityFailure(errorMessage(error))) {
+      if (
+        !isGfsSessionAuthorityCurrent(
+          operationContext.sessionScope,
+          operationContext.sessionGeneration,
+          moveContextRef.current.sessionScope,
+          moveContextRef.current.sessionGeneration
+        )
+      )
+        return
+      if (
+        !onAuthorityFailure(
+          errorMessage(error),
+          operationContext.sessionScope,
+          operationContext.sessionGeneration
+        )
+      ) {
         pushToast?.(describeGfsGrantError(error).message, 'error')
       }
     }
@@ -1160,6 +1697,7 @@ export function useFilePreviewResourceActions({
             parentResourceId: resource.parentResourceId,
           }}
           sessionScope={sessionScope}
+          sessionGeneration={sessionGeneration}
           initialCrumbs={[]}
           onMove={(destinationId, destinationName) => handleMove(destinationId, destinationName)}
           onRetryPermissionCheck={(destinationId, destinationName, isCurrent) =>

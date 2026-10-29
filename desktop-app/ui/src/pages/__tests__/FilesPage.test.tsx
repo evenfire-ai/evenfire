@@ -41,6 +41,7 @@ function baseController() {
     current: null,
     crumbs: [],
     sessionScope: 'env-1:user-1:team-1',
+    sessionGeneration: 0,
     accessibleResources: [],
     items: [],
     affordances: null,
@@ -6975,7 +6976,7 @@ describe('FilesPage', () => {
     // the first ten right if the cached ids were all at the front.
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     cached.forEach(resourceId =>
-      queryClient.setQueryData(desktopQueryKeys.gfsChildren(scope, resourceId, 'main'), {
+      queryClient.setQueryData(desktopQueryKeys.gfsChildren(scope, resourceId, 'main', 0), {
         pages: [{ items: [], nextCursor: null }],
         pageParams: [undefined],
       })

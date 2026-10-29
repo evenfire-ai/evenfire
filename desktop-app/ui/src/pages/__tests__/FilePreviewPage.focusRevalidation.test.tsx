@@ -52,6 +52,7 @@ describe('FilePreviewPage focus revalidation', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       accessState: 'active',
       sessionScope: 'preview-focus-user:main',
+      sessionGeneration: 1,
       authorityPending: false,
       handleAuthorityFailure: vi.fn(() => false),
     })
@@ -162,6 +163,7 @@ describe('FilePreviewPage focus revalidation', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       accessState: 'active',
       sessionScope: 'preview-focus-user:main',
+      sessionGeneration: 1,
       authorityPending: false,
       handleAuthorityFailure: vi.fn(() => false),
     })
@@ -201,7 +203,7 @@ describe('FilePreviewPage focus revalidation', () => {
     expect(sourceReads).toHaveLength(2)
     expect(
       queryClient.getQueryState(
-        desktopQueryKeys.gfsAffordances('preview-focus-user:main', 'source-parent', 'main')
+        desktopQueryKeys.gfsAffordances('preview-focus-user:main', 'source-parent', 'main', 1)
       )?.status
     ).toBe('error')
     expect(screen.getByText(/Too many file requests/)).toBeTruthy()
@@ -271,6 +273,7 @@ describe('FilePreviewPage focus revalidation', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       accessState: 'active',
       sessionScope: 'preview-focus-user:main',
+      sessionGeneration: 1,
       authorityPending: false,
       handleAuthorityFailure: vi.fn(() => false),
     })

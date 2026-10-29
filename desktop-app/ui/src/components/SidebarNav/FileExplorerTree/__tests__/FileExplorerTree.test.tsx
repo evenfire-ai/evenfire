@@ -43,6 +43,7 @@ const mockAuthContext = vi.hoisted(() => ({
   isAuthenticated: true,
   me: { id: 'user-1', teamId: 'team-1' },
   runtimeConfigState: { envKey: 'test' },
+  sessionGeneration: 7,
 }))
 vi.mock('@contexts/AuthContext', () => ({ useAuthContext: () => mockAuthContext }))
 
@@ -107,6 +108,7 @@ afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
   mockAuthContext.me = { id: 'user-1', teamId: 'team-1' }
+  mockAuthContext.sessionGeneration = 7
 })
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
@@ -946,7 +948,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       moveResource,
     })
     const { pushToast, queryClient } = renderTreeWithSession()
-    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main')
+    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main', 7)
     queryClient.setQueryData(oldScopeChildren, { marker: 'captured source cache' })
 
     try {
@@ -1008,7 +1010,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     })
     const { pushToast, queryClient } = renderTreeWithSession()
     const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
-    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main')
+    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main', 7)
     queryClient.setQueryData(oldScopeChildren, { marker: 'captured source cache' })
 
     try {
@@ -1070,12 +1072,13 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       moveResource,
     })
     const { pushToast, queryClient, rerender } = renderTreeWithSession()
-    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main')
-    const newScopeAccessible = desktopQueryKeys.gfsAccessible('test:user-1:team-2', 'main')
+    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main', 7)
+    const newScopeAccessible = desktopQueryKeys.gfsAccessible('test:user-1:team-2', 'main', 7)
     const newScopeChildren = desktopQueryKeys.gfsChildren(
       'test:user-1:team-2',
       sourceParentId,
-      'main'
+      'main',
+      7
     )
 
     try {
@@ -1132,7 +1135,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
       moveResource,
     })
     const { pushToast, queryClient, unmount } = renderTreeWithSession()
-    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main')
+    const oldScopeChildren = desktopQueryKeys.gfsChildren(sessionScope, sourceParentId, 'main', 7)
     queryClient.setQueryData(oldScopeChildren, { marker: 'captured source cache' })
 
     try {
@@ -1433,13 +1436,13 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     currentParentId = movedSourceParentId
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main'),
+        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main', 7),
       })
     })
     const currentSourceParent = () => {
       const accessibleData = queryClient.getQueryData<{
         pages: Array<{ items: Array<{ resourceId: string; parentResourceId: string | null }> }>
-      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main'))
+      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main', 7))
       return accessibleData?.pages
         .flatMap(page => page.items)
         .find(item => item.resourceId === sourceResourceId)?.parentResourceId
@@ -1524,13 +1527,13 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     currentParentId = movedSourceParentId
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main'),
+        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main', 7),
       })
     })
     const listedSourceParent = () => {
       const accessibleData = queryClient.getQueryData<{
         pages: Array<{ items: Array<{ resourceId: string; parentResourceId: string | null }> }>
-      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main'))
+      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main', 7))
       return accessibleData?.pages
         .flatMap(page => page.items)
         .find(item => item.resourceId === sourceResourceId)?.parentResourceId
@@ -1602,13 +1605,13 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     currentParentId = movedSourceParentId
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main'),
+        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main', 7),
       })
     })
     const listedSourceParent = () => {
       const accessibleData = queryClient.getQueryData<{
         pages: Array<{ items: Array<{ resourceId: string; parentResourceId: string | null }> }>
-      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main'))
+      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main', 7))
       return accessibleData?.pages
         .flatMap(page => page.items)
         .find(item => item.resourceId === sourceResourceId)?.parentResourceId
@@ -1725,7 +1728,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     affordances.mockClear()
     await expect(
       queryClient.fetchQuery({
-        queryKey: desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, 'main'),
+        queryKey: desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, 'main', 7),
         queryFn: async () => {
           throw new Error('429 Too Many Requests retryAfterSeconds=30')
         },
@@ -2933,7 +2936,7 @@ describe('FileExplorerTree — drag Move presentation lifetime', () => {
       moveResource,
     })
     const { pushToast, queryClient, unmount } = renderTreeWithSession()
-    const sourceCache = desktopQueryKeys.gfsChildren(sessionScope, 'foldera', 'main')
+    const sourceCache = desktopQueryKeys.gfsChildren(sessionScope, 'foldera', 'main', 7)
 
     try {
       await act(async () => {
@@ -3008,7 +3011,7 @@ describe('FileExplorerTree — drag Move presentation lifetime', () => {
       moveResource,
     })
     const { pushToast, queryClient, unmount } = renderTreeWithSession()
-    const sourceCache = desktopQueryKeys.gfsAccessible(sessionScope, 'main')
+    const sourceCache = desktopQueryKeys.gfsAccessible(sessionScope, 'main', 7)
 
     try {
       const source = await screen.findByRole('button', { name: 'A' })

@@ -43,6 +43,7 @@ const me = {
 
 const authValue = {
   isAuthenticated: true,
+  sessionGeneration: 0,
   me,
   runtimeConfigState: { envKey: 'test-environment' },
 } as unknown as AuthContextValue
@@ -541,7 +542,8 @@ describe('FilesPage stale permission action oracle', () => {
         queryKey: desktopQueryKeys.gfsAffordances(
           'test-environment:user-1:team-1',
           'folder-active',
-          'main'
+          'main',
+          0
         ),
       })
     })
@@ -611,7 +613,8 @@ describe('FilesPage stale permission action oracle', () => {
           queryKey: desktopQueryKeys.gfsAffordances(
             'test-environment:user-1:team-1',
             'folder-active',
-            'main'
+            'main',
+            0
           ),
         })
       })
@@ -684,7 +687,8 @@ describe('FilesPage stale permission action oracle', () => {
           queryKey: desktopQueryKeys.gfsAffordances(
             'test-environment:user-1:team-1',
             'source-parent',
-            'main'
+            'main',
+            0
           ),
         })
       })
@@ -761,7 +765,8 @@ describe('FilesPage stale permission action oracle', () => {
         const sourceParentKey = desktopQueryKeys.gfsAffordances(
           'test-environment:user-1:team-1',
           'source-parent',
-          'main'
+          'main',
+          0
         )
         await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main'))
         fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
@@ -855,7 +860,8 @@ describe('FilesPage stale permission action oracle', () => {
       const permissionKey = desktopQueryKeys.gfsAffordances(
         'test-environment:user-1:team-1',
         'folder-active',
-        'main'
+        'main',
+        0
       )
       await act(async () => {
         await client.invalidateQueries({
@@ -1030,7 +1036,8 @@ describe('FilesPage stale permission action oracle', () => {
     const sourceKey = desktopQueryKeys.gfsAffordances(
       'test-environment:user-1:team-1',
       'source-parent',
-      'main'
+      'main',
+      0
     )
     await act(async () => {
       await client.refetchQueries({ exact: true, queryKey: sourceKey })
@@ -1122,7 +1129,8 @@ describe('FilesPage stale permission action oracle', () => {
       const currentFolderKey = desktopQueryKeys.gfsAffordances(
         'test-environment:user-1:team-1',
         'folder-active',
-        'main'
+        'main',
+        0
       )
       rejectCurrentCheck = true
       await act(async () => {
@@ -1282,7 +1290,8 @@ describe('FilesPage stale permission action oracle', () => {
       const currentKey = desktopQueryKeys.gfsAffordances(
         'test-environment:user-1:team-1',
         'folder-active',
-        'main'
+        'main',
+        0
       )
       await waitFor(() => expect(client.getQueryState(currentKey)?.status).toBe('error'))
 
@@ -1355,7 +1364,8 @@ describe('FilesPage stale permission action oracle', () => {
       const currentKey = desktopQueryKeys.gfsAffordances(
         'test-environment:user-1:team-1',
         'folder-active',
-        'main'
+        'main',
+        0
       )
       await act(async () => {
         await client.refetchQueries({ exact: true, queryKey: currentKey })
@@ -1478,7 +1488,8 @@ describe('FilesPage stale permission action oracle', () => {
       const sourceParentKey = desktopQueryKeys.gfsAffordances(
         'test-environment:user-1:team-1',
         'shared-source-parent',
-        'main'
+        'main',
+        0
       )
       await waitFor(() => expect(sourceParentReads).toBe(1))
       await waitFor(() => expect(client.getQueryState(sourceParentKey)?.status).toBe('error'))

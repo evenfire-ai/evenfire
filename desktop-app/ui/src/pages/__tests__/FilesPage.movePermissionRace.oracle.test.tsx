@@ -59,6 +59,7 @@ function authFor(teamId: string, userId = 'user-a'): AuthContextValue {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: authoritativeSessionGeneration,
     me: member(teamId, userId),
     email: `${userId}@example.test`,
     password: '',
@@ -546,7 +547,10 @@ describe('FilesPage Move permission generation fencing', () => {
       const fixture = await numberedMoveFixture({ holdMove: true })
       const invalidateQueries = vi.spyOn(fixture.queryClient, 'invalidateQueries')
       const removeQueries = vi.spyOn(fixture.queryClient, 'removeQueries')
-      const accessStateKey = desktopQueryKeys.gfsAccessState(':user-a:team-a')
+      const accessStateKey = desktopQueryKeys.gfsAccessState(
+        ':user-a:team-a',
+        authoritativeSessionGeneration
+      )
       try {
         await fixture.beginMove()
         await fixture.pendingMoveStarted
@@ -1062,12 +1066,40 @@ describe('FilesPage Move permission generation fencing', () => {
     const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
     const teamAScope = ':user-a:team-a'
     const teamBScope = ':user-a:team-b'
-    const sourceChildrenA = desktopQueryKeys.gfsChildren(teamAScope, 'source-parent', 'main')
-    const destinationChildrenA = desktopQueryKeys.gfsChildren(teamAScope, 'destination-1', 'main')
-    const accessibleA = desktopQueryKeys.gfsAccessible(teamAScope, 'main')
-    const sourceChildrenB = desktopQueryKeys.gfsChildren(teamBScope, 'source-parent', 'main')
-    const destinationChildrenB = desktopQueryKeys.gfsChildren(teamBScope, 'destination-1', 'main')
-    const accessibleB = desktopQueryKeys.gfsAccessible(teamBScope, 'main')
+    const sourceChildrenA = desktopQueryKeys.gfsChildren(
+      teamAScope,
+      'source-parent',
+      'main',
+      authoritativeSessionGeneration
+    )
+    const destinationChildrenA = desktopQueryKeys.gfsChildren(
+      teamAScope,
+      'destination-1',
+      'main',
+      authoritativeSessionGeneration
+    )
+    const accessibleA = desktopQueryKeys.gfsAccessible(
+      teamAScope,
+      'main',
+      authoritativeSessionGeneration
+    )
+    const sourceChildrenB = desktopQueryKeys.gfsChildren(
+      teamBScope,
+      'source-parent',
+      'main',
+      authoritativeSessionGeneration
+    )
+    const destinationChildrenB = desktopQueryKeys.gfsChildren(
+      teamBScope,
+      'destination-1',
+      'main',
+      authoritativeSessionGeneration
+    )
+    const accessibleB = desktopQueryKeys.gfsAccessible(
+      teamBScope,
+      'main',
+      authoritativeSessionGeneration
+    )
     const emptyChildren = await listChildrenPage([])
     queryClient.setQueryData(sourceChildrenA, { pages: [children], pageParams: [undefined] })
     queryClient.setQueryData(destinationChildrenA, {
@@ -1852,20 +1884,40 @@ describe('FilesPage Move permission generation fencing', () => {
       const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
       const scope = ':user-a:team-a'
       const newTeamScope = ':user-a:team-b'
-      const sourceChildrenKey = desktopQueryKeys.gfsChildren(scope, 'source-parent', 'main')
-      const destinationChildrenKey = desktopQueryKeys.gfsChildren(scope, destinationId, 'main')
-      const accessibleKey = desktopQueryKeys.gfsAccessible(scope, 'main')
+      const sourceChildrenKey = desktopQueryKeys.gfsChildren(
+        scope,
+        'source-parent',
+        'main',
+        authoritativeSessionGeneration
+      )
+      const destinationChildrenKey = desktopQueryKeys.gfsChildren(
+        scope,
+        destinationId,
+        'main',
+        authoritativeSessionGeneration
+      )
+      const accessibleKey = desktopQueryKeys.gfsAccessible(
+        scope,
+        'main',
+        authoritativeSessionGeneration
+      )
       const newTeamSourceChildrenKey = desktopQueryKeys.gfsChildren(
         newTeamScope,
         'source-parent',
-        'main'
+        'main',
+        authoritativeSessionGeneration
       )
       const newTeamDestinationChildrenKey = desktopQueryKeys.gfsChildren(
         newTeamScope,
         destinationId,
-        'main'
+        'main',
+        authoritativeSessionGeneration
       )
-      const newTeamAccessibleKey = desktopQueryKeys.gfsAccessible(newTeamScope, 'main')
+      const newTeamAccessibleKey = desktopQueryKeys.gfsAccessible(
+        newTeamScope,
+        'main',
+        authoritativeSessionGeneration
+      )
       queryClient.setQueryData(sourceChildrenKey, { pages: [children], pageParams: [undefined] })
       queryClient.setQueryData(destinationChildrenKey, {
         pages: [await listChildrenPage([])],

@@ -59,6 +59,7 @@ describe('preview rename refreshes the workspace title from GFS', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
         gfs: {
           resolve,
           renameResource,
@@ -72,6 +73,7 @@ describe('preview rename refreshes the workspace title from GFS', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       accessState: 'active',
       sessionScope: 'preview-rename-user:main',
+      sessionGeneration: 1,
       authorityPending: false,
       handleAuthorityFailure: vi.fn(() => false),
     } as never)

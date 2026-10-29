@@ -182,11 +182,13 @@ describe('useAppController session ownership oracle', () => {
     const loadOtherScopeData = vi.fn(async () => ({ generation: 'other-scope' }))
     const currentGfsQueryKey = desktopQueryKeys.gfsAccessible(
       `harness-environment:${HARNESS_ME.id}:${HARNESS_ME.teamId}`,
-      'main'
+      'main',
+      publishedGeneration
     )
     const otherGfsQueryKey = desktopQueryKeys.gfsAccessible(
       'other-environment:user-z:team-z',
-      'main'
+      'main',
+      1
     )
     await app.queryClient.fetchQuery({
       queryKey: currentGfsQueryKey,
@@ -199,6 +201,15 @@ describe('useAppController session ownership oracle', () => {
     expect(app.queryClient.getQueryData(currentGfsQueryKey)).toEqual({ generation: 1 })
 
     publishedGeneration = 2
+    const replacementGfsQueryKey = desktopQueryKeys.gfsAccessible(
+      `harness-environment:${HARNESS_ME.id}:${HARNESS_ME.teamId}`,
+      'main',
+      publishedGeneration
+    )
+    await app.queryClient.fetchQuery({
+      queryKey: replacementGfsQueryKey,
+      queryFn: loadReplacementGfsData,
+    })
     handle.getSessionGeneration.mockResolvedValue(publishedGeneration)
     handle.getSessionState.mockResolvedValue({
       authenticated: true,
@@ -209,9 +220,11 @@ describe('useAppController session ownership oracle', () => {
       await app.result.current.controller.loadSession()
     })
 
-    await waitFor(() => expect(loadReplacementGfsData).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(loadReplacementGfsData).toHaveBeenCalledTimes(3))
     expect(loadOtherScopeData).toHaveBeenCalledTimes(1)
-    expect(app.queryClient.getQueryData(currentGfsQueryKey)).toEqual({ generation: 2 })
+    expect(app.queryClient.getQueryData(currentGfsQueryKey)).toEqual({ generation: 1 })
+    expect(app.queryClient.getQueryData(replacementGfsQueryKey)).toEqual({ generation: 2 })
+    expect(app.result.current.controller.sessionGeneration).toBe(2)
     expect(app.queryClient.getQueryData(otherGfsQueryKey)).toEqual({ generation: 'other-scope' })
     expect(app.result.current.controller.currentTeamId).toBe(HARNESS_ME.teamId)
   })

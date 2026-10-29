@@ -29,7 +29,12 @@ import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBa
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  hasGfsSessionGeneration,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
 import type { WorkspaceNavigationSnapshot } from '@hooks/domain/useNavigationController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
@@ -1358,8 +1363,38 @@ export function App() {
     [vm.completeGfsResourceNavigationPreview]
   )
 
+  const previewSessionScope =
+    vm.isAuthenticated && vm.me
+      ? `${vm.runtimeConfigState?.envKey ?? ''}:${vm.me.id}:${vm.me.teamId ?? ''}`
+      : null
+  const previewSessionGeneration = isGfsSessionGeneration(vm.sessionGeneration)
+    ? vm.sessionGeneration
+    : null
+  const livePreviewAuthorityRef = React.useRef({
+    scope: previewSessionScope,
+    generation: previewSessionGeneration,
+  })
+  livePreviewAuthorityRef.current = {
+    scope: previewSessionScope,
+    generation: previewSessionGeneration,
+  }
+
   const refreshOpenPreview = React.useCallback(
     async (gfsUri: string, fromRetry = false) => {
+      const ownsAuthority = () =>
+        isGfsSessionAuthorityCurrent(
+          previewSessionScope,
+          previewSessionGeneration,
+          livePreviewAuthorityRef.current.scope,
+          livePreviewAuthorityRef.current.generation
+        )
+      if (!ownsAuthority()) return
+      const queryFilter = {
+        queryKey: desktopQueryKeys.gfsRoot,
+        predicate: (query: { queryKey: readonly unknown[] }) =>
+          query.queryKey[2] === previewSessionScope &&
+          hasGfsSessionGeneration(query.queryKey, previewSessionGeneration),
+      }
       if (!fromRetry) {
         const existingTimer = previewRetryTimersRef.current.get(gfsUri)
         if (existingTimer !== undefined) window.clearTimeout(existingTimer)
@@ -1369,10 +1404,10 @@ export function App() {
       const generation = (previewRefreshGenerationRef.current.get(gfsUri) ?? 0) + 1
       previewRefreshGenerationRef.current.set(gfsUri, generation)
       const isCurrentGeneration = () =>
-        previewRefreshGenerationRef.current.get(gfsUri) === generation
+        previewRefreshGenerationRef.current.get(gfsUri) === generation && ownsAuthority()
       try {
         const resource = await window.clerum.gfs.resolve(gfsUri)
-        if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
+        if (!isCurrentGeneration()) return
         const preview =
           resource.kind === 'file'
             ? resolveGfsPreview({
@@ -1439,7 +1474,7 @@ export function App() {
         previewRetryTimersRef.current.delete(gfsUri)
         previewRetryAttemptRef.current.delete(gfsUri)
       } catch (error) {
-        if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
+        if (!isCurrentGeneration()) return
         const status = authoritativeGfsStatus(error)
         const message = error instanceof Error ? error.message : String(error ?? '')
         if (status === 401 || isGfsSessionAuthorityFailure(message, 'operation')) {
@@ -1460,7 +1495,7 @@ export function App() {
           setPluginGfsPreview(current =>
             markPluginGfsPreviewUnavailable(current, current?.gfsUri ?? '')
           )
-          void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+          void queryClient.removeQueries(queryFilter)
           return
         }
         if (status === 403 || status === 404) {
@@ -1475,7 +1510,7 @@ export function App() {
             isCurrentGeneration() ? markPluginGfsPreviewUnavailable(current, gfsUri) : current
           )
           void queryClient.invalidateQueries({
-            queryKey: desktopQueryKeys.gfsRoot,
+            ...queryFilter,
             refetchType: 'active',
           })
         }
@@ -1485,13 +1520,13 @@ export function App() {
           const delayMs = Math.min(5000 * 2 ** Math.min(attempt - 1, 4), 60_000)
           const retryTimer = window.setTimeout(() => {
             previewRetryTimersRef.current.delete(gfsUri)
-            void refreshOpenPreview(gfsUri, true)
+            if (isCurrentGeneration()) void refreshOpenPreview(gfsUri, true)
           }, delayMs)
           previewRetryTimersRef.current.set(gfsUri, retryTimer)
         }
       }
     },
-    [queryClient, setWorkspaceTabs]
+    [queryClient, setWorkspaceTabs, previewSessionScope, previewSessionGeneration]
   )
 
   React.useEffect(() => {
@@ -1506,6 +1541,8 @@ export function App() {
     const gfsQueryFilter = {
       queryKey: desktopQueryKeys.gfsRoot,
       predicate: (query: { queryKey: readonly unknown[] }) =>
+        query.queryKey[2] === previewSessionScope &&
+        hasGfsSessionGeneration(query.queryKey, previewSessionGeneration) &&
         shouldRevalidateGfsQuery(query.queryKey),
     }
     const revalidateGfs = (hardRecovery = false) => {
@@ -1516,12 +1553,20 @@ export function App() {
         return
       }
       gfsRevalidationInFlight = true
-      const queryFilter = hardRecovery ? { queryKey: desktopQueryKeys.gfsRoot } : gfsQueryFilter
+      const queryFilter = hardRecovery
+        ? {
+            queryKey: desktopQueryKeys.gfsRoot,
+            predicate: (query: { queryKey: readonly unknown[] }) =>
+              query.queryKey[2] === previewSessionScope &&
+              hasGfsSessionGeneration(query.queryKey, previewSessionGeneration),
+          }
+        : gfsQueryFilter
       const foregroundReadWasActive = queryClient.isFetching(queryFilter) > 0
       setRemoteGfsChangeEpoch(epoch => epoch + 1)
       void queryClient
         .invalidateQueries({ ...queryFilter, refetchType: 'active' }, { cancelRefetch: false })
         .then(async () => {
+          if (!active) return
           const resources = new Set(
             workspaceTabsRef.current.tabs
               .filter(tab => tab.kind === 'preview' && tab.preview)
@@ -1581,6 +1626,8 @@ export function App() {
     entityChangeRegistry,
     queryClient,
     refreshOpenPreview,
+    previewSessionScope,
+    previewSessionGeneration,
     vm.authenticatedPrincipalIdentity,
     vm.currentTeamId,
     vm.isAuthenticated,
@@ -3673,6 +3720,7 @@ export function App() {
       statusText: vm.statusText,
       statusTone: vm.statusTone,
       isAuthenticated: vm.isAuthenticated,
+      sessionGeneration: vm.sessionGeneration,
       me: vm.me,
       email: vm.email,
       password: vm.password,
@@ -3740,6 +3788,7 @@ export function App() {
       vm.handleStartDesktopSetup,
       vm.hasDependencyOutage,
       vm.isAuthenticated,
+      vm.sessionGeneration,
       vm.loadSession,
       vm.me,
       vm.password,

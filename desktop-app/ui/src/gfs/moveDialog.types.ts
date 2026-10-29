@@ -12,6 +12,8 @@ type GfsMoveDialogBaseProps = {
   }
   /** Cache scope from useGfsBrowserController — shares the page's gfs queries. */
   sessionScope?: string
+  /** Published generation that owns all authority reads in this dialog. */
+  sessionGeneration: number | null
   /** Dialog-local starting path (typically the page crumbs, minus the target). */
   initialCrumbs: GfsCrumb[]
   /** Recheck both source and destination permissions without committing Move. */
@@ -26,7 +28,7 @@ type GfsMoveDialogBaseProps = {
   /** Central fail-closed boundary (R4 spec §1): destination-listing authority
    *  failures must revoke the session even though the dialog owns these
    *  query observers. Policy verdicts return false and stay local. */
-  onAuthorityFailure?: (message: string) => boolean
+  onAuthorityFailure?: (message: string, scope: string, sessionGeneration: number) => boolean
 }
 
 export type GfsNumberedNameConsent = (proposedName: string) => Promise<boolean>

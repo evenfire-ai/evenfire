@@ -31,6 +31,7 @@ function controller(
   return {
     accessState,
     sessionScope: 'preview-test-user:main',
+    sessionGeneration: 1,
     authorityPending: false,
     handleAuthorityFailure: vi.fn(handleAuthorityFailure),
   }
@@ -303,6 +304,392 @@ describe('FilePreviewPage', () => {
     )
   })
 
+  it('releases and fences pending rename work across a generation change', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const renameResolvers: Array<() => void> = []
+    const renameResource = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          renameResolvers.push(resolve)
+        })
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(async () =>
+            resolveResource({
+              resourceId: '0123456789abcdef0123456789abcdef',
+              rid: '0123456789abcdef0123456789abcdef',
+              gfsUri: uri,
+              drive: 'main',
+              parentResourceId: 'preview-parent',
+              name: 'diagram.png',
+              kind: 'file',
+              version: 7,
+              bytes: 1,
+            })
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          renameResource,
+        },
+      },
+    })
+    const controllerState = controller()
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const props = {
+      gfsUri: uri,
+      fileName: 'diagram.png',
+      fileKind: 'image',
+      mimeType: 'image/png',
+      byteLength: 1,
+    } as const
+    const view = render(<FilePreviewPage {...props} />)
+
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
+    clickPreviewAction('diagram.png', 'Rename')
+    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    const submit = () =>
+      within(screen.getByRole('dialog', { name: 'Rename file' })).getByRole('button', {
+        name: 'Save',
+      }) as HTMLButtonElement
+    fireEvent.change(within(dialog).getByLabelText('New name'), {
+      target: { value: 'renamed.png' },
+    })
+    fireEvent.submit(dialog)
+    await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
+    expect(submit().disabled).toBe(true)
+
+    controllerState.sessionGeneration = 2
+    view.rerender(<FilePreviewPage {...props} />)
+    await waitFor(() => expect(submit().disabled).toBe(false))
+    fireEvent.change(
+      within(screen.getByRole('dialog', { name: 'Rename file' })).getByLabelText('New name'),
+      {
+        target: { value: 'renamed-again.png' },
+      }
+    )
+    fireEvent.click(submit())
+    await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(2))
+    expect(submit().disabled).toBe(true)
+    await act(async () => renameResolvers[0]!())
+    expect(submit().disabled).toBe(true)
+    await act(async () => renameResolvers[1]!())
+  })
+
+  it('does not report a rename committed when generation changes during invalidation', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    let resolveInvalidation!: (value: unknown) => void
+    const invalidationRead = new Promise<unknown>(resolve => {
+      resolveInvalidation = resolve
+    })
+    let resolveCount = 0
+    const resolve = vi.fn(async () => {
+      resolveCount += 1
+      if (resolveCount === 2) return invalidationRead
+      return resolveResource({
+        resourceId: '0123456789abcdef0123456789abcdef',
+        rid: '0123456789abcdef0123456789abcdef',
+        gfsUri: uri,
+        drive: 'main',
+        parentResourceId: 'preview-parent',
+        name: 'diagram.png',
+        kind: 'file',
+        version: 7,
+        bytes: 1,
+      })
+    })
+    const renameResource = vi.fn(async () => undefined)
+    const onRenameCommitted = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve,
+          affordances: vi.fn(async () => activeAffordances),
+          renameResource,
+        },
+      },
+    })
+    const controllerState = controller()
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const props = {
+      gfsUri: uri,
+      fileName: 'diagram.png',
+      fileKind: 'image',
+      mimeType: 'image/png',
+      byteLength: 1,
+      onRenameCommitted,
+    } as const
+    const view = render(<FilePreviewPage {...props} />)
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
+    clickPreviewAction('diagram.png', 'Rename')
+    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    fireEvent.change(within(dialog).getByLabelText('New name'), {
+      target: { value: 'renamed.png' },
+    })
+    fireEvent.submit(dialog)
+    await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+
+    controllerState.sessionGeneration = 2
+    view.rerender(<FilePreviewPage {...props} />)
+    await act(async () => resolveInvalidation(await resolvePreviewResource(uri)))
+    expect(onRenameCommitted).not.toHaveBeenCalled()
+  })
+
+  it('does not refetch old grant authority after a generation change during revoke', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    let resolveRevoke!: () => void
+    const revokePending = new Promise<void>(resolve => {
+      resolveRevoke = resolve
+    })
+    const revokeGrant = vi.fn(() => revokePending)
+    const listGrants = vi.fn(async () => [
+      {
+        id: 'preview-grant-1',
+        drive: 'main',
+        resourceId: '0123456789abcdef0123456789abcdef',
+        subject: { type: 'host' as const, id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        inherit: false,
+      },
+    ])
+    const producerResource = () =>
+      resolveResource({
+        resourceId: '0123456789abcdef0123456789abcdef',
+        rid: '0123456789abcdef0123456789abcdef',
+        gfsUri: uri,
+        drive: 'main',
+        parentResourceId: null,
+        name: 'diagram.png',
+        kind: 'file',
+        version: 7,
+        bytes: 1,
+      })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: {
+          listMine: vi.fn(async () => [
+            {
+              name: 'chatllm',
+              contextRef: 'ctx-1',
+              mcpServers: [],
+              gfsSubject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            },
+          ]),
+        },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(producerResource),
+          affordances: vi.fn(async () => activeAffordances),
+          listGrants,
+          listShares: vi.fn(async () => []),
+          listResourceAcl: vi.fn(async () => []),
+          revokeGrant,
+        },
+      },
+    })
+    const controllerState = controller()
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const view = render(
+      <FilePreviewPage gfsUri={uri} fileName="diagram.png" fileKind="image" byteLength={1} />
+    )
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
+    clickPreviewAction('diagram.png', 'Share')
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Share options for diagram.png' })).getByRole(
+        'menuitem',
+        { name: 'Share' }
+      )
+    )
+    await screen.findByRole('dialog', { name: 'Share file diagram.png' })
+    await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for chatllm' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('preview-grant-1'))
+
+    controllerState.sessionGeneration = 2
+    view.rerender(
+      <FilePreviewPage gfsUri={uri} fileName="diagram.png" fileKind="image" byteLength={1} />
+    )
+    await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(2))
+    await act(async () => resolveRevoke())
+    expect(listGrants).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not refetch old share authority after a generation change during revoke', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    let resolveRevoke!: () => void
+    const revokePending = new Promise<void>(resolve => {
+      resolveRevoke = resolve
+    })
+    const revokeShare = vi.fn(() => revokePending)
+    const listShares = vi.fn(async () => [
+      {
+        id: 'preview-share-1',
+        drive: 'main',
+        resourceId: '0123456789abcdef0123456789abcdef',
+        subject: { type: 'host' as const, id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        includeDescendants: true,
+      },
+    ])
+    const producerResource = () =>
+      resolveResource({
+        resourceId: '0123456789abcdef0123456789abcdef',
+        rid: '0123456789abcdef0123456789abcdef',
+        gfsUri: uri,
+        drive: 'main',
+        parentResourceId: null,
+        name: 'diagram.png',
+        kind: 'file',
+        version: 7,
+        bytes: 1,
+      })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: {
+          listMine: vi.fn(async () => [
+            {
+              name: 'chatllm',
+              contextRef: 'ctx-1',
+              mcpServers: [],
+              gfsSubject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            },
+          ]),
+        },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(producerResource),
+          affordances: vi.fn(async () => activeAffordances),
+          listGrants: vi.fn(async () => []),
+          listShares,
+          listResourceAcl: vi.fn(async () => []),
+          revokeShare,
+        },
+      },
+    })
+    const controllerState = controller()
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const view = render(
+      <FilePreviewPage gfsUri={uri} fileName="diagram.png" fileKind="image" byteLength={1} />
+    )
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
+    clickPreviewAction('diagram.png', 'Share')
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Share options for diagram.png' })).getByRole(
+        'menuitem',
+        { name: 'Share' }
+      )
+    )
+    await screen.findByRole('dialog', { name: 'Share file diagram.png' })
+    await waitFor(() => expect(listShares).toHaveBeenCalledTimes(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for chatllm' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('preview-share-1'))
+
+    controllerState.sessionGeneration = 2
+    view.rerender(
+      <FilePreviewPage gfsUri={uri} fileName="diagram.png" fileKind="image" byteLength={1} />
+    )
+    await waitFor(() => expect(listShares).toHaveBeenCalledTimes(2))
+    await act(async () => resolveRevoke())
+    expect(listShares).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not let a rename digest started in the old generation adopt new authority', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const nativeDigest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle)
+    let digestCompleted!: () => void
+    let releaseDigest!: (value: ArrayBuffer) => void
+    const digestFinished = new Promise<void>(resolve => {
+      digestCompleted = resolve
+    })
+    const digestResult = new Promise<ArrayBuffer>(resolve => {
+      releaseDigest = resolve
+    })
+    const digestSpy = vi
+      .spyOn(globalThis.crypto.subtle, 'digest')
+      .mockImplementation(async (algorithm, data) => {
+        const actualDigest = await nativeDigest(algorithm, data)
+        digestCompleted()
+        return digestResult.then(() => actualDigest)
+      })
+    const renameResource = vi.fn(async () => undefined)
+    const affordances = vi.fn(async () => activeAffordances)
+    const producerResource = () =>
+      resolveResource({
+        resourceId: '0123456789abcdef0123456789abcdef',
+        rid: '0123456789abcdef0123456789abcdef',
+        gfsUri: uri,
+        drive: 'main',
+        parentResourceId: 'preview-parent',
+        name: 'diagram.png',
+        kind: 'file',
+        version: 7,
+        bytes: 1,
+      })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(producerResource),
+          affordances,
+          renameResource,
+        },
+      },
+    })
+    const controllerState = controller()
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const props = {
+      gfsUri: uri,
+      fileName: 'diagram.png',
+      fileKind: 'image',
+      byteLength: 1,
+    } as const
+    const view = render(<FilePreviewPage {...props} />)
+
+    try {
+      expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+      await waitFor(() => expect(affordances).toHaveBeenCalled())
+      clickPreviewAction('diagram.png', 'Rename')
+      const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+      fireEvent.change(within(dialog).getByLabelText('New name'), {
+        target: { value: 'a'.repeat(260) + '.txt' },
+      })
+      fireEvent.submit(dialog)
+      await digestFinished
+      const permissionReadsBeforeReplacement = affordances.mock.calls.length
+
+      controllerState.sessionGeneration = 2
+      view.rerender(<FilePreviewPage {...props} />)
+      await act(async () => releaseDigest(new ArrayBuffer(0)))
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      expect(renameResource).not.toHaveBeenCalled()
+      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
+    } finally {
+      releaseDigest(new ArrayBuffer(0))
+      digestSpy.mockRestore()
+      view.unmount()
+    }
+  })
+
   it('keeps the preview delete confirmation busy and non-dismissible until settlement', async () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     let resolveDelete!: () => void
@@ -377,6 +764,82 @@ describe('FilePreviewPage', () => {
     expect(await screen.findByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
     expect(screen.queryByRole('dialog', { name: 'Delete diagram.png?' })).toBeNull()
     expect(pushToast).toHaveBeenCalledWith('Deleted diagram.png', 'success')
+  })
+
+  it('does not dispatch delete after its captured permission preflight loses authority', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    let resolvePermission!: (value: typeof activeAffordances) => void
+    let permissionStarted!: () => void
+    const permissionPending = new Promise<typeof activeAffordances>(resolve => {
+      resolvePermission = resolve
+    })
+    const permissionStartedPromise = new Promise<void>(resolve => {
+      permissionStarted = resolve
+    })
+    let holdNextPermission = false
+    const affordances = vi.fn(async () => {
+      if (holdNextPermission) {
+        holdNextPermission = false
+        permissionStarted()
+        return permissionPending
+      }
+      return activeAffordances
+    })
+    const deleteResource = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(async () =>
+            resolveResource({
+              resourceId: '0123456789abcdef0123456789abcdef',
+              rid: '0123456789abcdef0123456789abcdef',
+              gfsUri: uri,
+              drive: 'main',
+              parentResourceId: 'preview-parent',
+              name: 'diagram.png',
+              kind: 'file',
+              version: 7,
+              bytes: 1,
+            })
+          ),
+          affordances,
+          deleteResource,
+        },
+      },
+    })
+    const controllerState = controller()
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const props = {
+      gfsUri: uri,
+      fileName: 'diagram.png',
+      fileKind: 'image',
+      byteLength: 1,
+    } as const
+    const view = render(<FilePreviewPage {...props} />)
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(affordances).toHaveBeenCalled())
+    clickPreviewAction('diagram.png', 'Delete')
+    const dialog = await screen.findByRole('dialog', { name: 'Delete diagram.png?' })
+    const now = Date.now()
+    const advanceAuthorityAge = vi.spyOn(Date, 'now').mockReturnValue(now + 16_000)
+    holdNextPermission = true
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+    await permissionStartedPromise
+    expect(deleteResource).not.toHaveBeenCalled()
+
+    controllerState.sessionGeneration = 2
+    view.rerender(<FilePreviewPage {...props} />)
+    expect(deleteResource).not.toHaveBeenCalled()
+    await act(async () => resolvePermission(activeAffordances))
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(deleteResource).not.toHaveBeenCalled()
+    advanceAuthorityAge.mockRestore()
   })
 
   it('re-enables preview delete confirmation after a failed request', async () => {
@@ -592,6 +1055,108 @@ describe('FilePreviewPage', () => {
     expect(await screen.findByRole('heading', { name: 'Load 2' })).toBeTruthy()
     expect(downloadPreview).toHaveBeenCalledTimes(2)
     expect(screen.getByRole('heading', { name: 'report.md', level: 2 })).toBeTruthy()
+    view.unmount()
+    titlebarLeadingRoot.remove()
+  })
+
+  it('releases and fences pending refresh work when the published generation changes', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const refreshResolvers: Array<(value: unknown) => void> = []
+    const resolve = vi.fn(async () =>
+      resolveResource({
+        resourceId: '0123456789abcdef0123456789abcdef',
+        rid: '0123456789abcdef0123456789abcdef',
+        gfsUri: uri,
+        drive: 'main',
+        parentResourceId: 'preview-parent',
+        name: 'report.md',
+        kind: 'file',
+        version: 1,
+        bytes: 3,
+      })
+    )
+    const originalResolve = resolve.getMockImplementation()!
+    resolve.mockImplementationOnce(() => originalResolve())
+    const refreshResolve = vi.fn(
+      () =>
+        new Promise<unknown>(resolve => {
+          refreshResolvers.push(resolve)
+        })
+    )
+    let resolveCount = 0
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          downloadPreview: vi.fn(async () => ({
+            bytes: new TextEncoder().encode('# Preview').buffer,
+          })),
+          resolve: vi.fn(() => (refreshPending ? refreshResolve() : resolve())),
+          affordances: vi.fn(async () => activeAffordances),
+        },
+      },
+    })
+    let refreshPending = false
+    const controllerState = controller()
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="report.md"
+        fileKind="markdown"
+        byteLength={3}
+        titlebarLeadingTarget={titlebarLeadingRoot}
+      />
+    )
+
+    expect(await screen.findByRole('heading', { name: 'Preview' })).toBeTruthy()
+    refreshPending = true
+    fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(refreshResolve).toHaveBeenCalledTimes(1))
+    expect(
+      (within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
+
+    controllerState.sessionGeneration = 2
+    refreshPending = false
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    view.rerender(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="report.md"
+        fileKind="markdown"
+        byteLength={3}
+        titlebarLeadingTarget={titlebarLeadingRoot}
+      />
+    )
+    await waitFor(() =>
+      expect(
+        (within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement)
+          .disabled
+      ).toBe(false)
+    )
+    refreshPending = true
+    fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(refreshResolve).toHaveBeenCalledTimes(2))
+    expect(
+      (within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
+    await act(async () => {
+      refreshResolvers[0]!(await resolvePreviewResource(uri))
+    })
+    expect(
+      (within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
+    await act(async () => refreshResolvers[1]!(await resolvePreviewResource(uri)))
+    expect(
+      (within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement)
+        .disabled
+    ).toBe(false)
     view.unmount()
     titlebarLeadingRoot.remove()
   })
@@ -813,7 +1378,9 @@ describe('FilePreviewPage', () => {
     await waitFor(() =>
       expect(controllerState.handleAuthorityFailure).toHaveBeenCalledWith(
         sessionMessage,
-        'operation'
+        'operation',
+        'preview-test-user:main',
+        1
       )
     )
     // The session path handled it; the local per-resource denial did NOT fire.

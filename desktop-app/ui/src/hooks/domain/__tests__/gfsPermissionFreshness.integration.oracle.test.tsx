@@ -32,6 +32,7 @@ const authValue: AuthContextValue = {
   statusText: '',
   statusTone: 'info',
   isAuthenticated: true,
+  sessionGeneration: 1,
   me,
   email: me.email,
   password: '',
@@ -144,6 +145,7 @@ async function installFolder(children: ReturnType<typeof childView>[]) {
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
+      auth: { getSessionGeneration: vi.fn(async () => 1) },
       gfs: {
         listAccessible: vi.fn(async () => listAccessiblePage([parent])),
         listChildren,

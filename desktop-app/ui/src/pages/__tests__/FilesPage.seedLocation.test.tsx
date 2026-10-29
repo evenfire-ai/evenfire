@@ -56,6 +56,7 @@ function authValue(): AuthContextValue {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 0,
     me: AUTHED_USER,
     email: AUTHED_USER.email,
     password: '',
@@ -548,7 +549,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       fireEvent.click(screen.getByRole('button', { name: 'Options for Shared folder' }))
     })
 
-    const queryKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', parentResourceId, 'main')
+    const queryKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', parentResourceId, 'main', 0)
     await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentResourceId, 'main'))
     await waitFor(() => expect(client.getQueryData(queryKey)).toBe(sourcePermissions))
     expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
@@ -625,8 +626,8 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(screen.getByRole('button', { name: 'Rename Child folder' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Options for Child folder' }))
     expectFolderRowMutationMenu('Child folder', true)
-    const reportKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-report', 'main')
-    const folderKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-folder', 'main')
+    const reportKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-report', 'main', 0)
+    const folderKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-folder', 'main', 0)
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
@@ -755,7 +756,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(screen.getByRole('button', { name: 'Rename Shared folder' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Options for Shared folder' }))
     expectFolderRowMutationMenu('Shared folder', true)
-    const accessibleKey = desktopQueryKeys.gfsAccessible(':user-1:team-1', 'main')
+    const accessibleKey = desktopQueryKeys.gfsAccessible(':user-1:team-1', 'main', 0)
     const cachedPage = client.getQueryData(accessibleKey)
     expect(cachedPage).toBeDefined()
 
@@ -863,16 +864,18 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     const sessionScope = ':user-1:team-1'
     await waitFor(() =>
       expect(
-        client.getQueryData(desktopQueryKeys.gfsAccessible(sessionScope, 'main'))
+        client.getQueryData(desktopQueryKeys.gfsAccessible(sessionScope, 'main', 0))
       ).toBeDefined()
     )
     await waitFor(() =>
       expect(
-        client.getQueryData(desktopQueryKeys.gfsAffordances(sessionScope, 'folder-active', 'main'))
+        client.getQueryData(
+          desktopQueryKeys.gfsAffordances(sessionScope, 'folder-active', 'main', 0)
+        )
       ).toBeDefined()
     )
 
-    const key = desktopQueryKeys.gfsAffordances(sessionScope, 'folder-active', 'main')
+    const key = desktopQueryKeys.gfsAffordances(sessionScope, 'folder-active', 'main', 0)
     await act(async () => {
       void client.invalidateQueries({ exact: true, queryKey: key, refetchType: 'active' })
     })
@@ -971,7 +974,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     })
     expect(await screen.findByRole('dialog', { name: 'Share file notes.bin' })).toBeTruthy()
     const sessionScope = ':user-1:team-1'
-    const key = desktopQueryKeys.gfsAffordances(sessionScope, resourceId, 'main')
+    const key = desktopQueryKeys.gfsAffordances(sessionScope, resourceId, 'main', 0)
     await waitFor(() => expect(client.getQueryData(key)).toBeDefined())
     await act(async () => {
       void client.invalidateQueries({ exact: true, queryKey: key, refetchType: 'active' })

@@ -35,7 +35,11 @@ import {
   IconShare,
 } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import {
   GFS_UNAVAILABLE_LOCATION_MESSAGE,
   type GfsCrumb,
@@ -512,6 +516,7 @@ export function FilesPage({
   )
   const rowActionContextRef = useRef({
     sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
     currentResourceId: current?.resourceId ?? null,
     resourceVersions: new Map(
       [...items, ...accessibleResources, ...(current ? [current] : [])].map(resource => [
@@ -522,6 +527,7 @@ export function FilesPage({
   })
   rowActionContextRef.current = {
     sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
     currentResourceId: current?.resourceId ?? null,
     resourceVersions: new Map(
       [...items, ...accessibleResources, ...(current ? [current] : [])].map(resource => [
@@ -553,26 +559,42 @@ export function FilesPage({
       message: `Checking permissions for ${resourceName}…`,
     }
   }
-  const moveWorkspaceRef = useRef({ sessionScope, currentResourceId: current?.resourceId ?? null })
-  const cachedCurrentAffordances = current
-    ? queryClient.getQueryData<{ held?: string[]; grantableBits?: string[] }>(
-        desktopQueryKeys.gfsAffordances(sessionScope, current.resourceId, GFS_DRIVE_MAIN)
-      )
-    : undefined
-  moveWorkspaceRef.current = { sessionScope, currentResourceId: current?.resourceId ?? null }
+  const moveWorkspaceRef = useRef({
+    sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
+    currentResourceId: current?.resourceId ?? null,
+  })
+  const cachedCurrentAffordances =
+    current && isGfsSessionGeneration(ctrl.sessionGeneration)
+      ? queryClient.getQueryData<{ held?: string[]; grantableBits?: string[] }>(
+          desktopQueryKeys.gfsAffordances(
+            sessionScope,
+            current.resourceId,
+            GFS_DRIVE_MAIN,
+            ctrl.sessionGeneration
+          )
+        )
+      : undefined
+  moveWorkspaceRef.current = {
+    sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
+    currentResourceId: current?.resourceId ?? null,
+  }
 
   // Cross-surface drag coordinator (null outside the provider — e.g. unit
   // tests — where the local per-surface ref drives same-surface drags).
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
     scope: sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
     drive: GFS_DRIVE_MAIN,
     resolve: useCallback((uri: string) => window.clerum.gfs.resolve(uri), []),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
     handleAuthorityFailure: useCallback(
-      (message: string) => ctrl.handleAuthorityFailure(message, 'operation'),
-      [ctrl]
+      (message: string, scope: string, generation: number) =>
+        ctrl.handleAuthorityFailure(message, 'operation', scope, generation),
+      [ctrl.handleAuthorityFailure]
     ),
   })
 
@@ -585,7 +607,10 @@ export function FilesPage({
     [adjudication.endDragSession]
   )
 
-  const liveDragScope = ctrl.accessState === 'revoked' ? null : (sessionScope ?? 'anonymous')
+  const liveDragScope =
+    ctrl.accessState === 'revoked' || !isGfsSessionGeneration(ctrl.sessionGeneration)
+      ? null
+      : (sessionScope ?? 'anonymous')
   const liveDragScopeRef = useRef(liveDragScope)
   liveDragScopeRef.current = liveDragScope
   const previousDragScopeRef = useRef(liveDragScope)
@@ -643,7 +668,7 @@ export function FilesPage({
   // included), so a bare `slice(0, 10)` would re-select the same first ten
   // forever and never reach the rest.
   useEffect(() => {
-    if (!sessionScope) return
+    if (!sessionScope || !isGfsSessionGeneration(ctrl.sessionGeneration)) return
     // A running folder-zip walk holds the same per-actor read budget this
     // prefetch spends; a burst here is one more 429 away from killing the
     // job, so the warmer stays idle until the walk finishes (L9).
@@ -652,7 +677,12 @@ export function FilesPage({
       .filter(item => item.kind === 'directory')
       .map(folder => ({
         folder,
-        key: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, 'main'),
+        key: desktopQueryKeys.gfsChildren(
+          sessionScope,
+          folder.resourceId,
+          GFS_DRIVE_MAIN,
+          ctrl.sessionGeneration
+        ),
       }))
       .filter(({ key }) => {
         const state = queryClient.getQueryState(key)
@@ -688,7 +718,7 @@ export function FilesPage({
           })
       )
     )
-  }, [items, queryClient, sessionScope])
+  }, [ctrl.sessionGeneration, items, queryClient, sessionScope])
 
   const teamDirectoryQuery = useQuery({
     queryKey: desktopQueryKeys.teamsDirectory,
@@ -801,20 +831,32 @@ export function FilesPage({
    *  controller's authority classifier before toasting. Returns true when the
    *  session failed closed (caller should stop; the revoked state takes over). */
   const failClosedOnAuthorizationError = useCallback(
-    (error: unknown): boolean =>
+    (
+      error: unknown,
+      capturedScope = sessionScope,
+      capturedGeneration = ctrl.sessionGeneration
+    ): boolean =>
       ctrl.handleAuthorityFailure(
         error instanceof Error ? error.message : String(error),
-        'operation'
+        'operation',
+        capturedScope,
+        capturedGeneration
       ),
-    [ctrl]
+    [ctrl.handleAuthorityFailure, ctrl.sessionGeneration, sessionScope]
   )
   const fetchRowAuthority = async (resourceId: string, resourceName: string, drive: string) => {
     const requestedScope = sessionScope
-    if (!requestedScope || accessRevoked) {
+    const requestedGeneration = ctrl.sessionGeneration
+    if (!requestedScope || accessRevoked || !isGfsSessionGeneration(requestedGeneration)) {
       pushToast?.(`Could not verify permissions for ${resourceName}. Try again.`, 'error')
       return null
     }
-    const queryKey = desktopQueryKeys.gfsAffordances(requestedScope, resourceId, drive)
+    const queryKey = desktopQueryKeys.gfsAffordances(
+      requestedScope,
+      resourceId,
+      drive,
+      requestedGeneration
+    )
     try {
       assertGfsAuthorityRetryAllowed(queryClient, queryKey)
       const authority = await queryClient.fetchQuery({
@@ -823,12 +865,29 @@ export function FilesPage({
         staleTime: GFS_AUTHORITY_STALE_TIME_MS,
         retry: false,
       })
-      if (!pageActiveRef.current || moveWorkspaceRef.current.sessionScope !== requestedScope) {
+      if (
+        !pageActiveRef.current ||
+        !isGfsSessionAuthorityCurrent(
+          requestedScope,
+          requestedGeneration,
+          moveWorkspaceRef.current.sessionScope,
+          moveWorkspaceRef.current.sessionGeneration
+        )
+      ) {
         return null
       }
       return authority
     } catch (error) {
-      if (!failClosedOnAuthorizationError(error)) {
+      if (
+        !isGfsSessionAuthorityCurrent(
+          requestedScope,
+          requestedGeneration,
+          moveWorkspaceRef.current.sessionScope,
+          moveWorkspaceRef.current.sessionGeneration
+        )
+      )
+        return null
+      if (!failClosedOnAuthorizationError(error, requestedScope, requestedGeneration)) {
         pushToast?.(describeGfsReadError(error).message, 'error')
       }
       return null
@@ -842,9 +901,14 @@ export function FilesPage({
     requiredGrantableBits: string[] = []
   ) => {
     const requestedScope = sessionScope
-    const queryKey = requestedScope
-      ? desktopQueryKeys.gfsAffordances(requestedScope, resourceId, drive)
-      : null
+    const requestedGeneration = ctrl.sessionGeneration
+    if (!requestedScope || !isGfsSessionGeneration(requestedGeneration)) return false
+    const queryKey = desktopQueryKeys.gfsAffordances(
+      requestedScope,
+      resourceId,
+      drive,
+      requestedGeneration
+    )
     const queryState = queryKey ? queryClient.getQueryState(queryKey) : undefined
     const stateAuthority = queryState?.data as
       | { held?: string[]; grantableBits?: string[] }
@@ -917,6 +981,7 @@ export function FilesPage({
     if (
       !pageActiveRef.current ||
       latest.sessionScope !== requestContext.sessionScope ||
+      latest.sessionGeneration !== requestContext.sessionGeneration ||
       latest.currentResourceId !== requestContext.currentResourceId ||
       !latest.resourceVersions.has(target.resourceId) ||
       latest.resourceVersions.get(target.resourceId) !== target.version
@@ -2056,8 +2121,14 @@ export function FilesPage({
 
   /** Cached destination names for the suggested numbered-name candidate. */
   const cachedDestinationNames = (destinationId: string): Set<string> => {
+    if (!sessionScope || !isGfsSessionGeneration(ctrl.sessionGeneration)) return new Set()
     const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsDriveResource[] }> }>(
-      desktopQueryKeys.gfsChildren(sessionScope ?? 'anonymous', destinationId, GFS_DRIVE_MAIN)
+      desktopQueryKeys.gfsChildren(
+        sessionScope,
+        destinationId,
+        GFS_DRIVE_MAIN,
+        ctrl.sessionGeneration
+      )
     )
     return new Set((cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? []))
   }
@@ -2102,7 +2173,12 @@ export function FilesPage({
               expectedSessionGeneration
             ),
           handleAuthorityFailure: message =>
-            ctrl.handleAuthorityFailure(message, 'operation', source.scope),
+            ctrl.handleAuthorityFailure(
+              message,
+              'operation',
+              source.scope,
+              authoritativeSessionGeneration ?? null
+            ),
           ...(authorizeNumberedRename ? { authorizeNumberedRename } : {}),
           convergeCommittedMove: (input, receipt) =>
             ctrl.convergeCommittedMove(input, receipt, source.scope),
@@ -2111,7 +2187,12 @@ export function FilesPage({
                 pushToast: (message, tone) => {
                   if (
                     pageActiveRef.current &&
-                    moveWorkspaceRef.current.sessionScope === source.scope
+                    isGfsSessionAuthorityCurrent(
+                      source.scope,
+                      authoritativeSessionGeneration ?? null,
+                      moveWorkspaceRef.current.sessionScope,
+                      moveWorkspaceRef.current.sessionGeneration
+                    )
                   ) {
                     pushToast(message, tone)
                   }
@@ -2153,15 +2234,29 @@ export function FilesPage({
     const dragGeneration = dragSessionRef.current
     const sessionGeneration = dragSession?.currentGeneration() ?? null
     const scopeAtDrop = liveDragScopeRef.current
+    const publishedGeneration = ctrl.sessionGeneration
+    const ownsPublishedAuthority = () =>
+      isGfsSessionAuthorityCurrent(
+        source.scope,
+        publishedGeneration,
+        moveWorkspaceRef.current.sessionScope,
+        moveWorkspaceRef.current.sessionGeneration
+      )
+    if (!ownsPublishedAuthority()) return
     try {
       const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
+      if (authoritativeSessionGeneration !== publishedGeneration || !ownsPublishedAuthority())
+        return
       const decision = await adjudication.adjudicateDrop(source, {
         resourceId: destination.resourceId,
         name: destination.name,
         kind: destination.kind,
         ancestorIds: rowTargetAncestorIds(),
       })
-      if ((await window.clerum.auth.getSessionGeneration()) !== authoritativeSessionGeneration) {
+      if (
+        !ownsPublishedAuthority() ||
+        (await window.clerum.auth.getSessionGeneration()) !== authoritativeSessionGeneration
+      ) {
         return
       }
       if (!decision.allowed && decision.reason === 'session-lost') {
@@ -2213,7 +2308,7 @@ export function FilesPage({
       await runMoveCommit(
         source,
         { resourceId: destination.resourceId, name: destination.name },
-        () => ownsDrop(source, dragGeneration, sessionGeneration),
+        () => ownsPublishedAuthority() && ownsDrop(source, dragGeneration, sessionGeneration),
         undefined,
         true,
         undefined,
@@ -2457,19 +2552,31 @@ export function FilesPage({
       (target.resourceId === current?.resourceId ? current.parentResourceId : null)
     const origin = {
       sessionScope,
+      sessionGeneration: ctrl.sessionGeneration,
       currentResourceId: current?.resourceId ?? null,
       resourceId: target.resourceId,
       sourceParentId,
       destinationId,
       version: target.version,
     }
-    const sessionStillMatches = () => moveWorkspaceRef.current.sessionScope === origin.sessionScope
+    const sessionStillMatches = () =>
+      isGfsSessionAuthorityCurrent(
+        origin.sessionScope,
+        origin.sessionGeneration,
+        moveWorkspaceRef.current.sessionScope,
+        moveWorkspaceRef.current.sessionGeneration
+      )
     const contextStillMatches = () =>
       sessionStillMatches() &&
       moveWorkspaceRef.current.currentResourceId === origin.currentResourceId
     let authoritativeSessionGeneration: number | null = null
     const ownsAuthoritativeSession = async () => {
-      if (authoritativeSessionGeneration === null) return false
+      if (
+        !isGfsSessionGeneration(authoritativeSessionGeneration) ||
+        authoritativeSessionGeneration !== origin.sessionGeneration ||
+        !sessionStillMatches()
+      )
+        return false
       try {
         return (await window.clerum.auth.getSessionGeneration()) === authoritativeSessionGeneration
       } catch {
@@ -2481,18 +2588,26 @@ export function FilesPage({
     setMovePermissionStatus('checking')
     try {
       authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
-      if (!sessionScope || !sourceParentId) {
+      if (
+        !sessionScope ||
+        !sourceParentId ||
+        !isGfsSessionGeneration(authoritativeSessionGeneration) ||
+        authoritativeSessionGeneration !== origin.sessionGeneration ||
+        !sessionStillMatches()
+      ) {
         throw new Error('Could not verify the source folder for this move.')
       }
       const sourceKey = desktopQueryKeys.gfsAffordances(
         sessionScope,
         sourceParentId,
-        GFS_DRIVE_MAIN
+        GFS_DRIVE_MAIN,
+        authoritativeSessionGeneration
       )
       const destinationKey = desktopQueryKeys.gfsAffordances(
         sessionScope,
         destinationId,
-        GFS_DRIVE_MAIN
+        GFS_DRIVE_MAIN,
+        authoritativeSessionGeneration
       )
       assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
       assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
@@ -2589,17 +2704,20 @@ export function FilesPage({
           const resourceKey = desktopQueryKeys.gfsAffordances(
             origin.sessionScope,
             target.resourceId,
-            GFS_DRIVE_MAIN
+            GFS_DRIVE_MAIN,
+            authoritativeSessionGeneration
           )
           const sourceParentKey = desktopQueryKeys.gfsAffordances(
             origin.sessionScope,
             sourceParentId,
-            GFS_DRIVE_MAIN
+            GFS_DRIVE_MAIN,
+            authoritativeSessionGeneration
           )
           const destinationKey = desktopQueryKeys.gfsAffordances(
             origin.sessionScope,
             destinationId,
-            GFS_DRIVE_MAIN
+            GFS_DRIVE_MAIN,
+            authoritativeSessionGeneration
           )
           for (const key of [resourceKey, sourceParentKey, destinationKey]) {
             assertGfsAuthorityRetryAllowed(queryClient, key)
@@ -2707,7 +2825,13 @@ export function FilesPage({
         setMovePermissionStatus(null)
         return
       }
-      if (failClosedOnAuthorizationError(moveError)) {
+      if (
+        failClosedOnAuthorizationError(
+          moveError,
+          origin.sessionScope,
+          authoritativeSessionGeneration ?? origin.sessionGeneration
+        )
+      ) {
         closeOwnedDialog()
         return
       }
@@ -3969,8 +4093,11 @@ export function FilesPage({
           onRetryPermissionCheck={(destinationId, destinationName, isCurrent) =>
             handleMoveTarget(destinationId, destinationName, false, isCurrent)
           }
-          onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
+          onAuthorityFailure={message =>
+            ctrl.handleAuthorityFailure(message, 'operation', sessionScope, ctrl.sessionGeneration)
+          }
           sessionScope={sessionScope}
+          sessionGeneration={ctrl.sessionGeneration}
           target={moveTarget}
           permissionStatus={movePermissionStatus}
         />

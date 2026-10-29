@@ -7,7 +7,11 @@ import {
   GFS_DRIVE_MAIN,
   GFS_RESOURCE_DRAG_TYPE,
 } from '@constants/gfsBrowser'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import {
   type GfsBrowserChild,
   type GfsCrumb,
@@ -82,6 +86,7 @@ function FileExplorerNode({
   node,
   level,
   scope,
+  sessionGeneration,
   accessActive,
   expandedIds,
   selectedId,
@@ -114,7 +119,12 @@ function FileExplorerNode({
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
 
-  const childQueryKey = desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN)
+  const childQueryKey = desktopQueryKeys.gfsChildren(
+    scope,
+    node.resourceId,
+    GFS_DRIVE_MAIN,
+    sessionGeneration
+  )
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
@@ -122,7 +132,7 @@ function FileExplorerNode({
     // Gate on live access as the controller's own children query does: a revoked
     // session fetches nothing (the subtree also unmounts as accessibleResources
     // empties, but this keeps the guard robust to future refactors).
-    enabled: isExpanded && accessActive,
+    enabled: isExpanded && accessActive && isGfsSessionGeneration(sessionGeneration),
     // Folder contents change out-of-band: agents with host grants, other
     // sessions, and operator writes never pass through this client. The sidebar
     // is a persistent surface, so under the app's Infinity staleTime an expanded
@@ -145,10 +155,18 @@ function FileExplorerNode({
   )
 
   useEffect(() => {
-    if (!childQuery.error) return
+    if (!childQuery.error || !isGfsSessionGeneration(sessionGeneration)) return
     purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure(childError)
-  }, [childError, childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
+    if (childError) onAuthorityFailure(childError, scope, sessionGeneration)
+  }, [
+    childError,
+    childQuery.error,
+    childQueryKey,
+    onAuthorityFailure,
+    queryClient,
+    scope,
+    sessionGeneration,
+  ])
 
   // Deferred folder toggle: cancelled by a double-click within the window.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -415,6 +433,7 @@ function FileExplorerNode({
               onRequestMove={onRequestMove}
               onToggle={onToggle}
               scope={scope}
+              sessionGeneration={sessionGeneration}
               selectedId={selectedId}
             />
           ))}
@@ -464,11 +483,13 @@ export function FileExplorerTree({
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
     scope: ctrl.sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
     drive: GFS_DRIVE_MAIN,
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
-    handleAuthorityFailure: (message: string) => ctrl.handleAuthorityFailure(message, 'operation'),
+    handleAuthorityFailure: (message, scope, sessionGeneration) =>
+      ctrl.handleAuthorityFailure(message, 'operation', scope, sessionGeneration),
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -529,10 +550,23 @@ export function FileExplorerTree({
   const liveDragScope = ctrl.accessState === 'revoked' ? null : (ctrl.sessionScope ?? 'anonymous')
   const liveDragScopeRef = useRef(liveDragScope)
   liveDragScopeRef.current = liveDragScope
-  const previousDragScopeRef = useRef(liveDragScope)
+  const liveAuthorityRef = useRef({ scope: ctrl.sessionScope, generation: ctrl.sessionGeneration })
+  liveAuthorityRef.current = { scope: ctrl.sessionScope, generation: ctrl.sessionGeneration }
+  const previousDragAuthorityRef = useRef({
+    scope: liveDragScope,
+    generation: ctrl.sessionGeneration,
+  })
   useEffect(() => {
-    if (previousDragScopeRef.current === liveDragScope) return
-    previousDragScopeRef.current = liveDragScope
+    if (
+      previousDragAuthorityRef.current.scope === liveDragScope &&
+      previousDragAuthorityRef.current.generation === ctrl.sessionGeneration
+    ) {
+      return
+    }
+    previousDragAuthorityRef.current = {
+      scope: liveDragScope,
+      generation: ctrl.sessionGeneration,
+    }
     dragSessionEpochRef.current += 1
     draggingSourceRef.current = null
     hoverOwnerRef.current = null
@@ -547,7 +581,7 @@ export function FileExplorerTree({
     // TO revoked (scope null) must NOT clear it: that is exactly when the
     // message has to survive (A11), and the revoked surface below carries it.
     if (liveDragScope !== null) setDropSessionLost(false)
-  }, [adjudication.endDragSession, liveDragScope])
+  }, [adjudication.endDragSession, ctrl.sessionGeneration, liveDragScope])
 
   const ownsDrop = useCallback(
     (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
@@ -569,18 +603,22 @@ export function FileExplorerTree({
    * the same shared children cache the Files page seeds its commit from. */
   const cachedDestinationNames = useCallback(
     (destinationId: string): Set<string> => {
+      if (!ctrl.sessionScope || !isGfsSessionGeneration(ctrl.sessionGeneration)) {
+        return new Set()
+      }
       const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsBrowserChild[] }> }>(
         desktopQueryKeys.gfsChildren(
-          ctrl.sessionScope ?? 'anonymous',
+          ctrl.sessionScope,
           destinationId,
-          GFS_DRIVE_MAIN
+          GFS_DRIVE_MAIN,
+          ctrl.sessionGeneration
         )
       )
       return new Set(
         (cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? [])
       )
     },
-    [ctrl.sessionScope, queryClient]
+    [ctrl.sessionScope, ctrl.sessionGeneration, queryClient]
   )
 
   const handleToggle = useCallback((resourceId: string) => {
@@ -859,15 +897,29 @@ export function FileExplorerTree({
       const epoch = dragSessionEpochRef.current
       const sessionGeneration = dragSession?.currentGeneration() ?? null
       const scopeAtDrop = liveDragScopeRef.current
+      const publishedGeneration = ctrl.sessionGeneration
+      const ownsPublishedAuthority = () =>
+        isGfsSessionAuthorityCurrent(
+          source.scope,
+          publishedGeneration,
+          liveAuthorityRef.current.scope,
+          liveAuthorityRef.current.generation
+        )
+      if (!ownsPublishedAuthority()) return
       try {
         const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
+        if (authoritativeSessionGeneration !== publishedGeneration || !ownsPublishedAuthority())
+          return
         const decision = await adjudication.adjudicateDrop(source, {
           resourceId: node.resourceId,
           name: node.name,
           kind: node.kind,
           ancestorIds,
         })
-        if ((await window.clerum.auth.getSessionGeneration()) !== authoritativeSessionGeneration) {
+        if (
+          !ownsPublishedAuthority() ||
+          (await window.clerum.auth.getSessionGeneration()) !== authoritativeSessionGeneration
+        ) {
           return
         }
         if (!decision.allowed && decision.reason === 'session-lost') {
@@ -917,8 +969,11 @@ export function FileExplorerTree({
         await commitMove(
           source,
           { resourceId: node.resourceId, name: node.name },
-          () => ownsDrop(source, epoch, sessionGeneration),
-          () => mountedRef.current && liveDragScopeRef.current === source.scope,
+          () => ownsPublishedAuthority() && ownsDrop(source, epoch, sessionGeneration),
+          () =>
+            ownsPublishedAuthority() &&
+            mountedRef.current &&
+            liveDragScopeRef.current === source.scope,
           true,
           authoritativeSessionGeneration
         )
@@ -931,6 +986,8 @@ export function FileExplorerTree({
       cachedDestinationNames,
       finishNodeDropCleanup,
       commitMove,
+      ctrl.sessionGeneration,
+      ctrl.sessionScope,
       dragSession,
       ownsDrop,
       pushToast,
@@ -957,18 +1014,30 @@ export function FileExplorerTree({
     if (!target || !isDialogCurrent()) return
     const scope = ctrl.sessionScope
     const expectedScope = scope ?? 'anonymous'
+    const expectedGeneration = ctrl.sessionGeneration
     const ownsRetry = () =>
       moveDialogTargetRef.current === target &&
       liveDragScopeRef.current === expectedScope &&
+      isGfsSessionAuthorityCurrent(
+        scope,
+        expectedGeneration,
+        liveAuthorityRef.current.scope,
+        liveAuthorityRef.current.generation
+      ) &&
       isDialogCurrent()
     const drive = target.node.drive || GFS_DRIVE_MAIN
     setMovePermissionStatus('checking')
 
     try {
-      if (!scope) {
+      if (!scope || !isGfsSessionGeneration(expectedGeneration)) {
         throw new Error('Could not verify the source folder for this move.')
       }
-      const destinationKey = desktopQueryKeys.gfsAffordances(scope, destinationId, drive)
+      const destinationKey = desktopQueryKeys.gfsAffordances(
+        scope,
+        destinationId,
+        drive,
+        expectedGeneration
+      )
       assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
 
       if (!ownsRetry()) {
@@ -987,7 +1056,12 @@ export function FileExplorerTree({
       if (!sourceParentId) {
         throw new Error('Could not verify the source folder for this move.')
       }
-      const sourceKey = desktopQueryKeys.gfsAffordances(scope, sourceParentId, drive)
+      const sourceKey = desktopQueryKeys.gfsAffordances(
+        scope,
+        sourceParentId,
+        drive,
+        expectedGeneration
+      )
       assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
       assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
 
@@ -1023,7 +1097,7 @@ export function FileExplorerTree({
         return
       }
       const message = errorMessage(retryError) ?? String(retryError)
-      if (ctrl.handleAuthorityFailure(message, 'operation')) {
+      if (ctrl.handleAuthorityFailure(message, 'operation', scope, expectedGeneration)) {
         closeMoveDialog()
         return
       }
@@ -1048,9 +1122,8 @@ export function FileExplorerTree({
 
   const authorityFailure = ctrl.handleAuthorityFailure
   const handleAuthorityFailure = useCallback(
-    (message: string) => {
-      authorityFailure(message, 'operation')
-    },
+    (message: string, scope: string, sessionGeneration: number) =>
+      authorityFailure(message, 'operation', scope, sessionGeneration),
     [authorityFailure]
   )
 
@@ -1167,6 +1240,7 @@ export function FileExplorerTree({
               onRequestMove={handleRequestMove}
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
+              sessionGeneration={ctrl.sessionGeneration}
               selectedId={selectedId}
             />
           ))}
@@ -1223,6 +1297,16 @@ export function FileExplorerTree({
             setMovePermissionStatus(null)
             const target = moveDialogTargetRef.current
             if (!target) return
+            const publishedGeneration = ctrl.sessionGeneration
+            const publishedScope = ctrl.sessionScope
+            const ownsPublishedAuthority = () =>
+              isGfsSessionAuthorityCurrent(
+                publishedScope,
+                publishedGeneration,
+                liveAuthorityRef.current.scope,
+                liveAuthorityRef.current.generation
+              )
+            if (!ownsPublishedAuthority()) return
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,
@@ -1240,13 +1324,17 @@ export function FileExplorerTree({
               generation: dragSessionEpochRef.current,
             }
             const isCurrent = () =>
+              ownsPublishedAuthority() &&
               mountedRef.current &&
               moveDialogTargetRef.current === target &&
               liveDragScopeRef.current === source.scope &&
               isDialogCurrent()
             const isPresentationCurrent = () =>
-              mountedRef.current && liveDragScopeRef.current === source.scope
+              ownsPublishedAuthority() &&
+              mountedRef.current &&
+              liveDragScopeRef.current === source.scope
             const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
+            if (authoritativeSessionGeneration !== publishedGeneration || !isCurrent()) return
             const outcome = await commitMove(
               source,
               { resourceId: destinationId, name: destinationName },
@@ -1280,11 +1368,9 @@ export function FileExplorerTree({
             if (moveDialogTargetRef.current === target) closeMoveDialog()
           }}
           onRetryPermissionCheck={handleRetryMovePermission}
-          onAuthorityFailure={message => {
-            handleAuthorityFailure(message)
-            return false
-          }}
+          onAuthorityFailure={handleAuthorityFailure}
           sessionScope={ctrl.sessionScope}
+          sessionGeneration={ctrl.sessionGeneration}
           target={{
             resourceId: moveDialogTarget.node.resourceId,
             name: moveDialogTarget.node.name,

@@ -34,6 +34,7 @@ function authFor(teamId: string): AuthContextValue {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
     me: member(teamId, 'user-a'),
     email: 'user-a@example.test',
     password: '',
@@ -114,6 +115,7 @@ async function renderCurrentFileReplaceScenario(
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
+      auth: { getSessionGeneration: vi.fn(async () => 1) },
       gfs: {
         listAccessible,
         listChildren: vi.fn(async () => listChildrenPage([])),
@@ -141,7 +143,7 @@ async function renderCurrentFileReplaceScenario(
   await openManageForRow(user, 'report.txt')
   await waitFor(() => expect(affordances).toHaveBeenCalledWith(fileId, 'main'))
   expect(await screen.findByRole('dialog', { name: 'Share file report.txt' })).toBeTruthy()
-  const key = desktopQueryKeys.gfsAffordances(':user-a:team-a', fileId, 'main')
+  const key = desktopQueryKeys.gfsAffordances(':user-a:team-a', fileId, 'main', 1)
   await waitFor(() => expect(client.getQueryData(key)).toBeDefined())
 
   return {

@@ -352,6 +352,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
@@ -1407,8 +1408,8 @@ describe('App live GFS preview revalidation', () => {
     )
     Object.assign(window.clerum.gfs, { listChildren, listAccessible, affordances })
 
-    const childrenKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
-    const accessibleKey = desktopQueryKeys.gfsAccessible('session', 'main')
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder', 'main', 1)
+    const accessibleKey = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main', 1)
     desktopQueryClient.setQueryData(childrenKey, {
       pages: [firstPage, secondPage],
       pageParams: [undefined, 'page-2'],
@@ -1416,7 +1417,7 @@ describe('App live GFS preview revalidation', () => {
     desktopQueryClient.setQueryData(accessibleKey, { items: [], nextCursor: null })
     rows.forEach(row => {
       desktopQueryClient.setQueryData(
-        desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+        desktopQueryKeys.gfsAffordances(':user-a:team-a', row.resourceId, 'main', 1),
         { held: [] }
       )
     })
@@ -1431,7 +1432,7 @@ describe('App live GFS preview revalidation', () => {
       })
       useQueries({
         queries: rows.map(row => ({
-          queryKey: desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+          queryKey: desktopQueryKeys.gfsAffordances(':user-a:team-a', row.resourceId, 'main', 1),
           queryFn: () => window.clerum.gfs.affordances(row.resourceId, 'main'),
         })),
       })
@@ -1480,7 +1481,7 @@ describe('App live GFS preview revalidation', () => {
       })
     })
     Object.assign(window.clerum.gfs, { listChildren })
-    const queryKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
+    const queryKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder', 'main', 1)
     desktopQueryClient.setQueryData(queryKey, {
       pages: [
         { items: [{ name: 'first-old' }], nextCursor: 'page-2' },
@@ -1534,7 +1535,7 @@ describe('App live GFS preview revalidation', () => {
   })
 
   it('hard-resyncs active permission affordances as well as open previews', async () => {
-    const affordanceKey = desktopQueryKeys.gfsAffordances('session', 'folder', 'main')
+    const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'folder', 'main', 1)
     const affordances = vi.fn(async () => ({ held: ['read'] }))
     Object.assign(window.clerum.gfs, { affordances })
     desktopQueryClient.setQueryData(affordanceKey, { held: [] })
@@ -1602,12 +1603,12 @@ describe('App live GFS preview revalidation', () => {
     expect(queryFilter?.queryKey).toEqual(desktopQueryKeys.gfsRoot)
     expect(
       queryFilter?.predicate?.({
-        queryKey: desktopQueryKeys.gfsAffordances('session', 'resource-id', 'main'),
+        queryKey: desktopQueryKeys.gfsAffordances(':user-a:team-a', 'resource-id', 'main', 1),
       } as never)
     ).toBe(false)
     expect(
       queryFilter?.predicate?.({
-        queryKey: desktopQueryKeys.gfsChildren('session', 'resource-id', 'main'),
+        queryKey: desktopQueryKeys.gfsChildren(':user-a:team-a', 'resource-id', 'main', 1),
       } as never)
     ).toBe(true)
     expect(initial()).toEqual(before)

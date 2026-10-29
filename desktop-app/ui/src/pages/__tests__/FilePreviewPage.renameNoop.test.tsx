@@ -26,6 +26,7 @@ describe('FilePreviewPage unchanged rename', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
         gfs: {
           resolve: vi.fn(async () =>
             resolveResource({
@@ -49,6 +50,7 @@ describe('FilePreviewPage unchanged rename', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       accessState: 'active',
       sessionScope: 'preview-rename-noop-user:main',
+      sessionGeneration: 1,
       authorityPending: false,
       handleAuthorityFailure: vi.fn(() => false),
     })

@@ -34,7 +34,7 @@ import {
   resolveConnectResumeTargets,
 } from './domain/approvalDecision'
 import { createMcpOauthResumeBuffer } from './domain/mcpOauthResumeBuffer'
-import { desktopQueryKeys } from './domain/queryKeys'
+import { desktopQueryKeys, hasGfsSessionGeneration } from './domain/queryKeys'
 import { useActivityController } from './domain/useActivityController'
 import { useAgentChatController } from './domain/useAgentChatController'
 import { useAgentsDataController } from './domain/useAgentsDataController'
@@ -178,8 +178,11 @@ export function useAppController() {
   const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
   const authenticatedSessionIdentityRef = useRef<string | null>(null)
   const sessionGenerationRef = useRef<number | null>(null)
+  const [publishedSessionGeneration, setPublishedSessionGeneration] = useState<number | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
   const onExternalSessionEnded = useCallback(() => {
+    sessionGenerationRef.current = null
+    setPublishedSessionGeneration(null)
     activeAuthenticatedSessionIdentityRef.current = null
     authenticatedSessionIdentityRef.current = null
     setPostPaintDataReady(false)
@@ -748,6 +751,7 @@ export function useAppController() {
         connectorsData.reset()
         auth.setIsAuthenticated(true)
         auth.setMe(sessionState.me)
+        setPublishedSessionGeneration(sessionGenerationRef.current)
         auth.setEmail(sessionState.me.email || '')
         const activeTeamId = String(sessionState.me.teamId ?? '').trim()
         currentTeamIdRef.current = activeTeamId
@@ -897,6 +901,7 @@ export function useAppController() {
         auth.setMe(sessionState.me)
         currentTeamIdRef.current = authenticated ? String(sessionState.me?.teamId ?? '').trim() : ''
         sessionGenerationRef.current = authenticated ? nextSessionGeneration : null
+        setPublishedSessionGeneration(sessionGenerationRef.current)
 
         if (!authenticated || !sessionState.me) {
           setPostPaintDataReady(false)
@@ -914,6 +919,7 @@ export function useAppController() {
           activeAuthenticatedSessionIdentityRef.current = null
           authenticatedSessionIdentityRef.current = null
           sessionGenerationRef.current = null
+          setPublishedSessionGeneration(null)
           if (!preserveNav) {
             nav.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' })
           }
@@ -959,7 +965,9 @@ export function useAppController() {
             const currentGfsSessionScope = `${auth.runtimeConfigState?.envKey ?? ''}:${sessionState.me.id}:${sessionState.me.teamId ?? ''}`
             await queryClient.invalidateQueries({
               queryKey: desktopQueryKeys.gfsRoot,
-              predicate: query => query.queryKey[2] === currentGfsSessionScope,
+              predicate: query =>
+                query.queryKey[2] === currentGfsSessionScope &&
+                hasGfsSessionGeneration(query.queryKey, nextSessionGeneration),
               refetchType: 'all',
             })
           }
@@ -1042,6 +1050,7 @@ export function useAppController() {
       activeAuthenticatedSessionIdentityRef.current = null
       authenticatedSessionIdentityRef.current = null
       sessionGenerationRef.current = null
+      setPublishedSessionGeneration(null)
       await attemptCleanup(() => nav.resetSessionNavigation())
       await attemptCleanup(() => auth.setDesktopReleaseStatus(null))
       await attemptCleanup(() => setPostPaintDataReady(false))
@@ -1633,7 +1642,7 @@ export function useAppController() {
   return {
     // Auth
     booting: auth.booting,
-    sessionGeneration: sessionGenerationRef.current,
+    sessionGeneration: publishedSessionGeneration,
     initialExperienceLoading:
       auth.isAuthenticated &&
       !auth.hasDependencyOutage &&

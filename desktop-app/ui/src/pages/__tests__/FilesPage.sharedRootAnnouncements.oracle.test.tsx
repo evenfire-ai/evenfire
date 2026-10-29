@@ -10,6 +10,7 @@ import { FilesPage } from '../FilesPage'
 
 const authValue = {
   isAuthenticated: true,
+  sessionGeneration: 1,
   me: {
     id: 'user-a',
     email: 'user-a@example.test',
@@ -59,7 +60,7 @@ describe('FilesPage shared-root permission announcements', () => {
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listAccessible } },
+      value: { auth: { getSessionGeneration: vi.fn(async () => 1) }, gfs: { listAccessible } },
     })
 
     const client = new QueryClient({ defaultOptions: desktopQueryDefaults })

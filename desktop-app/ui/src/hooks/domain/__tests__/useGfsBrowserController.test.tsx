@@ -12,6 +12,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
+  affordancesFailureMessage,
   affordancesResult,
   childView,
   grantsListPage,
@@ -66,6 +67,7 @@ function authValue(me: AuthContextValue['me']): AuthContextValue {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: Boolean(me),
+    sessionGeneration: 1,
     me,
     email: me?.email ?? '',
     password: '',
@@ -398,8 +400,8 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('31'))
     await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
 
-    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
-    const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'row-0', 'main')
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
+    const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'row-0', 'main', 1)
 
     await act(async () => screen.getByRole('button', { name: 'revalidate GFS scope' }).click())
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(3))
@@ -472,7 +474,7 @@ describe('useGfsBrowserController', () => {
     })
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
 
-    const grantsKey = desktopQueryKeys.gfsGrants(':user-a:team-a', 'root', 'main')
+    const grantsKey = desktopQueryKeys.gfsGrants(':user-a:team-a', 'root', 'main', 1)
     lastHarnessQueryClient?.setQueryData(grantsKey, ['session-a-grant'])
     expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toEqual(['session-a-grant'])
 
@@ -2246,7 +2248,7 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
 
-    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
     expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeTruthy()
 
     // Access is revoked server-side; the next refetch observes the 401.
@@ -2301,7 +2303,7 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
     await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('1'))
 
-    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
     void lastHarnessQueryClient?.invalidateQueries({ queryKey: childrenKey })
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
     expect(screen.getByTestId('current').textContent).toBe('root')
@@ -2364,7 +2366,7 @@ describe('useGfsBrowserController', () => {
 
     void lastHarnessQueryClient?.invalidateQueries({
       exact: true,
-      queryKey: desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main'),
+      queryKey: desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1),
     })
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
     await act(async () => finishNavigation(folderB))
@@ -2540,9 +2542,9 @@ describe('useGfsBrowserController', () => {
       ],
       pageParams: [undefined],
     }
-    client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'), accessiblePage)
-    client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'), accessiblePage)
-    client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main'), [
+    client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main', 1), accessiblePage)
+    client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main', 1), accessiblePage)
+    client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main', 1), [
       {
         id: 'grant-1',
         drive: 'main',
@@ -2552,7 +2554,7 @@ describe('useGfsBrowserController', () => {
         inherit: false,
       },
     ])
-    client.setQueryData(desktopQueryKeys.gfsShares(scope, 'folder-x', 'main'), [
+    client.setQueryData(desktopQueryKeys.gfsShares(scope, 'folder-x', 'main', 1), [
       {
         id: 'share-1',
         drive: 'main',
@@ -2563,7 +2565,7 @@ describe('useGfsBrowserController', () => {
       },
     ])
     expect(
-      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'))
+      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main', 1))
     ).toBeTruthy()
     // The authority window compares cache timestamps against the controller
     // mount clock; sleep past millisecond granularity so the seeded data is
@@ -2633,15 +2635,15 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
     expect(screen.getByTestId('current').textContent).toBe('none')
     expect(screen.getByTestId('crumbs').textContent).toBe('')
-    expect(client.getQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'))).toBeUndefined()
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessible(scope, 'main', 1))).toBeUndefined()
     expect(
-      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'))
+      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main', 1))
     ).toBeUndefined()
     expect(
-      client.getQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main'))
+      client.getQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main', 1))
     ).toBeUndefined()
     expect(
-      client.getQueryData(desktopQueryKeys.gfsShares(scope, 'folder-x', 'main'))
+      client.getQueryData(desktopQueryKeys.gfsShares(scope, 'folder-x', 'main', 1))
     ).toBeUndefined()
   })
 
@@ -2701,7 +2703,7 @@ describe('useGfsBrowserController', () => {
       pages: [{ items: [], nextCursor: null }],
       pageParams: [undefined],
     }
-    client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'), {
+    client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main', 1), {
       pages: [
         {
           items: [
@@ -2726,8 +2728,8 @@ describe('useGfsBrowserController', () => {
       ],
       pageParams: [undefined],
     })
-    client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'), emptyPage)
-    client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'root', 'main'), [
+    client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main', 1), emptyPage)
+    client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'root', 'main', 1), [
       {
         id: 'grant-1',
         drive: 'main',
@@ -2737,7 +2739,7 @@ describe('useGfsBrowserController', () => {
         inherit: false,
       },
     ])
-    client.setQueryData(desktopQueryKeys.gfsShares(scope, 'root', 'main'), [
+    client.setQueryData(desktopQueryKeys.gfsShares(scope, 'root', 'main', 1), [
       {
         id: 'share-1',
         drive: 'main',
@@ -2788,7 +2790,7 @@ describe('useGfsBrowserController', () => {
     })
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
     await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('active'))
-    expect(client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'))).toBeTruthy()
+    expect(client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main', 1))).toBeTruthy()
 
     // The path-based replace is rejected with a bare 401.
     await act(async () => {
@@ -2802,10 +2804,16 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
     expect(screen.getByTestId('current').textContent).toBe('none')
     expect(screen.getByTestId('crumbs').textContent).toBe('')
-    expect(client.getQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'))).toBeUndefined()
-    expect(client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'))).toBeUndefined()
-    expect(client.getQueryData(desktopQueryKeys.gfsGrants(scope, 'root', 'main'))).toBeUndefined()
-    expect(client.getQueryData(desktopQueryKeys.gfsShares(scope, 'root', 'main'))).toBeUndefined()
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessible(scope, 'main', 1))).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main', 1))
+    ).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsGrants(scope, 'root', 'main', 1))
+    ).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsShares(scope, 'root', 'main', 1))
+    ).toBeUndefined()
   })
 })
 
@@ -2943,7 +2951,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('1'))
     expect(
       lastHarnessQueryClient?.getQueryData(
-        desktopQueryKeys.gfsGrants(':user-a:team-a', 'root', 'main')
+        desktopQueryKeys.gfsGrants(':user-a:team-a', 'root', 'main', 1)
       )
     ).toEqual([expect.objectContaining({ id: 'grant-42' })])
     expect(lastHarnessQueryClient?.getQueryData(['gfs', 'main', 'root', 'grants'])).toBeUndefined()
@@ -3148,7 +3156,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     // Shares live under the session-scoped key (never a cross-session leak).
     expect(
       lastHarnessQueryClient?.getQueryData(
-        desktopQueryKeys.gfsShares(':user-a:team-a', 'root', 'main')
+        desktopQueryKeys.gfsShares(':user-a:team-a', 'root', 'main', 1)
       )
     ).toEqual([expect.objectContaining({ id: 'share-42' })])
   })
@@ -3452,7 +3460,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
 
     const client = lastHarnessQueryClient!
     const scope = ':user-a:team-a'
-    const inheritedKey = desktopQueryKeys.gfsInheritedAccess(scope, 'file-1', 'main')
+    const inheritedKey = desktopQueryKeys.gfsInheritedAccess(scope, 'file-1', 'main', 1)
     const inheritedQuery = client.getQueryCache().find({ queryKey: inheritedKey })!
     const before = inheritedQuery.state.dataUpdatedAt
     expect(before).toBeGreaterThan(0)
@@ -3551,8 +3559,8 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
         await waitFor(() => expect(screen.getByTestId('current').textContent).toBe(targetId))
         const client = lastHarnessQueryClient!
         const scope = ':user-a:team-a'
-        const grantsKey = desktopQueryKeys.gfsGrants(scope, targetId, 'main')
-        const sharesKey = desktopQueryKeys.gfsShares(scope, targetId, 'main')
+        const grantsKey = desktopQueryKeys.gfsGrants(scope, targetId, 'main', 1)
+        const sharesKey = desktopQueryKeys.gfsShares(scope, targetId, 'main', 1)
         await act(async () => {
           client.setQueryData(grantsKey, directGrants)
           client.setQueryData(sharesKey, directShares)
@@ -3706,7 +3714,7 @@ describe('useGfsBrowserController — cross-surface move convergence (RP-005)', 
 
     const client = lastHarnessQueryClient!
     const scope = ':user-a:team-a'
-    const inheritedKey = desktopQueryKeys.gfsInheritedAccess(scope, 'leaf-1', 'main')
+    const inheritedKey = desktopQueryKeys.gfsInheritedAccess(scope, 'leaf-1', 'main', 1)
     const inheritedQuery = client.getQueryCache().find({ queryKey: inheritedKey })!
     const before = inheritedQuery.state.dataUpdatedAt
     expect(before).toBeGreaterThan(0)
@@ -3780,5 +3788,166 @@ describe('useGfsBrowserController — cross-surface move convergence (RP-005)', 
     expect(readGfsOpenLocations(client, ':user-a:team-a')).toEqual([
       { resourceId: 'leaf-1', ancestorResourceIds: ['parent-1', 'ancestor-1'] },
     ])
+  })
+})
+
+describe('captured GFS authority callbacks', () => {
+  it('keeps replacement authority intact after an old-generation producer 401, but revokes current authority', async () => {
+    const failure = await affordancesFailureMessage(401, {
+      code: 'unauthorized',
+      message: 'Session expired',
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let current!: ReturnType<typeof useGfsBrowserController>
+    const scope = ':user-a:team-a'
+    function CapturedProbe() {
+      current = useGfsBrowserController()
+      return <output data-testid="callback-access">{current.accessState}</output>
+    }
+    const view = (generation: number | null) => (
+      <AuthContext.Provider value={{ ...authValue(userA), sessionGeneration: generation }}>
+        <QueryClientProvider client={client}>
+          <CapturedProbe />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs: {} } })
+    const rendered = render(view(1))
+    const oldCallback = current.handleAuthorityFailure
+    rendered.rerender(view(2))
+    const markerKey = desktopQueryKeys.gfsChildren(scope, 'replacement-folder', 'main', 2)
+    client.setQueryData(markerKey, { pages: [{ items: [{ resourceId: 'replacement-file' }] }] })
+    const remove = vi.spyOn(client, 'removeQueries')
+    await act(async () => {
+      expect(oldCallback(failure, 'operation', scope, 1)).toBe(true)
+    })
+    expect(screen.getByTestId('callback-access').textContent).toBe('active')
+    expect(client.getQueryData(markerKey)).toEqual({
+      pages: [{ items: [{ resourceId: 'replacement-file' }] }],
+    })
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scope, 2))).toBe('active')
+    expect(remove).not.toHaveBeenCalled()
+    await act(async () => {
+      expect(current.handleAuthorityFailure(failure, 'operation', scope, 2)).toBe(true)
+    })
+    expect(screen.getByTestId('callback-access').textContent).toBe('revoked')
+    expect(client.getQueryData(markerKey)).toBeUndefined()
+    client.clear()
+  })
+
+  it('does not dispatch discovery or imperative reads with unknown generation', async () => {
+    const listAccessible = vi.fn()
+    const resolve = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listAccessible, resolve } },
+    })
+    let current!: ReturnType<typeof useGfsBrowserController>
+    function UnknownProbe() {
+      current = useGfsBrowserController()
+      return <output>{current.accessState}</output>
+    }
+    const client = new QueryClient()
+    render(
+      <AuthContext.Provider value={{ ...authValue(userA), sessionGeneration: null }}>
+        <QueryClientProvider client={client}>
+          <UnknownProbe />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    await act(async () => {
+      expect(await current.openUri('gfs://main/unknown')).toBe(false)
+      await current.retryDiscovery()
+      await current.retryChildren()
+      current.loadMore()
+      current.loadMoreAccessible()
+    })
+    expect(listAccessible).not.toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
+    expect(current.affordances).toBeNull()
+    expect(current.accessState).toBe('revoked')
+    client.clear()
+  })
+})
+
+describe('denied-location cleanup ownership', () => {
+  it('does not retarget an outgoing denied-location cleanup at replacement-generation children', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const deniedMessage = await resolveDeniedMessage('gfs://main/root')
+    expect(deniedMessage).toContain('httpStatus=403')
+    const children = await listChildrenPage([
+      childView('old-child', 'old.md', 'file', { parentResourceId: 'root' }),
+    ])
+    let rejectRefresh!: (error: Error) => void
+    const pendingRefresh = new Promise<never>((_resolve, reject) => {
+      rejectRefresh = reject
+    })
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(root)
+      .mockImplementationOnce(() => pendingRefresh)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          listChildren: vi.fn(async () => children),
+          affordances: vi.fn(async () => affordancesResult(heldAffordances(['read']))),
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let controller!: ReturnType<typeof useGfsBrowserController>
+    let publishGeneration!: (generation: number) => void
+    function OwnerProbe() {
+      controller = useGfsBrowserController()
+      return (
+        <output data-testid="denied-cleanup-current">
+          {controller.current?.resourceId ?? 'none'}
+        </output>
+      )
+    }
+    function PublishedSession() {
+      const [generation, setGeneration] = useState(1)
+      publishGeneration = setGeneration
+      return (
+        <AuthContext.Provider value={{ ...authValue(userA), sessionGeneration: generation }}>
+          <QueryClientProvider client={client}>
+            <OwnerProbe />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    }
+    render(<PublishedSession />)
+    await act(async () => {
+      await controller.openUri('gfs://main/root')
+    })
+    await waitFor(() => expect(controller.items).toHaveLength(1))
+    const replacementKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 2)
+    const replacementChildren = await listChildrenPage([
+      childView('new-child', 'new.md', 'file', { parentResourceId: 'root' }),
+    ])
+    client.setQueryData(replacementKey, { pages: [replacementChildren], pageParams: [undefined] })
+    await act(async () => {
+      const refresh = controller.refreshCurrentLocation({ background: true })
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+      rejectRefresh(new Error(deniedMessage))
+      expect(await refresh).toBe(false)
+      // Publication and the outgoing denial's queued navigation state commit
+      // together, as two asynchronous producers may settle in one React batch.
+      publishGeneration(2)
+    })
+    expect(screen.getByTestId('denied-cleanup-current').textContent).toBe('none')
+    expect(controller.accessState).toBe('active')
+    expect(client.getQueryData(replacementKey)).toEqual({
+      pages: [replacementChildren],
+      pageParams: [undefined],
+    })
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1))
+    ).toBeUndefined()
+    client.clear()
   })
 })

@@ -24,12 +24,13 @@ const RATE_LIMITED_IPC_MESSAGE =
   "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
   'Too Many Requests retryAfterSeconds=7'
 
-// The controller reads exactly three fields off this context — isAuthenticated,
-// me and runtimeConfigState — and FilesPage reads none. The cast keeps the
-// double to those three rather than restating forty unrelated auth-screen
+// The controller reads these four authority fields — isAuthenticated, me,
+// runtimeConfigState and sessionGeneration — and FilesPage reads none. The cast
+// keeps the double narrow rather than restating forty unrelated auth-screen
 // fields that no code under test touches.
 const authValue = {
   isAuthenticated: true,
+  sessionGeneration: 1,
   me: {
     id: 'user-a',
     email: 'a@example.test',
@@ -66,6 +67,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
         gfs: {
           listAccessible,
           resolve: vi.fn(),
@@ -119,6 +121,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
         gfs: {
           listAccessible,
           resolve: vi.fn(),

@@ -2,7 +2,11 @@ import { useCallback, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { decideDragAuthority, decideDragStructure } from '@clerum/gfs-interaction-policy'
 import { DRAG_COLD_CHECK_DEBOUNCE_MS } from '@constants/gfsBrowser'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import {
   describeGfsReadError,
   isGfsSessionAuthorityFailure,
@@ -32,6 +36,7 @@ interface ResolvedLike {
 
 export interface GfsDragAdjudicationDeps {
   scope: string | null
+  sessionGeneration: number | null
   drive: string
   /** Resolve by stable URI (read plane; 403/404/429 throw). */
   resolve: (gfsUri: string) => Promise<ResolvedLike>
@@ -43,7 +48,7 @@ export interface GfsDragAdjudicationDeps {
    * data. Optional so a surface without an authority boundary still refuses
    * the drop.
    */
-  handleAuthorityFailure?: (message: string) => boolean
+  handleAuthorityFailure?: (message: string, scope: string, sessionGeneration: number) => boolean
 }
 
 interface HeldAffordances {
@@ -100,6 +105,15 @@ function requiredProbeRejection(error: unknown): GfsDropRejection {
 export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
   const queryClient = useQueryClient()
   const session = useGfsDragSession()
+  const authorityRef = useRef({ scope: deps.scope, generation: deps.sessionGeneration })
+  authorityRef.current = { scope: deps.scope, generation: deps.sessionGeneration }
+  const isAuthorityCurrent = () =>
+    isGfsSessionAuthorityCurrent(
+      deps.scope,
+      deps.sessionGeneration,
+      authorityRef.current.scope,
+      authorityRef.current.generation
+    )
   const localGestureRef = useRef({ generation: 0, active: false })
   const localBudgetRef = useRef(new GfsHoverCheckBudget())
   const debounceTimerRef = useRef<number | null>(null)
@@ -138,7 +152,10 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       return {
         message,
         sessionFailure: true,
-        revoked: deps.handleAuthorityFailure?.(message) ?? false,
+        revoked:
+          isAuthorityCurrent() && deps.scope && isGfsSessionGeneration(deps.sessionGeneration)
+            ? (deps.handleAuthorityFailure?.(message, deps.scope, deps.sessionGeneration) ?? false)
+            : false,
       }
     },
     [deps]
@@ -146,34 +163,50 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
 
   const readCachedAffordances = useCallback(
     (resourceId: string): HeldAffordances | null => {
-      if (!deps.scope) return null
+      if (!deps.scope || !isGfsSessionGeneration(deps.sessionGeneration) || !isAuthorityCurrent()) {
+        return null
+      }
       return (
         queryClient.getQueryData<HeldAffordances>(
-          desktopQueryKeys.gfsAffordances(deps.scope, resourceId, deps.drive)
+          desktopQueryKeys.gfsAffordances(
+            deps.scope,
+            resourceId,
+            deps.drive,
+            deps.sessionGeneration
+          )
         ) ?? null
       )
     },
-    [deps.drive, deps.scope, queryClient]
+    [deps.drive, deps.scope, deps.sessionGeneration, queryClient]
   )
 
   const fetchAffordances = useCallback(
     async (resourceId: string, staleTime: number): Promise<AffordancesProbe> => {
-      if (!deps.scope) return { ok: false, error: new Error('No active session scope') }
+      if (!deps.scope || !isGfsSessionGeneration(deps.sessionGeneration) || !isAuthorityCurrent())
+        return { ok: false, error: new Error('No active session authority') }
       try {
         const held = await queryClient.fetchQuery({
-          queryKey: desktopQueryKeys.gfsAffordances(deps.scope, resourceId, deps.drive),
+          queryKey: desktopQueryKeys.gfsAffordances(
+            deps.scope,
+            resourceId,
+            deps.drive,
+            deps.sessionGeneration
+          ),
           queryFn: () => window.clerum.gfs.affordances(resourceId, deps.drive),
           staleTime,
         })
+        if (!isAuthorityCurrent()) {
+          return { ok: false, error: new Error('Session authority changed during drag check') }
+        }
         return { ok: true, held: held.held }
       } catch (error) {
         // A 401 here is a session failure, not a refused probe: report it so
         // the surface revokes instead of leaving the drop silently dead.
-        reportAuthorityFailure(error)
+        if (isAuthorityCurrent()) reportAuthorityFailure(error)
         return { ok: false, error }
       }
     },
-    [deps.drive, deps.scope, queryClient, reportAuthorityFailure]
+    [deps.drive, deps.scope, deps.sessionGeneration, queryClient, reportAuthorityFailure]
   )
 
   /** Warm hover verdict: cached structure + cached bits; ZERO network reads. */
@@ -225,6 +258,8 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       const expectedGeneration = session?.currentGeneration() ?? localGeneration
       const isCurrent = () =>
         deps.scope !== null &&
+        isGfsSessionGeneration(deps.sessionGeneration) &&
+        isAuthorityCurrent() &&
         localGeneration === localGestureRef.current.generation &&
         (session
           ? session.currentGeneration() === expectedGeneration && session.matchesScope(deps.scope)
@@ -278,7 +313,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         })()
       }, DRAG_COLD_CHECK_DEBOUNCE_MS)
     },
-    [deps.scope, fetchAffordances, readCachedAffordances, session]
+    [deps.scope, deps.sessionGeneration, fetchAffordances, readCachedAffordances, session]
   )
 
   const cancelHover = useCallback(() => {
@@ -301,7 +336,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
   useEffect(() => {
     endDragSession()
     return endDragSession
-  }, [deps.scope, endDragSession])
+  }, [deps.scope, deps.sessionGeneration, endDragSession])
 
   /**
    * Bounded upward continuation of the target's ancestor chain (rev-2 §3.1):
@@ -317,10 +352,12 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       if (oldest === null && chain.length > 0) return chain // already at root
       let nextIdToResolve: string = oldest ?? target.resourceId
       for (let step = 0; step < MAX_DROP_ANCESTOR_RESOLVES; step += 1) {
+        if (!isAuthorityCurrent()) return chain
         const uri = `gfs://${source.drive}/${nextIdToResolve.replace(/-/g, '').toLowerCase()}`
         let parent: string | null
         try {
           const resolved = await deps.resolve(uri)
+          if (!isAuthorityCurrent()) return chain
           parent = resolved.parentResourceId
         } catch (error) {
           const status = parseHttpStatus(error instanceof Error ? error.message : String(error))
@@ -348,6 +385,13 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
    */
   const adjudicateDrop = useCallback(
     async (source: GfsDragSource, target: GfsDropTargetFact): Promise<GfsDropDecision> => {
+      if (!deps.scope || !isGfsSessionGeneration(deps.sessionGeneration) || !isAuthorityCurrent()) {
+        return {
+          allowed: false,
+          reason: 'unavailable',
+          message: 'Could not verify permissions for this move.',
+        }
+      }
       if (target.kind !== 'directory') {
         return { allowed: false, reason: 'self', message: 'A folder destination is required.' }
       }
@@ -375,6 +419,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
             knownSourceAncestorIds: new Set(source.knownAncestorIds),
           })
         } catch (error) {
+          if (!isAuthorityCurrent()) return { allowed: false, reason: 'unavailable' }
           // A read failure upward is a visibility boundary, not a denial: the
           // ancestry stays unproven and the server PATCH remains the backstop.
           // A SESSION failure is not a boundary — the session the ancestry
@@ -396,9 +441,16 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       let sourceParentForProbe: string | null = source.parentKnown ? source.parentResourceId : null
       if (sourceParentForProbe === null) {
         try {
+          if (!isAuthorityCurrent()) {
+            return { allowed: false, reason: 'unavailable' }
+          }
           const resolved = await deps.resolve(source.gfsUri)
+          if (!isAuthorityCurrent()) {
+            return { allowed: false, reason: 'unavailable' }
+          }
           sourceParentForProbe = resolved.parentResourceId
         } catch (error) {
+          if (!isAuthorityCurrent()) return { allowed: false, reason: 'unavailable' }
           const status = parseHttpStatus(error instanceof Error ? error.message : String(error))
           if (status === 401) {
             // The drop is refused AND the session revoked: a 401 here means the
@@ -430,6 +482,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         target.resourceId,
         AFFORDANCES_MUTATION_STALE_MS
       )
+      if (!isAuthorityCurrent()) return { allowed: false, reason: 'unavailable' }
       if (!destinationProbe.ok) {
         return requiredProbeRejection(destinationProbe.error)
       }
