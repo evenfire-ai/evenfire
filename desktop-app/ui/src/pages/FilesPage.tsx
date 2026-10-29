@@ -95,7 +95,7 @@ import {
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
 import { GfsFilePicker } from '@/gfs/filePicker'
-import { suggestNumberedMoveName, toastMoveOutcome } from '@/gfs/moveCommit'
+import { toastMoveOutcome } from '@/gfs/moveCommit'
 import type {
   MoveCommitExpectedSourceSnapshot,
   MoveCommitOutcome,
@@ -454,8 +454,6 @@ export function FilesPage({
     gestureGeneration: number
     sessionGeneration: number | null
     destination: { resourceId: string; name: string }
-    allowNumberedRename: boolean
-    suggestedName?: string
   } | null>(null)
   const draggingResourceRef = useRef<GfsDriveResource | null>(null)
   const draggingSourceRef = useRef<GfsDragSource | null>(null)
@@ -2090,7 +2088,8 @@ export function FilesPage({
               ifMatch,
               newName,
               oldParentId,
-              source.scope
+              source.scope,
+              true
             ),
           handleAuthorityFailure: message =>
             ctrl.handleAuthorityFailure(message, 'operation', source.scope),
@@ -2172,24 +2171,20 @@ export function FilesPage({
         return
       }
       if (source.kind === 'directory') {
-        // The ONE folder confirmation (rev-2 §1): impact + naming policy in a
-        // single dialog; dispatch happens on explicit Move.
-        const occupied = cachedDestinationNames(destination.resourceId)
-        const suggested = suggestNumberedMoveName(source.name, occupied)
+        // The ONE folder confirmation discloses inherited-access impact. A
+        // drag permission probe does not consent to a numbered rename.
         setPendingFolderMove({
           source,
           gestureGeneration: dragGeneration,
           sessionGeneration,
           destination: { resourceId: destination.resourceId, name: destination.name },
-          allowNumberedRename: decision.allowNumberedRename,
-          ...(suggested !== undefined ? { suggestedName: suggested } : {}),
         })
         return
       }
       await runMoveCommit(
         source,
         { resourceId: destination.resourceId, name: destination.name },
-        decision.allowNumberedRename,
+        false,
         () => ownsDrop(source, dragGeneration, sessionGeneration)
       )
     } finally {
@@ -3878,20 +3873,16 @@ export function FilesPage({
           request={{
             sourceName: pendingFolderMove.source.name,
             destinationName: pendingFolderMove.destination.name,
-            canRename: pendingFolderMove.allowNumberedRename,
-            ...(pendingFolderMove.suggestedName !== undefined
-              ? { suggestedName: pendingFolderMove.suggestedName }
-              : {}),
           }}
           onCancel={() => setPendingFolderMove(null)}
-          onConfirm={({ allowNumberedRename }) => {
+          onConfirm={() => {
             const pending = pendingFolderMove
             setPendingFolderMove(null)
             if (
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void runMoveCommit(pending.source, pending.destination, allowNumberedRename, () =>
+              void runMoveCommit(pending.source, pending.destination, false, () =>
                 ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
               )
             }

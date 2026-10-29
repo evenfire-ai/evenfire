@@ -11,6 +11,7 @@ import {
   accessibleResource,
   affordancesResult,
   childView,
+  gfsRouteFailureMessage,
   heldAffordances,
   listAccessiblePage,
   listChildrenPage,
@@ -4968,7 +4969,8 @@ describe('FilesPage', () => {
       3,
       undefined,
       'folder-1',
-      'env-1:user-1:team-1'
+      'env-1:user-1:team-1',
+      true
     )
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
@@ -7414,6 +7416,7 @@ describe('FilesPage — folder drag-and-drop', () => {
       resolveVersion?: number
       moveResult?: () => Promise<{ resourceId: string; version: number }>
       conflictOnce?: boolean
+      conflictMessage?: string
     } = {}
   ) {
     const pushToast = vi.fn()
@@ -7425,7 +7428,10 @@ describe('FilesPage — folder drag-and-drop', () => {
       moveResource.mockImplementation(async () => {
         if (!conflicted) {
           conflicted = true
-          throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
+          throw new Error(
+            options.conflictMessage ??
+              '409 Conflict: a resource with this name already exists httpStatus=409'
+          )
         }
         return { resourceId: 'folder-src', version: 5 }
       })
@@ -7576,7 +7582,24 @@ describe('FilesPage — folder drag-and-drop', () => {
   })
 
   it('a folder conflict without the numbered-name opt-in stops with alternatives', async () => {
-    const { pushToast, moveResource } = folderDragHarness({ conflictOnce: true })
+    const conflictMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          {
+            resourceId: 'folder-src',
+            destinationId: 'archive-1',
+            drive: 'main',
+            ifMatch: 4,
+          },
+          'fixture-session-token'
+        ),
+      409,
+      { code: 'name_conflict', message: 'an item with this name already exists' }
+    )
+    const { pushToast, moveResource } = folderDragHarness({
+      conflictOnce: true,
+      conflictMessage,
+    })
     const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
     const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
     const dataTransfer = {
@@ -7591,6 +7614,8 @@ describe('FilesPage — folder drag-and-drop', () => {
     fireEvent.drop(destinationRow, { dataTransfer })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
+    expect(within(dialog).queryByRole('checkbox')).toBeNull()
+    expect(within(dialog).queryByText(/numbered name/i)).toBeNull()
     await act(async () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
     })
@@ -7601,6 +7626,15 @@ describe('FilesPage — folder drag-and-drop', () => {
       )
     })
     expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(moveResource).toHaveBeenCalledWith(
+      'folder-src',
+      'archive-1',
+      4,
+      undefined,
+      'folder-1',
+      'env-1:user-1:team-1',
+      true
+    )
   })
 
   // Breadcrumb crumb drop targets (Control UI parity): the trail inside a
@@ -7817,15 +7851,19 @@ describe('FilesPage — folder drag-and-drop', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
-  it('a file conflict resolves with a numbered whole-resource rename (CU parity)', async () => {
+  it('stops a file drag on a producer-derived name conflict without retrying', async () => {
+    const conflictMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId: 'file-1', destinationId: 'archive-1', drive: 'main', ifMatch: 3 },
+          'fixture-session-token'
+        ),
+      409,
+      { code: 'name_conflict', message: 'an item with this name already exists' }
+    )
     const pushToast = vi.fn()
-    let conflicted = false
-    const moveResource = vi.fn(async (_id: string, _dest: string, _v: number, newName?: string) => {
-      if (newName === undefined && !conflicted) {
-        conflicted = true
-        throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
-      }
-      return { resourceId: 'file-1', version: 6 }
+    const moveResource = vi.fn(async () => {
+      throw new Error(conflictMessage)
     })
     const affordances = vi.fn(async (resourceId: string) => {
       if (resourceId === 'folder-1') return { held: ['read', 'write', 'delete'] }
@@ -7898,19 +7936,21 @@ describe('FilesPage — folder drag-and-drop', () => {
     fireEvent.dragEnter(destinationRow, { dataTransfer })
     fireEvent.drop(destinationRow, { dataTransfer })
 
-    await waitFor(() => {
+    await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith(
-        'Moved notes.txt to Archive as notes (1).txt',
-        'success'
+        expect.stringContaining('notes.txt → Archive: An item with this name already exists'),
+        'error'
       )
-    })
-    expect(moveResource).toHaveBeenLastCalledWith(
+    )
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(moveResource).toHaveBeenCalledWith(
       'file-1',
       'archive-1',
       3,
-      'notes (1).txt',
+      undefined,
       'folder-1',
-      'env-1:user-1:team-1'
+      'env-1:user-1:team-1',
+      true
     )
   })
 

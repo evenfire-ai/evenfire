@@ -16412,25 +16412,6 @@ pre {
   color: var(--text-muted);
 }
 
-.da-gfs-move-confirm-dialog__rename-toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  cursor: pointer;
-}
-
-.da-gfs-move-confirm-dialog__rename-toggle input[type='checkbox'] {
-  width: var(--space-3);
-  min-width: var(--space-3);
-  height: var(--space-3);
-  min-height: var(--space-3);
-  flex: 0 0 var(--space-3);
-  margin: 0;
-  padding: 0;
-  border-radius: var(--radius-sm);
-  accent-color: var(--accent);
-}
-
 .da-gfs-move-confirm-dialog__actions {
   display: flex;
   justify-content: flex-end;

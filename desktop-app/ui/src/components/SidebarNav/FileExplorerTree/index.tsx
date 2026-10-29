@@ -31,7 +31,6 @@ import {
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
-import { suggestNumberedMoveName } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
@@ -492,13 +491,12 @@ export function FileExplorerTree({
   const draggingSourceRef = useRef<GfsDragSource | null>(null)
   const hoverOwnerRef = useRef<GfsDragSource | null>(null)
   const dragSessionEpochRef = useRef(0)
+  const treeMountedRef = useRef(true)
   const [pendingFolderMove, setPendingFolderMove] = useState<{
     source: GfsDragSource
     gestureGeneration: number
     sessionGeneration: number | null
     destination: { resourceId: string; name: string }
-    allowNumberedRename: boolean
-    suggestedName?: string
   } | null>(null)
   const [moveDialogTarget, setMoveDialogTarget] = useState<{
     node: GfsBrowserChild
@@ -516,14 +514,15 @@ export function FileExplorerTree({
     setMoveDialogTarget(null)
   }, [])
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    treeMountedRef.current = true
+    return () => {
+      treeMountedRef.current = false
       dragSessionEpochRef.current += 1
       hoverOwnerRef.current = null
       adjudication.endDragSession()
-    },
-    [adjudication.endDragSession]
-  )
+    }
+  }, [adjudication.endDragSession])
 
   const liveDragScope = ctrl.accessState === 'revoked' ? null : (ctrl.sessionScope ?? 'anonymous')
   const liveDragScopeRef = useRef(liveDragScope)
@@ -780,7 +779,8 @@ export function FileExplorerTree({
       source: GfsDragSource,
       destination: { resourceId: string; name: string },
       allowNumberedRename: boolean,
-      isCurrent?: () => boolean
+      isCurrent?: () => boolean,
+      preferInlineErrors = false
     ) => {
       movingResourceIdRef.current = source.resourceId
       setMovingResourceId(source.resourceId)
@@ -794,13 +794,20 @@ export function FileExplorerTree({
                 ifMatch,
                 newName,
                 oldParentId,
-                source.scope
+                source.scope,
+                true
               ),
             handleAuthorityFailure: message =>
               ctrl.handleAuthorityFailure(message, 'operation', source.scope),
             convergeCommittedMove: (input, receipt) =>
               ctrl.convergeCommittedMove(input, receipt, source.scope),
-            pushToast,
+            pushToast: (message, tone) => {
+              if (!treeMountedRef.current || liveDragScopeRef.current !== source.scope) return
+              if (preferInlineErrors && isCurrent?.() && (tone === 'error' || tone === 'warn')) {
+                return
+              }
+              pushToast?.(message, tone)
+            },
           },
           {
             source,
@@ -815,7 +822,7 @@ export function FileExplorerTree({
         setMovingResourceId(null)
       }
     },
-    [cachedDestinationNames, ctrl, pushToast]
+    [cachedDestinationNames, ctrl, liveDragScopeRef, pushToast]
   )
 
   const handleNodeDrop = useCallback(
@@ -876,23 +883,16 @@ export function FileExplorerTree({
           return
         }
         if (source.kind === 'directory') {
-          const occupied = cachedDestinationNames(node.resourceId)
-          const suggested = suggestNumberedMoveName(source.name, occupied)
           setPendingFolderMove({
             source,
             gestureGeneration: epoch,
             sessionGeneration,
             destination: { resourceId: node.resourceId, name: node.name },
-            allowNumberedRename: decision.allowNumberedRename,
-            ...(suggested !== undefined ? { suggestedName: suggested } : {}),
           })
           return
         }
-        await commitMove(
-          source,
-          { resourceId: node.resourceId, name: node.name },
-          decision.allowNumberedRename,
-          () => ownsDrop(source, epoch, sessionGeneration)
+        await commitMove(source, { resourceId: node.resourceId, name: node.name }, false, () =>
+          ownsDrop(source, epoch, sessionGeneration)
         )
       } finally {
         finishNodeDropCleanup(source, epoch, sessionGeneration)
@@ -1163,20 +1163,16 @@ export function FileExplorerTree({
           request={{
             sourceName: displayName(pendingFolderMove.source.name),
             destinationName: displayName(pendingFolderMove.destination.name),
-            canRename: pendingFolderMove.allowNumberedRename,
-            ...(pendingFolderMove.suggestedName !== undefined
-              ? { suggestedName: pendingFolderMove.suggestedName }
-              : {}),
           }}
           onCancel={() => setPendingFolderMove(null)}
-          onConfirm={({ allowNumberedRename }) => {
+          onConfirm={() => {
             const pending = pendingFolderMove
             setPendingFolderMove(null)
             if (
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void commitMove(pending.source, pending.destination, allowNumberedRename, () =>
+              void commitMove(pending.source, pending.destination, false, () =>
                 ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
               )
             }
@@ -1189,10 +1185,9 @@ export function FileExplorerTree({
           busy={ctrl.mutating || movePermissionStatus === 'checking'}
           initialCrumbs={moveDialogTarget.initialCrumbs}
           onClose={closeMoveDialog}
-          onMove={async (destinationId, destinationName) => {
+          onMoveWithOwnership={async (destinationId, destinationName, isCurrent) => {
             setMovePermissionStatus(null)
             const target = moveDialogTarget
-            const allowNumberedRename = await adjudication.probeSourceWrite(target.node.resourceId)
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,
@@ -1212,12 +1207,20 @@ export function FileExplorerTree({
             const outcome = await commitMove(
               source,
               { resourceId: destinationId, name: destinationName },
-              allowNumberedRename
+              false,
+              isCurrent,
+              true
             )
-            if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
-              setMoveDialogTarget(null)
+            if (outcome.status === 'session-lost') {
+              if (isCurrent()) setMoveDialogTarget(null)
               return
             }
+            if (outcome.status === 'gesture-lost') {
+              // The dialog selection or owning session changed while the
+              // source was resolving. Keep the newer dialog state untouched.
+              return
+            }
+            if (!isCurrent()) return
             if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
               if (
                 moveDialogTargetRef.current === target &&
