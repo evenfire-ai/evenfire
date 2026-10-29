@@ -1,1 +1,1 @@
-Capture a redacted verbose diagnostic for the first Windows password rollback case.
+Retry the first password rollback case with safe assertion details, excluding reporter headers.

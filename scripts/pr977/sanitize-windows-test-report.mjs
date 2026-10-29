@@ -61,12 +61,18 @@ function sanitizeExcerpt(messages, logText) {
     .filter(line => !/^at\s/.test(line))
     .filter(line => !line.includes('STACK_TRACE_ERROR'))
     .filter(line => !/^(?:npm test|> vitest run|Single-file command exit code)/i.test(line))
-  const detail = lines.find(line =>
-    /(?:AssertionError|TypeError|Error:|expected|received|not authenticated|ENOENT|EACCES|EPERM|timeout|failed)/i.test(
+    .filter(line => !/^⎯+\s*Failed Tests\b/i.test(line))
+    .filter(line => !/^Failed Tests\b/i.test(line))
+    .filter(line => !/^❯/.test(line))
+  const details = lines.filter(line =>
+    /(?:AssertionError|TypeError|Error:|expected|received|not authenticated|ENOENT|EACCES|EPERM|timeout)/i.test(
       line
     )
   )
-  return sanitizeLine(detail ?? 'No safe failure detail was recorded')
+  return (details.length ? details : ['No safe failure detail was recorded'])
+    .slice(0, 3)
+    .map(sanitizeLine)
+    .join(' | ')
 }
 
 function categoryFor(messages, code, type) {
