@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - test/pr977-windows-075794e5-20261028-r24m3
+    paths:
+      - .validation/windows/focused.trigger
 
 permissions:
   contents: read

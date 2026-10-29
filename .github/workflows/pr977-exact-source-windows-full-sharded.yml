@@ -1,0 +1,286 @@
+name: PR 977 exact-source Windows full Desktop suite (sharded)
+
+on:
+  push:
+    branches:
+      - test/pr977-windows-075794e5-20261028-r24m3
+    paths:
+      - .validation/windows/full-sharded.trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr977-windows-full-sharded-075794e5-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PR977_SOURCE_SHA: 075794e5606a65c30f4626a15f17718447393ec5
+
+jobs:
+  desktop-windows-build:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Check out exact PR application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out validation harness commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify and report source and workflow revisions
+        shell: pwsh
+        run: |
+          $triggerSha = $env:GITHUB_SHA
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nvmrc = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $triggerSha"
+          Write-Output "Validation harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          Write-Output "Repository-pinned Node version: $nvmrc"
+          if ($triggerSha -ne $harnessSha) { throw 'Harness checkout does not match trigger SHA' }
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source SHA mismatch' }
+          if ($nvmrc -ne '24.22.1') { throw 'Repository Node pin is not 24.22.1' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            source/desktop-app/package-lock.json
+            source/mcp-host/package-lock.json
+
+      - name: Record hosted Windows runtime
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Output "Runner image: $env:ImageOS $env:ImageVersion ($env:RUNNER_ARCH)"
+          Write-Output "Windows: $($os.Caption) $($os.Version)"
+          Write-Output "Node: $(node --version)"
+          Write-Output "npm: $(npm --version)"
+          if ((node --version) -ne 'v24.22.1') { throw 'Unexpected Node runtime' }
+
+      - name: Overlay durability test from validation harness
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source changed before overlay' }
+          $committedAcl = 'source/desktop-app/src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
+          if (-not (Test-Path $committedAcl)) { throw 'Committed native ACL suite is missing' }
+          $name = 'windowsSessionAuthorityDurableFileOps.native.test.ts'
+          $target = Join-Path 'source/desktop-app/src/__tests__' $name
+          if (Test-Path $target) { throw 'Refusing to replace a source-controlled test' }
+          $inputFile = Join-Path 'validation/.validation/windows' $name
+          if (-not (Test-Path $inputFile)) { throw 'Missing native durability test overlay' }
+          Copy-Item -LiteralPath $inputFile -Destination $target
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputFile).Hash.ToLowerInvariant()
+          Write-Output "Validation-only durability test overlay: $name SHA256=$hash"
+          if ((git -C source rev-parse HEAD).Trim() -ne $env:PR977_SOURCE_SHA) {
+            throw 'Application source SHA changed during test overlay'
+          }
+
+      - name: Install Host fixture dependencies
+        working-directory: source/mcp-host
+        run: npm ci
+
+      - name: Install Desktop dependencies
+        working-directory: source/desktop-app
+        run: npm ci
+
+      - name: Build Desktop main and renderer
+        working-directory: source/desktop-app
+        run: npm run build
+
+      - name: Verify Electron runtime
+        working-directory: source/desktop-app
+        run: npm run verify:electron
+
+  desktop-windows-shard:
+    needs: desktop-windows-build
+    runs-on: windows-2025
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      PR977_SHARD_INDEX: ${{ matrix.shard }}
+    steps:
+      - name: Check out exact PR application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out validation harness commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify and report source and workflow revisions
+        shell: pwsh
+        run: |
+          $triggerSha = $env:GITHUB_SHA
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          Write-Output "Workflow trigger SHA: $triggerSha"
+          Write-Output "Validation harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          Write-Output "Windows test shard: $env:PR977_SHARD_INDEX/8"
+          if ($triggerSha -ne $harnessSha) { throw 'Harness checkout does not match trigger SHA' }
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source SHA mismatch' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            source/desktop-app/package-lock.json
+            source/mcp-host/package-lock.json
+
+      - name: Install Host fixture dependencies
+        working-directory: source/mcp-host
+        run: npm ci
+
+      - name: Install Desktop dependencies
+        working-directory: source/desktop-app
+        run: npm ci
+
+      - name: Overlay durability test from validation harness
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source changed before overlay' }
+          $committedAcl = 'source/desktop-app/src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
+          if (-not (Test-Path $committedAcl)) { throw 'Committed native ACL suite is missing' }
+          $name = 'windowsSessionAuthorityDurableFileOps.native.test.ts'
+          $target = Join-Path 'source/desktop-app/src/__tests__' $name
+          if (Test-Path $target) { throw 'Refusing to replace a source-controlled test' }
+          $inputFile = Join-Path 'validation/.validation/windows' $name
+          if (-not (Test-Path $inputFile)) { throw 'Missing native durability test overlay' }
+          Copy-Item -LiteralPath $inputFile -Destination $target
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputFile).Hash.ToLowerInvariant()
+          Write-Output "Validation-only durability test overlay: $name SHA256=$hash"
+
+      - name: Run full Desktop suite shard on Windows
+        id: full_suite
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX.json"
+          $shard = "$env:PR977_SHARD_INDEX/8"
+          npm test -- "--shard=$shard" --reporter=json "--outputFile.json=$reportPath"
+          $testExit = $LASTEXITCODE
+          Write-Output "Full Desktop shard $shard command exit code: $testExit"
+          if (-not (Test-Path $reportPath)) { throw "Full Desktop shard report is missing: $shard" }
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          Write-Output "Shard $shard: files=$($report.numTotalTestSuites) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          if ($testExit -ne 0 -or -not $report.success -or $report.numTotalTestSuites -le 0 -or $report.numTotalTests -le 0) {
+            throw "Full Desktop shard failed or executed no tests: $shard"
+          }
+
+      - name: Preserve shard test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr977-full-desktop-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce shard result
+        if: always()
+        shell: pwsh
+        env:
+          FULL_SUITE_STEP: ${{ steps.full_suite.outcome }}
+        run: |
+          if ($env:FULL_SUITE_STEP -ne 'success') { throw "Windows Desktop shard did not pass: $env:PR977_SHARD_INDEX/8" }
+
+  aggregate-windows-suite:
+    if: always()
+    needs: [desktop-windows-build, desktop-windows-shard]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact PR application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out validation harness commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify aggregate source and harness revisions
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          Write-Output "Workflow trigger SHA: $env:GITHUB_SHA"
+          Write-Output "Validation harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          if ($env:GITHUB_SHA -ne $harnessSha) { throw 'Harness checkout does not match trigger SHA' }
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source SHA mismatch' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+
+      - name: Download all shard reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pr977-full-desktop-shard-*
+          path: reports
+          merge-multiple: true
+
+      - name: Verify complete Windows suite coverage and aggregate results
+        id: aggregate
+        run: node validation/scripts/pr977/aggregate-windows-full-shards.mjs reports source/desktop-app ${{ env.PR977_SOURCE_SHA }} ${{ github.sha }}
+
+      - name: Enforce build and shard job results
+        if: always()
+        shell: pwsh
+        env:
+          BUILD_RESULT: ${{ needs.desktop-windows-build.result }}
+          SHARD_RESULT: ${{ needs.desktop-windows-shard.result }}
+          AGGREGATE_STEP: ${{ steps.aggregate.outcome }}
+        run: |
+          Write-Output "Desktop build and Electron job: $env:BUILD_RESULT"
+          Write-Output "Eight full Desktop shard jobs: $env:SHARD_RESULT"
+          if ($env:BUILD_RESULT -ne 'success' -or $env:SHARD_RESULT -ne 'success') {
+            throw 'A required Windows build or test-shard job did not pass.'
+          }
+          if ($env:AGGREGATE_STEP -ne 'success') {
+            throw 'The complete Windows suite report did not pass aggregation.'
+          }
