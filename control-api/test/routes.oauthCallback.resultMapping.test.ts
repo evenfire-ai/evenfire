@@ -20,8 +20,11 @@ vi.mock('../src/oauth/callback.js', async importOriginal => {
 
 const { createOAuthCallbackRouter } = await import('../src/routes/external/oauthCallback.js')
 
-// Typed as a total record over the union's kinds: adding a kind to
-// CallbackResult without listing it here fails the typecheck of this table.
+// Typed as a total record over the union's kinds, so an editor flags a kind
+// missing from this table. That is documentation only: test/ is outside the
+// tsconfig that `npm run build` and CI typecheck. The enforced exhaustiveness
+// is the `satisfies never` default in src/routes/external/oauthCallback.ts,
+// which fails the build when the route stops mapping a kind.
 const EXPECTED: { [K in CallbackResult['kind']]: [Extract<CallbackResult, { kind: K }>, number] } =
   {
     ok: [
