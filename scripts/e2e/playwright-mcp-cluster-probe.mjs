@@ -103,9 +103,6 @@ export function makeFixtures(manifest, runId) {
   const server = `pwmcp${runId.slice('pw-mcp-'.length)}mcp`
   const labels = { 'evenfire.ai/e2e-suite': 'playwright-mcp', 'evenfire.ai/e2e-run': runId }
   const spec = structuredClone(manifest.spec)
-  // A unique reference is enough for HCC to create the server; this probe
-  // connects inside the pod and does not need to create a Context.
-  spec.contextRef = `${runId}-ctx`
   spec.transport.url = `http://${server}.mcp-server.svc.cluster.local:8931/mcp`
   return [
     {
