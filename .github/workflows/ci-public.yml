@@ -558,6 +558,16 @@ jobs:
             routes.mcp-host.renewal.realPostgres.integration.test.ts \
             routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
             oauth.contextGrant.scenarios.realPostgres.integration.test.ts \
+            oauth.contextGrant.purge.scenarios.realPostgres.integration.test.ts \
+            oauth.contextGrantLifecycle.model.realPostgres.integration.test.ts \
+            routes.resources.contextGrantPurge.realPostgres.integration.test.ts \
+            oauth.mcpDisconnect.realPostgres.integration.test.ts \
+            services.access.mcpInvocable.grantGate.realPostgres.integration.test.ts \
+            services.access.mcpConnectors.realPostgres.integration.test.ts \
+            oauth.store.installIdentityFence.realPostgres.integration.test.ts \
+            oauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
+            routes.mcpOauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
+            oauth.dcrCredential.installIdentity.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts
 
       - name: Install gfs-controller dependencies
