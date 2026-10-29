@@ -154,12 +154,14 @@ function renderPreviewWithToastStack(props: { gfsUri?: string; fileName?: string
 }
 
 function installController(sessionScope = 'preview-test-user:main') {
+  const handleAuthorityFailure = vi.fn(() => false)
   hookMock.useGfsBrowserController.mockReturnValue({
     accessState: 'active',
     sessionScope,
     authorityPending: false,
-    handleAuthorityFailure: vi.fn(() => false),
+    handleAuthorityFailure,
   })
+  return handleAuthorityFailure
 }
 
 async function openPreviewActions() {
@@ -1554,6 +1556,63 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       }
     }
   )
+
+  it('does not apply a stale Move 401 to the new Preview session', async () => {
+    const failureMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          'fixture-session-token'
+        ),
+      401,
+      { code: 'unauthorized', message: 'not authenticated' }
+    )
+    let rejectMove!: (error: Error) => void
+    const pendingMove = new Promise<MoveReceipt>((_resolve, reject) => {
+      rejectMove = reject
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      destination: async () => fullAccess,
+      listAccessible: async () => destinationPage,
+      move: () => pendingMove,
+    })
+    const oldSessionAuthorityFailure = installController(sessionScope)
+    const { queryClient, rerender } = renderPreviewWithToastStack()
+    const newScope = 'other-user:main'
+    const newSessionAuthorityFailure = vi.fn(() => false)
+    try {
+      const dialog = await dispatchArchiveMove()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close move dialog' }))
+
+      hookMock.useGfsBrowserController.mockReturnValue({
+        accessState: 'active',
+        sessionScope: newScope,
+        authorityPending: false,
+        handleAuthorityFailure: newSessionAuthorityFailure,
+      })
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <ToastingPreview />
+        </QueryClientProvider>
+      )
+      await screen.findByAltText('Preview of diagram.png')
+
+      await act(async () => rejectMove(new Error(failureMessage)))
+
+      expect(oldSessionAuthorityFailure).not.toHaveBeenCalled()
+      expect(newSessionAuthorityFailure).not.toHaveBeenCalled()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      await act(async () => rejectMove(new Error(failureMessage)))
+      queryClient.clear()
+    }
+  })
 
   it('does not dispatch a pending Preview Move after its owner unmounts', async () => {
     let sourceReads = 0

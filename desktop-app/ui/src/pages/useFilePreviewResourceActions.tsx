@@ -14,7 +14,11 @@ import {
   gfsAuthorityQueryPolicy,
 } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
-import { describeGfsGrantError, describeGfsReadError } from '@lib/gfsGrantErrors'
+import {
+  describeGfsGrantError,
+  describeGfsReadError,
+  isGfsSessionAuthorityFailure,
+} from '@lib/gfsGrantErrors'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
@@ -728,7 +732,13 @@ export function useFilePreviewResourceActions({
             mutationDispatched = true
             return window.clerum.gfs.moveResource(resourceId, targetId, moveContext.drive, ifMatch)
           },
-          isSessionAuthorityFailure: error => onAuthorityFailure(errorMessage(error)),
+          isSessionAuthorityFailure: error => {
+            const message = errorMessage(error)
+            if (moveContextRef.current.sessionScope !== moveContext.sessionScope) {
+              return isGfsSessionAuthorityFailure(message, 'operation')
+            }
+            return onAuthorityFailure(message)
+          },
           isCurrent: () =>
             previewMountedRef.current &&
             isActiveMove() &&
