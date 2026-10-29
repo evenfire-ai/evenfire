@@ -523,6 +523,9 @@ describe('FilesPage delegation request lifecycle', () => {
     const grantListReadsBeforeOldSuccess = listGrants.mock.calls.length
 
     await act(async () => oldGrant.resolve())
+    expect(within(restoredDialog).getByText('Read-only access')).toBeTruthy()
+    expect(within(restoredDialog).getByText('People with access')).toBeTruthy()
+    expect(within(restoredDialog).queryByText('chatllm')).toBeNull()
     expect(pushToast).not.toHaveBeenCalled()
     expect(grant).toHaveBeenCalledOnce()
     await waitFor(() =>
@@ -533,8 +536,14 @@ describe('FilesPage delegation request lifecycle', () => {
     setNextPermissionRefresh(positive.promise)
     await startPermissionRefresh(queryClient)
     await act(async () => positive.resolve(freshPositive))
-    expect(within(restoredDialog).queryByText(/late old share attempt failed/)).toBeNull()
+    expect(
+      within(restoredDialog).getByRole('combobox', {
+        name: 'Add people, teams, or agents',
+      })
+    ).toBeTruthy()
+    expect(within(restoredDialog).getByText('People with access')).toBeTruthy()
     expect(within(restoredDialog).queryByText('chatllm')).toBeNull()
+    expect(within(restoredDialog).queryByRole('button', { name: 'Share' })).toBeNull()
     expect(pushToast).not.toHaveBeenCalled()
   })
 })
