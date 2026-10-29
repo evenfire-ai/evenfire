@@ -117,7 +117,7 @@ export function AuthPage() {
             in length; sign-in has one short form and reads better snug. */}
             {runtimeSetupVisible ? (
               <form onSubmit={handleRuntimeSetupSubmit}>
-                <Flex vertical gap="middle">
+                <Flex vertical gap="large">
                   <Flex vertical gap="small">
                     <label htmlFor="runtime-config-name-input">Environment name</label>
                     <Input
@@ -158,7 +158,7 @@ export function AuthPage() {
               </form>
             ) : (
               <form onSubmit={handlePasswordSubmit}>
-                <Flex vertical gap="middle">
+                <Flex vertical gap="large">
                   <Flex vertical gap="small">
                     <label htmlFor="email-input">Email</label>
                     <Input
