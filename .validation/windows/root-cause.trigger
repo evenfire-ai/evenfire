@@ -1,1 +1,1 @@
-Auth-only bounded password rollback diagnostic: 360-second test timeout / 420-second watchdog
+Single final auth probe: 900-second test timeout / 960-second watchdog
