@@ -31,6 +31,8 @@ import {
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
 
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 function sendInvitationServiceError(
   res: { status: (code: number) => { json: (body: unknown) => unknown } },
   error: unknown
@@ -270,6 +272,12 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     requireExternalRole(['admin']),
     async (req, res, next) => {
       try {
+        // The membership service trims its target, so a padded copy of the
+        // caller's own id would otherwise delete a real membership. Reject any
+        // id that is not already canonical instead of normalising it.
+        if (!CANONICAL_UUID_RE.test(req.params.userId)) {
+          return res.status(400).json({ error: 'invalid_target' })
+        }
         const result = await deleteManagedMemberForUser(
           (req as ExternalAuthedRequest).externalAuth!.userId,
           req.params.userId,

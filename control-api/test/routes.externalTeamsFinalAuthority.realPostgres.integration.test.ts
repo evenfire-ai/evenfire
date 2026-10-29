@@ -501,6 +501,20 @@ describeRealPostgres('external team mutations final source authority on real Pos
     expect(result.rows[0]?.status).toBe('deleted')
   })
 
+  it('rejects a padded own id without deleting the membership', async () => {
+    await resetPrincipal('legacy-self-delete-padded')
+    const response = await request(app())
+      .delete(`/external/teams/${teamId}/members/%20${adminUserId}`)
+      .set('x-user-session-token', token)
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid_target' })
+    const result = await databasePool.query<{ status: string }>(
+      `SELECT status FROM team_members WHERE team_id = $1 AND user_id = $2`,
+      [teamId, adminUserId]
+    )
+    expect(result.rows[0]?.status).toBe('active')
+  })
+
   it('activates a managed invitation after delivery', async () => {
     await resetPrincipal('managed-invitation-activation')
     await prepareInvitation()
