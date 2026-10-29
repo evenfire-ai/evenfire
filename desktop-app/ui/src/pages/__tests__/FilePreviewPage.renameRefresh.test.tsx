@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { ComponentType } from 'react'
+import type { ComponentType, ReactNode } from 'react'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -31,6 +31,25 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+function installPreviewRenameFixture(sessionScope: string, gfs: Record<string, unknown>) {
+  Object.defineProperty(window, 'clerum', {
+    configurable: true,
+    value: {
+      auth: { getSessionGeneration: vi.fn(async () => 1) },
+      gfs,
+    },
+  })
+  hookMock.useGfsBrowserController.mockReset()
+  hookMock.useGfsBrowserController.mockReturnValue({
+    accessState: 'active',
+    sessionScope,
+    sessionGeneration: 1,
+    authorityPending: false,
+    handleAuthorityFailure: vi.fn(() => false),
+  } as never)
+  return new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+}
+
 describe('preview rename refreshes the workspace title from GFS', () => {
   it('updates the exact preview tab title without changing its selection or URI', async () => {
     let serverName = 'diagram.png'
@@ -56,27 +75,14 @@ describe('preview rename refreshes the workspace title from GFS', () => {
     const affordances = vi.fn(async () =>
       delegationAffordances(new Set(['read', 'write', 'delete', 'manage_acl', 'share']), false)
     )
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: {
-        auth: { getSessionGeneration: vi.fn(async () => 1) },
-        gfs: {
-          resolve,
-          renameResource,
-          affordances,
-          downloadPreview: vi.fn(async () => ({
-            bytes: new Uint8Array([1, 2, 3]).buffer,
-          })),
-        },
-      },
+    const queryClient = installPreviewRenameFixture('preview-rename-user:main', {
+      resolve,
+      renameResource,
+      affordances,
+      downloadPreview: vi.fn(async () => ({
+        bytes: new Uint8Array([1, 2, 3]).buffer,
+      })),
     })
-    hookMock.useGfsBrowserController.mockReturnValue({
-      accessState: 'active',
-      sessionScope: 'preview-rename-user:main',
-      sessionGeneration: 1,
-      authorityPending: false,
-      handleAuthorityFailure: vi.fn(() => false),
-    } as never)
 
     function Harness() {
       const [tabs, setTabs] = useState(() =>
@@ -123,9 +129,6 @@ describe('preview rename refreshes the workspace title from GFS', () => {
       )
     }
 
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false, gcTime: 0 } },
-    })
     render(<Harness />)
 
     await screen.findByAltText('Preview of diagram.png')
@@ -158,5 +161,62 @@ describe('preview rename refreshes the workspace title from GFS', () => {
     expect(renamedUris).toEqual([uri])
     expect(resolve).toHaveBeenCalledWith(uri)
     expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
+  })
+})
+
+describe('FilePreviewPage unchanged rename', () => {
+  it('closes without mutation or success feedback when the normalized name is unchanged', async () => {
+    const renameResource = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    const affordances = vi.fn(async () => delegationAffordances(new Set(['read', 'write']), false))
+    const queryClient = installPreviewRenameFixture('preview-rename-noop-user:main', {
+      resolve: vi.fn(async () =>
+        resolveResource({
+          resourceId: id,
+          rid: id,
+          gfsUri: uri,
+          drive: 'main',
+          parentResourceId: 'parent',
+          name: 'diagram.png',
+          kind: 'file',
+          version: 7,
+          bytes: 1,
+        })
+      ),
+      affordances,
+      downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+      renameResource,
+    })
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="diagram.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={1}
+        pushToast={pushToast}
+      />,
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(id, 'main'))
+    fireEvent.click(screen.getByRole('button', { name: 'Options for diagram.png' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    expect((within(dialog).getByLabelText('New name') as HTMLInputElement).value).toBe(
+      'diagram.png'
+    )
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull())
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(pushToast).not.toHaveBeenCalled()
+    queryClient.clear()
   })
 })
