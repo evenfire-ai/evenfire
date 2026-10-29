@@ -14,12 +14,30 @@ function replaceOnce(value, before, after, label) {
 
 let result = source
 if (kind === 'auth') {
-  const helper = `\nconst diagnosticPhases = new Set([\n  'hook-before-start', 'hook-before-ready', 'hook-before-end',\n  'hook-after-start', 'hook-after-end', 'test-start',\n  'first-login-start', 'first-login-end', 'accepted-source-read-start',\n  'accepted-source-read-end', 'replacement-login-start', 'replacement-login-end',\n  'restart-start', 'restart-end', 'http-password-start', 'http-password-end', 'http-me-start',\n  'complete-password-start', 'complete-password-end',\n  'credential-producer-start', 'credential-producer-end', 'credential-producer-error',\n  'session-persistence-start', 'session-persistence-end', 'session-persistence-error',\n  'login-install-start', 'login-install-end', 'login-install-error',\n  'login-install-once-start', 'login-install-once-end', 'login-install-once-error',\n  'acceptance-install-start', 'acceptance-install-end', 'acceptance-install-error',\n  'within-persistence-start', 'within-persistence-end', 'within-persistence-error',\n  'legacy-recovery-start', 'legacy-recovery-end', 'legacy-recovery-error',\n  'http-me-end', 'keytar-get-start', 'keytar-get-end', 'keytar-set-start',\n  'keytar-set-end', 'keytar-delete-start', 'keytar-delete-end',\n  'chat-prepare-start', 'chat-prepare-rejected', 'chat-bind-start', 'chat-bind-end',\n  'acl-provision-start', 'acl-provision-end', 'acl-provision-error',\n  'acl-verify-start', 'acl-verify-end', 'acl-verify-error',\n  'transaction-begin-start', 'transaction-begin-end', 'transaction-begin-error',\n  'transaction-publish-start', 'transaction-publish-end', 'transaction-publish-error'\n])\nfunction diagnosticPhase(name: string): void {\n  const phaseFile = process.env.PR977_DIAGNOSTIC_PHASE_FILE\n  if (!phaseFile) return\n  if (!diagnosticPhases.has(name)) throw new Error('Diagnostic phase is not allowlisted')\n  fsSync.appendFileSync(phaseFile, name + '\\n', 'utf8')\n}\n`
+  const helper = `\nconst diagnosticPhases = new Set([\n  'hook-before-start', 'hook-before-ready', 'hook-before-end',\n  'hook-after-start', 'hook-after-end', 'test-start',\n  'first-login-start', 'first-login-end', 'accepted-source-read-start',\n  'accepted-source-read-end', 'replacement-login-start', 'replacement-login-end',\n  'restart-start', 'restart-end', 'http-password-start', 'http-password-end', 'http-me-start',\n  'complete-password-start', 'complete-password-end',\n  'credential-producer-start', 'credential-producer-end', 'credential-producer-error',\n  'session-persistence-start', 'session-persistence-end', 'session-persistence-error',\n  'login-install-start', 'login-install-end', 'login-install-error',\n  'login-install-once-start', 'login-install-once-end', 'login-install-once-error',\n  'acceptance-install-start', 'acceptance-install-end', 'acceptance-install-error',\n  'within-persistence-start', 'within-persistence-end', 'within-persistence-error',\n  'legacy-recovery-start', 'legacy-recovery-end', 'legacy-recovery-error',\n  'journal-capture-start', 'journal-capture-end', 'journal-capture-error',\n  'http-me-end', 'keytar-get-start', 'keytar-get-end', 'keytar-set-start',\n  'keytar-set-end', 'keytar-delete-start', 'keytar-delete-end',\n  'chat-prepare-start', 'chat-prepare-rejected', 'chat-bind-start', 'chat-bind-end',\n  'acl-provision-start', 'acl-provision-end', 'acl-provision-error',\n  'acl-verify-start', 'acl-verify-end', 'acl-verify-error',\n  'transaction-begin-start', 'transaction-begin-end', 'transaction-begin-error',\n  'transaction-publish-start', 'transaction-publish-end', 'transaction-publish-error'\n])\nfunction diagnosticPhase(name: string): void {\n  const phaseFile = process.env.PR977_DIAGNOSTIC_PHASE_FILE\n  if (!phaseFile) return\n  if (!diagnosticPhases.has(name)) throw new Error('Diagnostic phase is not allowlisted')\n  fsSync.appendFileSync(phaseFile, name + '\\n', 'utf8')\n}\n`
   result = replaceOnce(
     result,
     "import path from 'node:path'\n",
     "import path from 'node:path'\n" + helper,
     'phase helper'
+  )
+  result = replaceOnce(
+    result,
+    "vi.mock('../chatStoreBinding.js', () => ({",
+    `vi.mock('../sessionPersistenceJournal.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../sessionPersistenceJournal.js')>()
+  return {
+    ...actual,
+    captureSessionPersistenceJournalRecovery: (...args: Parameters<typeof actual.captureSessionPersistenceJournalRecovery>) => {
+      diagnosticPhase('journal-capture-start')
+      try { const value = actual.captureSessionPersistenceJournalRecovery(...args); diagnosticPhase('journal-capture-end'); return value }
+      catch (error) { diagnosticPhase('journal-capture-error'); throw error }
+    },
+  }
+})
+
+vi.mock('../chatStoreBinding.js', () => ({`,
+    'legacy journal capture instrumentation'
   )
   result = replaceOnce(
     result,
