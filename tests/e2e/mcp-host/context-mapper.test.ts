@@ -14,6 +14,8 @@ describe('Context Mapper', () => {
       expect(server).not.toHaveProperty('auth')
       expect(server).not.toHaveProperty('secretRef')
       expect(server).not.toHaveProperty('secretKey')
+      // A server has no owning Context; membership lives only in Context.spec.mcpServers.
+      expect(server).not.toHaveProperty('contextRef')
     }
   })
 
