@@ -258,7 +258,11 @@ export interface SharedFileSystemSpec {
 }
 
 export type SharedFileSystemPhase =
-  'Provisioning' | 'Initializing' | 'Ready' | 'Degraded' | 'Failed'
+  | 'Provisioning'
+  | 'Initializing'
+  | 'Ready'
+  | 'Degraded'
+  | 'Failed'
 
 export interface SharedFileSystemCondition {
   type: string
@@ -326,7 +330,11 @@ export interface GlobalFileSystemSpec {
 }
 
 export type GlobalFileSystemPhase =
-  'Provisioning' | 'Initializing' | 'Ready' | 'Degraded' | 'Failed'
+  | 'Provisioning'
+  | 'Initializing'
+  | 'Ready'
+  | 'Degraded'
+  | 'Failed'
 
 export interface GlobalFileSystemCondition {
   type: string
@@ -740,7 +748,10 @@ export interface LlmHookTarget {
 export type LlmHookLifecyclePoint = 'preCall' | 'moderate' | 'postCallSuccess' | 'onError'
 
 export type LlmHookCapability =
-  'may_deny' | 'may_rewrite' | 'may_substitute_result' | 'may_add_context'
+  | 'may_deny'
+  | 'may_rewrite'
+  | 'may_substitute_result'
+  | 'may_add_context'
 
 export interface LlmHookSpec {
   target: LlmHookTarget

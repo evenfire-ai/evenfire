@@ -6,12 +6,104 @@ import { applyPragmas } from '../../pragmas'
 import { prepareStatements } from '../../statements'
 import { createDispatcher, dispatch } from '../dispatcher'
 import type {
+  ModelStepCheckpointAttachmentInput,
+  ModelStepClaimOutcome,
+} from '../modelStepCheckpointOps'
+import type {
   MessageRow,
   PendingApprovalRow,
   PersistedSession,
   ReapedSession,
   SessionRow,
 } from '../protocol'
+
+async function seedClaimedCheckpoint(
+  deps: ReturnType<typeof createDispatcher>,
+  session: SessionRow,
+  checkpointId: string,
+  originTaskId: string,
+  continuationTaskId: string,
+  attachments?: ModelStepCheckpointAttachmentInput[]
+) {
+  const now = 20
+  await dispatch(
+    {
+      kind: 'model_step_checkpoint_open',
+      now,
+      header: {
+        checkpointId,
+        sessionKey: session.session_key,
+        originTurnNumber: 1,
+        originTaskId,
+        provider: 'openai',
+        model: 'checkpoint-model',
+        hostId: 'host-a',
+        principal: session.user_id!,
+        loopState: JSON.stringify({ nextIteration: 1 }),
+        taskBudget: null,
+        sourceMessage: null,
+      },
+      entries: [
+        {
+          kind: 'message',
+          toolCallId: null,
+          payload: JSON.stringify({ role: 'user', content: 'origin request' }),
+        },
+        {
+          kind: 'tool_dispatch',
+          toolCallId: 'tc-seed',
+          payload: JSON.stringify({ name: 'list_files' }),
+        },
+        {
+          kind: 'tool_result',
+          toolCallId: 'tc-seed',
+          payload: JSON.stringify({ name: 'list_files', isError: false }),
+        },
+      ],
+    },
+    deps
+  )
+  const transition = (await dispatch(
+    {
+      kind: 'model_step_checkpoint_transition',
+      fence: { checkpointId, owner: originTaskId, generation: 0 },
+      from: ['open'],
+      to: 'resumable',
+      now,
+      failedAt: now,
+      expiresAt: now + 604_800_000,
+      blockedTtlMs: 604_800_000,
+      attachments,
+    },
+    deps
+  )) as { applied: boolean; version: number }
+  expect(transition).toEqual({ applied: true, version: 2 })
+  const claim = (await dispatch(
+    {
+      kind: 'model_step_checkpoint_claim',
+      sessionKey: session.session_key,
+      checkpointId,
+      version: transition.version,
+      hostInstanceId: 'host-instance-old',
+      newTaskId: continuationTaskId,
+      leaseMs: 300_000,
+      now,
+    },
+    deps
+  )) as ModelStepClaimOutcome
+  if (claim.outcome !== 'claimed') throw new Error(claim.outcome)
+  expect(claim.snapshot.header).toMatchObject({
+    status: 'claimed',
+    version: 3,
+    continuation_task_id: continuationTaskId,
+    claim_owner: 'host-instance-old',
+    claim_generation: 1,
+    claim_expires_at: 300_020,
+    failed_at: 20,
+    expires_at: 604_800_020,
+  })
+  return claim.fence
+}
 
 describe('dbWorker dispatcher', () => {
   let db: Database.Database
@@ -394,6 +486,137 @@ describe('dbWorker dispatcher', () => {
     expect(
       db.prepare('SELECT last_activity_at FROM sessions WHERE id = ?').get(session.id)
     ).toEqual({ last_activity_at: 200 })
+  })
+
+  it('keeps a completed continuation stamp on a message a retention rewrite retains', async () => {
+    const deps = createDispatcher(db)
+    const session = makeSession('conv-stamp', 'u-stamp:rpc:agent:default')
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+
+    // A live claim owned by the continuation that is about to write the final
+    // answer: `persist_turn_boundary` completes the checkpoint and stamps that
+    // message in the same transaction (#1043).
+    db.prepare(
+      `INSERT INTO model_step_checkpoints (
+         checkpoint_id, session_key, origin_turn_number, origin_task_id,
+         version, status, provider, model, host_id, principal,
+         claim_owner, claim_generation, created_at, updated_at
+       ) VALUES (
+         'cp-stamp', @session_key, 1, 'task-origin',
+         2, 'claimed', 'codex-subscription', 'gpt-6.1-sol', 'host-a', 'u-stamp',
+         'owner-1', 1, @now, @now
+       )`
+    ).run({ session_key: session.session_key, now: Date.now() })
+
+    const question: MessageRow = {
+      session_id: session.id,
+      ordinal: 0,
+      role: 'user',
+      content: 'recoverable question',
+      content_parts: null,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: 10,
+      token_count: null,
+      finish_reason: null,
+      spillover_ref: null,
+      is_error: 0,
+      turn_number: 1,
+    }
+    const finalAnswer: MessageRow = {
+      session_id: session.id,
+      ordinal: 1,
+      role: 'assistant',
+      content: 'continued answer',
+      content_parts: null,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: 20,
+      token_count: null,
+      finish_reason: 'stop',
+      spillover_ref: null,
+      is_error: 0,
+      turn_number: 1,
+    }
+    await dispatch({ kind: 'insert_message', payload: question }, deps)
+    await dispatch(
+      {
+        kind: 'persist_turn_boundary',
+        sessionId: session.id,
+        state: 'idle',
+        activeTaskId: null,
+        message: finalAnswer,
+        completeModelStepCheckpoint: { checkpointId: 'cp-stamp', owner: 'owner-1', generation: 1 },
+      },
+      deps
+    )
+
+    const stampAt = (ordinal: number): string | null | undefined =>
+      (
+        db
+          .prepare(
+            'SELECT model_step_checkpoint_id FROM messages WHERE session_id = ? AND ordinal = ?'
+          )
+          .get(session.id, ordinal) as { model_step_checkpoint_id: string | null } | undefined
+      )?.model_step_checkpoint_id
+
+    // Witness: completion stamped the continuation's final message while the
+    // ordinary user message stayed unstamped.
+    expect(stampAt(1)).toBe('cp-stamp')
+    expect(stampAt(0)).toBeNull()
+
+    await dispatch(
+      { kind: 'replace_messages', sessionId: session.id, messages: [question, finalAnswer] },
+      deps
+    )
+
+    // The retained message is the same message, so the rewrite must not erase
+    // its stamp.
+    expect(stampAt(1)).toBe('cp-stamp')
+    expect(stampAt(0)).toBeNull()
+
+    // The marker follows the message, not the ordinal: a rewrite that renumbers
+    // the retained set keeps it on the answer.
+    await dispatch(
+      {
+        kind: 'replace_messages',
+        sessionId: session.id,
+        messages: [
+          { ...question, ordinal: 5 },
+          { ...finalAnswer, ordinal: 6 },
+        ],
+      },
+      deps
+    )
+    expect(stampAt(6)).toBe('cp-stamp')
+    expect(stampAt(5)).toBeNull()
+
+    // A rewrite that replaces the answer with a summary at the same ordinal is
+    // a different message and must not inherit the stamp.
+    const summary: MessageRow = {
+      ...finalAnswer,
+      ordinal: 6,
+      content: 'summary of the continuation',
+    }
+    await dispatch(
+      {
+        kind: 'replace_messages',
+        sessionId: session.id,
+        messages: [{ ...question, ordinal: 5 }, summary],
+      },
+      deps
+    )
+    expect(
+      (
+        db
+          .prepare('SELECT content FROM messages WHERE session_id = ? AND ordinal = 6')
+          .get(session.id) as { content: string }
+      ).content
+    ).toBe('summary of the continuation')
+    expect(stampAt(6)).toBeNull()
+    expect(stampAt(5)).toBeNull()
   })
 
   it('separates tool-call storage rows from visible messages and token counters', async () => {
@@ -884,6 +1107,87 @@ describe('dbWorker dispatcher', () => {
     expect(mismatch).toEqual({ state: 'idle', active_task_id: null })
   })
 
+  it('#1158: approval reap deletes abandoned bytes in the same call and preserves a live neighbour', async () => {
+    const deps = createDispatcher(db)
+    const suspended = {
+      ...makeSession('conv-attachment-reap', 'u:rpc:agent:attachment-reap'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-suspended',
+    }
+    const neighbour = {
+      ...makeSession('conv-attachment-live', 'u:rpc:agent:attachment-live'),
+      state: 'processing',
+      active_task_id: 'task-live',
+    }
+    for (const [session, checkpointId] of [
+      [suspended, 'cp-suspended'],
+      [neighbour, 'cp-live'],
+    ] as const) {
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+      await seedClaimedCheckpoint(
+        deps,
+        session,
+        checkpointId,
+        `origin-${checkpointId}`,
+        session.active_task_id,
+        [
+          {
+            attachmentId: 'att-1',
+            digestHex: 'ab'.repeat(32),
+            bytes: new Uint8Array([0, 255, 1, 254]),
+            expiresAt: 3_600_000,
+          },
+        ]
+      )
+    }
+    await dispatch(
+      {
+        kind: 'insert_pending_approval',
+        payload: {
+          request_id: 'req-suspended',
+          session_id: suspended.id,
+          task_id: suspended.active_task_id,
+          tool_name: 'shell_exec',
+          tool_call_id: 'tc-suspended',
+          parameters: '{}',
+          description: 'test',
+          context_snapshot: '[]',
+          completed_results: null,
+          intent_summary: null,
+          source_message: null,
+          registered_at: 0,
+          expires_at: 25,
+          trace_context: null,
+          reason: null,
+          mcp_server_name: null,
+        },
+      },
+      deps
+    )
+    const rows = db.prepare(
+      'SELECT attachment_id, bytes FROM model_step_checkpoint_attachments WHERE checkpoint_id = ?'
+    )
+    expect(rows.all('cp-suspended')).toHaveLength(1)
+    const retained = rows.all('cp-live')
+    expect(retained).toHaveLength(1)
+
+    const reaped = (await dispatch(
+      { kind: 'reap_awaiting_approval_sessions', nowEpoch: 30_000 },
+      deps
+    )) as ReapedSession[]
+    expect(reaped.map(row => row.sessionId)).toEqual([suspended.id])
+    expect(
+      db
+        .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get('cp-suspended')
+    ).toEqual({ status: 'abandoned' })
+    expect(rows.all('cp-suspended')).toHaveLength(0)
+    expect(rows.all('cp-live')).toEqual(retained)
+    expect(
+      db.prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?').get('cp-live')
+    ).toEqual({ status: 'claimed' })
+  })
+
   it('R1-M1 — processing reaper leaves no phantom turn 0 for untracked-turn sessions', async () => {
     const deps = createDispatcher(db)
     const session = {
@@ -931,6 +1235,82 @@ describe('dbWorker dispatcher', () => {
     expect(page.total_turns).toBe(0)
     expect(page.first_turn_number).toBeNull()
     expect(page.last_turn_number).toBeNull()
+  })
+
+  it('keeps a live checkpoint turn unanswered while ordinary restarts get the marker', async () => {
+    const deps = createDispatcher(db)
+    const continuation = {
+      ...makeSession('conv-reap-live', 'u-live:rpc:agent:chat'),
+      state: 'processing',
+      active_task_id: 'task-live-continuation',
+    }
+    const ordinary = {
+      ...makeSession('conv-reap-ordinary', 'u-ordinary:rpc:agent:chat'),
+      state: 'processing',
+      active_task_id: 'task-ordinary',
+    }
+    for (const session of [continuation, ordinary]) {
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+      await dispatch(
+        {
+          kind: 'insert_message',
+          payload: {
+            session_id: session.id,
+            ordinal: 0,
+            role: 'user',
+            content: `request-${session.id}`,
+            content_parts: null,
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 10,
+            token_count: null,
+            finish_reason: null,
+            spillover_ref: null,
+            is_error: 0,
+            turn_number: 1,
+          },
+        },
+        deps
+      )
+    }
+    await seedClaimedCheckpoint(
+      deps,
+      continuation,
+      'checkpoint-reap-live',
+      'task-live-origin',
+      'task-live-continuation'
+    )
+
+    await dispatch(
+      { kind: 'model_step_checkpoint_boot_reap', hostInstanceId: 'host-instance-new', now: 25 },
+      deps
+    )
+    await dispatch({ kind: 'reap_processing_sessions', nowEpoch: 30_000 }, deps)
+
+    const states = db
+      .prepare('SELECT id, state, active_task_id FROM sessions ORDER BY id')
+      .all() as Array<{ id: string; state: string; active_task_id: string | null }>
+    expect(states).toEqual([
+      { id: continuation.id, state: 'idle', active_task_id: null },
+      { id: ordinary.id, state: 'idle', active_task_id: null },
+    ])
+    const continuationMessages = db
+      .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+      .all(continuation.id) as Array<{ role: string; content: string }>
+    expect(continuationMessages).toEqual([{ role: 'user', content: 'request-conv-reap-live' }])
+    const ordinaryMessages = db
+      .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+      .all(ordinary.id) as Array<{ role: string; content: string }>
+    expect(ordinaryMessages).toEqual([
+      { role: 'user', content: 'request-conv-reap-ordinary' },
+      { role: 'assistant', content: '[Task interrupted by server restart]' },
+    ])
+    expect(
+      db
+        .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get('checkpoint-reap-live')
+    ).toEqual({ status: 'resumable' })
   })
 
   it('R1-M1 — awaiting-approval reaper leaves no phantom turn 0 for untracked-turn sessions', async () => {
@@ -983,6 +1363,417 @@ describe('dbWorker dispatcher', () => {
     expect(page.total_turns).toBe(0)
     expect(page.first_turn_number).toBeNull()
     expect(page.last_turn_number).toBeNull()
+  })
+
+  it('rejects a stale continuation boundary and still accepts the owning fence', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-fence', 'u-fence:rpc:agent:chat'),
+      state: 'processing',
+      active_task_id: 'task-a',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          session_id: session.id,
+          ordinal: 0,
+          role: 'user',
+          content: 'origin request',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 10,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: 1,
+        },
+      },
+      deps
+    )
+    const claimedFence = await seedClaimedCheckpoint(
+      deps,
+      session,
+      'cp-fence',
+      'task-origin',
+      'task-a'
+    )
+    const boundary = {
+      session_id: session.id,
+      ordinal: 1,
+      role: 'assistant' as const,
+      content: 'stale answer',
+      content_parts: null,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: 11,
+      token_count: null,
+      finish_reason: 'stop' as const,
+      spillover_ref: null,
+      is_error: 0 as const,
+      turn_number: 1,
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
+    }
+    const owned = {
+      fence: claimedFence,
+      activeTaskId: 'task-a',
+      originTurnNumber: 1,
+    }
+    await expect(
+      dispatch(
+        {
+          kind: 'persist_turn_boundary',
+          message: boundary,
+          sessionId: session.id,
+          state: 'idle',
+          activeTaskId: null,
+          activeTraceContext: null,
+          modelStepTurnFence: {
+            ...owned,
+            fence: { ...owned.fence, generation: 9 },
+          },
+        },
+        deps
+      )
+    ).rejects.toThrow('model-step continuation fence mismatch')
+    expect(
+      db
+        .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+        .all(session.id)
+    ).toEqual([{ role: 'user', content: 'origin request' }])
+    expect(
+      db.prepare('SELECT state, active_task_id FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ state: 'processing', active_task_id: 'task-a' })
+
+    await dispatch(
+      {
+        kind: 'persist_turn_boundary',
+        message: { ...boundary, content: 'owner answer' },
+        sessionId: session.id,
+        state: 'idle',
+        activeTaskId: null,
+        activeTraceContext: null,
+        modelStepTurnFence: owned,
+      },
+      deps
+    )
+    expect(
+      db
+        .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+        .all(session.id)
+    ).toEqual([
+      { role: 'user', content: 'origin request' },
+      { role: 'assistant', content: 'owner answer' },
+    ])
+    expect(
+      db.prepare('SELECT state, active_task_id FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ state: 'idle', active_task_id: null })
+  })
+
+  it('R2-M1 — sweep retains an abandoned fence until the active continuation closes', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-sweep-fence', 'u-sweep:rpc:agent:chat'),
+      state: 'processing',
+      active_task_id: 'task-sweep-continuation',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    const boundary = {
+      session_id: session.id,
+      ordinal: 1,
+      role: 'assistant' as const,
+      content: 'closed after sweep',
+      content_parts: null,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: 31,
+      token_count: null,
+      finish_reason: 'stop' as const,
+      spillover_ref: null,
+      is_error: 0 as const,
+      turn_number: 1,
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
+    }
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          ...boundary,
+          ordinal: 0,
+          role: 'user',
+          content: 'origin request',
+          finish_reason: null,
+        },
+      },
+      deps
+    )
+    const fence = await seedClaimedCheckpoint(
+      deps,
+      session,
+      'cp-sweep-fence',
+      'task-sweep-origin',
+      'task-sweep-continuation'
+    )
+    await dispatch(
+      {
+        kind: 'model_step_checkpoint_transition',
+        fence,
+        from: ['claimed'],
+        to: 'abandoned',
+        blockedTtlMs: 604_800_000,
+        now: 30,
+      },
+      deps
+    )
+
+    expect(
+      await dispatch({ kind: 'model_step_checkpoint_sweep', now: 30, terminalRetentionMs: 0 }, deps)
+    ).toMatchObject({ purgedCheckpoints: 0 })
+    await dispatch(
+      {
+        kind: 'persist_turn_boundary',
+        message: boundary,
+        sessionId: session.id,
+        state: 'idle',
+        activeTaskId: null,
+        activeTraceContext: null,
+        modelStepTurnFence: {
+          fence,
+          activeTaskId: 'task-sweep-continuation',
+          originTurnNumber: 1,
+        },
+      },
+      deps
+    )
+    expect(
+      db.prepare('SELECT state, active_task_id FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ state: 'idle', active_task_id: null })
+
+    expect(
+      await dispatch({ kind: 'model_step_checkpoint_sweep', now: 31, terminalRetentionMs: 0 }, deps)
+    ).toMatchObject({ purgedCheckpoints: 1 })
+    expect(
+      db
+        .prepare('SELECT checkpoint_id FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get('cp-sweep-fence')
+    ).toBeUndefined()
+  })
+
+  it('R2-L3 — sweep retains an orphan continuation approval while ordinary approvals stays independent', async () => {
+    const deps = createDispatcher(db)
+    const orphan = makeSession('conv-orphan-approval', 'u-orphan:rpc:agent:chat')
+    const ordinary = {
+      ...makeSession('conv-ordinary-approval', 'u-ordinary:rpc:agent:chat'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-ordinary',
+    }
+    for (const session of [orphan, ordinary]) {
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+    }
+    const fence = await seedClaimedCheckpoint(
+      deps,
+      orphan,
+      'cp-orphan-approval',
+      'task-orphan-origin',
+      'task-orphan-continuation'
+    )
+    await dispatch(
+      {
+        kind: 'model_step_checkpoint_transition',
+        fence,
+        from: ['claimed'],
+        to: 'abandoned',
+        blockedTtlMs: 604_800_000,
+        now: 30,
+      },
+      deps
+    )
+    const insertApproval = async (sessionId: string, taskId: string) => {
+      await dispatch(
+        {
+          kind: 'insert_pending_approval',
+          payload: {
+            request_id: `req-${taskId}`,
+            session_id: sessionId,
+            task_id: taskId,
+            tool_name: 'shell_exec',
+            tool_call_id: `tc-${taskId}`,
+            parameters: '{}',
+            description: 'test',
+            context_snapshot: '[]',
+            completed_results: null,
+            intent_summary: null,
+            source_message: null,
+            registered_at: 0,
+            expires_at: 3_600,
+            trace_context: null,
+            reason: null,
+            mcp_server_name: null,
+          },
+        },
+        deps
+      )
+    }
+    await insertApproval(orphan.id, 'task-orphan-continuation')
+    await insertApproval(ordinary.id, 'task-ordinary')
+
+    expect(
+      await dispatch({ kind: 'model_step_checkpoint_sweep', now: 30, terminalRetentionMs: 0 }, deps)
+    ).toMatchObject({ purgedCheckpoints: 0 })
+    const continuation = (await dispatch(
+      {
+        kind: 'model_step_checkpoint_load_for_task',
+        sessionKey: orphan.session_key,
+        taskId: 'task-orphan-continuation',
+      },
+      deps
+    )) as { header: { status: string } }
+    expect(continuation.header.status).toBe('abandoned')
+    expect(
+      await dispatch(
+        {
+          kind: 'model_step_checkpoint_load_for_task',
+          sessionKey: ordinary.session_key,
+          taskId: 'task-ordinary',
+        },
+        deps
+      )
+    ).toBeNull()
+    expect(db.prepare('SELECT COUNT(*) AS n FROM pending_approvals').get()).toMatchObject({ n: 2 })
+
+    db.prepare('DELETE FROM pending_approvals WHERE request_id = ?').run(
+      'req-task-orphan-continuation'
+    )
+    expect(
+      await dispatch({ kind: 'model_step_checkpoint_sweep', now: 31, terminalRetentionMs: 0 }, deps)
+    ).toMatchObject({ purgedCheckpoints: 1 })
+    expect(
+      db.prepare('SELECT request_id FROM pending_approvals ORDER BY request_id').all()
+    ).toEqual([{ request_id: 'req-task-ordinary' }])
+  })
+
+  it('R2-M5 — loadForTask rejects a producer-written invalid loop state and loads a healthy neighbour', async () => {
+    const deps = createDispatcher(db)
+    const bad = {
+      ...makeSession('conv-bad-loop-state', 'u-bad:rpc:agent:chat'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-bad-continuation',
+    }
+    const healthy = {
+      ...makeSession('conv-good-loop-state', 'u-good:rpc:agent:chat'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-good-continuation',
+    }
+    for (const session of [bad, healthy]) {
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+    }
+    const openAndClaim = async (session: SessionRow, checkpointId: string) => {
+      await dispatch(
+        {
+          kind: 'model_step_checkpoint_open',
+          now: 20,
+          header: {
+            checkpointId,
+            sessionKey: session.session_key,
+            originTurnNumber: 1,
+            originTaskId: `${checkpointId}-origin`,
+            provider: 'openai',
+            model: 'checkpoint-model',
+            hostId: 'host-a',
+            principal: session.user_id!,
+            loopState: JSON.stringify({ nextIteration: 1 }),
+            taskBudget: null,
+            sourceMessage: null,
+          },
+          entries: [
+            {
+              kind: 'message',
+              toolCallId: null,
+              payload: JSON.stringify({ role: 'user', content: 'origin request' }),
+            },
+          ],
+        },
+        deps
+      )
+      await dispatch(
+        {
+          kind: 'model_step_checkpoint_transition',
+          fence: { checkpointId, owner: `${checkpointId}-origin`, generation: 0 },
+          from: ['open'],
+          to: 'resumable',
+          blockedTtlMs: 604_800_000,
+          now: 20,
+          failedAt: 20,
+          expiresAt: 604_800_020,
+        },
+        deps
+      )
+      const claim = (await dispatch(
+        {
+          kind: 'model_step_checkpoint_claim',
+          sessionKey: session.session_key,
+          checkpointId,
+          version: 2,
+          hostInstanceId: 'host-a',
+          newTaskId: session.active_task_id!,
+          leaseMs: 300_000,
+          now: 20,
+        },
+        deps
+      )) as ModelStepClaimOutcome
+      if (claim.outcome !== 'claimed') throw new Error(claim.outcome)
+      return claim.fence
+    }
+    const badFence = await openAndClaim(bad, 'cp-bad-loop-state')
+    const healthyFence = await openAndClaim(healthy, 'cp-good-loop-state')
+    await dispatch(
+      {
+        kind: 'model_step_checkpoint_update_state',
+        fence: badFence,
+        loopState: '{}',
+        taskBudget: null,
+        now: 21,
+      },
+      deps
+    )
+
+    await expect(
+      dispatch(
+        {
+          kind: 'model_step_checkpoint_load_for_task',
+          sessionKey: bad.session_key,
+          taskId: bad.active_task_id!,
+        },
+        deps
+      )
+    ).rejects.toMatchObject({
+      name: 'ModelStepCheckpointCorruptError',
+      code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
+    })
+    const neighbour = (await dispatch(
+      {
+        kind: 'model_step_checkpoint_load_for_task',
+        sessionKey: healthy.session_key,
+        taskId: healthy.active_task_id!,
+      },
+      deps
+    )) as { header: { checkpoint_id: string; loop_state: string } }
+    expect(neighbour.header).toMatchObject({
+      checkpoint_id: healthyFence.checkpointId,
+      loop_state: JSON.stringify({ nextIteration: 1 }),
+    })
   })
 
   it('integrity_check returns ok', async () => {

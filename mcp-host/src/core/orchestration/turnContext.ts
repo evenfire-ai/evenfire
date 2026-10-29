@@ -215,5 +215,28 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
     if (codes.has('quota_exceeded'))
       lines.push(`For code=quota_exceeded: ${GFS_CACHE_FULL_GUIDANCE}`)
   }
-  return `<turn-context>\n${lines.join('\n')}\n</turn-context>\n\n`
+  return `${TURN_CONTEXT_OPEN}${lines.join('\n')}${TURN_CONTEXT_CLOSE}`
+}
+
+const TURN_CONTEXT_OPEN = '<turn-context>\n'
+const TURN_CONTEXT_CLOSE = '\n</turn-context>\n\n'
+
+/**
+ * #1043 — remove only the context prefix added to the recorded origin text.
+ * The source message is kept separately from the recorded model input. Its
+ * exact text anchors the end of the prefix, even when the user pasted a
+ * closing fence into their message. If the recorded text differs for another
+ * reason, leave it intact instead of guessing where the prefix ends.
+ */
+export function stripTurnContextBlock(text: string, sourceText: string): string {
+  if (text === sourceText || !text.endsWith(sourceText)) return text
+  const prefix = text.slice(0, text.length - sourceText.length)
+  if (
+    !prefix.startsWith(`${TURN_CONTEXT_OPEN}date: `) ||
+    !prefix.includes('\nchannel: ') ||
+    !prefix.endsWith(TURN_CONTEXT_CLOSE)
+  ) {
+    return text
+  }
+  return sourceText
 }

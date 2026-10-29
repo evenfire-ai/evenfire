@@ -260,7 +260,8 @@ async function relaunchPaint(
         }>
       >((resolve, reject) => {
         const navigation = performance.getEntriesByType('navigation')[0] as
-          PerformanceNavigationTiming | undefined
+          | PerformanceNavigationTiming
+          | undefined
         if (!navigation) throw new Error('Window navigation timing is unavailable.')
         const installed = performance.now()
         const observed = new Map<string, { at: number; initial: boolean; beforeClick: boolean }>()

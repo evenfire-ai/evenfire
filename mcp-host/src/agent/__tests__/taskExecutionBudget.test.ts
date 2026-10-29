@@ -62,6 +62,35 @@ describe('TaskExecutionBudget', () => {
     await vi.advanceTimersByTimeAsync(200)
     expect(controller.signal.aborted).toBe(false)
   })
+  it('#1043 snapshot() records mid-turn spend without stopping the timer or the visual budget', async () => {
+    vi.useFakeTimers()
+    let now = 0
+    const budget = new TaskExecutionBudget(100, 3, () => now)
+    const controller = new AbortController()
+    budget.start(controller)
+    budget.consumeIteration()
+    now = 30
+    const first = budget.snapshot()
+    const second = budget.snapshot()
+    expect(first).toEqual({
+      elapsedActiveMs: 30,
+      iterationsUsed: 1,
+      durationMs: 100,
+      maxIterations: 3,
+    })
+    expect(second).toEqual(first)
+    // Still active: the visual budget is open, and the deadline still aborts.
+    expect(budget.visualInputs.isClosed).toBe(false)
+    expect(vi.getTimerCount()).toBe(1)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(controller.signal.reason.code).toBe('TASK_DURATION_LIMIT')
+    // The snapshot restores like a paused one.
+    const restored = new TaskExecutionBudget(100, 3, () => now)
+    restored.restore(first)
+    expect(restored.remainingDurationMs).toBe(70)
+    expect(restored.remainingIterations).toBe(2)
+    budget.pause()
+  })
   it('refuses exhausted restored time before work starts', () => {
     const budget = new TaskExecutionBudget(100, 2)
     budget.restore({ elapsedActiveMs: 100, iterationsUsed: 1, durationMs: 100, maxIterations: 2 })

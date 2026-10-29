@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { readFileSync } from 'node:fs'
 import {
   type IncomingMessage,
   type Server,
@@ -459,6 +460,75 @@ describe('R1-M12 /messages keeps the retry-until-deadline loop (it carries a mes
   })
 })
 
+describe('R1-H3 model-step continuation wakes a sleeping or draining Host', () => {
+  const path = '/rpc/hosts/chatllm/sessions/chatllm/c1/model-step-checkpoints/msc-1/continue'
+  const upstreamPath = '/v1/runtime/sessions/chatllm/c1/model-step-checkpoints/msc-1/continue'
+
+  it('wakes after a dropped Host socket and relays the retry result', async () => {
+    let retriedBody = ''
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      req.setEncoding('utf8')
+      req.on('data', chunk => {
+        retriedBody += chunk
+      })
+      req.on('end', () => {
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ taskId: 'continuation-1', status: 'claimed' }))
+      })
+    })
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(202)
+
+    expect(response.body).toEqual({ taskId: 'continuation-1', status: 'claimed' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${upstreamPath}`,
+      `POST ${upstreamPath}`,
+    ])
+    expect(JSON.parse(retriedBody)).toEqual({ version: 3 })
+  })
+
+  it('wakes after host_draining and relays the retry result', async () => {
+    await startUpstream((_req, res, index) => {
+      res.writeHead(index === 0 ? 503 : 202, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(index === 0 ? { code: 'host_draining' } : { status: 'claimed' }))
+    })
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(202)
+
+    expect(response.body).toEqual({ status: 'claimed' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([upstreamPath, upstreamPath])
+  })
+
+  it('returns a sanitized failure when the Host is down and cannot be woken', async () => {
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({ kind: 'not-stateless' })
+    await startUpstream(req => dropConnection(req))
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(502)
+
+    expect(response.body).toEqual({ error: 'Upstream host unavailable' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([`POST ${upstreamPath}`])
+  })
+})
+
 describe('artifact download deadlines (NEW-rpx-1)', () => {
   const DOWNLOAD_PATH = '/rpc/hosts/chatllm/artifacts/report.bin/download'
   const UPSTREAM_DOWNLOAD_PATH = '/v1/runtime/artifacts/report.bin/download'
@@ -658,6 +728,13 @@ const HELD_ROUTES = [
     upstreamPath: '/v1/runtime/tasks/task-1/cancel',
   },
   {
+    label: 'continue model step',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
+    body: { version: 1 },
+    upstreamPath: '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
+  },
+  {
     label: 'list sessions',
     method: 'get',
     path: '/rpc/hosts/chatllm/sessions',
@@ -766,6 +843,13 @@ const DISCONNECT_ROUTES = [
     path: '/rpc/hosts/chatllm/sessions/chatllm/chat-1/name',
     body: { title: 'Renamed chat' },
     upstreamPath: '/v1/runtime/sessions/chatllm/chat-1/name',
+  },
+  {
+    label: 'continue model step',
+    method: 'POST',
+    path: '/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
+    body: { version: 1 },
+    upstreamPath: '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
   },
 ] as const
 
@@ -928,4 +1012,51 @@ describe('R3-L4 task cancel first attempt has no client-side timeout', () => {
     ])
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
+})
+
+// The Host verdict bound is intentionally tested in wall time over real HTTP.
+// Keep this tied to the production Host constant, rather than a shorter test timer.
+describe('R1-M3 continuation verdict after wake at production defaults', () => {
+  it('relays 202 just below the Host verdict bound after the first connection drops', async () => {
+    const hostSource = readFileSync(
+      new URL('../../../mcp-host/src/agent/modelStepContinuation.ts', import.meta.url),
+      'utf8'
+    )
+    const bound = hostSource.match(/MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = ([\d_]+)/)
+    expect(bound).toBeTruthy()
+    const hostVerdictTimeoutMs = Number(bound![1]!.replaceAll('_', ''))
+    config.upstreamTimeoutMs = 8_000
+    config.wakeMaxHoldMs = 48_000
+    const upstreamPath = '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue'
+    const claimed = {
+      taskId: 'continued-task',
+      checkpointId: 'msc-1',
+      status: 'claimed',
+      replayed: false,
+    }
+    let replied = false
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      setTimeout(() => {
+        replied = true
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(claimed))
+      }, hostVerdictTimeoutMs - 100)
+    })
+
+    const result = await request(makeApp())
+      .post('/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue')
+      .set('authorization', 'Bearer tok')
+      .send({ version: 1 })
+
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([upstreamPath, upstreamPath])
+    expect(result.status).toBe(202)
+    expect(result.body).toEqual(claimed)
+    expect(replied).toBe(true)
+    expect(seen[1]!.closedEarly).toBe(false)
+  }, 20_000)
 })

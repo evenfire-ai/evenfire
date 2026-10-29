@@ -5,6 +5,7 @@ import { UnifiedApprovalGateController } from '../../extensions/mcpApprovalGateC
 import type { ToolRegistry } from '../../interfaces'
 import { ConversationState, PendingApproval } from '../../types'
 import { ConversationManager } from '../conversation'
+import { type ConversationStore, InMemoryConversationStore } from '../conversationStore'
 
 /** Ordinary-consent fixtures come from the real producer, including scope. */
 function ordinaryApproval(fixture: PendingApproval): PendingApproval {
@@ -23,6 +24,10 @@ function ordinaryApproval(fixture: PendingApproval): PendingApproval {
     description: fixture.description,
     context_snapshot: fixture.context_snapshot,
   }
+}
+
+function staleWorkerFence(): Error {
+  return new Error('model-step continuation fence mismatch')
 }
 
 describe('ConversationManager — state machine', () => {
@@ -90,6 +95,348 @@ describe('ConversationManager — state machine', () => {
     // Idle — cannot complete a turn that hasn't started
     await expect(manager.completeTurn(conv, 'response')).rejects.toThrow(ConversationError)
   })
+
+  it('rolls back RAM completion when durable completeTurn rejects', async () => {
+    class FailingCompleteStore extends InMemoryConversationStore implements ConversationStore {
+      fail = false
+
+      override async persistTurnComplete(): Promise<void> {
+        if (this.fail) throw staleWorkerFence()
+      }
+    }
+
+    const store = new FailingCompleteStore()
+    const failingManager = new ConversationManager(store)
+    const conv = await failingManager.getOrCreate('user-complete-reject')
+    await failingManager.startTurn(conv, 'Continue the checked turn', 'task-complete-reject')
+    store.fail = true
+
+    await expect(
+      failingManager.completeTurn(conv, 'rejected response', {
+        completeModelStepCheckpoint: {
+          checkpointId: 'checkpoint-complete-reject',
+          owner: 'task-complete-reject',
+          generation: 1,
+        },
+      })
+    ).rejects.toThrow('model-step continuation fence mismatch')
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.activeTaskId).toBe('task-complete-reject')
+    expect(conv.turns[0]?.response).toBeUndefined()
+    expect(conv.turns[0]?.completed_at).toBeUndefined()
+
+    store.fail = false
+    await failingManager.completeTurn(conv, 'durable response')
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.turns[0]?.response).toBe('durable response')
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+  })
+
+  it('rolls RAM back when only the turn fence rejects a TaskLimit completion', async () => {
+    class FailingTaskLimitStore extends InMemoryConversationStore implements ConversationStore {
+      override async persistTurnComplete(): Promise<void> {
+        throw staleWorkerFence()
+      }
+    }
+
+    const failingManager = new ConversationManager(new FailingTaskLimitStore())
+    const conv = await failingManager.getOrCreate('user-task-limit-fence')
+    await failingManager.startTurn(conv, 'Continue to the limit', 'task-limit')
+
+    await expect(
+      failingManager.completeTurn(conv, 'stale limited response', {
+        modelStepTurnFence: {
+          fence: {
+            checkpointId: 'checkpoint-task-limit',
+            owner: 'replacement-host',
+            generation: 2,
+          },
+          activeTaskId: 'replacement-task',
+          originTurnNumber: 1,
+        },
+      })
+    ).rejects.toThrow('model-step continuation fence mismatch')
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.activeTaskId).toBe('task-limit')
+    expect(conv.turns[0]?.response).toBeUndefined()
+    expect(conv.turns[0]?.completed_at).toBeUndefined()
+  })
+
+  it('keeps a valid TaskLimit-shaped fenced completion terminal', async () => {
+    class FencedMemoryStore extends InMemoryConversationStore implements ConversationStore {
+      override async persistTurnComplete(): Promise<void> {}
+    }
+
+    const manager = new ConversationManager(new FencedMemoryStore())
+    const conv = await manager.getOrCreate('user-valid-task-limit-fence')
+    await manager.startTurn(conv, 'Continue within the limit', 'task-limit-valid')
+
+    await manager.completeTurn(conv, 'valid limited response', {
+      modelStepTurnFence: {
+        fence: {
+          checkpointId: 'checkpoint-valid-task-limit',
+          owner: 'owner-valid',
+          generation: 1,
+        },
+        activeTaskId: 'task-limit-valid',
+        originTurnNumber: 1,
+      },
+    })
+
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.activeTaskId).toBeUndefined()
+    expect(conv.turns[0]?.response).toBe('valid limited response')
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+  })
+
+  it('rolls a fenced completion back for a non-fence worker error', async () => {
+    class BusyCompleteStore extends InMemoryConversationStore implements ConversationStore {
+      fail = true
+
+      override async persistTurnComplete(): Promise<void> {
+        if (this.fail) throw new Error('sqlite busy')
+      }
+    }
+
+    const store = new BusyCompleteStore()
+    const manager = new ConversationManager(store)
+    const conv = await manager.getOrCreate('user-fenced-non-fence-complete')
+    await manager.startTurn(conv, 'origin input', 'task-origin')
+
+    await expect(
+      manager.completeTurn(conv, 'unacknowledged answer', {
+        modelStepTurnFence: {
+          fence: { checkpointId: 'cp-busy', owner: 'owner', generation: 1 },
+          activeTaskId: 'task-origin',
+          originTurnNumber: 1,
+        },
+      })
+    ).rejects.toThrow('sqlite busy')
+    // R2-M2: any rejected fenced completion restores the owned turn, so the
+    // unpersisted answer never enters RAM history.
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.activeTaskId).toBe('task-origin')
+    expect(conv.turns[0]?.response).toBeUndefined()
+    expect(conv.turns[0]?.completed_at).toBeUndefined()
+
+    store.fail = false
+    await manager.completeTurn(conv, 'durable answer')
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.turns[0]?.response).toBe('durable answer')
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+  })
+
+  it('keeps an unfenced completion terminal after persistence rejects and admits the next turn', async () => {
+    class FailingCompleteStore extends InMemoryConversationStore {
+      override async persistTurnComplete(): Promise<void> {
+        throw new Error('completion write rejected')
+      }
+    }
+
+    const failingManager = new ConversationManager(new FailingCompleteStore())
+    const conv = await failingManager.getOrCreate('user-unfenced-complete')
+    await failingManager.startTurn(conv, 'first message', 'first-task')
+
+    await expect(failingManager.completeTurn(conv, 'first answer')).rejects.toThrow(
+      'completion write rejected'
+    )
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.turns[0]?.response).toBe('first answer')
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+    await failingManager.startTurn(conv, 'next message', 'next-task')
+    expect(conv.turns[1]?.user_input).toBe('next message')
+  })
+
+  it('keeps an unfenced failure terminal after persistence rejects and admits the next turn', async () => {
+    class FailingFailStore extends InMemoryConversationStore {
+      override async persistTurnFail(): Promise<void> {
+        throw new Error('failure write rejected')
+      }
+    }
+
+    const failingManager = new ConversationManager(new FailingFailStore())
+    const conv = await failingManager.getOrCreate('user-unfenced-fail')
+    await failingManager.startTurn(conv, 'first message', 'first-task')
+
+    await expect(failingManager.failTurn(conv)).rejects.toThrow('failure write rejected')
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.activeTaskId).toBeUndefined()
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+    await failingManager.startTurn(conv, 'next message', 'next-task')
+    expect(conv.turns[1]?.user_input).toBe('next message')
+  })
+
+  it('restores a fenced failure after persistence rejects, then accepts a durable retry', async () => {
+    class FailingFailStore extends InMemoryConversationStore {
+      fail = true
+
+      override async persistTurnFail(): Promise<void> {
+        if (this.fail) throw staleWorkerFence()
+      }
+    }
+
+    const store = new FailingFailStore()
+    const failingManager = new ConversationManager(store)
+    const conv = await failingManager.getOrCreate('user-fenced-fail')
+    await failingManager.startTurn(conv, 'continued message', 'continued-task')
+    const fence = {
+      fence: { checkpointId: 'checkpoint-fail', owner: 'continued-task', generation: 1 },
+      activeTaskId: 'continued-task',
+      originTurnNumber: 1,
+    }
+
+    await expect(failingManager.failTurn(conv, fence)).rejects.toThrow(
+      'model-step continuation fence mismatch'
+    )
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.activeTaskId).toBe('continued-task')
+    expect(conv.turns[0]?.completed_at).toBeUndefined()
+    store.fail = false
+    await failingManager.failTurn(conv, fence)
+    expect(conv.state).toBe(ConversationState.Idle)
+    await failingManager.startTurn(conv, 'next message', 'next-task')
+    expect(conv.turns[1]?.user_input).toBe('next message')
+  })
+
+  it('keeps a fenced failure terminal when persistence rejects with a non-fence error', async () => {
+    class BusyFailStore extends InMemoryConversationStore implements ConversationStore {
+      override async persistTurnFail(): Promise<void> {
+        throw new Error('sqlite busy')
+      }
+    }
+
+    const manager = new ConversationManager(new BusyFailStore())
+    const conv = await manager.getOrCreate('user-fenced-non-fence-fail')
+    await manager.startTurn(conv, 'origin input', 'task-origin')
+
+    await expect(
+      manager.failTurn(conv, {
+        fence: { checkpointId: 'cp-fail-busy', owner: 'owner', generation: 1 },
+        activeTaskId: 'task-origin',
+        originTurnNumber: 1,
+      })
+    ).rejects.toThrow('sqlite busy')
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.activeTaskId).toBeUndefined()
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+  })
+
+  it('restores a fenced cancellation after a real fence mismatch', async () => {
+    class StaleCancelStore extends InMemoryConversationStore implements ConversationStore {
+      override async persistTurnCancel(): Promise<void> {
+        throw staleWorkerFence()
+      }
+    }
+
+    const manager = new ConversationManager(new StaleCancelStore())
+    const conv = await manager.getOrCreate('user-stale-cancel')
+    await manager.startTurn(conv, 'origin input', 'task-origin')
+
+    await expect(
+      manager.cancelTurn(conv, {
+        fence: { checkpointId: 'cp-cancel', owner: 'owner', generation: 1 },
+        activeTaskId: 'task-origin',
+        originTurnNumber: 1,
+      })
+    ).rejects.toThrow('model-step continuation fence mismatch')
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.activeTaskId).toBe('task-origin')
+    expect(conv.turns[0]?.response).toBeUndefined()
+    expect(conv.turns[0]?.completed_at).toBeUndefined()
+  })
+
+  it('keeps a fenced cancellation terminal for a non-fence worker error', async () => {
+    class BusyCancelStore extends InMemoryConversationStore implements ConversationStore {
+      override async persistTurnCancel(): Promise<void> {
+        throw new Error('sqlite busy')
+      }
+    }
+
+    const manager = new ConversationManager(new BusyCancelStore())
+    const conv = await manager.getOrCreate('user-fenced-non-fence-cancel')
+    await manager.startTurn(conv, 'origin input', 'task-origin')
+
+    await expect(
+      manager.cancelTurn(conv, {
+        fence: { checkpointId: 'cp-cancel-busy', owner: 'owner', generation: 1 },
+        activeTaskId: 'task-origin',
+        originTurnNumber: 1,
+      })
+    ).rejects.toThrow('sqlite busy')
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.activeTaskId).toBeUndefined()
+    expect(conv.turns[0]?.response).toBe('[Task cancelled by user before completion]')
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+  })
+
+  it.each(['complete', 'cancel'] as const)(
+    'keeps a winner with identical response text after a stale %s rejects',
+    async ending => {
+      let rejectStale!: (error: Error) => void
+      const staleWrite = new Promise<void>((_resolve, reject) => {
+        rejectStale = reject
+      })
+      // The first durable boundary is deferred; later boundaries succeed. The
+      // fixture isolates ownership of the shared RAM turn from SQLite fencing.
+      class DeferredBoundaryStore extends InMemoryConversationStore {
+        private first = true
+        private write(): Promise<void> {
+          if (!this.first) return Promise.resolve()
+          this.first = false
+          return staleWrite
+        }
+        override persistTurnComplete(): Promise<void> {
+          return this.write()
+        }
+        override persistTurnCancel(): Promise<void> {
+          return this.write()
+        }
+        async persistContinuationStart(): Promise<void> {}
+      }
+      const ownerManager = new ConversationManager(new DeferredBoundaryStore())
+      const conv = await ownerManager.getOrCreate('same-response-owner')
+      await ownerManager.startTurn(conv, 'origin input', 'task-a')
+      const guard = {
+        fence: { checkpointId: 'cp-same-response', owner: 'host-a', generation: 1 },
+        activeTaskId: 'task-a',
+        originTurnNumber: 1,
+      }
+      const stale =
+        ending === 'complete'
+          ? ownerManager.completeTurn(conv, 'same answer')
+          : ownerManager.cancelTurn(conv, guard)
+      const rejection = expect(stale).rejects.toThrow('stale boundary rejected')
+      // A refreshed durable view has not seen A's pending answer. B reopens
+      // that same turn and produces exactly the same text as A.
+      const turn = conv.turns[0]!
+      turn.response = undefined
+      turn.completed_at = undefined
+      await ownerManager.resumeTurnForContinuation(conv, 'task-b', 1, null, undefined, {
+        ...guard,
+        fence: { ...guard.fence, generation: 2 },
+        activeTaskId: 'task-b',
+      })
+      if (ending === 'complete') await ownerManager.completeTurn(conv, 'same answer')
+      else {
+        await ownerManager.cancelTurn(conv, {
+          ...guard,
+          fence: { ...guard.fence, generation: 2 },
+          activeTaskId: 'task-b',
+        })
+      }
+      const winnerResponse = turn.response
+      const winnerCompletedAt = turn.completed_at
+      expect(winnerResponse).toBe(
+        ending === 'complete' ? 'same answer' : '[Task cancelled by user before completion]'
+      )
+      expect(winnerCompletedAt).toBeDefined()
+      rejectStale(new Error('stale boundary rejected'))
+      await rejection
+      expect(turn.response).toBe(winnerResponse)
+      expect(turn.completed_at).toBe(winnerCompletedAt)
+      expect(conv.state).toBe(ConversationState.Idle)
+    }
+  )
 
   it('recordSessionUsage mirrors token totals in RAM and OR-accumulates cacheTokensReported', async () => {
     const conv = await manager.getOrCreate('user-1')

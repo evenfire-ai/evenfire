@@ -3,7 +3,11 @@ import type {
   ConversationSessionMessages,
   ConversationSessionSummary,
 } from '../core/conversation/conversationStore'
+import type { ModelStepCheckpointView } from '../core/conversation/modelStepCheckpointContract'
+import { toModelStepCheckpointView } from '../core/conversation/modelStepCheckpointView'
+import type { ModelStepCheckpointStore } from '../core/conversation/persistence/modelStepCheckpointStore'
 import { type Conversation, ConversationState } from '../core/types'
+import { MODEL_STEP_CHECKPOINT_CORRUPT } from '../db/worker/modelStepCheckpointOps'
 import { projectApprovalInputPreview } from '../progress/approvalInputPreview'
 import { getDisplayName } from '../progress/intentExtraction'
 import {
@@ -15,6 +19,25 @@ import {
   projectTurnToolSteps,
   sessionsCursorScope,
 } from './wireProjections'
+
+/**
+ * Session GET may omit a permanently invalid checkpoint (option C, #1043).
+ * Transient worker/IO failures still reject; continuation POST uses the strict store.
+ */
+export async function loadSessionModelStepCheckpoint(
+  store: Pick<ModelStepCheckpointStore, 'loadLive'>,
+  sessionKey: string,
+  now = Date.now()
+): Promise<ModelStepCheckpointView | undefined> {
+  try {
+    const snapshot = await store.loadLive(sessionKey)
+    return snapshot ? toModelStepCheckpointView(snapshot, now) : undefined
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === MODEL_STEP_CHECKPOINT_CORRUPT)
+      return undefined
+    throw error
+  }
+}
 
 /**
  * Dependencies for the session-read RPC handlers, injected so the handlers can
@@ -34,10 +57,15 @@ export interface SessionRouteHandlerDeps {
    * over the operator secret list). Non-logging (unlike `redactToolError`).
    */
   redactTitle: (rawTitle: string) => string
+  /**
+   * #1043 — the session's live model-step checkpoint as the wire view, or
+   * `undefined`. Absent when checkpoints are not wired (memory store).
+   */
+  loadModelStepCheckpoint?: (sessionKey: string) => Promise<ModelStepCheckpointView | undefined>
 }
 
 export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
-  const { getConversationManager, redactToolError, redactTitle } = deps
+  const { getConversationManager, redactToolError, redactTitle, loadModelStepCheckpoint } = deps
 
   // Common projection: state + active task + pending approval + lifetime token
   // totals, shared by the list and messages handlers (RPC token exposure
@@ -159,6 +187,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     const keyPrefix = `${userSub}:rpc:`
     const page = await convManager.getSessionMessagesByKeyAsync(key, keyPrefix, query)
     if (!page) return null
+    const modelStepCheckpoint = await loadModelStepCheckpoint?.(key)
     const turns = page.turns
     const windowBounds = projectMessageWindowBounds(
       turns,
@@ -172,6 +201,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
       agent: agentName,
       chatId,
       ...sessionStateView(page),
+      ...(modelStepCheckpoint ? { modelStepCheckpoint } : {}),
       totalTurns: page.totalTurns,
       ...windowBounds,
       turns: turns.map(t => ({

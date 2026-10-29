@@ -5,12 +5,22 @@
  * directly with an in-memory Database and stubbed statements, without the
  * worker_threads boilerplate.
  */
-import type { Database } from 'better-sqlite3'
+import type { Database, Statement } from 'better-sqlite3'
 import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
+import {
+  completeModelStepCheckpointWithMessage,
+  deleteDeadModelStepCheckpointAttachments,
+  deleteModelStepCheckpointsOfSweptSessions,
+  dispatchModelStepCheckpointOp,
+  isModelStepCheckpointOp,
+  isModelStepCheckpointWriteOp,
+  retireLiveModelStepCheckpoints,
+} from './modelStepCheckpointOps'
 import type {
   LoadAllPendingApprovalsRow,
   ModelSelectionWriteOutcome,
+  ModelStepTurnFence,
   PendingApprovalRow,
   PersistedSession,
   PersistedSessionMessagePage,
@@ -20,13 +30,102 @@ import type {
   WorkerOp,
 } from './protocol'
 
+/**
+ * Statements the dispatcher owns. They are prepared once per worker so a boot
+ * reap over a long session list and every fenced write reuse one compiled plan
+ * instead of re-compiling SQL per row.
+ */
+interface DispatcherStatements {
+  /** A live checkpoint still owns this origin turn (reap keeps its transcript intact). */
+  selectRecoverableCheckpointForTurn: Statement
+  /** The exact claim that may write the continuation's boundary. */
+  selectModelStepTurnFence: Statement
+  /** The exact claim that may reopen the continuation's origin turn. */
+  selectContinuationStartFence: Statement
+  /** The stamps a `replace_messages` rewrite must carry over. */
+  selectStampedMessages: Statement
+  /** Re-applies one carried-over checkpoint stamp. */
+  stampMessage: Statement
+  /** Abandons the checkpoint a reaped approval session suspended. */
+  abandonSuspendedCheckpointByTask: Statement
+}
+
 export interface DispatcherDeps {
   db: Database
   statements: PreparedStatements
+  dispatcherStatements: DispatcherStatements
 }
 
 export function createDispatcher(db: Database): DispatcherDeps {
-  return { db, statements: prepareStatements(db) }
+  return {
+    db,
+    statements: prepareStatements(db),
+    dispatcherStatements: prepareDispatcherStatements(db),
+  }
+}
+
+function prepareDispatcherStatements(db: Database): DispatcherStatements {
+  return {
+    selectRecoverableCheckpointForTurn: db.prepare(
+      `SELECT 1
+         FROM model_step_checkpoints
+        WHERE session_key = ?
+          AND origin_turn_number = ?
+          AND status IN ('resumable', 'claimed')
+        LIMIT 1`
+    ),
+    selectModelStepTurnFence: db.prepare(
+      `SELECT 1 AS ok
+         FROM model_step_checkpoints c
+         JOIN sessions s ON s.session_key = c.session_key
+        WHERE s.id = ?
+          AND s.active_task_id = ?
+          AND c.checkpoint_id = ?
+          AND c.claim_owner = ?
+          AND c.claim_generation = ?
+          AND c.origin_turn_number = ?
+          AND c.status IN ('claimed', 'resumable', 'abandoned')`
+    ),
+    selectContinuationStartFence: db.prepare(
+      `SELECT 1 AS ok
+         FROM model_step_checkpoints c
+         JOIN sessions s ON s.session_key = c.session_key
+        WHERE s.id = ?
+          AND c.checkpoint_id = ?
+          AND c.claim_owner = ?
+          AND c.claim_generation = ?
+          AND c.origin_turn_number = ?
+          AND c.status IN ('claimed', 'resumable', 'abandoned')`
+    ),
+    selectStampedMessages: db.prepare(
+      `SELECT role, content, timestamp, model_step_checkpoint_id
+         FROM messages
+        WHERE session_id = ? AND model_step_checkpoint_id IS NOT NULL`
+    ),
+    stampMessage: db.prepare(
+      'UPDATE messages SET model_step_checkpoint_id = @checkpoint_id WHERE session_id = @session_id AND ordinal = @ordinal'
+    ),
+    abandonSuspendedCheckpointByTask: db.prepare(
+      `UPDATE model_step_checkpoints
+          SET status = 'abandoned', version = version + 1,
+              claim_expires_at = NULL, updated_at = @now
+        WHERE session_key = @session_key AND continuation_task_id = @task_id
+          AND status IN ('claimed', 'resumable', 'blocked')`
+    ),
+  }
+}
+
+/**
+ * Identity of a message across a retention rewrite (#1043): the checkpoint
+ * stamp marks the continuation's final message, so it follows that message and
+ * never a position in the transcript.
+ */
+function messageStampIdentity(message: {
+  role: string
+  content: string | null
+  timestamp: number
+}): string {
+  return JSON.stringify([message.role, message.content, message.timestamp])
 }
 
 function updateSessionSummaryAfterInsert(
@@ -48,6 +147,49 @@ function updateSessionSummaryAfterInsert(
         ? 1
         : 0,
   })
+}
+
+function hasRecoverableModelStepCheckpointForTurn(
+  deps: DispatcherDeps,
+  sessionKey: string,
+  turnNumber: number | null
+): boolean {
+  if (turnNumber === null) return false
+  const row = deps.dispatcherStatements.selectRecoverableCheckpointForTurn.get(
+    sessionKey,
+    turnNumber
+  )
+  return row !== undefined
+}
+
+function assertModelStepTurnFence(
+  deps: DispatcherDeps,
+  sessionId: string,
+  fence: ModelStepTurnFence,
+  continuationStart = false
+): void {
+  // A continuation start may replace a stale task that still owns the durable
+  // session, so it is fenced by the claim alone; closing writes also require
+  // the session to belong to the fenced task.
+  const row = continuationStart
+    ? deps.dispatcherStatements.selectContinuationStartFence.get(
+        sessionId,
+        fence.fence.checkpointId,
+        fence.fence.owner,
+        fence.fence.generation,
+        fence.originTurnNumber
+      )
+    : deps.dispatcherStatements.selectModelStepTurnFence.get(
+        sessionId,
+        fence.activeTaskId,
+        fence.fence.checkpointId,
+        fence.fence.owner,
+        fence.fence.generation,
+        fence.originTurnNumber
+      )
+  if (row === undefined) {
+    throw new Error('model-step continuation fence mismatch')
+  }
 }
 
 /**
@@ -93,7 +235,12 @@ export function parseIsoSinceOrThrow(raw: unknown): number | null {
  * `PersistQueue.enqueueAsync` keeps ordering correct cross-message.
  */
 export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unknown> {
-  const { db, statements: s } = deps
+  const { db, statements: s, dispatcherStatements: ds } = deps
+  if (isModelStepCheckpointOp(op)) {
+    return isModelStepCheckpointWriteOp(op)
+      ? withBusyRetry(() => dispatchModelStepCheckpointOp(op, db))
+      : dispatchModelStepCheckpointOp(op, db)
+  }
   switch (op.kind) {
     case 'ping':
       return { pong: true }
@@ -139,6 +286,14 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'update_session_state':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          if (op.modelStepTurnFence) {
+            assertModelStepTurnFence(
+              deps,
+              op.sessionId,
+              op.modelStepTurnFence,
+              op.state === 'processing' && typeof op.activeTaskId === 'string'
+            )
+          }
           // active_task_id: a string sets it; null/undefined pass NULL to the
           // COALESCE (keeps current). The explicit clear below handles null.
           s.updateSessionState.run({
@@ -192,41 +347,48 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 max_ordinal: number
                 max_turn: number | null
               }
+              const preserveForContinuation = hasRecoverableModelStepCheckpointForTurn(
+                deps,
+                sess.session_key,
+                agg.max_turn
+              )
               // Synthetic assistant message on the open turn. The marker lives
               // in content_parts JSON (machine-detectable) while finish_reason
               // stays a conventional 'error' (cross-ref D.2 P3 — no overload of
               // finish_reason, no non-existent error_code column).
-              s.insertMessage.run({
-                session_id: sess.id,
-                ordinal: agg.max_ordinal + 1,
-                role: 'assistant',
-                content: '[Task interrupted by server restart]',
-                content_parts: JSON.stringify({
-                  kind: 'system_error',
-                  error_code: 'POD_RESTART_DURING_EXECUTION',
-                  synthetic: true,
-                }),
-                tool_call_id: null,
-                tool_calls: null,
-                tool_name: null,
-                timestamp: nowMs / 1000,
-                token_count: null,
-                finish_reason: 'error',
-                spillover_ref: null,
-                is_error: 1,
-                turn_number: agg.max_turn,
-                input_tokens: null,
-                output_tokens: null,
-                cache_read_tokens: null,
-                cache_write_tokens: null,
-              })
-              updateSessionSummaryAfterInsert(s, {
-                session_id: sess.id,
-                role: 'assistant',
-                tool_calls: null,
-                timestamp: nowMs / 1000,
-                turn_number: agg.max_turn,
-              })
+              if (!preserveForContinuation) {
+                s.insertMessage.run({
+                  session_id: sess.id,
+                  ordinal: agg.max_ordinal + 1,
+                  role: 'assistant',
+                  content: '[Task interrupted by server restart]',
+                  content_parts: JSON.stringify({
+                    kind: 'system_error',
+                    error_code: 'POD_RESTART_DURING_EXECUTION',
+                    synthetic: true,
+                  }),
+                  tool_call_id: null,
+                  tool_calls: null,
+                  tool_name: null,
+                  timestamp: nowMs / 1000,
+                  token_count: null,
+                  finish_reason: 'error',
+                  spillover_ref: null,
+                  is_error: 1,
+                  turn_number: agg.max_turn,
+                  input_tokens: null,
+                  output_tokens: null,
+                  cache_read_tokens: null,
+                  cache_write_tokens: null,
+                })
+                updateSessionSummaryAfterInsert(s, {
+                  session_id: sess.id,
+                  role: 'assistant',
+                  tool_calls: null,
+                  timestamp: nowMs / 1000,
+                  turn_number: agg.max_turn,
+                })
+              }
               s.updateSessionState.run({
                 id: sess.id,
                 state: 'idle',
@@ -314,6 +476,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             }>
             const out: ReapedSession[] = []
             for (const sess of sessions) {
+              if (sess.active_task_id) {
+                ds.abandonSuspendedCheckpointByTask.run({
+                  session_key: sess.session_key,
+                  task_id: sess.active_task_id,
+                  now: nowMs,
+                })
+              }
               const agg = s.selectSessionMaxOrdinalTurn.get({ session_id: sess.id }) as {
                 max_ordinal: number
                 max_turn: number | null
@@ -374,6 +543,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 reapedAt: nowMs,
               })
             }
+            deleteDeadModelStepCheckpointAttachments(db, nowMs)
             return out
           })
           return tx.immediate()
@@ -428,7 +598,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         // fire-and-forget lie this change removes.
         const tx = db.transaction((): ModelSelectionWriteOutcome => {
           const row = s.selectSessionModelSelectionRevision.get({ id: op.sessionId }) as
-            { model_selection_revision: number; model_selections: string | null } | undefined
+            | { model_selection_revision: number; model_selections: string | null }
+            | undefined
           if (!row) {
             const err: Error & { code?: string } = new Error(
               `update_session_model_selections: no session row for id=${op.sessionId}`
@@ -539,6 +710,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       // the two writes is impossible by construction.
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          if (op.modelStepTurnFence) {
+            if (op.message.turn_number !== op.modelStepTurnFence.originTurnNumber) {
+              throw new Error('model-step continuation fence mismatch')
+            }
+            assertModelStepTurnFence(deps, op.sessionId, op.modelStepTurnFence)
+          }
           s.insertMessage.run({
             session_id: op.message.session_id,
             ordinal: op.message.ordinal,
@@ -590,6 +767,21 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           if (op.title !== undefined) {
             s.setSessionTitleIfAbsent.run({ id: op.sessionId, title: op.title })
           }
+          // #1043 — a new turn retires every live model-step checkpoint, and a
+          // continuation's final message completes its fenced checkpoint; both
+          // in the SAME transaction as the boundary message.
+          const now = Date.now()
+          if (op.retireModelStepCheckpointsOf !== undefined) {
+            retireLiveModelStepCheckpoints(db, op.retireModelStepCheckpointsOf, now)
+          }
+          if (op.completeModelStepCheckpoint !== undefined) {
+            completeModelStepCheckpointWithMessage(
+              db,
+              op.completeModelStepCheckpoint,
+              { session_id: op.message.session_id, ordinal: op.message.ordinal },
+              now
+            )
+          }
         })
         tx.immediate()
         return { ok: true }
@@ -598,6 +790,22 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'replace_messages':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          // #1043 — a continuation's final message carries its checkpoint stamp
+          // (written by `completeModelStepCheckpointWithMessage`). A retention
+          // rewrite must not erase it: every replacement row that is the same
+          // message (role + content + timestamp) as a stamped row this rewrite
+          // removes gets that stamp back. A rewritten message — a summary in the
+          // stamped message's place — is a different message and stays
+          // unstamped.
+          const stampedBefore = ds.selectStampedMessages.all(op.sessionId) as Array<{
+            role: string
+            content: string | null
+            timestamp: number
+            model_step_checkpoint_id: string
+          }>
+          const stamps = new Map(
+            stampedBefore.map(row => [messageStampIdentity(row), row.model_step_checkpoint_id])
+          )
           s.deleteMessagesBySession.run(op.sessionId)
           for (const m of op.messages) {
             s.insertMessage.run({
@@ -620,6 +828,14 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               cache_read_tokens: m.cache_read_tokens ?? null,
               cache_write_tokens: m.cache_write_tokens ?? null,
             })
+            const carriedStamp = stamps.get(messageStampIdentity(m))
+            if (carriedStamp !== undefined) {
+              ds.stampMessage.run({
+                checkpoint_id: carriedStamp,
+                session_id: m.session_id,
+                ordinal: m.ordinal,
+              })
+            }
           }
           s.recomputeSessionMessageSummary.run({ id: op.sessionId })
         })
@@ -717,7 +933,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           }
         | undefined
       const pendingRow = s.selectPendingApprovalBySession.get(sessionRow.id) as
-        PendingApprovalRow | undefined
+        | PendingApprovalRow
+        | undefined
       return {
         session: sessionRow,
         messages: messageRows as PersistedSessionMessagePage['messages'],
@@ -848,6 +1065,11 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
           const expiredApprovals = s.sweepExpiredApprovals.run(op.nowEpoch)
+          // #1043 — checkpoints have no FK to sessions; delete them first.
+          deleteModelStepCheckpointsOfSweptSessions(db, {
+            kind: 'ended',
+            cutoff: op.nowEpoch - op.ttlSeconds,
+          })
           const expiredSessions = s.sweepEndedSessions.run(op.nowEpoch - op.ttlSeconds)
           return {
             approvals_removed: expiredApprovals.changes,
@@ -892,6 +1114,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       }
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          // #1043 — checkpoints have no FK to sessions; delete them first.
+          deleteModelStepCheckpointsOfSweptSessions(db, { kind: 'closed', cutoff: op.cutoffEpoch })
           const params = { cutoff: op.cutoffEpoch, limit: op.limit }
           const deletedMessages = s.sweepClosedSessionMessages.run(params).changes
           const deletedSessions =

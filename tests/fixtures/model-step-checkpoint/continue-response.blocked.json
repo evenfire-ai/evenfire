@@ -1,0 +1,7 @@
+{
+  "httpStatus": 409,
+  "body": {
+    "code": "model_step_checkpoint_blocked",
+    "blockedReason": "budget_exhausted"
+  }
+}

@@ -701,8 +701,9 @@ export type RespondWithWakeAndHoldOptions = {
    * deadline expires. Only safe when a re-issued request cannot duplicate a
    * side effect: the idempotent GET reads (sessions, transcript, context
    * breakdown, models, task result, artifacts list and download, which commits
-   * only at `res.send`), and `/messages`, whose per-request `messageId`
-   * mcp-host's admission sink dedupes. Approve/deny/model/cancel have no
+   * only at `res.send`), `/messages`, whose per-request `messageId` mcp-host's
+   * admission sink dedupes, and model-step continuation, whose checkpoint
+   * claim replays a live or completed task. Approve/deny/model/cancel have no
    * idempotency key, so they re-issue at most ONCE after the hold: each extra
    * POST risks a duplicate side effect. Defaults to false.
    */

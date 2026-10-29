@@ -15,6 +15,7 @@ import {
 import { DefaultToolOutputProcessor } from '../safety/toolOutputProcessor'
 import type { SpilloverStorage } from '../spillover'
 import { Attachment, ChatMessage, Conversation, PendingApproval, ToolDefinition } from '../types'
+import type { ModelStepCheckpointRecorder } from './modelStepCheckpointRecorder'
 
 /**
  * Configuration for the tool-use loop.
@@ -158,6 +159,24 @@ export interface LoopConfig {
     getDeferrableCatalogNames: () => Set<string>
     nativeTargets: boolean
   }
+
+  /**
+   * #1043 — durable model-step checkpoint of this turn. Absent (memory store,
+   * or a caller that does not record) = today's behaviour. When set, a 503
+   * `provider_unavailable` after a confirmed tool result returns
+   * `LoopResult.error.checkpointId`.
+   */
+  modelStepCheckpointRecorder?: ModelStepCheckpointRecorder
+
+  /**
+   * #1043 — how many times one failed model step is retried automatically,
+   * when that failure would leave a resumable checkpoint
+   * (`modelStepCheckpointRecorder.canResume`). Absent means no automatic retry.
+   * Set by `TaskExecutor.buildLoopConfig()` from
+   * `config.modelStepAutoRetries`; the retry stays inside the current loop
+   * iteration and does not consume an iteration of the task budget.
+   */
+  modelStepAutoRetries?: number
 }
 
 /**

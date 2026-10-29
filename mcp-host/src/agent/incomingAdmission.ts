@@ -511,7 +511,10 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           },
           'Host runtime event'
         )
-        return { success: false, error: fileReferenceFailure(resolved.failure) }
+        return {
+          success: false,
+          error: fileReferenceCheckError(resolved.failure, deps.hostProvider() ?? 'unknown'),
+        }
       }
       normalizedMessage.fileReferenceResolutions = resolved.resolutions
       acceptedFileReferenceIds = resolved.resolutions.map(r => r.reference.id)
@@ -529,28 +532,35 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       )
       return admitAndRun()
     })()
+  }
+}
 
-    function fileReferenceFailure(failure: FileReferenceCheckFailure): TaskError {
-      const provider = deps.hostProvider() ?? 'unknown'
-      if (failure === 'invalid')
-        return {
-          code: FileReferenceErrorCode.Invalid,
-          message: 'A referenced file does not match the file it names. Pick the file again.',
-          retryable: false,
-          provider,
-        }
-      const messages: Record<Exclude<FileReferenceCheckFailure, 'invalid'>, string> = {
-        transient: 'The referenced files could not be checked. Send the message again.',
-        contract: 'The file service returned an unexpected answer for a referenced file.',
-        credentials:
-          'The Host could not authenticate to the file service to check the referenced files.',
-      }
-      return {
-        code: FileReferenceErrorCode.CheckFailed,
-        message: messages[failure],
-        retryable: failure === 'transient',
-        provider,
-      }
+/**
+ * The user-facing error for a file-reference check that could not complete.
+ * Shared by message admission and the #1043 model-step continuation, so a
+ * file-service failure reads the same on both paths.
+ */
+export function fileReferenceCheckError(
+  failure: FileReferenceCheckFailure,
+  provider: string
+): TaskError {
+  if (failure === 'invalid')
+    return {
+      code: FileReferenceErrorCode.Invalid,
+      message: 'A referenced file does not match the file it names. Pick the file again.',
+      retryable: false,
+      provider,
     }
+  const messages: Record<Exclude<FileReferenceCheckFailure, 'invalid'>, string> = {
+    transient: 'The referenced files could not be checked. Send the message again.',
+    contract: 'The file service returned an unexpected answer for a referenced file.',
+    credentials:
+      'The Host could not authenticate to the file service to check the referenced files.',
+  }
+  return {
+    code: FileReferenceErrorCode.CheckFailed,
+    message: messages[failure],
+    retryable: failure === 'transient',
+    provider,
   }
 }

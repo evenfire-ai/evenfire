@@ -5703,7 +5703,8 @@ describe('authHeaders template on remote installs', () => {
 
     // 3. The actual secret values landed in the K8s Secret only.
     const secretCall = secretSpy.mock.calls[0]?.[0] as
-      { name?: string; stringData?: Record<string, string> } | undefined
+      | { name?: string; stringData?: Record<string, string> }
+      | undefined
     expect(secretCall?.name).toBe('sentry-separation-credentials')
     expect(secretCall?.stringData).toEqual({
       SENTRY_AUTH_TOKEN: 'super-secret-token-value',
