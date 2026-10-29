@@ -54,7 +54,7 @@ export type MoveCommitOutcome =
   | { status: 'source-unavailable'; message: string }
   | { status: 'target-unavailable'; message: string }
   | { status: 'rate-limited'; message: string; retryAfterSeconds?: number }
-  | { status: 'unconfirmed'; message: string }
+  | { status: 'unconfirmed'; message: string; retryPermissionCheck?: true }
   | { status: 'session-lost' }
   /** The gesture that asked for this move is gone; nothing was dispatched. */
   | { status: 'gesture-lost' }
@@ -278,6 +278,7 @@ export async function commitGfsMove(
       return {
         status: 'unconfirmed',
         message: 'EvenDrive could not confirm permission for this move. Refresh and try again.',
+        retryPermissionCheck: true,
       }
     }
     if (status === 429 || (!status && /too many/i.test(message))) {

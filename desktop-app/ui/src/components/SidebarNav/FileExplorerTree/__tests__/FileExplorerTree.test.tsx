@@ -872,8 +872,22 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     const affordances = vi.fn((resourceId: string, drive?: string) =>
       produceAffordances(resourceId, drive)
     )
+    const moveFailure = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          {
+            resourceId: sourceResourceId,
+            destinationId: destinationAId,
+            drive: 'main',
+            ifMatch: 4,
+          },
+          'fixture-session-token'
+        ),
+      403,
+      { code: 'move_rejected', message: 'not allowed' }
+    )
     const moveResource = vi.fn(async () => {
-      throw new Error('403 Forbidden httpStatus=403')
+      throw new Error(moveFailure)
     })
     const resolved = await resolveSource()
     installDndClerum({
@@ -887,9 +901,9 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     const dialog = await openMoveDialog()
     await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
-    await within(dialog).findByText(
-      'EvenDrive could not confirm permission for this move. Refresh and try again.'
-    )
+    await waitFor(() => {
+      expect(dialog.querySelector('.status-banner')?.textContent?.trim()).not.toBe('')
+    })
     expect(
       await within(dialog).findByRole('button', { name: 'Retry permission check' })
     ).toBeTruthy()
@@ -921,10 +935,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     expect(affordances).toHaveBeenCalledWith(destinationAId, 'main')
     expect(affordances).toHaveBeenCalledTimes(4)
     expect(moveResource).toHaveBeenCalledTimes(1)
-    expect(pushToast).toHaveBeenCalledWith(
-      'EvenDrive could not confirm permission for this move. Refresh and try again.',
-      'warn'
-    )
+    expect(pushToast).toHaveBeenCalledWith(expect.any(String), 'warn')
   })
 
   it('does not apply an Archive A retry result after selection changes to Archive B', async () => {

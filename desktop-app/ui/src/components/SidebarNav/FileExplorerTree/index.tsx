@@ -1222,8 +1222,7 @@ export function FileExplorerTree({
               if (
                 moveDialogTargetRef.current === target &&
                 outcome.status === 'unconfirmed' &&
-                outcome.message ===
-                  'EvenDrive could not confirm permission for this move. Refresh and try again.'
+                outcome.retryPermissionCheck === true
               ) {
                 setMovePermissionStatus('failed')
               }

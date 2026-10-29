@@ -9,6 +9,7 @@ import { GfsUriError } from '../../../../src/gfs/uriHandler'
 import { ApiError } from '../../../../src/httpClient'
 import {
   gfsRouteFailureMessage,
+  resolveDeniedMessage,
   resolveResource,
   resolvedFile,
 } from '../__fixtures__/gfsProducerFixtures'
@@ -82,6 +83,33 @@ async function run(text: string, approveRename = false, landed = false, isCurren
 }
 
 describe('real move producer verdicts (R1-M3)', () => {
+  it('marks only a dispatched PATCH 403 for permission-only retry', async () => {
+    const patchFailure = await wireFailure(403)
+    const patchResult = await run(patchFailure.text)
+    expect(patchResult.outcome.status).toBe('unconfirmed')
+    expect('retryPermissionCheck' in patchResult.outcome).toBe(true)
+    if ('retryPermissionCheck' in patchResult.outcome) {
+      expect(patchResult.outcome.retryPermissionCheck).toBe(true)
+    }
+
+    const sourceResolveFailure = await resolveDeniedMessage(plan.source.gfsUri)
+    const moveResource = vi.fn(async () => ({ resourceId: sourceId, version: 8 }))
+    const preDispatchResult = await commitGfsMove(
+      {
+        resolveSource: vi.fn(async () => {
+          throw new Error(sourceResolveFailure)
+        }),
+        moveResource,
+        isSessionAuthorityFailure: error =>
+          isGfsSessionAuthorityFailure(String(error), 'operation'),
+      },
+      plan
+    )
+    expect(preDispatchResult.status).toBe('unconfirmed')
+    expect('retryPermissionCheck' in preDispatchResult).toBe(false)
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
   it.each([
     [400, 'destination-rejected'],
     [401, 'session-lost'],
