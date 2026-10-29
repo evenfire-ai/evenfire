@@ -14,7 +14,9 @@ import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec
 import { K8sGateway } from '../../k8s.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { uninstallMcpServer } from '../../oauth/mcpServerUninstall.js'
+import { deleteSharedGrantsForContextExcept } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
+import { contextAllowlist } from '../../services/access/mcpInvocable.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
@@ -510,6 +512,50 @@ function hostValidationDeps(db: DbClient) {
   return createHostValidationDeps(db)
 }
 
+type ContextGrantPurgeSource = 'context_create' | 'context_update' | 'context_delete'
+
+/**
+ * After a Context write the apiserver accepted, remove the shared OAuth grants
+ * of that Context whose server is not in `keep`. The broker already refuses
+ * such a grant; removing it is what stops it serving again, without a new
+ * consent, once the server is re-enabled or the Context is recreated under the
+ * same name.
+ *
+ * Never throws: the write already happened, so a failed purge must not change
+ * the response. The periodic shared-grant sweep removes what is left.
+ *
+ * The rows are keyed by the McpServers' namespace, not the Contexts' one.
+ */
+async function purgeContextSharedGrants(
+  db: DbClient,
+  reqLog: Pick<typeof log, 'info' | 'warn'>,
+  context: string,
+  keep: readonly string[],
+  source: ContextGrantPurgeSource
+): Promise<void> {
+  try {
+    const purged = await deleteSharedGrantsForContextExcept(db, {
+      namespace: config.mcpServersNamespace,
+      contextName: context,
+      keep,
+    })
+    for (const row of purged) {
+      reqLog.info(
+        {
+          event: 'oauth_shared_grant_purged',
+          mcpServerName: row.mcpServerName,
+          contextName: row.contextName,
+          bootstrappedBy: row.bootstrappedBy,
+          source,
+        },
+        'purged a shared OAuth grant the Context no longer enables'
+      )
+    }
+  } catch (err) {
+    reqLog.warn({ err, context }, 'shared_grant_purge_failed')
+  }
+}
+
 export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   const router = Router()
   // Uses the module-level `log` (= exported `adminResourcesLogger`). A local
@@ -518,7 +564,7 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   // Reliable local revocation of a remote server's DCR client on uninstall; the
   // AS-side RFC 7592 delete is courtesy (real pinned transport in production).
   const oauthEncryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
-  const dcrDb: DbClient = { query: (text, values) => pool.query(text, values) }
+  const oauthDb: DbClient = { query: (text, values) => pool.query(text, values) }
 
   // Middleware: enforce namespace per resource type and audit any injection attempt.
   // Uses enforceNamespace() consistently with all other admin routers.
@@ -575,7 +621,12 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // F0.3: identifier/display field validation for hosts + contexts (create =
       // no ratchet; every present field is validated).
       if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
-        const fieldIssues = collectResourceSpecFieldIssues(plural, body.spec, null)
+        const fieldIssues = collectResourceSpecFieldIssues(
+          plural,
+          body.spec,
+          null,
+          body.metadata.name
+        )
         if (fieldIssues.length > 0) {
           res.status(422).json({ errors: fieldIssues })
           return
@@ -766,6 +817,17 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       }
 
       const created = await gateway.createResource(plural, body, ns)
+      // Before any guard that answers an error: the Context now exists, so every
+      // grant row under its name is from an earlier Context of the same name.
+      if (plural === 'contexts') {
+        await purgeContextSharedGrants(
+          oauthDb,
+          req.log ?? log,
+          body.metadata.name,
+          [],
+          'context_create'
+        )
+      }
       if (plural === 'communicationchannels' && body.spec) {
         const missingField = missingPersistedProviderSetting(body.spec, created)
         if (missingField) {
@@ -864,7 +926,12 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           // which extractK8sStatusCode does not read, so check both.
           if (!(err instanceof K8sNotFoundError) && extractK8sStatusCode(err) !== 404) throw err
         }
-        const fieldIssues = collectResourceSpecFieldIssues(plural, body.spec, currentSpec)
+        const fieldIssues = collectResourceSpecFieldIssues(
+          plural,
+          body.spec,
+          currentSpec,
+          req.params.name
+        )
         if (fieldIssues.length > 0) {
           res.status(422).json({ errors: fieldIssues })
           return
@@ -1017,6 +1084,17 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
               preReadCurrent: ratchetCurrent,
             })
           : await gateway.updateResource(plural, req.params.name, updateBody, ns)
+        // Before the displayName guard, whose 409 is answered after the spec has
+        // persisted. The allowlist kept is the persisted one, not the request's.
+        if (plural === 'contexts') {
+          await purgeContextSharedGrants(
+            oauthDb,
+            req.log ?? log,
+            req.params.name,
+            [...contextAllowlist(updated as { spec?: { mcpServers?: unknown } })],
+            'context_update'
+          )
+        }
         // Host CR persisted: NOW emit any Pieza D tolerations (never before the
         // write lands, so a K8s conflict/error leaves no audit record).
         for (const event of hostTolerations) emitHostSpecIncoherenceTolerated(event)
@@ -1078,7 +1156,7 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         const outcome = await uninstallMcpServer(
           {
             gateway,
-            db: dcrDb,
+            db: oauthDb,
             encryptionKey: oauthEncryptionKey,
             dcrDeps: { logger: log },
             contextsNamespace: resourceNamespace('contexts'),
@@ -1142,6 +1220,9 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           : null
 
       const deleted = await gateway.deleteResource(plural, name, ns)
+      if (plural === 'contexts') {
+        await purgeContextSharedGrants(oauthDb, req.log ?? log, name, [], 'context_delete')
+      }
 
       if (plural === 'communicationchannels' && ccSecretRefName && ccSecretCleanup) {
         if (ccSecretCleanup.status !== 'ready') {

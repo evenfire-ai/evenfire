@@ -191,8 +191,10 @@ async function loadVisibleAgentHosts(
  * host-context-controller compare it: an entry that only matches after trimming
  * names no server.
  */
-function contextAllowlist(ctx: ContextCR): Set<string> {
-  const raw = ctx.spec?.mcpServers
+export function contextAllowlist(
+  ctx: { spec?: { mcpServers?: unknown } } | null | undefined
+): Set<string> {
+  const raw = ctx?.spec?.mcpServers
   const set = new Set<string>()
   if (!Array.isArray(raw)) return set
   for (const name of raw) {
@@ -212,9 +214,21 @@ async function loadAllowedNamesByContext(
   contextsNamespace: string,
   scopedContextNames?: ReadonlySet<string>
 ): Promise<Map<string, Set<string>>> {
-  const contexts = asArray<ContextCR>(await gateway.listResource('contexts', contextsNamespace))
+  const contexts = await gateway.listResource('contexts', contextsNamespace)
+  return allowlistsOfLiveContexts(contexts, scopedContextNames)
+}
+
+/**
+ * The allowlist of every live Context in a Context list, keyed by
+ * `metadata.name`. Contexts being deleted are left out, as the broker leaves
+ * them out.
+ */
+export function allowlistsOfLiveContexts(
+  contexts: unknown,
+  scopedContextNames?: ReadonlySet<string>
+): Map<string, Set<string>> {
   const byContext = new Map<string, Set<string>>()
-  for (const ctx of contexts) {
+  for (const ctx of asArray<ContextCR>(contexts)) {
     const name = ctx.metadata?.name
     if (typeof name !== 'string' || name.length === 0) continue
     if (!isLive(ctx.metadata)) continue

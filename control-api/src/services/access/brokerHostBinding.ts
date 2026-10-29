@@ -124,9 +124,11 @@ export async function resolveBrokerHostBinding(
 }
 
 /**
- * The admin API lets `spec.contextId` differ from the Context's name. The
- * broker keys nothing by contextId, so a mismatch is only worth a warning:
- * denying on it would silently cut OAuth for every Host of that Context.
+ * The admin API refuses a `spec.contextId` that differs from the Context's
+ * name, but writers outside it (kubectl) and Contexts written before that rule
+ * can still carry one. The broker keys nothing by contextId, so a mismatch is
+ * only worth a warning: denying on it would silently cut OAuth for every Host
+ * of that Context.
  */
 export function hasContextIdMismatch(ctx: ContextCR): boolean {
   const contextId = ctx.spec?.contextId
