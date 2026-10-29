@@ -10,8 +10,10 @@ if (!sourceTestStat.isFile() || sourceTestStat.isSymbolicLink()) {
   throw new Error('The password rollback test overlay requires a regular source file')
 }
 
-let source = readFileSync(testPath, 'utf8')
-const sourceSha256 = createHash('sha256').update(source).digest('hex')
+const originalSource = readFileSync(testPath, 'utf8')
+const sourceLineEnding = originalSource.includes('\r\n') ? '\r\n' : '\n'
+let source = originalSource.replaceAll('\r\n', '\n')
+const sourceSha256 = createHash('sha256').update(originalSource).digest('hex')
 const markers = [
   'beforeEach-start',
   'module-reset-complete',
@@ -189,12 +191,13 @@ replaceFirst(
     "    pr977Mark('test-1-complete')\n  })\n\n  it('never persists"
 )
 
-writeFileSync(testPath, source)
+const overlaySource = sourceLineEnding === '\r\n' ? source.replaceAll('\n', '\r\n') : source
+writeFileSync(testPath, overlaySource)
 process.stdout.write(
   `${JSON.stringify({
     mode: 'diagnostic-markers-only',
     sourceSha256,
-    overlayTestSha256: createHash('sha256').update(source).digest('hex'),
+    overlayTestSha256: createHash('sha256').update(overlaySource).digest('hex'),
     markerCount: markers.length,
   })}\n`
 )
