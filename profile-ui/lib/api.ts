@@ -54,14 +54,16 @@ function hasUnconfirmedLogout(): boolean {
   }
 }
 
-function markLogoutUnconfirmed(): void {
-  if (typeof window === 'undefined') return
+function markLogoutUnconfirmed(): boolean {
+  if (typeof window === 'undefined') return false
   logoutUnconfirmedInMemory = true
   try {
     window.localStorage.setItem(PROFILE_LOGOUT_UNCONFIRMED_KEY, 'true')
   } catch {
-    // Auth state still signs out in memory when browser storage is unavailable.
+    // Only this page is fenced; the caller must not report a durable sign-out.
+    return false
   }
+  return true
 }
 
 /**
@@ -285,8 +287,11 @@ export async function loginWithPassword(
   return (await res.json()) as PasswordLoginResponse
 }
 
-export async function logoutProfileUI(): Promise<{ revocationConfirmed: boolean }> {
-  markLogoutUnconfirmed()
+export async function logoutProfileUI(): Promise<{
+  revocationConfirmed: boolean
+  fencePersisted: boolean
+}> {
+  const fencePersisted = markLogoutUnconfirmed()
   let revocationConfirmed = false
   try {
     const response = await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/logout`, {
@@ -301,7 +306,7 @@ export async function logoutProfileUI(): Promise<{ revocationConfirmed: boolean 
     clearToken()
   }
   if (revocationConfirmed) clearUnconfirmedLogout()
-  return { revocationConfirmed }
+  return { revocationConfirmed, fencePersisted }
 }
 
 export async function requestPasswordReset(email: string): Promise<{ requested: true }> {
