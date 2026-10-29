@@ -510,7 +510,8 @@ for (const surface of ['sidebar', 'files'] as const) {
         'target',
         expect.any(Number),
         undefined,
-        'other-parent'
+        'other-parent',
+        h.ctrl.sessionScope
       )
     })
 
@@ -555,7 +556,8 @@ for (const surface of ['sidebar', 'files'] as const) {
       await waitFor(() => expect(h.ctrl.convergeCommittedMove).toHaveBeenCalled())
       expect(h.ctrl.convergeCommittedMove).toHaveBeenCalledWith(
         { resourceId: 'source', destinationId: 'target', oldParentId: 'grand' },
-        { version: expect.any(Number) }
+        { version: expect.any(Number) },
+        h.ctrl.sessionScope
       )
       expect(h.toast).toHaveBeenCalledWith('Moved Source to Target', 'success')
     })
