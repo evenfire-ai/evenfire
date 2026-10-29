@@ -1202,4 +1202,167 @@ describe('FilesPage Move permission generation fencing', () => {
     expect(affordances).toHaveBeenCalledWith('source-parent', 'main')
     expect(affordances).toHaveBeenCalledWith('destination-a', 'main')
   })
+
+  it.each([
+    { kind: 'file' as const, sourceId: 'file-src', sourceName: 'notes.txt' },
+    { kind: 'directory' as const, sourceId: 'folder-src', sourceName: 'Projects' },
+  ])(
+    'suppresses a dispatched $kind drag outcome after FilesPage unmount and converges its captured cache',
+    async ({ kind, sourceId, sourceName }) => {
+      const destinationId = 'destination-1'
+      const destinationName = 'Archive'
+      const sourceVersion = 3
+      const rows = await listAccessiblePage([
+        accessibleResource(destinationId, destinationName, 'directory', {
+          path: '/Archive',
+          permissions: ['read', 'write'],
+        }),
+      ])
+      const children = await listChildrenPage([
+        childView(sourceId, sourceName, kind, {
+          parentResourceId: 'source-parent',
+          path: `/Team/${sourceName}`,
+          version: sourceVersion,
+        }),
+        childView(destinationId, destinationName, 'directory', {
+          parentResourceId: 'source-parent',
+          path: '/Team/Archive',
+          version: 4,
+        }),
+      ])
+      const sourceParent = await resolveResource(
+        resolvedDirectory('source-parent', 'Team', { gfsUri: 'gfs://main/source-parent' })
+      )
+      const resolvedSource = await resolveResource(
+        kind === 'file'
+          ? resolvedFile(sourceId, sourceName, {
+              parentResourceId: 'source-parent',
+              path: `/Team/${sourceName}`,
+              version: sourceVersion,
+            })
+          : resolvedDirectory(sourceId, sourceName, {
+              parentResourceId: 'source-parent',
+              path: `/Team/${sourceName}`,
+              version: sourceVersion,
+            })
+      )
+      const resolvedDestination = await resolveResource(
+        resolvedDirectory(destinationId, destinationName, {
+          parentResourceId: 'source-parent',
+          path: '/Team/Archive',
+          version: 4,
+        })
+      )
+      const moveReceipt = await moveResourceReceipt(sourceId, destinationId, sourceVersion + 1)
+      let finishMove!: (receipt: typeof moveReceipt) => void
+      const moveGate = new Promise<typeof moveReceipt>(resolve => {
+        finishMove = resolve
+      })
+      const produceAffordances = appServiceAffordanceProducer(async resourceId =>
+        heldPermissionResponse(
+          resourceId === 'source-parent' || resourceId === destinationId
+            ? ['read', 'write', 'delete']
+            : ['read', 'write']
+        )
+      )
+      const affordances = vi.fn((resourceId: string, drive?: string) =>
+        produceAffordances(resourceId, drive)
+      )
+      const moveResource = vi.fn(() => moveGate)
+      const pushToast = vi.fn()
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => rows),
+            listChildren: vi.fn(async (resourceId: string) =>
+              resourceId === 'source-parent' ? children : listChildrenPage([])
+            ),
+            affordances,
+            resolve: vi.fn(async (uri: string) =>
+              uri.endsWith('/source-parent')
+                ? sourceParent
+                : uri.endsWith(`/${sourceId}`)
+                  ? resolvedSource
+                  : resolvedDestination
+            ),
+            moveResource,
+          },
+        },
+      })
+
+      const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+      const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
+      const scope = ':user-a:team-a'
+      const sourceChildrenKey = desktopQueryKeys.gfsChildren(scope, 'source-parent', 'main')
+      const destinationChildrenKey = desktopQueryKeys.gfsChildren(scope, destinationId, 'main')
+      const accessibleKey = desktopQueryKeys.gfsAccessible(scope, 'main')
+      queryClient.setQueryData(sourceChildrenKey, { pages: [children], pageParams: [undefined] })
+      queryClient.setQueryData(destinationChildrenKey, {
+        pages: [await listChildrenPage([])],
+        pageParams: [undefined],
+      })
+      queryClient.setQueryData(accessibleKey, { pages: [rows], pageParams: [undefined] })
+
+      const view = render(
+        <AuthContext.Provider value={authFor('team-a')}>
+          <QueryClientProvider client={queryClient}>
+            <FilesPage
+              pendingGfsUri="gfs://main/source-parent"
+              onPendingGfsUriHandled={vi.fn()}
+              pushToast={pushToast}
+            />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+      try {
+        const sourceRow = await screen.findByRole('button', { name: `Open ${sourceName}` })
+        const destinationRow = screen.getByRole('button', { name: `Open ${destinationName}` })
+        const dataTransfer = {
+          types: ['application/x-evenfire-gfs-resource'],
+          files: [],
+          effectAllowed: 'none',
+          dropEffect: 'none',
+          setData: vi.fn(),
+        }
+        fireEvent.dragStart(sourceRow, { dataTransfer })
+        fireEvent.dragEnter(destinationRow, { dataTransfer })
+        await waitFor(() => expect(affordances).toHaveBeenCalledWith(destinationId, 'main'))
+        fireEvent.dragOver(destinationRow, { dataTransfer })
+        fireEvent.drop(destinationRow, { dataTransfer })
+
+        if (kind === 'directory') {
+          const dialog = await screen.findByRole('dialog', {
+            name: `Move folder ${sourceName} to ${destinationName}`,
+          })
+          await act(async () => {
+            fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+          })
+        }
+
+        await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
+        expect(moveResource).toHaveBeenCalledWith(
+          sourceId,
+          destinationId,
+          'main',
+          sourceVersion,
+          undefined
+        )
+        expect(pushToast).not.toHaveBeenCalled()
+
+        view.unmount()
+        await act(async () => finishMove(moveReceipt))
+
+        expect(pushToast).not.toHaveBeenCalled()
+        const invalidatedKeys = invalidateQueries.mock.calls.map(([filters]) => filters?.queryKey)
+        expect(invalidatedKeys).toContainEqual(sourceChildrenKey)
+        expect(invalidatedKeys).toContainEqual(destinationChildrenKey)
+        expect(invalidatedKeys).toContainEqual(accessibleKey)
+        expect(moveResource).toHaveBeenCalledTimes(1)
+      } finally {
+        await act(async () => finishMove(moveReceipt))
+        queryClient.clear()
+      }
+    }
+  )
 })

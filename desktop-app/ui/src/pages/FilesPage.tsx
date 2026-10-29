@@ -2095,7 +2095,13 @@ export function FilesPage({
             ctrl.handleAuthorityFailure(message, 'operation', source.scope),
           convergeCommittedMove: (input, receipt) =>
             ctrl.convergeCommittedMove(input, receipt, source.scope),
-          ...(reportOutcomes && pushToast ? { pushToast } : {}),
+          ...(reportOutcomes && pushToast
+            ? {
+                pushToast: (message, tone) => {
+                  if (pageActiveRef.current) pushToast(message, tone)
+                },
+              }
+            : {}),
         },
         {
           source,
