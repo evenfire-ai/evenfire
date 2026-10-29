@@ -137,6 +137,18 @@ describe('resolveServerOAuthSubject — fail-closed branches (U5)', () => {
     expect(subject?.decl.id).toBe(resolved?.oauthClientId)
     expect(subject?.grantScope).toBe(resolved?.grantScope)
   })
+
+  // The consent callback keys the grant it writes from the subject's coordinate;
+  // it must be the very value the broker and the presence rails derive.
+  it('carries the resolveServerOAuth coordinate of the same CR, legacy provider included', () => {
+    const input = {
+      metadata: { uid: 'uid-1' },
+      spec: { oauth: { ...FULL_OAUTH, grantScope: 'context' } },
+    } as McpServerOAuthSpecInput
+    const subject = resolveServerOAuthSubject(input, 'consent')
+    expect(subject?.coordinate).toEqual(resolveServerOAuth(input))
+    expect(subject?.coordinate).toMatchObject({ legacyProvider: 'google', crUid: 'uid-1' })
+  })
 })
 
 describe('buildMcpServerGrantKey — context flavor keys by the supplied Context', () => {

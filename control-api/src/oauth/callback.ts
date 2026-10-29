@@ -8,6 +8,7 @@ import { getDynamicClient } from './dynamicClientStore.js'
 import {
   type RemoteOAuthSpecIncoherence,
   RemoteOAuthSpecIncoherentError,
+  type ResolvedServerOAuth,
   buildMcpServerGrantKey,
 } from './mcpServerOAuthSpec.js'
 import { buildPerServerRedirectUri, resolvePerServerRegistration } from './perServerRegistration.js'
@@ -212,6 +213,8 @@ export interface McpServerOAuthSubject {
    * the CR carried no uid.
    */
   crUid?: string
+  /** The grant coordinate of the same CR (`resolveServerOAuth`); keys the grant written. */
+  coordinate: ResolvedServerOAuth
 }
 
 export interface McpServerOAuthReader {
@@ -677,14 +680,11 @@ async function handleMcpOAuthCallback(
     if (!allowed) return { kind: 'context_membership_denied' }
     // The single key derivation shared with the broker, the presence rails and
     // the disconnect, so the row written here is the one they look up.
-    const key = buildMcpServerGrantKey(
-      { oauthClientId: subject.decl.id, grantScope: 'context', crUid: subject.crUid },
-      {
-        mcpServerName: claims.mcpServerName,
-        mcpServersNamespace: subject.namespace,
-        contextId: contextName,
-      }
-    )
+    const key = buildMcpServerGrantKey(subject.coordinate, {
+      mcpServerName: claims.mcpServerName,
+      mcpServersNamespace: subject.namespace,
+      contextId: contextName,
+    })
     if (!key || key.grantKind !== 'shared') return { kind: 'context_membership_denied' }
     sharedKey = key
   } else {

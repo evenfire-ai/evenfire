@@ -231,6 +231,12 @@ export interface ResolvedServerOAuthSubject {
   grantScope: GrantScope
   /** metadata.uid of the CR this subject was read from; undefined if absent. */
   crUid?: string
+  /**
+   * `resolveServerOAuth` of the same CR: the grant coordinate the broker and the
+   * presence rails key by. The callback derives its grant key from it, so the
+   * row it writes can never differ in any key field from the one they read.
+   */
+  coordinate: ResolvedServerOAuth
 }
 
 export type RemoteOAuthSpecIncoherence =
@@ -559,8 +565,9 @@ export function resolveServerOAuthSubject(
 ): ResolvedServerOAuthSubject | null {
   const oauth = server.spec?.oauth
   if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
-  const grantScope: GrantScope = oauth.grantScope === 'context' ? 'context' : 'user'
-  const crUid = readCrUid(server)
+  const coordinate = resolveServerOAuth(server)
+  if (!coordinate) return null
+  const { grantScope, crUid } = coordinate
   const lane = readOAuthLane(oauth)
 
   // ─── Remote lane (`source:'remote'`) ─────────────────────────────────────
@@ -586,7 +593,7 @@ export function resolveServerOAuthSubject(
       decl.clientIdRef = secretSource.clientIdRef
       decl.clientSecretRef = secretSource.clientSecretRef
     }
-    return { decl, grantScope, crUid }
+    return { decl, grantScope, crUid, coordinate }
   }
 
   // ─── Generic self-hosted lane (`source:'generic'`, DEC-28) ────────────────
@@ -610,7 +617,7 @@ export function resolveServerOAuthSubject(
       decl.clientIdRef = secretSource.clientIdRef
       decl.clientSecretRef = secretSource.clientSecretRef
     }
-    return { decl, grantScope, crUid }
+    return { decl, grantScope, crUid, coordinate }
   }
 
   // ─── Baked lane (byte-identical to before) ───────────────────────────────
@@ -629,5 +636,6 @@ export function resolveServerOAuthSubject(
     },
     grantScope,
     crUid,
+    coordinate,
   }
 }
