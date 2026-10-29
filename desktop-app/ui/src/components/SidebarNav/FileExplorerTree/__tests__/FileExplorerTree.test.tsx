@@ -848,6 +848,51 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     )
   }
 
+  it('runs captured Move 401 authority handling once', async () => {
+    const moveFailure = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          {
+            resourceId: sourceResourceId,
+            destinationId: destinationAId,
+            drive: 'main',
+            ifMatch: 4,
+          },
+          'fixture-session-token'
+        ),
+      401,
+      { code: 'unauthorized', message: 'session expired' }
+    )
+    const moveResource = vi.fn(async () => {
+      throw new Error(moveFailure)
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances: appServiceAffordanceProducer(async () =>
+        heldPermissionResponse(['read', 'write', 'delete'])
+      ),
+      resolve: vi.fn(async () => resolveSource()),
+      moveResource,
+    })
+    const { queryClient } = renderTreeWithSession()
+    const removeQueries = vi.spyOn(queryClient, 'removeQueries')
+
+    try {
+      const dialog = await openMoveDialog()
+      await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+
+      expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+      const rootPurges = removeQueries.mock.calls.filter(
+        ([filters]) => filters.queryKey?.[0] === 'desktop-app' && filters.queryKey?.[1] === 'gfs'
+      )
+      expect(rootPurges).toHaveLength(1)
+      expect(moveResource).toHaveBeenCalledTimes(1)
+    } finally {
+      queryClient.clear()
+    }
+  })
+
   it('freshly checks the source parent and destination without dispatching another Move', async () => {
     let sourcePermissions = ['read']
     let sourceParentReads = 0

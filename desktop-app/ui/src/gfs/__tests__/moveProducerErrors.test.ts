@@ -110,6 +110,37 @@ describe('real move producer verdicts (R1-M3)', () => {
     expect(moveResource).not.toHaveBeenCalled()
   })
 
+  it('keeps pre-dispatch source 403 details out of Move feedback', async () => {
+    const failure = await resolveDeniedMessage(
+      plan.source.gfsUri,
+      { code: 'forbidden', message: 'private upstream diagnostic' },
+      403
+    )
+    const moveResource = vi.fn(async () => ({ resourceId: sourceId, version: 8 }))
+    const outcome = await commitGfsMove(
+      {
+        resolveSource: vi.fn(async () => {
+          throw new Error(failure)
+        }),
+        moveResource,
+        isSessionAuthorityFailure: error =>
+          isGfsSessionAuthorityFailure(String(error), 'operation'),
+      },
+      plan
+    )
+
+    expect(outcome.status).toBe('unconfirmed')
+    if (outcome.status === 'unconfirmed') {
+      expect(outcome.message).toBe(
+        'EvenDrive could not confirm permission for this move. Refresh and try again.'
+      )
+      expect(outcome.message).not.toContain('private upstream diagnostic')
+      expect(outcome.message).not.toContain('httpStatus=403')
+      expect(outcome).not.toHaveProperty('retryPermissionCheck')
+    }
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
   it.each([
     [400, 'destination-rejected'],
     [401, 'session-lost'],
@@ -173,6 +204,46 @@ describe('real move producer verdicts (R1-M3)', () => {
     expect(result.resolveSource).toHaveBeenCalledTimes(2)
     expect(result.moveResource).toHaveBeenCalledTimes(1)
   })
+
+  it.each([404, 500] as const)(
+    'routes a verification-time 401 after PATCH %i through the session authority classifier',
+    async patchStatus => {
+      const patchFailure = await wireFailure(patchStatus)
+      const verificationFailure = await gfsRouteFailureMessage(
+        client => client.resolveUri(plan.source.gfsUri, 'fixture-session-token'),
+        401,
+        { code: 'unauthorized', message: 'verification session expired' }
+      )
+      const snapshot = await resolveResource(
+        resolvedFile(sourceId, 'report.md', { parentResourceId: oldParentId, version: 7 })
+      )
+      let resolveCalls = 0
+      const resolveSource = vi.fn(async () => {
+        resolveCalls += 1
+        if (resolveCalls === 1) return snapshot
+        throw new Error(verificationFailure)
+      })
+      const moveResource = vi.fn(async () => {
+        throw new Error(patchFailure.text)
+      })
+      const isSessionAuthorityFailure = vi.fn((error: unknown) =>
+        isGfsSessionAuthorityFailure(String(error), 'operation')
+      )
+
+      const outcome = await commitGfsMove(
+        { resolveSource, moveResource, isSessionAuthorityFailure },
+        plan
+      )
+
+      expect(outcome.status).toBe('session-lost')
+      expect(resolveSource).toHaveBeenCalledTimes(2)
+      expect(moveResource).toHaveBeenCalledTimes(1)
+      expect(isSessionAuthorityFailure).toHaveBeenCalledTimes(2)
+      const verificationError = isSessionAuthorityFailure.mock.calls.at(-1)?.[0]
+      expect(verificationError).toBeInstanceOf(Error)
+      expect((verificationError as Error).message).toBe(verificationFailure)
+    }
+  )
 
   it('keeps the approved 409 numbered-name attempts bounded', async () => {
     const { text } = await wireFailure(409)
