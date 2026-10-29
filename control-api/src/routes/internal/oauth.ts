@@ -321,8 +321,12 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         //     must exist, be live, allowlist the server, and be reached by the
         //     user (directly or through an assigned agent's Host), because the
         //     resulting shared grant is planted for that whole Context. Every
-        //     denial is the same 403, so the mint reveals nothing about which
-        //     Contexts exist or what they enable.
+        //     access denial is the same 403, so the mint reveals nothing about
+        //     which Contexts exist or what they enable. The `contextId` shape
+        //     check runs before the gate, so its 400 does reveal that the
+        //     server is `context`-scope — accepted: that is server
+        //     configuration, and existence (404) and oauth-ness (400) were
+        //     already answered before the gate.
         //   - `user`: the grant is keyed by (user, server) and serves every
         //     Context that enables the server, so the user must reach at least
         //     one Context whose `spec.mcpServers` allowlist names it — directly
