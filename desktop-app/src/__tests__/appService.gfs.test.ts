@@ -946,7 +946,11 @@ describe('AppService GFS upload security scope', () => {
         releaseAbort()
 
         await expect(pendingOutcome).resolves.toContain('authentication fence')
-        await expect(login).resolves.toEqual({ authenticated: true, me: nextMe })
+        await expect(login).resolves.toMatchObject({
+          authenticated: true,
+          me: nextMe,
+          sessionGeneration: expect.any(Number),
+        })
         expect(service.sessionToken).toBe('token-b')
         expect(service.me).toEqual(nextMe)
         expect(service.gfsDispatchBlocked).toBe(false)
