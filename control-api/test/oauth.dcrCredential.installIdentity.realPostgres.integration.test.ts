@@ -228,7 +228,6 @@ describeRealPostgres(
         db,
         recipeReader: { read: async () => null },
         mcpServerReader: subjectReader(gateway),
-        userContextsReader: async () => ({ contextIds: ['ctx-A'] }),
         userServerAccessReader: async () => true,
         secretReader: { read: async () => ({}) },
         fetchFn: (async () => {

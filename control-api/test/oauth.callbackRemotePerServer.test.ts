@@ -207,7 +207,6 @@ function harness() {
       },
     },
     mcpServerReader: { read },
-    userContextsReader: async () => ({ contextIds: [CONTEXT] }),
     userServerAccessReader: async () => true,
     fetchFn: (async () => {
       throw new Error('the remote lane must not use fetchFn')
