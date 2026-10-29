@@ -1204,11 +1204,33 @@ describe('FilesPage Move permission generation fencing', () => {
   })
 
   it.each([
-    { kind: 'file' as const, sourceId: 'file-src', sourceName: 'notes.txt' },
-    { kind: 'directory' as const, sourceId: 'folder-src', sourceName: 'Projects' },
+    {
+      kind: 'file' as const,
+      sourceId: 'file-src',
+      sourceName: 'notes.txt',
+      transition: 'page unmount' as const,
+    },
+    {
+      kind: 'directory' as const,
+      sourceId: 'folder-src',
+      sourceName: 'Projects',
+      transition: 'page unmount' as const,
+    },
+    {
+      kind: 'file' as const,
+      sourceId: 'file-src',
+      sourceName: 'notes.txt',
+      transition: 'team switch' as const,
+    },
+    {
+      kind: 'directory' as const,
+      sourceId: 'folder-src',
+      sourceName: 'Projects',
+      transition: 'team switch' as const,
+    },
   ])(
-    'suppresses a dispatched $kind drag outcome after FilesPage unmount and converges its captured cache',
-    async ({ kind, sourceId, sourceName }) => {
+    'suppresses a dispatched $kind drag outcome after $transition and converges its captured cache',
+    async ({ kind, sourceId, sourceName, transition }) => {
       const destinationId = 'destination-1'
       const destinationName = 'Archive'
       const sourceVersion = 3
@@ -1294,18 +1316,39 @@ describe('FilesPage Move permission generation fencing', () => {
       const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
       const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
       const scope = ':user-a:team-a'
+      const newTeamScope = ':user-a:team-b'
       const sourceChildrenKey = desktopQueryKeys.gfsChildren(scope, 'source-parent', 'main')
       const destinationChildrenKey = desktopQueryKeys.gfsChildren(scope, destinationId, 'main')
       const accessibleKey = desktopQueryKeys.gfsAccessible(scope, 'main')
+      const newTeamSourceChildrenKey = desktopQueryKeys.gfsChildren(
+        newTeamScope,
+        'source-parent',
+        'main'
+      )
+      const newTeamDestinationChildrenKey = desktopQueryKeys.gfsChildren(
+        newTeamScope,
+        destinationId,
+        'main'
+      )
+      const newTeamAccessibleKey = desktopQueryKeys.gfsAccessible(newTeamScope, 'main')
       queryClient.setQueryData(sourceChildrenKey, { pages: [children], pageParams: [undefined] })
       queryClient.setQueryData(destinationChildrenKey, {
         pages: [await listChildrenPage([])],
         pageParams: [undefined],
       })
       queryClient.setQueryData(accessibleKey, { pages: [rows], pageParams: [undefined] })
+      queryClient.setQueryData(newTeamSourceChildrenKey, {
+        pages: [children],
+        pageParams: [undefined],
+      })
+      queryClient.setQueryData(newTeamDestinationChildrenKey, {
+        pages: [await listChildrenPage([])],
+        pageParams: [undefined],
+      })
+      queryClient.setQueryData(newTeamAccessibleKey, { pages: [rows], pageParams: [undefined] })
 
-      const view = render(
-        <AuthContext.Provider value={authFor('team-a')}>
+      const renderPage = (teamId: string) => (
+        <AuthContext.Provider value={authFor(teamId)}>
           <QueryClientProvider client={queryClient}>
             <FilesPage
               pendingGfsUri="gfs://main/source-parent"
@@ -1315,6 +1358,7 @@ describe('FilesPage Move permission generation fencing', () => {
           </QueryClientProvider>
         </AuthContext.Provider>
       )
+      const view = render(renderPage('team-a'))
       try {
         const sourceRow = await screen.findByRole('button', { name: `Open ${sourceName}` })
         const destinationRow = screen.getByRole('button', { name: `Open ${destinationName}` })
@@ -1351,7 +1395,11 @@ describe('FilesPage Move permission generation fencing', () => {
         expect(pushToast).not.toHaveBeenCalled()
         invalidateQueries.mockClear()
 
-        view.unmount()
+        if (transition === 'page unmount') {
+          view.unmount()
+        } else {
+          view.rerender(renderPage('team-b'))
+        }
         await act(async () => finishMove(moveReceipt))
 
         expect(pushToast).not.toHaveBeenCalled()
@@ -1359,6 +1407,9 @@ describe('FilesPage Move permission generation fencing', () => {
         expect(invalidatedKeys).toContainEqual(sourceChildrenKey)
         expect(invalidatedKeys).toContainEqual(destinationChildrenKey)
         expect(invalidatedKeys).toContainEqual(accessibleKey)
+        expect(invalidatedKeys).not.toContainEqual(newTeamSourceChildrenKey)
+        expect(invalidatedKeys).not.toContainEqual(newTeamDestinationChildrenKey)
+        expect(invalidatedKeys).not.toContainEqual(newTeamAccessibleKey)
         expect(moveResource).toHaveBeenCalledTimes(1)
       } finally {
         await act(async () => finishMove(moveReceipt))

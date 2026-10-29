@@ -2098,7 +2098,12 @@ export function FilesPage({
           ...(reportOutcomes && pushToast
             ? {
                 pushToast: (message, tone) => {
-                  if (pageActiveRef.current) pushToast(message, tone)
+                  if (
+                    pageActiveRef.current &&
+                    moveWorkspaceRef.current.sessionScope === source.scope
+                  ) {
+                    pushToast(message, tone)
+                  }
                 },
               }
             : {}),
