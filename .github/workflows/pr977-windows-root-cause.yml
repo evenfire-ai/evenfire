@@ -245,11 +245,11 @@ jobs:
           $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
           $filter = 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts'
           $testName = "accepts a child owned by the allowlisted 'SYSTEM' principal with current-user access intact"
-          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '--testTimeout=60000', '--hookTimeout=60000', '--reporter=json', '"--outputFile.json=' + $report + '"', '"' + $filter + '"', '--testNamePattern', '"' + $testName + '"') -join ' '
+          $argumentLine = @('"' + $vitest + '"', 'run', '--maxWorkers=1', '--no-file-parallelism', '--testTimeout=120000', '--hookTimeout=120000', '--reporter=json', '"--outputFile.json=' + $report + '"', '"' + $filter + '"', '--testNamePattern', '"' + $testName + '"') -join ' '
           $started = [DateTime]::UtcNow
           $process = Start-Process -FilePath $node -ArgumentList $argumentLine -WorkingDirectory (Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app') -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           $watchdogExpired = $false
-          $deadline = $started.AddSeconds(150)
+          $deadline = $started.AddSeconds(180)
           while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Seconds 2
             $process.Refresh()

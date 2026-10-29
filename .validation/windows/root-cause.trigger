@@ -1,1 +1,1 @@
-Record ACL verifier count and teardown result; application source unchanged
+ACL-only bounded confirmation: 120-second test timeout / 180-second process watchdog
