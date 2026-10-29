@@ -210,13 +210,12 @@ async function withDesktopChat(run: (desktop: Page) => Promise<void>) {
     await run(desktop)
     journeyPassed = true
   } finally {
-    // The session token lives in the macOS Keychain and would sign the next
-    // launch in (see `helpers/desktop-session.ts`), so sign out on every path.
+    // Sign out on every path, so the journey ends its session.
     let cleanupError: string | undefined
     try {
       await signOutDesktop(await app.firstWindow())
     } catch {
-      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      cleanupError = 'Desktop sign-out failed'
     }
     try {
       await app.close()

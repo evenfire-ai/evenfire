@@ -1,22 +1,14 @@
 import { type Page, expect } from '@playwright/test'
 
-// The Desktop session token lives in the macOS Keychain under the service
-// `Evenfire` and the account `session-token::<envKey>`
-// (`desktop-app/src/tokenStore.ts`), and `envKey` is derived from the REST and
-// RPC origins alone (`desktop-app/src/config.ts:803-823`). Every launch in this
-// lane uses the same origins, so every launch resolves the same account, while
-// `launchDesktopApp` isolates only `--user-data-dir`, which the Keychain
-// ignores. A window closed while signed in therefore hands its session to the
-// next launch, and `restoreSavedSessionOnce`
-// (`desktop-app/src/appService.ts:1369-1440`) starts that launch authenticated,
-// so its login form never mounts. The leak also crosses runs, because the ports
-// are stable.
+// `launchDesktopApp` starts every Desktop dev-isolated in a new run directory,
+// so the session token is stored only inside that run's user-data directory
+// (`desktop-app/src/tokenStore.ts`, isolated mode: no keytar) and is removed
+// with it. A launch can therefore only start signed in if isolation failed.
 export async function signOutDesktop(desktop: Page): Promise<void> {
   await desktop.getByTestId('nav-settings-menu').click()
   await desktop.getByTestId('logout-btn').click()
-  // Logout clears the Keychain account (`desktop-app/src/appService.ts:1919`),
-  // and the login form is the witness that it did: the renderer mounts
-  // `AuthPage` only when no session remains.
+  // The login form is the witness that logout cleared the session: the renderer
+  // mounts `AuthPage` only when no session remains.
   await expect(desktop.getByLabel('Email', { exact: true })).toBeVisible()
 }
 
@@ -31,9 +23,8 @@ export async function expectSignedOutLaunch(desktop: Page): Promise<void> {
   await expect(loginForm.or(signedIn)).toBeVisible()
   if (await signedIn.isVisible())
     throw new Error(
-      'Desktop launched already signed in: an earlier Electron test left its session in the macOS ' +
-        'Keychain (service Evenfire, account session-token::<envKey>) instead of signing out before ' +
-        'closing its window.'
+      'Desktop launched already signed in: a new dev-isolated profile restored a session, so the ' +
+        'launch is not isolated from an earlier one.'
     )
   await expect(loginForm).toBeVisible()
 }

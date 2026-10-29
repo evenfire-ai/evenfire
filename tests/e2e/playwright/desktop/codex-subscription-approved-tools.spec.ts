@@ -154,17 +154,14 @@ test('authenticated user without agent access cannot select the protected agents
     expect(await Promise.all(cases.map(readEvidence))).toEqual(before)
     journeyPassed = true
   } finally {
-    // Sign out before the window closes. The session token lives in the macOS
-    // Keychain, keyed by the REST+RPC origin, which a fresh --user-data-dir does
-    // not isolate: leaving it behind signs the next launch in as this
-    // unauthorized user, and the next test's login form never renders. This has
-    // to run on the failure path too, because a journey that fails before
-    // signing out leaks the session exactly as one that never tried.
+    // Sign out before the window closes, on the failure path too, so the
+    // journey ends this user's session. Each launch is dev-isolated
+    // (`helpers/launch-desktop.ts`), so no session reaches the next launch.
     let cleanupError: string | undefined
     try {
       await signOutDesktop(await app.firstWindow())
     } catch {
-      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      cleanupError = 'Desktop sign-out failed'
     }
     try {
       await app.close()
@@ -515,7 +512,7 @@ for (const scenario of cases) {
       try {
         await signOutDesktop(await app.firstWindow())
       } catch {
-        cleanupFailures.push('Desktop sign-out failed; the session stays in the Keychain')
+        cleanupFailures.push('Desktop sign-out failed')
       }
       try {
         await app.close()
@@ -584,14 +581,12 @@ if (mode === 'deterministic') {
       })
       journeyPassed = true
     } finally {
-      // Sign out before closing: the session lives in the host Keychain, so a
-      // window closed while authenticated signs the next launch in and that
-      // launch never renders a login form.
+      // Sign out before closing, on every path, so the journey ends its session.
       let cleanupError: string | undefined
       try {
         await signOutDesktop(await app.firstWindow())
       } catch {
-        cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+        cleanupError = 'Desktop sign-out failed'
       }
       try {
         await app.close()
@@ -657,14 +652,12 @@ if (mode === 'deterministic') {
       })
       journeyPassed = true
     } finally {
-      // Sign out before closing: the session lives in the host Keychain, so a
-      // window closed while authenticated signs the next launch in and that
-      // launch never renders a login form.
+      // Sign out before closing, on every path, so the journey ends its session.
       let cleanupError: string | undefined
       try {
         await signOutDesktop(await app.firstWindow())
       } catch {
-        cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+        cleanupError = 'Desktop sign-out failed'
       }
       try {
         await app.close()

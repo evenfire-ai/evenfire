@@ -115,7 +115,7 @@ async function withDesktopChat(run: (desktop: Page) => Promise<void>): Promise<v
     try {
       await signOutDesktop(await app.firstWindow())
     } catch {
-      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      cleanupError = 'Desktop sign-out failed'
     }
     try {
       await app.close()
