@@ -57,7 +57,9 @@ describe('composerDraftStore', () => {
         suffixes => {
           resetComposerDraftStore()
           const requests = suffixes.map((suffix, index) => `gfs://main/${index}-${suffix}`)
-          const [first, ...retries] = requests
+          const first = requests[0]
+          if (first === undefined) throw new Error('the generated request list must be non-empty')
+          const retries = requests.slice(1)
 
           expect(setResourceComposerPrefill('tab-a', first, null)).toBe(true)
           for (const retry of retries) {
