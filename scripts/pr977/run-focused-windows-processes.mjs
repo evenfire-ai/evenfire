@@ -19,6 +19,20 @@ export function validateFocusedFingerprintPreflight(fingerprint, helperAttemptsP
   return true
 }
 
+export function buildObservedVitestNodeArgs(observerPath, vitestPath, vitestArgs) {
+  const isAbsolutePath = value =>
+    typeof value === 'string' && (path.isAbsolute(value) || path.win32.isAbsolute(value))
+  if (
+    !isAbsolutePath(observerPath) ||
+    !isAbsolutePath(vitestPath) ||
+    !Array.isArray(vitestArgs) ||
+    vitestArgs.some(value => typeof value !== 'string')
+  ) {
+    throw new Error('Focused Vitest launch requires absolute paths and string arguments')
+  }
+  return ['--require', observerPath, vitestPath, ...vitestArgs]
+}
+
 function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', ...options })
   if (result.error)
@@ -103,9 +117,10 @@ async function main() {
     const rawReportPath = path.join(processDirectory, 'vitest-raw.json')
     const reportPath = path.join(processDirectory, 'focused-report.json')
     const verifiedPath = path.join(processDirectory, 'verified-result.json')
-    const testArgs = [
-      vitest,
+    const vitestArgs = [
       'run',
+      '--execArgv=--require',
+      `--execArgv=${spawnObserver}`,
       '--testTimeout=120000',
       '--hookTimeout=30000',
       '--maxWorkers=1',
@@ -117,6 +132,7 @@ async function main() {
       focusedTestNamePattern(processSpec),
       selectedTarget,
     ]
+    const observedVitestArgs = buildObservedVitestNodeArgs(spawnObserver, vitest, vitestArgs)
     const runner = runCommand(
       process.execPath,
       [
@@ -127,7 +143,7 @@ async function main() {
         `--status=${statusPath}`,
         '--',
         process.execPath,
-        ...testArgs,
+        ...observedVitestArgs,
       ],
       {
         cwd: desktopRoot,
@@ -136,9 +152,6 @@ async function main() {
           PR977_DESKTOP_ROOT: desktopRoot,
           PR977_FOCUSED_PROCESS_ID: processSpec.id,
           PR977_NATIVE_LOAD_ATTEMPTS_PATH: helperAttemptsPath,
-          NODE_OPTIONS: [process.env.NODE_OPTIONS?.trim(), `--require="${spawnObserver}"`]
-            .filter(Boolean)
-            .join(' '),
         },
         stdio: 'inherit',
       }

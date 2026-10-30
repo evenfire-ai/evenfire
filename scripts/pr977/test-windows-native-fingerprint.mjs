@@ -36,6 +36,15 @@ try {
     path.join(scriptRoot, 'capture-windows-native-fingerprint.mjs'),
     'utf8'
   )
+  assert.doesNotMatch(
+    focusedRunner,
+    /NODE_OPTIONS/,
+    'Focused launcher must not encode the observer path in a Node environment string'
+  )
+  assert.doesNotMatch(focusedRunner, /shell:\s*true/)
+  assert.match(focusedRunner, /buildObservedVitestNodeArgs/)
+  assert.match(focusedRunner, /--execArgv=--require/)
+  assert.match(focusedRunner, /`--execArgv=\$\{spawnObserver\}`/)
   const archivedRunPath = path.join(
     scriptRoot,
     'fixtures/run-41139571472-environment-fingerprint.json'
@@ -532,8 +541,25 @@ try {
   assert.equal(esmRecords[0].lastPhase, null)
   assert.equal(validateNativeHelperAttempt(esmRecords[0], 'consent'), true)
   assert.doesNotMatch(JSON.stringify(esmRecords), /private|person|stdout|stderr|secret/i)
+  const launcherIntegration = spawnSync(
+    process.execPath,
+    [path.join(scriptRoot, 'test-focused-windows-launcher.mjs')],
+    {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, CODEX_SCRATCH_ROOT: scratchRoot },
+      shell: false,
+      timeout: 90_000,
+      windowsHide: true,
+    }
+  )
+  assert.equal(
+    launcherIntegration.status,
+    0,
+    'Focused launcher preload and watchdog integration contracts must pass'
+  )
   process.stdout.write(
-    'Windows native fingerprint schema, redaction, timing, and observer contracts passed\n'
+    'Windows native fingerprint, observer preload, and watchdog contracts passed\n'
   )
 } finally {
   rmSync(directory, { recursive: true, force: true })
