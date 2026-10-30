@@ -2,31 +2,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
+import {
+  disposeTokenStorePersistenceFixture,
+  tokenStorePersistenceFixture as fixture,
+  resetTokenStorePersistenceFixture,
+} from '../../testSupport/tokenStorePersistenceFixture.js'
 import { SessionTokenStorageSupersededBeforeWriteError, TokenStore } from '../tokenStore.js'
 
-const fixture = vi.hoisted(() => ({
-  directory: '',
-  encryptionAvailable: true,
-  keychain: new Map<string, string>(),
-}))
-vi.mock('electron', () => ({
-  app: { isReady: () => true, getPath: () => fixture.directory },
-  safeStorage: {
-    isEncryptionAvailable: () => fixture.encryptionAvailable,
-    getSelectedStorageBackend: () => 'gnome_libsecret',
-    encryptString: (token: string) => Buffer.from(`encrypted:${token}`),
-    decryptString: (value: Buffer) => value.toString().slice('encrypted:'.length),
-  },
-}))
-vi.mock('keytar', () => ({
-  getPassword: vi.fn(async (_service, account) => fixture.keychain.get(account) ?? null),
-  setPassword: vi.fn(async (_service, account, token) => {
-    fixture.keychain.set(account, token)
-  }),
-  deletePassword: vi.fn(async (_service, account) => fixture.keychain.delete(account)),
-}))
+vi.mock('electron', async () => {
+  const { createTokenStoreElectronFixture } =
+    await import('../../testSupport/tokenStorePersistenceFixture.js')
+  return createTokenStoreElectronFixture()
+})
+vi.mock('keytar', async () => {
+  const { tokenStoreKeytarFixture } =
+    await import('../../testSupport/tokenStorePersistenceFixture.js')
+  return tokenStoreKeytarFixture
+})
 const ENV = 'active-111111111111'
 const LEGACY_ENV = 'legacy-222222222222'
 const GLOBAL_PRODUCER_ENV = 'global-333333333333'
@@ -34,26 +27,12 @@ const OTHER_ENV = 'other-444444444444'
 const encrypted = (env = ENV) => path.join(fixture.directory, `session-token-${env}.enc`)
 const plaintext = (env = ENV) => path.join(fixture.directory, `session-token-${env}.json`)
 beforeEach(async () => {
-  fixture.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-fallback-retirement-'))
-  fixture.encryptionAvailable = true
-  fixture.keychain.clear()
+  await resetTokenStorePersistenceFixture('evenfire-fallback-retirement-')
   vi.clearAllMocks()
-  const keytar = await import('keytar')
-  vi.mocked(keytar.getPassword)
-    .mockReset()
-    .mockImplementation(async (_service, account) => fixture.keychain.get(account) ?? null)
-  vi.mocked(keytar.setPassword)
-    .mockReset()
-    .mockImplementation(async (_service, account, token) => {
-      fixture.keychain.set(account, token)
-    })
-  vi.mocked(keytar.deletePassword)
-    .mockReset()
-    .mockImplementation(async (_service, account) => fixture.keychain.delete(account))
 })
 afterEach(async () => {
   vi.restoreAllMocks()
-  await fs.rm(fixture.directory, { recursive: true, force: true })
+  await disposeTokenStorePersistenceFixture()
 })
 async function producePlaintext(env: string, token: string) {
   fixture.encryptionAvailable = false

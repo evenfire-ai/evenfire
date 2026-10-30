@@ -1,34 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
+import {
+  disposeTokenStorePersistenceFixture,
+  tokenStorePersistenceFixture as fixture,
+  resetTokenStorePersistenceFixture,
+} from '../../testSupport/tokenStorePersistenceFixture.js'
 import { type SessionTokenFallbackSnapshot, TokenStore } from '../tokenStore.js'
 
-const fixture = vi.hoisted(() => ({
-  directory: '',
-  keychain: new Map<string, string>(),
-}))
-
-vi.mock('electron', () => ({
-  app: { isReady: () => true, getPath: () => fixture.directory },
-  safeStorage: {
-    isEncryptionAvailable: () => true,
-    getSelectedStorageBackend: () => 'gnome_libsecret',
-    encryptString: (token: string) => Buffer.from(`encrypted:${token}`),
-    decryptString: (value: Buffer) => value.toString().slice('encrypted:'.length),
-  },
-}))
-vi.mock('keytar', () => ({
-  getPassword: vi.fn(
-    async (_service: string, account: string) => fixture.keychain.get(account) ?? null
-  ),
-  setPassword: vi.fn(async (_service: string, account: string, token: string) => {
-    fixture.keychain.set(account, token)
-  }),
-  deletePassword: vi.fn(async (_service: string, account: string) =>
-    fixture.keychain.delete(account)
-  ),
-}))
+vi.mock('electron', async () => {
+  const { createTokenStoreElectronFixture } =
+    await import('../../testSupport/tokenStorePersistenceFixture.js')
+  return createTokenStoreElectronFixture()
+})
+vi.mock('keytar', async () => {
+  const { tokenStoreKeytarFixture } =
+    await import('../../testSupport/tokenStorePersistenceFixture.js')
+  return tokenStoreKeytarFixture
+})
+vi.mock('../windowsSessionAuthorityFileOps.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityFileOps.js')>()
+  const { createWindowsSessionAuthorityFileOpsUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityFileOpsUnitFixture.js')
+  return createWindowsSessionAuthorityFileOpsUnitFixture(actual)
+})
 
 const ENV = 'drain-000000000000'
 const TOKEN = 'fixture-drain-token'
@@ -194,8 +189,7 @@ const operations: Operation[] = [
 ]
 
 beforeEach(async () => {
-  fixture.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-marker-drain-'))
-  fixture.keychain.clear()
+  await resetTokenStorePersistenceFixture('evenfire-marker-drain-')
   vi.clearAllMocks()
   const producer = new TokenStore()
   await producer.setSessionToken(TOKEN, ENV)
@@ -205,7 +199,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks()
-  await fs.rm(fixture.directory, { recursive: true, force: true })
+  await disposeTokenStorePersistenceFixture()
 })
 
 async function pauseBoundary(boundary: Operation['boundary'], store: TokenStore) {
@@ -213,13 +207,36 @@ async function pauseBoundary(boundary: Operation['boundary'], store: TokenStore)
   const release = deferred()
   const keytar = await import('keytar')
   let predecessor: Promise<void> | undefined
-  if (boundary === 'snapshot-file-lane') {
-    const rename = fs.rename.bind(fs)
-    vi.spyOn(fs, 'rename').mockImplementationOnce(async (source, destination) => {
-      started.resolve()
-      await release.promise
-      return rename(source, destination)
+  const pauseAtomicFileWrite = () => {
+    const open = fs.open.bind(fs)
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args)
+      const file = String(args[0])
+      if (file.startsWith(`${encryptedPath()}.`) && file.endsWith('.tmp')) {
+        const sync = handle.sync.bind(handle)
+        vi.spyOn(handle, 'sync').mockImplementation(async () => {
+          started.resolve()
+          await release.promise
+          return sync()
+        })
+      }
+      return handle
     })
+  }
+  if (
+    boundary === 'snapshot-file-lane' ||
+    (process.platform === 'win32' && boundary === 'sync-directory')
+  ) {
+    if (process.platform === 'win32') {
+      pauseAtomicFileWrite()
+    } else {
+      const rename = fs.rename.bind(fs)
+      vi.spyOn(fs, 'rename').mockImplementationOnce(async (source, destination) => {
+        started.resolve()
+        await release.promise
+        return rename(source, destination)
+      })
+    }
     predecessor = new TokenStore().setSafeStorageSessionToken(TOKEN, ENV)
     try {
       await awaitStorageBoundary(started.promise, 'earlier actual encrypted producer')
@@ -242,14 +259,17 @@ async function pauseBoundary(boundary: Operation['boundary'], store: TokenStore)
       return selection
     })
   } else if (boundary === 'rename-file') {
-    const rename = fs.rename.bind(fs)
-    vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
-      if (String(destination) === encryptedPath()) {
-        started.resolve()
-        await release.promise
-      }
-      return rename(source, destination)
-    })
+    if (process.platform === 'win32') pauseAtomicFileWrite()
+    else {
+      const rename = fs.rename.bind(fs)
+      vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+        if (String(destination) === encryptedPath()) {
+          started.resolve()
+          await release.promise
+        }
+        return rename(source, destination)
+      })
+    }
   } else if (boundary === 'sync-directory') {
     const open = fs.open.bind(fs)
     vi.spyOn(fs, 'open').mockImplementation(async (...args) => {

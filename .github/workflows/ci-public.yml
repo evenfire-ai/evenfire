@@ -216,10 +216,10 @@ jobs:
         working-directory: external-rest-api
         run: npm run build
 
-      # Inherited entity-change contracts still import Control API sources.
-      # directly, so install the producer's dependencies in this isolated job.
+      # Entity-change and Desktop session-clock contracts import Control API sources,
+      # so install the producer's dependencies in each isolated consumer job.
       - name: Install Control API producer dependencies
-        if: matrix.service == 'external-rest-api'
+        if: matrix.service == 'external-rest-api' || matrix.service == 'desktop-app'
         working-directory: control-api
         run: npm ci
 
