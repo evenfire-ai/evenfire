@@ -973,8 +973,8 @@ describe('App deep-link orchestration', () => {
     }
     transportBoundaries.authClient.googleLogin = vi
       .fn()
-      .mockResolvedValueOnce({ token: 'session-permission-A', me: userA })
-      .mockResolvedValueOnce({ token: 'session-permission-B', me: userA })
+      .mockResolvedValueOnce({ token: 'synthetic-session-permission-A', me: userA })
+      .mockResolvedValueOnce({ token: 'synthetic-session-permission-B', me: userA })
     // Keep public login, generation publication and the production controller real.
     transportBoundaries.bindCurrentChatStore = vi.fn(async () => undefined)
     transportBoundaries.updateDesktopGfsUploadState = vi.fn(async () => undefined)
@@ -5282,8 +5282,8 @@ describe('App deep-link orchestration', () => {
       }
       transports.authClient.googleLogin = vi
         .fn()
-        .mockResolvedValueOnce({ token: 'lag-session-A', me: userA })
-        .mockResolvedValueOnce({ token: 'lag-session-B', me: userA })
+        .mockResolvedValueOnce({ token: 'synthetic-lag-session-A', me: userA })
+        .mockResolvedValueOnce({ token: 'synthetic-lag-session-B', me: userA })
       transports.bindCurrentChatStore = vi.fn(async () => undefined)
       transports.updateDesktopGfsUploadState = vi.fn(async () => undefined)
       transports.migrateLegacyDesktopGfsUploadScopes = vi.fn(async () => undefined)
@@ -5442,7 +5442,7 @@ describe('App deep-link orchestration', () => {
         await gesture(true)
         await waitFor(() => expect(patches).toHaveLength(1))
         expect(patches[0]).toEqual({
-          token: 'lag-session-B',
+          token: 'synthetic-lag-session-B',
           path: `/api/v1/me/gfs/resources/${sourceId}`,
           body: { newParentId: destinationId, ifMatch: source.version },
         })
@@ -5556,7 +5556,7 @@ describe('App deep-link orchestration', () => {
           if (url.pathname.endsWith('/affordances')) {
             if (url.pathname.includes('/' + parentId + '/')) {
               sourceParentTokens.push(options?.token ?? '')
-              if (options?.token === 'session-permission-A') return oldPermission
+              if (options?.token === 'synthetic-session-permission-A') return oldPermission
               if (failCurrentPermission) throw new Error(oldFailure)
             }
             return heldAffordances(['read', 'write', 'delete'])
@@ -5612,7 +5612,7 @@ describe('App deep-link orchestration', () => {
       queryClient.setQueryData(otherKey, { marker: 'unrelated retained cache' })
       let replacementPublication: Promise<void> | null = null
       try {
-        await waitFor(() => expect(sourceParentTokens).toEqual(['session-permission-A']))
+        await waitFor(() => expect(sourceParentTokens).toEqual(['synthetic-session-permission-A']))
         expect(view.getByTestId('gfs-session-access').textContent).toBe('active')
         const replacement = await service.googleLogin('fixture-google-B')
         expect(replacement.me).toBe(userA)
@@ -5623,7 +5623,10 @@ describe('App deep-link orchestration', () => {
           await Promise.resolve()
         })
         await waitFor(() =>
-          expect(sourceParentTokens).toEqual(['session-permission-A', 'session-permission-B'])
+          expect(sourceParentTokens).toEqual([
+            'synthetic-session-permission-A',
+            'synthetic-session-permission-B',
+          ])
         )
         await act(async () => {
           await replacementPublication
@@ -5712,7 +5715,7 @@ describe('App deep-link orchestration', () => {
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     sessionAuthority.authClient.switchTeam = vi.fn(async (_token, _teamId) => ({
-      token: 'session-b-team-b',
+      token: 'synthetic-session-b-team-b',
     }))
     sessionAuthority.authClient.getMe = vi.fn(async () => userInTeamB)
     sessionAuthority.tokenStore.setSessionToken = vi.fn(async () => undefined)
@@ -5852,7 +5855,7 @@ describe('App deep-link orchestration', () => {
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
     sessionAuthority.authClient.switchTeam = vi.fn(async (_token, _teamId) => ({
-      token: 'session-b-team-b',
+      token: 'synthetic-session-b-team-b',
     }))
     sessionAuthority.authClient.getMe = vi.fn(async () => userInTeamB)
     sessionAuthority.tokenStore.setSessionToken = vi.fn(async () => undefined)
@@ -7858,7 +7861,7 @@ describe('App deep-link orchestration', () => {
       await new Promise<void>(r => setImmediate(r))
     })
     await waitFor(() => expect(held).toBe(true))
-    expect(tokens).toEqual(['session-permission-A'])
+    expect(tokens).toEqual(['synthetic-session-permission-A'])
     expect(moves).toEqual([{ resourceId: rootId, destinationId, generation: issuedN }])
     expect(capturedSnapshot).toBe(issuedN)
     // A later server edit advances the resource after the old Move committed.

@@ -34,8 +34,8 @@ describe('AppService GFS Move session generation', () => {
     service.authClient = {
       googleLogin: vi
         .fn()
-        .mockResolvedValueOnce({ token: 'session-a', me: userA })
-        .mockResolvedValueOnce({ token: 'session-b', me: userB }),
+        .mockResolvedValueOnce({ token: 'synthetic-session-a', me: userA })
+        .mockResolvedValueOnce({ token: 'synthetic-session-b', me: userB }),
     } as never
     const main = service as unknown as {
       getSessionGeneration(): number
@@ -106,8 +106,8 @@ describe('AppService GFS Move session generation', () => {
     service.authClient = {
       googleLogin: vi
         .fn()
-        .mockResolvedValueOnce({ token: 'session-a', me })
-        .mockResolvedValueOnce({ token: 'session-b', me }),
+        .mockResolvedValueOnce({ token: 'synthetic-session-a', me })
+        .mockResolvedValueOnce({ token: 'synthetic-session-b', me }),
     } as never
     const main = service as unknown as {
       getSessionGeneration(): number
@@ -151,8 +151,8 @@ describe('AppService GFS Move session generation', () => {
       service.authClient = {
         googleLogin: vi
           .fn()
-          .mockResolvedValueOnce({ token: 'session-a', me })
-          .mockResolvedValueOnce({ token: 'session-b', me }),
+          .mockResolvedValueOnce({ token: 'synthetic-session-a', me })
+          .mockResolvedValueOnce({ token: 'synthetic-session-b', me }),
       } as never
       await service.googleLogin('google-token-a')
 
@@ -222,7 +222,7 @@ describe('AppService GFS Move session generation', () => {
         expect(moveCalls[0]).toEqual({
           method: 'PATCH',
           url: `http://127.0.0.1:${address.port}/api/v1/me/gfs/resources/source-a?drive=main`,
-          token: 'session-a',
+          token: 'synthetic-session-a',
         })
       } finally {
         releaseResponse()
