@@ -27,6 +27,8 @@ export const fixtureConfigKeys = [
  * The Playwright journeys this runner can drive against the swapped Host. The
  * lane is chosen by `IMAGE_CAPABILITIES_LANE` and only from this closed set, so
  * an environment value can never name an arbitrary config path.
+ * `minimumExpected` is the floor `playwrightVerdict` requires. The save lane
+ * is three journeys; the older lanes stay at one.
  */
 export const playwrightLanes = {
   // `grep` selects the lane's fixture journey. The image spec also holds the
@@ -36,11 +38,19 @@ export const playwrightLanes = {
     config: 'desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
     label: 'image-capabilities-playwright',
     grep: 'image-capabilities fixture: ',
+    minimumExpected: 1,
   },
   'document-upload': {
     config: 'desktop-app/test/e2e-playwright/playwright.document-upload.config.ts',
     label: 'document-upload-playwright',
     grep: 'document-upload fixture: ',
+    minimumExpected: 1,
+  },
+  'attachment-gfs-save': {
+    config: 'desktop-app/test/e2e-playwright/playwright.attachment-gfs-save.config.ts',
+    label: 'attachment-gfs-save-playwright',
+    grep: 'attachment-gfs-save fixture: ',
+    minimumExpected: 3,
   },
 }
 
@@ -69,17 +79,23 @@ const isCount = value => Number.isSafeInteger(value) && value >= 0
 /**
  * A zero exit from the Playwright CLI is not a verdict on its own: a run that
  * collected nothing, skipped everything or retried into a pass also exits 0.
- * PASS needs the JSON report of this lane's config with at least one expected
- * test and no unexpected, skipped or flaky outcome.
+ * PASS needs the JSON report of this lane's config, at least that lane's
+ * `minimumExpected` tests, and no unexpected, skipped or flaky outcome.
  */
 export function playwrightVerdict(report, { lane, configFile }) {
-  const { grep } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
+  const { grep, minimumExpected } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
   const reported = report?.config?.configFile
   if (typeof reported !== 'string' || fs.realpathSync(reported) !== fs.realpathSync(configFile))
     throw new Error('Playwright report config mismatch')
   const stats = report.stats ?? {}
   if (!isCount(stats.expected) || stats.expected < 1)
     throw new Error('Playwright ran no expected tests')
+  if (!isCount(minimumExpected) || minimumExpected < 1)
+    throw new Error(`Playwright lane ${lane} has no expected-test minimum`)
+  if (stats.expected < minimumExpected)
+    throw new Error(
+      `Playwright report is below the ${lane} minimum of ${minimumExpected} expected tests`
+    )
   for (const outcome of ['unexpected', 'skipped', 'flaky'])
     if (stats[outcome] !== 0)
       throw new Error(`Playwright report is not clean: ${outcome}=${String(stats[outcome])}`)
@@ -804,6 +820,9 @@ async function main() {
       E2E_HOST_REF: 'chatllm',
       E2E_DEV_LOGIN_EMAIL: 'admin@evenfire.local',
       E2E_DESKTOP_PASSWORD: ADMIN_PASSWORD,
+      // SQL fixtures read this name. The shell context is shared across sessions,
+      // so the owned profile has to win over anything `process.env` already set.
+      E2E_K8S_CONTEXT: profile,
       EXTERNAL_REST_API_BASE_URL: urlFor('external-rest-api'),
       RPC_PROXY_BASE_URL: urlFor('rpc-proxy'),
       QA_RECORDER_CONFIRM_CHAT: '1',
