@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -14,8 +14,10 @@ const sanitizer =
   process.env.PR977_SANITIZER_PATH ?? path.join(here, 'sanitize-windows-vitest-report.mjs')
 const workflowPath =
   process.env.PR977_FOCUSED_WORKFLOW_PATH ??
-  path.join(here, '../../.github/workflows/pr977-windows-acl-focused-diagnostic.yml')
-const tempRoot = mkdtempSync(path.join(scratchRoot, 'evenfire', 'pr977-acl-sanitizer-fixtures-'))
+  path.join(here, '../../.github/workflows/pr977-windows-focused.yml')
+const tempParent = path.join(scratchRoot, 'evenfire')
+mkdirSync(tempParent, { recursive: true })
+const tempRoot = mkdtempSync(path.join(tempParent, 'pr977-acl-sanitizer-fixtures-'))
 process.on('exit', () => rmSync(tempRoot, { recursive: true, force: true }))
 
 const focusedWorkflow = readFileSync(workflowPath, 'utf8')
@@ -200,6 +202,61 @@ assert.equal(
   nativeFixtureFailure.sanitized.testResults[0].assertionResults[0].failure.diagnostic.operation,
   'add-everyone-modify'
 )
+
+const collectionFailure = runCase('collection-module-resolution-failure', {
+  success: false,
+  numTotalTestSuites: 1,
+  numPassedTestSuites: 0,
+  numFailedTestSuites: 1,
+  numPendingTestSuites: 0,
+  numTotalTests: 0,
+  numPassedTests: 0,
+  numFailedTests: 0,
+  numPendingTests: 0,
+  numTodoTests: 0,
+  testResults: [
+    {
+      name: 'test/__tests__/gfsDragAndDropGate.test.ts',
+      status: 'failed',
+      assertionResults: [],
+      diagnosticErrors: [
+        {
+          name: 'Error',
+          code: 'ERR_MODULE_NOT_FOUND',
+          message: 'Cannot find module private-package from C:\\Users\\private\\path',
+          phase: 'collection',
+          failedHooks: [],
+        },
+      ],
+    },
+  ],
+})
+assert.equal(collectionFailure.result.status, 0)
+assert.equal(collectionFailure.sanitized.success, false)
+assert.equal(collectionFailure.sanitized.testResults[0].failure.phase, 'collection')
+assert.equal(collectionFailure.sanitized.testResults[0].failure.category, 'module-resolution')
+assert.equal(collectionFailure.sanitized.testResults[0].failure.code, 'ERR_MODULE_NOT_FOUND')
+assert.doesNotMatch(
+  JSON.stringify(collectionFailure.sanitized),
+  /private-package|Users|private\\path/
+)
+
+const selectedReport = path.join(tempRoot, 'passing-output.json')
+const selectedManifest = path.join(tempRoot, 'selected-targets.txt')
+writeFileSync(selectedManifest, 'src/__tests__/case-1.test.ts\n')
+const selectedPass = spawnSync(
+  process.execPath,
+  [path.join(here, 'verify-focused-windows-report.mjs'), selectedReport, selectedManifest],
+  { encoding: 'utf8' }
+)
+assert.equal(selectedPass.status, 0)
+writeFileSync(selectedManifest, 'src/__tests__/case-1.test.ts\nsrc/__tests__/missing.test.ts\n')
+const selectedMissing = spawnSync(
+  process.execPath,
+  [path.join(here, 'verify-focused-windows-report.mjs'), selectedReport, selectedManifest],
+  { encoding: 'utf8' }
+)
+assert.equal(selectedMissing.status, 1, 'Missing required selected files must fail verification')
 
 rmSync(tempRoot, { recursive: true, force: true })
 process.stdout.write(

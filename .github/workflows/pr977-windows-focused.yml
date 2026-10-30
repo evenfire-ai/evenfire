@@ -1,4 +1,4 @@
-name: PR 977 exact-source Windows focused validation
+name: PR 977 exact-source Windows focused failure verification
 
 on:
   push:
@@ -7,28 +7,46 @@ on:
     paths:
       - .validation/windows/focused-test-target.txt
       - .github/workflows/pr977-windows-focused.yml
-      - scripts/pr977/sanitize-focused-windows-test.mjs
+      - scripts/pr977/windows-diagnostic-reporter.mjs
+      - scripts/pr977/run-vitest-with-watchdog.mjs
+      - scripts/pr977/test-run-vitest-with-watchdog.mjs
+      - scripts/pr977/test-windows-diagnostic-reporter.mjs
+      - scripts/pr977/test-sanitize-windows-vitest-report.mjs
+      - scripts/pr977/verify-focused-windows-report.mjs
+      - scripts/pr977/prepare-plugin-storage-prevhead-proof.mjs
+      - scripts/pr977/verify-plugin-storage-prevhead-proof.mjs
+      - scripts/pr977/test-verify-plugin-storage-prevhead-proof.mjs
+      - scripts/pr977/test-aggregate-windows-full-shards.mjs
+      - scripts/pr977/sanitize-windows-vitest-report.mjs
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr977-windows-focused-r24m7
+  group: pr977-windows-focused-r28
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: cee0e58a586761459ab259cfb575901ef4bb77db
+  PR977_SOURCE_SHA: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
 
 jobs:
   focused-windows-test:
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - name: Check out exact application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: cee0e58a586761459ab259cfb575901ef4bb77db
+          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
           path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out the exact defective previous head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 87864f04196240a29673038dedfb7d8bdc978353
+          path: previous-source
           persist-credentials: false
           fetch-depth: 1
 
@@ -40,36 +58,44 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Verify exact revisions and repository Node pin
+      - name: Verify exact revisions, Node pin, and selected source files
         shell: pwsh
         run: |
           $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $previousSha = (git -C previous-source rev-parse HEAD).Trim()
           $harnessSha = (git -C validation rev-parse HEAD).Trim()
           $nodePin = (Get-Content source/.nvmrc -Raw).Trim()
           Write-Output "Workflow trigger SHA: $env:GITHUB_SHA"
           Write-Output "Harness checkout SHA: $harnessSha"
           Write-Output "Application source SHA: $sourceSha"
-          if ($sourceSha -ne $env:PR977_SOURCE_SHA -or $harnessSha -ne $env:GITHUB_SHA) {
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA -or $previousSha -ne '87864f04196240a29673038dedfb7d8bdc978353' -or $harnessSha -ne $env:GITHUB_SHA) {
             throw 'The checked-out source or harness SHA does not match its pin'
           }
           if ($nodePin -ne '24.22.1') { throw 'Unexpected repository Node pin' }
+          $targets = @(Get-Content validation/.validation/windows/focused-test-target.txt |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          if ($targets.Count -ne 11 -or ($targets | Select-Object -Unique).Count -ne 11) {
+            throw 'Focused source target manifest is incomplete or duplicated'
+          }
+          foreach ($target in $targets) {
+            if ($target -notmatch '^(src|test|ui/src)/.*\.test\.(ts|tsx)$') {
+              throw 'Focused target is outside the reviewed Desktop test manifest'
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path source/desktop-app $target) -PathType Leaf)) {
+              throw 'A focused source test is missing from the pinned application commit'
+            }
+          }
 
       - name: Set up repository-pinned Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.22.1
           cache: npm
-          cache-dependency-path: |
-            source/mcp-host/package-lock.json
-            source/desktop-app/package-lock.json
+          cache-dependency-path: source/desktop-app/package-lock.json
 
-      - name: Install declared project dependencies
-        shell: pwsh
-        run: |
-          npm --prefix source/mcp-host ci
-          if ($LASTEXITCODE -ne 0) { throw 'Host dependency installation failed' }
-          npm --prefix source/desktop-app ci
-          if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed' }
+      - name: Install declared Desktop dependencies
+        working-directory: source/desktop-app
+        run: npm ci
 
       - name: Prepare the checked-out Windows native helper
         working-directory: source/desktop-app
@@ -81,231 +107,143 @@ jobs:
             throw 'The checked-out native helper was not produced'
           }
 
-      - name: Run the two focused source test files with a process watchdog
+      - name: Verify Windows diagnostic harness contracts
+        working-directory: source/desktop-app
         shell: pwsh
         run: |
-          $targets = @(
-            Get-Content validation/.validation/windows/focused-test-target.txt |
-              ForEach-Object { $_.Trim() } |
-              Where-Object { $_.Length -gt 0 }
-          )
-          $allowedTargets = @(
-            'tokenStore.markerOperationsDrain.test.ts',
-            'appService.acceptedPriorRecovery.regression.test.ts'
-          )
-          $selectedTargetKey = ($targets | Sort-Object) -join ','
-          $allowedTargetKey = ($allowedTargets | Sort-Object) -join ','
-          if ($targets.Count -ne 2 -or $selectedTargetKey -cne $allowedTargetKey) {
-            throw 'Focused Windows targets do not match the reviewed two-file selection'
+          $env:CODEX_SCRATCH_ROOT = $env:RUNNER_TEMP
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'evenfire') | Out-Null
+          node ../../validation/scripts/pr977/test-sanitize-windows-vitest-report.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Sanitizer contract tests failed' }
+          node ../../validation/scripts/pr977/test-windows-diagnostic-reporter.mjs `
+            (Get-Location).Path (Get-Location).Path
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic reporter contract tests failed' }
+          node ../../validation/scripts/pr977/test-run-vitest-with-watchdog.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'External watchdog contract tests failed' }
+          node ../../validation/scripts/pr977/test-verify-plugin-storage-prevhead-proof.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Previous-head proof verifier contract tests failed' }
+          node ../../validation/scripts/pr977/test-aggregate-windows-full-shards.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Windows shard aggregation contract tests failed' }
+
+      - name: Prepare assertion-level previous-head proof
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'pr977-focused') | Out-Null
+          node ../../validation/scripts/pr977/prepare-plugin-storage-prevhead-proof.mjs `
+            ../../previous-source 87864f04196240a29673038dedfb7d8bdc978353
+          if ($LASTEXITCODE -ne 0) { throw 'Previous-head proof preparation failed' }
+
+      - name: Verify regression test fails at the previous source assertion
+        id: previous_head_proof
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'pr977-focused'
+          $raw = Join-Path $artifactDirectory 'previous-head-raw.json'
+          $safe = Join-Path $artifactDirectory 'previous-head-proof.safe.json'
+          $progress = Join-Path $artifactDirectory 'previous-head-progress.jsonl'
+          $status = Join-Path $artifactDirectory 'previous-head-watchdog.json'
+          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
+          node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
+            --maximum-runtime-ms=120000 `
+            --no-progress-ms=90000 `
+            --progress=$progress `
+            --status=$status `
+            -- node node_modules/vitest/vitest.mjs run `
+              --testTimeout=30000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism `
+              '--reporter=../../validation/scripts/pr977/windows-diagnostic-reporter.mjs' `
+              "--outputFile.json=$raw" `
+              src/__tests__/r24m7-previous-head-plugin-audit.test.ts
+          $vitestExit = $LASTEXITCODE
+          if ($vitestExit -eq 0 -or -not (Test-Path -LiteralPath $raw -PathType Leaf)) {
+            throw 'The pinned defective source did not produce the required assertion failure'
+          }
+          node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $raw $safe
+          if ($LASTEXITCODE -ne 0) { throw 'Previous-head proof report was not safely sanitized' }
+          node ../../validation/scripts/pr977/verify-plugin-storage-prevhead-proof.mjs $safe
+          if ($LASTEXITCODE -ne 0) { throw 'Previous-head proof failed outside the intended assertion' }
+
+      - name: Remove temporary previous-head test overlay
+        if: always()
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath `
+            'src/__tests__/r24m7-previous-head-plugin-audit.test.ts', `
+            'src/__tests__/r24m7-previous-head-pluginAuditLog.ts', `
+            'src/__tests__/r24m7-previous-head-pluginConsentStore.ts' `
+            -Force -ErrorAction SilentlyContinue
+
+      - name: Run focused Windows tests with external watchdog
+        id: focused
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'pr977-focused'
+          New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+          $progress = Join-Path $artifactDirectory 'progress.jsonl'
+          $status = Join-Path $artifactDirectory 'watchdog-status.json'
+          $raw = Join-Path $artifactDirectory 'vitest-raw.json'
+          $safe = Join-Path $artifactDirectory 'focused-report.json'
+          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
+          node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
+            --maximum-runtime-ms=480000 `
+            --no-progress-ms=180000 `
+            --progress=$progress `
+            --status=$status `
+            -- node node_modules/vitest/vitest.mjs run `
+              --testTimeout=30000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism `
+              "--reporter=../../validation/scripts/pr977/windows-diagnostic-reporter.mjs" `
+              "--outputFile.json=$raw" `
+              src/__tests__/appService.directoryDiscoveryBinding.test.ts `
+              src/__tests__/appService.nullableRepairVerification.regression.test.ts `
+              src/__tests__/appService.rpc.test.ts `
+              src/__tests__/tokenStore.encryptedGuards.test.ts `
+              src/__tests__/tokenStore.fallbackRetirement.regression.test.ts `
+              src/__tests__/pluginAuditLog.test.ts `
+              src/__tests__/pluginConsentStore.test.ts `
+              src/__tests__/pluginStorageWindowsAcl.native.test.ts `
+              src/__tests__/pluginStorageWindowsAcl.contract.test.ts `
+              ui/src/hooks/__tests__/useAppController.desktopEnvironmentHandoff.test.tsx `
+              test/__tests__/gfsDragAndDropGate.test.ts
+          $runnerExit = $LASTEXITCODE
+          if (Test-Path -LiteralPath $raw -PathType Leaf) {
+            node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $raw $safe
+            $sanitizeExit = $LASTEXITCODE
+            if ($sanitizeExit -eq 0 -and (Test-Path -LiteralPath $safe -PathType Leaf)) {
+              node ../../validation/scripts/pr977/verify-focused-windows-report.mjs `
+                $safe ../../validation/.validation/windows/focused-test-target.txt
+              $verifyExit = $LASTEXITCODE
+            } else { $verifyExit = 1 }
+          } else {
+            $sanitizeExit = 1
+            $verifyExit = 1
+          }
+          if ($runnerExit -ne 0 -or $sanitizeExit -ne 0 -or $verifyExit -ne 0) {
+            throw 'Focused Windows verification did not satisfy the exact-source result contract'
           }
 
-          $report = Join-Path $env:RUNNER_TEMP 'focused-report.json'
-          $metaPath = Join-Path $env:RUNNER_TEMP 'focused-meta.json'
-          $phaseFile = Join-Path $env:RUNNER_TEMP 'focused-phases.txt'
-          $node = (Get-Command node).Source
-          $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
-          $deadlineSeconds = 150
-          $started = [DateTime]::UtcNow
-          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-          $startInfo.FileName = $node
-          $startInfo.WorkingDirectory = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app'
-          $startInfo.UseShellExecute = $false
-          $startInfo.RedirectStandardOutput = $true
-          $startInfo.RedirectStandardError = $true
-          $sourceTestDirectory = Join-Path $startInfo.WorkingDirectory 'src'
-          $sourceTestDirectory = Join-Path $sourceTestDirectory '__tests__'
-          $sourceTestPaths = @()
-          $sourceTestBlobs = @()
-          foreach ($target in $targets) {
-            $sourceTestPath = Join-Path $sourceTestDirectory $target
-            if (-not (Test-Path -LiteralPath $sourceTestPath -PathType Leaf)) {
-              [ordered]@{
-                exitCode = $null
-                watchdogExpired = $false
-                elapsedSeconds = 0
-                sourceCheckoutExists = Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'source') -PathType Container
-                desktopPackageExists = Test-Path -LiteralPath $startInfo.WorkingDirectory -PathType Container
-                testDirectoryExists = Test-Path -LiteralPath $sourceTestDirectory -PathType Container
-                sourceTestFileExists = $false
-                testFiles = $targets
-                failureClass = 'source-test-not-found'
-              } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
-              throw 'A selected source test file is absent'
-            }
-            $sourceTestPaths += $sourceTestPath
-            $sourceRelativePath = 'desktop-app/src/__tests__/' + $target
-            $expectedSourceTestBlob = (git -C source rev-parse ("{0}:{1}" -f $env:PR977_SOURCE_SHA, $sourceRelativePath)).Trim()
-            if ($LASTEXITCODE -ne 0) { throw 'A pinned source test blob could not be resolved' }
-            $actualSourceTestBlob = (git -C source hash-object --path=$sourceRelativePath -- $sourceTestPath).Trim()
-            if ($LASTEXITCODE -ne 0 -or $actualSourceTestBlob -ne $expectedSourceTestBlob) {
-              [ordered]@{
-                exitCode = $null
-                watchdogExpired = $false
-                elapsedSeconds = 0
-                sourceTestFileExists = $true
-                sourceTestBlobMatchesPin = $false
-                testFiles = $targets
-                failureClass = 'source-test-mismatch'
-              } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
-              throw 'A selected source test does not match the pinned commit blob'
-            }
-            $sourceTestBlobs += [ordered]@{ file = $target; gitBlob = $expectedSourceTestBlob }
-          }
-          $sourceCheckoutPath = Join-Path $env:GITHUB_WORKSPACE 'source'
-          $sourceSrcDirectory = Join-Path $startInfo.WorkingDirectory 'src'
-          $sourceItems = @($sourceCheckoutPath, $startInfo.WorkingDirectory, $sourceSrcDirectory, $sourceTestDirectory) + $sourceTestPaths
-          foreach ($sourceItemPath in $sourceItems) {
-            $sourceItem = Get-Item -LiteralPath $sourceItemPath -Force
-            if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-              throw 'The pinned source test path contains a reparse point'
-            }
-          }
-          $testOverlay = 'none'
-          $sourceTestSha256 = $null
-          $overlayTestSha256 = $null
-          if ($targets.Count -eq 1 -and $targets[0] -eq 'appService.passwordLoginRollback.regression.test.ts') {
-            $target = $targets[0]
-            Set-Content -LiteralPath $phaseFile -Value '' -Encoding ascii
-            $overlayText = node validation/scripts/pr977/instrument-windows-password-test.mjs $sourceTestPath
-            if ($LASTEXITCODE -ne 0) { throw 'Password test diagnostic instrumentation failed' }
-            $overlay = $overlayText | ConvertFrom-Json
-            if ($overlay.mode -ne 'diagnostic-markers-only' -or $overlay.markerCount -ne 70) {
-              throw 'Password test instrumentation did not match its reviewed contract'
-            }
-            $testOverlay = $overlay.mode
-            $sourceTestSha256 = $overlay.sourceSha256
-            $overlayTestSha256 = $overlay.overlayTestSha256
-            $env:PR977_PHASE_FILE = $phaseFile
-          }
-          foreach ($argument in @(
-            $vitest, 'run', '--maxWorkers=1', '--no-file-parallelism',
-            '--reporter=json', ('--outputFile.json=' + $report)
-          )) {
-            [void]$startInfo.ArgumentList.Add($argument)
-          }
-          foreach ($sourceTestPath in $sourceTestPaths) {
-            [void]$startInfo.ArgumentList.Add($sourceTestPath)
-          }
-          if ($targets.Count -eq 1 -and $targets[0] -eq 'appService.passwordLoginRollback.regression.test.ts') {
-            [void]$startInfo.ArgumentList.Add(
-              '--testNamePattern=restores the accepted prior source when candidate preparation fails after publication'
-            )
-          }
-          $process = [System.Diagnostics.Process]::new()
-          $process.StartInfo = $startInfo
-          if (-not $process.Start()) { throw 'The focused Vitest process did not start' }
-          $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-          $stderrTask = $process.StandardError.ReadToEndAsync()
-          $watchdogExpired = $false
-          $deadline = $started.AddSeconds($deadlineSeconds)
-          while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-            Start-Sleep -Seconds 2
-            $process.Refresh()
-          }
-          if (-not $process.HasExited) {
-            $watchdogExpired = $true
-            Write-Output 'The external watchdog expired; terminating only the focused Vitest process tree.'
-            & taskkill.exe /PID $process.Id /T /F *> $null
-            $process.WaitForExit()
-          }
-          $process.WaitForExit()
-          $stdoutText = $stdoutTask.GetAwaiter().GetResult()
-          $stderrText = $stderrTask.GetAwaiter().GetResult()
-          $combinedText = $stdoutText + "`n" + $stderrText
-          $allowedProgressMarkers = @(
-            'beforeEach-start', 'module-reset-complete', 'temp-directory-ready',
-            'app-service-import-start', 'app-service-import-complete', 'beforeEach-complete',
-            'afterEach-start', 'afterEach-unstub-complete', 'afterEach-mocks-complete',
-            'afterEach-directory-remove-start', 'afterEach-directory-remove-complete',
-            'afterEach-env-restore-complete', 'afterEach-fixture-clear-complete',
-            'afterEach-modules-reset-complete', 'afterEach-complete',
-            'fetch-request-start', 'password-login-http-start',
-            'password-login-http-response', 'me-http-start', 'me-http-response',
-            'credential-write-start', 'credential-write-complete',
-            'pending-logout-start', 'pending-logout-settled',
-            'accepted-login-start', 'accepted-login-settled',
-            'acceptance-transaction-start', 'acceptance-transaction-settled',
-            'login-persistence-start', 'login-persistence-settled',
-            'test-1-start', 'test-2-start',
-            'test-3-start', 'test-4-start', 'test-5-start', 'test-1-complete',
-            'test-2-complete', 'test-3-complete', 'test-4-complete', 'test-5-complete',
-            'password-a-start',
-            'password-a-complete', 'authority-before-start', 'authority-before-complete',
-            'password-b-start', 'password-b-complete', 'authority-after-start',
-            'authority-after-complete', 'restart-initialize-start',
-            'restart-initialize-complete', 'test-1-complete',
-            'transaction-reconcile-start', 'transaction-reconcile-end',
-            'transaction-plan-start', 'transaction-plan-end',
-            'transaction-begin-start', 'transaction-begin-end',
-            'transaction-prior-source-start', 'transaction-prior-source-end',
-            'transaction-publish-verify-start', 'transaction-publish-verify-end',
-            'transaction-execute-start', 'transaction-execute-end',
-            'acl-powershell-start', 'acl-powershell-fast',
-            'acl-powershell-slow', 'acl-powershell-timeout',
-            'fileops-powershell-start', 'fileops-powershell-fast',
-            'fileops-powershell-slow', 'fileops-powershell-timeout'
-          )
-          $lastProgressMarker = 'none'
-          $phaseLines = @()
-          if (Test-Path -LiteralPath $phaseFile -PathType Leaf) {
-            foreach ($line in (Get-Content -LiteralPath $phaseFile)) {
-              if ($line -in $allowedProgressMarkers) {
-                $lastProgressMarker = $line
-                $phaseLines += $line
-              }
-            }
-          }
-          $completedTestCount = @($phaseLines | Where-Object { $_ -match '^test-[1-5]-complete$' }).Count
-          $failureClass = if ($watchdogExpired) { 'watchdog-expired' }
-            elseif ($process.ExitCode -eq 0) { 'none' }
-            elseif ($combinedText -match 'No test files found') { 'no-test-files' }
-            elseif ($combinedText -match 'Failed to load config') { 'config-load' }
-            elseif ($combinedText -match 'Unknown option') { 'invalid-option' }
-            elseif ($combinedText -match 'AssertionError|Test Files\s+[0-9]+ failed') {
-              'test-failure'
-            } else { 'unclassified-process-failure' }
-          [ordered]@{
-            exitCode = if ($watchdogExpired) { $null } else { $process.ExitCode }
-            watchdogExpired = $watchdogExpired
-            elapsedSeconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 1)
-            reportPresent = Test-Path -LiteralPath $report -PathType Leaf
-            reportBytes = if (Test-Path -LiteralPath $report -PathType Leaf) {
-              (Get-Item -LiteralPath $report).Length
-            } else { 0 }
-            stdoutBytes = [Text.Encoding]::UTF8.GetByteCount($stdoutText)
-            stderrBytes = [Text.Encoding]::UTF8.GetByteCount($stderrText)
-            sourceTestFileExists = $true
-            sourceTestBlobMatchesPin = $true
-            sourceTestGitBlob = if ($sourceTestBlobs.Count -eq 1) { $sourceTestBlobs[0].gitBlob } else { $null }
-            sourceTestBlobs = @($sourceTestBlobs)
-            testFiles = @($targets)
-            phaseMarkerCount = if (Test-Path -LiteralPath $phaseFile -PathType Leaf) {
-              $phaseLines.Count
-            } else { 0 }
-            phaseMarkers = @($phaseLines)
-            diagnosticScope = if ($targets.Count -gt 1) { 'two-focused-files' }
-              elseif ($targets[0] -eq 'appService.passwordLoginRollback.regression.test.ts') {
-              'password-login-test-1-only'
-            } else { 'full-file' }
-            completedTestCount = $completedTestCount
-            testOverlay = $testOverlay
-            sourceTestSha256 = $sourceTestSha256
-            overlayTestSha256 = $overlayTestSha256
-            lastProgressMarker = $lastProgressMarker
-            failureClass = $failureClass
-          } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
-          $env:PR977_AUTH_TEST_FILES = $targets -join ','
-          node validation/scripts/pr977/sanitize-focused-windows-test.mjs $report $metaPath `
-            (Join-Path $env:RUNNER_TEMP 'focused-result.safe.json')
-          if ($LASTEXITCODE -ne 0) { throw 'The focused Windows source test did not pass its result contract' }
-
-      - name: Preserve sanitized focused Windows result
+      - name: Preserve focused reports and incremental progress
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pr977-windows-focused-${{ github.run_id }}
+          name: pr977-focused-windows-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/focused-result.safe.json
-            ${{ runner.temp }}/focused-meta.json
+            ${{ runner.temp }}/pr977-focused/focused-report.json
+            ${{ runner.temp }}/pr977-focused/progress.jsonl
+            ${{ runner.temp }}/pr977-focused/watchdog-status.json
+            ${{ runner.temp }}/pr977-focused/previous-head-proof.safe.json
+            ${{ runner.temp }}/pr977-focused/previous-head-progress.jsonl
+            ${{ runner.temp }}/pr977-focused/previous-head-watchdog.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Enforce focused result
+        if: always()
+        shell: pwsh
+        env:
+          FOCUSED_RESULT: ${{ steps.focused.outcome }}
+        run: |
+          if ($env:FOCUSED_RESULT -ne 'success') { throw 'Focused Windows verification failed' }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -12,9 +12,15 @@ if (
   throw new Error('Expected absolute dependency, application Desktop and scratch roots')
 }
 const here = path.dirname(fileURLToPath(import.meta.url))
-const directory = mkdtempSync(path.join(scratchRoot, 'evenfire/pr977-reporter-proof-'))
+const scratchDirectory = path.join(scratchRoot, 'evenfire')
+mkdirSync(scratchDirectory, { recursive: true })
+const directory = mkdtempSync(path.join(scratchDirectory, 'pr977-reporter-proof-'))
 try {
-  symlinkSync(path.join(dependencyRoot, 'node_modules'), path.join(directory, 'node_modules'))
+  symlinkSync(
+    path.join(dependencyRoot, 'node_modules'),
+    path.join(directory, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir'
+  )
   writeFileSync(
     path.join(directory, 'vitest.config.mjs'),
     `export default { test: { include: ['*.test.ts'], fileParallelism: false } }\n`
@@ -56,6 +62,10 @@ import { describe, it, expect } from 'vitest'
 describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => { expect(task.timeout).toBe(150000); expect(1).toBe(1) }) }) })
 `
   )
+  writeFileSync(
+    path.join(directory, 'collection.test.ts'),
+    `import './missing-collection-module.js'\n`
+  )
   const vitest = path.join(dependencyRoot, 'node_modules/vitest/vitest.mjs')
   const outputs = {}
   for (const [name, reporter] of [
@@ -63,6 +73,7 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
     ['enriched', path.join(here, 'windows-diagnostic-reporter.mjs')],
   ]) {
     const output = path.join(directory, `${name}.json`)
+    const progress = path.join(directory, `${name}-progress.jsonl`)
     const processResult = spawnSync(
       process.execPath,
       [
@@ -78,7 +89,11 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
       {
         encoding: 'utf8',
         timeout: 30000,
-        env: { ...process.env, PR977_DESKTOP_ROOT: dependencyRoot },
+        env: {
+          ...process.env,
+          PR977_DESKTOP_ROOT: dependencyRoot,
+          PR977_PROGRESS_PATH: name === 'enriched' ? progress : '',
+        },
       }
     )
     assert.equal(processResult.status, 1, 'Controlled failed assertions must keep Vitest red')
@@ -121,7 +136,7 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
   const report = JSON.parse(readFileSync(safe, 'utf8'))
   assert.equal(report.success, false)
   assert.equal(report.counterConsistency.valid, true)
-  assert.equal(report.numTestFiles, 2)
+  assert.equal(report.numTestFiles, 3)
   const cases = new Map(
     report.testResults.flatMap(file => file.assertionResults).map(test => [test.title, test])
   )
@@ -135,7 +150,27 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
   assert.equal(cases.get('fixture teardown').failure.phase, 'test-or-teardown')
   assert.deepEqual(cases.get('fixture teardown').failure.failedHooks, ['afterEach'])
   assert.equal(cases.get('assertion mismatch').failure.category, 'assertion')
+  const collection = report.testResults.find(file => file.name.endsWith('/collection.test.ts'))
+  assert.equal(collection.status, 'failed')
+  assert.equal(collection.failure.phase, 'collection')
+  assert.equal(collection.failure.category, 'module-resolution')
+  assert.equal(collection.failure.code, 'ERR_MODULE_NOT_FOUND')
   assert.doesNotMatch(JSON.stringify(report), /private-value|teardown details|Users|C:\\\\/)
+  const progress = readFileSync(path.join(directory, 'enriched-progress.jsonl'), 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .map(line => JSON.parse(line))
+  assert.ok(progress.some(event => event.event === 'file-started'))
+  assert.ok(progress.some(event => event.event === 'case-started'))
+  assert.ok(
+    progress.some(event => event.event === 'hook-started' && event.activeHook === 'beforeEach')
+  )
+  assert.ok(progress.some(event => event.event === 'hook-completed'))
+  assert.ok(progress.some(event => event.event === 'case-completed'))
+  assert.ok(progress.some(event => event.event === 'file-completed'))
+  assert.ok(
+    progress.every(event => !/Users|C:\\\\|synthetic-private-value/.test(JSON.stringify(event)))
+  )
   process.stdout.write(
     'Actual Vitest nested-suite, original-message, verifier, timeout, setup, teardown and assertion proofs passed.\n'
   )

@@ -78,6 +78,12 @@ const allowedWindowsSkips = new Map([
       'repair refuses a real nonregular FIFO before decrypting bytes',
     ]),
   ],
+  [
+    'tokenStore.fallbackRetirement.regression.test.ts',
+    new Set(['requires a durable directory sync on retry after a prior unlink succeeded']),
+  ],
+  ['pluginAuditLog.test.ts', new Set(['writes the file with POSIX mode 0600'])],
+  ['pluginConsentStore.test.ts', new Set(['writes the file with POSIX mode 0600'])],
 ])
 const expectedSkipKeys = new Set(
   [...allowedWindowsSkips].flatMap(([file, titles]) =>

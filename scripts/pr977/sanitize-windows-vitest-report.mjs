@@ -33,6 +33,8 @@ const allowedSkips = new Set([
   'rejects an actual nonregular FIFO without blocking',
   'discard refuses a real nonregular FIFO before decrypting bytes',
   'repair refuses a real nonregular FIFO before decrypting bytes',
+  'requires a durable directory sync on retry after a prior unlink succeeded',
+  'writes the file with POSIX mode 0600',
 ])
 const safeTitle = value =>
   String(value ?? 'unknown case')
@@ -65,6 +67,12 @@ const errorCodes = [
   'ENOTEMPTY',
   'EPERM',
   'ETIMEDOUT',
+  'ERR_MODULE_NOT_FOUND',
+  'ERR_UNKNOWN_FILE_EXTENSION',
+  'ERR_REQUIRE_ESM',
+  'ERR_PACKAGE_PATH_NOT_EXPORTED',
+  'ERR_INVALID_MODULE_SPECIFIER',
+  'ERR_UNSUPPORTED_DIR_IMPORT',
 ]
 const errorTypes = [
   'PrivilegeNotHeldException',
@@ -74,6 +82,9 @@ const errorTypes = [
   'FileNotFoundException',
   'Win32Exception',
   'AssertionError',
+  'Error',
+  'SyntaxError',
+  'ModuleNotFoundError',
   'TimeoutError',
   'TypeError',
   'ReferenceError',
@@ -91,27 +102,36 @@ const classifyFailure = (message, reportedPhase) => {
       ? 'native-fixture'
       : structured?.source === 'verifier'
         ? 'native-verifier'
-        : /(?:test|hook) timed out|timeout of .* exceeded|ETIMEDOUT/i.test(message)
-          ? 'timeout'
-          : /STACK_TRACE_ERROR/.test(message) && !/timed out/i.test(message)
-            ? 'reporter-message-unavailable'
-            : /expected \[Function\] to throw(?: an error)?/i.test(message)
-              ? 'expected-rejection-not-observed'
-              : /expected .*to throw/i.test(message)
-                ? 'expected-rejection-mismatch'
-                : errorType === 'PrivilegeNotHeldException'
-                  ? 'privilege-not-held'
-                  : errorType === 'PlatformNotSupportedException'
-                    ? 'platform-api-unavailable'
-                    : code === 'EACCES' ||
-                        code === 'EPERM' ||
-                        errorType === 'UnauthorizedAccessException'
-                      ? 'access-denied'
-                      : code === 'ETIMEDOUT' || errorType === 'TimeoutError'
-                        ? 'timeout'
-                        : errorType === 'AssertionError'
-                          ? 'assertion'
-                          : 'unclassified'
+        : [
+              'ERR_MODULE_NOT_FOUND',
+              'ERR_UNKNOWN_FILE_EXTENSION',
+              'ERR_REQUIRE_ESM',
+              'ERR_PACKAGE_PATH_NOT_EXPORTED',
+              'ERR_INVALID_MODULE_SPECIFIER',
+              'ERR_UNSUPPORTED_DIR_IMPORT',
+            ].some(value => message.includes(value))
+          ? 'module-resolution'
+          : /(?:test|hook) timed out|timeout of .* exceeded|ETIMEDOUT/i.test(message)
+            ? 'timeout'
+            : /STACK_TRACE_ERROR/.test(message) && !/timed out/i.test(message)
+              ? 'reporter-message-unavailable'
+              : /expected \[Function\] to throw(?: an error)?/i.test(message)
+                ? 'expected-rejection-not-observed'
+                : /expected .*to throw/i.test(message)
+                  ? 'expected-rejection-mismatch'
+                  : errorType === 'PrivilegeNotHeldException'
+                    ? 'privilege-not-held'
+                    : errorType === 'PlatformNotSupportedException'
+                      ? 'platform-api-unavailable'
+                      : code === 'EACCES' ||
+                          code === 'EPERM' ||
+                          errorType === 'UnauthorizedAccessException'
+                        ? 'access-denied'
+                        : code === 'ETIMEDOUT' || errorType === 'TimeoutError'
+                          ? 'timeout'
+                          : errorType === 'AssertionError'
+                            ? 'assertion'
+                            : 'unclassified'
   const match = message.match(/([^\\/\s()]+\.test\.[cm]?[jt]sx?):(\d+):(\d+)/)
   return {
     category,
@@ -353,14 +373,24 @@ function failuresFor(entry) {
     )
       throw new Error('Malformed diagnostic errors')
     if (entry.diagnosticErrors.length > 0)
-      return entry.diagnosticErrors.map(error => ({
-        ...classifyFailure(`${error.message}\n${error.stack ?? ''}`, error.phase),
-        failedHooks: Array.isArray(error.failedHooks)
-          ? error.failedHooks.filter(name =>
-              ['beforeAll', 'beforeEach', 'afterEach', 'afterAll'].includes(name)
-            )
-          : [],
-      }))
+      return entry.diagnosticErrors.map(error => {
+        const failure = classifyFailure(
+          `${error.name ?? ''} ${error.code ?? ''} ${error.message}\n${error.stack ?? ''}`,
+          error.phase
+        )
+        const safeCode = typeof error.code === 'string' && errorCodes.includes(error.code)
+        const safeName = errorTypes.includes(String(error.name))
+        return {
+          ...failure,
+          ...(safeCode ? { code: error.code } : {}),
+          ...(safeName ? { errorType: error.name } : {}),
+          failedHooks: Array.isArray(error.failedHooks)
+            ? error.failedHooks.filter(name =>
+                ['beforeAll', 'beforeEach', 'afterEach', 'afterAll'].includes(name)
+              )
+            : [],
+        }
+      })
   }
   if (
     entry.failureMessages !== undefined &&

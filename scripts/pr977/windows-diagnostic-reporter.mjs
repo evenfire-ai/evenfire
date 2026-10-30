@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -8,13 +9,59 @@ if (!desktopRoot || !path.isAbsolute(desktopRoot)) {
 const { JsonReporter } = await import(
   pathToFileURL(path.join(desktopRoot, 'node_modules/vitest/dist/reporters.js')).href
 )
+const progressPath = process.env.PR977_PROGRESS_PATH
+const progressStartedAt = Date.now()
+
+function safeLabel(value, limit = 180) {
+  return String(value ?? '')
+    .replace(/[\r\n]/g, ' ')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer <redacted>')
+    .replace(/\b[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_.-]{20,}\b/g, '<token>')
+    .replace(/\b[A-Za-z0-9_=-]{32,}\b/g, '<value>')
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>')
+    .replace(/(?:[A-Za-z]:[\\/]|\/Users\/|\/home\/)[^\s:]+/g, '<path>')
+    .slice(0, limit)
+}
 
 // Keep Vitest's counters, statuses and file inventory intact. Its JSON reporter uses
 // error.stack OR error.message, losing the timeout message when the stack is STACK_TRACE_ERROR.
 export default class WindowsDiagnosticReporter extends JsonReporter {
   taskFiles = new Map()
+  startedFiles = new Set()
+  completedFiles = new Set()
+  completedCases = 0
+  passedCases = 0
+  failedCases = 0
+  skippedCases = 0
+  active = { file: null, testCase: null, hook: null }
+  lastCompletedOperation = 'run-created'
 
-  diagnosticErrors(task, fallbackPhase) {
+  progress(event, fields = {}) {
+    if (!progressPath) return
+    const record = {
+      elapsedMs: Date.now() - progressStartedAt,
+      event,
+      activeFile: this.active.file,
+      activeCase: this.active.testCase,
+      activeHook: this.active.hook,
+      lastCompletedOperation: this.lastCompletedOperation,
+      filesStarted: this.startedFiles.size,
+      filesCompleted: this.completedFiles.size,
+      casesCompleted: this.completedCases,
+      passed: this.passedCases,
+      failed: this.failedCases,
+      skipped: this.skippedCases,
+      ...fields,
+    }
+    appendFileSync(progressPath, `${JSON.stringify(record)}\n`, { encoding: 'utf8' })
+  }
+
+  fileFor(entity) {
+    const file = entity?.filepath ?? entity?.module?.filepath
+    return file ? path.basename(String(file)) : null
+  }
+
+  diagnosticErrors(task, fallbackPhase, moduleErrors = []) {
     const hooks = task.result?.hooks ?? {}
     const failedHooks = ['beforeAll', 'beforeEach', 'afterEach', 'afterAll'].filter(
       name => hooks[name] === 'run'
@@ -30,33 +77,114 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
       : teardown
         ? 'test-or-teardown'
         : fallbackPhase
-    return (task.result?.errors ?? []).map(error => ({
+    return [...(task.result?.errors ?? []), ...moduleErrors].map(error => ({
       message: error.message,
       stack: error.stack,
+      name: error.name,
+      code: error.code,
       phase,
       failedHooks,
     }))
   }
 
-  async onTestRunEnd(modules) {
-    for (const module of modules) this.taskFiles.set(module.task.filepath, module.task)
-    return super.onTestRunEnd(modules)
+  onTestModuleQueued(module) {
+    this.active.file = this.fileFor(module.task)
+    this.active.testCase = null
+    this.active.hook = null
+    this.progress('file-queued')
+    return super.onTestModuleQueued?.(module)
+  }
+
+  onTestModuleStart(module) {
+    const file = this.fileFor(module.task)
+    this.active.file = file
+    this.startedFiles.add(file)
+    this.active.testCase = null
+    this.active.hook = null
+    this.progress('file-started')
+    return super.onTestModuleStart?.(module)
+  }
+
+  onTestCaseReady(test) {
+    this.active.file = this.fileFor(test)
+    this.active.testCase = safeLabel(test.name)
+    this.active.hook = null
+    this.progress('case-started')
+    return super.onTestCaseReady?.(test)
+  }
+
+  onHookStart(hook) {
+    this.active.file = this.fileFor(hook.entity)
+    this.active.testCase = hook.entity?.type === 'test' ? safeLabel(hook.entity.name) : null
+    this.active.hook = ['beforeAll', 'beforeEach', 'afterEach', 'afterAll'].includes(hook.name)
+      ? hook.name
+      : 'unknown-hook'
+    this.progress('hook-started')
+    return super.onHookStart?.(hook)
+  }
+
+  onHookEnd(hook) {
+    this.active.file = this.fileFor(hook.entity)
+    this.active.hook = null
+    this.lastCompletedOperation = `${hook.name}-completed`
+    this.progress('hook-completed')
+    return super.onHookEnd?.(hook)
+  }
+
+  onTestCaseResult(test) {
+    const result = test.result?.()
+    this.completedCases += 1
+    if (result?.state === 'passed') this.passedCases += 1
+    else if (result?.state === 'failed') this.failedCases += 1
+    else this.skippedCases += 1
+    this.active.file = this.fileFor(test)
+    this.active.testCase = null
+    this.active.hook = null
+    this.lastCompletedOperation = 'case-completed'
+    this.progress('case-completed', { caseStatus: result?.state ?? 'unknown' })
+    return super.onTestCaseResult?.(test)
+  }
+
+  onTestModuleEnd(module) {
+    const file = this.fileFor(module.task)
+    this.completedFiles.add(file)
+    this.active.file = file
+    this.active.testCase = null
+    this.active.hook = null
+    this.lastCompletedOperation = 'file-completed'
+    this.progress('file-completed')
+    return super.onTestModuleEnd?.(module)
+  }
+
+  async onTestRunEnd(modules, unhandledErrors, reason) {
+    for (const module of modules) {
+      this.taskFiles.set(module.task.filepath, {
+        task: module.task,
+        errors: typeof module.errors === 'function' ? module.errors() : [],
+      })
+    }
+    this.lastCompletedOperation = 'run-completed'
+    this.progress('run-completed', { runReason: reason ?? 'unknown' })
+    await super.onTestRunEnd(modules, unhandledErrors, reason)
   }
 
   async writeReport(json) {
     const report = JSON.parse(json)
     const tests = task => (task.type === 'test' ? [task] : (task.tasks ?? []).flatMap(tests))
     for (const file of report.testResults) {
-      const task = this.taskFiles.get(file.name)
-      if (!task) throw new Error('Diagnostic file provenance mismatch')
+      const saved = this.taskFiles.get(file.name)
+      if (!saved) throw new Error('Diagnostic file provenance mismatch')
+      const { task, errors } = saved
       const cases = tests(task)
       if (cases.length !== file.assertionResults.length) {
         throw new Error('Diagnostic assertion inventory mismatch')
       }
-      file.diagnosticErrors = this.diagnosticErrors(task, 'collection')
+      file.diagnosticErrors = this.diagnosticErrors(task, 'collection', errors)
       for (const [index, assertion] of file.assertionResults.entries()) {
         const test = cases[index]
-        if (test.name !== assertion.title) throw new Error('Diagnostic case provenance mismatch')
+        if (test && test.name !== assertion.title)
+          throw new Error('Diagnostic case provenance mismatch')
+        if (!test) continue
         assertion.diagnosticErrors = this.diagnosticErrors(test, 'test')
       }
     }

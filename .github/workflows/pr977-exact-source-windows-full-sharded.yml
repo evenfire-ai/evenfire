@@ -11,21 +11,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr977-windows-full-sharded-cee0e58a-${{ github.ref }}
+  group: pr977-windows-full-sharded-r24m7-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: cee0e58a586761459ab259cfb575901ef4bb77db
+  PR977_SOURCE_SHA: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
 
 jobs:
   desktop-windows-build:
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 20
     steps:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: cee0e58a586761459ab259cfb575901ef4bb77db
+          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -90,12 +90,12 @@ jobs:
 
   native-windows-authority:
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 22
     steps:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: cee0e58a586761459ab259cfb575901ef4bb77db
+          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -146,8 +146,18 @@ jobs:
           $reporter = Join-Path $env:GITHUB_WORKSPACE 'validation/scripts/pr977/windows-diagnostic-reporter.mjs'
           $rawReportPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority-raw.json'
           $reportPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority.json'
-          $logPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority.log'
-          npm test -- 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' --testTimeout=150000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism "--reporter=$reporter" "--outputFile.json=$rawReportPath" *> $logPath
+          $progressPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority-progress.jsonl'
+          $statusPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority-watchdog.json'
+          node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
+            --maximum-runtime-ms=1020000 `
+            --no-progress-ms=180000 `
+            "--progress=$progressPath" `
+            "--status=$statusPath" `
+            -- node node_modules/vitest/vitest.mjs run `
+              'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' `
+              'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' `
+              --testTimeout=150000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism `
+              "--reporter=$reporter" "--outputFile.json=$rawReportPath"
           $testExit = $LASTEXITCODE
           Write-Output "Native Windows ACL/durability command exit code: $testExit"
           if (-not (Test-Path $rawReportPath)) { throw 'Native Windows suites did not produce a JSON report.' }
@@ -170,16 +180,19 @@ jobs:
           if ($testExit -ne 0 -or -not $report.success -or $report.numTestFiles -ne 2 -or $report.testResults.Count -ne 2 -or -not $nativeNamesMatch -or $report.numTotalTests -le 0 -or $report.numFailedTests -ne 0 -or $report.numPendingTests -ne 0) {
             throw 'Native Windows ACL or durability validation failed.'
           }
-          Remove-Item -LiteralPath $rawReportPath, $logPath -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $rawReportPath -ErrorAction SilentlyContinue
 
       - name: Preserve native Windows report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pr977-windows-native-authority
-          path: ${{ runner.temp }}/native-windows-authority.json
-          if-no-files-found: error
-          retention-days: 1
+          path: |
+            ${{ runner.temp }}/native-windows-authority.json
+            ${{ runner.temp }}/native-windows-authority-progress.jsonl
+            ${{ runner.temp }}/native-windows-authority-watchdog.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Enforce native Windows result
         if: always()
@@ -192,7 +205,7 @@ jobs:
   desktop-windows-shard:
     needs: [desktop-windows-build, native-windows-authority]
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -204,7 +217,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: cee0e58a586761459ab259cfb575901ef4bb77db
+          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -262,32 +275,48 @@ jobs:
           EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
         run: |
           $env:PR977_DESKTOP_ROOT = (Get-Location).Path
-          $reporter = Join-Path $env:GITHUB_WORKSPACE 'validation/scripts/pr977/windows-diagnostic-reporter.mjs'
           $rawReportPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX-raw.json"
           $reportPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX.json"
-          $logPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX.log"
+          $progressPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX-progress.jsonl"
+          $statusPath = Join-Path $env:RUNNER_TEMP "shard-$env:PR977_SHARD_INDEX-watchdog.json"
           $shard = "$env:PR977_SHARD_INDEX/8"
-          npm test -- --exclude 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' --exclude 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' "--shard=$shard" "--reporter=$reporter" "--outputFile.json=$rawReportPath" *> $logPath
+          npm run prepare:windows-native
+          if ($LASTEXITCODE -ne 0) { throw "Native helper preparation failed for shard $shard" }
+          node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
+            --maximum-runtime-ms=1440000 `
+            --no-progress-ms=180000 `
+            "--progress=$progressPath" `
+            "--status=$statusPath" `
+            -- node node_modules/vitest/vitest.mjs run `
+              --exclude 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' `
+              --exclude 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' `
+              "--shard=$shard" --maxWorkers=1 --no-file-parallelism `
+              '--reporter=../../validation/scripts/pr977/windows-diagnostic-reporter.mjs' `
+              "--outputFile.json=$rawReportPath"
           $testExit = $LASTEXITCODE
           Write-Output "Full Desktop shard $shard command exit code: $testExit"
-          if (-not (Test-Path $rawReportPath)) { throw "Full Desktop shard report is missing: $shard" }
+          if (-not (Test-Path -LiteralPath $rawReportPath -PathType Leaf)) {
+            throw "Full Desktop shard report is missing: $shard"
+          }
           node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $rawReportPath $reportPath
           if ($LASTEXITCODE -ne 0) { throw "Full Desktop shard report could not be sanitized: $shard" }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           Write-Output "Shard ${shard}: files=$($report.numTestFiles) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
-          if ($testExit -ne 0 -or -not $report.success -or $report.numTestFiles -le 0 -or $report.numTotalTests -le 0) {
+          if ($testExit -ne 0 -or -not $report.success -or $report.numTestFiles -le 0 -or $report.numTotalTests -le 0 -or $report.numFailedTests -ne 0) {
             throw "Full Desktop shard failed or executed no tests: $shard"
           }
-          Remove-Item -LiteralPath $rawReportPath, $logPath -ErrorAction SilentlyContinue
 
       - name: Preserve shard test report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pr977-full-desktop-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/shard-${{ matrix.shard }}.json
+          path: |
+            ${{ runner.temp }}/shard-${{ matrix.shard }}.json
+            ${{ runner.temp }}/shard-${{ matrix.shard }}-progress.jsonl
+            ${{ runner.temp }}/shard-${{ matrix.shard }}-watchdog.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
       - name: Enforce shard result
         if: always()
@@ -301,12 +330,12 @@ jobs:
     if: always()
     needs: [desktop-windows-build, native-windows-authority, desktop-windows-shard]
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: cee0e58a586761459ab259cfb575901ef4bb77db
+          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -353,7 +382,12 @@ jobs:
       - name: Verify complete Windows suite coverage and aggregate results
         id: aggregate
         if: needs.native-windows-authority.result == 'success' && needs.desktop-windows-shard.result == 'success'
-        run: node validation/scripts/pr977/aggregate-windows-full-shards.mjs reports source/desktop-app ${{ env.PR977_SOURCE_SHA }} ${{ github.sha }} native-report/native-windows-authority.json
+        env:
+          CODEX_SCRATCH_ROOT: ${{ runner.temp }}
+        run: |
+          node validation/scripts/pr977/test-aggregate-windows-full-shards.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Windows aggregation contract fixtures failed' }
+          node validation/scripts/pr977/aggregate-windows-full-shards.mjs reports source/desktop-app ${{ env.PR977_SOURCE_SHA }} ${{ github.sha }} native-report/native-windows-authority.json
 
       - name: Enforce build and shard job results
         if: always()
