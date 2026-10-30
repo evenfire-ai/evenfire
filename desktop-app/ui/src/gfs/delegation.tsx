@@ -169,15 +169,7 @@ export function GfsDelegationPanel({
   }
 
   // A Leader without manage_acl (canDelegate=false) sees no controls.
-  if (!affordances.canDelegate) {
-    if (checkPending) {
-      return (
-        <p className="muted" role="status">
-          Checking permissions…
-        </p>
-      )
-    }
-    if (checkFailed) return null
+  if (permissionDenied) {
     return (
       <div className="da-gfs-delegation__empty" role="note">
         <strong>Read-only access</strong>
