@@ -134,9 +134,9 @@ describe('AppService.continueModelStep (#1044)', () => {
   })
 
   it.each([
-    { token: 'host_waking', bodyText: '{"code":"host_waking"}' },
-    { token: 'host_draining', bodyText: '{"code":"host_draining"}' },
-  ])('maps a 503 $token to the stable token and does not retry', async ({ token, bodyText }) => {
+    { code: 'host_waking', bodyText: '{"code":"host_waking"}' },
+    { code: 'host_draining', bodyText: '{"code":"host_draining"}' },
+  ])('maps a 503 $code to the stable error and does not retry', async ({ code, bodyText }) => {
     const { service, issueRpcTokenForHostRefs, rpcClient } = continueService()
     rpcClient.continueModelStep.mockRejectedValueOnce(
       new ApiError('Continue failed (503)', 503, bodyText)
@@ -144,7 +144,7 @@ describe('AppService.continueModelStep (#1044)', () => {
 
     await expect(
       service.continueModelStep('chatllm', 'agent-a', 'chat-1', CHECKPOINT_ID, 2)
-    ).rejects.toThrow(new RegExp(`^${token}:`))
+    ).rejects.toThrow(new RegExp(`^${code}:`))
 
     expect(rpcClient.continueModelStep).toHaveBeenCalledTimes(1)
     expect(issueRpcTokenForHostRefs).toHaveBeenCalledTimes(1)
