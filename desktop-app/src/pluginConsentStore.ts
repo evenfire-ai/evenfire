@@ -135,6 +135,7 @@ export class LocalConsentStore implements ConsentStore {
       const quarantine = `${file}.corrupt-${randomUUID()}`
       await fs.rename(file, quarantine)
       await this.privacy.recordRename(file, quarantine)
+      await this.privacy.verifyFile(quarantine)
       parsed = emptyFile()
     }
     this.cache.set(envKey, parsed)

@@ -14,6 +14,16 @@ const NATIVE_PHASE_VALUES = [
   'load-native-helper',
   'prepare-request',
   'verification',
+  'child-start',
+  'helper-load-start',
+  'helper-load-complete',
+  'request-prepare-start',
+  'request-prepare-complete',
+  'current-user-ready',
+  'inspect-start',
+  'inspect-complete',
+  'response-serialize-start',
+  'response-serialize-complete',
 ] as const
 const NATIVE_ERROR_TYPE_VALUES = [
   'ArgumentException',
@@ -47,24 +57,41 @@ const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $phase = 'load-native-helper'
+function Write-Phase([string]$name, [int]$ordinal = 0) {
+  if ($name -notmatch '^[a-z-]{1,40}$' -or $ordinal -lt 0 -or $ordinal -gt 64) { return }
+  $elapsedMs = [Math]::Min(60000, [Math]::Max(0, [int]$clock.ElapsedMilliseconds))
+  [Console]::Error.WriteLine("EVENFIRE_PLUGIN_ACL_PHASE=$name;ordinal=$ordinal;elapsedMs=$elapsedMs")
+  [Console]::Error.Flush()
+}
 try {
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  Write-Phase 'child-start'
   $assemblyPath = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_NATIVE_ASSEMBLY')
   if (-not $assemblyPath) { throw 'native-helper-path-missing' }
+  Write-Phase 'helper-load-start'
   Add-Type -Path $assemblyPath -ErrorAction Stop
+  Write-Phase 'helper-load-complete'
   $phase = 'prepare-request'
+  Write-Phase 'request-prepare-start'
   $payload = [Environment]::GetEnvironmentVariable('EVENFIRE_PLUGIN_STORAGE_ACL_REQUEST')
   if (-not $payload) { throw 'request-missing' }
   $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
+  Write-Phase 'request-prepare-complete'
   $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  Write-Phase 'current-user-ready'
   $allowed = @($currentSid, 'S-1-5-18', 'S-1-5-32-544')
   $creatorOwnerSid = 'S-1-3-0'
   $readMask = [uint32]0x00120089
   $writeMask = [uint32]0x00120116
   $relevantMask = [uint32]0x001F01FF
   $results = @()
+  $ordinal = 0
   foreach ($item in $request.items) {
+    $ordinal++
     $phase = 'inspect-object'
+    Write-Phase 'inspect-start' $ordinal
     $snapshot = [SessionAuthorityNative]::Inspect([string]$item.path)
+    Write-Phase 'inspect-complete' $ordinal
     $expected = [IO.Path]::GetFullPath([string]$item.path).TrimEnd('\')
     $actual = [IO.Path]::GetFullPath([string]$snapshot.FinalPath).TrimEnd('\')
     if ([string]::Compare($expected, $actual, $true) -ne 0 -or
@@ -106,7 +133,9 @@ try {
     }
   }
   $phase = 'verification'
+  Write-Phase 'response-serialize-start'
   [ordered]@{ ok = $true; items = $results } | ConvertTo-Json -Compress -Depth 5
+  Write-Phase 'response-serialize-complete'
   exit 0
 } catch {
   $operation = $_.Exception.Data['sessionAuthorityOperation']
@@ -177,6 +206,7 @@ export type PluginStorageNativeDiagnostic = {
   exitStatus?: number | null
   signal?: 'SIGABRT' | 'SIGBREAK' | 'SIGINT' | 'SIGKILL' | 'SIGTERM'
   nativePhase?: (typeof NATIVE_PHASE_VALUES)[number]
+  nativeOrdinal?: number
   nativeErrorType?: NativeErrorType
   hresult?: string
   nativeOperation?: string
@@ -310,6 +340,34 @@ function nativeDiagnostic(
     if (typeof fields.reason === 'string' && NATIVE_REASONS.has(fields.reason)) {
       diagnostic.nativeReason = fields.reason as NativeReason
     }
+  }
+  const stderr = typeof result.stderr === 'string' ? result.stderr : ''
+  const matches = [
+    ...stderr.matchAll(
+      /^EVENFIRE_PLUGIN_ACL_PHASE=([a-z-]{1,40});ordinal=(\d{1,2});elapsedMs=(\d{1,5})\r?$/gm
+    ),
+  ]
+  const lastPhase = matches.reverse().find(match => {
+    const ordinal = Number(match[2])
+    const phaseElapsedMs = Number(match[3])
+    return (
+      NATIVE_PHASES.has(match[1]!) &&
+      Number.isSafeInteger(ordinal) &&
+      ordinal >= 0 &&
+      ordinal <= 64 &&
+      Number.isSafeInteger(phaseElapsedMs) &&
+      phaseElapsedMs >= 0 &&
+      phaseElapsedMs <= 60_000
+    )
+  })
+  if (lastPhase) {
+    diagnostic.nativePhase = lastPhase[1] as PluginStorageNativeDiagnostic['nativePhase']
+    const ordinal = Number(lastPhase[2])
+    if (Number.isSafeInteger(ordinal) && ordinal > 0 && ordinal <= 64) {
+      diagnostic.nativeOrdinal = ordinal
+    }
+    const phaseElapsedMs = Number(lastPhase[3])
+    diagnostic.elapsedMs = Math.max(diagnostic.elapsedMs, phaseElapsedMs)
   }
   return diagnostic
 }
@@ -452,10 +510,10 @@ export function inspectWindowsPluginStoragePaths(
 }
 
 /**
- * Verify plugin storage directories and files once per object identity. A private parent and the
- * verified allowlist prevent unprivileged replacement or DACL changes. The current user, SYSTEM,
- * and Administrators are trusted to change their own DACLs. Cheap lstat identity checks detect a
- * changed object without launching PowerShell for every consent lookup or audit append.
+ * Verify plugin storage directories and files with fresh native evidence at each operation
+ * boundary. The verified map records only the source identity needed to validate a rename; it
+ * never skips inspection or authorizes a destination. The current user, SYSTEM, and Administrators
+ * remain trusted to change their own DACLs, so identity equality cannot establish fresh access.
  */
 export class PluginStoragePrivacyGuard {
   private readonly verified = new Map<
@@ -494,8 +552,11 @@ export class PluginStoragePrivacyGuard {
     if (!stats.isFile() || stats.isSymbolicLink()) {
       throw new PluginStoragePrivacyError('object-type-invalid')
     }
-    await this.verifyDirectory()
-    await this.verifyObjects([{ path: file, directory: false, requireInherited: true }])
+    await this.verifyObjects([
+      { path: path.dirname(this.baseDirectory), directory: true, requireInherited: false },
+      { path: this.baseDirectory, directory: true, requireInherited: true },
+      { path: file, directory: false, requireInherited: true },
+    ])
     return this.verified.get(file)?.identity
   }
 
@@ -517,10 +578,7 @@ export class PluginStoragePrivacyGuard {
       throw new PluginStoragePrivacyError('rename-identity-changed')
     }
     this.verified.delete(source)
-    this.verified.set(destination, {
-      identity: nodeIdentity(stats),
-      evidence: sourceRecord.evidence,
-    })
+    this.verified.delete(destination)
     return
   }
 
@@ -541,9 +599,6 @@ export class PluginStoragePrivacyGuard {
       if (stats.isSymbolicLink() || (check.directory ? !stats.isDirectory() : !stats.isFile())) {
         throw new PluginStoragePrivacyError('object-type-invalid')
       }
-      const cached = this.verified.get(check.path)
-      const identity = nodeIdentity(stats)
-      if (cached?.identity === identity) continue
       pending.push(check)
       pendingStats.push(stats)
     }
