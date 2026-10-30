@@ -1,7 +1,11 @@
 import {
+  GFS_RESOURCE_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
+  buildGfsResourceDeepLink,
   buildSandboxUiDeepLink,
+  normalizeGfsResourceUri,
+  parseGfsResourceDeepLink,
 } from '@clerum/desktop-app-links'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
 
@@ -42,6 +46,16 @@ export function buildEvenfireDesktopAppLink(parts: {
   }
 }
 
+export function buildEvenfireDesktopGfsResourceLink(uri: string): string | null {
+  const canonicalUri = normalizeGfsResourceUri(uri)
+  if (!canonicalUri) return null
+  try {
+    return buildGfsResourceDeepLink(canonicalUri)
+  } catch {
+    return null
+  }
+}
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -74,8 +88,53 @@ export function buildEvenfireDesktopAppRedirectDocument(
   const parsed = new URL(deepLink)
   if (
     parsed.protocol !== SANDBOX_UI_DEEP_LINK_PROTOCOL ||
-    parsed.hostname !== SANDBOX_UI_DEEP_LINK_HOST
+    parsed.hostname !== SANDBOX_UI_DEEP_LINK_HOST ||
+    parsed.port ||
+    parsed.username ||
+    parsed.password
   ) {
+    throw new Error('Cannot redirect to an invalid desktop app link')
+  }
+
+  return buildDesktopHandoffDocument(deepLink, scriptNonce, {
+    title: 'Open app in Evenfire',
+    description:
+      'Evenfire should open this app automatically. Use the button if your browser asks for confirmation.',
+  })
+}
+
+export function buildEvenfireDesktopGfsResourceRedirectDocument(
+  uri: string,
+  scriptNonce: string
+): string {
+  const deepLink = buildEvenfireDesktopGfsResourceLink(uri)
+  if (!deepLink || !parseGfsResourceDeepLink(deepLink)) {
+    throw new Error('Cannot redirect to an invalid EvenDrive resource link')
+  }
+  return buildDesktopHandoffDocument(deepLink, scriptNonce, {
+    title: 'Open resource in Evenfire',
+    description:
+      'Evenfire should open this EvenDrive resource automatically. Use the button if your browser asks for confirmation.',
+  })
+}
+
+function buildDesktopHandoffDocument(
+  deepLink: string,
+  scriptNonce: string,
+  copy: { title: string; description: string }
+): string {
+  const parsed = new URL(deepLink)
+  const isValidAppLink =
+    parsed.protocol === SANDBOX_UI_DEEP_LINK_PROTOCOL &&
+    parsed.hostname === SANDBOX_UI_DEEP_LINK_HOST &&
+    !parsed.port &&
+    !parsed.username &&
+    !parsed.password
+  const isValidResourceLink =
+    parsed.protocol === SANDBOX_UI_DEEP_LINK_PROTOCOL &&
+    parsed.hostname === GFS_RESOURCE_DEEP_LINK_HOST &&
+    Boolean(parseGfsResourceDeepLink(deepLink))
+  if (!isValidAppLink && !isValidResourceLink) {
     throw new Error('Cannot redirect to an invalid desktop app link')
   }
 
@@ -87,7 +146,7 @@ export function buildEvenfireDesktopAppRedirectDocument(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Open app in Evenfire</title>
+  <title>${escapeHtml(copy.title)}</title>
   <style nonce="${nonce}">
     :root {
       color-scheme: dark;
@@ -177,11 +236,8 @@ export function buildEvenfireDesktopAppRedirectDocument(
     <section class="page-card">
       <div class="stack-tight">
         <p class="eyebrow">Evenfire Desktop</p>
-        <h1>Open app in Evenfire</h1>
-        <p class="body-copy">
-          Evenfire should open this app automatically. Use the button if your browser asks for
-          confirmation.
-        </p>
+        <h1>${escapeHtml(copy.title)}</h1>
+        <p class="body-copy">${escapeHtml(copy.description)}</p>
       </div>
       <a class="open-button" href="${escapedLink}">Open in Evenfire</a>
       <p class="body-copy">

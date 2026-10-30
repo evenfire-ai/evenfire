@@ -153,7 +153,7 @@ export const electronMocks = {
   touchSandboxUiPartition: vi.fn(async () => undefined),
   sessionObject,
   views,
-  ipcHandlers: new Map<string, (event: unknown, payload?: unknown) => Promise<unknown>>(),
+  ipcHandlers: new Map<string, (event: unknown, payload?: unknown) => unknown>(),
   windowsBySender: new Map<unknown, unknown>(),
   /**
    * Observes every document load the driver starts, so a suite can decide when
@@ -169,7 +169,7 @@ export const electronModule = {
     fromWebContents: (sender: unknown) => electronMocks.windowsBySender.get(sender) ?? null,
   },
   ipcMain: {
-    handle: (channel: string, handler: (event: unknown, payload?: unknown) => Promise<unknown>) => {
+    handle: (channel: string, handler: (event: unknown, payload?: unknown) => unknown) => {
       electronMocks.ipcHandlers.set(channel, handler)
     },
     on: vi.fn(),

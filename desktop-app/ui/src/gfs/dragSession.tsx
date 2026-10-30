@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useRef } from 're
 import { useAuthContext } from '@contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
 import { DRAG_COLD_CHECK_BUDGET, DRAG_COLD_CHECK_MAX_CONCURRENCY } from '@constants/gfsBrowser'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { desktopQueryKeys, isGfsSessionGeneration } from '@hooks/domain/queryKeys'
 import type { GfsDragSessionApi, GfsDragSource, GfsHoverCheckLease } from './dragSession.types'
 
 type GfsAccessState = 'active' | 'revoked'
@@ -115,7 +115,7 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
   if (!storeRef.current) storeRef.current = new GfsDragSessionStore()
   const store = storeRef.current
 
-  const { isAuthenticated, me, runtimeConfigState } = useAuthContext()
+  const { isAuthenticated, me, runtimeConfigState, sessionGeneration } = useAuthContext()
   const scope = useMemo(
     () => sessionScopeOf({ isAuthenticated, me, runtimeConfigState }),
     [isAuthenticated, me, runtimeConfigState]
@@ -127,7 +127,7 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
   // pattern the controller uses (never fetches — a cold cache must not invent
   // a revocation, and 'active' is the safe default while nothing wrote yet).
   const accessStateQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsAccessState(scope ?? 'anonymous'),
+    queryKey: desktopQueryKeys.gfsAccessState(scope ?? 'anonymous', sessionGeneration ?? null),
     queryFn: (): GfsAccessState => 'active',
     enabled: false,
     initialData: 'active' as GfsAccessState,
@@ -135,23 +135,36 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
     staleTime: Infinity,
   })
   const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
-  const previousScopeRef = useRef(scope)
+  const previousAuthorityRef = useRef({ scope, generation: sessionGeneration ?? null })
 
   useEffect(() => {
-    const scopeChanged = previousScopeRef.current !== scope
-    previousScopeRef.current = scope
+    const scopeChanged = previousAuthorityRef.current.scope !== scope
+    const generationChanged =
+      previousAuthorityRef.current.generation !== (sessionGeneration ?? null)
+    previousAuthorityRef.current = { scope, generation: sessionGeneration ?? null }
     // Native end may already have cleared the transport source while a drop
     // is pending. Every scope transition still invalidates its ownership.
-    if (scopeChanged) store.invalidate('scope-change')
-    else if (scope === null || accessState === 'revoked') store.invalidate('authority')
-  }, [accessState, scope, store])
+    if (scopeChanged || generationChanged) store.invalidate('scope-change')
+    else if (
+      scope === null ||
+      !isGfsSessionGeneration(sessionGeneration) ||
+      accessState === 'revoked'
+    ) {
+      store.invalidate('authority')
+    }
+  }, [accessState, scope, sessionGeneration, store])
 
   useEffect(() => () => store.invalidate('authority'), [store])
 
   const api = useMemo<GfsDragSessionApi>(
     () => ({
       beginDrag: source => {
-        if (scope === null || accessState !== 'active') return false
+        if (
+          scope === null ||
+          !isGfsSessionGeneration(sessionGeneration) ||
+          accessState !== 'active'
+        )
+          return false
         // A drag started under another env/user/team never crosses into this
         // session (foreign/other-window drags stay inert).
         if (source.scope !== scope) return false
@@ -164,7 +177,7 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
       currentGeneration: () => store.currentGeneration(),
       beginHoverCheck: expectedGeneration => store.beginHoverCheck(expectedGeneration),
     }),
-    [accessState, scope, store]
+    [accessState, scope, sessionGeneration, store]
   )
 
   return <GfsDragSessionContext.Provider value={api}>{children}</GfsDragSessionContext.Provider>
