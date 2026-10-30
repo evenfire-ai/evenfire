@@ -12,9 +12,17 @@ const VERSION = '0131_oidc_protocol_attempts'
 describe(`${VERSION} migration`, () => {
   it('is registered after the latest development migration', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
-    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(VERSION)
-    expect(CONTROL_API_MIGRATIONS.at(-2)?.version).toBe('0130_password_login_success_admission')
-    expect(CONTROL_API_MIGRATIONS.at(-1)?.legacyVersions).toEqual(['0130_oidc_protocol_attempts'])
+    const migrationIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === VERSION
+    )
+    expect(migrationIndex).toBeGreaterThan(0)
+    expect(CONTROL_API_MIGRATIONS[migrationIndex - 1]?.version).toBe(
+      '0130_password_login_success_admission'
+    )
+    expect(CONTROL_API_MIGRATIONS[migrationIndex]?.legacyVersions).toEqual([
+      '0130_oidc_protocol_attempts',
+    ])
+    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe('0132_oidc_protocol_attempt_expiry_index')
   })
 
   it('creates only purpose-bound OIDC protocol attempts with encrypted transient proof inputs', async () => {

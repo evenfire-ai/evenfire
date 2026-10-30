@@ -125,6 +125,21 @@ export async function applyOidcProtocolAttemptSchema(db: Pick<DbClient, 'query'>
   `)
 }
 
+export async function applyOidcProtocolAttemptExpiryIndexMigration(
+  db: Pick<DbClient, 'query'>
+): Promise<void> {
+  const table = await db.query<{ relation: string | null }>(
+    `SELECT to_regclass('public.oidc_protocol_attempts')::text AS relation`
+  )
+  if (!table.rows[0]?.relation) return
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS oidc_protocol_attempts_expiry_idx
+      ON public.oidc_protocol_attempts (expires_at, id);
+    DROP INDEX IF EXISTS public.oidc_protocol_attempts_pending_expiry_idx;
+  `)
+}
+
 export async function insertOidcProtocolAttempt(
   db: Pick<DbClient, 'query'>,
   encryptionKeyHex: string,
@@ -137,12 +152,20 @@ export async function insertOidcProtocolAttempt(
   const id = randomUUID()
   const stateHash = createHash('sha256').update(input.state, 'utf8').digest('hex')
 
-  // Bound stale-attempt retention opportunistically without introducing a worker.
-  // The one-day grace is a technical storage default; it is not an auth policy.
+  // The one-day grace and 100-row batch are technical storage defaults, not auth policy.
   await db.query(
-    `DELETE FROM oidc_protocol_attempts
-      WHERE expires_at < now() - INTERVAL '1 day'
-        AND status IN ('pending', 'redeeming', 'completed', 'failed', 'cancelled')`
+    `WITH expired_attempts AS (
+       SELECT id
+         FROM oidc_protocol_attempts
+        WHERE expires_at < now() - INTERVAL '1 day'
+          AND status IN ('pending', 'redeeming', 'completed', 'failed', 'cancelled')
+        ORDER BY expires_at, id
+        LIMIT 100
+        FOR UPDATE SKIP LOCKED
+     )
+     DELETE FROM oidc_protocol_attempts AS attempt
+      USING expired_attempts
+      WHERE attempt.id = expired_attempts.id`
   )
   const result = await db.query(
     `INSERT INTO oidc_protocol_attempts (

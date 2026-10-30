@@ -6,7 +6,10 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import { rootLogger } from './observability/logger.js'
-import { applyOidcProtocolAttemptSchema } from './oidc/protocolAttemptStore.js'
+import {
+  applyOidcProtocolAttemptExpiryIndexMigration,
+  applyOidcProtocolAttemptSchema,
+} from './oidc/protocolAttemptStore.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
 import {
   applyPasswordAdmissionSchema,
@@ -6393,6 +6396,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // Preserve databases that recorded the original feature-branch identifier.
     legacyVersions: ['0130_oidc_protocol_attempts'],
     apply: applyOidcProtocolAttemptSchema,
+  },
+  {
+    version: '0132_oidc_protocol_attempt_expiry_index',
+    apply: applyOidcProtocolAttemptExpiryIndexMigration,
   },
 ]
 
