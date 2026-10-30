@@ -8,10 +8,11 @@ rules:
   - apiGroups: ["clerum.io"]
     resources: ["communicationchannels"]
     verbs: ["get", "list", "create", "update", "delete"]
-  # Per-Host channel-reader feature: control-api owns CRUD on per-host
-  # credentials Secrets via /admin/channel-secrets (POST/PUT/GET/DELETE).
-  # Secret name and labels are server-controlled; HCC's SecretInformer
-  # reacts to ADDED/MODIFIED/DELETED to roll the matching Deployment.
+  # CommunicationChannel credentials: control-api owns CRUD on per-channel
+  # credentials Secrets via /admin/communication-channels/<name>/credentials
+  # (GET/PUT/DELETE). The Secret name is server-controlled; HCC's
+  # SecretInformer reacts to ADDED/MODIFIED/DELETED to roll the matching
+  # Deployment.
   #
   # Figure D multi-bot ALSO relies on the `get` verb here: the user-bound
   # approval delivery worker (inside control-api) reads each CommunicationChannel

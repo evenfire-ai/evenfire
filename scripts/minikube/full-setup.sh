@@ -933,13 +933,12 @@ ok "Inter-service tokens applied (4 Secrets patched)"
 # The static `clerum-channel-reader-credentials` Secret used to be applied here
 # (from deploy/overlays/minikube/secrets/channel-credentials.yaml) and then
 # patched with .env overrides. With the static `clerum-channel-reader`
-# Deployment retired, channel credentials are per-Host and written via
-# control-api's `/admin/channel-secrets` endpoint from the Control UI's
-# Channel credentials panel. No bootstrap-time Secret needed.
-#
-# For minikube developers who want to skip the UI step: after `make minikube-setup`
-# finishes, send a PUT to /api/v1/admin/channel-secrets with the bot token JSON
-# (one POST per Host). See docs/deploy/minikube.md for the curl-based recipe.
+# Deployment retired, channel credentials are per CommunicationChannel and
+# written via control-api's
+# `PUT /api/v1/admin/communication-channels/<name>/credentials` endpoint from
+# the Control UI's Channel credentials panel (body: a flat key map such as
+# {"telegram-bot-token": "..."}). No bootstrap-time Secret needed. See
+# docs/how-to/connect-telegram.md for the end-to-end steps.
 
 # 4d. LLM API keys (override from .env if present)
 log "Applying LLM API keys..."

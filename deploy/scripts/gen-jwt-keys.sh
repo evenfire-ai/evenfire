@@ -15,9 +15,9 @@ set -euo pipefail
 #   6. inter-service-tokens (placeholder tokens + desktop-api-token)
 #   7. WRC signing key + configmaps
 #   8. control-api-public-key ConfigMap (admin JWT public key for WRC verification)
-# (#273: legacy clerum-channel-reader-credentials Secret retired — per-Host
-#  channel-reader-<host>-credentials Secrets are written by control-api's
-#  /admin/channel-secrets, not bootstrap-time.)
+# (#273: legacy clerum-channel-reader-credentials Secret retired — per-channel
+#  cc-<name>-credentials Secrets are written by control-api's
+#  /admin/communication-channels/<name>/credentials, not bootstrap-time.)
 
 kctl() {
   if [ -n "${CONTEXT:-}" ]; then
@@ -139,9 +139,9 @@ kctl create secret generic inter-service-tokens \
 # The static `clerum-channel-reader-credentials` Secret used to be minted
 # here with placeholder tokens for the legacy static channel-reader
 # Deployment. With #273 retiring the static Deployment, channel credentials
-# are now per-Host (`channel-reader-<host>-credentials`), written via
-# control-api's `/admin/channel-secrets` from the Control UI. No
-# placeholder Secret is needed at bootstrap.
+# are now per CommunicationChannel (`cc-<name>-credentials`), written via
+# control-api's `/admin/communication-channels/<name>/credentials` from the
+# Control UI. No placeholder Secret is needed at bootstrap.
 
 # --- 8. WRC signing key (control-plane namespace) ---
 # Code reads Secret keys as "private.pem" and "public.pem" via K8s API (k8sClient.ts:66)

@@ -125,7 +125,7 @@ The mock secrets server is pre-initialized with these test secrets:
 | `mcp-airtable-credentials` | `mcp-server` | `api-key`                                                            |
 | `mcp-host-keys`            | `mcp-host`   | `openai-api-key`, `claude-api-key`, `zai-api-key`, `bailian-api-key` |
 
-> (#273) The legacy `clerum-channel-reader-credentials` fixture is no longer seeded. Per-Host credentials (`channel-reader-<host>-credentials`) are written by control-api's `/admin/channel-secrets` during the test rather than pre-seeded.
+> (#273) The legacy `clerum-channel-reader-credentials` fixture is no longer seeded. Per-Host credentials (`channel-reader-<host>-credentials`) are written by control-api's `/admin/communication-channels/<name>/credentials` during the test rather than pre-seeded.
 
 ## Environment Variables
 

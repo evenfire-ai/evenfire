@@ -1,6 +1,6 @@
 {
   "name": "@clerum/mock-secrets-server",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Mock HTTP server for providing test secrets in E2E tests",
   "type": "module",
   "main": "index.ts",

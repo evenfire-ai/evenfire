@@ -103,7 +103,7 @@ function initializeDefaultSecrets() {
   // be seeded here for the static channel-reader Deployment. With the
   // static retired, channel credentials are per-Host
   // (`channel-reader-<host>-credentials`) and are written by control-api's
-  // `/admin/channel-secrets` endpoint during the test, not pre-seeded.
+  // `/admin/communication-channels/<name>/credentials` endpoint during the test, not pre-seeded.
 
   console.log(`[MockSecrets] Initialized with ${secretsStore.size} default secrets`)
 }
