@@ -12,6 +12,7 @@ import {
   createMockCustomApi,
 } from '../../test/__fixtures__/testMocks'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from '../constants'
+import { hccLogger } from '../logger'
 import { createsTotal } from '../metrics'
 import { McpServerReconciler } from '../reconciler'
 import { McpServerCRD } from '../types'
@@ -538,7 +539,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       })
 
       it('rejects CRLF injection attempts (header smuggling / nginx directive injection)', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const malicious = 'a\r\nproxy_pass http://evil.com'
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([{ header: 'X-Evil', valueTemplate: malicious }])
@@ -547,19 +548,28 @@ describe('McpServerReconciler remote egress proxy', () => {
 
         expect(conf).not.toContain('X-Evil')
         expect(conf).not.toContain('proxy_pass http://evil.com')
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('CR/LF/NUL'))
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader with CR/LF/NUL in value for header',
+          {
+            scope: '[HCC]',
+            header: 'X-Evil',
+          }
+        )
         warn.mockRestore()
       })
 
       it('rejects invalid header names (disallowed chars like space)', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([{ header: 'X-Bad Header', valueTemplate: 'ok' }])
         )
         const conf = cm.data['default.conf.template']
 
         expect(conf).not.toContain('X-Bad Header')
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('invalid name'))
+        expect(warn).toHaveBeenCalledWith('Rejecting authHeader with invalid name', {
+          scope: '[HCC]',
+          header: 'X-Bad Header',
+        })
         warn.mockRestore()
       })
 
@@ -572,7 +582,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       })
 
       it('emits valid entries and rejects invalid ones in a mixed batch', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([
             { header: 'Authorization', valueTemplate: 'Bearer ${T}' },
@@ -593,7 +603,7 @@ describe('McpServerReconciler remote egress proxy', () => {
       })
 
       it('rejects values longer than the 2048-char bound', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const tooLong = 'x'.repeat(2049)
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([{ header: 'Authorization', valueTemplate: tooLong }])
@@ -604,12 +614,15 @@ describe('McpServerReconciler remote egress proxy', () => {
         // Dropped by sanitization → the static remote clears Authorization (D-2):
         // the rejected value is never rendered and the incoming header is not forwarded.
         expect(conf).toContain('proxy_set_header Authorization "";')
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('too long'))
+        expect(warn).toHaveBeenCalledWith('Rejecting authHeader value too long for header', {
+          scope: '[HCC]',
+          header: 'Authorization',
+        })
         warn.mockRestore()
       })
 
       it('rejects NUL byte injection', () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
         const cm = (reconciler as any).buildNginxConfigMap(
           buildWithAuth([{ header: 'Authorization', valueTemplate: 'Bearer\0evil' }])
         )
@@ -618,7 +631,13 @@ describe('McpServerReconciler remote egress proxy', () => {
         // Dropped by sanitization → the static remote clears Authorization (D-2).
         expect(conf).toContain('proxy_set_header Authorization "";')
         expect(conf).not.toContain('evil')
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining('CR/LF/NUL'))
+        expect(warn).toHaveBeenCalledWith(
+          'Rejecting authHeader with CR/LF/NUL in value for header',
+          {
+            scope: '[HCC]',
+            header: 'Authorization',
+          }
+        )
         warn.mockRestore()
       })
     })
@@ -1041,7 +1060,7 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should fail closed for non-404 ConfigMap delete failure', async () => {
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
       const err = new Error('Internal Server Error') as Error & { code?: number }
       err.code = 500
       mockHccOwnedRuntimeReads(appsApi, coreApi)
@@ -1053,11 +1072,12 @@ describe('McpServerReconciler remote egress proxy', () => {
         'Failed to delete runtime Kubernetes resources for McpServer "mcp-sentry-remote"'
       )
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to delete ConfigMap'),
-        expect.anything()
-      )
-      consoleSpy.mockRestore()
+      expect(errorSpy).toHaveBeenCalledWith('Failed to delete ConfigMap', {
+        scope: '[Reconciler]',
+        name: 'mcp-sentry-remote-nginx-conf',
+        err,
+      })
+      errorSpy.mockRestore()
     })
   })
 
@@ -1523,7 +1543,7 @@ describe('McpServerReconciler remote egress proxy', () => {
 
 describe('plugin image-host allowlist (2.3)', () => {
   it('audit mode: a disallowed local image is warned but still built', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warn = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const appsApi = createMockAppsApi()
     const coreApi = createMockCoreApi()
     const customApi = createMockCustomApi()
@@ -1536,7 +1556,14 @@ describe('plugin image-host allowlist (2.3)', () => {
     await reconciler.reconcile(server)
 
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('audit mode'))
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('audit mode'),
+      expect.objectContaining({
+        scope: '[Reconciler]',
+        image: server.spec.image,
+        name: server.name,
+      })
+    )
     warn.mockRestore()
   })
 
