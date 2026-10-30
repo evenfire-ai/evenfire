@@ -1198,6 +1198,8 @@ export function FileExplorerTree({
       {moveDialogTarget ? (
         <GfsMoveDialog
           busy={ctrl.mutating}
+          drive={moveDialogTarget.node.drive}
+          home={ctrl.home}
           initialCrumbs={moveDialogTarget.initialCrumbs}
           onClose={() => setMoveDialogTarget(null)}
           onMove={async (destinationId, destinationName) => {
@@ -1241,7 +1243,6 @@ export function FileExplorerTree({
             return false
           }}
           sessionScope={ctrl.sessionScope}
-          drive={moveDialogTarget.node.drive}
           target={{
             resourceId: moveDialogTarget.node.resourceId,
             name: moveDialogTarget.node.name,

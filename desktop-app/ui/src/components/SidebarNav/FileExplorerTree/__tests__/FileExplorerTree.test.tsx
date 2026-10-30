@@ -2030,6 +2030,46 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     expect(await screen.findByRole('dialog', { name: 'Move folder A' })).toBeTruthy()
   })
 
+  it('offers My home as a Move destination for a folder listed under My home', async () => {
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('team-1', 'Team folder', 'directory')])
+      ),
+      listHomeChildren: vi.fn(async () =>
+        listChildrenPage([
+          childView('home-sub-1', 'Projects', 'directory', {
+            parentResourceId: FIXTURE_HOME_ID,
+          }),
+        ])
+      ),
+    })
+    renderTreeWithSession()
+
+    // A folder that lives in the caller's own home: the My home section lists
+    // it, so the keyboard Move path opens from inside the home.
+    const projectsRow = await screen.findByRole('button', { name: 'Projects' })
+    await act(async () => {
+      fireEvent.keyDown(projectsRow, { key: 'F10', shiftKey: true })
+    })
+
+    // Liveness: the dialog really opened for this folder, and its shared
+    // section settled with the folder someone else shared.
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects' })
+    expect(await within(dialog).findByRole('button', { name: 'Team folder' })).toBeTruthy()
+
+    // The caller's home is offered as a destination of its own, labelled
+    // "My home" rather than by its storage folder name.
+    const homeDestinations = within(dialog).getByRole('tree', { name: 'My home destination' })
+    // The treeitem's accessible name also carries its expand/collapse toggle, so
+    // the row itself is pinned by the select button inside it.
+    const homeItem = within(homeDestinations).getByRole('treeitem', { name: /My home/ })
+    expect(within(homeItem).getByRole('button', { name: 'My home' })).toBeTruthy()
+
+    // Liveness: the shared destinations keep their own tree in the same dialog,
+    // so the assertion above cannot be met by an unrelated render.
+    expect(within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })).toBeTruthy()
+  })
+
   it('drops a folder onto another folder while the home is pending', async () => {
     // The tree's roots carry their own drive; a pending home means the open
     // location has none, and the drop must still be admitted on the rows'.

@@ -3127,6 +3127,8 @@ export function FilesPage({
       {moveTarget ? (
         <GfsMoveDialog
           busy={ctrl.mutating}
+          drive={moveTarget.drive}
+          home={ctrl.home}
           initialCrumbs={
             moveTarget.resourceId === current?.resourceId ? crumbs.slice(0, -1) : crumbs
           }
@@ -3134,7 +3136,6 @@ export function FilesPage({
           onMove={handleMoveTarget}
           onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
           sessionScope={sessionScope}
-          drive={moveTarget.drive}
           target={moveTarget}
         />
       ) : null}

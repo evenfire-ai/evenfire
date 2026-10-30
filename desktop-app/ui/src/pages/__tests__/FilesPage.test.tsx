@@ -4936,6 +4936,84 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
   })
 
+  it('offers My home as a Move destination from a folder inside the home', async () => {
+    const sharedDestination = {
+      resourceId: 'team-1',
+      rid: 'team-1',
+      gfsUri: 'gfs://main/team-1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Team folder',
+      kind: 'directory' as const,
+      path: '/Team folder',
+      version: 1,
+      bytes: 0,
+    }
+    const listAccessible = vi.fn(async () => ({ items: [sharedDestination], nextCursor: null }))
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listAccessible, listChildren } },
+    })
+    const homeCrumb = {
+      resourceId: 'home-1',
+      gfsUri: 'gfs://main/home-1',
+      name: 'fixture',
+      kind: 'directory' as const,
+      version: 4,
+      bytes: 0,
+    }
+    const projects = {
+      ...homeCrumb,
+      resourceId: 'projects-1',
+      gfsUri: 'gfs://main/projects-1',
+      name: 'Projects',
+    }
+    const assets = {
+      resourceId: 'assets-1',
+      rid: 'assets-1',
+      gfsUri: 'gfs://main/assets-1',
+      drive: 'main',
+      parentResourceId: 'projects-1',
+      name: 'Assets',
+      kind: 'directory' as const,
+      path: '/Users/fixture/Projects/Assets',
+      version: 3,
+      bytes: 0,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      // The caller's own home is READY and the open folder is one of its
+      // subfolders: Move must reach the home through `ctrl.home`, never through
+      // the Shared with me listing (which does not carry the home root).
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/fixture' },
+      current: projects,
+      crumbs: [homeCrumb, projects],
+      items: [assets],
+    })
+
+    renderFilesPage()
+
+    await chooseResourceAction('Assets', 'Move to…')
+
+    // Liveness: the row menu opened the dialog for this folder, and its shared
+    // section settled with the folder someone else shared.
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Assets' })
+    expect(await within(dialog).findByRole('button', { name: 'Team folder' })).toBeTruthy()
+
+    // The caller's home is offered as a destination of its own, labelled
+    // "My home" rather than by its storage folder name ("fixture").
+    const homeDestinations = within(dialog).getByRole('tree', { name: 'My home destination' })
+    // The treeitem's accessible name also carries its expand/collapse toggle, so
+    // the row itself is pinned by the select button inside it.
+    const homeItem = within(homeDestinations).getByRole('treeitem', { name: /My home/ })
+    expect(within(homeItem).getByRole('button', { name: 'My home' })).toBeTruthy()
+
+    // Liveness: the shared destinations keep their own tree in the same dialog,
+    // so the assertion above cannot be met by an unrelated render.
+    expect(within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })).toBeTruthy()
+  })
+
   it('moves a dragged file onto a folder only after confirming destination write access', async () => {
     const pushToast = vi.fn()
     const moveResource = vi.fn(async () => ({}))

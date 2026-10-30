@@ -1,16 +1,10 @@
 import { GFS_MY_HOME_LABEL } from '@constants/gfsBrowser'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
-
-type CallerHome = {
-  state: string
-  drive: string | null
-  resourceId: string | null
-  path: string | null
-} | null
+import type { GfsCallerHome } from './callerHome.types'
 
 /** True only for the caller's READY home root: same resource AND same drive. */
 export function isCallerHomeRoot(
-  home: CallerHome,
+  home: GfsCallerHome,
   resource: { resourceId: string; drive: string }
 ): boolean {
   return (
@@ -32,7 +26,7 @@ export function isCallerHomeRoot(
  * them; no write reads them.
  */
 export function callerHomeRootNode<T extends GfsBrowserChild>(
-  home: CallerHome,
+  home: GfsCallerHome,
   accessible: readonly T[] = []
 ): T | GfsBrowserChild | null {
   if (home?.state !== 'ready' || !home.drive || !home.resourceId) return null
