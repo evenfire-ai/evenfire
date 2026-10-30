@@ -10,6 +10,8 @@ describe('Context Mapper', () => {
     expect(data.servers).toBeDefined()
     expect(Array.isArray(data.servers)).toBe(true)
     expect(data.contextRef).toBe('*')
+    // The disclosure checks below run per server; an empty inventory would pass them vacuously.
+    expect(data.servers.length).toBeGreaterThan(0)
     for (const server of data.servers) {
       expect(server).not.toHaveProperty('auth')
       expect(server).not.toHaveProperty('secretRef')
