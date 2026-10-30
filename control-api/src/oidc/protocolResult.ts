@@ -69,10 +69,16 @@ export class OidcCredentialConfigurationError extends OidcProviderIncompatibleEr
   }
 }
 
+export type OidcPersistenceOperation = 'insert' | 'preflight' | 'claim' | 'finalize'
+
 export class OidcPersistenceFailure extends Error {
   readonly category: OidcProtocolOutcome = 'persistence-failure'
 
-  constructor(readonly operation: 'insert' | 'preflight' | 'claim' | 'finalize') {
+  constructor(
+    readonly operation: OidcPersistenceOperation,
+    readonly primaryOutcome?: OidcProtocolOutcome,
+    readonly priorPersistenceOperation?: OidcPersistenceOperation
+  ) {
     super('OIDC protocol-attempt persistence failed')
     this.name = 'OidcPersistenceFailure'
   }

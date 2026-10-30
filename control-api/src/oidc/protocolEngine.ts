@@ -36,6 +36,7 @@ import {
   OidcCredentialConfigurationError,
   type OidcOperationContext,
   OidcPersistenceFailure,
+  type OidcProtocolOutcome,
   OidcProviderIncompatibleError,
   OidcProviderUnavailableError,
   type OidcProviderValidationReason,
@@ -62,6 +63,20 @@ type TrustedConfiguration = Readonly<{
   profile: ValidatedOidcProviderProfile
   validatedAt: number
 }>
+
+function safePrimaryOutcome(
+  error: unknown,
+  transportFailure: OidcOperationContext['transportFailure']
+): OidcProtocolOutcome {
+  if (error instanceof OidcCallerCancelledError) return error.category
+  if (error instanceof OidcProviderUnavailableError || transportFailure?.kind === 'unavailable') {
+    return 'provider-unavailable'
+  }
+  if (error instanceof OidcProviderIncompatibleError) return error.category
+  if (error instanceof OidcPersistenceFailure) return error.category
+  if (transportFailure?.kind === 'incompatible') return 'provider-incompatible'
+  return 'attempt-rejected'
+}
 
 /**
  * The OIDC protocol engine stops at a validated external identity proof. It has
@@ -398,16 +413,27 @@ export class OidcProtocolEngine {
           'OIDC response did not contain a validated ID token'
         )
       const proof = this.createVerifiedProof(claims, claimed)
-      const finalized = await finishOidcProtocolAttempt(
-        this.dependencies.db,
-        claimed.id,
-        'completed'
-      )
-      if (!finalized) throw new Error('OIDC attempt completion was not persisted')
+      let finalized: boolean
+      try {
+        finalized = await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'completed')
+      } catch {
+        throw new OidcPersistenceFailure('finalize')
+      }
+      if (!finalized) throw new OidcPersistenceFailure('finalize')
       return proof
     } catch (error) {
-      await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'failed')
       const transportFailure = this.operationContext.getStore()?.transportFailure
+      try {
+        const failed = await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'failed')
+        if (!failed) throw new Error('OIDC attempt failure was not persisted')
+      } catch {
+        throw new OidcPersistenceFailure(
+          'finalize',
+          safePrimaryOutcome(error, transportFailure),
+          error instanceof OidcPersistenceFailure ? error.operation : undefined
+        )
+      }
+      if (error instanceof OidcPersistenceFailure) throw error
       if (error instanceof OidcCallerCancelledError) throw error
       if (
         error instanceof OidcProviderUnavailableError ||

@@ -39,6 +39,7 @@ type StoredAttempt = {
 
 export class OidcR5MemoryAttemptDb {
   readonly rows = new Map<string, StoredAttempt>()
+  failFinishStatus?: 'completed' | 'failed'
   readonly client: Pick<DbClient, 'query'> = {
     query: async (sql: string, values: unknown[] = []) => {
       if (
@@ -134,6 +135,9 @@ export class OidcR5MemoryAttemptDb {
         return { rows: [], rowCount: 1 }
       }
       if (sql.includes('SET status = $2')) {
+        if (String(values[1]) === this.failFinishStatus) {
+          throw new Error('controlled terminal-state persistence failure')
+        }
         const row = this.rows.get(String(values[0]))
         if (!row || row.status !== 'redeeming') return { rows: [], rowCount: 0 }
         row.status = String(values[1])
@@ -171,6 +175,7 @@ export type OidcR5FixtureOptions = {
   clientAuthenticationMethod?: 'client_secret_basic' | 'client_secret_post'
   advertisedClientAuthenticationMethods?: string[]
   modulusLength?: number
+  tokenStatus?: number
 }
 
 export function createOidcR5ProtocolFixture(options: OidcR5FixtureOptions = {}) {
@@ -230,6 +235,9 @@ export function createOidcR5ProtocolFixture(options: OidcR5FixtureOptions = {}) 
     if (input.url === tokenEndpoint) {
       const body = input.body ?? ''
       tokenRequests.push({ headers: input.headers, body })
+      if (options.tokenStatus !== undefined) {
+        return jsonResponse({ error: 'fixture_token_endpoint_failure' }, options.tokenStatus)
+      }
       const form = new URLSearchParams(body)
       if (
         createHash('sha256')
