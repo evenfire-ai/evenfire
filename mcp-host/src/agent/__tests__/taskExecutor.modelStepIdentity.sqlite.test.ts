@@ -18,7 +18,9 @@ import { CodexProxyError } from '../../llm/codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../../llm/codexSubscription'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
-import type { SingleTurnProvider } from '../../llm/types'
+import { GrokProxyError } from '../../llm/grokLlmProxyClient'
+import { GrokSubscriptionProvider } from '../../llm/grokSubscription'
+import type { ClassifiedError, SingleTurnProvider } from '../../llm/types'
 import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
 import type { Task, TaskError } from '../../queue/types'
@@ -37,36 +39,73 @@ const codexClassifier = new CodexSubscriptionProvider('primary-model', {
   proxy: { stream: vi.fn() },
   attemptContext: vi.fn(),
 } as never)
+/**
+ * The same for Grok: the executor's provider identity must survive the port's
+ * classification so the loop-level retry gate sees `grok-subscription`.
+ */
+const grokClassifier = new GrokSubscriptionProvider('grok-4.6', {
+  authorizer: { authorize: vi.fn() },
+  proxy: { stream: vi.fn() },
+  attemptContext: vi.fn(),
+} as never)
+
+interface ProviderIdentity {
+  kind: 'openai' | 'grok-subscription'
+  classify: (error: Error) => ClassifiedError
+}
+const CODEX_IDENTITY: ProviderIdentity = {
+  kind: 'openai',
+  classify: error =>
+    codexClassifier.classifyError(new CodexProxyError('provider_unavailable', error.message)),
+}
+const GROK_IDENTITY: ProviderIdentity = {
+  kind: 'grok-subscription',
+  classify: error =>
+    grokClassifier.classifyError(new GrokProxyError('provider_unavailable', error.message)),
+}
 const savedConfig = {
   enableApproval: appConfig.enableApproval,
   dynamicToolsEnabled: appConfig.dynamicToolsEnabled,
   promptCacheEnabled: appConfig.promptCacheEnabled,
   nativeToolPresentation: appConfig.nativeToolPresentation,
   nativeToolDiscoveryBytes: appConfig.nativeToolDiscoveryBytes,
+  codexToolPresentation: appConfig.codexToolPresentation,
+  modelStepAutoRetries: appConfig.modelStepAutoRetries,
 }
 
 type Reply = { calls?: ToolCall[]; content?: string; error?: Error }
 function provider(
   kind: string,
-  answer: (messages: ChatMessage[], call: number) => Reply
-): SingleTurnProvider & { calls(): number; requests: ChatMessage[][] } {
+  answer: (messages: ChatMessage[], call: number) => Reply,
+  classifyWith: (error: Error) => ClassifiedError = CODEX_IDENTITY.classify
+): SingleTurnProvider & {
+  calls(): number
+  requests: ChatMessage[][]
+  classifications: ClassifiedError[]
+} {
   let count = 0
   const requests: ChatMessage[][] = []
+  const classifications: ClassifiedError[] = []
   return {
     calls: () => count,
     requests,
+    classifications,
     getProviderType: () => kind as never,
-    classifyError: error =>
-      // The 503 arm is the production failure shape: the real Codex classifier
-      // decides the class, the retryability and the provider-native code, as
-      // LlmPortAdapter.handleProviderError does (#1043 §2.1).
-      error instanceof Error && error.message === 'upstream 503'
-        ? codexClassifier.classifyError(new CodexProxyError('provider_unavailable', error.message))
-        : {
-            code: LlmErrorCode.ApiCallFailed,
-            retryable: false,
-            message: error instanceof Error ? error.message : String(error),
-          },
+    classifyError: error => {
+      // The 503 arm is the production failure shape: the real provider
+      // classifier decides the class, the retryability and the provider-native
+      // code, as LlmPortAdapter.handleProviderError does (#1043 §2.1).
+      if (error instanceof Error && error.message === 'upstream 503') {
+        const classified = classifyWith(error)
+        classifications.push(classified)
+        return classified
+      }
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        message: error instanceof Error ? error.message : String(error),
+      }
+    },
     completeSingleTurn: async () => {
       throw new Error('Unexpected tool-less completion')
     },
@@ -202,12 +241,17 @@ async function continueTurn(
 
 async function waitingOrigin(
   withConfirmed = true,
-  afterApproval: Reply | ((call: number) => Reply) = { error: new Error('upstream 503') }
+  afterApproval: Reply | ((call: number) => Reply) = { error: new Error('upstream 503') },
+  identity: ProviderIdentity = CODEX_IDENTITY
 ) {
   Object.assign(appConfig, {
     enableApproval: true,
     dynamicToolsEnabled: false,
     promptCacheEnabled: false,
+    // 'grok-subscription' is an OAuth-broker presentation target, so the tool
+    // presentation comes from this flag instead of `dynamicToolsEnabled`; the
+    // discovery bridge would hide `server__write` behind `clerum__tool_call`.
+    codexToolPresentation: 'direct',
   })
   vi.spyOn(Date, 'now').mockReturnValue(NOW)
   const handle = makeSqliteStore()
@@ -221,19 +265,22 @@ async function waitingOrigin(
     result: { content: [{ type: 'text', text: 'approved effect completed' }] },
     isError: false,
   })
-  const llm = provider('openai', (_messages, call) =>
-    call === 1
-      ? {
-          calls: [
-            ...(withConfirmed
-              ? [{ id: 'before-approval', name: 'system_info', arguments: {} }]
-              : []),
-            { id: 'approved-write', name: 'server__write', arguments: {} },
-          ],
-        }
-      : typeof afterApproval === 'function'
-        ? afterApproval(call)
-        : afterApproval
+  const llm = provider(
+    identity.kind,
+    (_messages, call) =>
+      call === 1
+        ? {
+            calls: [
+              ...(withConfirmed
+                ? [{ id: 'before-approval', name: 'system_info', arguments: {} }]
+                : []),
+              { id: 'approved-write', name: 'server__write', arguments: {} },
+            ],
+          }
+        : typeof afterApproval === 'function'
+          ? afterApproval(call)
+          : afterApproval,
+    identity.classify
   )
   const original = task('approval-origin')
   const originalDeps = deps(handle, llm, manager)
@@ -952,6 +999,57 @@ describe('real-producer checkpoint identity regressions', () => {
     }
   })
 
+  // #1043 §2.1 (Q1) — the loop-level Grok retry must be reachable through the
+  // executor: the provider identity survives the port's classification and the
+  // same automatic retry answers inside the task.
+  it('H7-Grok: a Grok provider_unavailable drives the same retry and answers', async () => {
+    const f = await waitingOrigin(
+      true,
+      call =>
+        call === 2
+          ? { error: new Error('upstream 503') }
+          : { content: 'grok answer after the retry' },
+      GROK_IDENTITY
+    )
+    try {
+      // Executor identity reachable at the checkpoint: the open header names the
+      // Grok provider.
+      expect(header(f.handle)).toMatchObject({ status: 'open', provider: 'grok-subscription' })
+
+      await f.executor.resumeAfterApproval(true)
+      await f.handle.persistQueue.drain()
+
+      // The step: approval answer, failed step, its retry.
+      expect(f.llm.calls()).toBe(3)
+      // The port really classified the failure through the Grok classifier,
+      // shape intact.
+      expect(f.llm.classifications).toEqual([
+        expect.objectContaining({
+          code: LlmErrorCode.ModelOverloaded,
+          retryable: true,
+          providerCode: 'provider_unavailable',
+          providerDispatched: true,
+        }),
+      ])
+      // Retry, not a second execution.
+      expect(f.execute).toHaveBeenCalledTimes(1)
+      expect(
+        f.llm.requests[2]!.filter(message => message.tool_call_id === 'approved-write')
+      ).toEqual([
+        expect.objectContaining({ content: expect.stringContaining('approved effect completed') }),
+      ])
+      expect(f.originalDeps.onComplete).toHaveBeenCalledTimes(1)
+      expect(f.originalDeps.onFail).not.toHaveBeenCalled()
+      expect(
+        f.handle.worker.db.prepare("SELECT content FROM messages WHERE role = 'assistant'").all()
+      ).toEqual([{ content: 'grok answer after the retry' }])
+      // Answered origin: the checkpoint is purged, nothing resumable is left.
+      expect(header(f.handle)).toBeUndefined()
+    } finally {
+      await f.handle.shutdown()
+    }
+  })
+
   it('C-5: boot abandons an open approval checkpoint and cold resume offers no Retry', async () => {
     const f = await waitingOrigin()
     try {
@@ -1168,6 +1266,108 @@ describe('real-producer checkpoint identity regressions', () => {
       expect(execute).toHaveBeenCalledTimes(1)
       expect(originalDeps.onComplete).toHaveBeenCalledTimes(1)
       expect(header(handle).status).toBe('completed')
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  // #1043 §2.1 (B3) — the operator's retry budget must reach the running loop
+  // per task. Zero retries: the single failed step settles resumable and is
+  // never re-requested.
+  it('H8a: modelStepAutoRetries 0 reaches the loop and the failed step is not retried', async () => {
+    Object.assign(appConfig, {
+      enableApproval: false,
+      dynamicToolsEnabled: false,
+      promptCacheEnabled: false,
+      modelStepAutoRetries: 0,
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(NOW)
+    const handle = makeSqliteStore()
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const llm = provider('openai', (_messages, call) =>
+        call === 1
+          ? { calls: [{ id: 'call_1', name: 'system_info', arguments: {} }] }
+          : { error: new Error('upstream 503') }
+      )
+      const original = task('retries-wiring-zero')
+      const originalDeps = deps(handle, llm)
+      originalDeps.taskLifecycle.register(original)
+      await new TaskExecutor(original, originalDeps).run()
+      await handle.persistQueue.drain()
+
+      // The tool call plus the single failed step: a third call would be the
+      // retry the configured budget forbids.
+      expect(llm.calls()).toBe(2)
+      expect(originalDeps.onFail).toHaveBeenCalledTimes(1)
+      expect(originalDeps.onComplete).not.toHaveBeenCalled()
+      const taskError = vi.mocked(originalDeps.onFail).mock.calls[0]![1]
+      expect(taskError).toMatchObject({
+        code: LlmErrorCode.ModelOverloaded,
+        providerCode: 'provider_unavailable',
+        retryable: true,
+      })
+      const rows = handle.worker.db
+        .prepare('SELECT checkpoint_id, status FROM model_step_checkpoints')
+        .all() as Array<{ checkpoint_id: string; status: string }>
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ status: 'resumable' })
+      expect(taskError.modelStepCheckpointId).toBe(rows[0]!.checkpoint_id)
+      // No retry happened, so the retry branch never announced itself.
+      expect(
+        warn.mock.calls.filter(
+          ([, message]) => message === 'Retrying model step after provider_unavailable'
+        )
+      ).toHaveLength(0)
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  // #1043 §2.1 (B3) — two configured retries reach the loop: the step fails
+  // twice, retries twice and answers; the answered turn purges its checkpoint.
+  it('H8b: modelStepAutoRetries 2 reaches the loop and the step answers on the third call', async () => {
+    const retries = 2
+    const failures = 2
+    Object.assign(appConfig, {
+      enableApproval: false,
+      dynamicToolsEnabled: false,
+      promptCacheEnabled: false,
+      modelStepAutoRetries: retries,
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(NOW)
+    const handle = makeSqliteStore()
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const llm = provider('openai', (_messages, call) =>
+        call === 1
+          ? { calls: [{ id: 'call_1', name: 'system_info', arguments: {} }] }
+          : call <= 1 + failures
+            ? { error: new Error('upstream 503') }
+            : { content: `answered after ${failures} pause(s)` }
+      )
+      const original = task('retries-wiring-two')
+      const originalDeps = deps(handle, llm)
+      originalDeps.taskLifecycle.register(original)
+      await new TaskExecutor(original, originalDeps).run()
+      await handle.persistQueue.drain()
+
+      // The tool call plus three calls of the retried step: two failures and the
+      // answer the configured budget allows.
+      expect(llm.calls()).toBe(4)
+      expect(originalDeps.onComplete).toHaveBeenCalledTimes(1)
+      expect(originalDeps.onFail).not.toHaveBeenCalled()
+      const retryWarnings = warn.mock.calls.filter(
+        ([, message]) => message === 'Retrying model step after provider_unavailable'
+      )
+      expect(retryWarnings.map(([fields]) => (fields as { attempt: number }).attempt)).toEqual([
+        1, 2,
+      ])
+      // Answered origin: the checkpoint is purged, never left resumable.
+      expect(header(handle)).toBeUndefined()
+      expect(
+        handle.worker.db.prepare("SELECT content FROM messages WHERE role = 'assistant'").all()
+      ).toEqual([{ content: 'answered after 2 pause(s)' }])
     } finally {
       await handle.shutdown()
     }
