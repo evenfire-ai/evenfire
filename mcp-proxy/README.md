@@ -23,7 +23,7 @@ MCP Proxy (:8083)
 MCP Server (e.g. mongodb-mcp:3000, stdio-bridge:3000)
 ```
 
-1. **Server discovery** -- `HccClient` polls `GET {HCC_API_URL}/api/v1/mcpservers` on a configurable interval. Each server entry includes a name, transport URL, readiness status, and context ref. Results are cached; stale/expired cache affects health probes.
+1. **Server discovery** -- `HccClient` polls `GET {HCC_API_URL}/api/v1/mcpservers` on a configurable interval. Each server entry includes a name, transport URL, enabled flag, and readiness status; a server has no owning Context (Context membership lives in `Context.spec.mcpServers`). Results are cached; stale/expired cache affects health probes.
 2. **Routing** -- `Router` maintains a `Map<name, ServerRoute>`. On each poll, it diffs the new list against the current map and logs additions/removals.
 3. **Forwarding** -- `HttpForwarder` pipes the incoming request body to the backend URL, buffers initial response chunks before committing headers (to avoid silent truncation on oversized responses), and enforces `maxResponseSize` and `requestTimeout`.
 4. **Metrics** -- Prometheus-format counters at `GET /metrics`: `mcp_proxy_requests_total`, `mcp_proxy_active_connections`, `mcp_proxy_server_health`.
