@@ -1,5 +1,13 @@
 import type { NextFunction, Request, Response } from 'express'
+import { type GfsPathBinding, type GfsScope, signGfsToken } from '../auth/gfsToken.js'
 import { config } from '../config.js'
+import { withTransaction } from '../db.js'
+import type { ExternalSessionAuthentication } from '../services/auth/externalSessionAuthentication.js'
+import {
+  externalSessionDatabaseFailure,
+  isExternalSessionBackendUnavailableError,
+} from '../services/auth/sessionDatabaseFailure.js'
+import { validateExternalSessionAuthorityContext } from '../services/auth/userSessionService.js'
 import {
   type GfsDesktopOperatorLink,
   GfsDesktopOperatorLinkError,
@@ -27,6 +35,102 @@ export type ExternalGfsLinkedAdminAuthority = {
 }
 
 export type ExternalGfsAuthority = ExternalGfsUserAuthority | ExternalGfsLinkedAdminAuthority
+
+type AuthenticatedExternalSession = Extract<
+  ExternalSessionAuthentication,
+  { status: 'authenticated' }
+>
+
+export type ExternalGfsUserTokenInput = Readonly<{
+  subject: string
+  drive: string
+  scopes: readonly GfsScope[]
+  pathBindings?: readonly GfsPathBinding[]
+}>
+
+/**
+ * Sign a user-plane GFS token while the authenticated session and canonical
+ * user generation are current under the same principal lock. GFSC consumes
+ * users.lifecycle_version as authGeneration; V2's sessionVersion is a
+ * different fence and must never be projected into that claim.
+ *
+ * The signed bytes remain private to this function until COMMIT succeeds, so a
+ * lost/uncertain commit cannot be reported as a usable GFS credential.
+ */
+export async function signCurrentExternalGfsUserToken(
+  authentication: AuthenticatedExternalSession | undefined,
+  input: ExternalGfsUserTokenInput
+): Promise<{ token: string; expiresInSeconds: number } | null> {
+  if (!authentication) return null
+  const context = authentication.authorityContext
+  const tokenClaims = authentication.tokenClaims
+  const hasLegacySubject = 'userId' in tokenClaims
+  const tokenSubject = hasLegacySubject ? tokenClaims.userId : tokenClaims.sub
+  const expiresAt = authentication.tokenClaims.exp
+  if (
+    context.contract !== authentication.contract ||
+    (authentication.contract === 'v1') !== hasLegacySubject ||
+    context.userId !== input.subject ||
+    tokenSubject !== context.userId ||
+    typeof expiresAt !== 'number' ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt < 1
+  ) {
+    return null
+  }
+
+  try {
+    return await withTransaction(
+      async transaction => {
+        const current = await validateExternalSessionAuthorityContext(context, {
+          db: transaction,
+        })
+        if (current.status !== 'valid' || current.identity.userId !== context.userId) return null
+
+        const result = await transaction.query(
+          `SELECT lifecycle_state, lifecycle_version, clock_timestamp() AS db_now
+             FROM users
+            WHERE id = $1`,
+          [context.userId]
+        )
+        const row = result.rows[0] as
+          | {
+              lifecycle_state?: unknown
+              lifecycle_version?: unknown
+              db_now?: Date | string
+            }
+          | undefined
+        const generation = Number(row?.lifecycle_version)
+        const dbNow = row?.db_now instanceof Date ? row.db_now : new Date(String(row?.db_now ?? ''))
+        if (
+          row?.lifecycle_state !== 'active' ||
+          !Number.isSafeInteger(generation) ||
+          generation < 1 ||
+          !Number.isFinite(dbNow.getTime()) ||
+          expiresAt * 1000 <= dbNow.getTime()
+        ) {
+          return null
+        }
+
+        return signGfsToken({
+          subject: input.subject,
+          drive: input.drive,
+          scopes: input.scopes,
+          ...(input.pathBindings === undefined ? {} : { pathBindings: input.pathBindings }),
+          authGeneration: generation,
+          principalType: 'user',
+        })
+      },
+      undefined,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
+    )
+  } catch (error) {
+    if (isExternalSessionBackendUnavailableError(error)) {
+      throw new ExternalGfsAuthorityError(503, 'gfs_authority_unavailable', { cause: error })
+    }
+    throw error
+  }
+}
 
 export class ExternalGfsAuthorityError extends Error {
   constructor(

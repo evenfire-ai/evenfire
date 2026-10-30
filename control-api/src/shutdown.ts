@@ -28,6 +28,7 @@ export const CONTROL_API_SHUTDOWN_STEP_NAMES = [
   'oauth-shared-grant-sweep',
   'workflow-approval-trace-projector',
   'entity-change-dispatcher',
+  'operational-access-indexer',
   'core-database-pool',
   'rate-limit-database-pool',
   'trace-database-pools',

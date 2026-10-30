@@ -625,6 +625,7 @@ export async function resolveMcpServersForAgents(
     contextsNamespace: string
     hostsNamespace: string
     agentNames: readonly string[]
+    onPartial?: (source: 'mcp_servers' | 'contexts') => void
   }
 ): Promise<AgentWithMcpServers[]> {
   const { mcpServersNamespace, contextsNamespace, hostsNamespace, agentNames } = opts
@@ -638,6 +639,7 @@ export async function resolveMcpServersForAgents(
   try {
     serverList = asArray<McpServerCR>(await gateway.listResource('mcpservers', mcpServersNamespace))
   } catch (err) {
+    opts.onPartial?.('mcp_servers')
     // Directory identity remains useful when optional MCP catalog enrichment
     // is temporarily unavailable — but the degradation must be observable, or
     // a broken mcpservers list path reads as "this agent has no tools".
@@ -662,6 +664,7 @@ export async function resolveMcpServersForAgents(
         scopedContextIds
       )
     } catch (err) {
+      opts.onPartial?.('contexts')
       // Preserve the authorized directory DTOs with an empty tool catalog —
       // loudly, so a Context-read outage is distinguishable from "no tools".
       log.error(

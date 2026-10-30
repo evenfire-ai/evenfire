@@ -12,9 +12,11 @@ const svc = vi.hoisted(() => ({
   acceptInvitation: vi.fn(),
   acceptInvitationForEmail: vi.fn(),
   createInvitation: vi.fn(),
+  createManagedInvitationForUser: vi.fn(),
   createTeamForUser: vi.fn(),
   findMemberRole: vi.fn(),
   findMembership: vi.fn(),
+  externalManagedInvitationResponse: vi.fn((value: unknown) => value),
   getCurrentTeam: vi.fn(),
   getMe: vi.fn(),
   getTeamAgents: vi.fn(),
@@ -39,6 +41,7 @@ const rpcMock = vi.hoisted(() => ({
 
 const googleAuthMock = vi.hoisted(() => ({
   verifyGoogleIdToken: vi.fn(),
+  GoogleIdentityRejectedError: class GoogleIdentityRejectedError extends Error {},
 }))
 
 const sandboxUiScopeMock = vi.hoisted(() => ({
@@ -54,6 +57,12 @@ const rateLimitMock = vi.hoisted(() => ({
   checkAndIncrement: vi.fn(),
 }))
 
+const liveTeamAuthorizationMock = vi.hoisted(() => ({
+  getLiveTeamMembership: vi.fn(),
+}))
+const passwordAuthMock = vi.hoisted(() => ({
+  authenticatePasswordAndIssueSession: vi.fn(),
+}))
 const dbMock = vi.hoisted(() => ({
   query: vi.fn(),
 }))
@@ -80,6 +89,27 @@ vi.mock('../src/utils/auth/rpcAuthToken.js', async importOriginal => {
 })
 vi.mock('../src/utils/auth/googleAuth.js', () => googleAuthMock)
 vi.mock('../src/utils/auth/sandboxUiScope.js', () => sandboxUiScopeMock)
+vi.mock('../src/services/access/liveTeamAuthorization.js', () => liveTeamAuthorizationMock)
+vi.mock('../src/services/auth/passwordSessionAuthentication.js', () => passwordAuthMock)
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return {
+    ...actual,
+    validateLegacyUserSession: vi.fn(async (_token, claims) => ({
+      status: 'valid' as const,
+      identity: {
+        userId: claims.userId,
+        email: claims.email,
+        sid: '',
+        jti: 'test-v1-fingerprint',
+        sessionVersion: 0,
+        expiresAt: new Date(claims.exp * 1000),
+        absoluteExpiresAt: new Date(claims.exp * 1000),
+        authenticationMethods: [],
+      },
+    })),
+  }
+})
 
 describe('routes/profile', () => {
   it('refuses to mint a session without a current lifecycle generation', () => {
@@ -127,9 +157,15 @@ describe('routes/profile', () => {
   beforeEach(() => {
     Object.values(svc).forEach(fn => fn.mockReset())
     Object.values(rpcMock).forEach(fn => fn.mockReset())
-    Object.values(googleAuthMock).forEach(fn => fn.mockReset())
+    googleAuthMock.verifyGoogleIdToken.mockReset()
     Object.values(sandboxUiScopeMock).forEach(fn => fn.mockReset())
     Object.values(invitationFlowRegistrationMock).forEach(fn => fn.mockReset())
+    Object.values(passwordAuthMock).forEach(fn => fn.mockReset())
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockReset()
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockImplementation(
+      async (_userId: string, teamId: string) =>
+        teamId === 't1' ? { teamId: 't1', role: 'member' } : null
+    )
     rateLimitMock.checkAndIncrement.mockReset()
     rateLimitMock.checkAndIncrement.mockResolvedValue({
       allowed: true,
@@ -438,6 +474,63 @@ describe('routes/profile', () => {
     ).expect(403)
   })
 
+  it('does not allow an ordinary team member to rename a team', async () => {
+    svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed' })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/teams/t1/name').send({ name: 'Renamed' })
+    ).expect(403)
+
+    expect(svc.renameTeam).not.toHaveBeenCalled()
+  })
+
+  it('does not expose the member directory to an ordinary member', async () => {
+    svc.listMembers.mockResolvedValue([{ id: 'u2', email: 'peer@example.com', role: 'member' }])
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/teams/t1/members')
+    ).expect(403)
+
+    expect(svc.listMembers).not.toHaveBeenCalled()
+  })
+
+  it('does not allow an inviter to create an admin invitation', async () => {
+    const inviterToken = signExternalSessionToken({
+      userId: 'u1',
+      email: 'u@example.com',
+      teamId: 't1',
+      role: 'inviter',
+      authGeneration: 1,
+    })
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 't1',
+      role: 'inviter',
+    })
+    svc.createManagedInvitationForUser.mockResolvedValue({ error: 'forbidden' })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuth(request(app).post('/external/teams/t1/invitations'))
+      .set('x-user-session-token', inviterToken)
+      .send({ email: 'target@example.com', role: 'admin' })
+      .expect(403)
+
+    expect(svc.createManagedInvitationForUser).toHaveBeenCalledWith(
+      'u1',
+      'target@example.com',
+      [{ teamId: 't1', role: 'admin' }],
+      'target',
+      expect.objectContaining({ contract: 'v1', userId: 'u1' })
+    )
+  })
+
   it('allows membership lookup for another team when user claim matches', async () => {
     svc.findMembership.mockResolvedValue({
       team_id: 't2',
@@ -507,12 +600,12 @@ describe('routes/profile', () => {
     expect(res.body).toEqual({
       currentTeamId: 't1',
       truncated: false,
+      complete: true,
+      partialErrors: [],
       items: [
         {
           team: { id: 't1', name: 'Alpha', role: 'member' },
-          members: [
-            { id: 'u1', email: 'u@example.com', name: 'User', role: 'member', status: 'active' },
-          ],
+          members: [],
           contextIds: ['ctx-a'],
           agentNames: ['agent-a'],
         },
@@ -535,6 +628,46 @@ describe('routes/profile', () => {
     expect(svc.getTeamContexts).toHaveBeenCalledWith('t2')
     expect(svc.getTeamAgents).toHaveBeenCalledWith('t2')
     expect(svc.listMembers).toHaveBeenCalledWith('t2')
+    expect(svc.listMembers).not.toHaveBeenCalledWith('t1')
+  })
+
+  it('logs team-directory partial failures through the structured request logger', async () => {
+    const warn = vi.fn()
+    const rejection = new Error('provider token secret')
+    svc.listTeams.mockResolvedValue({
+      currentTeamId: 't1',
+      items: [{ id: 't1', name: 'Alpha', role: 'admin' }],
+    })
+    svc.listMembers.mockResolvedValue([])
+    svc.getTeamContexts.mockRejectedValue(rejection)
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => {
+      ;(req as express.Request & { log?: { warn: typeof warn } }).log = { warn } as never
+      next()
+    })
+    mountInternalRoutes(app, accessCatalogGateway())
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const res = await withInternalServiceAuthAndUserSession(
+        request(app).get('/external/users/u1/team-directory')
+      ).expect(200)
+
+      expect(res.body.complete).toBe(false)
+      expect(res.body.partialErrors).toEqual([
+        { teamId: 't1', source: 'contexts', code: 'unavailable' },
+      ])
+      expect(warn).toHaveBeenCalledWith(
+        { err: rejection, userId: 'u1', teamId: 't1', source: 'contexts' },
+        'external user team directory source fetch failed'
+      )
+      expect(consoleWarn).not.toHaveBeenCalled()
+    } finally {
+      consoleWarn.mockRestore()
+    }
   })
 
   it('caps initial team directory fan-out and reports truncation', async () => {
@@ -557,9 +690,11 @@ describe('routes/profile', () => {
     ).expect(200)
 
     expect(res.body.truncated).toBe(true)
+    expect(res.body.complete).toBe(false)
+    expect(res.body.partialErrors).toEqual([])
     expect(res.body.items).toHaveLength(50)
     expect(res.body.items.at(-1)?.team.id).toBe('t50')
-    expect(svc.listMembers).toHaveBeenCalledTimes(50)
+    expect(svc.listMembers).not.toHaveBeenCalled()
     expect(svc.getTeamContexts).toHaveBeenCalledTimes(50)
     expect(svc.getTeamAgents).toHaveBeenCalledTimes(50)
   })
@@ -648,10 +783,15 @@ describe('routes/profile', () => {
     })
     const gateway = accessCatalogGateway()
     gateway.getResource.mockRejectedValue(transientError)
-    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
+    const structuredWarn = vi.fn()
+    const rootWarn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
 
     const app = express()
     app.use(express.json())
+    app.use((req, _res, next) => {
+      req.log = { warn: structuredWarn } as never
+      next()
+    })
     mountInternalRoutes(app, gateway)
 
     await withInternalServiceAuthAndUserSession(request(app).get('/external/users/u1/agents'))
@@ -672,13 +812,35 @@ describe('routes/profile', () => {
       'agent-stale',
       'agent-b',
     ])
-    expect(warn).toHaveBeenCalledTimes(2)
-    warn.mockRestore()
+    expect(structuredWarn).toHaveBeenCalledTimes(2)
+    expect(structuredWarn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: transientError,
+        source: 'agents',
+        userId: 'u1',
+      }),
+      'external user MCP server enrichment failed'
+    )
+    expect(structuredWarn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: transientError,
+        module: 'external-teams',
+        teamId: 't1',
+      }),
+      'MCP server enrichment failed'
+    )
+    // Both routes log through the request logger; nothing falls back to the root logger.
+    expect(rootWarn).not.toHaveBeenCalled()
+    rootWarn.mockRestore()
   })
 
   it('verifies session token server-side for rpc token issuance', async () => {
+    liveTeamAuthorizationMock.getLiveTeamMembership.mockResolvedValue({
+      teamId: 'team-from-claims',
+      role: 'member',
+    })
     rpcMock.issueRpcAccessToken.mockReturnValue({
-      token: 'rpc-token',
+      token: 'synthetic-rpc-token',
       accessScope: 'team',
       teamId: 'team-from-claims',
       scopes: ['mcp:servers:list'],
@@ -1008,5 +1170,218 @@ describe('routes/profile', () => {
       name: 'User',
       picture: 'https://example.com/avatar.png',
     })
+  })
+
+  it('returns one generic public denial for retired credential-provider logins', async () => {
+    googleAuthMock.verifyGoogleIdToken.mockResolvedValue({
+      email: 'retired@example.com',
+      name: 'Retired User',
+      picture: null,
+    })
+    svc.googleLoginData.mockResolvedValue({ error: 'user_retired' })
+    passwordAuthMock.authenticatePasswordAndIssueSession.mockResolvedValue({
+      error: 'user_retired',
+    })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/auth/google-login'))
+      .send({ idToken: 'retired-google-token' })
+      .expect(403, { error: 'membership_not_found' })
+
+    await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
+      .send({ email: 'retired@example.com', password: 'synthetic-correct-password' })
+      .expect(403, { error: 'membership_not_found' })
+
+    expect(svc.googleLoginData).toHaveBeenCalledWith({
+      email: 'retired@example.com',
+      name: 'Retired User',
+      picture: null,
+    })
+    expect(passwordAuthMock.authenticatePasswordAndIssueSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: 'retired@example.com',
+        password: 'synthetic-correct-password',
+      })
+    )
+  })
+
+  it('preserves the existing password-login response for invalid active credentials', async () => {
+    passwordAuthMock.authenticatePasswordAndIssueSession.mockResolvedValue(null)
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
+      .send({ email: 'active@example.com', password: 'synthetic-wrong-password' })
+      .expect(401, { error: 'invalid_credentials' })
+  })
+
+  // dev has no per-IP or per-user limiter on these routes; a denying PG limiter
+  // must never be consulted, and the handler must reach its business work.
+  const denyingRateLimit = () => ({
+    allowed: false,
+    remaining: 0,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    backendAvailable: true,
+    count: 99,
+  })
+  const prOnlyLimiterKeys = () =>
+    rateLimitMock.checkAndIncrement.mock.calls
+      .map(call => String(call[0]))
+      .filter(key => key.startsWith('external_'))
+
+  it('reaches Google verification without a PR-only attempt limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    googleAuthMock.verifyGoogleIdToken.mockResolvedValue(null)
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuth(
+      request(app).post('/external/auth/google-login')
+    ).send({ idToken: 'google-id-token' })
+
+    expect(response.status).not.toBe(429)
+    expect(googleAuthMock.verifyGoogleIdToken).toHaveBeenCalledWith('google-id-token')
+    expect(prOnlyLimiterKeys()).toEqual([])
+  })
+
+  it('verifies a session without a PR-only verification limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    await withInternalServiceAuth(request(app).post('/external/auth/verify'))
+      .send({ token: userSessionToken })
+      .expect(200)
+    expect(prOnlyLimiterKeys()).toEqual([])
+  })
+
+  it('issues RPC tokens without a PR-only issuance limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'synthetic-parity-rpc-token',
+      accessScope: 'user',
+      teamId: null,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+      expiresInSeconds: 300,
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuth(request(app).post('/external/rpc/token')).send({
+      sessionToken: userSessionToken,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+    })
+
+    expect(response.status).toBe(200)
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledOnce()
+    expect(prOnlyLimiterKeys()).toEqual([])
+  })
+
+  it('keeps legacy RPC issuance bound to the documented body session token', async () => {
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'synthetic-unexpected-token',
+      accessScope: 'user',
+      teamId: null,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+      expiresInSeconds: 300,
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuthAndUserSession(
+      request(app).post('/external/rpc/token')
+    ).send({ scopes: ['host:message:invoke'], hostRefs: ['agent-a'] })
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('uses the body session when legacy RPC header and body credentials conflict', async () => {
+    const bodySessionToken = signExternalSessionToken({
+      userId: 'body-user',
+      email: 'body@example.com',
+      teamId: null,
+      role: 'member',
+      authGeneration: 1,
+    })
+    svc.getUserAgents.mockResolvedValue({ userId: 'body-user', agentNames: ['agent-a'] })
+    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
+    rpcMock.issueRpcAccessToken.mockReturnValue({
+      token: 'synthetic-body-user-token',
+      accessScope: 'user',
+      teamId: null,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+      expiresInSeconds: 300,
+    })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuthAndUserSession(
+      request(app).post('/external/rpc/token')
+    ).send({
+      sessionToken: bodySessionToken,
+      scopes: ['host:message:invoke'],
+      hostRefs: ['agent-a'],
+    })
+
+    expect(response.status).toBe(200)
+    expect(rpcMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      { userId: 'body-user', teamId: null, role: 'member' },
+      ['host:message:invoke'],
+      ['agent-a'],
+      []
+    )
+  })
+
+  it('lists user teams without a PR-only read limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    svc.listTeams.mockResolvedValue([])
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuthAndUserSession(
+      request(app).get('/external/users/u1/teams')
+    )
+
+    expect(response.status).not.toBe(429)
+    expect(svc.listTeams).toHaveBeenCalled()
+    expect(prOnlyLimiterKeys()).toEqual([])
+  })
+
+  it('updates the user profile without a PR-only mutation limiter (dev parity)', async () => {
+    rateLimitMock.checkAndIncrement.mockResolvedValue(denyingRateLimit())
+    svc.updateProfile.mockResolvedValue({ userId: 'u1', displayName: 'New Name' })
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, { listResource: vi.fn() })
+
+    const response = await withInternalServiceAuthAndUserSession(
+      request(app).put('/external/users/u1/profile')
+    ).send({ displayName: 'New Name' })
+
+    expect(response.status).not.toBe(429)
+    expect(svc.updateProfile).toHaveBeenCalled()
+    expect(prOnlyLimiterKeys()).toEqual([])
   })
 })

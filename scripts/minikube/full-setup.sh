@@ -1901,6 +1901,19 @@ log "Re-applying inter-service tokens after kustomize deploy..."
 CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-inter-service-tokens.sh"
 ok "Inter-service tokens re-applied after kustomize deploy"
 
+# 6d. Align the profile's External REST browser origin with its Profile UI.
+# The base manifest pins EXTERNAL_REST_API_CORS_ORIGIN to http://localhost:3001,
+# while a branch profile serves Profile UI on a generated port; external-rest-api
+# rejects cookie-bearing POSTs whose Origin is not configured, so the profile
+# password login returned 403 on every branch profile (review C-8, OD-8). The
+# value belongs to the branch-profile harness, so it is re-asserted here after
+# every overlay apply: a later `kubectl apply` would otherwise merge the field
+# back to the manifest literal. Non-branch profiles have no persisted ports.env
+# and the sync exits without touching the cluster.
+log "Aligning the Profile UI browser origin on profiles/external-rest-api..."
+bash "${SCRIPT_DIR}/sync-external-rest-api-cors-origin.sh" --context="${PROFILE}"
+ok "External REST browser origin aligned for the branch profile (no-op otherwise)"
+
 # 6e. Deploy CRD instances
 log "Applying CRD instances..."
 $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances/"

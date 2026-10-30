@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import type { K8sGateway } from '../src/k8s.js'
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 import { DirectRunBindingConflictError } from '../src/services/tracing/directRunAttributionBindingService.js'
@@ -36,6 +38,12 @@ const svc = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/services/directory/index.js', () => svc)
+
+const rateLimiterMock = vi.hoisted(() => ({
+  checkAndIncrement: vi.fn(),
+}))
+
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiterMock)
 
 // Bypass the middleware chain — we are testing the handler logic specifically.
 // The middleware's own tests live in middleware.rpcAccessAuth.test.ts.
@@ -85,9 +93,34 @@ vi.mock('../src/middleware/rpcAccessAuth.js', async importOriginal => {
         authState.realMiddleware
           ? actual.requireValidRpcAccessTokenAny(...args)(req as never, res as never, next)
           : stubAuth(req, next),
-    requireRpcTokenUserMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+    requireRpcTokenUserMatch:
+      (paramName = 'userId') =>
+      (
+        req: { params: Record<string, string>; rpcAuth?: Record<string, unknown> },
+        res: { status: (status: number) => { json: (body: unknown) => void } },
+        next: () => void
+      ) => {
+        if (req.rpcAuth?.sub !== req.params[paramName]) {
+          res.status(403).json({ error: 'Forbidden' })
+          return
+        }
+        next()
+      },
     requireRpcTokenTeamMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
-    requireRpcTokenHostMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+    requireRpcTokenHostMatch:
+      (paramName = 'hostRef') =>
+      (
+        req: { params: Record<string, string>; rpcAuth?: Record<string, unknown> },
+        res: { status: (status: number) => { json: (body: unknown) => void } },
+        next: () => void
+      ) => {
+        const hostRefs = req.rpcAuth?.hostRefs
+        if (!Array.isArray(hostRefs) || !hostRefs.includes(req.params[paramName])) {
+          res.status(403).json({ error: 'Forbidden' })
+          return
+        }
+        next()
+      },
   }
 })
 
@@ -99,7 +132,11 @@ afterEach(() => {
 
 type HostCRD = { metadata: { name: string }; spec?: { enabled?: boolean } }
 
-function buildApp(hosts: HostCRD[], rpcAuth?: { teamId?: string }, bindingBudgetMs?: number) {
+function buildApp(
+  hosts: HostCRD[],
+  rpcAuth?: { teamId?: string; sub?: string; hostRefs?: string[] },
+  bindingBudgetMs?: number
+) {
   const gatewayStub = {
     listResource: vi.fn(async () => hosts),
     getResource: vi.fn(async () => ({}) as never),
@@ -290,6 +327,15 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — happy path', () =
   beforeEach(() => {
     svc.getUserAgents.mockReset()
     svc.getTeamAgents.mockReset()
+    rateLimiterMock.checkAndIncrement.mockReset()
+    rateLimiterMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+      backendAvailable: true,
+    })
   })
 
   it('returns 200 with connection URL when user has row AND host exists AND host is not disabled', async () => {
@@ -345,6 +391,35 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — happy path', () =
     })
     const { app } = buildApp([{ metadata: { name: 'multi-word-agent' }, spec: {} }])
     await request(app).get(`/rpc/access/users/user-a/mcp-hosts/multi-word-agent`).expect(200)
+  })
+})
+
+describe('removed Host sub-paths are not served', () => {
+  it('answers 404 for message-resolution and artifact-read, and 200 for the parent path', async () => {
+    const userId = 'user-a'
+    const hostRef = 'host-a'
+    svc.getUserAgents.mockReset()
+    svc.getUserAgents.mockResolvedValue({ userId, agentNames: [hostRef] })
+    const { app } = buildApp([{ metadata: { name: hostRef }, spec: { enabled: true } }])
+
+    await request(app)
+      .post(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/message-resolution`)
+      .send({ content: 'hi' })
+      .expect(404)
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`)
+      .expect(404)
+    expect(svc.getUserAgents).not.toHaveBeenCalled()
+
+    const parent = await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}`)
+      .expect(200)
+    expect(parent.body).toEqual({
+      userId,
+      hostRef,
+      url: `http://${hostRef}.${config.hostsNamespace}.svc.cluster.local:8080`,
+    })
+    expect(svc.getUserAgents).toHaveBeenCalledOnce()
   })
 })
 
@@ -525,6 +600,51 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — error propagation
     )
 
     await request(app).get(`/rpc/access/users/u/mcp-hosts/product`).expect(500)
+  })
+
+  it('forwards a Kubernetes 404 from the Host listing with its status', async () => {
+    svc.getUserAgents.mockResolvedValue({ userId: 'u', agentNames: ['product'] })
+    const k8sNotFound = Object.assign(new Error('namespaces "mcp-host" not found'), {
+      code: 404,
+      body: {
+        kind: 'Status',
+        status: 'Failure',
+        reason: 'NotFound',
+        message: 'namespaces "mcp-host" not found',
+      },
+    })
+    const listResource = vi
+      .fn()
+      .mockRejectedValueOnce(k8sNotFound)
+      .mockResolvedValue([{ metadata: { name: 'product' }, spec: { enabled: true } }])
+    const gatewayStub = {
+      listResource,
+      getResource: vi.fn(),
+      createResource: vi.fn(),
+      updateResource: vi.fn(),
+      deleteResource: vi.fn(),
+    }
+    const app = express()
+    app.use(express.json())
+    app.use(
+      createRpcAccessUsersRouter(gatewayStub as unknown as K8sGateway, {
+        bindingService: { bind: vi.fn() },
+      })
+    )
+    app.use(clerumErrorHandler)
+
+    const dependencyFailure = await request(app).get(`/rpc/access/users/u/mcp-hosts/product`)
+    expect(dependencyFailure.status).toBe(404)
+
+    // Positive control in the same test: once the dependency answers, the same
+    // route and handler resolve the Host normally.
+    const resolved = await request(app).get(`/rpc/access/users/u/mcp-hosts/product`).expect(200)
+    expect(resolved.body).toEqual({
+      userId: 'u',
+      hostRef: 'product',
+      url: 'http://product.mcp-host.svc.cluster.local:8080',
+    })
+    expect(listResource).toHaveBeenCalledTimes(2)
   })
 })
 

@@ -13,8 +13,10 @@ const { ControlApiError, clientMock } = vi.hoisted(() => {
     ) {
       super(message)
       this.headers = headers instanceof Headers ? Object.fromEntries(headers.entries()) : headers
+      this.responseHeaders = this.headers
     }
     public headers: Record<string, string>
+    public responseHeaders: Record<string, string>
   }
   return {
     ControlApiError,
@@ -169,7 +171,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(missing.status).toBe(200)
     expect(missing.body).toEqual({ upload: { resumableV2: { enabled: true } } })
     expect(mismatched.status).toBe(400)
-    expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
+    expect(mismatched.body.error.code).toBe('invalid_request')
     expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(2)
   })
 
@@ -191,13 +193,13 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         .get(`/me/gfs/capabilities?drive=${encodeURIComponent(drive)}`)
         .set('authorization', 'Bearer sess-xyz')
       expect(response.status).toBe(400)
-      expect(response.body).toEqual({ error: 'drive_required' })
+      expect(response.body.error.code).toBe('invalid_request')
     }
     const arrayValue = await request(buildApp())
       .get('/me/gfs/capabilities?drive=archive&drive=main')
       .set('authorization', 'Bearer sess-xyz')
     expect(arrayValue.status).toBe(400)
-    expect(arrayValue.body).toEqual({ error: 'drive_required' })
+    expect(arrayValue.body.error.code).toBe('invalid_request')
     expect(clientMock.controlApiStreamRequest).toHaveBeenCalledTimes(6)
     expect(forwardedDrives).toEqual([...malformed, undefined])
   })
@@ -284,11 +286,10 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(response.status).toBe(429)
     expect(response.headers['retry-after']).toBe('7')
     expect(response.headers['x-ratelimit-limit']).toBe('512')
-    expect(response.headers['x-gfs-ratelimit-scope']).toBe('principal_bytes')
-    expect(response.body).toEqual({
-      error: 'gfs_upload_rate_limited',
-      limit: 'principal_bytes',
-      retryAfterSeconds: 7,
+    expect(response.headers['x-gfs-ratelimit-scope']).toBeUndefined()
+    expect(response.body.error).toMatchObject({
+      code: 'rate_limited',
+      details: { retryAfterSeconds: 7 },
     })
   })
 
@@ -561,7 +562,10 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         permissions: ['write'],
       })
     expect(res.status).toBe(403)
-    expect(res.body).toEqual({ error: 'escalation_rejected' })
+    expect(res.body.error).toMatchObject({
+      code: 'forbidden',
+      details: { reason: 'escalation_rejected' },
+    })
   })
 
   it('preserves a public 413 payload_too_large response and its safe transport headers', async () => {
@@ -590,14 +594,21 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     const res = await request(buildApp())
       .put('/me/gfs/resources/abc/content?drive=main')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-correlation-id', 'gfs_ID-42')
       .send({ contentBase64: 'AAAA' })
 
     expect(res.status).toBe(413)
-    expect(res.body).toEqual(body)
-    expect(res.headers['retry-after']).toBe('9')
+    expect(res.body.error).toEqual({
+      code: 'payload_too_large',
+      message: 'The request payload is too large.',
+      correlationId: 'gfs_ID-42',
+      retryable: false,
+    })
+    expect(res.headers['retry-after']).toBeUndefined()
     expect(res.headers['upload-length']).toBe('209715200')
-    expect(res.headers['x-ratelimit-limit']).toBe('16')
+    expect(res.headers['x-ratelimit-limit']).toBeUndefined()
     expect(res.headers['x-internal-secret']).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toContain('200 MiB')
   })
 
   it('propagates GFS transport statuses/body/headers without changing retry semantics', async () => {
@@ -606,6 +617,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     // a generic 500 before the client can apply that policy.
     for (const [status, error] of [
       [408, 'request_timeout'],
+      [411, 'length_required'],
       [425, 'too_early'],
       [500, 'gfsc_internal'],
       [502, 'gfsc_unreachable'],
@@ -628,9 +640,33 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         .set('authorization', 'Bearer sess-xyz')
         .send({ contentBase64: 'AAAA' })
       expect(res.status).toBe(status)
-      expect(res.body).toEqual({ error })
-      expect(res.headers['retry-after']).toBe('7')
-      expect(res.headers['x-ratelimit-limit']).toBe('16')
+      const expectedCode =
+        status === 408
+          ? 'request_timeout'
+          : status === 411
+            ? 'length_required'
+            : status === 425
+              ? 'too_early'
+              : status === 502
+                ? 'upstream_unavailable'
+                : status === 503
+                  ? 'authority_unavailable'
+                  : status === 504
+                    ? 'upstream_timeout'
+                    : status === 507
+                      ? 'insufficient_storage'
+                      : 'internal_error'
+      expect(res.body.error.code).toBe(expectedCode)
+      expect(res.headers['retry-after']).toBe(
+        status === 408 || status === 425 || status === 502 || status === 503 || status === 504
+          ? '7'
+          : undefined
+      )
+      expect(res.headers['x-ratelimit-limit']).toBeUndefined()
+      expect(res.body.error.retryable).toBe(
+        status === 408 || status === 425 || status === 502 || status === 503 || status === 504
+      )
+      expect(JSON.stringify(res.body)).not.toContain('gfsc failure')
     }
   })
 
@@ -776,7 +812,10 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
       .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
       .set('authorization', 'Bearer sess-xyz')
     expect(res.status).toBe(403)
-    expect(res.body).toEqual({ error: 'manage_acl_required' })
+    expect(res.body.error).toMatchObject({
+      code: 'forbidden',
+      details: { reason: 'manage_acl_required' },
+    })
   })
 
   it('forwards only the allowlisted rate-limit and request headers on a control-api 429', async () => {
@@ -804,12 +843,15 @@ describe('GET /me/gfs/grants (delegation list passthrough)', () => {
       .get('/me/gfs/grants?drive=main&resourceId=11111111-1111-1111-1111-111111111111')
       .set('authorization', 'Bearer sess-xyz')
     expect(res.status).toBe(429)
-    expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 17 })
+    expect(res.body.error).toMatchObject({
+      code: 'rate_limited',
+      details: { retryAfterSeconds: 17 },
+    })
     expect(res.headers['retry-after']).toBe('17')
     expect(res.headers['x-ratelimit-limit']).toBe('30')
     expect(res.headers['x-ratelimit-remaining']).toBe('0')
     expect(res.headers['x-ratelimit-reset']).toBe('1776000000')
-    expect(res.headers['x-request-id']).toBe(REQUEST_ID)
+    expect(res.headers['x-request-id']).toMatch(UUID_RE)
     expect(res.headers['set-cookie']).toBeUndefined()
     expect(res.headers.server).toBeUndefined()
     expect(res.headers['x-internal-debug']).toBeUndefined()
@@ -888,7 +930,9 @@ describe('GET /me/gfs/shares (delegation list passthrough)', () => {
       .set('x-request-id', REQUEST_ID)
 
     expect(res.status).toBe(status)
-    expect(res.body).toEqual({ error })
+    const expectedCode =
+      status === 401 ? 'invalid_session' : status === 403 ? 'forbidden' : 'authority_unavailable'
+    expect(res.body.error.code).toBe(expectedCode)
     expect(res.headers['x-request-id']).toBe(REQUEST_ID)
   })
 })

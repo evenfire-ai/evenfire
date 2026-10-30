@@ -87,6 +87,12 @@ async function archiveOneBatch(olderThanDays: number, batchSize: number): Promis
 
     const ids = selected.rows.map(r => (r as { id: string }).id)
 
+    // Deadlock prevention: the DELETE below cascades to every live run that
+    // references an archived approval, and each trigger takes its subjects in
+    // table order. Hold the batch's whole subject set (teams before users)
+    // before the first write so a concurrent run writer cannot invert it.
+    await db.query('SELECT authorization_prelock_workflow_approval_revisions($1::uuid[])', [ids])
+
     // Copy into archive. Schema columns mirror workflow_approval_requests
     // plus archived_at (defaulted to NOW() in DDL). Use ON CONFLICT DO NOTHING
     // so a retry after partial failure is idempotent on PK collisions.

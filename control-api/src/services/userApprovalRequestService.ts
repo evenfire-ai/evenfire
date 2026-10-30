@@ -825,6 +825,16 @@ export async function recordDecision(
       return { ok: false, error: 'approval_requester_mismatch' }
     }
 
+    if (decision === 'approve') {
+      // The `approved` UPDATE below bumps the approval target's revision, and
+      // the run INSERT it can trigger takes the run's team before its user, so
+      // deciding first would hold the user while asking for the team. Take the
+      // same subject set the INSERT will bump, teams before users, first.
+      await db.query('SELECT authorization_prelock_workflow_approval_trigger_revisions($1::uuid)', [
+        id,
+      ])
+    }
+
     const decidedAt = new Date()
     const decidedAtIso = decidedAt.toISOString()
     await db.query(
@@ -1189,6 +1199,14 @@ export async function consumeApprovalForTrigger(
     )
   }
 
+  // The approval row is locked and every check passed. Take the revision
+  // subjects, teams before users, before the consume UPDATE bumps the target:
+  // the run INSERT that follows takes the run's team first, so consuming first
+  // would hold the target user while asking for that team.
+  await dbTx.query('SELECT authorization_prelock_workflow_approval_trigger_revisions($1::uuid)', [
+    params.approvalRequestId,
+  ])
+
   const consumed = await dbTx.query(
     `UPDATE workflow_approval_requests war
         SET status = 'consumed'
@@ -1330,14 +1348,35 @@ export async function assertApprovalTriggerBinding(params: {
 }
 
 export async function expirePendingRequests(): Promise<number> {
-  const result = await pool.query(
-    `UPDATE workflow_approval_requests
-        SET status = 'expired',
-            decided_at = COALESCE(decided_at, NOW())
-      WHERE status = 'pending' AND expires_at < NOW()
-     RETURNING id`
-  )
-  const expired = result.rowCount ?? 0
+  const expired = await withTransaction(async db => {
+    // Select the sweep's rows first: the UPDATE then has a fixed id set, so it
+    // cannot pick up rows committed after the prelock by re-evaluating the
+    // predicate under a newer snapshot. SKIP LOCKED lets a second replica, or a
+    // concurrent decision, keep its rows for the next tick.
+    const selected = await db.query(
+      `SELECT id FROM workflow_approval_requests
+        WHERE status = 'pending' AND expires_at < NOW()
+        FOR UPDATE SKIP LOCKED`
+    )
+    if ((selected.rowCount ?? 0) === 0) return 0
+
+    const ids = selected.rows.map(row => (row as { id: string }).id)
+
+    // Same ordered prelock as the approval archive: the UPDATE fires the
+    // approval revision trigger per row in scan order, so hold the whole batch
+    // (teams before users) before the first write.
+    await db.query('SELECT authorization_prelock_workflow_approval_revisions($1::uuid[])', [ids])
+
+    const updated = await db.query(
+      `UPDATE workflow_approval_requests
+          SET status = 'expired',
+              decided_at = COALESCE(decided_at, NOW())
+        WHERE id = ANY($1::uuid[])
+        RETURNING id`,
+      [ids]
+    )
+    return updated.rowCount ?? 0
+  })
   if (expired > 0) {
     approvalsExpiredTotal.inc(expired)
     rootLogger.info(

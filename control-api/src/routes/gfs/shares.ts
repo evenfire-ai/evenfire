@@ -164,6 +164,7 @@ export async function writeGfsShareBatchInTransaction(
          (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by)
        SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7
          FROM unnest($3::text[], $4::text[]) AS input(subject_type, subject_id)
+        ORDER BY input.subject_type, input.subject_id
        ON CONFLICT (drive, resource_id, subject_type, subject_id)
        DO UPDATE SET permissions = EXCLUDED.permissions,
                      include_descendants = EXCLUDED.include_descendants,

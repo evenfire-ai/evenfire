@@ -1,0 +1,288 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import request from 'supertest'
+import { createExternalAuthRouter } from '../src/routes/external/auth.js'
+import { externalSessionDatabaseFailure } from '../src/services/auth/sessionDatabaseFailure.js'
+
+const sessions = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
+const revocations = vi.hoisted(() => ({
+  revokeAllUserSessions: vi.fn(),
+  revokeUserSession: vi.fn(),
+}))
+const issuance = vi.hoisted(() => ({
+  exchangeLegacyExternalUserSession: vi.fn(),
+  issueExternalUserSession: vi.fn(),
+  selectExternalSessionRepresentation: vi.fn(),
+}))
+const database = vi.hoisted(() => ({ query: vi.fn() }))
+
+vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
+  ...sessions,
+  renewExternalUserSession: vi.fn(),
+}))
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return { ...actual, ...revocations }
+})
+vi.mock('../src/services/auth/externalSessionIssuance.js', () => issuance)
+vi.mock('../src/db.js', () => ({ pool: { query: database.query } }))
+
+function app() {
+  const value = express()
+  value.use(express.json())
+  value.use(createExternalAuthRouter({} as never))
+  return value
+}
+
+describe('legacy external-session replacement exchange', () => {
+  const claims = {
+    userId: 'user-1',
+    email: 'user@example.test',
+    teamId: 'team-old',
+    role: 'admin' as const,
+    authGeneration: 1,
+    iat: 1_700_000_000,
+    exp: 1_800_000_000,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sessions.authenticateExternalUserSession.mockResolvedValue({
+      status: 'authenticated',
+      contract: 'v1',
+      claims,
+      authorityContext: {
+        contract: 'v1',
+        userId: claims.userId,
+        tokenHash: 'source-hash',
+        issuedAt: claims.iat,
+        authGeneration: 1,
+      },
+      policy: { issueV1: true, switchCompatibility: true },
+    })
+    issuance.issueExternalUserSession.mockResolvedValue({
+      token: 'synthetic-stale-token',
+      contract: 'v1',
+    })
+    revocations.revokeAllUserSessions.mockResolvedValue(1)
+    revocations.revokeUserSession.mockResolvedValue(true)
+    database.query.mockResolvedValue({
+      rows: [{ role: 'admin', lifecycle_version: 1 }],
+      rowCount: 1,
+    })
+  })
+
+  it('fails closed when locked final validation observes a password invalidation', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({ status: 'invalid_session' })
+
+    const response = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
+
+    expect(response.status).toBe(401)
+    expect(response.body).toMatchObject({ error: { code: 'invalid_session' } })
+    expect(issuance.exchangeLegacyExternalUserSession).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'synthetic-source-token', teamId: 'team-new', claims }),
+      expect.objectContaining({ policy: expect.any(Object) })
+    )
+    expect(issuance.issueExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('uses the current locked membership role for the replacement representation', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'issued',
+      token: 'synthetic-replacement-token',
+      role: 'member',
+    })
+
+    const response = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
+      .expect(200)
+
+    expect(response.body).toEqual({
+      token: 'synthetic-replacement-token',
+      sessionContract: 'v1',
+      deprecated: true,
+    })
+  })
+
+  it('rejects a removed membership without signing a replacement', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'membership_not_found',
+    })
+
+    await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ userId: claims.userId, email: claims.email, teamId: 'team-new', role: 'admin' })
+      .expect(403, { error: 'membership_not_found' })
+
+    expect(issuance.issueExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing body role with dev invalid payload and accepts a valid role', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'issued',
+      token: 'synthetic-replacement-token',
+      role: 'admin',
+    })
+    const payload = { userId: claims.userId, email: claims.email, teamId: 'team-new' }
+
+    const missingRole = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send(payload)
+
+    expect(missingRole.status).toBe(400)
+    expect(missingRole.body).toEqual({ error: 'invalid payload' })
+    expect(issuance.exchangeLegacyExternalUserSession).not.toHaveBeenCalled()
+
+    const control = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'admin' })
+
+    expect(control.status).toBe(200)
+  })
+
+  it('rejects an invalid body role with dev invalid payload and accepts a valid role', async () => {
+    issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
+      status: 'issued',
+      token: 'synthetic-replacement-token',
+      role: 'admin',
+    })
+    const payload = { userId: claims.userId, email: claims.email, teamId: 'team-new' }
+
+    const invalidRole = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'owner' })
+
+    expect(invalidRole.status).toBe(400)
+    expect(invalidRole.body).toEqual({ error: 'invalid payload' })
+    expect(issuance.exchangeLegacyExternalUserSession).not.toHaveBeenCalled()
+
+    const control = await request(app())
+      .post('/external/auth/session-token')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .send({ ...payload, role: 'member' })
+
+    expect(control.status).toBe(200)
+  })
+
+  it('binds revoke-all to the authenticated actor authority context', async () => {
+    const authorityContext = {
+      contract: 'v1' as const,
+      userId: claims.userId,
+      tokenHash: 'source-hash',
+      issuedAt: claims.iat,
+      authGeneration: 1,
+    }
+    sessions.authenticateExternalUserSession.mockResolvedValueOnce({
+      status: 'authenticated',
+      contract: 'v1',
+      claims,
+      authorityContext,
+      policy: { issueV1: true, switchCompatibility: true },
+    })
+
+    await request(app())
+      .post('/external/auth/sessions/revoke-all')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .expect(200, { revoked: 1 })
+
+    expect(revocations.revokeAllUserSessions).toHaveBeenCalledWith(
+      claims.userId,
+      'user_revoked_all',
+      undefined,
+      authorityContext,
+      undefined,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
+    )
+  })
+
+  it('binds targeted revocation to the authenticated v2 actor authority context', async () => {
+    const v2Claims = {
+      userId: claims.userId,
+      sid: 'source-session',
+      jti: 'source-jti',
+    }
+    const authorityContext = {
+      contract: 'v2' as const,
+      userId: claims.userId,
+      sid: v2Claims.sid,
+      jti: v2Claims.jti,
+      sessionVersion: 1,
+    }
+    sessions.authenticateExternalUserSession.mockResolvedValueOnce({
+      status: 'authenticated',
+      contract: 'v2',
+      claims: v2Claims,
+      authorityContext,
+      policy: { issueV1: true, switchCompatibility: true },
+    })
+
+    await request(app())
+      .post('/external/auth/sessions/target-session/revoke')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .expect(200, { revoked: true })
+
+    expect(revocations.revokeUserSession).toHaveBeenCalledWith(
+      claims.userId,
+      'target-session',
+      'user_revoked',
+      undefined,
+      authorityContext,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
+    )
+  })
+
+  it('binds v2 logout to the authenticated actor authority context', async () => {
+    const v2Claims = {
+      userId: claims.userId,
+      sid: 'source-session',
+      jti: 'source-jti',
+    }
+    const authorityContext = {
+      contract: 'v2' as const,
+      userId: claims.userId,
+      sid: v2Claims.sid,
+      jti: v2Claims.jti,
+      sessionVersion: 1,
+    }
+    sessions.authenticateExternalUserSession.mockResolvedValueOnce({
+      status: 'authenticated',
+      contract: 'v2',
+      claims: v2Claims,
+      authorityContext,
+      policy: { issueV1: true, switchCompatibility: true },
+    })
+
+    await request(app())
+      .post('/external/auth/session/logout')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'synthetic-source-token')
+      .expect(200, { revoked: true })
+
+    expect(revocations.revokeUserSession).toHaveBeenCalledWith(
+      claims.userId,
+      v2Claims.sid,
+      'logout',
+      undefined,
+      authorityContext,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
+    )
+  })
+})

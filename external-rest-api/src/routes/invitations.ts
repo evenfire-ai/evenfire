@@ -14,10 +14,34 @@ import {
   getInvitationByToken,
   listPendingInvitations,
 } from '../services/invitationsService.js'
-import { setProfileSessionCookie } from '../sessionCookie.js'
+import {
+  PROFILE_SESSION_COOKIE,
+  clearProfileSessionCookie,
+  hasCookie,
+  readCookie,
+  setProfileSessionCookie,
+} from '../sessionCookie.js'
 
 const tokenLookupRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 30 })
 const acceptRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 10 })
+
+// The invitation password producer validates the trimmed value against the
+// same inclusive bounds. The edge checks it before any acceptance so an invalid
+// password cannot consume a still-pending invitation.
+const INVITATION_PASSWORD_MIN_LENGTH = 8
+const INVITATION_PASSWORD_MAX_LENGTH = 256
+
+function isValidInvitationPassword(password: string): boolean {
+  const trimmed = password.trim()
+  return (
+    trimmed.length >= INVITATION_PASSWORD_MIN_LENGTH &&
+    trimmed.length <= INVITATION_PASSWORD_MAX_LENGTH
+  )
+}
+
+function requestedSessionContract(req: Request): 'v2' | undefined {
+  return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
+}
 
 type InvitationPasswordAuth = {
   userId: string
@@ -25,27 +49,47 @@ type InvitationPasswordAuth = {
   sessionToken: string
 }
 
-function sendAcceptInvitationError(
-  res: Response,
-  error: 'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid'
-): void {
-  if (error === 'invalid') {
-    res.status(400).json({ error: 'Invalid invitation' })
-    return
-  }
-  if (error === 'not_found') {
-    res.status(404).json({ error: 'Invitation not found' })
-    return
-  }
+type AcceptInvitationError = 'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid'
+
+function acceptInvitationErrorResponse(error: AcceptInvitationError): {
+  status: number
+  body: Record<string, string>
+} {
+  if (error === 'invalid') return { status: 400, body: { error: 'Invalid invitation' } }
+  if (error === 'not_found') return { status: 404, body: { error: 'Invitation not found' } }
   if (error === 'forbidden') {
-    res.status(403).json({ error: 'Invitation email does not match authenticated user' })
-    return
+    return { status: 403, body: { error: 'Invitation email does not match authenticated user' } }
   }
-  if (error === 'expired') {
-    res.status(410).json({ error: 'Invitation has expired' })
-    return
-  }
-  res.status(400).json({ error: 'Invitation is not pending' })
+  if (error === 'expired') return { status: 410, body: { error: 'Invitation has expired' } }
+  return { status: 400, body: { error: 'Invitation is not pending' } }
+}
+
+// The password fallback publishes stable machine codes: profile-ui classifies
+// terminal states from `code` (profile-ui/lib/invitationErrors.ts).
+const FALLBACK_ACCEPT_ERROR_RESPONSES: Record<
+  AcceptInvitationError,
+  { status: number; body: Record<string, string> }
+> = {
+  invalid: { status: 400, body: { error: 'Invalid invitation' } },
+  not_found: { status: 404, body: { error: 'Invitation not found', code: 'not_found' } },
+  forbidden: { status: 403, body: { error: 'Invitation email does not match authenticated user' } },
+  expired: { status: 410, body: { error: 'Invitation has expired', code: 'expired' } },
+  not_pending: {
+    status: 400,
+    body: { error: 'Invitation is not pending', code: 'invitation_not_pending' },
+  },
+}
+
+function fallbackAcceptErrorResponse(error: AcceptInvitationError): {
+  status: number
+  body: Record<string, string>
+} {
+  return FALLBACK_ACCEPT_ERROR_RESPONSES[error]
+}
+
+function sendAcceptInvitationError(res: Response, error: AcceptInvitationError): void {
+  const response = acceptInvitationErrorResponse(error)
+  res.status(response.status).json(response.body)
 }
 
 function sendInvitationPasswordError(
@@ -58,13 +102,14 @@ function sendInvitationPasswordError(
     | 'expired'
     | 'invalid_invitation'
     | 'invalid_password'
+    | 'password_already_set'
 ): void {
   if (error === 'invalid_invitation') {
     res.status(400).json({ error: 'invalid_invitation' })
     return
   }
   if (error === 'not_found') {
-    res.status(404).json({ error: 'Invitation not found' })
+    res.status(404).json({ error: 'Invitation not found', code: 'not_found' })
     return
   }
   if (error === 'forbidden') {
@@ -75,12 +120,20 @@ function sendInvitationPasswordError(
     res.status(409).json({ error: 'Invitation must be accepted before setting a password' })
     return
   }
+  if (error === 'password_already_set') {
+    res
+      .status(409)
+      .json({ error: 'This account already has a password', code: 'password_already_set' })
+    return
+  }
   if (error === 'not_pending') {
-    res.status(409).json({ error: 'Invitation has already been used' })
+    res
+      .status(409)
+      .json({ error: 'Invitation has already been used', code: 'invitation_not_pending' })
     return
   }
   if (error === 'expired') {
-    res.status(410).json({ error: 'Invitation has expired' })
+    res.status(410).json({ error: 'Invitation has expired', code: 'expired' })
     return
   }
   res.status(400).json({ error: 'Password must be between 8 and 256 characters' })
@@ -129,6 +182,15 @@ function sendPasswordResetError(
   res.status(response.status).json({ error: response.code, message: response.message })
 }
 
+// The session token a request presents. A present Authorization header must
+// carry a bearer credential; any other value yields '' and fails verification
+// instead of yielding to the cookie.
+function presentedSessionToken(authorization: string | undefined, req: Request): string {
+  if (authorization === undefined) return readCookie(req, PROFILE_SESSION_COOKIE)
+  const raw = authorization.trim()
+  return /^bearer\s+/i.test(raw) ? raw.replace(/^bearer\s+/i, '').trim() : ''
+}
+
 async function invitationPasswordAuthFromRequest(req: Request): Promise<
   | { auth: InvitationPasswordAuth }
   | {
@@ -136,12 +198,23 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
       body: Record<string, string>
     }
 > {
-  const sessionToken = extractAuthToken(req)
-  if (sessionToken) {
-    const claims = verifyToken(sessionToken)
-    if (claims) {
-      return { auth: { userId: claims.userId, email: claims.email, sessionToken } }
+  // A presented session credential is the only proof considered: an invalid
+  // one fails closed instead of falling through to the invitation link.
+  // Presence is decided before extraction, because extractAuthToken returns ''
+  // for an empty or malformed credential and '' must not read as "absent".
+  const authorization = req.headers.authorization
+  if (authorization !== undefined || hasCookie(req, PROFILE_SESSION_COOKIE)) {
+    const sessionToken = presentedSessionToken(authorization, req)
+    // An empty or malformed credential is rejected before verification and
+    // never reaches the verifier.
+    if (!sessionToken) {
+      return { status: 401, body: { error: 'Unauthorized' } }
     }
+    const claims = verifyToken(sessionToken)
+    if (!claims) {
+      return { status: 401, body: { error: 'Unauthorized' } }
+    }
+    return { auth: { userId: claims.userId, email: claims.email, sessionToken } }
   }
 
   const token = String(req.body?.token || '').trim()
@@ -152,19 +225,25 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
     return { status: 401, body: { error: 'Unauthorized' } }
   }
 
-  const accepted = await acceptInvitation(token, email)
+  // Validate before this fallback accepts the invitation: that acceptance is a
+  // one-time consumption, so an invalid password must be refused while the link
+  // is still pending. A presented session never reaches this branch, so its
+  // 401 precedence is unchanged.
+  const password = String(req.body?.password || '')
+  if (!isValidInvitationPassword(password)) {
+    return { status: 400, body: { error: 'Password must be between 8 and 256 characters' } }
+  }
+
+  const accepted = await acceptInvitation(token, email, requestedSessionContract(req))
   if (accepted.error) {
-    const response = {
-      invalid: { status: 400, body: { error: 'Invalid invitation' } },
-      not_found: { status: 404, body: { error: 'Invitation not found' } },
-      forbidden: {
-        status: 403,
-        body: { error: 'Invitation email does not match authenticated user' },
-      },
-      expired: { status: 410, body: { error: 'Invitation has expired' } },
-      not_pending: { status: 400, body: { error: 'Invitation is not pending' } },
-    }[accepted.error]
-    return response ?? { status: 502, body: { error: 'Failed to start invited session' } }
+    return fallbackAcceptErrorResponse(accepted.error)
+  }
+  // A replay is an explicit success without a session. It must not continue
+  // into the password change: the token no longer proves a pending invitation,
+  // so it maps exactly like a not-pending acceptance instead of the 502 that
+  // marks a broken first-acceptance response.
+  if (accepted.data?.replay) {
+    return fallbackAcceptErrorResponse('not_pending')
   }
   if (!accepted.data?.token || !accepted.data.userId) {
     return { status: 502, body: { error: 'Failed to start invited session' } }
@@ -192,21 +271,21 @@ async function completePasswordReset(
   email: string,
   invitationId: string,
   password: string,
-  sendError: typeof sendInvitationPasswordError = sendInvitationPasswordError
+  // The reset producer cannot report password_already_set; type this hook to
+  // the reset errors it can publish.
+  sendError: typeof sendPasswordResetError = sendInvitationPasswordError
 ): Promise<void> {
   const result = await setupInvitationPasswordWithToken(token, email, invitationId, password)
   if (result.error) {
     sendError(res, result.error)
     return
   }
-  const sessionToken = result.data?.token
-  if (!result.data || !sessionToken) {
-    res.status(502).json({ error: 'Failed to restore account session' })
+  if (!result.data) {
+    res.status(502).json({ error: 'Password recovery service returned an invalid response' })
     return
   }
-  const { token: _sessionToken, ...body } = result.data
-  setProfileSessionCookie(req, res, sessionToken)
-  res.status(200).json(body)
+  clearProfileSessionCookie(req, res)
+  res.status(200).json({ ...result.data, reauthenticationRequired: true })
 }
 
 export function createInvitationsRouter(): Router {
@@ -281,8 +360,8 @@ export function createInvitationsRouter(): Router {
         sendInvitationPasswordError(res, result.error)
         return
       }
-      setProfileSessionCookie(req, res, authResult.auth.sessionToken)
-      res.status(200).json(result.data)
+      clearProfileSessionCookie(req, res)
+      res.status(200).json({ ...result.data, reauthenticationRequired: true })
     } catch (error) {
       if (sendPasswordAuthorityError(error, res)) return
       next(error)
@@ -371,13 +450,25 @@ export function createInvitationsRouter(): Router {
         return
       }
 
-      const result = await acceptInvitation(token, email)
+      const result = await acceptInvitation(token, email, requestedSessionContract(req))
       if (result.error) {
         sendAcceptInvitationError(res, result.error)
         return
       }
-      setProfileSessionCookie(req, res, result.data!.token)
-      const { token: _token, ...data } = result.data!
+      const accepted = result.data
+      if (!accepted) {
+        throw new Error('control-api accepted an invitation without a response payload')
+      }
+      if (accepted.replay) {
+        const { token: _token, ...data } = accepted
+        res.status(200).json(data)
+        return
+      }
+      if (!accepted.token) {
+        throw new Error('control-api accepted an invitation without issuing a session')
+      }
+      setProfileSessionCookie(req, res, accepted.token)
+      const { token: _token, ...data } = accepted
       res.status(200).json(data)
     } catch (error) {
       next(error)

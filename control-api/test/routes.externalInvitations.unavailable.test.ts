@@ -14,7 +14,7 @@ const flow = vi.hoisted(() => ({
 vi.mock('../src/services/invitationFlowRegistrationService.js', () => flow)
 
 const directory = vi.hoisted(() => ({
-  acceptInvitationForEmail: vi.fn(),
+  acceptInvitationForEmailInTransaction: vi.fn(),
   getInvitationByToken: vi.fn(),
   listPendingInvitations: vi.fn(),
   setInvitationPasswordForEmail: vi.fn(),
@@ -23,11 +23,15 @@ const directory = vi.hoisted(() => ({
 }))
 vi.mock('../src/services/directory/index.js', () => directory)
 
-vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
-  rateLimitMiddleware:
-    () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
-      next(),
+const database = vi.hoisted(() => ({
+  query: vi.fn(),
+  withTransaction: vi.fn(),
 }))
+vi.mock('../src/db.js', () => ({ withTransaction: database.withTransaction }))
+
+const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
+
 vi.mock('../src/middleware/externalSessionAuth.js', () => ({
   rejectBodyUserTeamMismatch: (
     _req: express.Request,
@@ -35,13 +39,24 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
     next: express.NextFunction
   ) => next(),
   requireValidExternalSessionToken: (
-    _req: express.Request,
+    req: express.Request & { externalAuth?: Record<string, unknown> },
     _res: express.Response,
     next: express.NextFunction
-  ) => next(),
+  ) => {
+    req.externalAuth = {
+      userId: 'caller-user',
+      email: 'caller@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 4_102_444_800,
+    }
+    next()
+  },
 }))
-const sessionToken = vi.hoisted(() => ({ signExternalSessionToken: vi.fn(() => 'session-token') }))
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => sessionToken)
+const tokenSigner = vi.hoisted(() => ({ sign: vi.fn(() => 'synthetic-session-token') }))
+vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
+  signExternalSessionToken: tokenSigner.sign,
+}))
 
 // Router-level harness: proves the ROUTE GUARDS rethrow instead of swallowing.
 // The real app.ts middleware is covered separately in
@@ -64,6 +79,15 @@ function app(): express.Express {
 describe('external invitation routes when the hub is unavailable', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    database.query.mockReset()
+    database.withTransaction.mockImplementation(async work => work({ query: database.query }))
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
   })
 
   it('GET token lookup returns 503 member_registration_unavailable, NOT 400 invalid_invitation', async () => {
@@ -82,162 +106,196 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(res.body.error).toBe('member_registration_unavailable')
   })
 
-  it('REGRESSION: a generic validation error still maps to 400 invalid_invitation', async () => {
-    flow.validateInvitationFlowToken.mockRejectedValue(new Error('invalid_invitation'))
-    const res = await request(app()).get('/external/invitations/token/some-token')
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe('invalid_invitation')
+  it('issues a session only for the first acceptance and returns a replay without one', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'a@b.c',
+      invitationUuid: 'database-capability',
+    })
+    const replayData = {
+      accepted: true as const,
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'a@b.c',
+      teamId: null,
+      role: 'member',
+      authGeneration: 1,
+      replay: true as const,
+    }
+    directory.acceptInvitationForEmailInTransaction
+      .mockResolvedValueOnce({
+        data: {
+          accepted: true,
+          userId: '00000000-0000-4000-8000-000000000001',
+          email: 'a@b.c',
+          teamId: null,
+          role: 'member',
+          authGeneration: 1,
+        },
+      })
+      .mockResolvedValueOnce({ data: replayData })
+    database.query.mockImplementation(async sql => {
+      const text = String(sql)
+      if (text.includes('SELECT id FROM users') && text.includes('FOR UPDATE')) {
+        return { rows: [{ id: '00000000-0000-4000-8000-000000000001' }], rowCount: 1 }
+      }
+      if (text.includes('SELECT lifecycle_state, lifecycle_version')) {
+        return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
+      }
+      if (text.includes('clock_timestamp()')) {
+        return { rows: [{ db_now: new Date('2026-10-07T12:00:00.000Z') }], rowCount: 1 }
+      }
+      if (text.includes('SELECT valid_after')) return { rows: [], rowCount: 0 }
+      throw new Error(`unexpected invitation session issuance query: ${text}`)
+    })
+
+    const first = await request(app())
+      .post('/external/invitations/accept')
+      .send({ email: 'a@b.c', token: 'synthetic-one-use-flow' })
+    const replay = await request(app())
+      .post('/external/invitations/accept')
+      .send({ email: 'a@b.c', token: 'synthetic-one-use-flow' })
+
+    expect(first.status).toBe(200)
+    expect(first.body.token).toBe('synthetic-session-token')
+    expect(first.body).not.toHaveProperty('replay')
+    expect(replay.status).toBe(200)
+    expect(replay.body).toEqual(replayData)
+    expect(replay.body).not.toHaveProperty('token')
+    expect(replay.body).not.toHaveProperty('sessionContract')
+    expect(tokenSigner.sign).toHaveBeenCalledTimes(1)
+    // Only the first acceptance reaches the user lock and the issuance reads.
+    expect(database.query).toHaveBeenCalledTimes(4)
+    expect(String(database.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(database.query.mock.calls[1]?.[0])).toContain('lifecycle_version')
+    expect(String(database.query.mock.calls[2]?.[0])).toContain('clock_timestamp()')
+    expect(String(database.query.mock.calls[3]?.[0])).toContain('SELECT valid_after')
+    expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(2)
   })
 
-  it('issues a normal session only after trusted password-reset validation and completion', async () => {
+  it.each([
+    ['not_pending', 400, 'not_pending'],
+    ['user_retired', 401, 'Unauthorized'],
+  ])(
+    'maps %s acceptance without starting a session',
+    async (error, expectedStatus, responseError) => {
+      flow.validateInvitationFlowToken.mockResolvedValue({
+        email: 'a@b.c',
+        invitationUuid: 'database-capability',
+      })
+      directory.acceptInvitationForEmailInTransaction.mockReset()
+      directory.acceptInvitationForEmailInTransaction.mockResolvedValue({ error })
+
+      const res = await request(app())
+        .post('/external/invitations/accept')
+        .send({ email: 'a@b.c', token: 'synthetic-not-pending-flow' })
+
+      expect(res.status).toBe(expectedStatus)
+      expect(res.body).toEqual({ error: responseError })
+      expect(tokenSigner.sign).not.toHaveBeenCalled()
+      expect(database.query).not.toHaveBeenCalled()
+      expect(directory.acceptInvitationForEmailInTransaction).toHaveBeenCalledWith(
+        expect.anything(),
+        'a@b.c',
+        'database-capability'
+      )
+    }
+  )
+
+  it('binds the secret capability to the public id and never issues on password setup', async () => {
     flow.validateInvitationFlowToken.mockResolvedValue({
-      email: 'member@example.invalid',
-      invitationUuid: 'Synthetic-producer-token-1',
+      email: 'a@b.c',
+      invitationUuid: 'database-secret-capability',
     })
     directory.getInvitationByToken.mockResolvedValue({
-      id: 'database-row-1',
-      token: 'Synthetic-producer-token-1',
-      email: 'member@example.invalid',
+      id: '00000000-0000-4000-8000-000000000200',
+      email: 'a@b.c',
       purpose: 'password_reset',
       status: 'pending',
     })
     directory.setInvitationPasswordForEmail.mockResolvedValue({
       data: {
-        id: 'database-row-1',
-        userId: 'user-1',
-        email: 'member@example.invalid',
-        teamId: null,
-        role: 'member',
-        purpose: 'password_reset',
-        status: 'accepted',
-        lifecycleState: 'active',
-        authGeneration: 7,
+        id: '00000000-0000-4000-8000-000000000200',
+        userId: '00000000-0000-4000-8000-000000000001',
         passwordUpdated: true,
+        authGeneration: 1,
+        lifecycleState: 'active',
+        token: 'synthetic-producer-session-token',
         sessionContext: {
-          userId: 'user-1',
-          email: 'member@example.invalid',
-          teamId: 'team-1',
-          role: 'admin',
-          authGeneration: 7,
+          userId: '00000000-0000-4000-8000-000000000001',
+          email: 'a@b.c',
+          teamId: null,
+          role: 'member',
+          authGeneration: 1,
         },
       },
     })
 
-    const res = await request(app())
-      .post('/external/invitations/password-token')
-      .send({
-        token: 'Synthetic-trusted-reset-proof',
-        email: 'member@example.invalid',
-        invitationId: 'database-row-1',
-        password: 'Synthetic-new-password',
-      })
-      .expect(200)
+    const response = await request(app()).post('/external/invitations/password-token').send({
+      email: 'a@b.c',
+      token: 'synthetic-member-registration-flow-token',
+      invitationId: '00000000-0000-4000-8000-000000000200',
+      password: 'synthetic-valid-password',
+    })
 
-    expect(flow.validateInvitationFlowToken).toHaveBeenCalledWith(
-      'Synthetic-trusted-reset-proof',
-      'member@example.invalid'
-    )
+    expect(response.status).toBe(200)
+    expect(response.body.reauthenticationRequired).toBe(true)
+    expect(response.body).not.toHaveProperty('token')
+    expect(response.body).not.toHaveProperty('sessionContext')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(directory.getInvitationByToken).toHaveBeenCalledWith('database-secret-capability')
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
-      'member@example.invalid',
-      'database-row-1',
-      'Synthetic-new-password'
+      'a@b.c',
+      '00000000-0000-4000-8000-000000000200',
+      'synthetic-valid-password'
     )
-    expect(sessionToken.signExternalSessionToken).toHaveBeenCalledWith({
-      userId: 'user-1',
-      email: 'member@example.invalid',
-      teamId: 'team-1',
-      role: 'admin',
-      authGeneration: 7,
-    })
-    expect(res.body.token).toBe('session-token')
-    expect(res.body).not.toHaveProperty('sessionContext')
+    expect(tokenSigner.sign).not.toHaveBeenCalled()
   })
 
-  it('does not issue a session when reset proof or pending state is invalid', async () => {
-    directory.setInvitationPasswordForEmail.mockReset()
-    sessionToken.signExternalSessionToken.mockReset().mockReturnValue('session-token')
-    flow.validateInvitationFlowToken.mockRejectedValue(new Error('invalid'))
-    const invalidProof = await request(app())
-      .post('/external/invitations/password-token')
-      .send({
-        token: 'Synthetic-invalid-reset-proof',
-        email: 'member@example.invalid',
-        invitationId: 'reset-1',
-        password: 'Synthetic-new-password',
-      })
-      .expect(400)
-    expect(invalidProof.body.error).toBe('invalid_invitation')
-
+  it('rejects a recovery row id that does not match the trusted token capability', async () => {
     flow.validateInvitationFlowToken.mockResolvedValue({
-      email: 'member@example.invalid',
-      invitationUuid: 'Synthetic-producer-token-1',
+      email: 'a@b.c',
+      invitationUuid: 'database-secret-capability',
     })
     directory.getInvitationByToken.mockResolvedValue({
-      id: 'database-row-1',
-      token: 'Synthetic-producer-token-1',
-      email: 'member@example.invalid',
-      purpose: 'password_reset',
-      status: 'accepted',
-    })
-    await request(app())
-      .post('/external/invitations/password-token')
-      .send({
-        token: 'Synthetic-redeemed-reset-proof',
-        email: 'member@example.invalid',
-        invitationId: 'database-row-1',
-        password: 'Synthetic-new-password',
-      })
-      .expect(409)
-
-    expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
-    expect(sessionToken.signExternalSessionToken).not.toHaveBeenCalled()
-
-    directory.getInvitationByToken.mockReset().mockResolvedValue({
-      id: 'database-row-1',
-      token: 'Synthetic-producer-token-1',
-      email: 'member@example.invalid',
-      purpose: 'password_reset',
-      status: 'pending',
-    })
-    directory.setInvitationPasswordForEmail.mockResolvedValue({ error: 'not_pending' })
-    await request(app())
-      .post('/external/invitations/password-token')
-      .send({
-        token: 'Synthetic-raced-reset-proof',
-        email: 'member@example.invalid',
-        invitationId: 'database-row-1',
-        password: 'Synthetic-new-password',
-      })
-      .expect(409)
-    expect(sessionToken.signExternalSessionToken).not.toHaveBeenCalled()
-  })
-
-  it('rejects a database row ID that does not match the trusted flow token', async () => {
-    flow.validateInvitationFlowToken.mockResolvedValue({
-      email: 'member@example.invalid',
-      invitationUuid: 'Synthetic-producer-token-1',
-    })
-    directory.getInvitationByToken.mockResolvedValue({
-      id: 'database-row-1',
-      token: 'Synthetic-producer-token-1',
-      email: 'member@example.invalid',
+      id: '00000000-0000-4000-8000-000000000201',
+      email: 'a@b.c',
       purpose: 'password_reset',
       status: 'pending',
     })
 
-    const res = await request(app())
-      .post('/external/invitations/password-token')
-      .send({
-        token: 'Synthetic-trusted-reset-proof',
-        email: 'member@example.invalid',
-        invitationId: 'another-row',
-        password: 'Synthetic-new-password',
-      })
-      .expect(403)
+    const response = await request(app()).post('/external/invitations/password-token').send({
+      email: 'a@b.c',
+      token: 'synthetic-member-registration-flow-token',
+      invitationId: '00000000-0000-4000-8000-000000000200',
+      password: 'synthetic-valid-password',
+    })
 
-    expect(res.body.error).toBe('forbidden')
+    expect(response.status).toBe(403)
     expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
-    expect(sessionToken.signExternalSessionToken).not.toHaveBeenCalled()
+    expect(tokenSigner.sign).not.toHaveBeenCalled()
+  })
+
+  it('lists invitations only for the authenticated email', async () => {
+    directory.listPendingInvitations.mockResolvedValue([])
+
+    const res = await request(app()).get('/external/invitations/pending?email=victim@example.com')
+
+    expect(res.status).toBe(200)
+    expect(directory.listPendingInvitations).toHaveBeenCalledWith('caller@example.com')
+    expect(directory.listPendingInvitations).not.toHaveBeenCalledWith('victim@example.com')
+  })
+
+  it('reads owned pending invitations without an added user quota', async () => {
+    directory.listPendingInvitations.mockResolvedValue([])
+    await request(app()).get('/external/invitations/pending').expect(200)
+    expect(directory.listPendingInvitations).toHaveBeenCalledWith('caller@example.com')
+    expect(rateLimiter.checkAndIncrement).not.toHaveBeenCalled()
+  })
+
+  it('REGRESSION: a generic validation error still maps to 400 invalid_invitation', async () => {
+    flow.validateInvitationFlowToken.mockRejectedValue(new Error('invalid_invitation'))
+    const res = await request(app()).get('/external/invitations/token/some-token')
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_invitation')
   })
 
   it('POST desktop-authorization returns 503, NOT 404, when the hub-rejection message shape collides with the "(404)" not_found string match', async () => {

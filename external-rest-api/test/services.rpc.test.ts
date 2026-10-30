@@ -13,21 +13,21 @@ describe('rpcService.issueRpcAccessToken', () => {
     clientMock.controlApiRequest.mockReset()
   })
 
-  it('surfaces the control-api denial reason on a 403 instead of collapsing to null', async () => {
+  it('does not convert a control-api 403 body into a public result', async () => {
     clientMock.controlApiRequest.mockRejectedValueOnce(
       new ControlApiError(
-        'Control API POST /external/rpc/token failed (403): desktop_requires_team',
+        'Control API POST /external/rpc/token failed (403): secret-internal-reason',
         403,
-        { error: 'desktop_requires_team' }
+        { error: 'secret-internal-reason' }
       )
     )
 
-    const result = await issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
-
-    expect(result).toEqual({ error: 'desktop_requires_team' })
+    await expect(
+      issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
+    ).rejects.toBeInstanceOf(ControlApiError)
   })
 
-  it('uses the generic forbidden reason when a 403 error code is not a string', async () => {
+  it('propagates malformed 403 bodies for the route sanitizer to reject safely', async () => {
     for (const body of [{ error: ['desktop_requires_team'] }, { error: 42 }]) {
       clientMock.controlApiRequest.mockRejectedValueOnce(
         new ControlApiError(
@@ -39,7 +39,7 @@ describe('rpcService.issueRpcAccessToken', () => {
 
       await expect(
         issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
-      ).resolves.toEqual({ error: 'forbidden' })
+      ).rejects.toBeInstanceOf(ControlApiError)
     }
   })
 

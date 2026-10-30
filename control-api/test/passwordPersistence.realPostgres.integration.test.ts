@@ -753,9 +753,16 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   })
   it('real password-change producer fences stale failure and success results', async () => {
     const stale = await capturePasswordEvaluation(email, false)
+    const before = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
     expect(
       await updateUserPassword(userId, email, password, 'Synthetic-BUG192-new-password')
     ).toEqual({ updated: true })
+    const after = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
+    expect(Number(after)).toBe(Number(before) + 1)
     if (!stale) throw new Error('expected capture')
     const lease = await acquirePasswordWork()
     if (!lease) throw new Error('expected password work owner')
@@ -831,12 +838,19 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
         [email]
       )
     ).rows[0]
+    const before = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
     const result = await setInvitationPasswordForEmail(
       email,
       invitation.id,
       'Synthetic-BUG192-reset-password'
     )
     expect(result).not.toHaveProperty('error')
+    const after = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
+    expect(Number(after)).toBe(Number(before) + 1)
     if (!stale) throw new Error('expected capture')
     const lease = await acquirePasswordWork()
     if (!lease) throw new Error('expected password work owner')
@@ -888,6 +902,86 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       await endPoolAndWaitForClients(singleConnectionPool)
     }
   })
+  it('advances password generation once for both existing-user admin seed producers', async () => {
+    const { provisionAdminDesktopWorkspace, provisionMemberFromAdmin } =
+      await import('../src/services/directory/adminProvisioning.js')
+    const firstSeedHash = await bcrypt.hash('Synthetic-BUG192-admin-seed-one', 12)
+    const secondSeedHash = await bcrypt.hash('Synthetic-BUG192-admin-seed-two', 12)
+    const before = (
+      await holder.pool.query(
+        'SELECT password_auth_generation, lifecycle_version FROM users WHERE id = $1',
+        [userId]
+      )
+    ).rows[0]
+    const adminId = (
+      await holder.pool.query(
+        `INSERT INTO control_admin_users(username, email, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [`seed-admin-${randomBytes(4).toString('hex')}`, email, secondSeedHash]
+      )
+    ).rows[0].id as string
+
+    await provisionAdminDesktopWorkspace({
+      controlAdminId: adminId,
+      email,
+      displayName: 'Synthetic member',
+      passwordHash: firstSeedHash,
+      agentNames: [],
+      contextIds: [],
+      linkDesktopOperator: false,
+    })
+    const afterWorkspaceSeed = (
+      await holder.pool.query(
+        'SELECT password_auth_generation, lifecycle_version FROM users WHERE id = $1',
+        [userId]
+      )
+    ).rows[0]
+    expect(Number(afterWorkspaceSeed.password_auth_generation)).toBe(
+      Number(before.password_auth_generation) + 1
+    )
+    expect(Number(afterWorkspaceSeed.lifecycle_version)).toBe(Number(before.lifecycle_version) + 1)
+
+    await provisionMemberFromAdmin({
+      adminId,
+      operatorSub: adminId,
+      teamAssignments: [],
+      seedPassword: true,
+    })
+    const afterMemberSeed = (
+      await holder.pool.query(
+        'SELECT password_auth_generation, lifecycle_version FROM users WHERE id = $1',
+        [userId]
+      )
+    ).rows[0]
+    expect(Number(afterMemberSeed.password_auth_generation)).toBe(
+      Number(afterWorkspaceSeed.password_auth_generation) + 1
+    )
+    expect(Number(afterMemberSeed.lifecycle_version)).toBe(
+      Number(afterWorkspaceSeed.lifecycle_version) + 1
+    )
+  })
+  it('fails closed when session revocation sees a different password lifecycle generation', async () => {
+    const { revokeAllUserSessions } = await import('../src/services/auth/userSessionService.js')
+    const before = (
+      await holder.pool.query('SELECT lifecycle_version FROM users WHERE id = $1', [userId])
+    ).rows[0].lifecycle_version
+    const staleVersion = (BigInt(String(before)) - 1n).toString()
+
+    await expect(
+      revokeAllUserSessions(userId, 'password_changed', undefined, undefined, staleVersion)
+    ).rejects.toThrow('password transition lifecycle generation changed before session revocation')
+
+    const after = (
+      await holder.pool.query('SELECT lifecycle_version FROM users WHERE id = $1', [userId])
+    ).rows[0].lifecycle_version
+    const epochs = await holder.pool.query(
+      'SELECT count(*)::int AS count FROM external_user_session_security_epochs WHERE user_id = $1',
+      [userId]
+    )
+    expect(String(after)).toBe(String(before))
+    expect(epochs.rows[0].count).toBe(0)
+  })
   it('does not hash accepted invitation passwords outside the durable owner', async () => {
     const invitation = await createSilentInvitationForTeams({
       inviteeName: 'Synthetic member',
@@ -931,6 +1025,9 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     })
     const accepted = await acceptInvitationForEmail(email, invitation.token, invitation.id)
     expect(accepted).toMatchObject({ data: { accepted: true, userId } })
+    const before = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
 
     const result = await withMemberPasswordWorkLease(lease =>
       setInvitationPasswordForUser(
@@ -943,6 +1040,10 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     )
 
     expect(result).not.toHaveProperty('error')
+    const after = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
+    expect(Number(after)).toBe(Number(before) + 1)
     expect(
       (await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])).rows[0]
         .password_hash

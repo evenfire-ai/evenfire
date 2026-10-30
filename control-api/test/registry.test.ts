@@ -178,6 +178,12 @@ describe('POST /registry/identity-voucher', () => {
   })
 
   it('rate-limits per-admin: 31st request in a minute returns 429', async () => {
+    // Keep all requests in one fixed limiter window. Repeated RS256 signing can
+    // otherwise cross a wall-clock minute boundary under CI load and make this
+    // test intermittently observe a fresh bucket on its final request.
+    const fixedNow = Math.floor(Date.now() / 60_000) * 60_000 + 59_999
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(fixedNow)
+
     adminSvc.findAdminById.mockResolvedValue({
       id: 'admin-uuid-123',
       username: 'rl-admin',
@@ -192,16 +198,18 @@ describe('POST /registry/identity-voucher', () => {
     app.use(express.json())
     app.use(createRegistryRouter())
 
-    // Drain the bucket. Cap is 30/min (set in the route definition).
-    // Keep the burst in one quota window, including its final millisecond.
-    const fixedNow = Math.floor(Date.now() / 60_000) * 60_000 + 59_999
-    vi.spyOn(Date, 'now').mockReturnValue(fixedNow)
-    for (let i = 0; i < 30; i += 1) {
-      const ok = await request(app).post('/registry/identity-voucher')
-      expect(ok.status).toBe(200)
+    try {
+      // Drain the bucket. Cap is 30/min (set in the route definition).
+      // The clock is held at the window's last millisecond to keep the burst together.
+      for (let i = 0; i < 30; i += 1) {
+        const ok = await request(app).post('/registry/identity-voucher')
+        expect(ok.status).toBe(200)
+      }
+      const denied = await request(app).post('/registry/identity-voucher')
+      expect(denied.status).toBe(429)
+    } finally {
+      nowSpy.mockRestore()
     }
-    const denied = await request(app).post('/registry/identity-voucher')
-    expect(denied.status).toBe(429)
   })
 
   it('rejects disabled admins with 401', async () => {

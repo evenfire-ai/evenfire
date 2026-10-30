@@ -18,6 +18,7 @@ import {
   updatePassword,
   updateProfile,
 } from '../services/meService.js'
+import { setProfileSessionCookie } from '../sessionCookie.js'
 import { PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE } from './mePasswordErrors.js'
 
 const teamDirectoryRateLimit = createRateLimiter({
@@ -67,12 +68,14 @@ export function createMeRouter(): Router {
         return
       }
 
-      const result = await switchTeam(auth.userId, auth.email, nextTeamId, sessionToken)
+      const result = await switchTeam(auth.userId, auth.email, nextTeamId, sessionToken, req.ip)
       if (!result) {
         res.status(403).json({ error: 'You are not a member of this team' })
         return
       }
-      res.status(200).json(result)
+      const browserRequest = Boolean(req.header('origin') || req.header('sec-fetch-site'))
+      if (browserRequest) setProfileSessionCookie(req, res, result.token)
+      res.status(200).json(browserRequest ? { team: result.team } : result)
     } catch (error) {
       next(error)
     }

@@ -9198,6 +9198,34 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
     const sqls = query.mock.calls.map(([sql]) => String(sql))
     expect(sqls).toContainEqual('BEGIN')
+    // The cleanup takes the global order before its first triggered write:
+    // approval rows, then the definer prelock of the policy subjects, then the
+    // user-grant DELETE that would otherwise take users before teams.
+    const beginIndex = sqls.indexOf('BEGIN')
+    const approvalLockIndex = sqls.findIndex(
+      sql =>
+        sql.includes('SELECT id FROM workflow_approval_requests') &&
+        sql.includes('ORDER BY id') &&
+        sql.includes('FOR UPDATE')
+    )
+    const prelockIndex = sqls.indexOf(
+      'SELECT authorization_prelock_workflow_recipe_policy_revisions($1, $2)'
+    )
+    const userGrantDeleteIndex = sqls.findIndex(sql =>
+      sql.includes('DELETE FROM user_workflow_triggers')
+    )
+    expect(beginIndex).toBeGreaterThanOrEqual(0)
+    expect(approvalLockIndex).toBeGreaterThan(beginIndex)
+    expect(prelockIndex).toBeGreaterThan(approvalLockIndex)
+    expect(userGrantDeleteIndex).toBeGreaterThan(prelockIndex)
+    expect(query.mock.calls[approvalLockIndex]).toEqual([
+      expect.stringContaining('FOR UPDATE'),
+      ['sandbox-recipes', 'test-wf'],
+    ])
+    expect(query.mock.calls[prelockIndex]).toEqual([
+      'SELECT authorization_prelock_workflow_recipe_policy_revisions($1, $2)',
+      ['sandbox-recipes', 'test-wf'],
+    ])
     expect(sqls).toContainEqual(expect.stringContaining('DELETE FROM user_workflow_triggers'))
     expect(sqls).toContainEqual(expect.stringContaining('DELETE FROM team_workflow_triggers'))
     expect(sqls).toContainEqual(

@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { randomUUID } from 'node:crypto'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createAuthRouter } from '../src/routes/auth.js'
 
@@ -8,6 +10,8 @@ const authServiceMock = vi.hoisted(() => ({
   loginWithGoogle: vi.fn(),
   loginWithPassword: vi.fn(),
   requestPasswordReset: vi.fn(),
+  logoutUserSession: vi.fn(),
+  renewUserSession: vi.fn(),
 }))
 
 vi.mock('../src/services/authService.js', () => authServiceMock)
@@ -17,13 +21,7 @@ function buildApp() {
   app.set('trust proxy', 1)
   app.use(express.json())
   app.use('/api/v1', createAuthRouter())
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({
-        error: err instanceof Error ? err.message : 'Unknown error',
-      })
-    }
-  )
+  app.use(externalRestPublicErrorHandler)
   return app
 }
 
@@ -31,16 +29,97 @@ describe('routes/auth password-login', () => {
   beforeEach(() => {
     authServiceMock.loginWithPassword.mockReset()
     authServiceMock.requestPasswordReset.mockReset()
+    authServiceMock.logoutUserSession.mockReset()
+    authServiceMock.renewUserSession.mockReset()
   })
 
-  it('propagates invalid credentials as a 401 instead of a 500', async () => {
+  it.each([
+    [401, { error: 'invalid_credentials' }],
+    [403, { error: 'membership_not_found' }],
+    [409, { error: 'password_not_set' }],
+  ] as const)('keeps upstream %s password-login outcomes opaque', async (status, body) => {
     authServiceMock.loginWithPassword.mockRejectedValueOnce(
-      new ControlApiError('control-api error (401)', 401, { error: 'Unauthorized' })
+      new ControlApiError(`control-api error (${status})`, status, body)
     )
 
     const res = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'user@example.invalid', password: 'wrong-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-wrong-password' })
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'invalid_credentials' })
+    expect(res.headers['cache-control']).toBeUndefined()
+    expect(res.headers['retry-after']).toBeUndefined()
+    expect(res.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(res.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toMatch(/membership_not_found|password_not_set/)
+  })
+
+  it('keeps retired password accounts indistinguishable from invalid credentials', async () => {
+    authServiceMock.loginWithPassword.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 403, { error: 'membership_not_found' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/password-login')
+      .send({ email: 'retired@example.invalid', password: 'synthetic-wrong-password' })
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'invalid_credentials' })
+  })
+
+  it('keeps retired Google accounts indistinguishable across credential providers', async () => {
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 403, { error: 'membership_not_found' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'validly-shaped-test-token' })
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('answers a Google identity refused by control-api like a retired account', async () => {
+    authServiceMock.loginWithGoogle.mockReset()
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'validly-shaped-test-token' })
+
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('keeps any other Google login 401 on the sanitized public envelope', async () => {
+    authServiceMock.loginWithGoogle.mockReset()
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'session_revoked' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'validly-shaped-test-token' })
+
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(401)
+    expect(res.body).not.toEqual({ error: 'Unauthorized' })
+    expect(res.body.error).toEqual(expect.objectContaining({ code: expect.any(String) }))
+  })
+
+  it('keeps password setup state opaque on password-login', async () => {
+    authServiceMock.loginWithPassword.mockRejectedValueOnce(
+      new ControlApiError('control-api error (409)', 409, { error: 'password_not_set' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/password-login')
+      .send({ email: 'active@example.invalid', password: 'synthetic-valid-password' })
 
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'invalid_credentials' })
@@ -64,7 +143,7 @@ describe('routes/auth password-login', () => {
 
   it('sets an HttpOnly profile session cookie and omits bearer token body for browser login', async () => {
     authServiceMock.loginWithPassword.mockResolvedValueOnce({
-      token: 'profile-session-jwt',
+      token: 'profile-session-test-token',
       me: {
         id: 'user-1',
         email: 'user@example.invalid',
@@ -80,12 +159,14 @@ describe('routes/auth password-login', () => {
       .post('/api/v1/auth/password-login')
       .set('origin', 'http://localhost:3001')
       .set('x-forwarded-proto', 'https')
-      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-correct-password' })
       .expect(200)
 
     expect(res.body.token).toBeUndefined()
     expect(res.body.me.email).toBe('user@example.invalid')
-    expect(String(res.headers['set-cookie'])).toContain('profile_session=profile-session-jwt')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=profile-session-test-token'
+    )
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
     expect(String(res.headers['set-cookie'])).toContain('Max-Age=43200')
     expect(String(res.headers['set-cookie'])).toContain('Secure')
@@ -94,7 +175,7 @@ describe('routes/auth password-login', () => {
 
   it('returns the bearer token body for non-browser Desktop App login', async () => {
     authServiceMock.loginWithPassword.mockResolvedValueOnce({
-      token: 'desktop-session-jwt',
+      token: 'desktop-session-test-token',
       me: {
         id: 'user-1',
         email: 'user@example.invalid',
@@ -108,12 +189,53 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-correct-password' })
       .expect(200)
 
-    expect(res.body.token).toBe('desktop-session-jwt')
+    expect(res.body.token).toBe('desktop-session-test-token')
     expect(res.body.me.email).toBe('user@example.invalid')
-    expect(String(res.headers['set-cookie'])).toContain('profile_session=desktop-session-jwt')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=desktop-session-test-token'
+    )
+  })
+
+  it('delegates Google verification with the trusted client IP', async () => {
+    authServiceMock.loginWithGoogle.mockResolvedValueOnce({
+      token: 'google-session-test-token',
+      me: { id: 'user-1', email: 'user@example.test' },
+    })
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .set('x-forwarded-for', '198.51.100.52')
+      .send({ idToken: 'opaque-test-token' })
+
+    expect(response.status).toBe(200)
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith(
+      { idToken: 'opaque-test-token' },
+      '198.51.100.52'
+    )
+  })
+
+  it('forwards more than ten session renewals without a local rate limit', async () => {
+    const session = randomUUID()
+    authServiceMock.renewUserSession.mockResolvedValue({
+      token: session,
+      expiresInSeconds: 3600,
+    })
+    const app = buildApp()
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const response = await request(app)
+        .post('/api/v1/auth/session/renew')
+        .set('authorization', `Bearer ${session}`)
+        .set('x-forwarded-for', '198.51.100.89')
+        .expect(200)
+      expect(response.body.expiresInSeconds).toBe(3600)
+      expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+    }
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledTimes(12)
+    expect(authServiceMock.renewUserSession).toHaveBeenCalledWith(session, '198.51.100.89')
   })
 
   it('documents the password-reset limiter headers and client-IP contract', async () => {
@@ -140,5 +262,78 @@ describe('routes/auth password-login', () => {
     expect(limited.headers['x-ratelimit-limit']).toBe('5')
     expect(limited.headers['x-ratelimit-remaining']).toBe('0')
     expect(limited.body).toMatchObject({ retryAfterSeconds: expect.any(Number) })
+  })
+
+  it.each([
+    [429, 'rate_limited'],
+    [503, 'authority_unavailable'],
+  ] as const)(
+    'expires the Profile cookie without claiming logout success when revocation returns %s',
+    async (status, code) => {
+      authServiceMock.logoutUserSession.mockRejectedValueOnce(
+        new ControlApiError('private upstream detail', status, { error: { code } })
+      )
+
+      const response = await request(buildApp())
+        .post('/api/v1/auth/logout')
+        .set('Cookie', 'profile_session=opaque-session')
+        .set('x-forwarded-proto', 'https')
+        .expect(status)
+
+      expect(response.body.error.code).toBe(code)
+      expect(JSON.stringify(response.body)).not.toContain('private upstream detail')
+      expect(response.body.ok).toBeUndefined()
+      expect(authServiceMock.logoutUserSession).toHaveBeenCalledOnce()
+      const cookie = String(response.headers['set-cookie'])
+      expect(cookie).toContain('profile_session=')
+      expect(cookie).toContain('Expires=Thu, 01 Jan 1970 00:00:00 GMT')
+      expect(cookie).toContain('HttpOnly')
+      expect(cookie).toContain('Secure')
+      expect(cookie).toContain('SameSite=Lax')
+      expect(cookie).toContain('Path=/')
+    }
+  )
+
+  it('preserves successful logout and expires the Profile cookie', async () => {
+    authServiceMock.logoutUserSession.mockResolvedValueOnce(undefined)
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/logout')
+      .set('Cookie', 'profile_session=opaque-session')
+      .set('x-forwarded-proto', 'https')
+      .expect(200)
+
+    expect(response.body).toEqual({ ok: true })
+    expect(String(response.headers['set-cookie'])).toContain(
+      'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    )
+    expect(String(response.headers['set-cookie'])).toContain('Secure')
+  })
+
+  it('keeps already-invalid logout idempotent and expires its cookie', async () => {
+    authServiceMock.logoutUserSession.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 401, { error: 'Unauthorized' })
+    )
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/logout')
+      .set('Cookie', 'profile_session=opaque-session')
+      .set('x-forwarded-proto', 'https')
+      .expect(200)
+
+    expect(response.body).toEqual({ ok: true })
+    expect(String(response.headers['set-cookie'])).toContain(
+      'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    )
+  })
+
+  it('does not call remote revocation or set a cookie when no session is present', async () => {
+    const response = await request(buildApp()).post('/api/v1/auth/logout').expect(200)
+
+    expect(response.body).toEqual({ ok: true })
+    expect(authServiceMock.logoutUserSession).not.toHaveBeenCalled()
+    expect(String(response.headers['set-cookie'])).toContain(
+      'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    )
   })
 })

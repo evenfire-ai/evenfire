@@ -64,7 +64,8 @@ export function normalizeInvitationPurpose(purpose?: InvitationPurpose): Invitat
 
 export async function getInvitationRecordByToken(
   db: Pick<DbClient, 'query'>,
-  token: string
+  token: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const result = await db.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at, i.accepted_at,
@@ -73,7 +74,8 @@ export async function getInvitationRecordByToken(
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE i.token = $1
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [token]
   )
   return (result.rows[0] as InvitationRow | undefined) || null
@@ -82,7 +84,8 @@ export async function getInvitationRecordByToken(
 export async function getInvitationRecordByTokenOrId(
   db: Pick<DbClient, 'query'>,
   token: string,
-  invitationId: string
+  invitationId: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const normalizedToken = token.trim()
   const normalizedInvitationId = invitationId.trim()
@@ -96,10 +99,12 @@ export async function getInvitationRecordByTokenOrId(
             t.name AS team_name
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
-      WHERE ($1 <> '' AND i.token = $1)
-         OR ($2 <> '' AND i.id::text = $2)
+      WHERE ($1 <> '' AND $2 = '' AND i.token = $1)
+         OR ($1 = '' AND $2 <> '' AND i.id::text = $2)
+         OR ($1 <> '' AND $2 <> '' AND i.token = $1 AND i.id::text = $2)
       ORDER BY i.created_at DESC
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [normalizedToken, normalizedInvitationId]
   )
 
@@ -109,7 +114,7 @@ export async function getInvitationRecordByTokenOrId(
 export async function getInvitationRecordById(
   db: Pick<DbClient, 'query'>,
   invitationId: string,
-  lockForUpdate = false
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const normalizedInvitationId = invitationId.trim()
   if (!normalizedInvitationId) return null
@@ -122,7 +127,7 @@ export async function getInvitationRecordById(
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE i.id::text = $1
       LIMIT 1
-      ${lockForUpdate ? 'FOR UPDATE OF i' : ''}`,
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [normalizedInvitationId]
   )
   return (result.rows[0] as InvitationRow | undefined) || null
@@ -139,6 +144,27 @@ export async function lockPasswordResetUser(
       LIMIT 1
       FOR NO KEY UPDATE`,
     [email]
+  )
+  return (result.rows[0] as InvitationUserRow | undefined) ?? null
+}
+
+/**
+ * Locks the authoritative user row inside the transaction that is about to
+ * write the password. A passwordless invited user is represented by
+ * `users.password_hash IS NULL`: the column is nullable and
+ * `ensureInvitationUser` inserts only email and name.
+ */
+export async function lockInvitationUserForPasswordSetup(
+  db: Pick<DbClient, 'query'>,
+  userId: string
+): Promise<InvitationUserRow | null> {
+  const result = await db.query(
+    `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
+       FROM users
+      WHERE id = $1
+      LIMIT 1
+      FOR NO KEY UPDATE`,
+    [userId]
   )
   return (result.rows[0] as InvitationUserRow | undefined) ?? null
 }
@@ -160,29 +186,26 @@ export async function ensureInvitationUser(
 
   let user = (existing.rows[0] as InvitationUserRow | undefined) || null
   if (!user) {
-    user = (
-      await db.query(
-        `INSERT INTO users(email, name)
+    const inserted = await db.query(
+      `INSERT INTO users(email, name)
        VALUES($1, $2)
-       ON CONFLICT (email) DO UPDATE
-           SET name = COALESCE(users.name, EXCLUDED.name),
-               updated_at = NOW()
+       ON CONFLICT (email) DO NOTHING
        RETURNING id, email, name, picture, password_hash, lifecycle_state, lifecycle_version`,
-        [normalizedEmail, normalizedInviteeName]
+      [normalizedEmail, normalizedInviteeName]
+    )
+    user = (inserted.rows[0] as InvitationUserRow | undefined) || null
+    if (!user) {
+      const racedExisting = await db.query(
+        `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
+           FROM users
+          WHERE email = $1
+          LIMIT 1`,
+        [normalizedEmail]
       )
-    ).rows[0] as InvitationUserRow
-  } else if (normalizedInviteeName && user.name !== normalizedInviteeName) {
-    user = (
-      await db.query(
-        `UPDATE users
-            SET name = $2,
-                updated_at = NOW()
-          WHERE id = $1
-       RETURNING id, email, name, picture, password_hash, lifecycle_state, lifecycle_version`,
-        [user.id, normalizedInviteeName]
-      )
-    ).rows[0] as InvitationUserRow
+      user = (racedExisting.rows[0] as InvitationUserRow | undefined) || null
+    }
   }
+  if (!user) throw new Error('Failed to resolve invitation user')
 
   await db.query(
     `INSERT INTO profiles(user_id, display_name)
@@ -190,15 +213,6 @@ export async function ensureInvitationUser(
      ON CONFLICT (user_id) DO NOTHING`,
     [user.id, user.name || null]
   )
-  if (normalizedInviteeName) {
-    await db.query(
-      `UPDATE profiles
-          SET display_name = $2,
-              updated_at = NOW()
-        WHERE user_id = $1`,
-      [user.id, normalizedInviteeName]
-    )
-  }
 
   return user
 }

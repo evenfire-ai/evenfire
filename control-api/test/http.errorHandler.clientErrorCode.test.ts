@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { ExternalSessionIssuanceUnavailableError } from '../src/services/auth/externalSessionIssuance.js'
 import {
   TracingIdempotencyConflictError,
   UnsafeTracingInputError,
@@ -26,6 +27,22 @@ function appThrowing(err: unknown) {
 }
 
 describe('clerumErrorHandler — machine-readable code on allowlisted 4xx', () => {
+  it('returns bounded no-store retry guidance for inadmissible V1 issuance', async () => {
+    const res = await request(appThrowing(new ExternalSessionIssuanceUnavailableError())).post(
+      '/boom'
+    )
+
+    expect(res.status).toBe(503)
+    expect(res.headers['cache-control']).toBe('no-store')
+    expect(res.headers['retry-after']).toBe('2')
+    expect(res.body.error).toMatchObject({
+      code: 'session_issuance_temporarily_unavailable',
+      retryable: true,
+      message: 'A session could not be issued right now. Try again in two seconds.',
+    })
+    expect(res.body.error).not.toHaveProperty('details')
+  })
+
   it.each([
     [
       new TracingIdempotencyConflictError('administrative', 'hcc_internal_control', 'e-1'),

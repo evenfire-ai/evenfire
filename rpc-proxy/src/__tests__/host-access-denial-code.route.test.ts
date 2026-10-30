@@ -63,9 +63,11 @@ function makeApp() {
 }
 
 type ControlApiAnswer = { status: number; body?: unknown; headers?: Record<string, string> }
+type ControlApiRequest = { url: string; init?: RequestInit }
 const originalFetch = globalThis.fetch
 let controlApiAnswer: ControlApiAnswer
 let controlApiCalls: string[]
+let controlApiRequests: ControlApiRequest[]
 let hostCalls: string[]
 let hostAnswer: { status: number; body: string }
 
@@ -73,6 +75,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   authTokenMock.verifyRpcToken.mockReturnValue({ ...CLAIMS })
   controlApiCalls = []
+  controlApiRequests = []
   hostCalls = []
   hostAnswer = { status: 200, body: '{}' }
   controlApiAnswer = {
@@ -80,10 +83,11 @@ beforeEach(() => {
     body: CONTROL_API_403_BODY,
     headers: { [REASON_HEADER]: 'directory_grant_missing' },
   }
-  globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+  globalThis.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input)
     if (url.includes('/rpc/access/users/')) {
       controlApiCalls.push(url)
+      controlApiRequests.push({ url, init })
       return new Response(
         controlApiAnswer.body === undefined ? null : JSON.stringify(controlApiAnswer.body),
         {
@@ -93,6 +97,23 @@ beforeEach(() => {
       )
     }
     hostCalls.push(url)
+    if (hostAnswer.status === 200 && hostAnswer.body === '{}') {
+      // Minimal route-shaped success payloads so the liveness witnesses exercise
+      // the same rail the route would use in production. Explicit hostAnswer
+      // overrides in a test always win.
+      if (url.endsWith('/v1/runtime/status')) {
+        return new Response(JSON.stringify({ agent: { state: 'running' }, queue: {} }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url.endsWith('/rpc/hosts/chatllm/wake')) {
+        return new Response(JSON.stringify({ status: 'active' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+    }
     return new Response(hostAnswer.body, {
       status: hostAnswer.status,
       headers: { 'content-type': 'application/json' },
@@ -175,9 +196,42 @@ const DENYING_ROUTES: RouteCase[] = [
   },
 ]
 
-async function send(route: RouteCase) {
+function send(route: RouteCase) {
   const pending = request(makeApp())[route.method](route.path).set('authorization', 'Bearer tok')
   return route.body ? pending.send(route.body) : pending
+}
+
+const CONTROL_API_CONNECTION = {
+  userId: CLAIMS.sub,
+  hostRef: 'chatllm',
+  url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+  bindingStatus: 'recorded',
+}
+
+/**
+ * Liveness witness for the negative `hostCalls` assertions: run the same route
+ * with a successful control-api authorization and prove it reaches its Host
+ * rail. A long-lived SSE route never completes, so its response is aborted once
+ * the Host call is observable.
+ */
+async function proveAuthorizedForwarding(route: RouteCase): Promise<void> {
+  controlApiAnswer = { status: 200, body: CONTROL_API_CONNECTION }
+  const pending = send(route)
+  let settled = false
+  const completion = pending.then(
+    () => {
+      settled = true
+    },
+    () => {
+      settled = true
+    }
+  )
+  const deadline = Date.now() + 2_000
+  while (!settled && hostCalls.length === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  if (!settled) pending.abort()
+  await completion
 }
 
 describe('host authorization 403 carries a machine-readable code at every site', () => {
@@ -194,15 +248,109 @@ describe('host authorization 403 carries a machine-readable code at every site',
     }
   )
 
-  it.each(DENYING_ROUTES)('$label: a missing host (404) -> host_access_denied', async route => {
+  it.each(DENYING_ROUTES)(
+    '$label: an unbound control-api 404 -> host_access_denied',
+    async route => {
+      await proveAuthorizedForwarding(route)
+      // Witness: an authorized request reached control-api and the route then
+      // contacted its Host rail, so both counters are live before the refusal.
+      expect(controlApiCalls).toHaveLength(1)
+      expect(hostCalls).toHaveLength(1)
+
+      controlApiAnswer = { status: 404, body: { error: 'not found' } }
+
+      const res = await send(route)
+
+      // Witness: the refused request still reached control-api (authorization
+      // ran) and contacted no Host rail.
+      expect(controlApiCalls).toHaveLength(2)
+      expect(hostCalls).toHaveLength(1)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
+    }
+  )
+
+  it('messages: a real 403 denial stays host_access_denied', async () => {
+    // Witness for the 404 test above: a coded 403 is still mapped on the same
+    // route, so the 404 denial is not a blanket replacement of every refusal.
+    const messages = DENYING_ROUTES.find(route => route.label === 'messages')!
+    await proveAuthorizedForwarding(messages)
+    expect(controlApiCalls).toHaveLength(1)
+    expect(hostCalls).toHaveLength(1)
+
+    controlApiAnswer = {
+      status: 403,
+      body: CONTROL_API_403_BODY,
+      headers: { [REASON_HEADER]: 'host_disabled' },
+    }
+
+    const res = await send(messages)
+
+    // The refused request still reached control-api and did not forward.
+    expect(controlApiCalls).toHaveLength(2)
+    expect(hostCalls).toHaveLength(1)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
+  })
+
+  it('messages: a threaded send posts the binding to the parent path, and a 404 is an upstream failure', async () => {
+    const threaded: RouteCase = {
+      label: 'messages with threadId',
+      method: 'post',
+      path: '/rpc/hosts/chatllm/messages',
+      body: { content: 'hi', threadId: 'thread-1' },
+    }
+    await proveAuthorizedForwarding(threaded)
+    expect(controlApiCalls).toHaveLength(1)
+    expect(hostCalls).toHaveLength(1)
+
+    // The threaded send is the direct-run-bound production shape: it POSTs
+    // the derived binding to the parent Host path before forwarding.
+    expect(String(controlApiRequests[0]!.url)).toMatch(/\/mcp-hosts\/chatllm$/)
+    expect(controlApiRequests[0]!.init?.method).toBe('POST')
+    expect(JSON.parse(String(controlApiRequests[0]!.init?.body))).toMatchObject({
+      runId: expect.any(String),
+      sessionId: 'thread-1',
+      origin: 'direct_chat',
+    })
+
+    controlApiAnswer = { status: 404, body: { error: 'not found' } }
+
+    const res = await send(threaded)
+
+    expect(controlApiCalls).toHaveLength(2)
+    expect(hostCalls).toHaveLength(1)
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({ error: 'Upstream host unavailable' })
+  })
+
+  // These two answer their own 404 (rather than a coded 403) on a Host denial,
+  // so they live outside DENYING_ROUTES. An unbound control-api 404 is that
+  // denial, not an upstream failure.
+  it.each([
+    {
+      label: 'task result',
+      method: 'get' as const,
+      path: '/rpc/hosts/chatllm/tasks/task-1/result',
+    },
+    {
+      label: 'task cancel',
+      method: 'post' as const,
+      path: '/rpc/hosts/chatllm/tasks/task-1/cancel',
+    },
+  ])('$label: an unbound control-api 404 stays Host-not-accessible', async route => {
+    await proveAuthorizedForwarding(route)
+    expect(controlApiCalls).toHaveLength(1)
+    expect(hostCalls).toHaveLength(1)
+
     controlApiAnswer = { status: 404, body: { error: 'not found' } }
 
     const res = await send(route)
 
-    expect(controlApiCalls).toHaveLength(1)
-    expect(hostCalls).toEqual([])
-    expect(res.status).toBe(403)
-    expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
+    expect(controlApiCalls).toHaveLength(2)
+    expect(hostCalls).toHaveLength(1)
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'Host not found or not accessible' })
   })
 })
 

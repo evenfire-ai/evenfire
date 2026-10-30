@@ -1,21 +1,36 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { readFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import type { IncomingHttpHeaders, Server } from 'node:http'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
 import { createExternalUsersRouter } from '../src/routes/external/users.js'
 import { PasswordAdmissionError } from '../src/services/auth/passwordCredentialVerification.js'
-import {
-  signExternalSessionToken,
-  verifyExternalSessionToken,
-} from '../src/utils/auth/externalSessionAuthToken.js'
+import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import {
   type ExternalRestHttpProcess,
   boundedRequest as request,
   startExternalRestHttpProcess,
 } from './helpers/externalRestHttpProcess.js'
 import { responseDropProxyApp } from './helpers/passwordRecoveryResponseProxy.js'
+
+// The edge publishes these bodies and profile-ui classifies them by `code`
+// from the same document, so the producer mappings are pinned to it.
+const invitationPasswordContract = JSON.parse(
+  readFileSync(
+    new URL('../../tests/contracts/invitation-password-public-errors.json', import.meta.url),
+    'utf8'
+  )
+) as Record<
+  'password_not_found' | 'password_not_pending' | 'password_expired',
+  { status: number; body: Record<string, string> }
+>
+const {
+  password_not_found: notFound,
+  password_not_pending: notPending,
+  password_expired: expired,
+} = invitationPasswordContract
 
 const externalConfig = {
   controlApiBaseUrl: '',
@@ -484,14 +499,9 @@ describe('invitation/password producer response mappings', () => {
       403,
       { error: 'Invitation is invalid or unavailable' },
     ],
-    ['missing invitation', { error: 'not_found' }, 404, { error: 'Invitation not found' }],
-    [
-      'redeemed invitation',
-      { error: 'not_pending' },
-      409,
-      { error: 'Invitation has already been used' },
-    ],
-    ['expired invitation', { error: 'expired' }, 410, { error: 'Invitation has expired' }],
+    ['missing invitation', { error: 'not_found' }, notFound.status, notFound.body],
+    ['redeemed invitation', { error: 'not_pending' }, notPending.status, notPending.body],
+    ['expired invitation', { error: 'expired' }, expired.status, expired.body],
   ])(
     'maps the producer %s domain response to the public contract',
     async (label, result, status, body) => {
@@ -613,8 +623,8 @@ describe('invitation/password producer response mappings', () => {
       serviceResult: { error: 'user_retired' },
       producerStatus: 401,
       producerBody: { error: 'user_retired' },
-      publicStatus: 404,
-      publicBody: { error: 'Invitation not found' },
+      publicStatus: notFound.status,
+      publicBody: notFound.body,
     },
     {
       label: 'wrong member binding',
@@ -633,8 +643,8 @@ describe('invitation/password producer response mappings', () => {
       serviceResult: { error: 'not_found' },
       producerStatus: 404,
       producerBody: { error: 'not_found' },
-      publicStatus: 404,
-      publicBody: { error: 'Invitation not found' },
+      publicStatus: notFound.status,
+      publicBody: notFound.body,
     },
     {
       label: 'invitation no longer accepted',
@@ -653,8 +663,8 @@ describe('invitation/password producer response mappings', () => {
       serviceResult: { error: 'not_pending' },
       producerStatus: 409,
       producerBody: { error: 'invitation_not_pending' },
-      publicStatus: 409,
-      publicBody: { error: 'Invitation has already been used' },
+      publicStatus: notPending.status,
+      publicBody: notPending.body,
     },
     {
       label: 'reset invitation expired through authenticated setup',
@@ -663,8 +673,8 @@ describe('invitation/password producer response mappings', () => {
       serviceResult: { error: 'expired' },
       producerStatus: 410,
       producerBody: { error: 'expired' },
-      publicStatus: 410,
-      publicBody: { error: 'Invitation has expired' },
+      publicStatus: expired.status,
+      publicBody: expired.body,
     },
   ])('maps the authenticated password-setup producer outcome: $label', async scenario => {
     directory.setInvitationPasswordForUser.mockResolvedValue(scenario.serviceResult)
@@ -704,7 +714,9 @@ describe('invitation/password producer response mappings', () => {
       'r6-user',
       'r6-member@example.invalid',
       scenario.invitationId,
-      scenario.password
+      scenario.password,
+      undefined,
+      { rejectIfPasswordAlreadySet: true }
     )
     expect(directory.setInvitationPasswordForUser).toHaveBeenCalledTimes(2)
     expect(directory.acceptInvitationForEmail).not.toHaveBeenCalled()
@@ -782,13 +794,6 @@ describe('invitation/password producer response mappings', () => {
         lifecycleState: 'active',
         authGeneration: 7,
         passwordUpdated: true,
-        sessionContext: {
-          userId: preview.userId,
-          email: preview.email,
-          teamId: null,
-          role: 'member',
-          authGeneration: 7,
-        },
       },
     })
 
@@ -810,21 +815,12 @@ describe('invitation/password producer response mappings', () => {
       purpose: 'password_reset',
       status: 'accepted',
       passwordUpdated: true,
+      reauthenticationRequired: true,
     })
     expect(response.body).not.toHaveProperty('token')
-    expect(String(response.headers['set-cookie'])).toContain('profile_session=')
+    expect(response.body).not.toHaveProperty('sessionContext')
+    expect(String(response.headers['set-cookie'])).toContain('profile_session=;')
     expect(String(response.headers['set-cookie'])).toContain('HttpOnly')
-    const cookie = String(response.headers['set-cookie']).match(/profile_session=([^;]+)/)?.[1]
-    expect(cookie).toBeTruthy()
-    const claims = verifyExternalSessionToken(decodeURIComponent(cookie!))
-    expect(claims).toMatchObject({
-      userId: preview.userId,
-      email: preview.email,
-      teamId: null,
-      role: 'member',
-      authGeneration: 7,
-    })
-    expect(claims!.exp).toBeGreaterThan(Math.floor(Date.now() / 1000))
 
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
       preview.email,
@@ -835,6 +831,53 @@ describe('invitation/password producer response mappings', () => {
     expect(directory.getInvitationByToken).toHaveBeenCalledWith('r6-producer-invitation-token')
     expect(directory.getInvitationByToken).toHaveBeenCalledOnce()
     expect(directory.acceptInvitationForEmail).not.toHaveBeenCalled()
+  })
+
+  it('returns no session and sets no cookie from the reset producer', async () => {
+    directory.setInvitationPasswordForEmail.mockResolvedValueOnce({
+      data: {
+        id: preview.id,
+        userId: preview.userId,
+        email: preview.email,
+        teamId: null,
+        role: 'member',
+        purpose: 'password_reset',
+        status: 'accepted',
+        lifecycleState: 'active',
+        authGeneration: 7,
+        passwordUpdated: true,
+        token: 'synthetic-producer-session-token',
+        sessionContext: {
+          userId: preview.userId,
+          email: preview.email,
+          teamId: null,
+          role: 'member',
+          authGeneration: 7,
+        },
+      },
+    })
+
+    const response = await request(producerServer)
+      .post('/api/v1/external/invitations/password-token')
+      .set('authorization', `Bearer ${internalServiceToken}`)
+      .set('x-service-token', 'external-rest-api')
+      .send({
+        token: 'r6-synthetic-reset-proof',
+        email: preview.email,
+        invitationId: preview.id,
+        password: 'R6-synthetic-valid-password',
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      userId: preview.userId,
+      passwordUpdated: true,
+      reauthenticationRequired: true,
+    })
+    expect(response.body).not.toHaveProperty('token')
+    expect(response.body).not.toHaveProperty('sessionContext')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledOnce()
   })
 
   it('keeps a dropped post-dispatch reset acknowledgement unknown and never retries it', async () => {
@@ -852,13 +895,6 @@ describe('invitation/password producer response mappings', () => {
         lifecycleState: 'active',
         authGeneration: 7,
         passwordUpdated: true,
-        sessionContext: {
-          userId: preview.userId,
-          email: preview.email,
-          teamId: null,
-          role: 'member',
-          authGeneration: 7,
-        },
       },
     })
 
@@ -1045,14 +1081,7 @@ describe('invitation/password producer response mappings', () => {
     }
   )
 
-  it.each([
-    'html',
-    'missing_session',
-    'empty_session',
-    'invalid_payload',
-    'legacy_busy',
-    'legacy_unavailable',
-  ] as const)(
+  it.each(['html', 'invalid_payload', 'legacy_busy', 'legacy_unavailable'] as const)(
     'alters only %s after real preview and serialized successful producer completion',
     async resetFault => {
       directory.setInvitationPasswordForEmail.mockResolvedValue({
@@ -1061,13 +1090,6 @@ describe('invitation/password producer response mappings', () => {
           status: 'accepted',
           role: 'member',
           passwordUpdated: true,
-          sessionContext: {
-            userId: preview.userId,
-            email: preview.email,
-            teamId: null,
-            role: 'member',
-            authGeneration: 7,
-          },
         },
       })
       let writes = 0

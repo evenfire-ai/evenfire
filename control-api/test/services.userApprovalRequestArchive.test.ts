@@ -40,6 +40,9 @@ const mockTransactionQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
     const ids = (params?.[0] as string[]) ?? []
     return { rows: [], rowCount: ids.length }
   }
+  if (/SELECT authorization_prelock_workflow_approval_revisions/i.test(text)) {
+    return { rows: [], rowCount: 1 }
+  }
   return { rows: [], rowCount: 0 }
 })
 
@@ -71,6 +74,38 @@ describe('archiveTerminalApprovals', () => {
     expect(total).toBe(0)
     // Only the SELECT should fire (one batch → 0 rows → loop exits).
     expect(mockTransactionQuery).toHaveBeenCalledTimes(1)
+    // An empty batch must not take the approval subject prelock.
+    expect(
+      mockTransactionQuery.mock.calls.filter(([sql]) =>
+        /authorization_prelock_workflow_approval_revisions/i.test(String(sql))
+      )
+    ).toHaveLength(0)
+  })
+
+  it('takes the approval subject prelock between the SELECT and the first write', async () => {
+    eligibleRows.push({ id: 'id-a' }, { id: 'id-b' })
+
+    await archiveTerminalApprovals(180, 500)
+
+    const calls = mockTransactionQuery.mock.calls
+    const selectIndex = calls.findIndex(([sql]) =>
+      /SELECT id FROM workflow_approval_requests/i.test(String(sql))
+    )
+    const prelockIndex = calls.findIndex(([sql]) =>
+      /SELECT authorization_prelock_workflow_approval_revisions/i.test(String(sql))
+    )
+    const firstWriteIndex = calls.findIndex(([sql]) =>
+      /INSERT INTO workflow_approval_requests_archive/i.test(String(sql))
+    )
+    const deleteIndex = calls.findIndex(([sql]) =>
+      /DELETE FROM workflow_approval_requests/i.test(String(sql))
+    )
+
+    expect(selectIndex).toBe(0)
+    expect(prelockIndex).toBe(1)
+    expect(firstWriteIndex).toBeGreaterThan(prelockIndex)
+    expect(deleteIndex).toBeGreaterThan(firstWriteIndex)
+    expect(calls[prelockIndex]?.[1]).toEqual([['id-a', 'id-b']])
   })
 
   it('archives all eligible rows in a single batch when count <= batchSize', async () => {

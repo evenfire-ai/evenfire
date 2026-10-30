@@ -30,6 +30,44 @@ test('exact checked-in census and full reporter pass', () => {
   assert.equal(verifySuiteManifest(root, manifest), manifest)
   assert.deepEqual(reportViolations(root, manifest, 'publicPostgres', green()), [])
 })
+test('new unclassified physical PostgreSQL suite fails closed', () => {
+  const scratchRoot = process.env.CODEX_SCRATCH_ROOT
+  assert.ok(scratchRoot, 'CODEX_SCRATCH_ROOT is required for census fixtures')
+  const repositoryScratch = join(scratchRoot, 'evenfire')
+  mkdirSync(repositoryScratch, { recursive: true })
+  const fixture = mkdtempSync(join(repositoryScratch, 'recovery-census-'))
+  const selection = {
+    version: 1,
+    publicPostgres: ['control-api/test/public.realPostgres.test.ts'],
+    privatePostgres: {
+      local: 'control-api/test/local.realPostgres.test.ts',
+      configured: 'control-api/test/configured.realPostgres.test.ts',
+    },
+    composedContract: ['control-api/test/contract.test.ts'],
+    consumer: ['external-rest-api/test/consumer.test.ts'],
+  }
+  try {
+    for (const directory of ['control-api/test', 'external-rest-api/test'])
+      mkdirSync(join(fixture, directory), { recursive: true })
+    for (const entry of [
+      ...selection.publicPostgres,
+      ...Object.values(selection.privatePostgres),
+      ...selection.composedContract,
+      ...selection.consumer,
+    ])
+      writeFileSync(join(fixture, entry), '// fixture\n')
+    writeFileSync(
+      join(fixture, 'control-api/test/unclassified.realPostgres.test.ts'),
+      '// newly discovered physical suite\n'
+    )
+    assert.throws(
+      () => verifySuiteManifest(fixture, selection),
+      /PostgreSQL suite census differs from exact manifest/
+    )
+  } finally {
+    rmSync(fixture, { recursive: true, force: true })
+  }
+})
 test('pathname replacement cannot substitute nonempty contents after a suite is opened', () => {
   const scratchRoot = process.env.CODEX_SCRATCH_ROOT
   assert.ok(scratchRoot, 'CODEX_SCRATCH_ROOT is required for manifest fixtures')

@@ -795,6 +795,7 @@ describe('userApprovalRequestService', () => {
           rows: [{ status: 'pending', isExpired: false }],
           rowCount: 1,
         } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
 
@@ -802,6 +803,34 @@ describe('userApprovalRequestService', () => {
 
       const result = await recordDecision('id-1', 'approve', { userId: 'u1' })
       expect(result).toMatchObject({ ok: true })
+      // The approval row is locked, then its revision subjects are taken, and
+      // only then the decision UPDATE bumps the target.
+      const statements = mockDb.query.mock.calls.map(([sql]) => String(sql))
+      expect(statements[0]).toContain('FOR UPDATE')
+      expect(statements[1]).toContain('authorization_prelock_workflow_approval_trigger_revisions')
+      expect(mockDb.query.mock.calls[1]?.[1]).toEqual(['id-1'])
+      expect(statements[2]).toContain('SET status = $2')
+    })
+
+    it('denies without prelocking revision subjects', async () => {
+      const mockDb = { query: vi.fn() }
+      mockDb.query
+        .mockResolvedValueOnce({
+          rows: [{ status: 'pending', isExpired: false }],
+          rowCount: 1,
+        } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
+
+      mockedWithTransaction.mockImplementationOnce(async (work: any) => work(mockDb))
+
+      const result = await recordDecision('id-1', 'deny', { userId: 'u1' })
+      expect(result).toMatchObject({ ok: true })
+      // A denial bumps one subject, so no prelock is needed; the UPDATE is the
+      // witness that the decision still ran.
+      const statements = mockDb.query.mock.calls.map(([sql]) => String(sql))
+      expect(statements).toHaveLength(2)
+      expect(statements.some(sql => sql.includes('authorization_prelock'))).toBe(false)
+      expect(statements[1]).toContain('SET status = $2')
     })
 
     it('does not record a team workflow decision from a different requester', async () => {
@@ -874,6 +903,7 @@ describe('userApprovalRequestService', () => {
           rows: [{ status: 'pending', isExpired: false }],
           rowCount: 1,
         } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
         .mockResolvedValueOnce({
           rows: [
@@ -919,6 +949,7 @@ describe('userApprovalRequestService', () => {
           rowCount: 1,
         } as any)
         .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({ rows: [{ teamId: null }], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [runRow], rowCount: 1 } as any)
 
@@ -929,6 +960,17 @@ describe('userApprovalRequestService', () => {
         ok: true,
         workflowRun: { row: expect.objectContaining({ run_id: 'run-1' }), created: true },
       })
+      const statements = mockDb.query.mock.calls.map(([sql]) => String(sql))
+      // Both call sites prelock before the UPDATE they precede: the decision
+      // before the `approved` bump and the consume before the `consumed` one.
+      const prelocks = statements
+        .map((sql, index) => ({ sql, index }))
+        .filter(({ sql }) => sql.includes('authorization_prelock_workflow_approval_trigger'))
+      expect(prelocks).toHaveLength(2)
+      const approvedUpdate = statements.findIndex(sql => sql.includes('SET status = $2'))
+      const consumedUpdate = statements.findIndex(sql => sql.includes("SET status = 'consumed'"))
+      expect(prelocks[0]!.index).toBeLessThan(approvedUpdate)
+      expect(prelocks[1]!.index).toBeLessThan(consumedUpdate)
       expect(mockDb.query).toHaveBeenCalledWith(
         expect.stringContaining('UPDATE workflow_approval_requests war'),
         ['id-1', 'ns', 'recipe', 'external-rest-api:user:u1:team:t1']
@@ -1079,6 +1121,11 @@ describe('userApprovalRequestService', () => {
           mockDb as any
         )
       ).rejects.toThrow("cannot be consumed: status is 'pending'")
+      // The early throw happens before the prelock: the locked SELECT is the
+      // only statement, so a rejected consume holds no revision row.
+      expect(mockDb.query).toHaveBeenCalledTimes(1)
+      expect(String(mockDb.query.mock.calls[0]?.[0])).toContain('FOR UPDATE OF war')
+      expect(String(mockDb.query.mock.calls[0]?.[0])).not.toContain('authorization_prelock')
     })
 
     it("throws if approval status is 'denied'", async () => {
@@ -1265,6 +1312,7 @@ describe('userApprovalRequestService', () => {
       mockDb.query
         .mockResolvedValueOnce({ rows: [approvalRow()], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({
           rows: [{ teamId: '11111111-1111-4111-8111-111111111111' }],
           rowCount: 1,
@@ -1291,7 +1339,12 @@ describe('userApprovalRequestService', () => {
       expect(selectSql).toContain('LEFT JOIN workflow_approval_trigger_intents')
       expect(selectSql).toContain('FOR UPDATE OF war')
       expect(selectSql).toContain('war.payload')
-      const updateSql = mockDb.query.mock.calls[2]?.[0] as string
+      // The prelock sits between the locked read and the consume UPDATE.
+      expect(mockDb.query.mock.calls[2]?.[0]).toContain(
+        'authorization_prelock_workflow_approval_trigger_revisions'
+      )
+      expect(mockDb.query.mock.calls[2]?.[1]).toEqual(['id-approved'])
+      const updateSql = mockDb.query.mock.calls[3]?.[0] as string
       expect(updateSql).toContain('workflow_approval_trigger_intents')
       expect(updateSql).toContain('user_workflow_triggers trigger_uwt')
       expect(updateSql).toContain('war.target_user_id::text = war.decided_by_user_id')
@@ -1309,6 +1362,7 @@ describe('userApprovalRequestService', () => {
       mockDb.query
         .mockResolvedValueOnce({ rows: [approvalRow()], rowCount: 1 } as any)
         .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
 
       await expect(
@@ -1340,6 +1394,7 @@ describe('userApprovalRequestService', () => {
           rowCount: 1,
         } as any)
         .mockResolvedValueOnce({ rows: [{ teamGranted: true }], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({ rows: [{ teamId: 'team-1' }], rowCount: 1 } as any)
 
       await expect(
@@ -1356,6 +1411,11 @@ describe('userApprovalRequestService', () => {
       ).resolves.toEqual({ teamId: 'team-1' })
 
       expect(mockDb.query.mock.calls[1]?.[1]).toEqual(['user-1', 'team-1', 'ns', 'recipe'])
+      expect(mockDb.query.mock.calls[2]?.[0]).toContain(
+        'authorization_prelock_workflow_approval_trigger_revisions'
+      )
+      expect(mockDb.query.mock.calls[2]?.[1]).toEqual(['id-team'])
+      expect(mockDb.query.mock.calls[3]?.[0]).toContain("SET status = 'consumed'")
     })
 
     it('rejects target-team approvals when another user decides a requester-bound workflow', async () => {
@@ -1416,6 +1476,7 @@ describe('userApprovalRequestService', () => {
           rowCount: 1,
         } as any)
         .mockResolvedValueOnce({ rows: [{}], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
         .mockResolvedValueOnce({ rows: [{ teamId: null }], rowCount: 1 } as any)
 
       await expect(
@@ -1441,13 +1502,46 @@ describe('userApprovalRequestService', () => {
   })
 
   describe('expirePendingRequests', () => {
-    it('returns count of expired requests', async () => {
-      mockedQuery.mockResolvedValueOnce({
-        rows: [{ id: 'id-1' }, { id: 'id-2' }],
-        rowCount: 2,
-      } as any)
+    it('expires the selected rows in SELECT, prelock and UPDATE order', async () => {
+      mockedQuery
+        .mockResolvedValueOnce({ rows: [{ id: 'id-1' }, { id: 'id-2' }], rowCount: 2 } as any)
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as any)
+        .mockResolvedValueOnce({ rows: [{ id: 'id-1' }, { id: 'id-2' }], rowCount: 2 } as any)
+
       const count = await expirePendingRequests()
+
       expect(count).toBe(2)
+      expect(mockedWithTransaction).toHaveBeenCalledTimes(1)
+      const statements = mockedQuery.mock.calls.map(([sql]) => String(sql))
+      expect(statements).toHaveLength(3)
+
+      // The sweep must not re-evaluate its predicate in the UPDATE.
+      expect(statements[0]).toContain('FROM workflow_approval_requests')
+      expect(statements[0]).toContain("status = 'pending'")
+      expect(statements[0]).toContain('expires_at < NOW()')
+      expect(statements[0]).toContain('FOR UPDATE SKIP LOCKED')
+      expect(statements[0]).not.toMatch(/\bLIMIT\b/)
+
+      expect(statements[1]).toBe(
+        'SELECT authorization_prelock_workflow_approval_revisions($1::uuid[])'
+      )
+      expect(mockedQuery.mock.calls[1]?.[1]).toEqual([['id-1', 'id-2']])
+
+      expect(statements[2]).toContain('UPDATE workflow_approval_requests')
+      expect(statements[2]).toContain("SET status = 'expired'")
+      expect(statements[2]).toContain('WHERE id = ANY($1::uuid[])')
+      expect(statements[2]).not.toContain("status = 'pending'")
+      expect(mockedQuery.mock.calls[2]?.[1]).toEqual([['id-1', 'id-2']])
+    })
+
+    it('returns zero without prelock or UPDATE when nothing is expiring', async () => {
+      mockedQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
+
+      await expect(expirePendingRequests()).resolves.toBe(0)
+
+      expect(mockedWithTransaction).toHaveBeenCalledTimes(1)
+      expect(mockedQuery).toHaveBeenCalledTimes(1)
+      expect(String(mockedQuery.mock.calls[0]?.[0])).toContain('FOR UPDATE SKIP LOCKED')
     })
   })
 })

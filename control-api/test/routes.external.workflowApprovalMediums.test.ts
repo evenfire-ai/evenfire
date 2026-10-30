@@ -40,6 +40,7 @@ const teamsTargetMock = vi.hoisted(() => ({
 const linkSessionMock = vi.hoisted(() => ({
   createMediumLinkSession: vi.fn(),
 }))
+const rateLimitMock = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 
 vi.mock('../src/middleware/externalSessionAuth.js', () => ({
   requireValidExternalSessionToken: (
@@ -73,6 +74,7 @@ vi.mock(
 vi.mock('../src/services/workflowApprovalMediumSlackVerificationService.js', () => slackTargetMock)
 vi.mock('../src/services/workflowApprovalMediumTeamsVerificationService.js', () => teamsTargetMock)
 vi.mock('../src/services/workflowApprovalMediumLinkSessionService.js', () => linkSessionMock)
+vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 
 function makeApp() {
   const app = express()
@@ -89,6 +91,14 @@ function makeApp() {
 describe('external workflow approval medium routes', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    rateLimitMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      count: 1,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      backendAvailable: true,
+    })
     linkSessionMock.createMediumLinkSession.mockReset()
     slackTargetMock.attachSlackTargetsToAccounts.mockImplementation(
       async (_gateway: unknown, _userId: string, accounts: unknown[]) => accounts
@@ -300,6 +310,26 @@ describe('external workflow approval medium routes', () => {
       'user-1',
       expect.arrayContaining([expect.objectContaining({ id: 'account-1' })])
     )
+  })
+
+  it('lists medium accounts without an added user quota', async () => {
+    preferenceServiceMock.listVerifiedMediumAccountsWithPreference.mockResolvedValue([])
+    await request(makeApp()).get('/external/workflow-approval-mediums').expect(200)
+    expect(preferenceServiceMock.listVerifiedMediumAccountsWithPreference).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
+  })
+
+  it('creates medium challenges without an added user quota', async () => {
+    identityServiceMock.createMediumChallenge.mockResolvedValue({
+      id: 'challenge-parity',
+      nonce: '123456',
+    })
+    await request(makeApp())
+      .post('/external/workflow-approval-mediums/challenges')
+      .send({ medium: 'email', providerUserId: 'user@example.test' })
+      .expect(202)
+    expect(identityServiceMock.createMediumChallenge).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 
   it('deletes workflow approval medium records through the Telegram association service', async () => {

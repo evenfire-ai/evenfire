@@ -151,7 +151,7 @@ const UPSERT_STEP = `
         )`
 
 const FIND_STUCK_RUNS = `
-  SELECT run_id, started_at, max_duration_seconds
+  SELECT run_id, started_at, max_duration_seconds, approval_request_id
     FROM workflow_runs
    WHERE phase = 'Running'
      AND owner_instance_id = $1
@@ -569,7 +569,26 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     const terminalNotifications: Array<{ runId: string; phase: WorkflowRunPhase }> = []
     try {
       await client.query('BEGIN')
-      const res = await client.query<{ run_id: string }>(FIND_STUCK_RUNS, [opts.instanceId])
+      const res = await client.query<{ run_id: string; approval_request_id: string | null }>(
+        FIND_STUCK_RUNS,
+        [opts.instanceId]
+      )
+      // A failed provider-bound run makes notify_workflow_run_update INSERT one
+      // delivery, which bumps that delivery's subject; hold this batch's
+      // approval subjects in the global team-then-user order before the loop so
+      // a concurrent run INSERT cannot reverse it.
+      const approvalRequestIds = [
+        ...new Set(
+          res.rows
+            .map(row => row.approval_request_id)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0)
+        ),
+      ]
+      if (approvalRequestIds.length > 0) {
+        await client.query('SELECT authorization_prelock_workflow_approval_revisions($1::uuid[])', [
+          approvalRequestIds,
+        ])
+      }
       for (const row of res.rows) {
         const upd = await client.query(FAIL_STUCK_RUN, [row.run_id, opts.instanceId])
         if (upd.rowCount && upd.rowCount > 0) {

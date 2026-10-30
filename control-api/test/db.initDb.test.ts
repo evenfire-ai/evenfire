@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
 import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 const clientQuery = vi.fn()
@@ -20,21 +21,26 @@ describe('db.initDb', () => {
     vi.resetModules()
     vi.clearAllMocks()
     mockConnect.mockResolvedValue({
-      query: clientQuery,
+      query: onlineIndexAwareQuery(clientQuery),
       release: clientRelease,
     })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('runs pending migrations under a single advisory-locked transaction and records the baseline', async () => {
+  it('holds one advisory lock while partitioning legacy and PR1 migration transactions', async () => {
     const { initDb } = await import('../src/db.js')
 
     await initDb()
 
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql).trim())
 
-    expect(sqls[0]).toContain('SELECT pg_advisory_lock')
-    expect(sqls[1]).toBe('BEGIN')
+    expect(sqls.slice(0, 3)).toEqual([
+      "SET lock_timeout = '10000ms'",
+      "SET statement_timeout = '15000ms'",
+      "SET idle_in_transaction_session_timeout = '15000ms'",
+    ])
+    expect(sqls[3]).toContain('SELECT pg_advisory_lock')
+    expect(sqls[4]).toBe('BEGIN')
     expect(sqls).toContainEqual(
       expect.stringContaining('CREATE TABLE IF NOT EXISTS schema_migrations')
     )
@@ -60,9 +66,35 @@ describe('db.initDb', () => {
     ).toBe(false)
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
+    // The committed password-admission rollout fence, one dev batch through
+    // 0130_password_login_success_admission (as in dev), then five PR1 versions
+    // plus the 0133 function transaction.
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(8)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(8)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)
+
+    // The first and last dev migrations after 0106 are recorded inside the
+    // second transaction (the dev batch), before its COMMIT.
+    const receiptIndex = (version: string) =>
+      clientQuery.mock.calls.findIndex(
+        ([sql, values]) =>
+          String(sql).includes('INSERT INTO schema_migrations(version)') &&
+          Array.isArray(values) &&
+          values[0] === version
+      )
+    const devBatchBegin = sqls.indexOf('BEGIN', sqls.indexOf('BEGIN') + 1)
+    const devBatchCommit = sqls.indexOf('COMMIT', devBatchBegin)
+    for (const version of [
+      '0107_llm_provider_attempts_sdk_link',
+      '0130_password_login_success_admission',
+    ]) {
+      const index = receiptIndex(version)
+      expect(index, version).toBeGreaterThan(devBatchBegin)
+      expect(index, version).toBeLessThan(devBatchCommit)
+    }
+    expect(receiptIndex('0131_user_access_foundation')).toBeGreaterThan(devBatchCommit)
   })
 
   it('applies the triggered_at audit index migration on top of an already-migrated baseline', async () => {
@@ -963,8 +995,8 @@ describe('db.initDb', () => {
 
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql).trim())
 
-    expect(sqls[0]).toContain('SELECT pg_advisory_lock')
-    expect(sqls[1]).toBe('BEGIN')
+    expect(sqls[3]).toContain('SELECT pg_advisory_lock')
+    expect(sqls[4]).toBe('BEGIN')
     expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(1)
     expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2)
     expect(sqls).toContainEqual(

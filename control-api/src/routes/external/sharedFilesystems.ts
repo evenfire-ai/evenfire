@@ -2,11 +2,14 @@ import { Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
+import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
 import {
   listActiveContextIds,
   partitionAccessValues,
@@ -58,10 +61,19 @@ class ContextAccessReconciliationError extends Error {
   }
 }
 
+class ContextAuthorizationUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('Context authorization is unavailable')
+    this.name = 'ContextAuthorizationUnavailableError'
+    this.cause = cause
+  }
+}
+
 async function loadAccessibleContextIds(
   gateway: K8sGateway,
   userId: string,
-  teamId: string | null
+  teamId: string | null,
+  budget: NonNullable<ExternalAuthedRequest['accessExecutionBudget']>
 ): Promise<Set<string>> {
   const accessible = new Set<string>()
   let activeContextIds: string[]
@@ -77,10 +89,19 @@ async function loadAccessibleContextIds(
     accessible.add(id)
   }
   if (teamId && teamId.trim()) {
-    const teamCtx = await getTeamContexts(teamId.trim())
-    const teamContextIds = partitionAccessValues(teamCtx.contextIds, activeContextIds).active
-    for (const id of teamContextIds) {
-      accessible.add(id)
+    const compatibilityTeamId = teamId.trim()
+    let membership
+    try {
+      membership = await getLiveTeamMembership(userId, compatibilityTeamId, { budget })
+    } catch (err) {
+      throw new ContextAuthorizationUnavailableError(err)
+    }
+    if (membership) {
+      const teamCtx = await getTeamContexts(compatibilityTeamId)
+      const teamContextIds = partitionAccessValues(teamCtx.contextIds, activeContextIds).active
+      for (const id of teamContextIds) {
+        accessible.add(id)
+      }
     }
   }
   return accessible
@@ -100,7 +121,12 @@ function loadAccessibleContextIdsForRequest(
 ): Promise<Set<string>> {
   const cache = requestCache(res)
   const claims = req.externalAuth!
-  cache.accessibleContextIds ??= loadAccessibleContextIds(gateway, claims.userId, claims.teamId)
+  cache.accessibleContextIds ??= loadAccessibleContextIds(
+    gateway,
+    claims.userId,
+    claims.teamId,
+    req.accessExecutionBudget!
+  )
   return cache.accessibleContextIds
 }
 
@@ -115,8 +141,12 @@ async function resolveAccessibleContextIdsForRequest(
   try {
     return await loadAccessibleContextIdsForRequest(gateway, req, res)
   } catch (err) {
-    if (!(err instanceof ContextAccessReconciliationError)) throw err
-    res.status(503).json({ error: 'context_reconciliation_unavailable' })
+    if (err instanceof ContextAccessReconciliationError) {
+      res.status(503).json({ error: 'context_reconciliation_unavailable' })
+      return null
+    }
+    if (!(err instanceof ContextAuthorizationUnavailableError)) throw err
+    res.status(503).json({ error: 'authority_unavailable' })
     return null
   }
 }
@@ -193,7 +223,8 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
   router.use(
     '/external/contexts/:contextId/shared-filesystems',
     ...externalSharedFilesystemsRateLimits,
-    requireValidExternalSessionToken
+    requireValidExternalSessionToken,
+    attachAccessExecutionBudget
   )
 
   // Reject anything but GET/HEAD up-front so the proxy below can never be
@@ -283,6 +314,19 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
           // reach this end-user-facing API. See curatedSfsMessage().
           message: curatedSfsMessage(phase),
         }
+      })
+
+      scheduleAccessCatalogShadow({
+        session: req.externalSessionAuthority,
+        family: 'shared_filesystem',
+        legacyLogicalIds: items.map(item => `${sfsNs}/${item.name}`),
+        legacyComplete: true,
+        scope: {
+          kind: 'behavior-json',
+          dimension: 'filesystemScope',
+          field: 'contextId',
+          equals: `${ctxNs}/${contextId}`,
+        },
       })
 
       res.status(200).json({ items })

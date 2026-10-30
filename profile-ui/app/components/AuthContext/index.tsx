@@ -9,6 +9,7 @@ import React, {
   useRef,
   useState,
 } from 'react'
+import { useToast } from '@components/Toast'
 import {
   clearToken,
   getMe,
@@ -23,6 +24,9 @@ import type { Me } from '@/app/types/profile'
 import type { AuthCheckResult, AuthContextValue, AuthState } from './types'
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
+
+const UNCONFIRMED_REVOCATION_MESSAGE =
+  'You are signed out here, but the server could not confirm that your session was revoked. The old session may remain valid until it expires.'
 
 function meFromPasswordLoginResponse(me: PasswordLoginResponse['me']): Me {
   return {
@@ -48,6 +52,7 @@ function meFromPasswordLoginResponse(me: PasswordLoginResponse['me']): Me {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const { showToast } = useToast()
   const sessionExpiredHandledRef = useRef(false)
   const authCheckSequenceRef = useRef(0)
   const [authState, setAuthState] = useState<AuthState>({
@@ -55,6 +60,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isLoading: true,
     me: null,
   })
+  const [signOutIncomplete, setSignOutIncomplete] = useState(false)
 
   const checkAuth = useCallback(async (): Promise<AuthCheckResult> => {
     const sequence = ++authCheckSequenceRef.current
@@ -98,6 +104,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return meFromPasswordLoginResponse(result.me)
       })
       sessionExpiredHandledRef.current = false
+      setSignOutIncomplete(false)
       setAuthState({
         isLoggedIn: true,
         isLoading: false,
@@ -111,17 +118,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  const requestRevocation = useCallback(() => {
+    void logoutProfileUI()
+      .then(({ revocationConfirmed, fencePersisted }) => {
+        if (revocationConfirmed) {
+          setSignOutIncomplete(false)
+          return
+        }
+        if (!fencePersisted) {
+          // Browser storage could not record the logout fence, so the local sign-out
+          // outlives only this page. The login screen says so and offers a retry.
+          setSignOutIncomplete(true)
+          return
+        }
+        setSignOutIncomplete(false)
+        showToast(UNCONFIRMED_REVOCATION_MESSAGE, { tone: 'error', durationMs: 7000 })
+      })
+      .catch(() => {
+        showToast(UNCONFIRMED_REVOCATION_MESSAGE, { tone: 'error', durationMs: 7000 })
+      })
+  }, [showToast])
+
   const logout = useCallback(() => {
     authCheckSequenceRef.current += 1
     sessionExpiredHandledRef.current = false
     resetProfileAccessCache(authState.me?.id)
-    void logoutProfileUI()
+    clearToken()
+    setSignOutIncomplete(false)
     setAuthState({ isLoggedIn: false, isLoading: false, me: null })
-  }, [authState.me?.id])
+    requestRevocation()
+  }, [authState.me?.id, requestRevocation])
 
   const value = useMemo(
-    () => ({ authState, login, logout, checkAuth }),
-    [authState, checkAuth, login, logout]
+    () => ({
+      authState,
+      login,
+      logout,
+      checkAuth,
+      signOutIncomplete,
+      retrySignOut: requestRevocation,
+    }),
+    [authState, checkAuth, login, logout, signOutIncomplete, requestRevocation]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

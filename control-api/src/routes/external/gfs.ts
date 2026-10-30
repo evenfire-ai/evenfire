@@ -11,9 +11,12 @@ import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import {
   type ExternalGfsAuthority,
+  ExternalGfsAuthorityError,
+  type ExternalGfsUserTokenInput,
   type RequestWithExternalGfsAuthority,
   attachExternalGfsAuthority,
   attachExternalGfsUserLifecycle,
+  signCurrentExternalGfsUserToken,
 } from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId, makeHostSubjectId } from '../../gfs/hostSubject.js'
 import { DbResolveStore } from '../../gfs/resolve.js'
@@ -47,6 +50,7 @@ import {
 } from '../../middleware/gfsUploadAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
+import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { getUserAgents } from '../../services/directory/index.js'
 import {
   GfsGrantError,
@@ -169,6 +173,25 @@ function authorityOf(req: ExternalGfsRequest): ExternalGfsAuthority {
   return authority
 }
 
+async function signCurrentUserToken(
+  req: ExternalAuthedRequest,
+  res: import('express').Response,
+  input: ExternalGfsUserTokenInput
+): Promise<{ token: string; expiresInSeconds: number } | null> {
+  try {
+    const issued = await signCurrentExternalGfsUserToken(req.externalSessionAuthentication, input)
+    if (issued) return issued
+    res.status(401).json({ error: 'Unauthorized' })
+    return null
+  } catch (error) {
+    if (error instanceof ExternalGfsAuthorityError) {
+      res.status(error.status).json({ error: error.code })
+      return null
+    }
+    throw error
+  }
+}
+
 type ExternalGfsUploadRequest = GfsUploadAdmissionRequest & {
   gfsUploadDrive?: string
 }
@@ -231,7 +254,6 @@ async function externalCallerSubjects(req: ExternalAuthedRequest): Promise<Set<s
   if (authority.kind === 'linked-admin') return new Set(['operator:'])
   const claims = req.externalAuth!
   const subjects = new Set<string>([`user:${claims.userId}`])
-  if (claims.teamId) subjects.add(`team:${claims.teamId}`)
   const result = await pool.query(
     `SELECT team_id FROM team_members WHERE user_id = $1 AND status = 'active'`,
     [claims.userId]
@@ -545,15 +567,14 @@ export function createExternalGfsRouter(): Router {
       }
       // pathBindings: [] — the permission store is the source of truth; gfsc
       // re-checks it on every op (same as the operator/human mint).
-      const { token, expiresInSeconds } = signGfsToken({
+      const issued = await signCurrentUserToken(req, res, {
         subject: claims.userId,
         drive,
         scopes,
         pathBindings: [],
-        ...(claims.authGeneration === undefined ? {} : { authGeneration: claims.authGeneration }),
-        principalType: 'user',
       })
-      res.status(200).json({ token, expiresInSeconds })
+      if (!issued) return
+      res.status(200).json(issued)
     })
   )
 
@@ -939,6 +960,18 @@ export function createExternalGfsRouter(): Router {
       }>
       const page = rows.length > limit ? rows.slice(0, limit) : rows
       const last = page[page.length - 1]
+      scheduleAccessCatalogShadow({
+        session: req.externalSessionAuthority,
+        family: 'gfs_resource',
+        legacyLogicalIds: page.map(row => String(row.resource_id)),
+        legacyComplete: rows.length <= limit && after === undefined,
+        scope: {
+          kind: 'behavior-json',
+          dimension: 'filesystemScope',
+          field: 'drive',
+          equals: drive,
+        },
+      })
       res.status(200).json({
         ok: true,
         data: {
@@ -1050,25 +1083,34 @@ async function proxyReadToGfsc(
   gfscPath: string
 ): Promise<void> {
   const authority = authorityOf(req as ExternalGfsRequest)
-  const { token } = signGfsToken({
-    subject: authority.tokenSubject,
-    drive,
-    scopes: [GFS_READ_SCOPE],
-    ...(authority.authGeneration === undefined ? {} : { authGeneration: authority.authGeneration }),
-    principalType: authority.kind === 'linked-admin' ? 'control-admin' : 'user',
-    ...(authority.kind === 'linked-admin'
-      ? {
-          brokeredAuthority: {
-            desktopUserId: authority.desktopUserId,
-            controlAdminId: authority.controlAdminId,
-            authoritySource: authority.authoritySource,
-            linkLineageId: authority.linkLineageId,
-            linkGeneration: authority.linkGeneration,
-            desktopUserGeneration: authority.desktopUserGeneration,
-          },
-        }
-      : {}),
-  })
+  let token: string
+  if (authority.kind === 'linked-admin') {
+    token = signGfsToken({
+      subject: authority.tokenSubject,
+      drive,
+      scopes: [GFS_READ_SCOPE],
+      ...(authority.authGeneration === undefined
+        ? {}
+        : { authGeneration: authority.authGeneration }),
+      principalType: 'control-admin',
+      brokeredAuthority: {
+        desktopUserId: authority.desktopUserId,
+        controlAdminId: authority.controlAdminId,
+        authoritySource: authority.authoritySource,
+        linkLineageId: authority.linkLineageId,
+        linkGeneration: authority.linkGeneration,
+        desktopUserGeneration: authority.desktopUserGeneration,
+      },
+    }).token
+  } else {
+    const issued = await signCurrentUserToken(req, res, {
+      subject: authority.tokenSubject,
+      drive,
+      scopes: [GFS_READ_SCOPE],
+    })
+    if (!issued) return
+    token = issued.token
+  }
   const target = `${config.gfscBaseUrl.replace(/\/+$/, '')}${gfscPath}`
   let upstream: Response
   // Header-only deadline: bound the wait for gfsc to START responding, but never
@@ -1151,25 +1193,34 @@ async function proxyMutationToGfsc(
   scope: typeof GFS_WRITE_SCOPE | typeof GFS_DELETE_SCOPE
 ): Promise<void> {
   const authority = authorityOf(req as ExternalGfsRequest)
-  const { token } = signGfsToken({
-    subject: authority.tokenSubject,
-    drive,
-    scopes: [scope],
-    ...(authority.authGeneration === undefined ? {} : { authGeneration: authority.authGeneration }),
-    principalType: authority.kind === 'linked-admin' ? 'control-admin' : 'user',
-    ...(authority.kind === 'linked-admin'
-      ? {
-          brokeredAuthority: {
-            desktopUserId: authority.desktopUserId,
-            controlAdminId: authority.controlAdminId,
-            authoritySource: authority.authoritySource,
-            linkLineageId: authority.linkLineageId,
-            linkGeneration: authority.linkGeneration,
-            desktopUserGeneration: authority.desktopUserGeneration,
-          },
-        }
-      : {}),
-  })
+  let token: string
+  if (authority.kind === 'linked-admin') {
+    token = signGfsToken({
+      subject: authority.tokenSubject,
+      drive,
+      scopes: [scope],
+      ...(authority.authGeneration === undefined
+        ? {}
+        : { authGeneration: authority.authGeneration }),
+      principalType: 'control-admin',
+      brokeredAuthority: {
+        desktopUserId: authority.desktopUserId,
+        controlAdminId: authority.controlAdminId,
+        authoritySource: authority.authoritySource,
+        linkLineageId: authority.linkLineageId,
+        linkGeneration: authority.linkGeneration,
+        desktopUserGeneration: authority.desktopUserGeneration,
+      },
+    }).token
+  } else {
+    const issued = await signCurrentUserToken(req, res, {
+      subject: authority.tokenSubject,
+      drive,
+      scopes: [scope],
+    })
+    if (!issued) return
+    token = issued.token
+  }
   const target = `${config.gfscWriteBaseUrl.replace(/\/+$/, '')}${gfscPath}`
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   headers['author' + 'ization'] = ['Bearer', token].join(' ')
@@ -1245,16 +1296,13 @@ async function proxyUploadToGfsc(
   query?: Record<string, string | undefined>
 ): Promise<void> {
   const claims = req.externalAuth!
-  const { token } = signGfsToken({
+  const issued = await signCurrentUserToken(req, res, {
     subject: claims.userId,
     drive,
     scopes: [GFS_WRITE_SCOPE],
-    // GFSC resolves user authority against users.lifecycle_version on every
-    // request.  The session generation must cross this relay boundary or a
-    // valid external session is rejected as an un-fenced user token.
-    authGeneration: claims.authGeneration,
-    principalType: 'user',
   })
+  if (!issued) return
+  const { token } = issued
   const targetUrl = new URL(`${config.gfscWriteBaseUrl.replace(/\/+$/, '')}${gfscPath}`)
   for (const [key, value] of Object.entries(query ?? {})) {
     if (value !== undefined && value !== '') targetUrl.searchParams.set(key, value)

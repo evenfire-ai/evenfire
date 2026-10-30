@@ -195,10 +195,11 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
 
     def test_removing_the_real_spec_marker_is_detected(self) -> None:
         spec = Path(
-            "tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts"
+            "tests/e2e/playwright/profile-ui-recovery/j2-password-recovery.spec.ts"
         ).read_text(encoding="utf-8")
         without_marker = spec.replace(
-            "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — the synthetic emailed reset URL\n", ""
+            "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — the synthetic emailed recovery link\n",
+            "",
         )
         self.assertTrue(
             any(

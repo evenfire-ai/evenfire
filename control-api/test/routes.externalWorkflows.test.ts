@@ -12,7 +12,8 @@ const mockIssueWorkflowControlToken = vi.fn()
 const mockVerifyWorkflowControlToken = vi.fn()
 const mockIsHostRefAuthorized = vi.fn()
 const mockVerifyAdminToken = vi.fn()
-const mockVerifyExternalSessionToken = vi.fn()
+const mockAuthenticateExternalUserSession = vi.fn()
+const mockRateLimitCheck = vi.fn()
 const mockVerifyInternalControlJwt = vi.fn()
 const mockIsAdminTokenRevoked = vi.fn()
 
@@ -39,8 +40,23 @@ vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
   verifyAdminToken: (...args: unknown[]) => mockVerifyAdminToken(...args),
 }))
 
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
-  verifyExternalSessionToken: (...args: unknown[]) => mockVerifyExternalSessionToken(...args),
+vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
+  authenticateExternalUserSession: (...args: unknown[]) =>
+    mockAuthenticateExternalUserSession(...args),
+  authenticateExternalUserSessionIdentity: (...args: unknown[]) =>
+    mockAuthenticateExternalUserSession(...args),
+  externalSessionUserIdForRateLimit: (token: string) =>
+    token === 'user-session-token'
+      ? 'user-123'
+      : token === 'user-session-token-b'
+        ? 'user-456'
+        : token === 'user-session-token-rotated'
+          ? 'user-123'
+          : null,
+}))
+
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: (...args: unknown[]) => mockRateLimitCheck(...args),
 }))
 
 vi.mock('../src/utils/auth/internalControlToken.js', () => ({
@@ -127,7 +143,8 @@ describe('routes/external/workflows', () => {
     mockVerifyWorkflowControlToken.mockReset()
     mockIsHostRefAuthorized.mockReset()
     mockVerifyAdminToken.mockReset()
-    mockVerifyExternalSessionToken.mockReset()
+    mockAuthenticateExternalUserSession.mockReset()
+    mockRateLimitCheck.mockReset()
     mockVerifyInternalControlJwt.mockReset()
     mockIsAdminTokenRevoked.mockReset()
     gateway = new MockGateway(RECIPE_NS)
@@ -137,9 +154,45 @@ describe('routes/external/workflows', () => {
       expiresInSeconds: 600,
     })
     mockIsAdminTokenRevoked.mockResolvedValue(false)
-    mockVerifyExternalSessionToken.mockImplementation(token =>
-      token === 'user-session-token' ? USER_SESSION_CLAIMS : null
-    )
+    mockRateLimitCheck.mockResolvedValue({
+      allowed: true,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      backendAvailable: true,
+      count: 1,
+    })
+    mockAuthenticateExternalUserSession.mockImplementation(token => {
+      if (token === 'user-session-token' || token === 'user-session-token-rotated') {
+        return Promise.resolve({
+          status: 'authenticated',
+          contract: 'v1',
+          claims: USER_SESSION_CLAIMS,
+          authorityContext: {
+            contract: 'v1',
+            userId: USER_SESSION_CLAIMS.userId,
+            tokenHash: `${token}-hash`,
+            issuedAt: USER_SESSION_CLAIMS.iat,
+            authGeneration: USER_SESSION_CLAIMS.authGeneration,
+          },
+        })
+      }
+      if (token === 'user-session-token-b') {
+        return Promise.resolve({
+          status: 'authenticated',
+          contract: 'v1',
+          claims: { ...USER_SESSION_CLAIMS, userId: 'user-456' },
+          authorityContext: {
+            contract: 'v1',
+            userId: 'user-456',
+            tokenHash: `${token}-hash`,
+            issuedAt: USER_SESSION_CLAIMS.iat,
+            authGeneration: USER_SESSION_CLAIMS.authGeneration,
+          },
+        })
+      }
+      return Promise.resolve({ status: 'invalid', reason: 'invalid_representation' })
+    })
     mockVerifyAdminToken.mockImplementation(token =>
       token === 'admin-token' ? ADMIN_CLAIMS : null
     )
@@ -238,6 +291,71 @@ describe('routes/external/workflows', () => {
     })
   })
 
+  describe('authenticated workflow admission ordering', () => {
+    it.each([['POST', `/external/workflows/${RECIPE_NS}/test-recipe/trigger`, 10]] as const)(
+      'limits %s %s before any session work, as dev does',
+      async (method, path, limit) => {
+        mockRateLimitCheck.mockResolvedValue({
+          allowed: false,
+          remaining: 0,
+          resetMs: Date.now() + 60_000,
+          windowStartMs: Date.now(),
+          backendAvailable: true,
+          count: limit + 1,
+        })
+
+        const response = await request(makeApp(gateway))
+          [method === 'GET' ? 'get' : 'post'](path)
+          .set('x-user-session-token', 'user-session-token')
+          .send(method === 'POST' ? {} : undefined)
+
+        expect(response.status).toBe(429)
+        expect(response.body).toMatchObject(
+          method === 'POST' ? { error: 'Too Many Requests' } : { error: { code: 'rate_limited' } }
+        )
+        expect(mockRateLimitCheck).toHaveBeenCalledOnce()
+        expect(mockAuthenticateExternalUserSession).not.toHaveBeenCalled()
+        expect(mockPoolQuery).not.toHaveBeenCalled()
+      }
+    )
+
+    it('charges the trigger bucket even when the session is then rejected', async () => {
+      const response = await request(makeApp(gateway))
+        .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
+        .set('x-user-session-token', 'rejected-session-token')
+        .send({})
+
+      expect(response.status).toBe(401)
+      // Witness: the session was evaluated and rejected after the limiter ran.
+      expect(mockAuthenticateExternalUserSession).toHaveBeenCalledWith(
+        'rejected-session-token',
+        expect.anything()
+      )
+      expect(mockRateLimitCheck).toHaveBeenCalledOnce()
+      expect(String(mockRateLimitCheck.mock.calls[0][0])).toMatch(/^workflow_trigger:/)
+      expect(mockPoolQuery).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['/external/workflows', 200],
+      [`/external/workflows/${RECIPE_NS}/test-recipe`, 403],
+      [`/external/workflows/${RECIPE_NS}/test-recipe/health`, 403],
+      [`/external/workflows/${RECIPE_NS}/test-recipe/runs`, 403],
+      [`/external/workflows/${RECIPE_NS}/test-recipe/runs/run-1/artifacts`, 403],
+      [`/external/workflows/${RECIPE_NS}/test-recipe/runs/run-1/artifacts/output/download`, 403],
+    ] as const)('authorizes read %s without a PG charge', async (path, status) => {
+      mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+      await request(makeApp(gateway))
+        .get(path)
+        .set('x-user-session-token', 'user-session-token')
+        .expect(status)
+      // One live session validation per request, as in dev (P-7).
+      expect(mockAuthenticateExternalUserSession).toHaveBeenCalledOnce()
+      expect(mockPoolQuery).toHaveBeenCalled()
+      expect(mockRateLimitCheck).not.toHaveBeenCalled()
+    })
+  })
+
   describe('Cross-user isolation (ensureRecipeAuthorized)', () => {
     it('returns 403 when user-session caller has no grant for the recipe', async () => {
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
@@ -268,11 +386,7 @@ describe('routes/external/workflows', () => {
   })
 
   describe('POST /external/workflows/:ns/:name/trigger', () => {
-    // Rate limiter (10 req/min per token) consumes the first mockPoolQuery call
-    // — see matching helper in adminWorkflows.test.ts.
-    function mockRateLimiterAllowed() {
-      mockPoolQuery.mockResolvedValueOnce({ rows: [{ count: 1 }], rowCount: 1 })
-    }
+    function mockRateLimiterAllowed() {}
 
     function makeTransportRecipe(overrides: Record<string, unknown> = {}) {
       return {
@@ -405,7 +519,7 @@ describe('routes/external/workflows', () => {
       expect(
         mockPoolQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO workflow_runs'))
       ).toBe(false)
-      expect(mockPoolQuery).toHaveBeenCalledTimes(6)
+      expect(mockPoolQuery).toHaveBeenCalledTimes(5)
     })
 
     it('rejects approval-gated user triggers before transport MCP runtime is ready', async () => {
@@ -553,7 +667,7 @@ describe('routes/external/workflows', () => {
         .expect(400)
 
       expect(res.body.error).toBe('Workflow does not declare an onDemand trigger')
-      expect(mockPoolQuery).toHaveBeenCalledTimes(2)
+      expect(mockPoolQuery).toHaveBeenCalledTimes(1)
     })
 
     it('returns 403 when user lacks recipe grant — prevents cross-user trigger', async () => {
@@ -574,20 +688,10 @@ describe('routes/external/workflows', () => {
     })
 
     function rateLimitBucketKeys(): string[] {
-      return mockPoolQuery.mock.calls
-        .filter(call => String(call[0]).includes('INSERT INTO rate_limit_buckets'))
-        .map(call => String((call[1] as unknown[] | undefined)?.[0] ?? ''))
+      return mockRateLimitCheck.mock.calls.map(call => String(call[0] ?? ''))
     }
 
     it('keys independent trigger buckets for two user sessions behind the same service bearer', async () => {
-      mockVerifyExternalSessionToken.mockImplementation(token => {
-        if (token === 'user-session-token') return USER_SESSION_CLAIMS
-        if (token === 'user-session-token-b') {
-          return { ...USER_SESSION_CLAIMS, userId: 'user-456' }
-        }
-        return null
-      })
-
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
       mockRateLimiterAllowed()
       mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
@@ -624,13 +728,6 @@ describe('routes/external/workflows', () => {
     })
 
     it('reuses one trigger bucket for two session tokens of the same verified user', async () => {
-      mockVerifyExternalSessionToken.mockImplementation(token => {
-        if (token === 'user-session-token' || token === 'user-session-token-rotated') {
-          return USER_SESSION_CLAIMS
-        }
-        return null
-      })
-
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
       mockRateLimiterAllowed()
       mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
@@ -1052,7 +1149,8 @@ describe('routes/external/workflows', () => {
         'approved-target-run-id',
       ])
       expect(String(mockPoolQuery.mock.calls[1][0])).toContain('workflow_approval_requests')
-      expect(String(mockPoolQuery.mock.calls[1][0])).not.toContain('team_workflow_triggers')
+      expect(String(mockPoolQuery.mock.calls[1][0])).toContain('team_workflow_triggers')
+      expect(String(mockPoolQuery.mock.calls[1][0])).toContain("tm.status = 'active'")
     })
 
     it('returns 403 when user-session caller is not granted to the recipe', async () => {

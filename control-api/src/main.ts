@@ -5,6 +5,8 @@ import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootRec
 import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
+import { OperationalAccessIndexer } from './services/access/operationalAccessIndexer.js'
+import { resolveEffectiveUserAccessPolicy } from './services/access/userAccessRuntimePolicy.js'
 import {
   startAdminRevokedTokenCleanup,
   stopAdminRevokedTokenCleanup,
@@ -78,6 +80,7 @@ const logger = rootLogger.child({ module: 'control-api-shutdown' })
 let activeServer: ControlApiServer | null = null
 let requestedExitCode = 0
 let shutdownRequested = false
+let stopOperationalAccessIndexer: (() => void) | null = null
 
 const shutdown = createShutdownHandler(async () => {
   const result = await runShutdownSteps(
@@ -101,6 +104,7 @@ const shutdown = createShutdownHandler(async () => {
       'oauth-shared-grant-sweep': stopOauthSharedGrantSweepCron,
       'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
       'entity-change-dispatcher': stopEntityChangeDispatcher,
+      'operational-access-indexer': () => stopOperationalAccessIndexer?.(),
       'core-database-pool': () => pool.end(),
       'rate-limit-database-pool': () => rateLimitPool.end(),
       'trace-database-pools': closeTracingPools,
@@ -144,6 +148,12 @@ async function main(): Promise<void> {
   await assertDbReady()
   ensureStartupActive()
   logger.info({ event: 'control_api_database_ready' }, 'Database schema ready')
+  const userAccessPolicy = await resolveEffectiveUserAccessPolicy()
+  logger.info(
+    { event: 'user_access_policy_ready', policyRevision: userAccessPolicy.policyRevision },
+    'User-access policy ready'
+  )
+  ensureStartupActive()
   startEntityChangeDispatcher()
 
   // Observability only (never fatal): report whether this self-hosted deployment
@@ -191,6 +201,29 @@ async function main(): Promise<void> {
   }
 
   const gateway = new K8sGateway(config.namespace)
+
+  if (config.operationalAccessIndexerEnabled) {
+    const operationalIndexer = new OperationalAccessIndexer(gateway, undefined, {
+      retryDelayMs: config.operationalAccessIndexerRetryMs,
+    })
+    const runningIndexer = operationalIndexer.start()
+    stopOperationalAccessIndexer = runningIndexer.stop
+    void runningIndexer.completion.catch(error => {
+      rootLogger.error(
+        { err: error, event: 'operational_access_indexer_stopped' },
+        'operational access index stopped unexpectedly'
+      )
+    })
+    logger.info(
+      { event: 'operational_access_indexer_enabled' },
+      'Operational access indexer enabled'
+    )
+  } else {
+    logger.info(
+      { event: 'operational_access_indexer_disabled' },
+      'Operational access indexer disabled'
+    )
+  }
 
   // LLM catalog discovery sync cron (Fase 4). Code default off; the base deploy
   // sets LLM_CATALOG_SYNC_CRON_ENABLED=true. When on, the first sync runs a few

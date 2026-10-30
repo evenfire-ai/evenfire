@@ -1,18 +1,13 @@
 import { NextFunction, Request, Response } from 'express'
-import { isCurrentExternalSession } from '../../../middleware/externalSessionAuth.js'
+import type { ExternalAuthedRequest } from '../../../middleware/externalSessionAuth.js'
 import { authenticateAdminSession } from '../../../services/adminSessionAuth.js'
 import type { WorkflowCaller } from '../../../services/workflows/types.js'
-import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
 import {
   type McpHostControlScope,
   verifyMcpHostControlJwt,
 } from '../../../utils/auth/mcpHostJwtToken.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
-
-function getUserSessionToken(req: Request): string {
-  return String(req.header('x-user-session-token') || '').trim()
-}
 
 // The admin workflow routes bypass requireAuthForControlUI (they resolve a
 // multi-kind WorkflowCaller), so they must read the same control-ui credential
@@ -30,6 +25,10 @@ function unauthorized(res: Response): null {
 
 export type AdminWorkflowAuthedRequest = Request & {
   adminWorkflowCaller?: Extract<WorkflowCaller, { kind: 'admin-ui' }>
+}
+
+export type ExternalWorkflowAuthedRequest = Request & {
+  externalWorkflowCaller?: Extract<WorkflowCaller, { kind: 'user-session' }>
 }
 
 export async function requireAdminWorkflowCaller(
@@ -81,19 +80,39 @@ export function bindAdminWorkflowAuth(req: Request, res: Response, next: NextFun
   )
 }
 
-export async function requireExternalWorkflowCaller(
-  req: Request,
-  res: Response
-): Promise<Extract<WorkflowCaller, { kind: 'user-session' }> | null> {
-  const userSessionToken = getUserSessionToken(req)
-  if (!userSessionToken || userSessionToken.length > 4096) return unauthorized(res)
+export function externalWorkflowCaller(
+  req: Request
+): ExternalWorkflowAuthedRequest['externalWorkflowCaller'] {
+  return (req as ExternalWorkflowAuthedRequest).externalWorkflowCaller
+}
 
-  const claims = verifyExternalSessionToken(userSessionToken)
-  if (!claims) return unauthorized(res)
-  if (!(await isCurrentExternalSession(claims))) {
-    return unauthorized(res)
+export function requireBoundExternalWorkflowCaller(req: Request, res: Response) {
+  const caller = externalWorkflowCaller(req)
+  if (!caller) {
+    if (!res.headersSent) {
+      res.status(401).json({ error: 'Unauthorized' })
+    }
+    return null
   }
-  return { kind: 'user-session', claims }
+  return caller
+}
+
+export function bindCompletedExternalWorkflowCaller(
+  req: ExternalWorkflowAuthedRequest & ExternalAuthedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  const authentication = req.externalSessionAuthentication
+  if (!authentication) {
+    unauthorized(res)
+    return
+  }
+  req.externalWorkflowCaller = {
+    kind: 'user-session',
+    claims: authentication.claims,
+    session: authentication.authorityContext,
+  }
+  next()
 }
 
 export function requireMcpHostControlWorkflowCaller(

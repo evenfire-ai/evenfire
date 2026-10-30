@@ -31,6 +31,10 @@ export interface ClerumResource<TSpec = Record<string, unknown>> {
 
 export interface ResourceListResponse {
   items: unknown[]
+  metadata?: {
+    continue?: string
+    resourceVersion?: string
+  }
 }
 
 export interface HostOverview {

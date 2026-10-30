@@ -1,4 +1,4 @@
-import { controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 import { TeamAgentsResponse, TeamRole } from '../types.js'
 
 type AuthContext = {
@@ -28,14 +28,16 @@ export async function getCurrentTeam(auth: AuthContext) {
       `/external/teams/${auth.teamId}/users/${auth.userId}/current`,
       { userSessionToken: auth.sessionToken }
     )
-  } catch {
-    return null
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 404) return null
+    throw error
   }
 }
 
 export async function createTeamForUser(
   auth: Pick<AuthContext, 'userId' | 'email' | 'sessionToken'>,
-  name: string
+  name: string,
+  clientIp?: string
 ) {
   const team = await controlApiRequest<{ id: string; name: string }>('POST', '/external/teams', {
     body: {
@@ -55,6 +57,8 @@ export async function createTeamForUser(
         teamId: team.id,
         role: 'admin',
       },
+      userSessionToken: auth.sessionToken,
+      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
 
@@ -86,8 +90,14 @@ export async function renameTeam(
         userSessionToken: auth.sessionToken,
       }
     )
-  } catch {
-    return { error: 'not_found' as const }
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 403) {
+      return { error: 'forbidden' as const }
+    }
+    if (error instanceof ControlApiError && error.status === 404) {
+      return { error: 'not_found' as const }
+    }
+    throw error
   }
 
   return {
@@ -136,19 +146,25 @@ export async function updateMemberRole(
   if (targetUserId === auth.userId) {
     return { error: 'bad_request' }
   }
-  let target: { role: TeamRole }
+  // Existence and visibility check only: the PATCH below carries the change.
   try {
-    target = await controlApiRequest<{ role: TeamRole }>(
+    await controlApiRequest<{ role: TeamRole }>(
       'GET',
-      `/external/teams/${auth.teamId}/members/${targetUserId}/role`,
+      `/external/teams/${auth.teamId}/members/${encodeURIComponent(targetUserId)}/role`,
       { userSessionToken: auth.sessionToken }
     )
-  } catch {
-    return { error: 'not_found' }
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 403) {
+      return { error: 'forbidden' }
+    }
+    if (error instanceof ControlApiError && error.status === 404) {
+      return { error: 'not_found' }
+    }
+    throw error
   }
   const updated = await controlApiRequest<unknown>(
     'PATCH',
-    `/external/teams/${auth.teamId}/members/${targetUserId}/role`,
+    `/external/teams/${auth.teamId}/members/${encodeURIComponent(targetUserId)}/role`,
     {
       body: {
         role: newRole,
@@ -190,13 +206,19 @@ export async function deleteMember(auth: AuthContext, userId: string) {
   try {
     deleted = await controlApiRequest<unknown>(
       'DELETE',
-      `/external/teams/${auth.teamId}/members/${userId}`,
+      `/external/teams/${auth.teamId}/members/${encodeURIComponent(userId)}`,
       {
         userSessionToken: auth.sessionToken,
       }
     )
-  } catch {
-    return { error: 'not_found' as const }
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 403) {
+      return { error: 'forbidden' as const }
+    }
+    if (error instanceof ControlApiError && error.status === 404) {
+      return { error: 'not_found' as const }
+    }
+    throw error
   }
   return { deleted }
 }
