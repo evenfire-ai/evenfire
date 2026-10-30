@@ -73,26 +73,31 @@ describe('OIDC deployment configuration', () => {
   })
 
   it('rejects incomplete and unknown OIDC settings without echoing the credential', () => {
-    expect(() =>
-      loadOidcProviderConfiguration(
-        { ...OIDC_ENV, CONTROL_API_OIDC_CLIENT_ID: undefined },
-        GENERATION_KEY
-      )
-    ).toThrow(/CONTROL_API_OIDC_CLIENT_ID/)
-    expect(() =>
-      loadOidcProviderConfiguration(
-        { ...OIDC_ENV, CONTROL_API_OIDC_PROVIDERS: 'two' },
-        GENERATION_KEY
-      )
-    ).toThrow(/Unsupported OIDC configuration field/)
+    let missingClientId: unknown
     try {
       loadOidcProviderConfiguration(
         { ...OIDC_ENV, CONTROL_API_OIDC_CLIENT_ID: undefined },
         GENERATION_KEY
       )
     } catch (error) {
-      expect(String(error)).not.toContain(SECRET)
+      missingClientId = error
     }
+    expect(missingClientId).toBeInstanceOf(Error)
+    expect(String(missingClientId)).toContain('CONTROL_API_OIDC_CLIENT_ID')
+    expect(String(missingClientId)).not.toContain(SECRET)
+
+    let unknownSetting: unknown
+    try {
+      loadOidcProviderConfiguration(
+        { ...OIDC_ENV, CONTROL_API_OIDC_PROVIDERS: 'two' },
+        GENERATION_KEY
+      )
+    } catch (error) {
+      unknownSetting = error
+    }
+    expect(unknownSetting).toBeInstanceOf(Error)
+    expect(String(unknownSetting)).toContain('Unsupported OIDC configuration field')
+    expect(String(unknownSetting)).not.toContain(SECRET)
   })
 
   it.each([
@@ -118,6 +123,23 @@ describe('OIDC deployment configuration', () => {
     ],
   ])('rejects %s configuration', (_label, environment) => {
     expect(() => loadOidcProviderConfiguration(environment, GENERATION_KEY)).toThrow()
+  })
+
+  it.each([
+    'tenant.localhost',
+    'service.local',
+    'provider.internal',
+    'issuer.svc',
+    'api.svc.cluster.local',
+    'issuer.cluster.local',
+    'metadata.goog',
+  ])('rejects reserved issuer host %s', host => {
+    expect(() =>
+      loadOidcProviderConfiguration(
+        { ...OIDC_ENV, CONTROL_API_OIDC_ISSUER: `https://${host}/tenant` },
+        GENERATION_KEY
+      )
+    ).toThrow(/public HTTPS DNS name/)
   })
 
   it('fails closed when the configured credential reference no longer resolves', () => {

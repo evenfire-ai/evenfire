@@ -1155,4 +1155,34 @@ describe('generic OIDC protocol foundation', () => {
       )
     ).toMatchObject({ code: 'auth-code' })
   })
+
+  it('classifies malformed callback issuer, denial, fragment, userinfo, and missing-field cases', () => {
+    const state = 's'.repeat(48)
+    const valid = `${GENERIC_REDIRECT}?state=${state}&code=auth-code`
+    const cases = [
+      [
+        `${valid}&iss=${encodeURIComponent(GENERIC_ISSUER)}&iss=${encodeURIComponent(GENERIC_ISSUER)}`,
+        'malformed-callback',
+      ],
+      [`${GENERIC_REDIRECT}?state=${state}&error=access_denied`, 'provider-response'],
+      [`${valid}#unexpected`, 'malformed-callback'],
+      [
+        `https://user@api.example.test/api/v1/oidc/callback?state=${state}&code=auth-code`,
+        'malformed-callback',
+      ],
+      [`${GENERIC_REDIRECT}?code=auth-code`, 'malformed-callback'],
+      [`${GENERIC_REDIRECT}?state=${state}`, 'malformed-callback'],
+    ] as const
+
+    for (const [callback, reason] of cases) {
+      let failure: unknown
+      try {
+        parseOidcCallbackUrl(callback, GENERIC_REDIRECT)
+      } catch (error) {
+        failure = error
+      }
+      expect(failure).toBeInstanceOf(OidcAttemptRejectedError)
+      expect(failure).toMatchObject({ category: 'attempt-rejected', attemptReason: reason })
+    }
+  })
 })
