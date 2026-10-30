@@ -125,6 +125,21 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
   const caseManifest = JSON.parse(
     readFileSync(path.join(here, '../../.validation/windows/focused-test-cases.json'), 'utf8')
   )
+  const nativeTestSource = readFileSync(
+    path.join(applicationRoot, 'src/__tests__/pluginStorageWindowsAcl.native.test.ts'),
+    'utf8'
+  )
+  const nativeCaseTitles = [...nativeTestSource.matchAll(/\bwindowsIt\s*\(\s*'([^']+)'/g)].map(
+    match => match[1]
+  )
+  const manifestCaseTitles = [...caseManifest.selected, ...caseManifest.deselected]
+  assert.equal(nativeCaseTitles.length, 12, 'Unexpected native plugin privacy case inventory')
+  assert.equal(new Set(nativeCaseTitles).size, nativeCaseTitles.length, 'Duplicate source cases')
+  assert.deepEqual(
+    [...manifestCaseTitles].sort(),
+    [...nativeCaseTitles].sort(),
+    'Focused manifest must account for every real native privacy case exactly once'
+  )
   const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const alternatives = caseManifest.selected.map(escapeRegExp).join('|')
   writeFileSync(
