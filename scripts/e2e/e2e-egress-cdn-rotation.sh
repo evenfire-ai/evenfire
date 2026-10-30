@@ -350,8 +350,22 @@ hcc_env_json() {
 }
 
 # ── Probe loop (one independent loop per pod, plus one for the policy) ─
+proxy_port() { # <namespace> <pod> ; the egress-proxy container port the Deployment declares
+  local port
+  port="$(kctl get pod "$2" -n "$1" \
+    -o jsonpath='{.spec.containers[?(@.name=="egress-proxy")].ports[0].containerPort}')" || return 1
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$port"
+}
+
 probe_pod() { # <namespace> <pod> <max-time> ; prints the raw curl transcript
-  # shellcheck disable=SC2016  # $? and $1 belong to the pod-side shell
+  # The probe runs inside the pod against the container port its Deployment
+  # declares, so only the proxy -> upstream hop crosses the network.
+  local port
+  # A port that cannot be read is an executor error (no PROBE_BEGIN), never a
+  # network failure of the proxy.
+  port="$(proxy_port "$1" "$2")" || { printf 'PROBE_PORT_UNAVAILABLE\n'; return 0; }
+  # shellcheck disable=SC2016  # $?, $1 and $2 belong to the pod-side shell
   kctl exec "$2" -n "$1" -c egress-proxy --request-timeout=40s -- sh -c '
     printf "PROBE_BEGIN\n"
     curl -sS -o /dev/null -D - -w "\n%{http_code}\n" --max-time "$1" \
@@ -359,9 +373,9 @@ probe_pod() { # <namespace> <pod> <max-time> ; prints the raw curl transcript
       -H "Content-Type: application/json" \
       -H "Accept: application/json, text/event-stream" \
       --data-binary "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"e2e-egress-cdn-rotation\",\"version\":\"1.0.0\"}}}" \
-      "http://127.0.0.1:3000/mcp"
+      "http://127.0.0.1:$2/mcp"
     printf "CURL_EXIT=%s\n" "$?"
-  ' -- "$3" 2>&1
+  ' -- "$3" "$port" 2>&1
 }
 
 classify_probe() { # reads the transcript
