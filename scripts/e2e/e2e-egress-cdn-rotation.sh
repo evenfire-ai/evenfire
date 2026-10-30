@@ -1386,6 +1386,11 @@ phase4() {
 
   # 3 has precedence over 1: only now are the branch samples evaluated.
   assert_control_identity
+  if ! wait_until "$PROXY_UPSTREAM_TIMEOUT" "a branch probe result with policy = A" \
+    has_result_since "$BRANCH_SAMPLES" "$T_POLICY_MS"; then
+    fail "the branch probe produced no network result with policy = A; the 0-failure claim has no witness"
+    finish 3 probe-unavailable
+  fi
   assert_branch_identity
   local post_failures transition_failures
   post_failures="$(count_failures "$BRANCH_SAMPLES" "$T_POLICY_MS" -1)"
@@ -1393,10 +1398,6 @@ phase4() {
     first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase4.txt" || :
     fail "the branch proxy failed ${post_failures} time(s) with the policy exactly set A: it is pinned to B"
     finish 1 branch-pinned-old-set
-  fi
-  if ! has_result_since "$BRANCH_SAMPLES" "$T_POLICY_MS"; then
-    fail "the branch probe produced no network result with policy = A; the 0-failure claim has no witness"
-    finish 3 probe-unavailable
   fi
   transition_failures="$(count_failures "$BRANCH_SAMPLES" "$patch_ms" "$T_POLICY_MS")"
   if [ "$transition_failures" -gt 1 ]; then
@@ -1415,7 +1416,9 @@ phase5() {
   }
   local patch_ms=$T_PATCH_MS t_dns=""
   # The branch-probe-reads-control mutation starts here, once A is validated.
-  : >"$BRANCH_REDIRECT_FILE"
+  if [ "$MUTATION" = branch-probe-reads-control ]; then
+    : >"$BRANCH_REDIRECT_FILE"
+  fi
 
   if ! wait_until "$DNS_VISIBLE_TIMEOUT" "HCC's resolver to answer set B" dns_is "$CSV_B"; then
     fail "HCC did not see set B within ${DNS_VISIBLE_TIMEOUT}s"
@@ -1447,18 +1450,25 @@ phase5() {
   ok "policy ${POLICY_NAME} is exactly set B (set A pruned)"
   assert_no_rate_limit "$patch_ms" -1
 
-  # A5.7 phase order: branch first, then the control's required failure.
+  # Both probes are observed over the same policy = B window, which lasts until the control has failed three
+  # times in a row or CONTROL_FAIL_TIMEOUT has passed. The branch verdict is still reported first (A5.7).
+  local control_failed=0
+  if wait_until "$CONTROL_FAIL_TIMEOUT" "the control to fail three times in a row" \
+    streak_of_failures "$CONTROL_SAMPLES" "$T_POLICY_MS" "$((CONTROL_FAIL_TIMEOUT * 1000))" 3; then
+    control_failed=1
+  fi
+
   assert_branch_identity
   local post_failures transition_failures
+  if ! has_result_since "$BRANCH_SAMPLES" "$T_POLICY_MS"; then
+    fail "the branch probe produced no network result with policy = B; the 0-failure claim has no witness"
+    finish 3 probe-unavailable
+  fi
   post_failures="$(count_failures "$BRANCH_SAMPLES" "$T_POLICY_MS" -1)"
   if [ "$post_failures" -gt 0 ]; then
     first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase5.txt" || :
     fail "the branch proxy failed ${post_failures} time(s) with the policy exactly set B"
     finish 1 branch-failed-after-prune
-  fi
-  if ! has_result_since "$BRANCH_SAMPLES" "$T_POLICY_MS"; then
-    fail "the branch probe produced no network result with policy = B; the 0-failure claim has no witness"
-    finish 3 probe-unavailable
   fi
   transition_failures="$(count_failures "$BRANCH_SAMPLES" "$patch_ms" "$T_POLICY_MS")"
   if [ "$transition_failures" -gt 1 ]; then
@@ -1468,9 +1478,8 @@ phase5() {
   ok "the branch proxy followed A→B without a restart (${transition_failures} transition failure, 0 after)"
 
   assert_control_identity
-  # Control: at least three consecutive failures within 120 s of the prune.
-  if ! wait_until "$CONTROL_FAIL_TIMEOUT" "the control to fail three times in a row" \
-    streak_of_failures "$CONTROL_SAMPLES" "$T_POLICY_MS" "$CONTROL_FAIL_TIMEOUT" 3; then
+  # Control: at least three consecutive failures within CONTROL_FAIL_TIMEOUT of the prune.
+  if [ "$control_failed" -ne 1 ]; then
     if ! has_result_since "$CONTROL_SAMPLES" "$T_POLICY_MS"; then
       fail "the control probe produced no network result after the prune; the failure claim has no witness"
       finish 3 probe-unavailable
@@ -1532,6 +1541,12 @@ phase6() {
   fi
   ok "the control recovered through CloudFront without restarting"
 
+  # The control can recover on its first sample after the policy change, before the branch has sampled at all.
+  if ! wait_until "$PROXY_UPSTREAM_TIMEOUT" "a branch probe result with policy = A" \
+    has_result_since "$BRANCH_SAMPLES" "$T_POLICY_MS"; then
+    fail "the branch probe produced no network result with policy = A; the 0-failure claim has no witness"
+    finish 3 probe-unavailable
+  fi
   assert_branch_identity
   local post_failures transition_failures
   post_failures="$(count_failures "$BRANCH_SAMPLES" "$T_POLICY_MS" -1)"
@@ -1539,10 +1554,6 @@ phase6() {
     first_failure "$BRANCH_SAMPLES" "$T_POLICY_MS" -1 >"${EVIDENCE_DIR}/branch-failure-phase6.txt" || :
     fail "the branch proxy failed ${post_failures} time(s) with the policy exactly set A after recovery"
     finish 1 branch-failed-after-recovery
-  fi
-  if ! has_result_since "$BRANCH_SAMPLES" "$T_POLICY_MS"; then
-    fail "the branch probe produced no network result with policy = A; the 0-failure claim has no witness"
-    finish 3 probe-unavailable
   fi
   transition_failures="$(count_failures "$BRANCH_SAMPLES" "$patch_ms" "$T_POLICY_MS")"
   if [ "$transition_failures" -gt 1 ]; then
