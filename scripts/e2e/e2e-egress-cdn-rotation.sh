@@ -314,7 +314,7 @@ hcc_pod() { ready_pod "$HCC_NS" "app=${HCC_DEPLOY}"; }
 dns_actual_set() { # prints the sorted address CSV, or fails
   local raw
   raw="$(kctl exec "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -c "$HCC_CONTAINER" --request-timeout=40s -- \
-    node -e 'const dns=require("dns");dns.resolve4(process.argv[1],{ttl:true}).then(r=>console.log(JSON.stringify(r))).catch(e=>{console.error(e.code||"ERR");process.exit(3)})' \
+    node -e 'require("dns").promises.resolve4(process.argv[1],{ttl:true}).then(r=>console.log(JSON.stringify(r))).catch(e=>{console.error(e.code||"ERR");process.exit(3)})' \
     "$CDN_HOST")" || return 1
   printf '%s' "$raw" | jq -er '
     select(length > 0 and all(.[]; (.ttl | type) == "number" and .ttl <= 5))
@@ -571,20 +571,35 @@ restore_corefile() {
   patch="$(jq -cn --rawfile cf "${EVIDENCE_DIR}/corefile-original.txt" \
     --arg key "$OVERRIDE_ANNOTATION" \
     '{data:{Corefile:$cf},metadata:{annotations:{($key):null}}}')"
-  kctl patch configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --type=merge -p "$patch" >/dev/null || return 1
+  kctl patch configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --type=merge -p "$patch" >/dev/null || {
+    warn "the CoreDNS ConfigMap patch was rejected"
+    return 1
+  }
   kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --request-timeout=20s -o json |
-    jq -j '.data.Corefile' >"${EVIDENCE_DIR}/corefile-restored.txt" || return 1
-  cmp -s "${EVIDENCE_DIR}/corefile-original.txt" "${EVIDENCE_DIR}/corefile-restored.txt" || return 1
+    jq -j '.data.Corefile' >"${EVIDENCE_DIR}/corefile-restored.txt" || {
+    warn "the restored Corefile could not be read back"
+    return 1
+  }
+  cmp -s "${EVIDENCE_DIR}/corefile-original.txt" "${EVIDENCE_DIR}/corefile-restored.txt" || {
+    warn "the Corefile differs from the saved original"
+    return 1
+  }
   [ -z "$(kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" -o json |
-    jq -r --arg key "$OVERRIDE_ANNOTATION" '.metadata.annotations[$key] // ""')" ] || return 1
-  wait_until "$DNS_RESTORE_TIMEOUT" "CoreDNS answering after the Corefile restore" dns_liveness || return 1
+    jq -r --arg key "$OVERRIDE_ANNOTATION" '.metadata.annotations[$key] // ""')" ] || {
+    warn "the CoreDNS override annotation is still present"
+    return 1
+  }
+  wait_until "$DNS_RESTORE_TIMEOUT" "CoreDNS answering after the Corefile restore" dns_liveness || {
+    warn "the Corefile is restored but CoreDNS did not answer ${CDN_HOST} afterwards"
+    return 1
+  }
   return 0
 }
 
 dns_liveness() {
   local raw
   raw="$(kctl exec "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -c "$HCC_CONTAINER" --request-timeout=40s -- \
-    node -e 'require("dns").resolve4(process.argv[1]).then(r=>{if(r.length===0)process.exit(3);console.log("ok")}).catch(()=>process.exit(3))' \
+    node -e 'require("dns").promises.resolve4(process.argv[1]).then(r=>{if(r.length===0)process.exit(3);console.log("ok")}).catch(()=>process.exit(3))' \
     "$CDN_HOST")" || return 1
   [ "$raw" = ok ]
 }
@@ -620,7 +635,7 @@ cleanup() {
   if [ "$COREFILE_TOUCHED" = 1 ]; then
     touched=1
     if ! restore_corefile; then
-      warn "the CoreDNS Corefile was not restored byte for byte"
+      warn "the CoreDNS restore did not complete (see the reason above)"
       status=1
     fi
   fi
