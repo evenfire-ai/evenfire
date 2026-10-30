@@ -8,6 +8,8 @@ export type StatusBannerProps = {
   children?: ReactNode
   tone: Tone
   leadingIcon?: string
+  /** Native tooltip for the whole banner, icon included. */
+  title?: string
   /** Tighter padding/font for inline header use (D.5). */
   compact?: boolean
 }

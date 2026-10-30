@@ -19,6 +19,11 @@ export type RpcScope =
   | 'sandbox:ui:view'
 export type RpcAccessScope = 'team' | 'user'
 
+export type DeepLinkAcknowledgmentAuthority = {
+  sessionGeneration: number
+  userNavigationGeneration: number
+}
+
 export type SandboxUiApp = {
   appRef: string
   title?: string
@@ -32,6 +37,35 @@ export type SandboxUiApp = {
 
 export type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
 export type { GfsResourceDeepLinkEnvelope } from '@clerum/desktop-app-links'
+
+/**
+ * Why a sandbox-ui view died. `crashed` never carries a location: handing the
+ * route back would relaunch straight into whatever crashed it. `open_failed`
+ * is a view torn down by the open that mounted it, which then rejects: the
+ * failure is that rejection, so the renderer must wait for it.
+ */
+export type SandboxUiReleaseReason =
+  | 'replaced'
+  | 'closed'
+  | 'open_failed'
+  | 'crashed'
+  | 'parent_closed'
+  | 'session'
+  | 'renderer_replaced'
+
+/** `{}` is the app's default route, `{ routePath }` a specific one. */
+export type SandboxUiRoute = { routePath?: string }
+
+/**
+ * Sent once per sandbox-ui view main tears down, to the window it was mounted
+ * in. `location: null` means the route could not be read: keep the last known
+ * one.
+ */
+export type SandboxUiReleasedEvent = {
+  launchId: string
+  reason: SandboxUiReleaseReason
+  location: SandboxUiRoute | null
+}
 
 export type SessionMe = {
   id: string
@@ -659,6 +693,8 @@ export type HostMessageResponse = {
 export type SessionState = {
   authenticated: boolean
   me: SessionMe | null
+  /** Main-process authentication epoch captured with this identity snapshot. */
+  sessionGeneration?: number
 }
 
 export type PasswordLoginResult = SessionState

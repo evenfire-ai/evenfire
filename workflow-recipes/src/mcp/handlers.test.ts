@@ -39,7 +39,7 @@ function makeRecipe(name: string, phase?: string, contextRef?: string): Workflow
     kind: 'WorkflowRecipe',
     metadata: { name, namespace: 'mcp-server' },
     spec: {
-      workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+      workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       contextRef,
     },
     status: phase
@@ -141,7 +141,7 @@ describe('handleValidateRecipe', () => {
   it('returns {valid: true} for valid recipe (4.10d)', () => {
     const validRecipe = JSON.stringify({
       spec: {
-        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
     })
     const result = handleValidateRecipe({ recipe_yaml: validRecipe })

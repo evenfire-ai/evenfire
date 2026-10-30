@@ -233,6 +233,7 @@ export interface Config {
   dbWorkerHeartbeatMs: number
   dbPersistSyncTimeoutMs: number
   dbPersistAsyncTimeoutMs: number
+  dbWorkerStallTimeoutMs: number
   dbCheckpointEveryWrites: number
   dbWalSizeAlarmBytes: number
 
@@ -474,6 +475,42 @@ export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): numb
 }
 
 /**
+ * Parse CLERUM_DB_WORKER_STALL_TIMEOUT_MS, the longest time the db worker may
+ * go without completing an operation while it has work in flight. It must
+ * exceed the sync write timeout, so a sync write times out on its own budget
+ * before the worker is declared stalled. It must fit a Node timer (at most
+ * 2147483647 ms; a larger delay becomes 1 ms). An invalid value, the default
+ * included, fails at boot, as does a sync timeout that is not a positive
+ * integer.
+ */
+export function parseDbWorkerStallTimeoutMs(
+  raw: string | undefined,
+  syncTimeoutMs: number
+): number {
+  if (!Number.isSafeInteger(syncTimeoutMs) || syncTimeoutMs <= 0) {
+    throw new Error(
+      `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS (${syncTimeoutMs}) must be a positive integer`
+    )
+  }
+  const name = 'CLERUM_DB_WORKER_STALL_TIMEOUT_MS'
+  const isDefault = raw === undefined || raw.trim() === ''
+  const label = isDefault ? "'30000' (default)" : `'${raw}'`
+  const value = isDefault ? 30_000 : /^\d+$/.test(raw) ? Number(raw) : NaN
+  if (!Number.isSafeInteger(value) || value < 1000) {
+    throw new Error(`${name}=${label} must be an integer of at least 1000`)
+  }
+  if (value > 2_147_483_647) {
+    throw new Error(`${name}=${label} must not exceed 2147483647`)
+  }
+  if (value <= syncTimeoutMs) {
+    throw new Error(
+      `${name}=${label} must exceed CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS (${syncTimeoutMs})`
+    )
+  }
+  return value
+}
+
+/**
  * Parse an MCP status-heartbeat duration. These values participate in the
  * liveness scheduler, so an explicit typo must fail at boot rather than turn
  * into an unbounded timer or a silent fallback.
@@ -691,7 +728,8 @@ function getDevHostConfig(): HostSpec | undefined {
 
 /**
  * Parse CLERUM_MCP_SERVERS JSON for dev mode.
- * Format: [{"name": "...", "spec": {"contextRef": "...", "transport": {...}}}]
+ * Format: a flat McpServerInfo[] — [{"name": "...", "transport": {...}}]
+ * (no `spec` wrapper; the parsed JSON is used as-is, without shape validation).
  */
 function parseDevMcpServers(): McpServerInfo[] | undefined {
   const serversJson = process.env.CLERUM_MCP_SERVERS
@@ -1022,7 +1060,9 @@ export const config: Config = {
   // T2.1 — Conversation store backend selector.
   //
   //   - `memory`: legacy InMemoryConversationStore (no durability). Default
-  //     so the canary rollout can opt in per Host.
+  //     for a process started outside HCC (local dev, tests). HCC sets
+  //     `CLERUM_SESSION_STORE=sqlite` in every Host container's env, which
+  //     wins over the mcp-host ConfigMap (docs/architecture/host-storage-layout.md).
   //   - `sqlite`: SqliteConversationStore (RAM + worker thread + state.db).
   //   - `dual`: both stores live, reads from RAM, writes apply to both —
   //     for one-week parity validation (`clerum_conversation_store_parity_total`).
@@ -1067,6 +1107,10 @@ export const config: Config = {
   dbWorkerHeartbeatMs: parseInt(getEnv('CLERUM_DB_WORKER_HEARTBEAT_MS', '5000')!, 10),
   dbPersistSyncTimeoutMs: parseInt(getEnv('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS', '2000')!, 10),
   dbPersistAsyncTimeoutMs: parseInt(getEnv('CLERUM_DB_PERSIST_ASYNC_TIMEOUT_MS', '5000')!, 10),
+  dbWorkerStallTimeoutMs: parseDbWorkerStallTimeoutMs(
+    getEnv('CLERUM_DB_WORKER_STALL_TIMEOUT_MS', ''),
+    parseInt(getEnv('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS', '2000')!, 10)
+  ),
   dbCheckpointEveryWrites: parseInt(getEnv('CLERUM_DB_CHECKPOINT_EVERY_WRITES', '100')!, 10),
   dbWalSizeAlarmBytes: parseInt(getEnv('CLERUM_DB_WAL_SIZE_ALARM_BYTES', '52428800')!, 10),
 

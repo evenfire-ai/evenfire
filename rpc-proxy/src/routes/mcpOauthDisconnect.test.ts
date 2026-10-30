@@ -114,14 +114,16 @@ describe('DELETE /api/v1/mcp-oauth/:mcpServerName/grant (spec 11 U4 disconnect)'
     expect(res.body.error).toBe('server_not_found')
   })
 
-  it('propagates a 400 context_mismatch from control-api verbatim', async () => {
-    fetchSpy.mockResolvedValue(jsonResponse(400, { error: 'context_mismatch' }))
+  it('drops a blank contextId and propagates the 400 context_required verbatim', async () => {
+    fetchSpy.mockResolvedValue(jsonResponse(400, { error: 'context_required' }))
     const res = await request(makeApp())
       .delete(PATH)
       .set('Authorization', 'Bearer t')
-      .send({ contextId: 'ctx-B' })
+      .send({ contextId: '   ' })
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect('contextId' in JSON.parse(String(init.body))).toBe(false)
     expect(res.status).toBe(400)
-    expect(res.body.error).toBe('context_mismatch')
+    expect(res.body.error).toBe('context_required')
   })
 
   it('coerces a control-api 401 (service-token misconfig) to 502, not the user auth failure', async () => {

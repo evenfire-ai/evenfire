@@ -202,6 +202,49 @@ describe('resolveGuardrailHookDescriptors', () => {
   })
 })
 
+describe('resolveGuardrailHookDescriptors — Host phase scoping', () => {
+  const multiPoint: LlmHookCR = {
+    spec: {
+      target: { service: { name: 's', namespace: NS, port: 80 } },
+      lifecyclePoints: ['preCall', 'moderate', 'preToolUse'],
+      capabilities: ['may_deny'],
+    },
+  }
+
+  it('runs a hook only at the phases the Host references it under', async () => {
+    const out = await resolveGuardrailHookDescriptors(
+      guardrails({ moderate: [{ id: 'mp' }] }),
+      deps({ mp: multiPoint })
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].lifecyclePoints).toEqual(['moderate'])
+  })
+
+  it('unions the phases across Host keys, keeping CR declaration order', async () => {
+    const out = await resolveGuardrailHookDescriptors(
+      guardrails({ preToolUse: [{ id: 'mp' }], preCall: [{ id: 'mp' }] }),
+      deps({ mp: multiPoint })
+    )
+    expect(out[0].lifecyclePoints).toEqual(['pre_call', 'pre_tool_use'])
+  })
+
+  it('ignores a Host phase the hook does not declare', async () => {
+    const out = await resolveGuardrailHookDescriptors(
+      guardrails({ moderate: [{ id: 'mp' }], postToolUse: [{ id: 'mp' }] }),
+      deps({ mp: multiPoint })
+    )
+    expect(out[0].lifecyclePoints).toEqual(['moderate'])
+  })
+
+  it('skips a hook whose Host phases do not overlap its lifecyclePoints', async () => {
+    const out = await resolveGuardrailHookDescriptors(
+      guardrails({ postToolUse: [{ id: 'mp' }], onError: [{ id: 'mp' }] }),
+      deps({ mp: multiPoint })
+    )
+    expect(out).toHaveLength(0)
+  })
+})
+
 describe('withResolvedHookDescriptors', () => {
   it('merges resolved descriptors while preserving inline descriptors and other blocks', () => {
     const inline = {

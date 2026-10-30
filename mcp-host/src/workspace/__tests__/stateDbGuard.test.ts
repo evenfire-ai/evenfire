@@ -1,7 +1,7 @@
 /**
  * D3 (stateless-agents) §1.2 — defense-in-depth guard: agent file tools and
  * shell_exec must reject any path resolving to the session state database
- * (state.db / state.db-wal / state.db-shm) or the reserved `.clerum-state/`
+ * (every `state.db*` name) or the reserved `.clerum-state/`
  * directory — loudly, with the database left untouched.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -21,6 +21,7 @@ describe('isStateDbPath', () => {
     '/state.db',
     'state.db-wal',
     'state.db-shm',
+    'state.db.bak',
     'sub/state.db',
     'sub/deep/state.db-wal',
     '.clerum-state',
@@ -32,7 +33,6 @@ describe('isStateDbPath', () => {
 
   it.each([
     'notes.md',
-    'state.db.bak',
     'state.database',
     'mystate.db',
     'daily/2026-07-03.md',

@@ -189,7 +189,7 @@ spec:
   workloads:
     - id: ${args.workloadId}
       type: deployment
-      image: nginxinc/nginx-unprivileged:1.27-alpine
+      image: nginxinc/nginx-unprivileged:1.30.6-alpine
       port: 8080
       healthCheck:
         type: http

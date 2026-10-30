@@ -1,6 +1,12 @@
 import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import {
+  INVITATION_TTL_HOURS,
+  type InvitationTeamAssignment,
+  insertInvitationForTeams,
+  invitationForTeamsResponse,
+} from './directory/invitationStore.js'
 import { retireDesktopUserInTransaction } from './directory/users.js'
 import { gfsDesktopOperatorLinkService } from './gfsDesktopOperatorLinkService.js'
 import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
@@ -628,6 +634,8 @@ export async function retireControlAdminInTransaction(
 
   if ((deletedResult.rowCount ?? 0) === 0) return { error: 'not_found' as const }
 
+  await revokeControlAdminInvitations(db, { invitedByAdminId: adminId })
+
   const actor = actorResult.rows[0] as
     | { id: string; username: string; email: string | null }
     | undefined
@@ -864,8 +872,26 @@ export async function listControlAdmins(): Promise<{
 export async function createControlAdminInvitation(
   email: string,
   invitedByAdminId: string,
-  options: { replaceInviter?: boolean } = {}
-): Promise<ControlAdminInvitationRecord | { error: 'duplicate_email' | 'inviter_not_active' }> {
+  options: {
+    replaceInviter?: boolean
+    desktopAccess?: { teamAssignments: readonly InvitationTeamAssignment[] }
+  } = {}
+): Promise<
+  | ControlAdminInvitationRecord
+  | {
+      invitation: ControlAdminInvitationRecord
+      desktopInvitation: ReturnType<typeof invitationForTeamsResponse>
+    }
+  | { error: 'duplicate_email' | 'inviter_not_active' }
+> {
+  type CreationResult =
+    | { error: 'duplicate_email' | 'inviter_not_active' }
+    | { invitation: ControlAdminInvitationRecord }
+    | {
+        invitation: ControlAdminInvitationRecord
+        desktopInvitation: ReturnType<typeof invitationForTeamsResponse>
+      }
+
   const normalizedEmail = normalizeEmail(email)
   const replaceInviter = options.replaceInviter === true
   // Revoke expired active invitations first so the INSERT guard can treat any remaining
@@ -879,30 +905,55 @@ export async function createControlAdminInvitation(
     [normalizedEmail]
   )
 
-  let result
+  let created: CreationResult
   try {
-    result = await pool.query(
-      `WITH locked_inviter AS (
-         SELECT id
+    created = await withTransaction<CreationResult>(async db => {
+      const inviter = await db.query(
+        `SELECT id
            FROM control_admin_users
-          WHERE id = $2::uuid
+          WHERE id = $1::uuid
             AND status = 'active'
-          FOR UPDATE
-       )
-       INSERT INTO control_admin_invitations(email, invited_by_admin_id, replace_inviter)
-       SELECT $1, locked_inviter.id, $3::boolean
-         FROM locked_inviter
-        WHERE NOT EXISTS (
-          SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)
-        )
-          AND NOT EXISTS (
-            SELECT 1 FROM control_admin_invitations
-             WHERE lower(email) = lower($1)
-               AND status IN ('pending', 'opened')
+          FOR UPDATE`,
+        [invitedByAdminId]
+      )
+      if ((inviter.rowCount ?? 0) === 0) return { error: 'inviter_not_active' as const }
+
+      const result = await db.query(
+        `INSERT INTO control_admin_invitations(email, invited_by_admin_id, replace_inviter, expires_at)
+         SELECT $1, $2::uuid, $3::boolean,
+                NOW() + ($4::int * INTERVAL '1 hour')
+          WHERE NOT EXISTS (
+            SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)
           )
-       RETURNING ${INVITATION_COLUMNS}`,
-      [normalizedEmail, invitedByAdminId, replaceInviter]
-    )
+            AND NOT EXISTS (
+              SELECT 1 FROM control_admin_invitations
+               WHERE lower(email) = lower($1)
+                 AND status IN ('pending', 'opened')
+            )
+         RETURNING ${INVITATION_COLUMNS}`,
+        [normalizedEmail, invitedByAdminId, replaceInviter, INVITATION_TTL_HOURS]
+      )
+      if ((result.rowCount ?? 0) === 0) return { error: 'duplicate_email' as const }
+
+      const invitation = mapInvitationRow(result.rows[0] as never)
+      if (!options.desktopAccess) return { invitation }
+
+      const desktopInvitation = await insertInvitationForTeams(db, {
+        inviteeName: normalizedEmail,
+        email: normalizedEmail,
+        teamAssignments: options.desktopAccess.teamAssignments,
+        fallbackRole: 'member',
+        purpose: 'admin_desktop_access',
+        status: 'pending',
+      })
+      return {
+        invitation,
+        desktopInvitation: invitationForTeamsResponse(
+          desktopInvitation.invitation,
+          desktopInvitation.teams
+        ),
+      }
+    })
   } catch (error) {
     if (
       error &&
@@ -917,27 +968,30 @@ export async function createControlAdminInvitation(
     throw error
   }
 
-  if ((result.rowCount ?? 0) === 0) {
-    const inviter = await pool.query(`SELECT status FROM control_admin_users WHERE id = $1::uuid`, [
-      invitedByAdminId,
-    ])
-    const status = (inviter.rows[0] as { status?: string } | undefined)?.status
-    if (status !== 'active') return { error: 'inviter_not_active' }
-    return { error: 'duplicate_email' }
-  }
-  return mapInvitationRow(result.rows[0] as never)
+  if ('error' in created) return created
+  if ('desktopInvitation' in created) return created
+  return created.invitation
 }
 
 export async function revokeControlAdminInvitation(invitationId: string): Promise<void> {
-  // One statement: the admin invitation and the silent desktop invitation the
-  // POST route paired with it (same email, purpose admin_desktop_access) are
-  // revoked together, so a caller never strands a desktop invitation that would
-  // still grant team membership on its own.
-  await pool.query(
+  await revokeControlAdminInvitations(pool, { invitationId })
+}
+
+async function revokeControlAdminInvitations(
+  db: DbClient,
+  selector: { invitationId: string } | { invitedByAdminId: string }
+): Promise<void> {
+  // The admin invitation and its paired silent Desktop invitation share the
+  // email and are revoked in one statement, so no paired Desktop access remains.
+  const predicate =
+    'invitedByAdminId' in selector ? 'invited_by_admin_id = $1::uuid' : 'id = $1::uuid'
+  const id = 'invitedByAdminId' in selector ? selector.invitedByAdminId : selector.invitationId
+
+  await db.query(
     `WITH revoked AS (
        UPDATE control_admin_invitations
           SET status = 'revoked'
-        WHERE id = $1
+        WHERE ${predicate}
           AND status IN ('pending', 'opened')
         RETURNING email
      )
@@ -946,7 +1000,7 @@ export async function revokeControlAdminInvitation(invitationId: string): Promis
       WHERE purpose = 'admin_desktop_access'
         AND status = 'pending'
         AND lower(email) IN (SELECT lower(email) FROM revoked)`,
-    [invitationId]
+    [id]
   )
 }
 
@@ -1020,13 +1074,19 @@ export async function completeControlAdminInvitation(input: {
     const invitation = await getPendingControlAdminInvitation(db, input.invitationId, email)
     if (!invitation) return { error: 'not_found' as const }
 
-    // A replace-inviter acceptance locks the inviter before its invitation, so
-    // two acceptances from one inviter queue here instead of deadlocking when
-    // step (4) revokes the other's invitation.
-    if (invitation.replaceInviter && invitation.invitedByAdminId) {
-      await db.query(`SELECT 1 FROM control_admin_users WHERE id = $1 FOR UPDATE`, [
-        invitation.invitedByAdminId,
-      ])
+    // Retirement locks the inviter before revoking their pending invitations.
+    // Taking that same lock before the invitation serializes redemption against
+    // retirement and keeps the lock order consistent for replacement handovers.
+    if (invitation.invitedByAdminId) {
+      const inviterResult = await db.query(
+        `SELECT status FROM control_admin_users WHERE id = $1::uuid FOR UPDATE`,
+        [invitation.invitedByAdminId]
+      )
+      const inviterStatus = (inviterResult.rows[0] as { status?: string } | undefined)?.status
+      if (inviterStatus !== 'active') {
+        await revokeControlAdminInvitations(db, { invitationId: invitation.id })
+        return { error: 'not_found' as const }
+      }
     }
 
     // Lock and re-check before creating anything: getPendingControlAdminInvitation
@@ -1334,25 +1394,8 @@ async function replaceInviterInTransaction(
     throw new Error('inviting control admin changed during replace-inviter acceptance')
   }
 
-  // (4) Nothing the inviter started may outlive them. `invitations` has no
-  // inviter column (dropped by applyInvitationAndUserPasswordMigration), so the
-  // paired desktop invitations are found by the revoked admin invitations' emails.
-  await db.query(
-    `WITH revoked AS (
-       UPDATE control_admin_invitations
-          SET status = 'revoked'
-        WHERE invited_by_admin_id = $1::uuid
-          AND id <> $2::uuid
-          AND status IN ('pending', 'opened')
-        RETURNING email
-     )
-     UPDATE invitations
-        SET status = 'revoked'
-      WHERE purpose = 'admin_desktop_access'
-        AND status = 'pending'
-        AND lower(email) IN (SELECT lower(email) FROM revoked)`,
-    [inviter.id, input.invitationId]
-  )
+  // retireControlAdminInTransaction revokes the inviter's other outstanding
+  // Control Admin invitations and their paired Desktop invitations atomically.
   return null
 }
 

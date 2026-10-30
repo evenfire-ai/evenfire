@@ -278,6 +278,14 @@ policy_has_identity() {
     ' >/dev/null
 }
 
+# The delegated McpServer has no owner Context: WRC stamps the recipe Context as a
+# label and grants access only through that Context's allowlist.
+# shellcheck disable=SC2016 # jq filter; $context is a jq --arg, not a shell variable.
+DELEGATED_MCP_CONTEXT_FILTER='
+  .metadata.labels["clerum.io/context"] == $context and
+  (.spec | has("contextRef") | not)
+'
+
 context_projection_converged() {
   local context deployment deployment_ready
   context="$(kctl get context "$CONTEXT_NAME" -n "$MCP_NS" -o json 2>/dev/null)" || return 1
@@ -289,7 +297,7 @@ context_projection_converged() {
     ((.metadata.ownerReferences // []) | length) == 0
   ' <<<"$context" >/dev/null || return 1
   kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json 2>/dev/null |
-    jq -e --arg context "$CONTEXT_NAME" '.spec.contextRef == $context' >/dev/null || return 1
+    jq -e --arg context "$CONTEXT_NAME" "$DELEGATED_MCP_CONTEXT_FILTER" >/dev/null || return 1
   mcpserver_named_current_ready "$MCP_NAME" || return 1
   deployment="$(mcp_workload_deployment_named_json "$WORKLOAD_SELECTOR")" || return 1
   deployment_ready="$(jq -r '.status.readyReplicas // 0' <<<"$deployment")" || return 1
@@ -311,9 +319,9 @@ expanded_context_projection_converged() {
     ((.metadata.ownerReferences // []) | length) == 0
   ' <<<"$context" >/dev/null || return 1
   kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json 2>/dev/null |
-    jq -e --arg context "$CONTEXT_NAME" '.spec.contextRef == $context' >/dev/null || return 1
+    jq -e --arg context "$CONTEXT_NAME" "$DELEGATED_MCP_CONTEXT_FILTER" >/dev/null || return 1
   kctl get mcpserver "$SECOND_MCP_NAME" -n "$MCP_NS" -o json 2>/dev/null |
-    jq -e --arg context "$CONTEXT_NAME" '.spec.contextRef == $context' >/dev/null || return 1
+    jq -e --arg context "$CONTEXT_NAME" "$DELEGATED_MCP_CONTEXT_FILTER" >/dev/null || return 1
   mcp_named_runtime_still_ready "$MCP_NAME" "$WORKLOAD_SELECTOR" || return 1
   mcp_named_runtime_still_ready "$SECOND_MCP_NAME" "$SECOND_WORKLOAD_SELECTOR" || return 1
   policy_has_identity "$MCP_NS" "$CONTEXT_POLICY" context-allow "$MCP_NAME" || return 1

@@ -1,17 +1,26 @@
 // @vitest-environment jsdom
-import { useEffect, useReducer } from 'react'
+import { type ReactElement, type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
-import { QueryClientProvider, useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query'
+import {
+  QueryClient,
+  QueryClientProvider,
+  useInfiniteQuery,
+  useQueries,
+  useQuery,
+} from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { revokeGfsSessionAccess } from '@hooks/domain/useGfsBrowserController'
 import { useAppController } from '@hooks/useAppController'
+import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
+import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
-import { desktopQueryClient } from '@lib/queryClient'
+import { desktopQueryClient, desktopQueryDefaults } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
+  createEmptyWorkspaceTabsState,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
@@ -28,6 +37,7 @@ import {
   previewDownloadDeniedMessage,
   resolveDeniedMessage,
   resolveResource,
+  resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { AppNotification } from '@/uiTypes'
@@ -78,13 +88,13 @@ function activateChatState(
 // is stubbed to null / prop-capture.
 const sidebarHarness = vi.hoisted(() => ({
   props: null as null | {
+    onNewChat?: () => void
     onOpenSandboxUiApp?: (app: { appRef: string; label: string; defaultPath: string }) => void
   },
 }))
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
-    onEmbeddedAppMounted?: () => void
-    onEmbeddedAppBack?: () => void
+    embed: EmbedOwnershipMachine
     onEmbedBoundsApplied?: () => void
     onEmbedSlotTopChange?: (topPx: number) => void
     onEmbedSlotRightChange?: (rightPx: number) => void
@@ -178,15 +188,39 @@ vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 // than hand-written controller state.
 vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
+  const { useNavigationContext } = await import('@contexts/NavigationContext')
+  const { useComposerDraft } = await import('@hooks/useComposerDraft')
   return {
     ChatPage: () => {
-      const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
+      const { activeChatId, composerFocusRequestId, workspaceChatTabId } =
+        useChatComposerStateContext()
+      const { selectedAgent } = useNavigationContext()
+      const [draft, setDraft, ownerConflictTabId] = useComposerDraft(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceChatTabId
+      )
       return (
         <div
           data-testid="chat-page-surface"
           data-active-chat-id={activeChatId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
-        />
+          data-workspace-chat-tab-id={workspaceChatTabId ?? ''}
+          data-composer-draft={draft}
+        >
+          <textarea
+            aria-label="App drawer composer"
+            disabled={Boolean(ownerConflictTabId)}
+            onChange={event => setDraft(event.currentTarget.value)}
+            value={draft}
+          />
+          {ownerConflictTabId ? (
+            <div role="alert">Another workspace tab owns this draft.</div>
+          ) : null}
+          <button type="button" onClick={() => setDraft('failed-send recovery')}>
+            Write tabless recovery draft
+          </button>
+        </div>
       )
     },
   }
@@ -196,9 +230,15 @@ vi.mock('@pages/ContextsPage', () => ({ ContextsPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/FilePreviewPage', () => ({ FilePreviewPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
+// Like the real page, the stub measures the slot for each launch while mounted.
 vi.mock('@pages/SandboxUiPage', () => ({
   SandboxUiPage: (props: NonNullable<typeof sandboxUiPageHarness.props>) => {
     sandboxUiPageHarness.props = props
+    const { embed } = props
+    useLayoutEffect(
+      () => embed.registerMeasurer(async () => ({ x: 0, y: 0, width: 400, height: 300 })),
+      [embed]
+    )
     return null
   },
 }))
@@ -214,7 +254,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
-  let navigationIntentSequence = 0
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   // React-setState-faithful: bail out on an unchanged reference (so the
   // idempotent reconcile effect can't spin), otherwise commit + re-render.
@@ -234,23 +273,9 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
-  const beginUserNavigationIntent = vi.fn(() => {
-    navigationIntentSequence += 1
-    controller.navigationIntentSequence = navigationIntentSequence
-    forceControllerRender()
-    return navigationIntentSequence
-  })
-  const selectWorkspaceTabById = vi.fn((id: string) => {
-    if (!controller.workspaceTabs.tabs.some(tab => tab.id === id)) return false
-    beginUserNavigationIntent()
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) => selectWorkspaceTab(state, id))
-    return true
-  })
   // Faithful to the real controller's openFilesSection: open/focus a files tab at
   // `path` through the real store producer (dedupe by path lives in the store).
   const openFilesSection = vi.fn((path: string | null = null) => {
-    beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openFilesTab(state, { id: nextWorkspaceTabId(), path })
@@ -277,7 +302,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     forceControllerRender()
   })
   const showAppsPicker = vi.fn(() => {
-    beginUserNavigationIntent()
     // The picker residual is redundant when an app tab is already active.
     if (controller.appsPickerActive) return
     if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
@@ -288,7 +312,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // (useReactiveController), so these drive the store — never set navItem.
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
     if (item === DESKTOP_ROUTES.chat) {
-      beginUserNavigationIntent()
       controller.selectedAgent = null
       clearAppsPicker()
       setWorkspaceTabs((state: WorkspaceState) => focusChatState(state, nextWorkspaceTabId()))
@@ -300,7 +323,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     } else {
       const section = settingsSectionForRoute(item)
       if (section) {
-        beginUserNavigationIntent()
         if (section === 'agents') controller.selectedAgent = null
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
@@ -319,7 +341,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       controller.selectedAgent = agentName
       controller.activeChatId = options.chatId ?? null
       if (!options.keepNavItem) {
-        beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           activateChatState(state, agentName, options.chatId ?? null, nextWorkspaceTabId())
@@ -339,7 +360,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       // Faithful routing: workflow notifications navigate to the plugins section;
       // sdk notifications navigate away without touching the agent chat state.
       if (notification.kind === 'workflow_completed') {
-        beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           openSettingsTab(state, { id: nextWorkspaceTabId(), section: 'plugins' })
@@ -373,6 +393,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
@@ -382,9 +403,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     selectedContext: null,
     selectedTeam: null,
     workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
-    navigationIntentSequence,
-    beginUserNavigationIntent,
-    selectWorkspaceTabById,
     setWorkspaceTabs,
     activeWorkspaceTab: undefined,
     nextWorkspaceTabId,
@@ -392,6 +410,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showAppsPicker,
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
+    beginUserNavigationIntent: vi.fn(),
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
@@ -477,6 +496,15 @@ const CHAT_LIST = [
   },
 ]
 
+function renderApp(ui: ReactElement) {
+  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+  return render(ui, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  })
+}
+
 describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   let currentController: AppController
 
@@ -500,6 +528,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -512,6 +541,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   afterEach(() => {
     cleanup()
     delete (window as { clerum?: unknown }).clerum
+    resetComposerDraftStore()
   })
 
   it('reopening the drawer keeps the switched-to chat instead of re-seeding the origin', () => {
@@ -521,7 +551,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     // Open a second real tab (chat-2), then return to chat-1 — mirrors a user
     // who has both conversations open and is viewing chat-1 when they launch.
@@ -546,8 +576,13 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
 
     // Switch to chat-2 in the drawer switcher.
+    const beginUserNavigationIntent = currentController.beginUserNavigationIntent as ReturnType<
+      typeof vi.fn
+    >
+    const intentAdvancesBeforeSwitch = beginUserNavigationIntent.mock.calls.length
     act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chats' })))
     act(() => fireEvent.click(screen.getByRole('option', { name: 'Second chat' })))
+    expect(beginUserNavigationIntent).toHaveBeenCalledTimes(intentAdvancesBeforeSwitch + 1)
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
 
     // Close the drawer, then reopen it.
@@ -558,6 +593,36 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  it('binds a Files New Chat prefill to the exact chat tab created by the App', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    let workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), {
+      id: 'files-resource-tab',
+      path: folder.gfsUri,
+    })
+    workspaceTabs = openFilesTab(workspaceTabs, { id: 'files-empty-tab', path: null })
+    workspaceTabs = selectWorkspaceTab(workspaceTabs, 'files-resource-tab')
+    currentController = makeController({
+      selectedAgent: 'agent-a',
+      activeChatId: null,
+      workspaceTabs,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+
+    renderApp(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    act(() => sidebarHarness.props?.onNewChat?.())
+
+    const composer = await screen.findByTestId('chat-page-surface')
+    const destinationTabId = composer.getAttribute('data-workspace-chat-tab-id')
+    expect(destinationTabId).toBeTruthy()
+    await waitFor(() => expect(composer.getAttribute('data-composer-draft')).toBe(folder.gfsUri))
+    expect(getComposerDraft(null, 'agent-a', destinationTabId!)).toBe(folder.gfsUri)
+    expect(getComposerDraft(null, 'agent-a')).toBe('')
   })
 
   it('hides already-delivered notifications after a Host is revoked', () => {
@@ -578,7 +643,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       hostAuthorityRevision,
     } as Partial<AppController>)
 
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     expect(appHeaderHarness.notifications).toEqual([notification])
     expect(appHeaderHarness.unreadNotificationCount).toBe(1)
@@ -609,7 +674,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     // Open both conversations as real tabs (chat-2, then back to chat-1) so the
     // drawer switcher lists both — the user has chat-2 open and is viewing chat-1
@@ -680,7 +745,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   // embed acks its bounds and the drawer is READY — bumping on visibility alone
   // would open the option list while still inert, leaving it unfocused. This pins
   // that ordering at the observable level: options appear only after ready.
-  it('defers the chat.switcher open until the drawer is ready, not merely visible', () => {
+  it('defers the chat.switcher open until the drawer is ready, not merely visible', async () => {
     currentController = makeController({
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
@@ -703,15 +768,17 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
+          open: vi.fn().mockResolvedValue(undefined),
           close: vi.fn().mockResolvedValue(undefined),
         },
       } as unknown as Window['clerum'],
     })
 
-    render(<App />)
+    renderApp(<App />)
 
     // Launch the app and mark the embed mounted so `chat.switcher` (eligibility
     // `app-mounted`) is dispatchable, then manually close the drawer so the
@@ -723,7 +790,11 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    // main mounts the launch.
+    await waitFor(() => {
+      const state = sandboxUiPageHarness.props!.embed.getSnapshot()
+      expect(state.owner && state.views.get(state.owner)?.phase).toBe('mounted')
+    })
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
@@ -768,6 +839,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -776,7 +848,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       } as unknown as Window['clerum'],
     })
 
-    render(<App />)
+    renderApp(<App />)
 
     // Launch from chat-1: drawer opens over the live embed with chat-1 active.
     act(() => {
@@ -810,7 +882,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     // Launch from chat-1: the chat drawer becomes visible over the live embed.
     act(() => {
@@ -834,7 +906,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
   it('passes the measured embed edge to the notification drawer while chat is closed', () => {
     currentController = makeController({ navItem: DESKTOP_ROUTES.apps } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     act(() => {
       sidebarHarness.props?.onOpenSandboxUiApp?.({
@@ -851,7 +923,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
   it('keeps the notification rail boundary through a same-edge app reopen', () => {
     currentController = makeController({ navItem: DESKTOP_ROUTES.apps } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     act(() => {
       sidebarHarness.props?.onOpenSandboxUiApp?.({
@@ -863,7 +935,8 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     expect(appHeaderHarness.props?.notificationTrayLeft).toBe(716)
 
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppBack?.())
+    // Back to apps: the embed is gone while the tab stays.
+    act(() => sandboxUiPageHarness.props?.embed.dispatch({ type: 'backToApps' }))
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
     expect(appHeaderHarness.props?.notificationTrayLeft).toBeNull()
 
@@ -896,7 +969,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     // Launch from chat-1 → drawer opens on chat-1.
     act(() => {
@@ -930,7 +1003,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     // Launch from chat-1 → drawer open, app live, navItem apps.
     act(() => {
@@ -984,7 +1057,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     // Launch from the picker (no origin) → app live, apps route, drawer CLOSED.
     act(() => {
@@ -1031,7 +1104,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     // Launch from the picker (no origin) → app live, apps route, drawer CLOSED.
     act(() => {
@@ -1080,7 +1153,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     // Launch from the picker (no origin) → app live, apps route, drawer CLOSED.
     act(() => {
@@ -1147,6 +1220,7 @@ describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1172,7 +1246,7 @@ describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3
   })
 
   it('opens two files tabs for two distinct gfsUris and focuses the existing one on re-open', () => {
-    render(<App />)
+    renderApp(<App />)
     const filesTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'files')
 
     // Two distinct deep-links -> two separate files tabs, in open order.
@@ -1230,6 +1304,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1265,7 +1340,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     const videoPayload = await openGfsResourcePayload(
       resolvedFile('vid1', 'demo.mp4', { gfsUri: 'gfs://main/vid1' })
     )
-    render(<App />)
+    renderApp(<App />)
     const previewTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'preview')
     const filesTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'files')
 
@@ -1296,7 +1371,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     const pdfPayload = await openGfsResourcePayload(
       resolvedFile('doc1', 'report.pdf', { gfsUri: 'gfs://main/doc1' })
     )
-    render(<App />)
+    renderApp(<App />)
     const previewTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'preview')
     const filesTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'files')
 
@@ -1549,6 +1624,7 @@ describe('App live GFS preview revalidation', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1597,8 +1673,8 @@ describe('App live GFS preview revalidation', () => {
     )
     Object.assign(window.clerum.gfs, { listChildren, listAccessible, affordances })
 
-    const childrenKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
-    const accessibleKey = desktopQueryKeys.gfsAccessible('session', 'main')
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder', 'main', 1)
+    const accessibleKey = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main', 1)
     desktopQueryClient.setQueryData(childrenKey, {
       pages: [firstPage, secondPage],
       pageParams: [undefined, 'page-2'],
@@ -1606,7 +1682,7 @@ describe('App live GFS preview revalidation', () => {
     desktopQueryClient.setQueryData(accessibleKey, { items: [], nextCursor: null })
     rows.forEach(row => {
       desktopQueryClient.setQueryData(
-        desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+        desktopQueryKeys.gfsAffordances(':user-a:team-a', row.resourceId, 'main', 1),
         { held: [] }
       )
     })
@@ -1621,7 +1697,7 @@ describe('App live GFS preview revalidation', () => {
       })
       useQueries({
         queries: rows.map(row => ({
-          queryKey: desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+          queryKey: desktopQueryKeys.gfsAffordances(':user-a:team-a', row.resourceId, 'main', 1),
           queryFn: () => window.clerum.gfs.affordances(row.resourceId, 'main'),
         })),
       })
@@ -1670,7 +1746,7 @@ describe('App live GFS preview revalidation', () => {
       })
     })
     Object.assign(window.clerum.gfs, { listChildren })
-    const queryKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
+    const queryKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder', 'main', 1)
     desktopQueryClient.setQueryData(queryKey, {
       pages: [
         { items: [{ name: 'first-old' }], nextCursor: 'page-2' },
@@ -1724,7 +1800,7 @@ describe('App live GFS preview revalidation', () => {
   })
 
   it('hard-resyncs active permission affordances as well as open previews', async () => {
-    const affordanceKey = desktopQueryKeys.gfsAffordances('session', 'folder', 'main')
+    const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'folder', 'main', 1)
     const affordances = vi.fn(async () => ({ held: ['read'] }))
     Object.assign(window.clerum.gfs, { affordances })
     desktopQueryClient.setQueryData(affordanceKey, { held: [] })
@@ -1780,7 +1856,7 @@ describe('App live GFS preview revalidation', () => {
           finishResolve = resolvePromise
         }) as never
     )
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
 
     const initial = () => currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-md')
@@ -1792,12 +1868,12 @@ describe('App live GFS preview revalidation', () => {
     expect(queryFilter?.queryKey).toEqual(desktopQueryKeys.gfsRoot)
     expect(
       queryFilter?.predicate?.({
-        queryKey: desktopQueryKeys.gfsAffordances('session', 'resource-id', 'main'),
+        queryKey: desktopQueryKeys.gfsAffordances(':user-a:team-a', 'resource-id', 'main', 1),
       } as never)
     ).toBe(false)
     expect(
       queryFilter?.predicate?.({
-        queryKey: desktopQueryKeys.gfsChildren('session', 'resource-id', 'main'),
+        queryKey: desktopQueryKeys.gfsChildren(':user-a:team-a', 'resource-id', 'main', 1),
       } as never)
     ).toBe(true)
     expect(initial()).toEqual(before)
@@ -1893,7 +1969,7 @@ describe('App live GFS preview revalidation', () => {
       }
       return new Promise(() => {}) as never
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
 
     act(() =>
@@ -1935,7 +2011,7 @@ describe('App live GFS preview revalidation', () => {
         return Promise.reject(new Error('Not authenticated')) as never
       return new Promise(() => {}) as never
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
 
     act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
@@ -2127,7 +2203,7 @@ describe('App live GFS preview revalidation', () => {
     const scheduleTimeout = vi.spyOn(window, 'setTimeout')
     const resolve = vi.mocked(window.clerum.gfs.resolve)
     resolve.mockRejectedValue(new Error(unavailableMessage))
-    render(<App />)
+    renderApp(<App />)
     await act(async () => {
       await Promise.resolve()
       await Promise.resolve()
@@ -2209,6 +2285,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -2275,7 +2352,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
   })
 
   it('suppresses the drawer below the threshold and restores it on re-widen, but a manual close stays closed', () => {
-    render(<App />)
+    renderApp(<App />)
 
     // Launch from chat-1: the drawer opens over the live embed. The first sync
     // reads a 0 panel (jsdom), which is not "too narrow", so it starts visible.
@@ -2334,6 +2411,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -2342,7 +2420,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
       } as unknown as Window['clerum'],
     })
 
-    render(<App />)
+    renderApp(<App />)
 
     // Launch the app (drawer available), then narrow the panel below 846 so the
     // drawer is suppressed: app is live, but the drawer is not a divertable surface.
@@ -2365,7 +2443,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
   })
 
   it('publishes the rail top from the measured embed slot on app tabs, falling back until measured', () => {
-    render(<App />)
+    renderApp(<App />)
 
     act(() => {
       sidebarHarness.props?.onOpenSandboxUiApp?.({
@@ -2429,6 +2507,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -2445,7 +2524,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
 
   // R2: available on app/files/settings, never on chat.
   it('makes the drawer available on non-chat tabs and hides it on chat tabs (R2)', () => {
-    render(<App />)
+    renderApp(<App />)
     expect(appHeaderHarness.props?.drawerAvailable).toBe(false) // chat tab
 
     act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
@@ -2477,7 +2556,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
       navItem: DESKTOP_ROUTES.files,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { container } = render(<App />)
+    const { container } = renderApp(<App />)
     expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
 
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
@@ -2501,7 +2580,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
       navItem: DESKTOP_ROUTES.files,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    const { container } = render(<App />)
+    const { container } = renderApp(<App />)
     expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
 
     // jsdom lays nothing out (getBoundingClientRect is all-zero), so give the
@@ -2544,7 +2623,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
       navItem: DESKTOP_ROUTES.files,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     const blankChatCount = () =>
       currentController.workspaceTabs.tabs.filter(
@@ -2569,7 +2648,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
   // R5 + DEC-2: the drawer is global; switching between non-chat kinds keeps it
   // open and never lets the chat reconcile steal focus onto a chat tab.
   it('keeps the drawer intact across non-chat tab switches without stealing focus (R5/DEC-2)', () => {
-    render(<App />)
+    renderApp(<App />)
     act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
@@ -2593,7 +2672,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
   // chat shows, and clears the open intent so returning to a non-chat tab does not
   // silently re-open it.
   it('collapses the drawer before the chat and clears the intent when a chat tab is selected (R4)', () => {
-    render(<App />)
+    renderApp(<App />)
     act(() =>
       sidebarHarness.props?.onOpenSandboxUiApp?.({
         appRef: 'ns/app',
@@ -2625,7 +2704,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
   // form), so opening the tray can't close the drawer. Collapsing the drawer frees
   // the rail and the tray reclaims its drawer form — the tray behavior is intact.
   it('keeps the notification tray out of the rail while the chat drawer occupies it', () => {
-    render(<App />)
+    renderApp(<App />)
     act(() =>
       sidebarHarness.props?.onOpenSandboxUiApp?.({
         appRef: 'ns/app',

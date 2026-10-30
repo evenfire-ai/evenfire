@@ -16,6 +16,7 @@ import type {
   RemoteDiscoveryErrorKind,
   RemoteInstallMode,
   RemoteRegistrationMode,
+  RemoteTenantRequiredDetail,
   RemoteTransportProbe,
 } from './remoteMcp.types'
 
@@ -28,10 +29,16 @@ export const REMOTE_MCP_BASE = '/api/v1/admin/mcp-servers/remote'
  * Dry-run discovery for `baseUrl`. Resolves to the full discover response — the
  * `detected` OAuth prefill plus the optional MCP `transport` probe — or throws
  * the `apiSend` error (whose `.code`/`.body` carry the discovery-error detail).
+ * `authorizationServer` is the Entra tenant authority, sent only after a
+ * `tenant_required` answer.
  */
-export async function discoverRemoteServer(baseUrl: string): Promise<DiscoverRemoteResponse> {
+export async function discoverRemoteServer(
+  baseUrl: string,
+  authorizationServer?: string
+): Promise<DiscoverRemoteResponse> {
   return (await apiSend('POST', `${REMOTE_MCP_BASE}/discover`, {
     baseUrl,
+    ...(authorizationServer ? { authorizationServer } : {}),
   })) as DiscoverRemoteResponse
 }
 
@@ -224,6 +231,92 @@ export function getRemoteBaseUrlError(raw: string): string {
   return ''
 }
 
+// RFC 6749 §3.3 scope-token. Commas are legal inside a scope, so — unlike the generic
+// lane's parser — remote scopes split on whitespace only.
+const SCOPE_TOKEN_RE = /^[\x21\x23-\x5B\x5D-\x7E]+$/
+const ENTRA_TENANT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Validate the operator-typed Microsoft Entra tenant ID. Only the GUID form works:
+ * Entra reports the issuer with the GUID, so a domain name could never match it.
+ */
+export function getEntraTenantIdError(raw: string): string {
+  const value = raw.trim()
+  if (!value) return 'Tenant ID is required.'
+  if (!ENTRA_TENANT_ID_RE.test(value)) {
+    return 'Enter the tenant ID as a GUID (Directory (tenant) ID in the Microsoft Entra admin center), not a domain name.'
+  }
+  return ''
+}
+
+/**
+ * Fill the backend's tenant authority template. control-api accepts only the lower-case
+ * GUID, so the tenant is normalised here.
+ */
+export function tenantAuthority(template: string, tenantId: string): string {
+  return template.split('{tenantId}').join(tenantId.trim().toLowerCase())
+}
+
+/**
+ * Parse the space-separated scopes field. An empty field yields no scopes, which the
+ * wizard reads as "use the scopes the server advertises".
+ */
+export function parseRemoteScopesInput(
+  raw: string,
+  maxScopes: number
+): { scopes: string[] } | { error: string } {
+  const scopes = [...new Set(raw.split(/\s+/).filter(Boolean))]
+  const invalid = scopes.find(scope => !SCOPE_TOKEN_RE.test(scope))
+  if (invalid !== undefined) {
+    return { error: `Scope "${invalid}" contains characters OAuth does not allow.` }
+  }
+  if (scopes.length > maxScopes) return { error: `At most ${maxScopes} scopes.` }
+  return { scopes }
+}
+
+/** The scopes to send on install: undefined when the input is empty or equals the detected list (same order). */
+export function remoteScopesOverride(parsed: string[], detected: string[]): string[] | undefined {
+  if (parsed.length === 0) return undefined
+  const same =
+    parsed.length === detected.length && parsed.every((scope, i) => scope === detected[i])
+  return same ? undefined : parsed
+}
+
+/**
+ * The `tenant_required` detail of a discover failure, or null for any other error. The
+ * wizard answers it with the tenant prompt instead of an error banner.
+ */
+export function tenantRequiredDetail(error: unknown): RemoteTenantRequiredDetail | null {
+  const e = asCodedError(error)
+  if (e.code !== 'discovery_failed') return null
+  const detail = e.body?.detail
+  if (!detail || typeof detail !== 'object') return null
+  const d = detail as Record<string, unknown>
+  if (
+    d.kind !== 'tenant_required' ||
+    typeof d.authorizationServer !== 'string' ||
+    typeof d.tenantAuthorityTemplate !== 'string'
+  ) {
+    return null
+  }
+  return {
+    kind: 'tenant_required',
+    authorizationServer: d.authorizationServer,
+    tenantAuthorityTemplate: d.tenantAuthorityTemplate,
+    detail: typeof d.detail === 'string' ? d.detail : '',
+  }
+}
+
+/** `scopes` of a 400 scope_audience_unverified install error (strings only), or null for any other error. */
+export function unverifiedScopesFromInstallError(error: unknown): string[] | null {
+  const e = asCodedError(error)
+  if (e.code !== 'scope_audience_unverified') return null
+  const scopes = e.body?.scopes
+  if (!Array.isArray(scopes)) return null
+  const strings = scopes.filter((scope): scope is string => typeof scope === 'string')
+  return strings.length > 0 ? strings : null
+}
+
 // ── Error mapping to human-readable UI text ──────────────────────────────────
 
 type CodedError = {
@@ -266,6 +359,10 @@ export function describeDiscoveryError(
       return "The server's protected-resource metadata is inconsistent with its own URL."
     case 'issuer_mismatch':
       return "The authorization server's issuer does not match the address it was fetched from."
+    case 'tenant_required':
+      return "This server signs in with Microsoft Entra ID through a multi-tenant authority. Enter your organization's tenant ID to continue."
+    case 'authorization_server_override_rejected':
+      return "This server doesn't accept a Microsoft Entra tenant sign-in address. Check the server URL."
     default:
       return 'OAuth discovery failed for this server.'
   }
@@ -303,7 +400,25 @@ function detailString(
   return undefined
 }
 
+const ENTRA_LOGIN_ORIGIN = 'https://login.microsoftonline.com/'
+
+/** Entra answers the metadata of a tenant it does not know with a 400. */
+function isUnknownEntraTenant(body: Record<string, unknown> | undefined): boolean {
+  const detail = body?.detail
+  if (!detail || typeof detail !== 'object') return false
+  const d = detail as Record<string, unknown>
+  return (
+    d.kind === 'fetch_failed' &&
+    d.status === 400 &&
+    typeof d.url === 'string' &&
+    d.url.startsWith(ENTRA_LOGIN_ORIGIN)
+  )
+}
+
 function describeDiscoveryFailure(body: Record<string, unknown> | undefined): string {
+  if (isUnknownEntraTenant(body)) {
+    return 'Microsoft Entra ID did not recognize this tenant ID. Check the Directory (tenant) ID and try again.'
+  }
   return describeDiscoveryError(discoveryDetailKind(body), detailString(body, 'field'))
 }
 
@@ -347,6 +462,9 @@ export function mapRemoteDiscoverError(error: unknown): string {
   const e = asCodedError(error)
   if (e.code === 'discovery_failed') {
     return describeDiscoveryFailure(e.body)
+  }
+  if (e.code === 'invalid_request') {
+    return 'The request was rejected as invalid. Reload the page and try again.'
   }
   // Kernel §4 400: `{ error: '<message>', errors }`. formatApiError surfaces the
   // message in `.message`; fall back to it (or a generic line).
@@ -400,7 +518,24 @@ export function mapRemoteInstallError(
       // reappears here with the same detail kind.
       return describeDiscoveryFailure(body)
     case 'invalid_request':
-      return 'The install request was rejected as invalid. Reload the page and try again.'
+      // Set when the request is well formed but the server refuses it (e.g. a required
+      // field for this authorization server, or the scope limit).
+      return (
+        serverMessage ||
+        'The install request was rejected as invalid. Reload the page and try again.'
+      )
+    case 'scope_audience_mismatch': {
+      const scope = typeof body?.scope === 'string' ? body.scope : ''
+      return scope
+        ? `The scope "${scope}" belongs to another API, so a token for it must not be sent to this server. Remove it or use this server's own scope.`
+        : "The scope belongs to another API, so a token for it must not be sent to this server. Remove it or use this server's own scope."
+    }
+    case 'scope_audience_missing':
+      return 'Add this server’s own scope. Sign-in scopes alone (openid, profile, email, offline_access) would send a Microsoft Graph token to the server.'
+    case 'scope_audience_unverified':
+      // A well-formed answer is turned into the confirmation by the wizard; this copy
+      // only covers a body without a usable scope list.
+      return 'Some scopes name an API this platform cannot tie to the server. Review the scopes and try again.'
     case 'transport_unreachable': {
       // The MCP transport probe found the typed path dead before any write.
       const detail =
@@ -418,8 +553,8 @@ export function mapRemoteInstallError(
       break
   }
 
-  // Context-not-found and Secret/Context allowlist failures arrive as a plain
-  // `{ error: '<string>' }`; formatApiError surfaces that string in `.message`.
+  // Secret and CR failures arrive as a plain `{ error: '<string>' }`;
+  // formatApiError surfaces that string in `.message`.
   return e.message?.trim() || 'Failed to install the remote server.'
 }
 
@@ -432,16 +567,17 @@ export function mapRemoteInstallError(
  */
 export function buildRemoteInstallRequest(input: {
   serverName: string
-  contextRef: string
   baseUrl: string
   mode: RemoteInstallMode
   grantScope: RemoteGrantScopeInput
   clientId?: string
   clientSecret?: string
+  authorizationServer?: string
+  scopes?: string[]
+  confirmedUnverifiedScopes?: string[]
 }): InstallRemoteRequest {
   const body: InstallRemoteRequest = {
     serverName: input.serverName.trim(),
-    contextRef: input.contextRef,
     baseUrl: input.baseUrl.trim(),
     mode: input.mode,
     grantScope: input.grantScope,
@@ -449,6 +585,11 @@ export function buildRemoteInstallRequest(input: {
   if (input.mode === 'pre-registered') {
     body.clientId = input.clientId?.trim()
     body.clientSecret = input.clientSecret
+  }
+  if (input.authorizationServer !== undefined) body.authorizationServer = input.authorizationServer
+  if (input.scopes !== undefined) body.scopes = input.scopes
+  if (input.confirmedUnverifiedScopes && input.confirmedUnverifiedScopes.length > 0) {
+    body.confirmedUnverifiedScopes = input.confirmedUnverifiedScopes
   }
   return body
 }

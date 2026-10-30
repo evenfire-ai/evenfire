@@ -78,10 +78,13 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
       timeout: 20_000,
     })
 
-    // The "Open route" affordance lives in the card header and is always present.
-    await expect(page.getByRole('button', { name: 'Open route', exact: true })).toBeVisible({
-      timeout: 20_000,
-    })
+    // Shared-with-me has titlebar actions; Copy link is intentionally disabled
+    // because the virtual root does not have a shareable resource URL.
+    const titlebar = page.getByRole('toolbar', { name: 'EvenDrive actions' })
+    await expect(titlebar).toBeVisible({ timeout: 20_000 })
+    await expect(titlebar.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible()
+    await expect(titlebar.getByRole('button', { name: 'Copy link', exact: true })).toBeDisabled()
+    await expect(titlebar.getByRole('button', { name: 'Open link', exact: true })).toBeVisible()
 
     // Download is in the file's action menu; verify the menu action without
     // clicking it because the native save dialog is not reliably drivable.
@@ -117,12 +120,10 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
       })
       await expect(filesHeading).toBeVisible({ timeout: 20_000 })
       await expect(browserCard).toBeVisible({ timeout: 20_000 })
-      await expect(page.getByRole('toolbar', { name: 'EvenDrive actions' })).toBeVisible({
-        timeout: 20_000,
-      })
-      await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'Copy route', exact: true })).toBeVisible()
+      await expect(titlebar).toBeVisible({ timeout: 20_000 })
+      await expect(titlebar.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible()
+      await expect(titlebar.getByRole('button', { name: 'Copy link', exact: true })).toBeEnabled()
+      await expect(titlebar.getByRole('button', { name: 'Open link', exact: true })).toBeVisible()
       await screenshotAndLog(page, testInfo, 'desktop-shared-files-inside')
 
       // (3) Navigate back via the breadcrumb root ("Shared with me") and assert

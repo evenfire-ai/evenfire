@@ -41,6 +41,9 @@ import {
   type GfsAccessibleResource,
   type GfsChildView,
   GfsClient,
+  type GfsGrantListItem,
+  type GfsHeldAffordances,
+  type GfsShareListItem,
   type GfsTransport,
   type ResolvedGfsResource,
 } from '../../../../src/gfs/uriHandler.js'
@@ -147,6 +150,20 @@ export async function resourceAffordances(
   const client = new GfsClient(stubTransport({ held, isOperator }))
   const result = await client.affordances('fixture-resource', SESSION_TOKEN, 'main')
   return structuredClone(delegationAffordances(new Set(result.held), result.isOperator))
+}
+
+/** Run a successful PATCH receipt through the real GfsClient and IPC clone. */
+export async function moveResourceReceipt(
+  resourceId: string,
+  destinationId: string,
+  version: number
+): Promise<Awaited<ReturnType<typeof window.clerum.gfs.moveResource>>> {
+  const client = new GfsClient(stubTransport({ ok: true, data: { resourceId, version } }))
+  const receipt = await client.moveResource(
+    { resourceId, destinationId, drive: 'main', ifMatch: version },
+    SESSION_TOKEN
+  )
+  return structuredClone(receipt)
 }
 
 /** Run a resolve + byte fetch through the real `GfsClient.download` — the
@@ -373,4 +390,176 @@ export function resolvedDirectory(
 export async function resolveResource(resource: ResolvedGfsResource): Promise<ResolvedGfsResource> {
   const client = new GfsClient(stubTransport({ ok: true, data: resource }))
   return structuredClone(await client.resolveUri(resource.gfsUri, SESSION_TOKEN))
+}
+
+/** A `GfsHeldAffordances` — the direct (NOT enveloped) affordances route body. */
+export function heldAffordances(
+  held: string[],
+  overrides: Partial<GfsHeldAffordances> = {}
+): GfsHeldAffordances {
+  return { held, isOperator: false, ...overrides }
+}
+
+/**
+ * Run held bits through the real `GfsClient.affordances` (the direct,
+ * un-enveloped affordances route) and the IPC structured-clone boundary —
+ * the value `window.clerum.gfs.affordances` resolves with in production.
+ */
+export async function affordancesResult(held: GfsHeldAffordances): Promise<GfsHeldAffordances> {
+  const client = new GfsClient(stubTransport({ ...held }))
+  return structuredClone(await client.affordances('fixture-parent', SESSION_TOKEN, 'main'))
+}
+
+/**
+ * The Error message `window.clerum.gfs.affordances` rejects with when the
+ * route answers a non-2xx — derived, not hand-written (T1), at the same honest
+ * seam as `resolveDeniedMessage`: the real `httpClient.requestJson` mints the
+ * ApiError from the HTTP status, and `GfsClient.affordances` surfaces it with
+ * its vetted `httpStatus=` marker.
+ */
+export async function affordancesFailureMessage(
+  status = 500,
+  body: { code: string; message: string } = {
+    code: 'internal',
+    message: 'gfs controller failed',
+  },
+  resourceId = 'fixture-parent'
+): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: body }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    const client = new GfsClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      requestJson,
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await client.affordances(resourceId, SESSION_TOKEN, 'main')
+    throw new Error(`expected affordances to reject with a ${status} failure`)
+  } catch (error) {
+    if (!(error instanceof Error)) return String(error)
+    return error.message
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+}
+
+/**
+ * The Error message a transport-level affordances failure produces (dead
+ * endpoint, real `httpClient.requestJson`) — connection refused with no HTTP
+ * response, so `parseHttpStatus` must read no status from it.
+ */
+export async function affordancesTransportFailureMessage(): Promise<string> {
+  const client = new GfsClient({
+    baseUrl: 'http://127.0.0.1:9',
+    requestJson,
+    fetchBytes: async () => new ArrayBuffer(0),
+  })
+  try {
+    await client.affordances('fixture-parent', SESSION_TOKEN, 'main')
+    throw new Error('expected affordances to fail at the transport layer')
+  } catch (error) {
+    if (!(error instanceof Error)) return String(error)
+    return error.message
+  }
+}
+
+// ── ACL list fixtures (R1-H3 inherited-access walk) ──────────────────────────
+// Appended without touching the H1/H8 helpers above; distinct names.
+
+/**
+ * Run grant rows through the real `GfsClient.listGrants` (envelope unwrap +
+ * items-array validation) and the IPC structured-clone boundary — the exact
+ * value `window.clerum.gfs.listGrants` resolves with in production. Bound to
+ * the renderer `.d.ts` return type so producer/renderer drift fails the
+ * typecheck, like the builders above.
+ */
+export async function grantsListPage(
+  items: GfsGrantListItem[]
+): Promise<Awaited<ReturnType<typeof window.clerum.gfs.listGrants>>> {
+  const client = new GfsClient(stubTransport({ items }))
+  return structuredClone(await client.listGrants({ resourceId: 'fixture-parent' }, SESSION_TOKEN))
+}
+
+/** Same as `grantsListPage` for the shares list. */
+export async function sharesListPage(
+  items: GfsShareListItem[]
+): Promise<Awaited<ReturnType<typeof window.clerum.gfs.listShares>>> {
+  const client = new GfsClient(stubTransport({ items }))
+  return structuredClone(await client.listShares({ resourceId: 'fixture-parent' }, SESSION_TOKEN))
+}
+
+/**
+ * The Error message a GfsClient read route rejects with when the server answers
+ * a non-2xx — derived, not hand-written (T1), at the same honest seam as
+ * `resolveDeniedMessage`/`affordancesFailureMessage`: a temp HTTP endpoint
+ * returns the gfsc error envelope, the real `httpClient.requestJson` mints the
+ * `ApiError`, and `surfaceGfsGrantError` appends the vetted `httpStatus=` (and
+ * `retryAfterSeconds=`) markers the renderer classifies on. Generalized over
+ * the invoked client method; the ACL wrappers below keep call sites readable.
+ */
+export async function gfsRouteFailureMessage(
+  invoke: (client: GfsClient) => Promise<unknown>,
+  status = 403,
+  body: { code: string; message: string } = {
+    code: 'forbidden',
+    message: 'not authorized',
+  },
+  headers: Record<string, string> = {}
+): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json', ...headers })
+    res.end(JSON.stringify({ ok: false, error: body }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    const client = new GfsClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      requestJson,
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await invoke(client)
+    throw new Error(`expected the gfs route to reject with a ${status} failure`)
+  } catch (error) {
+    if (!(error instanceof Error)) return String(error)
+    return error.message
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+}
+
+/** Producer-derived grants-list rejection (default: a 403 manage_acl denial). */
+export async function listGrantsFailureMessage(
+  status = 403,
+  body: { code: string; message: string } = {
+    code: 'manage_acl_required',
+    message: 'viewing the access list requires manage_acl',
+  }
+): Promise<string> {
+  return gfsRouteFailureMessage(
+    client => client.listGrants({ resourceId: 'fixture-parent' }, SESSION_TOKEN),
+    status,
+    body
+  )
+}
+
+/** Producer-derived shares-list rejection (default: a 403 manage_acl denial). */
+export async function listSharesFailureMessage(
+  status = 403,
+  body: { code: string; message: string } = {
+    code: 'manage_acl_required',
+    message: 'viewing the share list requires manage_acl',
+  }
+): Promise<string> {
+  return gfsRouteFailureMessage(
+    client => client.listShares({ resourceId: 'fixture-parent' }, SESSION_TOKEN),
+    status,
+    body
+  )
 }

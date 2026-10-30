@@ -43,7 +43,7 @@ function generatedPolicies(input: fc.ArbitraryValue<typeof scenario>) {
     kind: 'WorkflowRecipe',
     metadata: { name: `recipe-${input.id}`, namespace: 'sandbox-recipes', uid: `uid-${input.id}` },
     spec: {
-      workloads: [{ id: 'backend', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+      workloads: [{ id: 'backend', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       ui: {
         workloadRef: 'backend',
         port: ports[0],

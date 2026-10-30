@@ -18,7 +18,7 @@
     }
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "build": "node --check index.cjs && node --check dev-store.cjs",

@@ -10,6 +10,10 @@ import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscr
 import {
   applyPasswordAdmissionSchema,
   applyPasswordEvaluationRetentionSchema,
+  applyPasswordSuccessAdmissionSchema,
+  assertPasswordAdmissionRolloutReady,
+  passwordVerificationOwnerCount,
+  preparePasswordAdmissionRolloutFence,
 } from './services/auth/passwordAdmissionSchema.js'
 import { applyPasswordWorkOwnershipSchema } from './services/auth/passwordWorkOwnershipSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
@@ -95,6 +99,7 @@ type DbConnector = {
 }
 
 const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
+const PASSWORD_SUCCESS_ADMISSION_MIGRATION = '0130_password_login_success_admission'
 
 type DbMigration = {
   version: string
@@ -6377,6 +6382,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0129_workflow_schedules_concurrency_policy',
     apply: applyWorkflowScheduleConcurrencyPolicyMigration,
   },
+  {
+    version: '0130_password_login_success_admission',
+    apply: applyPasswordSuccessAdmissionSchema,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6707,6 +6716,85 @@ async function applyPendingMigrations(db: DbClient): Promise<void> {
   }
 }
 
+async function preparePasswordAdmissionMigrationFence(
+  db: DbClient,
+  appliedVersions: Set<string>
+): Promise<boolean> {
+  if (appliedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)) return false
+
+  const result = await db.query(`
+    SELECT to_regclass('public.password_identifier_state') AS identifier_state,
+           to_regclass('public.password_verification_work') AS work_owner,
+           to_regclass('public.users') AS users
+  `)
+  const tables = result.rows[0] as
+    | { identifier_state: string | null; work_owner: string | null; users: string | null }
+    | undefined
+  if (!tables?.identifier_state) {
+    if (appliedVersions.size > 0 || tables?.users) {
+      throw new Error(
+        'password admission upgrade is blocked: pre-existing application schema or migration history has no identifier admission state to establish a legacy fence; ' +
+          'deploy the owner-aware release that applies migrations 0126_bug192_password_admission, 0127_password_evaluation_retention, and 0128_password_work_ownership, complete its Recreate rollout, and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission'
+      )
+    }
+    return false
+  }
+  if (!tables.work_owner) {
+    throw new Error(
+      'password admission upgrade is blocked: existing identifier state has no durable verifier owner; ' +
+        'deploy the release that applies migration 0128_password_work_ownership, complete its Recreate rollout, and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission'
+    )
+  }
+
+  const requiredAdmissionMigrations = [
+    '0126_bug192_password_admission',
+    '0127_password_evaluation_retention',
+    '0128_password_work_ownership',
+  ]
+  const requiredAdmissionMigrationReceipts = requiredAdmissionMigrations.flatMap(version => {
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    return migration ? [version, ...(migration.legacyVersions ?? [])] : [version]
+  })
+  const receiptResult = await db.query(
+    `SELECT version FROM schema_migrations
+      WHERE version = ANY($1::text[])
+      /* password-admission-required-receipts */`,
+    [requiredAdmissionMigrationReceipts]
+  )
+  const recordedAdmissionMigrations = new Set(
+    receiptResult.rows.map(row => String((row as { version: string }).version))
+  )
+  const missingAdmissionMigrations = requiredAdmissionMigrations.filter(version => {
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    return (
+      !migration ||
+      (!recordedAdmissionMigrations.has(version) &&
+        !migration.legacyVersions?.some(legacyVersion =>
+          recordedAdmissionMigrations.has(legacyVersion)
+        ))
+    )
+  })
+  if (missingAdmissionMigrations.length > 0) {
+    throw new Error(
+      'password admission upgrade is blocked: existing admission tables lack required migration receipts ' +
+        `${missingAdmissionMigrations.join(', ')}; complete the owner-aware Recreate rollout and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission`
+    )
+  }
+
+  await db.query("SET LOCAL lock_timeout = '60s'")
+  await preparePasswordAdmissionRolloutFence(db)
+  return true
+}
+
+async function waitForPasswordVerifierDrain(db: DbClient): Promise<void> {
+  for (;;) {
+    if ((await passwordVerificationOwnerCount(db)) === 0) return
+    // The surrounding Kubernetes migration Job provides the established finite
+    // rollout deadline. Never clear or age-reclaim a durable owner here.
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+}
+
 export async function initDb(db: DbConnector = pool): Promise<void> {
   const client = await db.connect()
   let locked = false
@@ -6716,10 +6804,39 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
     await client.query(`SELECT pg_advisory_lock(${INIT_DB_LOCK_KEY_SQL})`)
     locked = true
 
+    // Ensure the rollout fence is durably committed before the schema transaction
+    // can alter the old verifier's admission state. The session advisory lock is
+    // held across both phases and the owner drain, but no database transaction is.
     await client.query('BEGIN')
     inTransaction = true
+    await client.query('SET LOCAL synchronous_commit = on')
+    await ensureSchemaMigrationsTable(client)
+    const initialAppliedVersions = await loadAppliedMigrationVersions(client)
+    const drainLegacyVerifiers = await preparePasswordAdmissionMigrationFence(
+      client,
+      initialAppliedVersions
+    )
+    await client.query('COMMIT')
+    inTransaction = false
+
+    if (drainLegacyVerifiers) await waitForPasswordVerifierDrain(client)
+
+    await client.query('BEGIN')
+    inTransaction = true
+    await client.query('SET LOCAL synchronous_commit = on')
+    await client.query("SET LOCAL app.password_admission_rollout_migration = 'v2'")
 
     await applyPendingMigrations(client)
+    // The explicit readiness probe is meaningful after the migration row is
+    // visible in PostgreSQL. Lightweight migration fakes do not persist rows;
+    // startup still performs this probe through assertDbReady().
+    const completedVersions = await loadAppliedMigrationVersions(client)
+    if (
+      !initialAppliedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION) &&
+      completedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)
+    ) {
+      await assertPasswordAdmissionRolloutReady(client)
+    }
 
     await client.query('COMMIT')
     inTransaction = false
@@ -6756,9 +6873,32 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   if (missing.length) {
     throw new Error(`Control API database is not ready: missing migrations ${missing.join(', ')}`)
   }
+  if (applied.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)) {
+    await assertPasswordAdmissionRolloutReady(db)
+  }
 }
 
-export type DbTransactionOptions = { signal?: AbortSignal }
+export type DbTransactionOptions = {
+  signal?: AbortSignal
+  /** Called only after PostgreSQL acknowledges COMMIT. Must be synchronous and non-throwing. */
+  onCommitAcknowledged?: () => void
+  /** Called when COMMIT was sent but PostgreSQL did not acknowledge its outcome. */
+  onCommitOutcomeUnknown?: () => void
+}
+
+const UNKNOWN_COMMIT_OUTCOME_SQLSTATES = new Set(['08007', '40003'])
+
+function isDefinitivePostgresCommitErrorResponse(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const response = error as { name?: unknown; code?: unknown; severity?: unknown }
+  return (
+    response.name === 'error' &&
+    typeof response.code === 'string' &&
+    /^[0-9A-Z]{5}$/.test(response.code) &&
+    response.severity === 'ERROR' &&
+    !UNKNOWN_COMMIT_OUTCOME_SQLSTATES.has(response.code)
+  )
+}
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
@@ -6898,6 +7038,7 @@ export async function withTransaction<T>(
     commitSent = true
     await client.query('COMMIT')
     transactionFinished = true
+    options.onCommitAcknowledged?.()
     // An acknowledged COMMIT is the outcome, even if the signal aborted
     // meanwhile: the finally still evicts the session instead of restoring it.
     return result
@@ -6912,8 +7053,12 @@ export async function withTransaction<T>(
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
     }
-    // Once COMMIT was sent, a missing reply is an unknown durable outcome.
-    // Cancellation does not establish rollback, no spend or no dispatch.
+    // Only an ERROR-severity PostgreSQL response proves COMMIT was rejected.
+    // FATAL/PANIC may terminate a backend after COMMIT succeeded while its
+    // acknowledgement is withheld, so those and SQLSTATE 08007/40003 stay unknown.
+    if (commitSent && !transactionFinished && !isDefinitivePostgresCommitErrorResponse(error)) {
+      options.onCommitOutcomeUnknown?.()
+    }
     signal?.throwIfAborted()
     throw error
   } finally {

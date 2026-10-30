@@ -1,4 +1,5 @@
 import {
+  GFS_RESOURCE_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
   buildGfsResourceDeepLink,
@@ -131,7 +132,7 @@ function buildDesktopHandoffDocument(
     !parsed.password
   const isValidResourceLink =
     parsed.protocol === SANDBOX_UI_DEEP_LINK_PROTOCOL &&
-    parsed.hostname === 'files' &&
+    parsed.hostname === GFS_RESOURCE_DEEP_LINK_HOST &&
     Boolean(parseGfsResourceDeepLink(deepLink))
   if (!isValidAppLink && !isValidResourceLink) {
     throw new Error('Cannot redirect to an invalid desktop app link')

@@ -10,6 +10,7 @@
  */
 import * as path from 'node:path'
 import { Worker } from 'node:worker_threads'
+import { logger } from '../../../logger'
 import { type ConversationStore, InMemoryConversationStore } from '../conversationStore'
 import { DualConversationStore } from './dualConversationStore'
 import { PersistQueue, type WorkerLike } from './persistQueue'
@@ -24,6 +25,8 @@ export interface ConversationStoreFactoryOptions {
   cacheSize: number
   syncTimeoutMs: number
   asyncTimeoutMs: number
+  /** Progress bound of the persist queue (`PersistQueueOptions.stallTimeoutMs`). */
+  stallTimeoutMs: number
   checkpointEveryWrites: number
   heartbeatMs: number
   /**
@@ -35,6 +38,11 @@ export interface ConversationStoreFactoryOptions {
   pendingApprovalTtlMs?: number
   /** Optional override for the compiled worker script path (used by tests). */
   workerScriptPath?: string
+  /**
+   * Called once when the persist queue becomes unusable (unexpected worker
+   * exit or a failed async write). `main.ts` ends the process here.
+   */
+  onPersistFailure?: (err: Error) => void
 }
 
 export interface ConversationStoreHandle {
@@ -89,13 +97,26 @@ export function createConversationStore(
   const persistQueue = new PersistQueue(worker, {
     syncTimeoutMs: opts.syncTimeoutMs,
     asyncTimeoutMs: opts.asyncTimeoutMs,
+    stallTimeoutMs: opts.stallTimeoutMs,
     onTransportError: err => {
-      console.error('[ConversationStore] worker transport error:', err)
+      logger.error({ err }, '[ConversationStore] worker transport error')
     },
     onExit: code => {
-      console.warn(`[ConversationStore] worker exited (code=${code})`)
+      logger.error({ code }, '[ConversationStore] worker exited; writes are rejected')
     },
+    onFailure: opts.onPersistFailure,
   })
+  // The worker answers only after it has opened and migrated the database, so
+  // the path is logged once that is true. One line per process names the
+  // database this Host reads and writes, so a Pod replacement that changes the
+  // store is visible in the Pod logs. A worker exit before the answer rejects
+  // the ping and fires `onFailure`; in production the process then exits 1
+  // once the pre-exit flush ends, so this handler still logs, next to the
+  // worker's fatal log and the exit log that name the cause.
+  persistQueue.awaitOpen().then(
+    () => logger.info({ dbPath: opts.dbPath, mode: opts.mode }, '[ConversationStore] opened'),
+    (err: unknown) => logger.error({ err }, '[ConversationStore] database did not open')
+  )
 
   const sqliteStore = new SqliteConversationStore(persistQueue, {
     cacheSize: opts.cacheSize,

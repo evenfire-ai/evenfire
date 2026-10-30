@@ -25,6 +25,7 @@ import {
 } from '../../core/types'
 import type { ProviderCredentials } from '../../types'
 import { classifyByHttpStatus, classifyUnknown } from '../errorClassification'
+import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
 
@@ -362,19 +363,23 @@ export interface BedrockClientConfig {
 }
 
 /**
- * Pure: derive the Bedrock client config from the credential bag + pod env.
- * Both AWS key slots are required (also validated upstream in
- * `createLLMProvider`); `AWS_REGION` is required non-secret pod env
- * (`host-<ref>-env`). Throws on a missing region / key. Separated from
+ * Pure: derive the Bedrock client config from the credential bag + the
+ * non-secret provider env. Both AWS key slots are required (also validated
+ * upstream in `createLLMProvider`); `AWS_REGION` is required non-secret env,
+ * resolved through `env` (the per-Host `host-<ref>-env` via ConfigStore in a
+ * Host pod, `process.env` by default). Throws on a missing region / key. Separated from
  * {@link buildBedrockConverseDriver} so the wiring is testable without the SDK.
  */
-export function buildBedrockClientConfig(credentials: ProviderCredentials): BedrockClientConfig {
+export function buildBedrockClientConfig(
+  credentials: ProviderCredentials,
+  env: ProviderEnvLookup = processEnvLookup
+): BedrockClientConfig {
   const accessKeyId = credentials['aws-access-key-id']
   const secretAccessKey = credentials['aws-secret-access-key']
   if (!accessKeyId || !secretAccessKey) {
     throw new Error('bedrock: missing AWS access-key-id / secret-access-key')
   }
-  const region = process.env.AWS_REGION
+  const region = env('AWS_REGION')?.trim()
   if (!region) throw new Error('bedrock: AWS_REGION is required')
   return { region, credentials: { accessKeyId, secretAccessKey } }
 }
@@ -388,9 +393,10 @@ export function buildBedrockClientConfig(credentials: ProviderCredentials): Bedr
  */
 export function buildBedrockConverseDriver(
   credentials: ProviderCredentials,
-  model: string
+  model: string,
+  env: ProviderEnvLookup = processEnvLookup
 ): SingleTurnProvider {
-  const clientConfig = buildBedrockClientConfig(credentials)
+  const clientConfig = buildBedrockClientConfig(credentials, env)
 
   // Lazy CommonJS require — only reached for a Bedrock Host.
 

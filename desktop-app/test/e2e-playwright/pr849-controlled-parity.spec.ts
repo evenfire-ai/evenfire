@@ -118,11 +118,7 @@ function functionalWorkloadTemplate(template: Json | undefined): Json | undefine
   return functional
 }
 
-async function hostSnapshot(
-  deploymentName: string,
-  hostName: string,
-  requireStatelessSqlite: boolean
-): Promise<HostSnapshot> {
+async function hostSnapshot(deploymentName: string, hostName: string): Promise<HostSnapshot> {
   const [deployment, host, podList] = await Promise.all([
     jsonAsync(['-n', 'mcp-host', 'get', `deployment/${deploymentName}`, '-o', 'json']),
     jsonAsync(['-n', 'mcp-host', 'get', `host/${hostName}`, '-o', 'json']),
@@ -142,13 +138,14 @@ async function hostSnapshot(
   if (!workspace?.mountPath || !claimName) {
     throw new Error(`${hostName} lost its workspace PVC declaration`)
   }
-  if (requireStatelessSqlite) {
-    const sqliteMount = container?.volumeMounts?.find(
-      (item: Json) => item.name === workspace.name && item.mountPath === sqliteDir
+  // Every lifecycle mounts the PVC root once and keeps state.db there (#825).
+  const workspaceMounts = (container?.volumeMounts ?? []).filter(
+    (item: Json) => item.name === workspace.name
+  )
+  if (workspaceMounts.length !== 1 || workspace.subPath || sqliteDir !== workspace.mountPath) {
+    throw new Error(
+      `${hostName} does not mount the workspace PVC root once with CLERUM_SESSION_DB_DIR at it`
     )
-    if (!sqliteDir || sqliteMount?.subPath !== 'state') {
-      throw new Error(`${hostName} lost its dedicated SQLite subPath mount`)
-    }
   }
   const claim = await jsonAsync(['-n', 'mcp-host', 'get', `pvc/${claimName}`, '-o', 'json'])
   const livePods = (podList.items ?? []).filter((item: Json) => !item.metadata?.deletionTimestamp)
@@ -342,7 +339,7 @@ async function waitForStateless(
   const started = Date.now()
   for (;;) {
     if (shouldStop?.()) throw new Error(`Stopped waiting for ${STATELESS_HOST}=${desired}`)
-    const snapshot = await hostSnapshot(STATELESS_HOST, STATELESS_HOST, true)
+    const snapshot = await hostSnapshot(STATELESS_HOST, STATELESS_HOST)
     if (shouldStop?.()) throw new Error(`Stopped waiting for ${STATELESS_HOST}=${desired}`)
     const matched =
       desired === 'suspended'
@@ -734,7 +731,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       expect(hccEnv()).toEqual(BASELINE_HCC_ENV)
       runtimeProbeHosts.add(STATEFUL_HOST)
       await settleHccRuntimeIdentity(STATEFUL_HOST)
-      beforeStateful = await hostSnapshot(STATEFUL_HOST, STATEFUL_HOST, false)
+      beforeStateful = await hostSnapshot(STATEFUL_HOST, STATEFUL_HOST)
       expect(beforeStateful.readyReplicas).toBe(1)
       assertGfsInfraHealthy()
       fixtures = seedAgentGfsFixtures(desktopCredentials().email)
@@ -1005,7 +1002,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
     })
 
     await test.step('reopen the same isolated profile and continue after wake', async () => {
-      const relaunchBefore = await hostSnapshot(STATELESS_HOST, STATELESS_HOST, true)
+      const relaunchBefore = await hostSnapshot(STATELESS_HOST, STATELESS_HOST)
       expect(relaunchBefore.lifecycle.state).toBe('suspended')
       expect(relaunchBefore.pods).toHaveLength(0)
       let readyObservedAt: number | null = null
@@ -1047,7 +1044,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       if (!readyObservedAt || !afterStateless) {
         throw new Error(`${STATELESS_HOST} readiness observer completed without a Ready snapshot`)
       }
-      afterStateful = await hostSnapshot(STATEFUL_HOST, STATEFUL_HOST, false)
+      afterStateful = await hostSnapshot(STATEFUL_HOST, STATEFUL_HOST)
       metrics.secondLaunchToReadyMs = readyObservedAt - launchStarted
       metrics.cacheVisibleBeforeReadyObserved =
         readyObservedAt !== null && cachedVisibleAt < readyObservedAt

@@ -15,10 +15,13 @@ import {
   type McpServerOAuthSpecInput,
   resolveServerOAuthSubject,
 } from '../src/oauth/mcpServerOAuthSpec.js'
+import { deriveCodeVerifier } from '../src/oauth/pkce.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import {
+  WORKIQ_URL_SCOPE,
   discoverPilot,
   installRemoteServer,
+  installWorkIqServer,
   seedContext,
   withRfc9207,
 } from './fixtures/perServerInstall.js'
@@ -98,7 +101,7 @@ beforeEach(async () => {
   savedBaseUrl = config.oauthCallbackBaseUrl
   config.oauthCallbackBaseUrl = ORIGIN
   gateway = new MockGateway(NS)
-  await seedContext(gateway, NS, CONTEXT)
+  await seedContext(gateway, config.contextsNamespace, CONTEXT)
   db = makeInMemoryDynamicClientsDb().db
   logged.warns.length = 0
 })
@@ -123,7 +126,7 @@ async function installDcr(
     gateway,
     db,
     discovery,
-    body: { serverName: name, contextRef: CONTEXT, baseUrl, mode: 'dcr' },
+    body: { serverName: name, baseUrl, mode: 'dcr' },
   })
   if (res.status !== 201) throw new Error(`install failed: ${JSON.stringify(res.body)}`)
   const redirectUri = String(res.body.redirectUri)
@@ -137,7 +140,6 @@ async function installPreRegistered(name: string): Promise<Installed> {
     discovery: notion,
     body: {
       serverName: name,
-      contextRef: CONTEXT,
       baseUrl: PILOTS.notion.mcpUrl,
       mode: 'pre-registered',
       clientId: `client-${name}`,
@@ -204,7 +206,6 @@ function harness() {
       },
     },
     mcpServerReader: { read },
-    userContextsReader: async () => ({ contextIds: [CONTEXT] }),
     userServerAccessReader: async () => true,
     fetchFn: (async () => {
       throw new Error('the remote lane must not use fetchFn')
@@ -250,6 +251,47 @@ describe('per-server callback — success', () => {
     expect(redirectUriOf(h.tokenPosts[0])).toBe(`${ORIGIN}/api/v1/oauth-callback/remote/hubspot`)
     expect(redirectUriOf(h.tokenPosts[0])).toBe(srv.redirectUri)
     expect(new URLSearchParams(h.tokenPosts[0].body).get('client_secret')).toBe('secret-hubspot')
+  })
+})
+
+describe('per-server callback — the code exchange body (I5, I6)', () => {
+  it('entra-v2: the exchange sends the CR scopes plus offline_access, the verifier and no resource', async () => {
+    // The CR as the Work IQ install writes it, read back by the production subject reader.
+    const cr = await installWorkIqServer({ scopes: [WORKIQ_URL_SCOPE], gateway, db })
+    expect(cr.spec.oauth.resource).toBe('https://workiq.svc.cloud.microsoft/mcp')
+    const h = harness()
+    const state = await stateFor(cr.metadata.name)
+
+    const result = await handleOAuthCallback(
+      { target: perServer(cr.metadata.name), code: 'CODE', state },
+      h.deps
+    )
+
+    expect(result.kind).toBe('ok')
+    expect(h.tokenPosts).toHaveLength(1)
+    expect(h.tokenPosts[0].url).toBe(
+      'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token'
+    )
+    const body = new URLSearchParams(h.tokenPosts[0].body)
+    expect(body.get('grant_type')).toBe('authorization_code')
+    expect(body.get('scope')).toBe(`${WORKIQ_URL_SCOPE} offline_access`)
+    expect(body.get('code_verifier')).toBe(deriveCodeVerifier(STATE_SECRET, state))
+    expect(body.has('resource')).toBe(false)
+    expect(h.tokenPosts[0].body).not.toContain('resource=')
+  })
+
+  it('without a profile (Notion) the exchange body is unchanged: resource, no scope', async () => {
+    const srv = await installPreRegistered('hubspot')
+    const resource = String((await oauthOf(srv.name)).resource)
+    const h = harness()
+    const state = await stateFor(srv.name)
+
+    await handleOAuthCallback({ target: perServer(srv.name), code: 'CODE', state }, h.deps)
+
+    expect(h.tokenPosts).toHaveLength(1)
+    expect(h.tokenPosts[0].body).toBe(
+      `grant_type=authorization_code&code=CODE&client_id=client-hubspot&client_secret=secret-hubspot&redirect_uri=${encodeURIComponent(srv.redirectUri)}&code_verifier=${deriveCodeVerifier(STATE_SECRET, state)}&resource=${encodeURIComponent(resource)}`
+    )
   })
 })
 

@@ -397,6 +397,7 @@ modified MPL-licensed files. See [LICENSE](../../LICENSE).
 - [Configuration reference](../reference/configuration.md)
 - [Minikube setup](minikube.md)
 - [WorkflowRecipes operations](workflow-recipes-guide.md)
+- [Host PVC layout upgrade from v0.10.x / v0.11.x](host-pvc-layout-upgrade.md)
 - [Member invitations on self-hosted](../how-to/member-invitations-self-hosted.md)
 - [Architecture / topology](../architecture/platform-topology.md)
 - [FAQ](../faq.md)

@@ -25,12 +25,19 @@ import { buildGoogleGenerativeDriver } from './drivers/googleGenerative'
 import { type GrokSubscriptionDeps, GrokSubscriptionProvider } from './grokSubscription'
 import { OpenAIProvider } from './openai'
 import { OpenAICompatibleProvider } from './openaiCompatible'
+import { type ProviderEnvLookup, processEnvLookup } from './providerEnv'
 import { type LlmProvider, descriptorFor, primarySlot } from './registryCore'
 import type { SingleTurnProvider } from './types'
 
 export type MakeProviderOptions = {
   codex?: CodexSubscriptionDeps
   grok?: GrokSubscriptionDeps
+  /**
+   * Source for the provider's declared non-secret env (AWS_REGION, Vertex
+   * project/location, Azure endpoint/api-version). Defaults to process.env; a
+   * Host pod passes the per-Host env from ConfigStore (see ./providerEnv).
+   */
+  env?: ProviderEnvLookup
 }
 
 export {
@@ -69,6 +76,7 @@ export function makeProvider(
   options?: MakeProviderOptions
 ): SingleTurnProvider {
   const d = descriptorFor(provider)
+  const env = options?.env ?? processEnvLookup
   switch (provider) {
     case 'openai':
       return new OpenAIProvider(credentials[primarySlot(d).dataKey], model)
@@ -76,10 +84,10 @@ export function makeProvider(
       return new ClaudeProvider(credentials[primarySlot(d).dataKey], model)
     case 'vertex':
       // Own-SDK arm — lazy require lives inside the driver builder.
-      return buildGoogleGenerativeDriver(credentials, model ?? d.defaultModel ?? '')
+      return buildGoogleGenerativeDriver(credentials, model ?? d.defaultModel ?? '', env)
     case 'bedrock':
       // Own-SDK arm — lazy require lives inside the driver builder.
-      return buildBedrockConverseDriver(credentials, model ?? d.defaultModel ?? '')
+      return buildBedrockConverseDriver(credentials, model ?? d.defaultModel ?? '', env)
     case 'azure':
       // Light-driver arm: OpenAI wire shape but per-resource host
       // (AZURE_OPENAI_ENDPOINT) + `api-key` header + deployment-name-as-model, so
@@ -87,7 +95,8 @@ export function makeProvider(
       // below. Fails closed (throws) if the operator omitted the endpoint.
       return new AzureOpenAIProvider(
         credentials[primarySlot(d).dataKey],
-        model ?? d.defaultModel ?? ''
+        model ?? d.defaultModel ?? '',
+        env
       )
     case 'codex-subscription':
       if (process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true') {

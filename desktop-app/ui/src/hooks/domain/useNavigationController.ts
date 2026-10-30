@@ -29,6 +29,14 @@ import type { WorkspaceTabsState } from '../../lib/workspaceTabs.types'
 import { mapKindToRoute, settingsSectionForRoute } from '../../lib/workspaceTabsRoute'
 import type { AgentWorkspaceRoute, NavItem } from '../../uiTypes'
 
+export interface WorkspaceNavigationSnapshot {
+  workspaceTabs: WorkspaceTabsState
+  selectedAgent: string | null
+  selectedAgentRoute: AgentWorkspaceRoute
+  appsPickerActive: boolean
+  lastActiveChatTabId: string | null
+}
+
 /**
  * Owner of the universal tab store (mini-spec 03 §3/§4/§6). The store lives here
  * — upstream of `useAgentChatController`, which reads `navItem` in its effect
@@ -77,7 +85,9 @@ export function useNavigationController() {
   const [navigationIntentSequence, setNavigationIntentSequence] = useState(0)
   const navigationIntentSequenceRef = useRef(0)
   const userNavigationGenerationRef = useRef<number | null>(null)
+  const userNavigationGenerationUnavailableRef = useRef(false)
   const currentUserNavigationGeneration = useCallback((): number | null => {
+    if (userNavigationGenerationUnavailableRef.current) return null
     if (userNavigationGenerationRef.current !== null) return userNavigationGenerationRef.current
     try {
       const generation =
@@ -103,7 +113,8 @@ export function useNavigationController() {
       typeof window === 'undefined'
         ? undefined
         : window.clerum?.gfs?.advanceUserNavigationGeneration
-    if (advance) {
+    try {
+      if (!advance) throw new Error('The main process GFS navigation generation is unavailable')
       const nextGeneration = advance()
       if (
         typeof nextGeneration !== 'number' ||
@@ -113,10 +124,12 @@ export function useNavigationController() {
         throw new Error('The main process returned an invalid GFS navigation generation')
       }
       userNavigationGenerationRef.current = nextGeneration
-    } else {
-      // User navigation still proceeds, but deep links fail closed until main
-      // can provide the authoritative cross-process ordering generation.
+      userNavigationGenerationUnavailableRef.current = false
+    } catch {
+      // Keep local navigation responsive, but do not let an old main value
+      // make links eligible after an explicit action we could not order.
       userNavigationGenerationRef.current = null
+      userNavigationGenerationUnavailableRef.current = true
     }
     return beginNavigationIntent()
   }, [beginNavigationIntent])
@@ -158,6 +171,48 @@ export function useNavigationController() {
 
   const clearAppsPicker = useCallback(() => setAppsPickerActive(false), [])
 
+  // Session identity owns the workspace contents. Tear navigation down before a
+  // different principal is published, and give the new session one fresh blank
+  // Chat tab. Advancing the local intent sequence fences pending continuations;
+  // this is not a user selection and does not advance the main-process link
+  // generation.
+  const resetSessionNavigation = useCallback(() => {
+    beginNavigationIntent()
+    setSelectedAgent(null)
+    setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
+    setAppsPickerActive(false)
+    const chatTabId = nextWorkspaceTabId()
+    setWorkspaceTabs(createWorkspaceTabsState(chatTabId))
+    lastActiveChatTabIdRef.current = chatTabId
+    setLastActiveChatTabId(chatTabId)
+  }, [beginNavigationIntent, nextWorkspaceTabId, setWorkspaceTabs])
+
+  const captureWorkspaceNavigation = useCallback(
+    (): WorkspaceNavigationSnapshot => ({
+      workspaceTabs: workspaceTabsRef.current,
+      selectedAgent,
+      selectedAgentRoute,
+      appsPickerActive,
+      lastActiveChatTabId: lastActiveChatTabIdRef.current,
+    }),
+    [appsPickerActive, selectedAgent, selectedAgentRoute]
+  )
+
+  const restoreWorkspaceNavigation = useCallback(
+    (snapshot: WorkspaceNavigationSnapshot, expectedIntentSequence: number): number | null => {
+      if (!isNavigationIntentCurrent(expectedIntentSequence)) return null
+      const restoredIntentSequence = beginNavigationIntent()
+      setWorkspaceTabs(snapshot.workspaceTabs)
+      setSelectedAgent(snapshot.selectedAgent)
+      setSelectedAgentRoute(snapshot.selectedAgentRoute)
+      setAppsPickerActive(snapshot.appsPickerActive)
+      lastActiveChatTabIdRef.current = snapshot.lastActiveChatTabId
+      setLastActiveChatTabId(snapshot.lastActiveChatTabId)
+      return restoredIntentSequence
+    },
+    [beginNavigationIntent, isNavigationIntentCurrent, setWorkspaceTabs]
+  )
+
   // Apps route with no launched app → the picker residual. Redundant (and thus
   // skipped) when an app tab is already active, since that already derives to
   // the Apps route.
@@ -177,40 +232,45 @@ export function useNavigationController() {
   // (`useAppController.handleNavSelect`) loads exactly that value instead of
   // re-deriving the same rule in its own layer, so the loaded chat can never
   // drift from the focused one (D4).
-  const focusChatSection = useCallback((): { agentRef: string; chatId: string } | null => {
-    beginUserNavigationIntent()
-    const current = workspaceTabsRef.current
-    const active = activeWorkspaceTab(current)
-    if (active?.kind !== 'files' && active?.kind !== 'preview') {
-      clearLatestGfsConversationContext()
-    }
-    setAppsPickerActive(false)
-    // Precedence (mini-spec 08 §1): the active chat wins (no re-homing); else
-    // RESUME the last active chat tab the user left — validated live against the
-    // store so a not-yet-reflected close cannot resurrect a stale id — rather than
-    // the last chat by array order; else the last chat by order (first boot, no
-    // last-active); else seed a blank.
-    const lastActiveId = lastActiveChatTabIdRef.current
-    const resumeTarget =
-      lastActiveId !== null
-        ? current.tabs.find(tab => tab.id === lastActiveId && tab.kind === 'chat')
-        : undefined
-    const target =
-      active?.kind === 'chat'
-        ? active
-        : (resumeTarget ?? [...current.tabs].reverse().find(tab => tab.kind === 'chat'))
-    if (target) {
-      setWorkspaceTabs(state =>
-        state.activeTabId === target.id ? state : { ...state, activeTabId: target.id }
-      )
-      return target.chat?.agentRef && target.chat.chatId
-        ? { agentRef: target.chat.agentRef, chatId: target.chat.chatId }
-        : null
-    }
-    const id = nextWorkspaceTabId()
-    setWorkspaceTabs(state => newChatTab(state, id, null))
-    return null
-  }, [beginUserNavigationIntent, nextWorkspaceTabId])
+  const focusChatSection = useCallback(
+    (
+      source: 'explicit' | 'programmatic' = 'explicit'
+    ): { agentRef: string; chatId: string } | null => {
+      if (source === 'explicit') {
+        beginUserNavigationIntent()
+      } else if (navigationIntentSequenceRef.current > 0) {
+        // Bootstrap must not replace a tab selected while authentication loads.
+        return null
+      }
+      const current = workspaceTabsRef.current
+      const active = activeWorkspaceTab(current)
+      if (active?.kind !== 'files' && active?.kind !== 'preview') {
+        clearLatestGfsConversationContext()
+      }
+      setAppsPickerActive(false)
+      const lastActiveId = lastActiveChatTabIdRef.current
+      const resumeTarget =
+        lastActiveId !== null
+          ? current.tabs.find(tab => tab.id === lastActiveId && tab.kind === 'chat')
+          : undefined
+      const target =
+        active?.kind === 'chat'
+          ? active
+          : (resumeTarget ?? [...current.tabs].reverse().find(tab => tab.kind === 'chat'))
+      if (target) {
+        setWorkspaceTabs(state =>
+          state.activeTabId === target.id ? state : { ...state, activeTabId: target.id }
+        )
+        return target.chat?.agentRef && target.chat.chatId
+          ? { agentRef: target.chat.agentRef, chatId: target.chat.chatId }
+          : null
+      }
+      const id = nextWorkspaceTabId()
+      setWorkspaceTabs(state => newChatTab(state, id, null))
+      return null
+    },
+    [beginUserNavigationIntent, nextWorkspaceTabId]
+  )
 
   /**
    * Activate a chat tab so `navItem` derives to `chat` in the same commit as the
@@ -221,8 +281,13 @@ export function useNavigationController() {
    * active and the route stays on `apps`.
    */
   const activateChatTab = useCallback(
-    (agentRef: string | null, chatId: string | null, title?: string) => {
-      beginUserNavigationIntent()
+    (
+      agentRef: string | null,
+      chatId: string | null,
+      title?: string,
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
       setWorkspaceTabs(current =>
@@ -240,8 +305,11 @@ export function useNavigationController() {
   )
 
   const openSettingsSection = useCallback(
-    (section: Parameters<typeof openSettingsTab>[1]['section']) => {
-      beginUserNavigationIntent()
+    (
+      section: Parameters<typeof openSettingsTab>[1]['section'],
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
       setWorkspaceTabs(current => openSettingsTab(current, { id, section }))
@@ -418,11 +486,19 @@ export function useNavigationController() {
   // coordinator can load exactly that conversation; `null` for every other route
   // and for a blank/seeded chat.
   const handleNavSelect = useCallback(
-    (item: NavItem): { agentRef: string; chatId: string } | null => {
+    (
+      item: NavItem,
+      options: {
+        source?: 'explicit' | 'programmatic'
+        navigationIntentAlreadyStarted?: boolean
+      } = {}
+    ): { agentRef: string; chatId: string } | null => {
+      const source = options.source ?? 'explicit'
+      if (source === 'programmatic' && navigationIntentSequenceRef.current > 0) return null
       if (item === DESKTOP_ROUTES.chat) {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
-        return focusChatSection()
+        return focusChatSection(source)
       }
       if (item === DESKTOP_ROUTES.apps) {
         showAppsPicker()
@@ -438,7 +514,7 @@ export function useNavigationController() {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
       }
-      openSettingsSection(section)
+      openSettingsSection(section, options.navigationIntentAlreadyStarted)
       return null
     },
     [focusChatSection, openFilesSection, openSettingsSection, showAppsPicker]
@@ -468,6 +544,9 @@ export function useNavigationController() {
     appsPickerActive,
     showAppsPicker,
     clearAppsPicker,
+    resetSessionNavigation,
+    captureWorkspaceNavigation,
+    restoreWorkspaceNavigation,
     activateChatTab,
     lastActiveChatTabId,
     openFilesSection,

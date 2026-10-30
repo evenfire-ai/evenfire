@@ -241,7 +241,11 @@ describe('D3 durability barrier', () => {
     it('a worker failure applies NEITHER the assistant message NOR the active_task_id clear', async () => {
       const raw = createInProcessWorker(tmpDbPath())
       const faulty = new FaultInjectingWorker(raw.worker)
-      const queue = new PersistQueue(faulty, { syncTimeoutMs: 2000, asyncTimeoutMs: 5000 })
+      const queue = new PersistQueue(faulty, {
+        syncTimeoutMs: 2000,
+        asyncTimeoutMs: 5000,
+        stallTimeoutMs: 30_000,
+      })
       const store = new SqliteConversationStore(queue, { cacheSize: 8 })
       const manager = new ConversationManager(store)
 
@@ -263,7 +267,11 @@ describe('D3 durability barrier', () => {
     it('a worker failure on turn-start applies NOTHING and rolls back the in-RAM turn', async () => {
       const raw = createInProcessWorker(tmpDbPath())
       const faulty = new FaultInjectingWorker(raw.worker)
-      const queue = new PersistQueue(faulty, { syncTimeoutMs: 2000, asyncTimeoutMs: 5000 })
+      const queue = new PersistQueue(faulty, {
+        syncTimeoutMs: 2000,
+        asyncTimeoutMs: 5000,
+        stallTimeoutMs: 30_000,
+      })
       const store = new SqliteConversationStore(queue, { cacheSize: 8 })
       const manager = new ConversationManager(store)
 
@@ -382,7 +390,11 @@ describe('D3 durability barrier', () => {
       const dbPath = tmpDbPath()
       const raw = createInProcessWorker(dbPath, { barrierMode: true })
       const faulty = new FaultInjectingWorker(raw.worker)
-      const queue = new PersistQueue(faulty, { syncTimeoutMs: 500, asyncTimeoutMs: 5000 })
+      const queue = new PersistQueue(faulty, {
+        syncTimeoutMs: 500,
+        asyncTimeoutMs: 5000,
+        stallTimeoutMs: 30_000,
+      })
       const store = new SqliteConversationStore(queue, { cacheSize: 8 })
       const manager = new ConversationManager(store)
 

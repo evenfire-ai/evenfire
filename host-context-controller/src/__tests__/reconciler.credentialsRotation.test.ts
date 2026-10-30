@@ -38,7 +38,6 @@ function makeServer(withEnvSecret = true): McpServerCRD {
     namespace: 'mcp-server',
     uid: 'uid-linear-1234',
     spec: {
-      contextRef: 'ctx1',
       image: 'linear-mcp:v1',
       transport: { type: 'streamableHttp', port: 3000, url: 'http://linear.mcp-server.svc:3000' },
       ...(withEnvSecret && {

@@ -26,6 +26,7 @@ import type {
   ToolCompletionResponse,
 } from '../../types'
 import type { Capability, Contributor } from '../types'
+import { DEFAULT_HOOK_HARD_DEADLINE_MS, guardHookFetcher } from './guardedFetch'
 import { type HookBreakerRegistry, defaultBreakerRegistry } from './hookBreaker'
 import { projectForHook } from './hookProjection'
 import type { HookDescriptor, HookFetcher, HookHttpResult, LifecyclePoint } from './types'
@@ -71,11 +72,11 @@ function filteredPostResponse(usage: ToolCompletionResponse['usage']): ToolCompl
 export class RemoteLlmHook {
   constructor(
     private readonly descriptor: HookDescriptor,
-    private readonly fetch: HookFetcher,
+    fetch: HookFetcher,
     /** Shared so a trip survives the per-task rebuild of this instance (§8.6). */
-    private readonly breakers: HookBreakerRegistry = defaultBreakerRegistry,
+    breakers: HookBreakerRegistry = defaultBreakerRegistry,
     /** Injectable clock for deterministic breaker tests. */
-    private readonly now: () => number = () => Date.now(),
+    now: () => number = () => Date.now(),
     /**
      * Belt-and-braces hard deadline (§8.6): an ABSOLUTE ceiling on every hook
      * dial, independent of the transport's own timeout. If the transport ever
@@ -84,8 +85,12 @@ export class RemoteLlmHook {
      * so the §8.6 fail-posture always applies and the await can never hang. Set
      * well above the transport timeout so normal timeouts settle there first.
      */
-    private readonly hardDeadlineMs: number = 15000
-  ) {}
+    hardDeadlineMs: number = DEFAULT_HOOK_HARD_DEADLINE_MS
+  ) {
+    this.guarded = guardHookFetcher({ descriptor, fetch, breakers, now, hardDeadlineMs })
+  }
+
+  private readonly guarded: HookFetcher
 
   /** Stable hook id (the descriptor's id) — for diagnostics/logging only. */
   get id(): string {
@@ -96,95 +101,17 @@ export class RemoteLlmHook {
     return this.descriptor.capabilities.includes(cap)
   }
 
-  /** Identity of the breaker state (per hook pod+path), shared across tasks (§8.6). */
-  private breakerKey(): string {
-    return `${this.descriptor.endpoint}${this.descriptor.path}`
-  }
-
   /**
-   * The circuit breaker is honored only for an advisory hook that opted into
-   * `breaker` mode (§8.6): a deny-authoritative (`may_deny`) hook always dials
-   * strict so it can never be tripped into failing open.
+   * Transport with the quarantine gate (§8.2), the §8.6 circuit breaker and the
+   * hard deadline — shared with the tool lane (`guardHookFetcher`). Every
+   * short-circuit reports `unavailable`, so each point's fail-posture applies.
    */
-  private breakerEngaged(): boolean {
-    return this.descriptor.onUnavailable?.mode === 'breaker' && !this.has('may_deny')
-  }
-
-  /**
-   * Transport with the quarantine gate (§8.2) and the §8.6 circuit breaker.
-   *
-   * A quarantined hook (e.g. digest mismatch) never reaches the network — every
-   * call reports `unavailable`, so each point's §8.6 fail-posture applies. When a
-   * `breaker`-mode advisory hook has tripped, calls likewise short-circuit to
-   * `unavailable` WITHOUT dialing for the cooldown window, so a down hook is not
-   * re-dialed (and re-timed-out) on every request. Every branch reports
-   * `unavailable` — never a silent allow.
-   */
-  private async fetchGuarded(args: {
+  private fetchGuarded(args: {
     point: LifecyclePoint
     descriptor: HookDescriptor
     body: unknown
   }): Promise<HookHttpResult> {
-    if (this.descriptor.quarantined) {
-      return { status: 0, body: undefined, unavailable: true }
-    }
-    const engaged = this.breakerEngaged()
-    if (engaged && this.breakers.isOpen(this.breakerKey(), this.now())) {
-      // Breaker open: skip the dial (and its timeout); report unavailable.
-      return { status: 0, body: undefined, unavailable: true }
-    }
-    const res = await this.fetchWithDeadline(args)
-    if (engaged) {
-      const policy = this.descriptor.onUnavailable!
-      // "Response too big" (oversized) is NOT a hook-down failure — it must not
-      // trip the breaker (which would then skip small payloads that would fit).
-      // Leave breaker state unchanged for oversized; only a real transport failure
-      // counts, and a reachable response resets it.
-      if (res.oversized) {
-        // no-op on breaker state
-      } else if (res.unavailable) {
-        const tripped = this.breakers.recordFailure(
-          this.breakerKey(),
-          policy.failureThreshold,
-          policy.cooldownMs,
-          this.now()
-        )
-        if (tripped) {
-          console.warn(
-            `[Guardrails] hook ${this.descriptor.id} breaker tripped after ${policy.failureThreshold} failures; ` +
-              `failing open for ${policy.cooldownMs}ms`
-          )
-        }
-      } else {
-        this.breakers.recordSuccess(this.breakerKey())
-      }
-    }
-    return res
-  }
-
-  /**
-   * Race the transport against an absolute deadline so a dial that never settles
-   * (buggy/unhonored transport timeout) still yields `unavailable` rather than
-   * hanging the awaiting turn. Promise.race attaches a handler to the loser, so a
-   * late transport rejection is not an unhandled rejection.
-   */
-  private fetchWithDeadline(args: {
-    point: LifecyclePoint
-    descriptor: HookDescriptor
-    body: unknown
-  }): Promise<HookHttpResult> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const deadline = new Promise<HookHttpResult>(resolve => {
-      timer = setTimeout(
-        () => resolve({ status: 0, body: undefined, unavailable: true }),
-        this.hardDeadlineMs
-      )
-      // Don't let the backstop timer keep the event loop alive.
-      ;(timer as { unref?: () => void }).unref?.()
-    })
-    return Promise.race([this.fetch(args), deadline]).finally(() => {
-      if (timer) clearTimeout(timer)
-    })
+    return this.guarded(args)
   }
 
   private handles(point: LifecyclePoint): boolean {

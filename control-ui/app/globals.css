@@ -351,6 +351,154 @@ body.cu-body {
   gap: var(--cu-space-3);
 }
 
+.cu-connector-credentials-status {
+  display: grid;
+  gap: var(--cu-space-3);
+  width: 100%;
+}
+
+.cu-connector-credentials-status:empty {
+  display: none;
+}
+
+.cu-existing-secret-control {
+  --cu-existing-secret-control-height: 2.85rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--cu-space-2);
+}
+
+.cu-existing-secret-control > .cu-field {
+  flex: 1 1 40%;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.cu-existing-secret-control > .cu-btn {
+  flex: 0 0 auto;
+  min-height: var(--cu-existing-secret-control-height);
+}
+
+.cu-existing-secret-control > .cu-btn--icon {
+  width: var(--cu-existing-secret-control-height);
+}
+
+.cu-existing-secret-control .cu-selection-dropdown__button {
+  min-height: var(--cu-existing-secret-control-height);
+}
+
+.cu-secret-assignment-form {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+}
+
+.cu-assigned-secret-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--cu-space-4);
+  width: 100%;
+}
+
+.cu-assigned-secret-field {
+  display: grid;
+  gap: var(--cu-space-2);
+  min-width: 0;
+  flex: 1 1 50%;
+}
+
+.cu-assigned-secret-field__label {
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-xs);
+  font-weight: var(--cu-font-weight-semibold);
+  text-transform: uppercase;
+}
+
+.cu-assigned-secret-field__value {
+  display: flex;
+  align-items: center;
+  min-height: calc(var(--cu-space-7) + var(--cu-space-3));
+  padding: var(--cu-space-2) var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text);
+  font-size: var(--cu-font-size-lg);
+  overflow-wrap: anywhere;
+}
+
+.cu-assigned-secret-row > .cu-btn {
+  margin-left: auto;
+}
+
+.cu-secret-keys {
+  min-width: 0;
+  display: grid;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-4);
+  border: 1px solid var(--cu-border);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cu-secret-keys .cu-table-panel__head {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+.cu-secret-keys > .cu-table-wrap {
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.cu-credential-key-table {
+  table-layout: fixed;
+  min-width: 0;
+}
+
+.cu-body .cu-credential-key-table thead th {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.cu-credential-key-table .cu-table__cell-actions {
+  width: calc(var(--cu-space-7) * 3);
+  min-width: 0;
+  max-width: none;
+  text-align: right;
+}
+
+.cu-credential-key-table td:not(:last-child) {
+  overflow-wrap: anywhere;
+}
+
+.cu-credential-key-table td code + code {
+  margin-left: var(--cu-space-2);
+}
+
+.cu-secret-keys__note {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-connector-edit-form .cu-form-section {
+  min-width: 0;
+  align-content: start;
+  justify-items: start;
+}
+
+.cu-connector-edit-form .cu-form-section > .cu-form-section__header,
+.cu-connector-edit-form .cu-form-section > .cu-table-wrap {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
 .cu-form-grid {
   display: grid;
   gap: var(--cu-space-3);
@@ -4740,6 +4888,14 @@ td.cu-registry-description {
   margin-top: var(--cu-space-1);
 }
 
+/* Remote wizard: the exact scopes an Entra install asks the operator to confirm. */
+.cu-unverified-scopes {
+  margin: var(--cu-space-1) 0;
+  padding-left: var(--cu-space-4);
+  font-family: var(--cu-font-mono);
+  overflow-wrap: anywhere;
+}
+
 /* Catalog-attention banner (stale-but-referenced models) on /llm-models. */
 .cu-model-attention__lede {
   margin: 0 0 var(--cu-space-2);
@@ -4839,6 +4995,11 @@ td.cu-registry-description {
 .cu-toast--error {
   color: var(--cu-danger);
   border-color: rgba(var(--cu-danger-rgb), 0.42);
+}
+
+.cu-toast--warning {
+  color: var(--cu-warning);
+  border-color: rgba(var(--cu-warning-rgb), 0.42);
 }
 
 .cu-toast__text {
@@ -12669,6 +12830,56 @@ button.cu-gfs-tree__button:focus-visible,
   height: 100%;
 }
 
+/* Drop-move verdicts on breadcrumb crumbs (plan §3.3): only an allowed
+   target paints the blue affordance; checking stays neutral; ordinary
+   denials read as error; unavailable reads as warning; the same-parent
+   no-op reads neutral/info. The reason rides along on data-drop-reason. */
+.cu-gfs-breadcrumb__button[data-drop-state='allowed'] {
+  outline: 2px solid rgba(var(--cu-accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--cu-accent-rgb), 0.14);
+}
+
+.cu-gfs-breadcrumb__button[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--cu-accent-rgb), 0.4);
+  outline-offset: -2px;
+  background: var(--cu-surface-hover);
+}
+
+.cu-gfs-breadcrumb__button[data-drop-state='denied'] {
+  outline: 2px solid rgba(var(--cu-danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--cu-danger-rgb), 0.12);
+}
+
+.cu-gfs-breadcrumb__button[data-drop-state='unavailable'] {
+  outline: 2px solid rgba(var(--cu-warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--cu-warning-rgb), 0.12);
+}
+
+.cu-gfs-breadcrumb__button[data-drop-state='same-parent'] {
+  outline: 2px solid rgba(var(--cu-accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: var(--cu-surface-hover);
+}
+
+/* Visually-hidden live region carrying the hover verdict sentence (RP-026):
+   painted verdicts are invisible to screen readers, so the same wording is
+   spoken here when it changes. */
+.cu-gfs-drop-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .cu-gfs-list-frame {
   --cu-gfs-list-columns: 2.25rem minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem;
 
@@ -12813,6 +13024,33 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-gfs-list__row[data-drop-target='true']:hover {
   background: rgba(var(--cu-accent-rgb), 0.18);
+}
+
+/* Reason-aware row verdicts share the crumb tone contract: denied = error,
+   unavailable = warning, checking = neutral, same-parent = neutral/info.
+   Only the allowed verdict keeps the blue data-drop-target affordance. */
+.cu-gfs-list__row[data-drop-state='denied'] {
+  outline: 2px solid rgba(var(--cu-danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--cu-danger-rgb), 0.12);
+}
+
+.cu-gfs-list__row[data-drop-state='unavailable'] {
+  outline: 2px solid rgba(var(--cu-warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--cu-warning-rgb), 0.12);
+}
+
+.cu-gfs-list__row[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--cu-accent-rgb), 0.4);
+  outline-offset: -2px;
+  background: var(--cu-surface-hover);
+}
+
+.cu-gfs-list__row[data-drop-state='same-parent'] {
+  outline: 2px solid rgba(var(--cu-accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: var(--cu-surface-hover);
 }
 
 .cu-gfs-list__row--clickable {
@@ -14362,6 +14600,14 @@ button.cu-gfs-tree__button:focus-visible,
   color: var(--cu-text);
 }
 
+/* R1-M5: the confirmation states the surviving Editor shares BEFORE the
+   operator approves, not only in the post-change toast. */
+.cu-gfs-parent-update__residual {
+  margin: 0;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-sm);
+}
+
 .cu-gfs-parent-update__help {
   display: grid;
   gap: var(--cu-space-2);
@@ -14709,4 +14955,39 @@ button.cu-gfs-tree__button:focus-visible,
       height: calc(100dvh - 2 * var(--cu-space-4));
     }
   }
+}
+
+/* ── GfsMoveConfirmDialog (rev-2 drag-and-drop D2) ─────────────────────────
+   One confirmation for folder drag moves: impact + naming policy. Reuses the
+   established move-dialog action/token vocabulary. */
+.cu-gfs-move-confirm {
+  max-width: 30rem;
+}
+
+.cu-gfs-move-confirm__header h3 {
+  margin: 0;
+}
+
+.cu-gfs-move-confirm__body {
+  display: grid;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-3) 0;
+}
+
+.cu-gfs-move-confirm__impact {
+  margin: 0;
+  color: var(--cu-text-muted, var(--cu-text-dim));
+}
+
+.cu-gfs-move-confirm__rename-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  cursor: pointer;
+}
+
+.cu-gfs-move-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--cu-space-1);
 }

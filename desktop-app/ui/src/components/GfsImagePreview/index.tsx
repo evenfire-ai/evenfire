@@ -27,21 +27,49 @@ export function GfsImagePreview({
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
   const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
+  const copiedResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [copyContentReady, setCopyContentReady] = useState(false)
   const [copied, setCopied] = useState(false)
   const backdropStyle = useWorkspaceModalStyle()
 
-  const handleCopyContentReady = useCallback((copy: (() => Promise<boolean>) | null) => {
-    copyContentRef.current = copy
-    setCopyContentReady(Boolean(copy))
-    if (!copy) setCopied(false)
+  const clearCopiedResetTimeout = useCallback(() => {
+    if (copiedResetTimeoutRef.current !== null) {
+      clearTimeout(copiedResetTimeoutRef.current)
+      copiedResetTimeoutRef.current = null
+    }
   }, [])
+
+  const handleCopyContentReady = useCallback(
+    (copy: (() => Promise<boolean>) | null) => {
+      copyContentRef.current = copy
+      setCopyContentReady(Boolean(copy))
+      if (!copy) {
+        clearCopiedResetTimeout()
+        setCopied(false)
+      }
+    },
+    [clearCopiedResetTimeout]
+  )
 
   const handleCopy = async () => {
     const copy = copyContentRef.current
     if (!copy) return
-    setCopied(await copy())
+    clearCopiedResetTimeout()
+    setCopied(false)
+    try {
+      if (!(await copy())) return
+      clearCopiedResetTimeout()
+      setCopied(true)
+      copiedResetTimeoutRef.current = setTimeout(() => {
+        copiedResetTimeoutRef.current = null
+        setCopied(false)
+      }, 2_000)
+    } catch {
+      setCopied(false)
+    }
   }
+
+  useEffect(() => clearCopiedResetTimeout, [clearCopiedResetTimeout])
 
   useEffect(() => {
     closeButtonRef.current?.focus()

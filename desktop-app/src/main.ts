@@ -25,7 +25,11 @@ import {
   GfsUserNavigationGeneration,
   createLogoutWithGfsResourceDeepLinkClear,
 } from './gfsResourceDeepLinkQueue.js'
-import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
+import {
+  assertTrustedSender,
+  registerDeepLinkAcknowledgmentHandlers,
+  registerIpcHandlers,
+} from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
@@ -39,6 +43,7 @@ import {
   parseSandboxUiDeepLink,
 } from './sandboxUiDeepLinks.js'
 import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
+import { notifySandboxUiHostResumed } from './sandboxUiSessionRefresh.js'
 import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 import { TokenStore } from './tokenStore.js'
@@ -70,18 +75,34 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
-const appService = new AppService(
-  devIsolationPlan
-    ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
-    : {}
-)
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
+const appService = new AppService({
+  ...(devIsolationPlan
+    ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
+    : {}),
+  onSandboxUiSessionInvalidated: () => {
+    const appDeepLinkMinimumId = sandboxUiDeepLinkQueue.clear()
+    const gfsDeepLinkMinimumId = gfsResourceDeepLinkQueue.clear()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sandboxUi:sessionInvalidated', {
+        sessionGeneration: appService.getSessionGeneration(),
+        appDeepLinkMinimumId,
+        gfsDeepLinkMinimumId,
+      })
+    }
+  },
+})
 const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
 const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
 const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkClear(
   gfsResourceDeepLinkQueue,
   () => appService.logout()
 )
+registerDeepLinkAcknowledgmentHandlers(appService, () => mainWindow, {
+  appQueue: sandboxUiDeepLinkQueue,
+  gfsQueue: gfsResourceDeepLinkQueue,
+  navigation: gfsUserNavigationGeneration,
+})
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
 const mcpOauthCompletionQueue = new McpOauthCompletionQueue(completion => {
@@ -158,6 +179,8 @@ function emitWindowControlsState(win: BrowserWindow): void {
  * streams — the 30s watchdog stays as a slower safety net. No payload: the
  * renderer decides which chats to reconcile from its own FSM. Registered once,
  * app-wide (not per-window); `send` is a no-op when the webContents is gone.
+ * The sandbox UI session loop gets the same tick: a cookie that expired during
+ * sleep is re-minted now instead of whenever its timer catches up.
  */
 function wirePowerMonitor(): void {
   const emit = () => {
@@ -167,6 +190,8 @@ function wirePowerMonitor(): void {
   }
   powerMonitor.on('resume', emit)
   powerMonitor.on('unlock-screen', emit)
+  powerMonitor.on('resume', notifySandboxUiHostResumed)
+  powerMonitor.on('unlock-screen', notifySandboxUiHostResumed)
 }
 
 /** Push native window state to the renderer on every visibility/focus change. */
@@ -264,32 +289,33 @@ ipcMain.handle('sandboxUi:clearPendingDeepLinks', event => {
   sandboxUiDeepLinkQueue.clear()
 })
 
-ipcMain.handle('sandboxUi:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
-  assertTrustedSender(event)
-  const id = Number(payload?.id)
-  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid app deep-link id')
-  sandboxUiDeepLinkQueue.acknowledge(id)
-})
-
 ipcMain.handle('gfs:listPendingDeepLinks', event => {
   assertTrustedSender(event)
   return { links: gfsResourceDeepLinkQueue.list() }
 })
 
-function assertTrustedGfsNavigationSender(event: IpcMainEvent): void {
-  assertTrustedSender(event)
-  if (!mainWindow || event.sender !== mainWindow.webContents) {
-    throw new Error('Untrusted GFS navigation sender')
+function isTrustedGfsNavigationSender(event: IpcMainEvent): boolean {
+  try {
+    assertTrustedSender(event)
+  } catch {
+    return false
   }
+  return Boolean(mainWindow && event.sender === mainWindow.webContents)
 }
 
 ipcMain.on('gfs:getUserNavigationGeneration', event => {
-  assertTrustedGfsNavigationSender(event)
+  if (!isTrustedGfsNavigationSender(event)) {
+    event.returnValue = null
+    return
+  }
   event.returnValue = gfsUserNavigationGeneration.current()
 })
 
 ipcMain.on('gfs:advanceUserNavigationGeneration', event => {
-  assertTrustedGfsNavigationSender(event)
+  if (!isTrustedGfsNavigationSender(event)) {
+    event.returnValue = null
+    return
+  }
   event.returnValue = gfsUserNavigationGeneration.advance()
 })
 
@@ -298,12 +324,6 @@ ipcMain.handle('gfs:clearPendingDeepLinks', event => {
   return gfsResourceDeepLinkQueue.clear()
 })
 
-ipcMain.handle('gfs:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
-  assertTrustedSender(event)
-  const id = Number(payload?.id)
-  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid EvenDrive deep-link id')
-  gfsResourceDeepLinkQueue.acknowledge(id)
-})
 function focusMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isMinimized()) mainWindow.restore()
@@ -331,7 +351,7 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
   // Coalesce only while the same semantic target is awaiting renderer
   // acknowledgement. Query-parameter order cannot bypass this check, and once
   // acknowledged, an immediate user re-click creates a fresh envelope.
-  const envelope = sandboxUiDeepLinkQueue.enqueue(target)
+  const envelope = sandboxUiDeepLinkQueue.enqueue(target, gfsUserNavigationGeneration.current())
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sandboxUi:deepLink', envelope)
   }
@@ -566,7 +586,7 @@ async function createWindow(): Promise<void> {
     markNotReady: () => {
       mainWindowRendererReady = false
     },
-    closeSandboxUi: () => appService.closeSandboxUi(),
+    sandboxUi: appService,
   })
 
   wireWindowVisibility(window)

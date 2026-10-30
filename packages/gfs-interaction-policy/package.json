@@ -8,8 +8,12 @@
   "files": [
     "index.cjs",
     "index.d.ts",
+    "dragPolicy.cjs",
+    "dragPolicy.d.ts",
     "fileClassifier.cjs",
     "fileClassifier.d.ts",
+    "inheritedAccess.cjs",
+    "inheritedAccess.d.ts",
     "fileReference.cjs",
     "fileReference.d.ts"
   ],
@@ -21,8 +25,8 @@
     }
   },
   "scripts": {
-    "build": "node --check index.cjs && node --check fileClassifier.cjs && node --check fileReference.cjs",
-    "test": "node --test index.test.cjs fileReference.test.cjs fileClassifier.test.cjs"
+    "build": "node --check index.cjs && node --check dragPolicy.cjs && node --check fileClassifier.cjs && node --check fileReference.cjs && node --check inheritedAccess.cjs",
+    "test": "node --test index.test.cjs dragPolicy.test.cjs fileReference.test.cjs fileClassifier.test.cjs inheritedAccess.test.cjs"
   },
   "license": "MIT"
 }

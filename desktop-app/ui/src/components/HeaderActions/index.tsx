@@ -1,5 +1,5 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { AuthContext } from '@contexts/AuthContext'
+import { AuthContext, useAuthContext } from '@contexts/AuthContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { QueryClientContext } from '@tanstack/react-query'
@@ -126,9 +126,10 @@ export const HeaderActions = React.memo(function HeaderActions({
     teamDirectory,
     loading: teamDirectoryLoading,
     teamDirectoryHydrated,
-    currentTeamId,
     ensureHydrated: onEnsureTeamDirectory,
   } = useTeamsDataController()
+  const { me } = useAuthContext()
+  const currentTeamId = String(me?.teamId ?? '').trim()
   const {
     plugins: searchPlugins,
     apps: searchApps,

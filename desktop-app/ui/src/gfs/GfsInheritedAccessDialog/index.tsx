@@ -126,6 +126,12 @@ export function GfsInheritedAccessDialog({
                   </span>
                 </div>
               </div>
+              {request.residualEditorFolderNames && request.residualEditorFolderNames.length > 0 ? (
+                <p className="da-gfs-parent-update-dialog__residual">
+                  Sharing entries on {request.residualEditorFolderNames.join(', ')} still grant
+                  Editor access. This change does not remove them.
+                </p>
+              ) : null}
             </>
           )}
         </div>

@@ -40,9 +40,8 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
     next: express.NextFunction
   ) => next(),
 }))
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
-  signExternalSessionToken: vi.fn(() => 'session-token'),
-}))
+const sessionToken = vi.hoisted(() => ({ signExternalSessionToken: vi.fn(() => 'session-token') }))
+vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => sessionToken)
 
 // Router-level harness: proves the ROUTE GUARDS rethrow instead of swallowing.
 // The real app.ts middleware is covered separately in
@@ -88,6 +87,157 @@ describe('external invitation routes when the hub is unavailable', () => {
     const res = await request(app()).get('/external/invitations/token/some-token')
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('invalid_invitation')
+  })
+
+  it('issues a normal session only after trusted password-reset validation and completion', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'member@example.invalid',
+      invitationUuid: 'Synthetic-producer-token-1',
+    })
+    directory.getInvitationByToken.mockResolvedValue({
+      id: 'database-row-1',
+      token: 'Synthetic-producer-token-1',
+      email: 'member@example.invalid',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    directory.setInvitationPasswordForEmail.mockResolvedValue({
+      data: {
+        id: 'database-row-1',
+        userId: 'user-1',
+        email: 'member@example.invalid',
+        teamId: null,
+        role: 'member',
+        purpose: 'password_reset',
+        status: 'accepted',
+        lifecycleState: 'active',
+        authGeneration: 7,
+        passwordUpdated: true,
+        sessionContext: {
+          userId: 'user-1',
+          email: 'member@example.invalid',
+          teamId: 'team-1',
+          role: 'admin',
+          authGeneration: 7,
+        },
+      },
+    })
+
+    const res = await request(app())
+      .post('/external/invitations/password-token')
+      .send({
+        token: 'Synthetic-trusted-reset-proof',
+        email: 'member@example.invalid',
+        invitationId: 'database-row-1',
+        password: 'Synthetic-new-password',
+      })
+      .expect(200)
+
+    expect(flow.validateInvitationFlowToken).toHaveBeenCalledWith(
+      'Synthetic-trusted-reset-proof',
+      'member@example.invalid'
+    )
+    expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
+      'member@example.invalid',
+      'database-row-1',
+      'Synthetic-new-password'
+    )
+    expect(sessionToken.signExternalSessionToken).toHaveBeenCalledWith({
+      userId: 'user-1',
+      email: 'member@example.invalid',
+      teamId: 'team-1',
+      role: 'admin',
+      authGeneration: 7,
+    })
+    expect(res.body.token).toBe('session-token')
+    expect(res.body).not.toHaveProperty('sessionContext')
+  })
+
+  it('does not issue a session when reset proof or pending state is invalid', async () => {
+    directory.setInvitationPasswordForEmail.mockReset()
+    sessionToken.signExternalSessionToken.mockReset().mockReturnValue('session-token')
+    flow.validateInvitationFlowToken.mockRejectedValue(new Error('invalid'))
+    const invalidProof = await request(app())
+      .post('/external/invitations/password-token')
+      .send({
+        token: 'Synthetic-invalid-reset-proof',
+        email: 'member@example.invalid',
+        invitationId: 'reset-1',
+        password: 'Synthetic-new-password',
+      })
+      .expect(400)
+    expect(invalidProof.body.error).toBe('invalid_invitation')
+
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'member@example.invalid',
+      invitationUuid: 'Synthetic-producer-token-1',
+    })
+    directory.getInvitationByToken.mockResolvedValue({
+      id: 'database-row-1',
+      token: 'Synthetic-producer-token-1',
+      email: 'member@example.invalid',
+      purpose: 'password_reset',
+      status: 'accepted',
+    })
+    await request(app())
+      .post('/external/invitations/password-token')
+      .send({
+        token: 'Synthetic-redeemed-reset-proof',
+        email: 'member@example.invalid',
+        invitationId: 'database-row-1',
+        password: 'Synthetic-new-password',
+      })
+      .expect(409)
+
+    expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
+    expect(sessionToken.signExternalSessionToken).not.toHaveBeenCalled()
+
+    directory.getInvitationByToken.mockReset().mockResolvedValue({
+      id: 'database-row-1',
+      token: 'Synthetic-producer-token-1',
+      email: 'member@example.invalid',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    directory.setInvitationPasswordForEmail.mockResolvedValue({ error: 'not_pending' })
+    await request(app())
+      .post('/external/invitations/password-token')
+      .send({
+        token: 'Synthetic-raced-reset-proof',
+        email: 'member@example.invalid',
+        invitationId: 'database-row-1',
+        password: 'Synthetic-new-password',
+      })
+      .expect(409)
+    expect(sessionToken.signExternalSessionToken).not.toHaveBeenCalled()
+  })
+
+  it('rejects a database row ID that does not match the trusted flow token', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'member@example.invalid',
+      invitationUuid: 'Synthetic-producer-token-1',
+    })
+    directory.getInvitationByToken.mockResolvedValue({
+      id: 'database-row-1',
+      token: 'Synthetic-producer-token-1',
+      email: 'member@example.invalid',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+
+    const res = await request(app())
+      .post('/external/invitations/password-token')
+      .send({
+        token: 'Synthetic-trusted-reset-proof',
+        email: 'member@example.invalid',
+        invitationId: 'another-row',
+        password: 'Synthetic-new-password',
+      })
+      .expect(403)
+
+    expect(res.body.error).toBe('forbidden')
+    expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
+    expect(sessionToken.signExternalSessionToken).not.toHaveBeenCalled()
   })
 
   it('POST desktop-authorization returns 503, NOT 404, when the hub-rejection message shape collides with the "(404)" not_found string match', async () => {

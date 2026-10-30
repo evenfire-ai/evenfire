@@ -3,7 +3,7 @@ import {
   claimAutomaticResourcePrefill,
   getComposerDraft,
   setComposerDraft,
-  setPendingResourceComposerDraft,
+  setResourceComposerPrefill,
 } from './composerDraftStore'
 import type { WorkspaceTab } from './workspaceTabs.types'
 
@@ -48,7 +48,8 @@ export function prefillEmptyConversationWithGfsResource(
 
 export function prefillNewConversationWithGfsResource(
   tab: WorkspaceTab | null | undefined,
-  agentRef: string | null
+  agentRef: string | null,
+  destinationWorkspaceTabId: string | null | undefined
 ): boolean {
   const context = latestGfsConversationContext
   if (!context) return false
@@ -56,8 +57,6 @@ export function prefillNewConversationWithGfsResource(
   const visibleUri = resourceUriForTab(tab)
   if (!visibleUri || tab.id !== context.sourceTabId || visibleUri !== context.uri) return false
   const uri = context.uri
-  if (!uri || getComposerDraft(null, agentRef ?? undefined)) return false
-  if (agentRef) setComposerDraft(null, uri, agentRef)
-  else setPendingResourceComposerDraft(uri)
-  return true
+  if (!uri || !destinationWorkspaceTabId) return false
+  return setResourceComposerPrefill(destinationWorkspaceTabId, uri, agentRef)
 }

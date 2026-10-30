@@ -14,9 +14,9 @@
  *   5.  GET  .../credential-schema (credential form)
  *   ── Install: Local Connector ──
  *   6.  POST /install              (local, no credentials)
- *   7.  CRD  McpServer             (spec: image, transport, managed, enabled, contextRef)
+ *   7.  CRD  McpServer             (spec: image, transport, managed, enabled; no contextRef)
  *   8.  CRD  McpServer metadata    (catalog-id/version annotations; managed-by/server-mode labels)
- *   9.  Context allowlist updated
+ *   9.  Context allowlist untouched (enabling is a later "Add to agents")
  *   ── Install: Remote Connector + Credentials ──
  *   10. POST /install              (remote, with credentials + envSecret)
  *   11. CRD  McpServer             (spec: remote.baseUrl, egressBindings, envSecret)
@@ -29,11 +29,11 @@
  *   16. POST /upgrade-recipe       (recipe version bump)
  *   ── Lifecycle ──
  *   17. POST .../report-install    (telemetry)
- *   18. DELETE /uninstall MCP      (McpServer + Secret + Context cleanup)
+ *   18. DELETE /uninstall MCP      (McpServer + Secret cleanup)
  *   19. DELETE /uninstall recipe   (WorkflowRecipe cleanup)
  *   ── Error handling ──
  *   20. 409  duplicate install     (K8s conflict → descriptive error, not 500)
- *   21. 400  missing contextRef
+ *   21. 400  missing registryEntryName
  *   22. 400  invalid serverName
  *   ── UI Smoke ──
  *   23. Catalog loads in control-ui
@@ -922,16 +922,16 @@ test.describe('B. Install Local Connector + CRD Validation', () => {
   test('B1. POST /install — local server (no credentials)', async () => {
     const { status, data } = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName: SERVER_NAME,
-      contextRef: 'context1',
       registryEntryName: 'mcp-filesystem',
       registryEntryVersion: '1.0.0',
     })
     expect(status).toBe(201)
     expect(data.serverName).toBe(SERVER_NAME)
-    expect(data.contextUpdated).toBe(true)
+    expect(data).not.toHaveProperty('contextRef')
+    expect(data).not.toHaveProperty('contextUpdated')
   })
 
-  test('B2. CRD spec — image, transport, managed, enabled, contextRef', async () => {
+  test('B2. CRD spec — image, transport, managed, enabled, no contextRef', async () => {
     const { status, data } = await api(token, 'GET', '/api/v1/admin/mcp-servers')
     expect(status).toBe(200)
     const items = data.items as Array<{ metadata: { name: string }; spec: Record<string, unknown> }>
@@ -942,7 +942,7 @@ test.describe('B. Install Local Connector + CRD Validation', () => {
     // Core fields
     expect(spec.managed).toBe(true)
     expect(spec.enabled).toBe(true)
-    expect(spec.contextRef).toBe('context1')
+    expect(spec.contextRef).toBeUndefined()
     // Image from registry entry
     expect(typeof spec.image).toBe('string')
     expect((spec.image as string).length).toBeGreaterThan(0)
@@ -974,18 +974,16 @@ test.describe('B. Install Local Connector + CRD Validation', () => {
     expect(labels['clerum.io/server-mode']).toBe('local')
   })
 
-  test('B4. Context allowlist includes the new server', async () => {
+  test('B4. No Context allowlist lists the new server', async () => {
     const { data } = await api(token, 'GET', '/api/v1/admin/contexts')
     const items = data.items as Array<{
       metadata: { name: string }
       spec: { mcpServers?: string[] }
     }>
-    const ctx = items.find(c => c.metadata.name === 'context1')
-    expect(ctx).toBeDefined()
-    expect(ctx!.spec.mcpServers).toContain(SERVER_NAME)
+    expect(items.filter(c => c.spec.mcpServers?.includes(SERVER_NAME))).toEqual([])
   })
 
-  test('B5. Cleanup — uninstall removes McpServer + context allowlist', async () => {
+  test('B5. Cleanup — uninstall removes McpServer', async () => {
     const { status, data } = await api(
       token,
       'DELETE',
@@ -1019,7 +1017,6 @@ test.describe('C. Install Remote Connector + Credentials', () => {
   test('C1. POST /install — remote server with credentials', async () => {
     const { status, data } = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName,
-      contextRef: 'context1',
       registryEntryName: 'mcp-sentry-remote',
       registryEntryVersion: '1.0.0',
       credentials: { SENTRY_AUTH_TOKEN: 'e2e-test-token-value' },
@@ -1201,7 +1198,6 @@ test.describe('E. Upgrade Connector + Recipe', () => {
     // Pre-install resources to upgrade
     const mcpInstall = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName,
-      contextRef: 'context1',
       registryEntryName: 'mcp-filesystem',
       registryEntryVersion: '1.0.0',
     })
@@ -1276,10 +1272,9 @@ test.describe('G. Error Handling', () => {
     await cleanup(token, [DUP_NAME])
   })
 
-  test('G1. 400 — missing contextRef', async () => {
+  test('G1. 400 — missing registryEntryName', async () => {
     const { status } = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName: 'x',
-      registryEntryName: 'mcp-postgres',
       registryEntryVersion: '1.0.0',
     })
     expect(status).toBe(400)
@@ -1288,7 +1283,6 @@ test.describe('G. Error Handling', () => {
   test('G2. 400 — invalid serverName', async () => {
     const { status } = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName: 'INVALID_UPPERCASE',
-      contextRef: 'context1',
       registryEntryName: 'mcp-postgres',
       registryEntryVersion: '1.0.0',
     })
@@ -1299,7 +1293,6 @@ test.describe('G. Error Handling', () => {
     // First install
     const { status: s1 } = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName: DUP_NAME,
-      contextRef: 'context1',
       registryEntryName: 'mcp-filesystem',
       registryEntryVersion: '1.0.0',
     })
@@ -1308,7 +1301,6 @@ test.describe('G. Error Handling', () => {
     // Duplicate install — must NOT return 500
     const { status: s2 } = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName: DUP_NAME,
-      contextRef: 'context1',
       registryEntryName: 'mcp-filesystem',
       registryEntryVersion: '1.0.0',
     })
@@ -1319,7 +1311,6 @@ test.describe('G. Error Handling', () => {
   test('G4. 201 — remote server with omitted required credential values installs pending', async () => {
     const { status, data } = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName: 'e2e-no-creds',
-      contextRef: 'context1',
       registryEntryName: 'mcp-sentry-remote',
       registryEntryVersion: '1.0.0',
     })
@@ -1784,9 +1775,6 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       await egressSection.locator('input[placeholder="443"]').fill('443')
       await expect(egressSection.getByRole('status')).toContainText('1 domain(s) x 1 port(s)')
 
-      // The Access step is optional (no agents required) — continue through it.
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Agent access' })).toBeVisible()
       await page.getByRole('button', { name: 'Continue' }).click()
       await expect(page.getByRole('heading', { name: 'Secrets and environment' })).toBeVisible()
 
@@ -1840,9 +1828,6 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       await expect(egressSection.getByRole('alert')).toContainText('Public web egress allows')
       await expect(egressSection.getByRole('status')).toContainText('1 public-web binding')
 
-      // The Access step is optional (no agents required) — continue through it.
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Agent access' })).toBeVisible()
       await page.getByRole('button', { name: 'Continue' }).click()
       await expect(page.getByRole('heading', { name: 'Secrets and environment' })).toBeVisible()
 
@@ -2267,8 +2252,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     const secretRow = page.locator('tr', { hasText: expectedSecretName })
     await expect(secretRow).toBeVisible({ timeout: 15_000 })
     await secretRow
-      .getByRole('button', { name: `Add connector secret ${expectedSecretName}` })
+      .getByRole('button', { name: `Actions for connector secret ${expectedSecretName}` })
       .click()
+    await page.getByRole('menuitem', { name: 'Add', exact: true }).click()
 
     await expect(page).toHaveURL(/\/secrets\/new\?/)
     await expect(page.getByRole('heading', { name: 'Create connector secret' })).toBeVisible()

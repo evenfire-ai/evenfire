@@ -45,8 +45,8 @@ export const NULL_EXPIRY_MAX_AGE_MS = 5 * 60_000
 export interface BrokerTokenSubject {
   /**
    * The per-user grant subject. Absent (`{}`) for oauth-context, where control-api
-   * resolves the shared grant server-side from `server.spec.contextRef` and
-   * mcp-host transports NO context identity (invariant I1). There is deliberately
+   * resolves the shared grant server-side from the authenticated Host's context
+   * and mcp-host transports NO context identity (invariant I1). There is deliberately
    * no `contextId` here: the factory never sends one, so accepting it would be an
    * unreachable branch that contradicts I1.
    */

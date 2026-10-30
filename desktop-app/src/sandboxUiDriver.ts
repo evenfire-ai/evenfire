@@ -10,6 +10,9 @@ import {
   isSandboxUiNavigationWithinPrefix as isNavigationWithinPrefix,
 } from './sandboxUiPartitionPolicies.js'
 import { wireDesktopShortcutRouting } from './shortcutRouter.js'
+import type { SandboxUiReleaseReason, SandboxUiReleasedEvent, SandboxUiRoute } from './types.js'
+
+export type { SandboxUiReleaseReason, SandboxUiReleasedEvent, SandboxUiRoute }
 
 /**
  * Sandbox UI embed driver. Owns the lifecycle of the single active
@@ -95,6 +98,8 @@ function toViewBounds(
 }
 
 export type MountSandboxUiArgs = {
+  /** Names this mount in every event about the view it creates. */
+  launchId: string
   recipeNs: string
   recipeName: string
   setCookie: string
@@ -103,7 +108,15 @@ export type MountSandboxUiArgs = {
   parentWindow: BrowserWindow
   bounds: SandboxUiBounds
   routePath?: string
+  /** Main-side cleanup for a teardown nobody asked for (crash, parent closed). */
   onClosed?: () => void
+  /**
+   * Fired exactly once when this mount's view is torn down, for any reason,
+   * including a teardown that fails half-way. Only a mount that got as far as
+   * making its view the active one fires it: a view created but not yet active
+   * (a step between its construction and its activation threw) never does.
+   */
+  onReleased?: (event: SandboxUiReleasedEvent) => void
   /**
    * Fired when the embedded document's `<title>` changes (`page-title-updated`).
    * The driver only forwards the plugin-controlled title; the renderer decides
@@ -126,6 +139,13 @@ export type MountSandboxUiArgs = {
    */
   onGfsOpen?: (uri: string) => void
   /**
+   * Fired when a main-frame navigation inside the app's `view/` prefix
+   * commits with HTTP 401 — the session cookie was rejected and the page left
+   * behind has no script that could ask for a refresh. Lives as long as the
+   * view, unlike the one-shot client-route handoff listener.
+   */
+  onUnauthorizedNavigation?: (webContentsId: number) => void
+  /**
    * Re-checked at every await before a session effect (cookie write, view
    * creation). False means the caller's authenticated session ended while this
    * mount was in flight, so it must not attach anything for it.
@@ -134,7 +154,9 @@ export type MountSandboxUiArgs = {
 }
 
 type ActiveView = {
+  launchId: string
   view: WebContentsView
+  onReleased?: (event: SandboxUiReleasedEvent) => void
   recipeNs: string
   recipeName: string
   defaultPath: string
@@ -147,6 +169,14 @@ type ActiveView = {
   cleanupShortcutRouting?: () => void
   cleanupDocumentLifecycle?: () => void
   cleanupFindResults?: () => void
+  /** The route the open asked for, as `representedSandboxUiLocation` reports it. */
+  requestedRoute: SandboxUiRoute
+  /**
+   * False while the document cannot yet stand for the requested route: it has
+   * not loaded, or the route handoff is pending or failed with no navigation
+   * since. Once true it stays true: a reload keeps the committed URL.
+   */
+  routeSettled: boolean
   documentGeneration: number
   documentReady: boolean
   findSession?: {
@@ -164,6 +194,7 @@ let mountGeneration = 0
 export const isSandboxUiNavigationWithinPrefix = isNavigationWithinPrefix
 
 export function getActiveSandboxUi(): {
+  launchId: string
   recipeNs: string
   recipeName: string
   appRef: string
@@ -171,6 +202,7 @@ export function getActiveSandboxUi(): {
 } | null {
   if (!active) return null
   return {
+    launchId: active.launchId,
     recipeNs: active.recipeNs,
     recipeName: active.recipeName,
     appRef: `${active.recipeNs}/${active.recipeName}`,
@@ -185,18 +217,31 @@ export function getActiveSandboxUiLocation(): {
 } | null {
   if (!active) return null
   if (active.view.webContents.isDestroyed()) return null
-  const path = resolveSandboxUiSharePath({
-    currentUrl: active.view.webContents.getURL(),
-    rpcProxyOrigin: active.rpcProxyOrigin,
-    recipeNs: active.recipeNs,
-    recipeName: active.recipeName,
-    defaultPath: active.defaultPath,
-  })
+  const { routePath } = representedSandboxUiLocation(active)
   return {
     recipeNs: active.recipeNs,
     recipeName: active.recipeName,
-    ...(path ? { path } : {}),
+    ...(routePath ? { path: routePath } : {}),
   }
+}
+
+/**
+ * The single reader of the route a view stands for. Until the document can
+ * represent the requested route, the live URL is empty or the default route,
+ * and reporting it would overwrite the route the user is on with a wrong one.
+ * Throws when the live URL is outside the app; each caller decides what that
+ * means for it.
+ */
+function representedSandboxUiLocation(view: ActiveView): SandboxUiRoute {
+  if (!view.routeSettled) return { ...view.requestedRoute }
+  const routePath = resolveSandboxUiSharePath({
+    currentUrl: view.view.webContents.getURL(),
+    rpcProxyOrigin: view.rpcProxyOrigin,
+    recipeNs: view.recipeNs,
+    recipeName: view.recipeName,
+    defaultPath: view.defaultPath,
+  })
+  return routePath ? { routePath } : {}
 }
 
 export function resolveSandboxUiSharePath(input: {
@@ -339,38 +384,82 @@ export async function installSandboxUiCookie(setCookie: string | string[]): Prom
   })
 }
 
-async function teardownActive(
-  reason: 'replaced' | 'closed' | 'parent_closed' | 'crashed'
-): Promise<void> {
+function readReleasedLocation(
+  view: ActiveView,
+  reason: SandboxUiReleaseReason
+): SandboxUiRoute | null {
+  if (reason === 'crashed') return null
+  try {
+    return representedSandboxUiLocation(view)
+  } catch (err) {
+    console.warn('[SandboxUI] could not read the route of a view being torn down:', err)
+    return null
+  }
+}
+
+function runTeardownStep(step: string, reason: SandboxUiReleaseReason, run: () => void): void {
+  try {
+    run()
+  } catch (err) {
+    console.error(`[SandboxUI] teardown step ${step} failed:`, err, 'reason:', reason)
+  }
+}
+
+/**
+ * Synchronous on purpose: the release event must leave before anything else
+ * can run, so a caller that rejects after a teardown always reports the release
+ * first. Every step is isolated; a failing listener unhook must not leave the
+ * view attached, alive or unreported.
+ */
+function teardownActive(reason: SandboxUiReleaseReason): void {
   if (!active) return
   const current = active
   active = null
+  const location = readReleasedLocation(current, reason)
+  const webContents = current.view.webContents
   try {
-    current.cleanupClientRouteHandoff?.()
-    current.cleanupParentClosed?.()
-    current.cleanupRenderProcessGone?.()
-    current.cleanupShortcutRouting?.()
-    current.cleanupDocumentLifecycle?.()
-    current.cleanupFindResults?.()
-    if (!current.view.webContents.isDestroyed()) {
-      current.view.webContents.stopFindInPage('clearSelection')
-    }
-    // contentView.removeChildView is the documented teardown step; it both
-    // detaches the view from layout AND severs the parent's ownership ref.
-    if (!current.parentWindow.isDestroyed()) {
-      current.parentWindow.contentView.removeChildView(current.view)
-    }
-    // Closing the webContents stops loading + frees the renderer process.
-    if (!current.view.webContents.isDestroyed()) {
-      current.view.webContents.close()
-    }
-  } catch (err) {
-    console.error('[SandboxUI] teardown error:', err, 'reason:', reason)
+    runTeardownStep('cleanupClientRouteHandoff', reason, () =>
+      current.cleanupClientRouteHandoff?.()
+    )
+    runTeardownStep('cleanupParentClosed', reason, () => current.cleanupParentClosed?.())
+    runTeardownStep('cleanupRenderProcessGone', reason, () => current.cleanupRenderProcessGone?.())
+    runTeardownStep('cleanupShortcutRouting', reason, () => current.cleanupShortcutRouting?.())
+    runTeardownStep('cleanupDocumentLifecycle', reason, () => current.cleanupDocumentLifecycle?.())
+    runTeardownStep('cleanupFindResults', reason, () => current.cleanupFindResults?.())
+    runTeardownStep('stopFindInPage', reason, () => {
+      if (!webContents.isDestroyed()) webContents.stopFindInPage('clearSelection')
+    })
+  } finally {
+    // Every step above is guarded today; the finally keeps detach, close and
+    // release unconditional if a step is ever added without its guard.
+    // removeChildView both detaches the view from layout and severs the
+    // parent's ownership ref.
+    runTeardownStep('removeChildView', reason, () => {
+      if (!current.parentWindow.isDestroyed()) {
+        current.parentWindow.contentView.removeChildView(current.view)
+      }
+    })
+    // Closing the webContents stops loading and frees the renderer process.
+    runTeardownStep('closeWebContents', reason, () => {
+      if (!webContents.isDestroyed()) webContents.close()
+    })
+    runTeardownStep('onReleased', reason, () =>
+      current.onReleased?.({ launchId: current.launchId, reason, location })
+    )
+    runTeardownStep('verifyDetached', reason, () => {
+      if (
+        !current.parentWindow.isDestroyed() &&
+        current.parentWindow.contentView.children.includes(current.view)
+      ) {
+        console.error('[SandboxUI] a torn-down view is still attached to its window')
+      }
+    })
   }
 }
 
 export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void> {
   const {
+    launchId,
     recipeNs,
     recipeName,
     setCookie,
@@ -380,6 +469,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     bounds,
     routePath,
     onClosed,
+    onReleased,
     onTitleChanged,
     isCurrent = () => true,
   } = args
@@ -399,7 +489,9 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // Tear down any existing view before mounting (one-at-a-time embed). The
   // per-recipe partition is left in place so storage survives a re-mount
   // within the ACL window.
-  await teardownActive('replaced')
+  // AppService already tore down before minting; this covers callers that
+  // mount through the driver without that queue.
+  teardownActive('replaced')
   if (generation !== mountGeneration || !isCurrent()) return
 
   const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
@@ -407,6 +499,9 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   const viewPath = resolveSandboxUiDefaultPath(defaultPath)
   const clientRoutePath = normalizeSandboxUiRoute(routePath || '')
   const sharedViewPath = sharedPathForDefaultPath(viewPath)
+  const needsClientRouteHandoff = Boolean(clientRoutePath && clientRoutePath !== sharedViewPath)
+  const requestedRoute: SandboxUiRoute =
+    needsClientRouteHandoff && clientRoutePath ? { routePath: clientRoutePath } : {}
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view`
@@ -473,10 +568,10 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
 
   // `onClosed` reports a teardown nobody asked for: the parent window closed
   // or the embed's renderer died. Solicited teardowns (`unmountSandboxUiView`,
-  // a replacing mount) stay silent — the caller already knows, and the
-  // renderer drops its owner of the embed on that signal.
+  // a replacing mount) stay silent — the caller already ran its own cleanup.
+  // The renderer learns of every teardown from `onReleased` instead.
   const onParentClosed = (): void => {
-    void teardownActive('parent_closed')
+    teardownActive('parent_closed')
     onClosed?.()
   }
   parentWindow.once('closed', onParentClosed)
@@ -490,7 +585,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // unrelated mount that is in flight.
   const onRenderProcessGone = (): void => {
     if (active?.view !== view) return
-    void teardownActive('crashed')
+    teardownActive('crashed')
     onClosed?.()
   }
   view.webContents.on('render-process-gone', onRenderProcessGone)
@@ -499,7 +594,9 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   }
 
   active = {
+    launchId,
     view,
+    onReleased,
     recipeNs,
     recipeName,
     defaultPath: viewPath,
@@ -508,6 +605,8 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     rpcProxyOrigin: proxyOriginUrl,
     cleanupParentClosed,
     cleanupRenderProcessGone,
+    requestedRoute,
+    routeSettled: false,
     documentGeneration: 0,
     documentReady: false,
   }
@@ -526,8 +625,25 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   ): void => {
     if (isMainFrame) invalidateFindForNavigation(!isInPlace)
   }
+  let documentLoaded = false
+  // Cleared by the handoff when it applies the route, fails, times out or is
+  // abandoned.
+  let clientRouteHandoffPending = needsClientRouteHandoff
+  let lastMainFrameUrl = ''
   const onDocumentReady = (): void => {
-    if (active?.view === view) active.documentReady = true
+    if (active?.view !== view) return
+    documentLoaded = true
+    active.documentReady = true
+    if (!needsClientRouteHandoff) active.routeSettled = true
+  }
+  // A navigation inside the loaded document is the user's (or the app's) own:
+  // from then on the live URL is the route, whatever became of the handoff.
+  const onDidNavigateInPage = (_event: Electron.Event, url: string, isMainFrame: boolean): void => {
+    if (active?.view !== view || !isMainFrame) return
+    // A router can move the URL before the first load; a later reload commits
+    // that URL and must still read as a reload.
+    lastMainFrameUrl = url
+    if (documentLoaded) active.routeSettled = true
   }
   // Forward the embed's live `document.title` so the renderer can name its app
   // tab after it (mirrors the URL-report pattern). The title is plugin content,
@@ -535,13 +651,44 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   const onPageTitleUpdated = (_event: Electron.Event, title: string): void => {
     if (active?.view === view) onTitleChanged?.(title)
   }
+  // `did-navigate` only fires for the main frame.
+  const onDocumentNavigated = (
+    _event: Electron.Event,
+    navigatedUrl: string,
+    httpResponseCode: number
+  ): void => {
+    if (active?.view !== view) return
+    const previousUrl = lastMainFrameUrl
+    lastMainFrameUrl = navigatedUrl
+    const withinApp = isSandboxUiNavigationWithinPrefix(navigatedUrl, allowedNavigationPrefix)
+    // With no requested route there is nothing a boot rewrite could overwrite,
+    // so the first document committed inside the app is already the live
+    // route; waiting for the load would drop where the user goes meanwhile.
+    // Otherwise, a new document the user reached after the handoff gave up (a
+    // multi-page app) is the live route. A reload commits the same URL and the
+    // commits a pending handoff is still waiting through are not the user's:
+    // neither may replace the requested route.
+    if (
+      withinApp &&
+      (!needsClientRouteHandoff ||
+        (documentLoaded && !clientRouteHandoffPending && navigatedUrl !== previousUrl))
+    ) {
+      active.routeSettled = true
+    }
+    if (httpResponseCode !== 401 || !withinApp) return
+    args.onUnauthorizedNavigation?.(view.webContents.id)
+  }
   view.webContents.on('did-start-navigation', onDidStartNavigation)
   view.webContents.on('did-finish-load', onDocumentReady)
+  view.webContents.on('did-navigate-in-page', onDidNavigateInPage)
   view.webContents.on('page-title-updated', onPageTitleUpdated)
+  view.webContents.on('did-navigate', onDocumentNavigated)
   active.cleanupDocumentLifecycle = () => {
     view.webContents.removeListener('did-start-navigation', onDidStartNavigation)
     view.webContents.removeListener('did-finish-load', onDocumentReady)
+    view.webContents.removeListener('did-navigate-in-page', onDidNavigateInPage)
     view.webContents.removeListener('page-title-updated', onPageTitleUpdated)
+    view.webContents.removeListener('did-navigate', onDocumentNavigated)
   }
 
   active.cleanupShortcutRouting = wireDesktopShortcutRouting({
@@ -570,7 +717,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${encodeSandboxUiDefaultPath(
       viewPath
     )}`
-  if (clientRoutePath && clientRoutePath !== sharedViewPath) {
+  if (needsClientRouteHandoff && clientRoutePath) {
     const encodedClientRoutePath = encodeSandboxUiRoutePath(clientRoutePath)
     const clientRouteUrl =
       `${proxyOriginUrl}/api/v1/sandbox-ui/` +
@@ -581,6 +728,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     const cleanupClientRouteHandoff = () => {
       if (handoffFinished) return
       handoffFinished = true
+      clientRouteHandoffPending = false
       if (handoffTimeout) clearTimeout(handoffTimeout)
       view.webContents.removeListener('did-navigate', onDidNavigate)
       view.webContents.removeListener('did-finish-load', onDidFinishLoad)
@@ -620,6 +768,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
       }
       void applySandboxUiClientRoute(view.webContents, clientRouteUrl)
         .then(applied => {
+          if (applied && active?.view === view) active.routeSettled = true
           if (!applied) {
             console.warn('[SandboxUI] client route handoff did not update the app URL')
           }
@@ -783,9 +932,11 @@ export function canApplySandboxUiClientRoute(input: {
  * "Close" / navigate-away. Leaves the per-recipe partition intact so a
  * re-mount within the ACL window is fast.
  */
-export async function unmountSandboxUiView(): Promise<void> {
+export async function unmountSandboxUiView(
+  reason: SandboxUiReleaseReason = 'closed'
+): Promise<void> {
   mountGeneration += 1
-  await teardownActive('closed')
+  teardownActive(reason)
 }
 
 /**
@@ -951,10 +1102,10 @@ export function reloadSandboxUiWebContents(
 }
 
 /**
- * Reload the active embed in place (user-initiated "Refresh"). No-op when
- * nothing is mounted or the view was already torn down. This is the only
- * in-place refresh path — without it, the embed's content stays as of its
- * initial `loadURL` until the user navigates away and back (which remounts).
+ * Reload the active embed in place, keeping its view, session and refresh loop.
+ * Used by the user-facing Refresh of a healthy view and by the session refresh
+ * once it has re-minted the cookie after the document came back 401. No-op when
+ * nothing is mounted or the view was already torn down.
  */
 export function reloadActiveSandboxUiView(): void {
   reloadSandboxUiWebContents(active?.view.webContents)

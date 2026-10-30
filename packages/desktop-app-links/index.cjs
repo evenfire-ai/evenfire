@@ -266,6 +266,37 @@ function parseGfsResourceDeepLink(rawUrl) {
   return uri ? { uri } : null
 }
 
+function parseGfsResourceLink(rawLink) {
+  if (typeof rawLink !== 'string' || rawLink.length > 4096) return null
+  const value = rawLink.trim()
+  const uri = normalizeGfsResourceUri(value)
+  if (uri) return { uri }
+
+  const desktopTarget = parseGfsResourceDeepLink(value)
+  if (desktopTarget) return desktopTarget
+
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    return null
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== GFS_RESOURCE_WEB_LINK_PATH ||
+    parsed.hash ||
+    [...parsed.searchParams.keys()].some(key => key !== 'uri') ||
+    parsed.searchParams.getAll('uri').length !== 1
+  ) {
+    return null
+  }
+
+  const webUri = normalizeGfsResourceUri(parsed.searchParams.get('uri'))
+  return webUri ? { uri: webUri } : null
+}
+
 module.exports = {
   CLERUM_OAUTH_PROTOCOL,
   GFS_RESOURCE_DEEP_LINK_HOST,
@@ -280,6 +311,7 @@ module.exports = {
   normalizeSandboxUiRoute,
   normalizeGfsResourceUri,
   parseGfsResourceDeepLink,
+  parseGfsResourceLink,
   parseSandboxUiDeepLink,
   sandboxUiDeepLinkTargetsEqual,
 }

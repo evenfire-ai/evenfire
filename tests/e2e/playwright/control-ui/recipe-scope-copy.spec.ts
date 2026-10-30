@@ -33,7 +33,7 @@ function agenticManifestWithoutOptIn(): string {
       metadata: { name: AGENTIC_RECIPE_NAME },
       spec: {
         contextRef: CONTEXT_NAME,
-        workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
         steps: [
           {
             id: 'run',
@@ -113,7 +113,7 @@ test.describe('Control UI — Recipe editor — connector scope copy', () => {
         spec: {
           contextRef: CONTEXT_NAME,
           security: { allowContextRef: true },
-          workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+          workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
           steps: [
             {
               id: 'run',

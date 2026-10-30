@@ -39,3 +39,7 @@ control-ui/node_modules/
 control-ui/coverage/
 control-ui/playwright-report/
 control-ui/test-results/
+# `!control-ui/` re-includes the whole directory, so test trees must be excluded
+# explicitly: `next build` type-checks them, and fixtures import control-api/,
+# which is not in this context.
+control-ui/test/

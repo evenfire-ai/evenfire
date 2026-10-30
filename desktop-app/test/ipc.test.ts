@@ -18,6 +18,9 @@ const testState = vi.hoisted(() => {
     handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
       handlers.set(channel, handler)
     }),
+    // The real ipcMain also carries event listeners (gfs:abort); registration
+    // must not depend on them being exercised.
+    on: vi.fn(),
   }
   return { handlers, ipcMainMock, downloadsDir }
 })
@@ -148,7 +151,10 @@ describe('ipc host status stream handlers', () => {
       sessionGeneration: 7,
     })
     service.stopHostStatusStream.mockReturnValue(true)
-    registerIpcHandlers(service as never)
+    registerIpcHandlers(service as never, async () => {
+      await service.logout()
+      return 0
+    })
   })
 
   it('rejects legacy chat deletion without a binding fence', async () => {
@@ -1230,7 +1236,10 @@ describe('ipc desktop window handlers', () => {
     testState.handlers.clear()
     vi.clearAllMocks()
     desktopService.stopHostStatusStream.mockReturnValue(true)
-    registerIpcHandlers(desktopService as never)
+    registerIpcHandlers(desktopService as never, async () => {
+      await desktopService.logout()
+      return 0
+    })
   })
 
   it('desktop:openWindow rejects untrusted sender', async () => {

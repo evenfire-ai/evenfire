@@ -91,6 +91,17 @@ export {
   sessionSearchRetentionSweep,
 }
 
+/**
+ * Rows one retention-sweep operation may delete. Measured on the real worker
+ * with 400k expired messages: max 123 ms per message-phase batch. Session
+ * phase, with 200k expired sessions and the `parent_session_id` index
+ * (migration 017): max 32 ms per batch (about 2.4 s without the index).
+ * Both are far below the sync timeout and the worker progress bound.
+ * The cap counts rows, not bytes: the FTS delete trigger re-tokenizes each
+ * deleted message's content, so a batch of very large messages takes longer.
+ */
+const RETENTION_SWEEP_BATCH_ROWS = 250
+
 export interface SessionSearchServiceDeps {
   persistQueue: PersistQueue
 }
@@ -137,16 +148,28 @@ export class SessionSearchService {
    * whose `ended_at` is older than `retentionDays`. In-flight sessions
    * (`end_reason IS NULL`) are always preserved.
    *
-   * Idempotent. Failures are propagated to the caller — `main.ts` swallows
-   * them so a corrupt DB doesn't block Pod startup.
+   * The sweep runs as a sequence of worker operations of at most
+   * `RETENTION_SWEEP_BATCH_ROWS` rows each, so the worker acknowledges every
+   * batch and a large backlog never trips the queue's progress bound. A batch
+   * deletes an expired session's messages before its row, so between batches
+   * the session would load with part of its history; `main.ts` awaits the
+   * whole sweep before bootstrap and before the Host serves traffic, so no
+   * load runs between batches. The cutoff is fixed before the first batch,
+   * so the loop ends once the expired set is empty.
+   *
+   * Idempotent. Failures are propagated to the caller; `main.ts` logs them.
    */
   async sweepRetention(retentionDays: number): Promise<number> {
     const cutoffEpoch = Date.now() / 1000 - retentionDays * 86400
-    const result = await this.deps.persistQueue.enqueueSync<{ deleted_sessions: number }>({
-      kind: 'sweep_closed_sessions',
-      cutoffEpoch,
-    })
-    sessionSearchRetentionSweep?.inc(result.deleted_sessions)
-    return result.deleted_sessions
+    let deletedSessions = 0
+    for (;;) {
+      const batch = await this.deps.persistQueue.enqueueSync<{
+        deleted_messages: number
+        deleted_sessions: number
+      }>({ kind: 'sweep_closed_sessions', cutoffEpoch, limit: RETENTION_SWEEP_BATCH_ROWS })
+      sessionSearchRetentionSweep?.inc(batch.deleted_sessions)
+      deletedSessions += batch.deleted_sessions
+      if (batch.deleted_messages === 0 && batch.deleted_sessions === 0) return deletedSessions
+    }
   }
 }

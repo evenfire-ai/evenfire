@@ -26,6 +26,18 @@ import {
 import { getAccessTokenReactive } from '../oauth/reactiveTokenHelper.js'
 import { type OAuthGrantKey, oauthGrantExists } from '../oauth/store.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
+import { mcpOauthBrokerDeniedTotal } from '../observability/metrics.js'
+import {
+  type ResolvedHostBinding,
+  checkBrokerCallerLineage,
+  hasContextIdMismatch,
+  hostAccessForUser,
+  isCanonicalUuid,
+  isLive,
+  isValidK8sName,
+  resolveBrokerHostBinding,
+} from '../services/access/brokerHostBinding.js'
+import { isK8sResourceNotFound } from '../services/access/mcpInvocable.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
 import {
   type McpHostControlClaims,
@@ -46,33 +58,36 @@ import { extractBearerToken } from '../utils/extractBearerToken.js'
  * Gate: the control JWT + scope `oauth:user-token`. No new static credential
  * and no new broker-token minting infra (the híbrido design, §U1).
  *
- * Identity provenance:
+ * Binding: the body only names the mcp-server and, for per-user servers, the
+ * end user. Everything else comes from the authenticated caller:
+ *   - The control JWT must belong to a host-context-controller Host
+ *     (`hostRefs[0]` + `host_uid`), and that Host must be live with the same
+ *     uid, so a token cannot outlive or be replayed against a recreated Host.
+ *   - The Context is the Host's `spec.contextRef`, never a body field: a
+ *     caller cannot name another Context to obtain its shared token.
+ *   - The mcp-server must be in that Context's allowlist (exact match, as
+ *     host-context-controller applies it), enabled and live. Anything else
+ *     answers the same 404 as a missing server, read before the CR is fetched,
+ *     so the broker is no existence oracle across Contexts.
+ *   - A per-user token requires the body `userId` to be an active user who
+ *     enters this Host (directly or through an active team). The `userId`
+ *     itself is still asserted by mcp-host, not proven by a signature here.
  *   - `oauthClientId` is derived from the McpServer's `spec.oauth.id`, NEVER
  *     from the request body.
- *   - `userId` / `contextId` ride the request body. This is the accepted pattern
- *     of the mutually-authenticated mcp-host ↔ control-api seam (same as
- *     `routes/internal/oauth.ts`): the caller is authenticated by its control
- *     JWT and asserts, over that trusted channel, which end-user session /
- *     Context pod the token is for. control-api authorizes the grant against the
- *     forwarded `userId`/`contextId` (defense in depth — a wrong value simply
- *     resolves to `no_grant`). It is therefore INCORRECT to say "userId is never
- *     a body param" here.
  *
  * Flavor dispatch — read from the server's `spec.oauth.grantScope`:
- *   - `user`    → grant key `(server, userId)`   — per-user identity.
- *   - `context` → grant key `(server, contextId)` — shared identity.
- * Both branches ship in v1; the `context` branch is governed/exercised by U6.
+ *   - `user`    → grant key `(server, userId)` — per-user identity.
+ *   - `context` → grant key `(server, Host's Context)` — shared identity: the
+ *     grant of the calling Host's Context, whichever Context the server is
+ *     also enabled in.
  */
 
 export interface McpServerResource {
-  metadata?: { name?: string; namespace?: string; uid?: string }
+  metadata?: { name?: string; namespace?: string; uid?: string; deletionTimestamp?: unknown }
   spec?: {
+    enabled?: unknown
     auth?: { type?: unknown }
     oauth?: McpServerOAuthDecl
-    // `spec.contextRef` is REQUIRED + singular on the CRD ("the context this
-    // server belongs to", mcpserver.yaml). It is the AUTHORITATIVE Context of a
-    // context-identity server — the shared grant coordinate — never the body.
-    contextRef?: unknown
   }
 }
 
@@ -156,13 +171,21 @@ export function normalizeMcpServerOwnerDecl(
   }
 }
 
-// DNS-1123 subdomain, the shape a k8s resource name takes. Reject anything else
-// up front so a malformed `mcpServerName` (e.g. "Foo/Bar") becomes a 400 rather
-// than surfacing a non-404 apiserver error as a 500.
-const K8S_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
-function isValidK8sName(name: string): boolean {
-  return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
-}
+type BrokerDenialReason =
+  | 'lineage'
+  | 'unauthenticated'
+  | 'host_not_bound'
+  | 'server_not_found'
+  | 'no_grant'
+  | 'unavailable'
+
+// Fixed bodies: denials must not vary with what was found, and a 503 never
+// forwards the apiserver or DB error (an RBAC 403 from Kubernetes would
+// otherwise reach the client through the shared error handler).
+const HOST_NOT_BOUND = { error: 'host_not_bound' }
+const SERVER_NOT_FOUND = { error: 'server_not_found' }
+const STATE_UNAVAILABLE = { error: 'host_state_unavailable' }
+const NO_GRANT = { error: 'no_grant' }
 
 // Upper bound on the grant-existence batch. mcp-host caps its per-user OAuth
 // partitions at OAUTH_USER_PARTITION_MAX=500, so one sweep never legitimately
@@ -176,8 +199,8 @@ export interface GrantExistsQuery {
   userId?: string
   /**
    * Accepted for API fidelity but NEVER used to key a lookup — `context`
-   * servers key by the server's authoritative `contextRef` (server-side). A
-   * lying value therefore cannot change the answer (no body-trust).
+   * servers key by the calling Host's Context (server-side). A lying value
+   * therefore cannot change the answer (no body-trust).
    */
   contextId?: string
 }
@@ -189,7 +212,7 @@ export interface GrantExistsQuery {
  * partitions of the SAME server (different `userId`) must stay distinguishable.
  * `userId`/`contextId` are echoed exactly as the caller sent them: values the
  * caller itself supplied, so echoing them leaks nothing (confirmed in review).
- * Never a token, never the server's authoritative contextRef, never a key.
+ * Never a token, never the Host's Context, never a key.
  */
 export interface GrantExistsResult {
   mcpServerName: string
@@ -198,142 +221,250 @@ export interface GrantExistsResult {
   exists: boolean
 }
 
+/**
+ * The coordinates of one untrusted batch entry, echoed back exactly as they
+ * arrived so the consumer correlates by tuple. A non-string `mcpServerName`
+ * cannot address a server and echoes as ''.
+ */
+function parseGrantExistsEntry(raw: unknown): GrantExistsQuery {
+  const entry = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const parsed: GrantExistsQuery = {
+    mcpServerName: typeof entry.mcpServerName === 'string' ? entry.mcpServerName : '',
+  }
+  if (typeof entry.userId === 'string') parsed.userId = entry.userId
+  if (typeof entry.contextId === 'string') parsed.contextId = entry.contextId
+  return parsed
+}
+
+function echoGrantExistsEntry(entry: GrantExistsQuery, exists: boolean): GrantExistsResult {
+  return { ...entry, exists }
+}
+
 export interface GrantExistenceDeps {
   db: DbClient
-  gateway: K8sGateway
+  gateway: Pick<K8sGateway, 'getResource'>
+  /** The calling Host, already resolved live: every entry is judged against it. */
+  binding: ResolvedHostBinding
   mcpServersNamespace: string
   log?: Logger
 }
 
+type BrokerRoute = 'user_token' | 'grants_exists'
+
+function recordBrokerDenial(
+  log: Logger,
+  route: BrokerRoute,
+  reason: BrokerDenialReason,
+  context: Record<string, unknown>,
+  level: 'warn' | 'debug' = 'warn'
+): void {
+  mcpOauthBrokerDeniedTotal.inc({ reason, route }, 1)
+  log[level](
+    { event: 'mcp_oauth_broker_denied', reason, route, ...context },
+    'mcp oauth broker denied'
+  )
+}
+
+/** What one mcp-server contributes to every entry that names it in a batch. */
+type ServerVerdict =
+  | { kind: 'deny'; reason: 'server_not_found' }
+  // Cannot be decided now, or nothing to evict: keep the partition. `cause` is
+  // set only for a transient read failure, which is reported per entry.
+  | { kind: 'error'; cause?: { err: unknown } }
+  | { kind: 'resolved'; resolved: NonNullable<ReturnType<typeof resolveServerOAuth>> }
+
 /**
- * Batch grant-existence resolver for the hot-revocation poll-sweep (mini-spec
- * 13 §4.1). For each query it resolves the server's OAuth spec, derives the
- * grant key with the SAME `buildMcpServerGrantKey` the mint uses (D4), and
- * reports `oauthGrantExists` — a pure `SELECT 1`, never the token, never any
- * secret.
+ * Batch grant-existence resolver for the hot-revocation sweep, bound to the
+ * calling Host (`deps.binding`). Each entry gets the `user-token` rules, but a
+ * definitive denial answers `exists:false` (mcp-host evicts the partition) and
+ * anything transient or undecidable answers `exists:true` (mcp-host keeps it):
+ * an apiserver or DB blip must never disconnect a user.
  *
- * Contract: STRICT 1:1 with the input — exactly one result per input entry, in
- * order, each echoing that entry's coordinates. Entries are per-entry untrusted
- * (`unknown`): a malformed one is NOT dropped (that would break positional and
- * tuple correlation) but yields a fail-open placeholder in its own slot.
+ *   - outside the Host Context's allowlist (exact match), being deleted or
+ *     disabled → false; outside the allowlist the CR is never read;
+ *   - allowlisted but the CR is gone → true: an uninstall in flight is not
+ *     this sweep's to evict (the uninstall itself purges grants);
+ *   - read error, not an OAuth server, a per-user entry without userId → true;
+ *   - per-user: non-UUID userId or a user who cannot enter the Host → false,
+ *     a DB error checking that → true;
+ *   - otherwise the store decides (`oauthGrantExists`, never the token).
  *
- * Fail-OPEN per query (§4.2 "fail-open transitorio"): ANY problem — malformed
- * entry, server not found (deleted CR), not an OAuth server, a missing grant
- * coordinate for the flavor, an apiserver blip, or a DB error — yields
- * `exists: true` for THAT entry, so a transient hiccup never provokes an
- * eviction. `exists: false` is returned ONLY when `oauthGrantExists` says so
- * definitively. For `context` servers the key is the server's authoritative
- * `contextRef` (server-side), never the body `contextId`.
+ * Strictly 1:1 and in order with the input, each result echoing its entry's
+ * coordinates; a malformed entry gets a fail-open placeholder in its slot.
+ * Every mcp-server is read once and every userId's Host access queried once
+ * per batch; denials are logged and counted once per (reason, mcp-server).
  */
 export async function resolveBatchGrantExistence(
   deps: GrantExistenceDeps,
   queries: readonly unknown[]
 ): Promise<GrantExistsResult[]> {
   const log = deps.log ?? rootLogger
+  const { binding } = deps
   const results: GrantExistsResult[] = []
 
-  // Memoize the CR resolution by `mcpServerName` for the lifetime of THIS batch.
-  // The sweep fans a per-user partition out to one entry per user, so a shared
-  // server with N live users produces N IDENTICAL apiserver reads of the same CR
-  // (mini-spec 13 Should-fix #1). The apiserver read + `resolveServerOAuth`
-  // depend ONLY on the server name (not on userId), so they are resolved once
-  // per distinct name; the grant SELECT still runs per entry (it keys by userId).
-  //
-  // A `null` entry is the memoized fail-open verdict for a server whose CR read
-  // threw (deleted CR / apiserver blip) OR did not resolve as OAuth — both yield
-  // `exists:true` per entry exactly as before, and neither is retried N times.
-  // `.has()` distinguishes "not yet read" from "read → null", so a failed read is
-  // cached, never re-attempted within the batch.
-  const serverOAuthCache = new Map<string, ReturnType<typeof resolveServerOAuth>>()
-  const resolveServerOAuthCached = async (
-    name: string
-  ): Promise<ReturnType<typeof resolveServerOAuth>> => {
-    if (serverOAuthCache.has(name)) return serverOAuthCache.get(name) ?? null
-    let resolved: ReturnType<typeof resolveServerOAuth>
+  type Denial = {
+    reason: BrokerDenialReason
+    mcpServerName: string
+    entries: number
+    warn: boolean
+    detail: Record<string, unknown>
+  }
+  const denials = new Map<string, Denial>()
+  // Called once per affected entry; the first call's detail (stage, err) is kept.
+  const noteDenial = (
+    reason: BrokerDenialReason,
+    mcpServerName: string,
+    opts: { warn?: boolean; detail?: Record<string, unknown> } = {}
+  ) => {
+    const warn = opts.warn ?? true
+    const key = `${reason}\u0000${mcpServerName}`
+    const seen = denials.get(key)
+    if (seen) {
+      seen.entries += 1
+      seen.warn ||= warn
+    } else {
+      denials.set(key, { reason, mcpServerName, entries: 1, warn, detail: opts.detail ?? {} })
+    }
+  }
+
+  const serverVerdicts = new Map<string, ServerVerdict>()
+  const serverVerdict = async (name: string): Promise<ServerVerdict> => {
+    const memo = serverVerdicts.get(name)
+    if (memo) return memo
+    const verdict = await readServerVerdict(name)
+    serverVerdicts.set(name, verdict)
+    return verdict
+  }
+  const readServerVerdict = async (name: string): Promise<ServerVerdict> => {
+    if (!binding.allowlist.includes(name)) return { kind: 'deny', reason: 'server_not_found' }
+    let server: McpServerResource
     try {
-      const server = (await deps.gateway.getResource(
+      server = (await deps.gateway.getResource(
         'mcpservers',
         name,
         deps.mcpServersNamespace
       )) as McpServerResource
-      resolved = resolveServerOAuth(server)
-      if (!resolved) {
-        // Not an OAuth server / no usable oauth id → ambiguous, fail-open.
+    } catch (err) {
+      if (isK8sResourceNotFound(err)) {
         log.warn(
           { mcpServerName: name },
-          'grant-existence: server not resolvable as oauth; fail-open'
+          'grant-existence: allowlisted server not found; fail-open'
         )
+        return { kind: 'error' }
       }
-    } catch (err) {
-      // Server not found (deleted CR) or apiserver blip — transient/ambiguous.
-      // Fail-open: never evict a live partition on a hiccup.
-      log.warn(
-        { err, mcpServerName: name },
-        'grant-existence: server read failed; fail-open (exists:true)'
-      )
-      resolved = null
+      return { kind: 'error', cause: { err } }
     }
-    serverOAuthCache.set(name, resolved)
-    return resolved
+    if (!server || !isLive(server.metadata) || server.spec?.enabled === false) {
+      return { kind: 'deny', reason: 'server_not_found' }
+    }
+    const resolved = resolveServerOAuth(server)
+    if (server.spec?.auth?.type !== 'oauth' || !resolved) {
+      log.warn(
+        { mcpServerName: name },
+        'grant-existence: server not resolvable as oauth; fail-open'
+      )
+      return { kind: 'error' }
+    }
+    return { kind: 'resolved', resolved }
+  }
+
+  type Access = { kind: 'allowed' } | { kind: 'denied' } | { kind: 'error'; err: unknown }
+  const userAccess = new Map<string, Access>()
+  const accessFor = async (userId: string): Promise<Access> => {
+    const memo = userAccess.get(userId)
+    if (memo) return memo
+    let access: Access
+    try {
+      access = { kind: await hostAccessForUser(deps.db, userId, binding.hostName) }
+    } catch (err) {
+      access = { kind: 'error', err }
+    }
+    userAccess.set(userId, access)
+    return access
   }
 
   for (const raw of queries) {
-    const entry = (raw && typeof raw === 'object' ? raw : {}) as {
-      mcpServerName?: unknown
-      userId?: unknown
-      contextId?: unknown
-    }
-    // Echo the caller-supplied coordinates exactly as they arrived (a non-string
-    // `mcpServerName` cannot address a server, so it echoes as ''). One `echo()`
-    // per iteration guarantees `results.length === queries.length`.
-    const mcpServerName = typeof entry.mcpServerName === 'string' ? entry.mcpServerName : ''
-    const userId = typeof entry.userId === 'string' ? entry.userId : undefined
-    const contextId = typeof entry.contextId === 'string' ? entry.contextId : undefined
-    const echo = (exists: boolean): GrantExistsResult => {
-      const r: GrantExistsResult = { mcpServerName, exists }
-      if (userId !== undefined) r.userId = userId
-      if (contextId !== undefined) r.contextId = contextId
-      return r
-    }
+    const entry = parseGrantExistsEntry(raw)
+    const { mcpServerName, userId } = entry
+    const echo = (exists: boolean) => echoGrantExistsEntry(entry, exists)
 
-    // Malformed name → cannot address a server; fail-open placeholder in slot.
     if (!mcpServerName || !isValidK8sName(mcpServerName)) {
       log.warn({ mcpServerName }, 'grant-existence: malformed query entry; fail-open (exists:true)')
       results.push(echo(true))
       continue
     }
 
-    // Resolve the server's OAuth spec ONCE per distinct name (memoized above).
-    // A null verdict (read failed OR not an OAuth server) is fail-open per entry.
-    const resolved = await resolveServerOAuthCached(mcpServerName)
-    if (!resolved) {
+    const verdict = await serverVerdict(mcpServerName)
+    if (verdict.kind === 'deny') {
+      noteDenial(verdict.reason, mcpServerName)
+      results.push(echo(false))
+      continue
+    }
+    if (verdict.kind === 'error') {
+      if (verdict.cause) {
+        noteDenial('unavailable', mcpServerName, {
+          detail: { stage: 'mcp_server', err: verdict.cause.err },
+        })
+      }
       results.push(echo(true))
       continue
     }
+    const { resolved } = verdict
+
+    if (resolved.grantScope === 'user') {
+      if (!userId) {
+        results.push(echo(true))
+        continue
+      }
+      if (!isCanonicalUuid(userId)) {
+        // Channel senders reach here on every sweep by design: debug only.
+        noteDenial('no_grant', mcpServerName, { warn: false })
+        results.push(echo(false))
+        continue
+      }
+      const access = await accessFor(userId)
+      if (access.kind === 'error') {
+        noteDenial('unavailable', mcpServerName, {
+          detail: { stage: 'user_access', err: access.err },
+        })
+        results.push(echo(true))
+        continue
+      }
+      if (access.kind === 'denied') {
+        noteDenial('no_grant', mcpServerName)
+        results.push(echo(false))
+        continue
+      }
+    }
+
     const key = buildMcpServerGrantKey(resolved, {
       mcpServerName,
       mcpServersNamespace: deps.mcpServersNamespace,
       userId,
+      contextId: binding.contextName,
     })
     if (!key) {
-      // Missing the coordinate the flavor needs (no userId for a user server,
-      // no contextRef for a context server) → ambiguous, fail-open. Depends on
-      // the per-entry userId, so it is decided per entry, not memoized.
-      log.warn(
-        { mcpServerName, grantScope: resolved.grantScope },
-        'grant-existence: missing grant coordinate; fail-open'
-      )
+      // Unreachable: the binding always names its Context and a per-user entry
+      // without userId answered already. Keep the partition.
       results.push(echo(true))
       continue
     }
     try {
-      // The grant SELECT keys by the per-entry coordinate, so it always runs per
-      // entry. A DB error here is transient/ambiguous → fail-open for THIS entry.
       results.push(echo(await oauthGrantExists(deps.db, key)))
     } catch (err) {
       log.warn({ err, mcpServerName }, 'grant-existence check failed; fail-open (exists:true)')
       results.push(echo(true))
     }
+  }
+
+  for (const { reason, mcpServerName, entries, warn, detail } of denials.values()) {
+    recordBrokerDenial(
+      log,
+      'grants_exists',
+      reason,
+      { host: binding.hostName, mcpServerName, entries, ...detail },
+      warn ? 'warn' : 'debug'
+    )
   }
   return results
 }
@@ -438,23 +569,63 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       if (!claims || !claims.scopes.includes('oauth:user-token')) {
         return res.status(403).json({ error: 'insufficient_scope' })
       }
+      const log = req.log ?? rootLogger
+      const deny = (
+        reason: BrokerDenialReason,
+        status: number,
+        body: Record<string, string>,
+        context: Record<string, unknown> = {},
+        level: 'warn' | 'debug' = 'warn'
+      ) => {
+        recordBrokerDenial(log, 'user_token', reason, context, level)
+        return res.status(status).json(body)
+      }
+
+      const lineage = checkBrokerCallerLineage(claims, config)
+      if (lineage.kind === 'lineage') {
+        return deny('lineage', 403, HOST_NOT_BOUND, { sub: claims.sub })
+      }
+      if (lineage.kind === 'unauthenticated') {
+        return deny('unauthenticated', 401, { error: 'Unauthorized' }, { host: claims.hostRefs[0] })
+      }
+      const hostName = lineage.hostName
 
       try {
         const body = (req.body ?? {}) as {
           mcpServerName?: unknown
           userId?: unknown
-          contextId?: unknown
         }
         const mcpServerName = body.mcpServerName
         const userId = body.userId
-        const contextId = body.contextId
         if (typeof mcpServerName !== 'string' || !isValidK8sName(mcpServerName)) {
           return res.status(400).json({ error: 'invalid_request' })
         }
+        const where = { host: hostName, mcpServerName }
 
-        // Read the McpServer to derive `oauthClientId` + `grantScope` from the
-        // server's declaration — never from the body.
-        let server: McpServerResource | null
+        const binding = await resolveBrokerHostBinding(gateway, hostName, lineage.hostUid, config)
+        if (binding.kind === 'denied') return deny('host_not_bound', 403, HOST_NOT_BOUND, where)
+        if (binding.kind === 'unavailable') {
+          return deny('unavailable', 503, STATE_UNAVAILABLE, {
+            ...where,
+            stage: 'host_binding',
+            err: binding.cause,
+          })
+        }
+        // Debug, not warn: the broker never keys on spec.contextId, and this
+        // fires on every mint for every Host of the Context.
+        if (hasContextIdMismatch(binding.ctx)) {
+          log.debug(
+            { event: 'context_id_mismatch', host: hostName, context: binding.ctx.metadata?.name },
+            'context spec.contextId differs from its name'
+          )
+        }
+
+        // Allowlist before the CR read: a server outside this Host's Context
+        // must cost the same as one that does not exist.
+        if (!binding.allowlist.includes(mcpServerName)) {
+          return deny('server_not_found', 404, SERVER_NOT_FOUND, where)
+        }
+        let server: McpServerResource
         try {
           server = (await gateway.getResource(
             'mcpservers',
@@ -462,17 +633,25 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
             config.mcpServersNamespace
           )) as McpServerResource
         } catch (err) {
-          if (err instanceof K8sNotFoundError) {
-            return res.status(404).json({ error: 'server_not_found' })
+          if (isK8sResourceNotFound(err)) {
+            return deny('server_not_found', 404, SERVER_NOT_FOUND, where)
           }
-          throw err
+          return deny('unavailable', 503, STATE_UNAVAILABLE, {
+            ...where,
+            stage: 'mcp_server',
+            err,
+          })
+        }
+        if (!server || !isLive(server.metadata) || server.spec?.enabled === false) {
+          return deny('server_not_found', 404, SERVER_NOT_FOUND, where)
         }
 
-        const authType = server?.spec?.auth?.type
+        const authType = server.spec?.auth?.type
         const resolved = resolveServerOAuth(server)
         if (authType !== 'oauth' || !resolved) {
           return res.status(400).json({ error: 'not_oauth_server' })
         }
+
         // Checked up front, not only through the refresh reader: a still-fresh
         // access token is served without ever reading the owner declaration.
         assertRemoteOAuthSpecCoherent(server, 'token')
@@ -480,37 +659,46 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
         // Bifurcate by grantScope read from the server. The KEY comes from the
         // shared derivation (`buildMcpServerGrantKey`, D4) so the mint, the
         // rpc-proxy grant-presence gate and the grant-existence sweep never
-        // drift. The mint keeps its own request-validation guards, which map to
-        // specific error codes the shared builder's null return cannot express.
+        // drift.
         let userForKey: string | undefined
-        if (resolved.grantScope === 'context') {
-          // AUTHORITATIVE Context = server.spec.contextRef, NEVER the body.
-          // Trusting a body contextId would let a caller with the scope request
-          // {server, contextId: <someone else's Context>} and receive that
-          // Context's shared token (cross-context token theft). The body value,
-          // if present, is only cross-checked against the authoritative one.
-          if (!resolved.contextRef) {
-            // A context-identity server MUST carry contextRef (CRD-required).
-            // Fail closed if it somehow doesn't.
-            return res.status(400).json({ error: 'server_missing_context' })
-          }
-          if (typeof contextId === 'string' && contextId !== resolved.contextRef) {
-            return res.status(400).json({ error: 'context_mismatch' })
-          }
-        } else {
+        if (resolved.grantScope === 'user') {
           if (typeof userId !== 'string' || userId.length === 0) {
             return res.status(400).json({ error: 'invalid_request' })
           }
+          // A user who cannot enter this Host looks exactly like one who never
+          // connected the server.
+          let access: 'allowed' | 'denied'
+          try {
+            access = await hostAccessForUser(pool, userId, hostName)
+          } catch (err) {
+            return deny('unavailable', 503, STATE_UNAVAILABLE, {
+              ...where,
+              stage: 'user_access',
+              err,
+            })
+          }
+          if (access === 'denied') {
+            // Channel senders (Slack, email, Telegram ids) are not users.id and
+            // reach here on every mint by design; only an entitled-looking id
+            // that cannot enter the Host is worth a warning.
+            return isCanonicalUuid(userId)
+              ? deny('no_grant', 404, NO_GRANT, { ...where, cause: 'no_host_access' })
+              : deny('no_grant', 404, NO_GRANT, { ...where, cause: 'non_uuid_user_id' }, 'debug')
+          }
           userForKey = userId
         }
+        // A context-scope token is the grant of the calling Host's Context; any
+        // body `contextId` is ignored.
         const key: OAuthGrantKey | null = buildMcpServerGrantKey(resolved, {
           mcpServerName,
           mcpServersNamespace: config.mcpServersNamespace,
           userId: userForKey,
+          contextId: binding.contextName,
         })
         if (!key) {
-          // Unreachable: the guards above already rejected the null cases. Fail
-          // closed defensively rather than mint against a malformed key.
+          // Unreachable: the binding always names its Context and the per-user
+          // userId was validated above. Fail closed defensively rather than mint
+          // against a malformed key.
           return res.status(400).json({ error: 'invalid_request' })
         }
 
@@ -534,6 +722,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
               mcpServerName,
               grantScope: resolved.grantScope,
               oauthClientId: resolved.oauthClientId,
+              ...(resolved.grantScope === 'context' ? { contextName: binding.contextName } : {}),
               outcome,
             },
             'mcp oauth user token issued'
@@ -580,16 +769,15 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
     }
   )
 
-  // Batch grant-existence sweep (mini-spec 13 §4.1 / §4.3). mcp-host asks, in the
-  // cadence of the poll it already runs, whether its live per-user OAuth
-  // partitions still have a grant, and evicts the ones that do not. MIRROR of
-  // `user-token` in the FULL gate + key derivation, but batch + read-only: same
-  // kill-switch, same `requireControlCaller`, the SAME `mcp_oauth_broker` rate
-  // limiter keyed by caller, and the SAME `oauth:user-token` scope (no new scope
-  // — that would force re-issuing control JWTs, §5). Each result echoes its
-  // query's coordinates so the consumer correlates by tuple, not position;
-  // returns ONLY `{ mcpServerName, userId?, contextId?, exists }` — never a
-  // token, the authoritative contextRef, or a key.
+  // Batch grant-existence sweep. mcp-host asks, in the cadence
+  // of the poll it already runs, whether its live OAuth partitions still have a
+  // grant, and evicts the ones answered with a strict `exists:false`. Same
+  // kill-switch, caller gate, rate-limit bucket and scope as user-token, and the
+  // same Host binding. mcp-host treats ANY non-200 as "keep everything", so
+  // only caller-level failures (scope, lineage, a token to renew) are errors:
+  // a Host that no longer binds answers 200 with every entry false, and a
+  // binding that cannot be read answers 200 with every entry true. Returns only
+  // `{ mcpServerName, userId?, contextId?, exists }` — never a token or a key.
   router.post(
     '/mcp-oauth/grants/exists',
     requireBrokerEnabled,
@@ -614,6 +802,20 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       if (!claims || !claims.scopes.includes('oauth:user-token')) {
         return res.status(403).json({ error: 'insufficient_scope' })
       }
+      const log = req.log ?? rootLogger
+
+      // wrc tokens never call this endpoint; a 403 is harmless. A token
+      // without host_uid gets 401 so mcp-host renews it.
+      const lineage = checkBrokerCallerLineage(claims, config)
+      if (lineage.kind === 'lineage') {
+        recordBrokerDenial(log, 'grants_exists', 'lineage', { sub: claims.sub })
+        return res.status(403).json(HOST_NOT_BOUND)
+      }
+      if (lineage.kind === 'unauthenticated') {
+        recordBrokerDenial(log, 'grants_exists', 'unauthenticated', { host: claims.hostRefs[0] })
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
+      const hostName = lineage.hostName
 
       const body = (req.body ?? {}) as { queries?: unknown }
       if (!Array.isArray(body.queries)) {
@@ -622,19 +824,39 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       if (body.queries.length > MAX_EXISTS_BATCH) {
         return res.status(400).json({ error: 'batch_too_large' })
       }
+      const queries: unknown[] = body.queries
+      if (queries.length === 0) return res.status(200).json({ results: [] })
+      const everyEntry = (exists: boolean) => ({
+        results: queries.map(raw => echoGrantExistsEntry(parseGrantExistsEntry(raw), exists)),
+      })
 
       try {
-        // Per-entry untrusted, but 1:1 with the input: the resolver validates
-        // each entry, never drops one, and emits a fail-open placeholder in the
-        // slot of any malformed/unresolvable entry.
+        const binding = await resolveBrokerHostBinding(gateway, hostName, lineage.hostUid, config)
+        if (binding.kind === 'denied') {
+          mcpOauthBrokerDeniedTotal.inc({ reason: 'host_not_bound', route: 'grants_exists' }, 1)
+          log.warn(
+            { event: 'broker_batch_denied', host: hostName, entries: queries.length },
+            'grant-existence batch denied: Host not bound'
+          )
+          return res.status(200).json(everyEntry(false))
+        }
+        if (binding.kind === 'unavailable') {
+          recordBrokerDenial(log, 'grants_exists', 'unavailable', {
+            host: hostName,
+            stage: 'host_binding',
+            err: binding.cause,
+          })
+          return res.status(200).json(everyEntry(true))
+        }
         const results = await resolveBatchGrantExistence(
           {
             db: { query: (text, values) => pool.query(text, values) },
             gateway,
+            binding,
             mcpServersNamespace: config.mcpServersNamespace,
-            log: req.log ?? rootLogger,
+            log,
           },
-          body.queries
+          queries
         )
         return res.status(200).json({ results })
       } catch (err) {

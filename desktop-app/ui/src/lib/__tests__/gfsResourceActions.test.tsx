@@ -1,5 +1,8 @@
+// @vitest-environment jsdom
 import { isValidElement } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, within } from '@testing-library/react'
+import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { buildGfsResourceActions, getGfsMenuActions } from '../gfsResourceActions'
 
 const handler = () => vi.fn()
@@ -16,6 +19,7 @@ const allHandlers = () => ({
   'copy-content': handler(),
   preview: handler(),
   download: handler(),
+  'download-zip': handler(),
   replace: handler(),
   'open-folder': handler(),
   delete: handler(),
@@ -23,8 +27,10 @@ const allHandlers = () => ({
 
 const resourceUri = 'gfs://main/0123456789abcdef0123456789abcdef'
 
+afterEach(cleanup)
+
 describe('GFS resource action model', () => {
-  it('keeps the canonical folder and file menu order with unique icons', () => {
+  it('keeps the canonical folder and file menu order with valid historical icons', () => {
     const folderActions = getGfsMenuActions(
       buildGfsResourceActions({
         kind: 'directory',
@@ -34,6 +40,7 @@ describe('GFS resource action model', () => {
         canMove: true,
         canCreateFolder: true,
         canUpload: true,
+        canDownloadZip: true,
         canShare: true,
         canOpenFolder: true,
         canDelete: true,
@@ -56,24 +63,21 @@ describe('GFS resource action model', () => {
     )
 
     expect(folderActions.map(action => action.id)).toEqual([
-      'refresh',
       'share',
       'copy-link',
       'copy-route',
-      'open-route',
       'open-folder',
       'rename',
       'move',
       'new-folder',
       'upload-file',
+      'download-zip',
       'delete',
     ])
     expect(fileActions.map(action => action.id)).toEqual([
-      'refresh',
       'share',
       'copy-link',
       'copy-route',
-      'open-route',
       'rename',
       'move',
       'copy-content',
@@ -83,58 +87,85 @@ describe('GFS resource action model', () => {
       'delete',
     ])
     for (const actions of [folderActions, fileActions]) {
-      const iconTypes = actions.map(action => {
+      for (const action of actions) {
         expect(isValidElement(action.icon)).toBe(true)
-        return isValidElement(action.icon) ? action.icon.type : null
-      })
-      expect(new Set(iconTypes).size).toBe(actions.length)
+      }
       expect(actions.every(action => action.targetUri === resourceUri)).toBe(true)
+    }
+    const moveIcon = folderActions.find(action => action.id === 'move')?.icon
+    const openFolderIcon = folderActions.find(action => action.id === 'open-folder')?.icon
+    expect(isValidElement(moveIcon)).toBe(true)
+    expect(isValidElement(openFolderIcon)).toBe(true)
+    if (isValidElement(moveIcon) && isValidElement(openFolderIcon)) {
+      expect(moveIcon.type).toBe(openFolderIcon.type)
     }
   })
 
-  it('omits unsupported or unauthorized operations and retains busy feedback in menus', () => {
-    const actions = getGfsMenuActions(
-      buildGfsResourceActions({
-        kind: 'file',
-        uri: resourceUri,
-        handlers: {
-          refresh: handler(),
-          'copy-link': handler(),
-          'copy-route': handler(),
-          'open-route': handler(),
-          rename: handler(),
-          move: handler(),
-          'new-folder': handler(),
-          'upload-file': handler(),
-          share: handler(),
-          'copy-content': handler(),
-          delete: handler(),
-        },
-        canRename: false,
-        canMove: true,
-        canCreateFolder: true,
-        canUpload: true,
-        canShare: false,
-        canCopyContent: false,
-        canDelete: false,
-        mutating: true,
-        refreshing: true,
-      })
-    )
+  it('keeps busy Refresh on the titlebar and excludes it from resource menus', () => {
+    const descriptors = buildGfsResourceActions({
+      kind: 'file',
+      uri: resourceUri,
+      handlers: {
+        refresh: handler(),
+        'copy-link': handler(),
+        'copy-route': handler(),
+        'open-route': handler(),
+        rename: handler(),
+        move: handler(),
+        'new-folder': handler(),
+        'upload-file': handler(),
+        share: handler(),
+        'copy-content': handler(),
+        delete: handler(),
+      },
+      canRename: false,
+      canMove: true,
+      canCreateFolder: true,
+      canUpload: true,
+      canShare: false,
+      canCopyContent: false,
+      canDelete: false,
+      mutating: true,
+      refreshing: true,
+    })
+    const actions = getGfsMenuActions(descriptors)
 
     expect(actions.map(action => action.id)).toEqual([
-      'refresh',
       'copy-link',
       'copy-route',
-      'open-route',
       'move',
       'copy-content',
     ])
-    expect(actions[0]).toMatchObject({ disabled: true, loading: true })
+    expect(descriptors.find(action => action.id === 'refresh')).toMatchObject({
+      menu: false,
+      disabled: true,
+      loading: true,
+    })
+    expect(actions.some(action => ['refresh', 'open-route'].includes(action.id))).toBe(false)
     expect(actions.find(action => action.id === 'copy-content')).toMatchObject({
       disabled: true,
     })
     expect(actions.some(action => action.id === 'delete')).toBe(false)
+
+    const target = document.createElement('div')
+    document.body.appendChild(target)
+    const onRefresh = handler()
+    render(
+      <GfsResourceTitlebarActions
+        target={target}
+        onRefresh={onRefresh}
+        refreshing
+        onCopyLink={handler()}
+        onOpenLink={handler()}
+      />
+    )
+    const toolbar = within(target).getByRole('toolbar', { name: 'EvenDrive actions' })
+    const refreshButton = within(toolbar).getByRole('button', { name: 'Refresh' })
+    expect((refreshButton as HTMLButtonElement).disabled).toBe(true)
+    expect(refreshButton.parentElement?.getAttribute('title')).toBe('Refreshing EvenDrive')
+    expect(within(toolbar).getByRole('button', { name: 'Copy link' })).toBeTruthy()
+    expect(within(toolbar).getByRole('button', { name: 'Open link' })).toBeTruthy()
+    target.remove()
   })
 
   it('keeps replacement execution in the shared menu descriptor', () => {

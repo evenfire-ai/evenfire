@@ -11,12 +11,24 @@ import { SecretService } from '../src/services/secretService.js'
 // hand-built row (e.g. one with a stray `data` field the producer never emits)
 // would test an impossible leak path instead of the real one.
 async function listSecretsOutput(
-  secrets: Array<{ name: string; data: Record<string, string> }>
+  secrets: Array<{
+    name: string
+    data: Record<string, string>
+    uid?: string
+    resourceVersion?: string
+  }>
 ): Promise<unknown[]> {
   const fakeCoreApi = {
     listNamespacedSecret: async ({ namespace }: { namespace: string }) => ({
       items: secrets.map(s => ({
-        metadata: { name: s.name, namespace, labels: {}, annotations: {} },
+        metadata: {
+          name: s.name,
+          namespace,
+          ...(s.uid ? { uid: s.uid } : {}),
+          ...(s.resourceVersion ? { resourceVersion: s.resourceVersion } : {}),
+          labels: {},
+          annotations: {},
+        },
         type: 'Opaque',
         data: s.data,
       })),
@@ -69,5 +81,23 @@ describe('GET /admin/mcp-secrets (E-16.1)', () => {
     expect(raw).not.toContain('aWR2YWw=')
     expect(res.body.items[0]).not.toHaveProperty('data')
     expect(res.body.items[0]).not.toHaveProperty('stringData')
+  })
+
+  it('forwards the live uid/resourceVersion identity the UI needs for compare-and-delete', async () => {
+    const rows = await listSecretsOutput([
+      {
+        name: 'asana-creds',
+        data: { api_key: 'a2V5' },
+        uid: 'uid-asana-1',
+        resourceVersion: '42',
+      },
+      { name: 'legacy-creds', data: { api_key: 'a2V5' } },
+    ])
+    const { app } = makeApp(rows)
+    const res = await request(app).get('/admin/mcp-secrets').expect(200)
+    expect(res.body.items).toEqual([
+      { name: 'asana-creds', keys: ['api_key'], uid: 'uid-asana-1', resourceVersion: '42' },
+      { name: 'legacy-creds', keys: ['api_key'] },
+    ])
   })
 })

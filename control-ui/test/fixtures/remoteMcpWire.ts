@@ -51,6 +51,20 @@ export const PRE_REGISTERED_PER_SERVER_DISCOVER = loadGolden<DiscoverRemoteRespo
   'discover.preRegisteredPerServer'
 ).body
 
+/** Work IQ with the Entra tenant authority: entra-v2 profile, pre-registered, per-server. */
+export const WORKIQ_DISCOVER = loadGolden<DiscoverRemoteResponse>('discover.workiq').body
+/** Work IQ whose PRM advertises an unknown GUID-form scope: the install needs it confirmed. */
+export const ENTRA_UNKNOWN_GUID_DISCOVER = loadGolden<DiscoverRemoteResponse>(
+  'discover.entraUnknownGuid'
+).body
+/** Work IQ whose PRM advertises no scopes: only sign-in scopes are left (scopeAudienceMissing). */
+export const ENTRA_NO_SCOPES_DISCOVER =
+  loadGolden<DiscoverRemoteResponse>('discover.entraNoScopes').body
+/** Work IQ whose PRM advertises an empty scope beside its own: `scopeAudienceViolation` is `''`. */
+export const ENTRA_EMPTY_SCOPE_DISCOVER = loadGolden<DiscoverRemoteResponse>(
+  'discover.entraEmptyScope'
+).body
+
 export const ALL_DISCOVER_BODIES: ReadonlyArray<{ name: string; body: DiscoverRemoteResponse }> = [
   { name: 'linear', body: LINEAR_DISCOVER },
   { name: 'notion', body: NOTION_DISCOVER },
@@ -59,6 +73,8 @@ export const ALL_DISCOVER_BODIES: ReadonlyArray<{ name: string; body: DiscoverRe
   { name: 'linear-unconfigured', body: LINEAR_DISCOVER_UNCONFIGURED },
   { name: 'dcr-confidential', body: DCR_CONFIDENTIAL_DISCOVER },
   { name: 'pre-registered-per-server', body: PRE_REGISTERED_PER_SERVER_DISCOVER },
+  { name: 'workiq', body: WORKIQ_DISCOVER },
+  { name: 'entra-empty-scope', body: ENTRA_EMPTY_SCOPE_DISCOVER },
 ]
 
 // ─── /discover from a control-api older than the per-server callback ─────────
@@ -105,6 +121,8 @@ export const PRE_REGISTERED_PER_SERVER_INSTALLED = loadGolden<InstallRemoteRespo
 export const PRE_REGISTERED_SHARED_INSTALLED = loadGolden<InstallRemoteResponse>(
   'install.preRegisteredShared'
 ).body
+/** Work IQ, pre-registered on its per-server callback, with the Entra tenant authority. */
+export const WORKIQ_INSTALLED = loadGolden<InstallRemoteResponse>('install.workiq').body
 
 // ─── errors ───────────────────────────────────────────────────────────────────
 
@@ -116,6 +134,15 @@ export const CLIENT_ID_IN_USE_FAILURE = loadGolden('install.clientIdInUse')
 export const DCR_REDIRECT_MISMATCH_FAILURE = loadGolden('install.dcrRedirectMismatch')
 export const CIMD_WITHOUT_ISS_BINDING_FAILURE = loadGolden('install.cimdWithoutIssBinding')
 export const CALLBACK_UNCONFIGURED_FAILURE = loadGolden('install.callbackUnconfigured')
+/** Work IQ discovered without a tenant: the PRM names Entra's multi-tenant authority. */
+export const WORKIQ_DISCOVER_TENANT_REQUIRED = loadGolden('discover.workiqTenantRequired')
+/** A tenant Entra does not know: its metadata answers 400, surfaced as a 424. */
+export const ENTRA_UNKNOWN_TENANT_DISCOVER_FAILURE = loadGolden('discover.entraUnknownTenant')
+export const SCOPE_AUDIENCE_UNVERIFIED_FAILURE = loadGolden('install.scopeAudienceUnverified')
+export const SCOPE_AUDIENCE_MISMATCH_FAILURE = loadGolden('install.scopeAudienceMismatch')
+export const SCOPE_AUDIENCE_MISSING_FAILURE = loadGolden('install.scopeAudienceMissing')
+/** 128 scopes plus the offline_access the Entra profile adds: over the CRD limit. */
+export const SCOPE_LIMIT_EXCEEDED_FAILURE = loadGolden('install.scopeLimitExceeded')
 
 /**
  * The error `apiSend` throws for a captured failure: the real `formatApiError` over

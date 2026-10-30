@@ -63,8 +63,20 @@ export type OAuthCredentialManifest = {
   fields: OAuthCredentialField[]
 }
 
+// GET /admin/oauth/callback — the deployment's public OAuth callback, owned by
+// control-api (CONTROL_API_OAUTH_CALLBACK_BASE_URL). `redirectUriTemplate` carries the
+// literal `{oauthClientId}` placeholder and is present only when `configured`.
+export type OAuthCallbackConfig = {
+  configured: boolean
+  redirectUriTemplate?: string
+}
+
 // GET /admin/mcp-secrets item — names + keys only, never values (E-16.1).
+// `uid`/`resourceVersion` carry the live Secret identity for
+// compare-and-delete; they are optional so older backends still type-check.
 export type McpSecretSummary = {
   name: string
   keys: string[]
+  uid?: string
+  resourceVersion?: string
 }

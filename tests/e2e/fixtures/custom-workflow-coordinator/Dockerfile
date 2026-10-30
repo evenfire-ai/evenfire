@@ -1,4 +1,4 @@
-FROM node:24-alpine AS sdk-builder
+FROM node:24.22.1-alpine AS sdk-builder
 
 WORKDIR /app
 
@@ -18,7 +18,7 @@ COPY packages/workflow-sdk/src ./packages/workflow-sdk/src
 WORKDIR /app/packages/workflow-sdk
 RUN npm ci && npm run build:docker
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 
 WORKDIR /app
 

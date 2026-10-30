@@ -156,8 +156,8 @@ require_contains "${RUNNER}" "npx vitest run --no-color" \
   "color-free Vitest output for the zero-test guard"
 require_contains "${WORKFLOW}" "E2E Vitest node-unit (tests/e2e)" \
   "public CI job"
-require_contains "${WORKFLOW}" "node-version: '24'" \
-  "Node 24 setup"
+require_contains "${WORKFLOW}" "node-version-file: .nvmrc" \
+  "repository-pinned Node setup"
 require_contains "${WORKFLOW}" "E2E_VITEST_SUITE_GROUP=node-unit bash scripts/e2e/run-vitest-e2e.sh" \
   "canonical runner invocation"
 require_contains "${WORKFLOW}" "Test image-capabilities fixtures and runner" \

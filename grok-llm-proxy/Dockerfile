@@ -1,6 +1,6 @@
 # BUILD CONTEXT = repo root. The proxy consumes
 # @clerum/grok-provider-attempt-contract via file:.
-FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS builder
 
 WORKDIR /app
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
@@ -11,7 +11,7 @@ COPY grok-llm-proxy/tsconfig.json grok-llm-proxy/tsconfig.build.json ./
 COPY grok-llm-proxy/src ./src
 RUN npm run build
 
-FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53
 
 WORKDIR /app
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract

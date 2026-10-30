@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import { useAuthContext } from '@contexts/AuthContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
@@ -28,12 +29,14 @@ import {
   composerImageBudget,
   composerImageCountedBytes,
 } from '@constants/attachments'
+import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
+import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { getComposerDraft, getComposerDraftRevision } from '@lib/composerDraftStore'
 import { formatFileSize } from '@lib/composerFileAdmission'
 import { prefillEmptyConversationWithGfsResource } from '@lib/gfsConversationPrefill'
@@ -162,6 +165,7 @@ function getComposerFileNotice(file: ComposerFileAttachment): string | null {
 
 export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelProps) {
   const { selectedAgent } = useNavigationContext()
+  const { me } = useAuthContext()
   const {
     composerImageAttachments,
     composerFileAttachments,
@@ -171,6 +175,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     agentError,
     failedAgentSend,
     activeChatId,
+    workspaceChatTabId,
     activeMessageCount,
     composerFocusRequestId,
   } = useChatComposerStateContext()
@@ -183,6 +188,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     handleRemoveComposerFileAttachment: onRemoveComposerFileAttachment,
     handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment: onRemoveComposerReferenceAttachment,
+    handleClearComposerAttachments: onClearComposerAttachments,
     handleSendAgentMessage: onSend,
     handleRetryFailedAgentSend: onRetryFailedSend,
     handleRecoverFailedAgentSend: onRecoverFailedSend,
@@ -197,6 +203,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     selectedAgent,
   })
   const { sharedFilesByContext, refreshSharedFiles } = useContextsDataController()
+  const agentCatalog = useAgentsDataController()
 
   const [composerAttachmentError, setComposerAttachmentError] = useState<string | null>(null)
   const [composerMenuOpen, setComposerMenuOpen] = useState(false)
@@ -216,7 +223,11 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Per-chat draft from the module-scoped store. Typing only re-renders this
   // component (it's the sole subscriber); the value is restored automatically when
   // activeChatId changes and survives the inline→docked composer swap.
-  const [draft, setDraft] = useComposerDraft(activeChatId, selectedAgent ?? undefined)
+  const [draft, setDraft] = useComposerDraft(
+    activeChatId,
+    selectedAgent ?? undefined,
+    workspaceChatTabId
+  )
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
@@ -432,9 +443,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const handleDraftChange = useCallback(
     (value: string, selectionStart?: number) => {
-      setDraft(value)
+      const result = setDraft(value)
       const session = gfsInsertionSessionRef.current
-      if (session && session.chatId === activeChatId && session.agent === selectedAgent) {
+      if (
+        result.accepted &&
+        session &&
+        session.chatId === activeChatId &&
+        session.agent === selectedAgent
+      ) {
         session.expectedDraft = value
         session.expectedRevision = getComposerDraftRevision(
           activeChatId,
@@ -444,7 +460,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       }
       // Clear any pending send error as the user resumes typing. No re-render up-tree
       // unless an error is actually present.
-      clearComposerSendError()
+      if (result.accepted) clearComposerSendError()
     },
     [activeChatId, clearComposerSendError, selectedAgent, setDraft]
   )
@@ -480,10 +496,42 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Sending now would leave it out without saying so, so send stays disabled
   // until each chip is ready or removed.
   const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
+  const accessCatalog = agentCatalog.accessCatalog
+  const agentCatalogMatchesSession = Boolean(
+    me && accessCatalog && accessCatalog.userId === me.id && accessCatalog.teamId === me.teamId
+  )
+  const selectedAgentCatalogState = resolveAgentCatalogAvailability({
+    selectedAgent,
+    loading: agentCatalog.loading,
+    error: agentCatalog.error,
+    catalogMatchesSession: agentCatalogMatchesSession,
+    agentNames: agentCatalog.agentNames,
+  })
+  const selectedAgentCatalogMessage =
+    selectedAgentCatalogState === 'checking'
+      ? 'Checking agent access for this team…'
+      : selectedAgentCatalogState === 'error'
+        ? 'Could not verify agent access for this team. Retry the check before sending.'
+        : selectedAgentCatalogState === 'unavailable'
+          ? `${selectedAgent} is unavailable in this team. Select an available agent to send.`
+          : null
+  const selectedAgentSendBlocked =
+    selectedAgentCatalogState !== 'ready' && selectedAgentCatalogState !== 'available'
+  const agentCatalogNoticeId = useId()
   const handleSend = useCallback(() => {
-    if (imagesBlockedForSend || filesBlockedForSend) return
-    void onSend(draft)
-  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend])
+    if (imagesBlockedForSend || filesBlockedForSend || selectedAgentSendBlocked) {
+      return
+    }
+    if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
+    else void onSend(draft)
+  }, [
+    onSend,
+    draft,
+    imagesBlockedForSend,
+    filesBlockedForSend,
+    selectedAgentSendBlocked,
+    workspaceChatTabId,
+  ])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1285,6 +1333,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             </span>
             {hasComposerAttachments ? (
               <span className="composer-attachments-list composer-attachments-list--inline">
+                <span
+                  className="composer-attachments-count"
+                  data-testid="composer-attachments-count"
+                >
+                  {composerAttachmentItems.length}{' '}
+                  {composerAttachmentItems.length === 1 ? 'attachment' : 'attachments'}
+                </span>
                 {composerAttachmentItems.map(item => {
                   if (item.kind === 'reference') {
                     const attachment = item.attachment
@@ -1380,6 +1435,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     </span>
                   )
                 })}
+                <button
+                  type="button"
+                  className="composer-attachments-clear"
+                  onClick={onClearComposerAttachments}
+                  aria-label="Clear all attachments"
+                >
+                  Clear all
+                </button>
               </span>
             ) : null}
           </span>
@@ -1399,13 +1462,21 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 agentSending ||
                 imagesBlockedForSend ||
                 filesBlockedForSend ||
+                selectedAgentSendBlocked ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
                   composerFileAttachments.length === 0 &&
                   composerReferenceAttachments.length === 0)
               }
               aria-label={agentSending ? 'Sending message' : 'Send message'}
-              aria-describedby={imagesBlockedForSend ? imageNoticeId : undefined}
+              aria-describedby={
+                [
+                  imagesBlockedForSend ? imageNoticeId : null,
+                  selectedAgentCatalogMessage ? agentCatalogNoticeId : null,
+                ]
+                  .filter(Boolean)
+                  .join(' ') || undefined
+              }
               label={agentSending ? 'Sending message' : 'Send message'}
               size="sm"
               title={agentSending ? 'Sending...' : 'Send message'}
@@ -1436,6 +1507,32 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 'Image attachments are not available for this model yet.')
               : composerAttachmentError}
           </p>
+        </div>
+      ) : null}
+      {selectedAgentCatalogMessage ? (
+        <div className="composer-attachments">
+          <p
+            className={
+              selectedAgentCatalogState === 'checking'
+                ? 'composer-attachment-notice'
+                : 'composer-attachment-error'
+            }
+            role={selectedAgentCatalogState === 'checking' ? 'status' : 'alert'}
+            id={agentCatalogNoticeId}
+            data-testid="composer-agent-catalog-notice"
+          >
+            {selectedAgentCatalogMessage}
+          </p>
+          {selectedAgentCatalogState === 'error' ? (
+            <Button
+              disabled={agentCatalog.loading}
+              onClick={() => void agentCatalog.refresh()}
+              size="sm"
+              variant="ghost"
+            >
+              Retry access check
+            </Button>
+          ) : null}
         </div>
       ) : null}
       {composerFileNotices.length > 0 ? (
@@ -1503,7 +1600,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       {failedAgentSend ? (
         <div className="composer-footer">
           <div className="action-row">
-            <Button onClick={onRecoverFailedSend} disabled={agentSending} size="xs" variant="ghost">
+            <Button
+              onClick={() => onRecoverFailedSend(workspaceChatTabId)}
+              disabled={agentSending}
+              size="xs"
+              variant="ghost"
+            >
               {failedAgentSend.answeredWithoutFiles ? 'Recover files' : 'Recover input'}
             </Button>
             <Button onClick={onDiscardFailedSend} disabled={agentSending} size="xs" variant="ghost">

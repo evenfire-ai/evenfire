@@ -32,8 +32,8 @@ const META_MAX_BYTES = 64 * 1024
 /**
  * Share of the volume admission keeps free and the startup and periodic
  * sweeps restore. The
- * volume is shared: on a stateless Host `state/` (state.db) is a subPath of
- * the same PVC, and shell commands and file writes land on it too.
+ * volume is shared: the conversation database (`state.db`) sits at the root
+ * of the same PVC, and shell commands and file writes land on it too.
  */
 const FREE_SPACE_FLOOR_PERCENT = 15n
 /** The floor on a volume too small for its percentage to reach this. */

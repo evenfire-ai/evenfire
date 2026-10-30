@@ -113,6 +113,57 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     expect(getLatestGfsConversationContext()).toBeNull()
   })
 
+  it.each([
+    [
+      'throws',
+      () => {
+        throw new Error('generation IPC failed')
+      },
+    ],
+    ['returns malformed data', () => Number.NaN],
+  ])('keeps explicit tab navigation usable when generation IPC %s', (_case, advance) => {
+    const { result } = renderHook(() => useNavigationController())
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getUserNavigationGeneration: () => mainNavigationGeneration,
+          advanceUserNavigationGeneration: advance,
+        },
+      },
+    })
+
+    expect(() => act(() => result.current.handleNavSelect(DESKTOP_ROUTES.files))).not.toThrow()
+    expect(result.current.activeTab?.kind).toBe('files')
+    expect(
+      result.current.beginGfsResourceNavigation(
+        1,
+        'gfs://main/0123456789abcdef0123456789abcdef',
+        7,
+        mainNavigationGeneration
+      )
+    ).toBeNull()
+
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getUserNavigationGeneration: () => mainNavigationGeneration,
+          advanceUserNavigationGeneration: () => (mainNavigationGeneration += 1),
+        },
+      },
+    })
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
+    expect(
+      result.current.beginGfsResourceNavigation(
+        2,
+        'gfs://main/abababababababababababababababab',
+        7,
+        mainNavigationGeneration
+      )
+    ).not.toBeNull()
+  })
+
   it('defaults selectedAgentRoute to Connectors (mcp-servers), not details', () => {
     const { result } = renderHook(() => useNavigationController())
     expect(result.current.selectedAgentRoute).toBe(AGENT_WORKSPACE_ROUTES.connectors)

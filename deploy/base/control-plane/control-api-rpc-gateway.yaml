@@ -25,7 +25,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: nginx
-        image: nginx:1.30.1-alpine
+        image: nginx:1.30.6-alpine
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8090

@@ -65,8 +65,8 @@ export function isLockedPath(relativePath: string): boolean {
 
 export {
   GfsDownloadPathError,
-  PROTECTED_STATE_DB_FILES,
   StateDbPathError,
+  isStateDbName,
   isStateDbPath,
   stateDbProtectedMessage,
 } from './protectedPaths'
@@ -306,6 +306,7 @@ export class WorkspaceService implements Workspace {
       return []
     }
 
+    const realWorkspaceRoot = await fs.realpath(this.workspacePath)
     const results: WorkspaceEntry[] = []
     for (const entry of entries) {
       if (isProtectedWorkspacePath(entry.name)) continue
@@ -313,6 +314,11 @@ export class WorkspaceService implements Workspace {
       if (!directory && this.options?.excludeDirs?.includes(entry.name)) continue
       const entryPath = path.join(directory, entry.name).replace(/^\//, '')
       const absPath = path.join(resolved, entry.name)
+      // A symlink with a harmless name can resolve to store data; the listing
+      // omits it as read and write already deny it. A dangling link reaches no
+      // file and stays listed. A link that cannot be resolved (a loop, a path
+      // through a file) is omitted without hiding its siblings.
+      if (await this.omitFromListing(absPath, realWorkspaceRoot)) continue
       let size: number | undefined
       let modifiedAt: string | undefined
       try {
@@ -331,6 +337,16 @@ export class WorkspaceService implements Workspace {
       })
     }
     return results
+  }
+
+  private async omitFromListing(absPath: string, realWorkspaceRoot: string): Promise<boolean> {
+    let realPath: string
+    try {
+      realPath = await fs.realpath(absPath)
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code !== 'ENOENT'
+    }
+    return isProtectedRealPath(realPath, realWorkspaceRoot)
   }
 
   async listAll(): Promise<string[]> {

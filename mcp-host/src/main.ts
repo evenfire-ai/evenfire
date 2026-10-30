@@ -45,6 +45,10 @@ import {
   SqliteColdStartLoader,
   createConversationStore,
 } from './core/conversation/persistence'
+import {
+  exitOnPersistFailure,
+  storeShutdownExitCode,
+} from './core/conversation/persistence/persistFailureExit'
 import { validateApprovalConfig } from './core/extensions'
 import type { ApprovalDecision } from './core/extensions/approvalTypes'
 import { BasicSafety } from './core/safety/safety'
@@ -82,6 +86,11 @@ import { hostPrimaryLlmBindingChanged } from './llm/hostLlmBinding'
 import { type ImageInputResolver } from './llm/imageInput'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
+import {
+  type ProviderEnvLookup,
+  createProviderEnvChangeDetector,
+  providerEnvLookup,
+} from './llm/providerEnv'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { logger } from './logger'
 import {
@@ -251,6 +260,8 @@ let agent: AgentStateMachine | null = null
 let cronScheduler: CronScheduler | null = null
 let sessionProcessor: SessionProcessor | null = null
 let isShuttingDown = false
+/** Bound on the reporter flush that precedes a persist-failure exit 1. */
+const PERSIST_FAILURE_FLUSH_TIMEOUT_MS = 5_000
 let mcpInitializationGeneration = 0
 // Stage 3 (stateless-agents) — heartbeat emitter + DRAINING fence holder.
 let statelessHeartbeat: StatelessHeartbeat | null = null
@@ -423,6 +434,20 @@ function apiKeysFromConfigStore(store: ConfigStore): ApiKeys {
   return { [llm.provider]: llm.credentials }
 }
 
+/**
+ * The non-secret provider env for `provider` (AWS_REGION, Vertex project/
+ * location, Azure endpoint/api-version), resolved from the live ConfigStore —
+ * per-Host `host-<ref>-env` / `-env-secret` first, then process.env. Restricted
+ * to the provider's declared non-secret names and kept in-process (never
+ * written to process.env, so it cannot reach a tool subprocess). Undefined
+ * without a ConfigStore (dev mode) → drivers read process.env.
+ */
+function hostProviderEnv(provider: string | undefined): ProviderEnvLookup | undefined {
+  const store = configStore
+  if (!store || !provider || !isLlmProvider(provider)) return undefined
+  return providerEnvLookup(provider, name => store.get(name))
+}
+
 // ─── R5 — provider fallback ────────────────────────────────────────────────
 
 /** Structured WARN on every failover switch (no secrets). */
@@ -519,7 +544,8 @@ function buildFallbackProvider(entry: FallbackEntry): SingleTurnProvider | null 
   if (!creds) return null
   return createLLMProvider(
     { [entry.provider]: creds },
-    { provider: entry.provider as LlmProvider, name: entry.model }
+    { provider: entry.provider as LlmProvider, name: entry.model },
+    { env: hostProviderEnv(entry.provider) }
   )
 }
 
@@ -606,7 +632,11 @@ function buildProviderForModel(model: string): SingleTurnProvider | null {
   const modelCfg = currentHost?.spec.model
   if (!modelCfg?.provider) return null
   const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
-  return createLLMProvider(keys, { provider: modelCfg.provider, name: model })
+  return createLLMProvider(
+    keys,
+    { provider: modelCfg.provider, name: model },
+    { env: hostProviderEnv(modelCfg.provider) }
+  )
 }
 
 /**
@@ -679,20 +709,35 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
   // lives in control-api/WRC. Re-checked on every allowlist reload below.
   signalHostModelAllowlist(store, host.spec.model)
 
+  // Host → Environment edits (host-<ref>-env CM / -env-secret) fire only
+  // `envChanged`. Rebuild the provider when one of ITS declared non-secret env
+  // values (AWS_REGION, VERTEX_*, AZURE_OPENAI_*) actually changed; unrelated
+  // env edits keep the live provider. The store is rebuilt on a provider change,
+  // so the detector is per (store, provider).
+  const providerEnvChanged =
+    provider && isLlmProvider(provider)
+      ? createProviderEnvChangeDetector(provider, name => store.get(name))
+      : () => false
+
   // Hot reload: rebuild the LLM provider on key rotation. The agent receives
   // a swapped provider via setLLMProvider; in-flight requests finish on the
   // old client (already dispatched), the next task uses the new one.
-  store.onChange(({ llmKeyChanged, allowlistChanged }) => {
+  store.onChange(({ llmKeyChanged, envChanged, allowlistChanged }) => {
     // R3.7 — re-evaluate the Host model against the freshly-loaded allowlist.
     if (allowlistChanged && currentHost) signalHostModelAllowlist(store, currentHost.spec.model)
-    if (!llmKeyChanged || !currentHost) return
+    // Always consult the detector on envChanged so its baseline tracks the
+    // latest values even when a key rotation triggers the rebuild instead.
+    const providerConfigChanged = envChanged && providerEnvChanged()
+    if ((!llmKeyChanged && !providerConfigChanged) || !currentHost) return
     const keys = apiKeysFromConfigStore(store)
     currentKeys = keys
-    const next = createLLMProvider(keys, currentHost.spec.model)
+    const next = createLLMProvider(keys, currentHost.spec.model, {
+      env: hostProviderEnv(currentHost.spec.model?.provider),
+    })
     if (!next) {
       logger.error(
         {},
-        '[Main] LLM provider rebuild failed after key rotation — Host may be degraded'
+        '[Main] LLM provider rebuild failed after LLM config change — Host may be degraded'
       )
       return
     }
@@ -706,7 +751,10 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
     failoverEngine?.clearCooldown()
     if (agent) {
       agent.setLLMProvider(next, currentHost.spec.model?.name)
-      logger.info({}, '[Main] LLM provider rebuilt and re-attached to agent (key rotated)')
+      logger.info(
+        { llmKeyChanged, providerConfigChanged },
+        '[Main] LLM provider rebuilt and re-attached to agent (LLM config changed)'
+      )
     } else {
       logger.info({}, '[Main] LLM provider rebuilt (agent not ready yet, will use on init)')
     }
@@ -738,7 +786,9 @@ async function initializeProvider(
   logger.info({ model: host.spec.model }, '[Main] Model config:')
   logger.info({ contextRef: host.spec.contextRef }, '[Main] Context ref:')
 
-  currentProvider = createLLMProvider(keys, host.spec.model)
+  currentProvider = createLLMProvider(keys, host.spec.model, {
+    env: hostProviderEnv(host.spec.model?.provider),
+  })
   bootFallbackEntry = null
 
   // R5.10 — boot with fallback (Q8 ratified): if the PRIMARY is inconstructible
@@ -866,14 +916,14 @@ const OAUTH_USER_PARTITION_MAX = 500
  * oauth servers. Static servers do NOT use this (the manager builds their static
  * provider from the revision-locked getAuthToken route). The sabor is read from
  * the HCC v2 inventory field `server.authKind` (mini-spec §3.2) — never from
- * `auth.type`/`oauth.grantScope`/`contextRef`, which the v2 contract no longer
- * emits:
+ * `auth.type`/`oauth.grantScope`, which the v2 contract no longer emits:
  *
  *  - authKind='oauth-user', principal=userId  → broker (server, {userId})
  *  - authKind='oauth-user', principal=SHARED   → token-less representative
  *  - authKind='oauth-context', principal=any    → broker (server, {}); control-api
- *    resolves the shared grant by server.spec.contextRef server-side, so mcp-host
- *    transports NO context identity (invariant I1).
+ *    resolves the shared grant from the authenticated Host's context (its
+ *    `spec.contextRef`, bound server-side), so mcp-host transports NO context
+ *    identity (invariant I1).
  *  - anything else (static/none/absent)         → token-less; manager owns static.
  *
  * The broker is reached via the workflow-approval gateway (decision #6/B): a
@@ -883,8 +933,8 @@ function createMcpTokenProviderFactory(): McpTokenProviderFactory {
   return (server: McpServerInfo, principal: McpPrincipal): McpTokenProvider => {
     if (server.authKind === 'oauth-context') {
       // Shared identity — one broker grant per (server, context). control-api
-      // keys it by server.spec.contextRef (authoritative) and cross-checks the
-      // body, so mcp-host omits the contextId entirely.
+      // takes the context from the authenticated Host's binding (authoritative),
+      // so mcp-host omits the contextId entirely.
       return createBrokerTokenProvider(server, {}, brokerTokenProviderDeps())
     }
     if (server.authKind === 'oauth-user') {
@@ -1577,7 +1627,7 @@ function setupUsageReporting(): void {
 
 /**
  * Resolve the absolute path where `state.db` should live. D3 §1.2 precedence:
- * `CLERUM_SESSION_DB_DIR` (dedicated PVC mount injected by HCC) → explicit
+ * `CLERUM_SESSION_DB_DIR` (the workspace PVC root, injected by HCC) → explicit
  * `CLERUM_SESSION_DB_PATH` → the workspace PVC → tmpdir fallback (dev/test
  * only; forbidden — throws — under the stateless lifecycle).
  */
@@ -1625,10 +1675,24 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     cacheSize: config.conversationCacheSize,
     syncTimeoutMs: config.dbPersistSyncTimeoutMs,
     asyncTimeoutMs: config.dbPersistAsyncTimeoutMs,
+    stallTimeoutMs: config.dbWorkerStallTimeoutMs,
     checkpointEveryWrites: config.dbCheckpointEveryWrites,
     heartbeatMs: config.dbWorkerHeartbeatMs,
     pendingApprovalTtlMs: config.pendingApprovalTtlMs,
     barrierMode,
+    onPersistFailure: exitOnPersistFailure(() => isShuttingDown, {
+      // Flush buffered usage and governed-run events before the exit 1.
+      // Marking the Host as shutting down keeps a SIGTERM during the flush
+      // from starting the graceful shutdown path as a second, concurrent
+      // shutdown.
+      beforeExit: async () => {
+        isShuttingDown = true
+        usageReporter?.stop()
+        governedRunReporter?.stop()
+        await Promise.all([usageReporter?.drain(), governedRunReporter?.drain()])
+      },
+      beforeExitTimeoutMs: PERSIST_FAILURE_FLUSH_TIMEOUT_MS,
+    }),
   })
 
   agent.setConversationStore(handle.store)
@@ -1877,21 +1941,22 @@ async function initializeAgent(): Promise<void> {
 
     // Boot-only retention sweep (T3.1 §8). Failures are non-fatal so a
     // corrupt DB does not block traffic — the metric / log surfaces the issue.
-    sessionSearchService.sweepRetention(config.searchRetentionDays).then(
-      deleted => {
-        logger.info(
-          {
-            event: 'search_retention_sweep',
-            deleted_sessions: deleted,
-            retention_days: config.searchRetentionDays,
-          },
-          'Host runtime event'
-        )
-      },
-      err => {
-        logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
-      }
-    )
+    // Awaited before bootstrap: the sweep runs in batches that delete an
+    // expired session's messages before the session row, so no load may run
+    // between them. It therefore counts against the Host startup window.
+    try {
+      const deleted = await sessionSearchService.sweepRetention(config.searchRetentionDays)
+      logger.info(
+        {
+          event: 'search_retention_sweep',
+          deleted_sessions: deleted,
+          retention_days: config.searchRetentionDays,
+        },
+        'Host runtime event'
+      )
+    } catch (err) {
+      logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
+    }
     logger.info(
       { searchRetentionDays: config.searchRetentionDays },
       '[Main] Session search enabled (retentionDays=)'
@@ -3131,13 +3196,12 @@ async function shutdown(signal: string): Promise<void> {
   await pluginWorkloadSdkServer?.stop()
   await rpcServer?.stop()
 
-  // T2.1 — drain pending DB writes, then terminate the SQLite worker.
+  // T2.1 — drain pending DB writes, then terminate the SQLite worker. A
+  // write that could not be persisted makes the process exit 1.
+  let exitCode = 0
   if (conversationStoreHandle) {
-    try {
-      await conversationStoreHandle.shutdown()
-    } catch (err) {
-      logger.warn({ err: err }, '[Main] ConversationStore shutdown raised:')
-    }
+    const handle = conversationStoreHandle
+    exitCode = await storeShutdownExitCode(() => handle.shutdown())
   }
 
   if (gfsRuntimeStop) {
@@ -3150,7 +3214,7 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  process.exit(0)
+  process.exit(exitCode)
 }
 
 /**
@@ -3546,7 +3610,6 @@ async function main(): Promise<void> {
       const mcpClientFactory = (server: { name: string; url: string; authToken?: string }) => {
         const info = {
           name: server.name,
-          contextRef: '',
           transport: { type: 'streamableHttp' as const, url: server.url },
           enabled: true,
           status: { deployed: true, ready: true },

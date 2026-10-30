@@ -98,7 +98,7 @@ function render(ui: React.ReactNode, options?: Parameters<typeof renderTestingLi
   const ExistingWrapper = options?.wrapper
   function TestProviders({ children }: { children: React.ReactNode }) {
     const wrapped = ExistingWrapper ? <ExistingWrapper>{children}</ExistingWrapper> : children
-    return <QueryClientProvider client={client}>{wrapped}</QueryClientProvider>
+    return <QueryClientProvider client={client}><AuthContext.Provider value={{ me: null } as never}>{wrapped}</AuthContext.Provider></QueryClientProvider>
   }
   return renderTestingLibrary(ui, { ...options, wrapper: TestProviders })
 }

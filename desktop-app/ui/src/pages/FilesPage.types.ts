@@ -11,8 +11,8 @@ export type GfsDriveResource = GfsBrowserChild & {
 
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */
-  pushToast?: (message: string, tone: Tone) => void
-  /** @deprecated Kept for App compatibility; GFS actions now use resource-local menus. */
+  pushToast?: (message: string, tone: Tone, options?: { durationMs?: number }) => void
+  /** Native titlebar action slot supplied by the app shell. */
   titlebarLeadingTarget?: HTMLElement | null
   /**
    * A `gfs://` link handed over from elsewhere in the app — today, a plugin

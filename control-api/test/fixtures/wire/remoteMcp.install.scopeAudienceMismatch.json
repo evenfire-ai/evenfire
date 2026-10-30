@@ -1,0 +1,8 @@
+{
+  "status": 400,
+  "body": {
+    "error": "scope_audience_mismatch",
+    "scope": "00000003-0000-0ff1-ce00-000000000000/AllSites.Read",
+    "message": "with Microsoft Entra ID, every resource scope must belong to this server; this scope would mint a token for another API"
+  }
+}

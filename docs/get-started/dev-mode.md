@@ -14,7 +14,7 @@ native tool, guardrails or an MCP server.
 
 ## Run mcp-host locally
 
-You need Node.js 24 and an API key for one
+You need Node.js 24.22.1 or later in the Node 24 line and an API key for one
 [supported provider](../llm-providers/README.md).
 
 mcp-host has no setting to bind only to localhost, and with
@@ -148,8 +148,18 @@ docker run --rm -p 127.0.0.1:8080:8080 \
   mcp-host-dev
 ```
 
-The root `docker-compose.yml` declares the same dev-mode settings, plus an
-optional channel-reader under the `telegram` profile. Its mcp-host build does
-not work as written: it uses `context: ./mcp-host`, so the Dockerfile cannot
-find `packages/`. It also publishes `8080:8080` on all interfaces with auth
-off. Use the commands above instead.
+The root `docker-compose.yml` runs the same setup. It builds mcp-host from the
+repository root, publishes the port on `127.0.0.1:8080` only, and passes
+through `CLERUM_MODEL_PROVIDER` and the `OPENAI_API_KEY`, `CLAUDE_API_KEY`,
+`ZAI_API_KEY` and `BAILIAN_API_KEY` keys from your shell:
+
+```bash
+# from the repository root
+OPENAI_API_KEY=sk-... docker compose up mcp-host
+```
+
+It also has an optional channel-reader under the `telegram` profile
+(`docker compose --profile telegram up`), already pointed at mcp-host with
+`CLERUM_HOST_REF=dev-host`. Set `CLERUM_TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_ALLOWED_USER_ID` (your Telegram user ID) first, and edit its
+`CLERUM_CHANNEL` if your bot setup differs.

@@ -13,7 +13,9 @@ import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import { signOAuthState } from '../src/oauth/state.js'
 
 /**
- * U5 — the mcp-subject OAuth callback. Fixtures are derived from the REAL
+ * The mcp-subject OAuth callback, per-user flavor and dispatch. The
+ * context flavor runs through the production deps in
+ * src/oauth/__tests__/callbackMcpMembership.test.ts. Fixtures are derived from the REAL
  * `signOAuthState` (T1: no hand-forged state) and the observable outcome asserted
  * is the persisted grant + the `source:'mcp'` return (T4), not intermediate calls.
  */
@@ -50,13 +52,10 @@ function buildInput(overrides: Partial<CallbackInput> = {}): CallbackInput {
 // The subject `decl` is derived from the REAL producer (`resolveServerOAuthSubject`)
 // out of a raw McpServer fixture (T1) — not hand-built — so the callback is fed
 // exactly the shape production wiring emits.
-function gdriveSubject(
-  opts: { grantScope?: 'user' | 'context'; contextRef?: string } = {}
-): McpServerOAuthSubject {
+function gdriveSubject(opts: { grantScope?: 'user' | 'context' } = {}): McpServerOAuthSubject {
   const rawServer = {
     metadata: { name: 'gdrive', namespace: MCP_NS },
     spec: {
-      ...(opts.contextRef !== undefined ? { contextRef: opts.contextRef } : {}),
       auth: { type: 'oauth' },
       oauth: {
         id: 'google-drive',
@@ -78,12 +77,10 @@ interface StubDb {
   query: ReturnType<typeof vi.fn>
 }
 
-function buildDeps(opts: {
-  subject?: McpServerOAuthSubject | null
-  subjectError?: unknown
-  /** Contexts the signed user belongs to (shared-bootstrap membership gate). Default: member of ctx-A. */
-  memberContexts?: string[]
-}): { deps: CallbackDeps; db: StubDb } {
+function buildDeps(opts: { subject?: McpServerOAuthSubject | null; subjectError?: unknown }): {
+  deps: CallbackDeps
+  db: StubDb
+} {
   const db: StubDb = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }) }
 
   // A recipeReader that would explode if the mcp path ever hit it — proves the
@@ -117,15 +114,11 @@ function buildDeps(opts: {
     text: async () => '',
   }))
 
-  const memberContexts = opts.memberContexts ?? ['ctx-A']
-  const userContextsReader = vi.fn(async () => ({ contextIds: memberContexts }))
-
   return {
     deps: {
       db: db as unknown as CallbackDeps['db'],
       recipeReader,
       mcpServerReader,
-      userContextsReader,
       // Per-user servers: a Context of the user enables the server.
       userServerAccessReader: vi.fn(async () => true),
       secretReader: secretReader as unknown as CallbackDeps['secretReader'],
@@ -168,63 +161,6 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
     expect(params[5]).toBe('google') // provider
     expect(typeof params[6]).toBe('string')
     expect((params[6] as string).startsWith('v1.')).toBe(true) // encrypted access token
-  })
-
-  it('context server: bootstraps a SHARED grant keyed by the authoritative contextRef, user_id NULL', async () => {
-    const { deps, db } = buildDeps({
-      subject: gdriveSubject({ grantScope: 'context', contextRef: 'ctx-A' }),
-    })
-    const result = await handleOAuthCallback(buildInput(), deps)
-    expect(result.kind).toBe('ok')
-
-    expect(db.query).toHaveBeenCalledTimes(1)
-    const [sql, params] = db.query.mock.calls[0] as [string, unknown[]]
-    // The shared bootstrap INSERT … ON CONFLICT DO UPDATE fenced by cr_uid (R3-H5):
-    // same-uid conflict no-ops (first-wins), a different uid / legacy row is replaced.
-    expect(sql).toContain('INSERT INTO oauth_grants')
-    expect(sql).toContain("'shared'")
-    expect(sql).toContain('DO UPDATE SET')
-    expect(sql).toContain('oauth_grants.cr_uid IS DISTINCT FROM EXCLUDED.cr_uid')
-    // owner_kind, ns, name, context_id(=contextRef), oauthClientId, bootstrappedBy
-    expect(params[0]).toBe('mcpserver')
-    expect(params[1]).toBe(MCP_NS)
-    expect(params[2]).toBe('gdrive')
-    expect(params[3]).toBe('ctx-A') // authoritative context, from the subject not the state
-    expect(params[4]).toBe('google-drive')
-    expect(params[5]).toBe(USER_ID) // bootstrapped_by = the signed initiator
-  })
-
-  it('context server: a NON-member of the Context is denied (403) and NO shared grant is written', async () => {
-    // Signed user consents, but is not a member of the server's contextRef.
-    const { deps, db } = buildDeps({
-      subject: gdriveSubject({ grantScope: 'context', contextRef: 'ctx-A' }),
-      memberContexts: ['ctx-other', 'ctx-else'], // NOT ctx-A
-    })
-    const result = await handleOAuthCallback(buildInput(), deps)
-    expect(result.kind).toBe('context_membership_denied')
-    // Observable outcome (T4): the shared row was never inserted.
-    expect(db.query).not.toHaveBeenCalled()
-  })
-
-  it('context server: fails closed when no userContextsReader is wired', async () => {
-    const { deps, db } = buildDeps({
-      subject: gdriveSubject({ grantScope: 'context', contextRef: 'ctx-A' }),
-    })
-    const result = await handleOAuthCallback(buildInput(), {
-      ...deps,
-      userContextsReader: undefined,
-    })
-    expect(result.kind).toBe('context_membership_denied')
-    expect(db.query).not.toHaveBeenCalled()
-  })
-
-  it('context server WITHOUT contextRef fails closed (server_missing_context), no persist', async () => {
-    const { deps, db } = buildDeps({
-      subject: gdriveSubject({ grantScope: 'context', contextRef: undefined }),
-    })
-    const result = await handleOAuthCallback(buildInput(), deps)
-    expect(result.kind).toBe('server_missing_context')
-    expect(db.query).not.toHaveBeenCalled()
   })
 
   it('unknown server → server_not_found (reader returns null)', async () => {

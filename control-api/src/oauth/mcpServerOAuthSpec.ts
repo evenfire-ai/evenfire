@@ -1,7 +1,7 @@
 /**
  * Shared reader for an OAuth McpServer's `spec.oauth` declaration.
  *
- * The grant-scope / oauthClientId / contextRef derivation is a security-relevant
+ * The grant-scope / oauthClientId derivation is a security-relevant
  * rule (it decides WHICH grant coordinate governs a server). It is consumed by
  * three seams that must never drift apart (D4):
  *   - the token broker (`routes/mcpOauth.ts`) — the LLM/tool-call rail;
@@ -12,6 +12,14 @@
  * (`buildMcpServerGrantKey`), so the rule lives here once.
  */
 import { rootLogger } from '../observability/logger.js'
+import {
+  detectAsProfile,
+  isAsProfileId,
+  profileHasResourceScope,
+  profileScopeViolation,
+  remoteWireForProfile,
+  withProfileScopes,
+} from './asProfiles.js'
 import type {
   GenericClientRouting,
   OAuthClientDecl,
@@ -46,6 +54,7 @@ export interface McpServerOAuthDecl {
   bearerInBody?: unknown
   supportsRefresh?: unknown
   issForCallback?: unknown
+  asProfile?: unknown
   // Generic self-hosted lane (`source:'generic'`, DEC-28). Untrusted CR data →
   // every field is validated before use; a malformed generic block fails closed.
   refreshEndpoint?: unknown
@@ -63,10 +72,7 @@ export interface McpServerOAuthSpecInput {
   metadata?: { uid?: unknown; name?: unknown }
   spec?: {
     oauth?: McpServerOAuthDecl
-    // `spec.contextRef` is REQUIRED + singular on the CRD ("the context this
-    // server belongs to", mcpserver.yaml). It is the AUTHORITATIVE Context of a
-    // context-identity server — the shared grant coordinate — never the body.
-    contextRef?: unknown
+    remote?: { baseUrl?: unknown }
   }
 }
 
@@ -75,8 +81,6 @@ export type GrantScope = 'user' | 'context'
 export interface ResolvedServerOAuth {
   oauthClientId: string
   grantScope: GrantScope
-  /** Authoritative Context of the server (spec.contextRef); undefined if absent. */
-  contextRef?: string
   /**
    * metadata.uid of the CR this resolution was read from — the installation
    * identity grant reads are fenced by. Undefined when the object carried none.
@@ -120,7 +124,7 @@ export function readCrUid(server: McpServerOAuthSpecInput): string | undefined {
 }
 
 /**
- * Derive `{ oauthClientId, grantScope, contextRef, crUid }` from a McpServer's
+ * Derive `{ oauthClientId, grantScope, crUid }` from a McpServer's
  * `spec.oauth`. Returns null when the server carries no usable OAuth id, so
  * callers fail closed. `grantScope` defaults to `'user'` for anything other
  * than the explicit `'context'` sentinel (U1: immutable per server, CEL-guarded).
@@ -129,10 +133,6 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
   const oauth = server.spec?.oauth
   if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
   const grantScope: GrantScope = oauth.grantScope === 'context' ? 'context' : 'user'
-  const contextRef =
-    typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
-      ? server.spec.contextRef
-      : undefined
   const legacyProvider =
     readOAuthLane(oauth) === 'baked' &&
     typeof oauth.provider === 'string' &&
@@ -142,7 +142,6 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
   return {
     oauthClientId: oauth.id,
     grantScope,
-    contextRef,
     crUid: readCrUid(server),
     ...(legacyProvider ? { legacyProvider } : {}),
   }
@@ -154,12 +153,16 @@ export interface McpServerGrantKeyCoords {
   mcpServerName: string
   /** The mcp-servers namespace — the grant owner's `recipeNamespace`. */
   mcpServersNamespace: string
-  /**
-   * End-user identity, for `grantScope='user'` servers only. IGNORED for
-   * `context` servers, which key by the server's AUTHORITATIVE `contextRef`
-   * (server-side), never by any caller-supplied context value.
-   */
+  /** End-user identity, for `grantScope='user'` servers only; ignored otherwise. */
   userId?: string
+  /**
+   * The Context (its `metadata.name`) of a `grantScope='context'` grant; ignored
+   * otherwise. A server has no Context of its own, so the caller supplies it from
+   * an authenticated source it has already validated: the consenting user's
+   * session (mint, disconnect), the signed state (callback) or the calling Host
+   * (broker, presence). Never an unchecked body value.
+   */
+  contextId?: string
 }
 
 /**
@@ -170,8 +173,7 @@ export interface McpServerGrantKeyCoords {
  * the coordinate the flavor needs is absent, so every caller decides fail-open
  * vs fail-closed for itself:
  *   - `user`    → needs a non-empty `userId`; null otherwise.
- *   - `context` → keys by the server's AUTHORITATIVE `contextRef` (server-side,
- *                 NEVER a body value); null when the server carries none.
+ *   - `context` → needs a non-empty `contextId`; null otherwise.
  *
  * It intentionally does NOT read the token or touch the DB — it only maps a
  * resolved OAuth declaration + coordinates to a key.
@@ -186,15 +188,13 @@ export function buildMcpServerGrantKey(
   coords: McpServerGrantKeyCoords
 ): OAuthGrantKey | null {
   if (resolved.grantScope === 'context') {
-    // Shared identity is keyed by the server's authoritative Context, decoupled
-    // from any caller-supplied userId/contextId (no body-trust).
-    if (!resolved.contextRef) return null
+    if (typeof coords.contextId !== 'string' || coords.contextId.length === 0) return null
     return {
       grantKind: 'shared',
       ownerKind: 'mcpserver',
       recipeNamespace: coords.mcpServersNamespace,
       recipeName: coords.mcpServerName,
-      contextId: resolved.contextRef,
+      contextId: coords.contextId,
       oauthClientId: resolved.oauthClientId,
       crUid: resolved.crUid,
       ...(resolved.legacyProvider ? { legacyProvider: resolved.legacyProvider } : {}),
@@ -229,10 +229,14 @@ export interface ResolvedServerOAuthSubject {
    */
   decl: OAuthClientDecl
   grantScope: GrantScope
-  /** Authoritative Context (spec.contextRef); undefined if absent. */
-  contextRef?: string
   /** metadata.uid of the CR this subject was read from; undefined if absent. */
   crUid?: string
+  /**
+   * `resolveServerOAuth` of the same CR: the grant coordinate the broker and the
+   * presence rails key by. The callback derives its grant key from it, so the
+   * row it writes can never differ in any key field from the one they read.
+   */
+  coordinate: ResolvedServerOAuth
 }
 
 export type RemoteOAuthSpecIncoherence =
@@ -240,13 +244,16 @@ export type RemoteOAuthSpecIncoherence =
   | 'bearer_in_body'
   | 'cimd_without_issuer_binding'
   | 'as_endpoints_cross_site'
+  | 'as_profile_issuer_mismatch'
+  | 'scope_audience_mismatch'
 
 /**
  * A remote `spec.oauth` the admission rules reject but that reached the apiserver
  * anyway (CRD applied after the object, or a write that bypassed validation, e.g. by
  * kubectl/GitOps). The phase using it refuses it with this specific error instead of
  * degrading to a generic failure: the CRD-mirror reasons (`public_client_with_secret_refs`,
- * `bearer_in_body`) in consent and token issuance alike; the per-server callback
+ * `bearer_in_body`, `as_profile_issuer_mismatch`) and the profile's scope audience
+ * (`scope_audience_mismatch`) in consent and token issuance alike; the per-server callback
  * reasons (`cimd_without_issuer_binding`, `as_endpoints_cross_site`) only in consent
  * (authorize-URL minting and the callback), so grants already obtained keep serving.
  */
@@ -270,6 +277,7 @@ export type RemoteOAuthCoherencePhase = 'consent' | 'token'
 
 function remoteOAuthSpecIncoherence(
   oauth: McpServerOAuthDecl,
+  baseUrl: unknown,
   phase: RemoteOAuthCoherencePhase
 ): RemoteOAuthSpecIncoherence | null {
   if (
@@ -279,6 +287,43 @@ function remoteOAuthSpecIncoherence(
     return 'public_client_with_secret_refs'
   }
   if (oauth.bearerInBody === true) return 'bearer_in_body'
+  // A profile stops sending RFC 8707 `resource`, so it is only honoured on the issuer it
+  // is recognised from; anywhere else it would strip the audience binding of another AS.
+  if (
+    oauth.asProfile !== undefined &&
+    (!isAsProfileId(oauth.asProfile) ||
+      typeof oauth.issuer !== 'string' ||
+      detectAsProfile(oauth.issuer)?.id !== oauth.asProfile)
+  ) {
+    return 'as_profile_issuer_mismatch'
+  }
+  // The converse: the install always pins the profile its issuer is recognised from, so
+  // a tenant issuer without one was written outside it, typically by an apiserver whose
+  // CRD predates the field and pruned it. On the generic wire that issuer either rejects
+  // the exchange or picks the audience from the browser's scopes.
+  if (
+    oauth.asProfile === undefined &&
+    typeof oauth.issuer === 'string' &&
+    detectAsProfile(oauth.issuer) !== null
+  ) {
+    return 'as_profile_issuer_mismatch'
+  }
+  // Without `resource` the scopes alone pick the token's audience, and the scopes or the
+  // base URL can be edited after the install (API or kubectl). The hard audience rules
+  // are therefore re-checked against the base URL in force now: a known API's GUID scope
+  // off its own host is refused. GUID scopes of an API the platform does not know pass:
+  // writing the CR is the operator's confirmation.
+  if (oauth.asProfile === 'entra-v2') {
+    const scopes = withProfileScopes(normalizeScopes(oauth.scopes) ?? [], 'entra-v2')
+    if (
+      typeof baseUrl !== 'string' ||
+      !URL.canParse(baseUrl) ||
+      profileScopeViolation('entra-v2', baseUrl, scopes) !== null ||
+      !profileHasResourceScope('entra-v2', baseUrl, scopes)
+    ) {
+      return 'scope_audience_mismatch'
+    }
+  }
   // The per-server rules defend the authorization response (which AS minted a code, and
   // where it is redeemed). A grant already obtained is sealed to this CR's uid and its
   // endpoints are immutable, so a refresh only ever returns to the token endpoint that
@@ -318,7 +363,10 @@ function asEndpointsOnIssuerSite(oauth: McpServerOAuthDecl): boolean {
 
 /**
  * Runtime mirror of the remote-carril coherence rules of the McpServer CRD
- * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER) and of the install's
+ * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER, AS-PROFILE-ISSUER), of the
+ * install's profile pinning (a recognised issuer always carries its profile; the CRD does
+ * not require it, and an older CRD prunes the field), of the install's
+ * scope-audience rules for an authorization-server profile, and of the install's
  * per-server callback rules (no CIMD client and same-site AS endpoints when the AS
  * does not return `iss`, which the CRD cannot express). Throws
  * {@link RemoteOAuthSpecIncoherentError} for a remote server whose shape no
@@ -336,7 +384,7 @@ export function assertRemoteOAuthSpecCoherent(
 ): void {
   const oauth = server.spec?.oauth
   if (!oauth || readOAuthLane(oauth) !== 'remote') return
-  const reason = remoteOAuthSpecIncoherence(oauth, phase)
+  const reason = remoteOAuthSpecIncoherence(oauth, server.spec?.remote?.baseUrl, phase)
   if (!reason) return
   const name = server.metadata?.name
   log.warn(
@@ -359,8 +407,14 @@ function extractRemoteRouting(oauth: McpServerOAuthDecl): RemoteClientRouting | 
   const tokenEndpoint = oauth.tokenEndpoint
   if (typeof authorizationEndpoint !== 'string' || authorizationEndpoint.length === 0) return null
   if (typeof tokenEndpoint !== 'string' || tokenEndpoint.length === 0) return null
+  const asProfile = isAsProfileId(oauth.asProfile) ? oauth.asProfile : undefined
+  // The CR keeps the PRM's `resource` for audit even when the profile does not send it.
   const resource =
-    typeof oauth.resource === 'string' && oauth.resource.length > 0 ? oauth.resource : undefined
+    remoteWireForProfile(asProfile).sendResource &&
+    typeof oauth.resource === 'string' &&
+    oauth.resource.length > 0
+      ? oauth.resource
+      : undefined
   const issForCallback =
     typeof oauth.issForCallback === 'string' && oauth.issForCallback.length > 0
       ? oauth.issForCallback
@@ -376,6 +430,7 @@ function extractRemoteRouting(oauth: McpServerOAuthDecl): RemoteClientRouting | 
     supportsRefresh: oauth.supportsRefresh === true,
     issForCallback,
     ...(issuer ? { issuer } : {}),
+    ...(asProfile ? { asProfile } : {}),
   }
 }
 
@@ -510,12 +565,9 @@ export function resolveServerOAuthSubject(
 ): ResolvedServerOAuthSubject | null {
   const oauth = server.spec?.oauth
   if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
-  const grantScope: GrantScope = oauth.grantScope === 'context' ? 'context' : 'user'
-  const contextRef =
-    typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
-      ? server.spec.contextRef
-      : undefined
-  const crUid = readCrUid(server)
+  const coordinate = resolveServerOAuth(server)
+  if (!coordinate) return null
+  const { grantScope, crUid } = coordinate
   const lane = readOAuthLane(oauth)
 
   // ─── Remote lane (`source:'remote'`) ─────────────────────────────────────
@@ -530,7 +582,9 @@ export function resolveServerOAuthSubject(
       // `remote` before any provider-adapter lookup. `'remote'` is the persisted /
       // displayed label.
       provider: 'remote',
-      scopes: normalizeScopes(oauth.scopes),
+      // With a profile the required scopes ride every authorize and refresh, even when
+      // the CR (edited after the install) dropped them.
+      scopes: withProfileScopes(normalizeScopes(oauth.scopes) ?? [], remote.asProfile),
       backgroundAccess: oauth.backgroundAccess === true,
       remote,
       secretSource,
@@ -539,7 +593,7 @@ export function resolveServerOAuthSubject(
       decl.clientIdRef = secretSource.clientIdRef
       decl.clientSecretRef = secretSource.clientSecretRef
     }
-    return { decl, grantScope, contextRef, crUid }
+    return { decl, grantScope, crUid, coordinate }
   }
 
   // ─── Generic self-hosted lane (`source:'generic'`, DEC-28) ────────────────
@@ -563,7 +617,7 @@ export function resolveServerOAuthSubject(
       decl.clientIdRef = secretSource.clientIdRef
       decl.clientSecretRef = secretSource.clientSecretRef
     }
-    return { decl, grantScope, contextRef, crUid }
+    return { decl, grantScope, crUid, coordinate }
   }
 
   // ─── Baked lane (byte-identical to before) ───────────────────────────────
@@ -581,7 +635,7 @@ export function resolveServerOAuthSubject(
       backgroundAccess: oauth.backgroundAccess === true,
     },
     grantScope,
-    contextRef,
     crUid,
+    coordinate,
   }
 }

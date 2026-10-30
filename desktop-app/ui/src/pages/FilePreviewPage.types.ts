@@ -23,6 +23,8 @@ export interface FilePreviewPageProps {
   /** One-shot Copy content action requested by a sidebar resource row. */
   pendingResourceAction?: GfsResourceActionRequest | null
   onPendingResourceActionHandled?: (requestId: number) => void
-  /** @deprecated Kept for App compatibility; GFS actions now use resource-local menus. */
+  /** Refresh the app-owned preview tab from the server after a successful rename. */
+  onRenameCommitted?: (gfsUri: string) => void
+  /** Native titlebar action slot supplied by the app shell. */
   titlebarLeadingTarget?: HTMLElement | null
 }

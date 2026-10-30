@@ -591,10 +591,10 @@ fi
 # them avoids repeated BuildKit metadata/blob downloads from Docker Hub during
 # pre-gate sync, which can fail on transient Cloudflare/R2 timeouts.
 BUILD_BASE_IMAGES=(
-  "node:24-alpine"
-  "node:24"
-  "node:24-slim"
-  "nginx:1.30.1-alpine"
+  "node:24.22.1-alpine"
+  "node:24.22.1"
+  "node:24.22.1-slim"
+  "nginx:1.30.6-alpine"
 )
 
 normalize_minikube_image_tag() {
@@ -1373,7 +1373,7 @@ if [ "$SKIP_PUBLIC" = false ]; then
   PUBLIC_IMAGES=(
     "postgres:16-alpine"
     "redis:7-alpine"
-    "nginx:1.30.1-alpine"
+    "nginx:1.30.6-alpine"
     # MinIO is not pulled here: nothing in this distribution consumes the
     # image; the optional sibling evenfire-registry deployment pulls its own.
     "axllent/mailpit:latest"

@@ -18,9 +18,8 @@ spec:
   size: 5Gi
   accessModes:
     # Minikube's default `standard` StorageClass is RWO-only. The wfc
-    # reconciler detects RWO and forces replicas:1 automatically (what GKE
-    # callers will do is set ReadWriteMany backed by the GCS FUSE
-    # StorageClass — see deploy/scripts/gcp-enable-gcsfuse.sh).
+    # Deployment always runs a single replica regardless of access mode;
+    # ReadWriteMany requires a StorageClass that supports it.
     - ReadWriteOnce
   directories:
     - docs

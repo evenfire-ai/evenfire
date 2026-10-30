@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
+import type { InstallFromRegistryResponse } from '../../lib/api'
 import type { CatalogOAuthBlock } from '../../lib/oauthInstall.types'
 import { NOTION_GENERIC_PREFILL } from '../../test/fixtures/genericDiscoveryPrefill'
 import { OAuthInstallForm } from '../OAuthInstallForm'
@@ -46,10 +47,23 @@ const GENERIC_MANIFEST = {
 vi.mock('../../lib/api', () => ({
   apiSend: vi.fn().mockResolvedValue({}),
   getOAuthCredentialManifest: vi.fn(),
+  getOAuthCallbackConfig: vi.fn(),
   listMcpSecrets: vi.fn(),
   discoverGenericOAuth: vi.fn(),
-  installFromRegistry: vi.fn().mockResolvedValue({ serverName: 'acme', namespace: 'mcp-server' }),
+  installFromRegistry: vi.fn().mockResolvedValue({
+    serverName: 'acme',
+    namespace: 'mcp-server',
+    registryEntry: 'acme',
+    registryVersion: '1.0.0',
+    correlationId: 'test-corr-id',
+    pendingCredentials: [],
+  } satisfies InstallFromRegistryResponse),
 }))
+
+const CALLBACK_CONFIGURED = {
+  configured: true,
+  redirectUriTemplate: 'https://oauth.example.com/api/v1/oauth-callback/{oauthClientId}',
+}
 
 const ENTRY = {
   id: '1',
@@ -81,7 +95,9 @@ async function waitForLoaded(): Promise<void> {
 }
 
 beforeEach(() => {
-  vi.stubEnv('NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL', 'https://oauth.example.com')
+  // Exact shape control-api's GET /admin/oauth/callback returns when
+  // CONTROL_API_OAUTH_CALLBACK_BASE_URL is set (routes/admin/oauthProviders.ts).
+  vi.mocked(api.getOAuthCallbackConfig).mockResolvedValue(CALLBACK_CONFIGURED)
   vi.mocked(api.getOAuthCredentialManifest).mockResolvedValue(MANIFEST)
   vi.mocked(api.listMcpSecrets).mockResolvedValue({ items: [] })
 })
@@ -89,7 +105,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  vi.unstubAllEnvs()
 })
 
 describe('OAuthInstallForm — scopes reach the submit (Fam A(3)/E-19.3)', () => {
@@ -120,6 +135,12 @@ describe('OAuthInstallForm — scopes reach the submit (Fam A(3)/E-19.3)', () =>
     expect(req.oauth?.grantScope).toBe('user')
     // oauth.id is never sent — control-api derives it (D-B5).
     expect(req.oauth).not.toHaveProperty('id')
+    expect(req).not.toHaveProperty('contextRef')
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'POST',
+      '/api/v1/admin/contexts',
+      expect.anything()
+    )
   })
 })
 
@@ -198,14 +219,58 @@ describe('OAuthInstallForm — manifest load failure blocks the managed gate', (
   })
 })
 
+describe('OAuthInstallForm — callback configuration comes from control-api at runtime', () => {
+  it('renders the exact redirect URI from the control-api template, not a build-time env', async () => {
+    renderForm({ provider: 'google', grantScope: 'user', scopes: ['a.read'] })
+    await waitForLoaded()
+
+    expect(await screen.findByRole('textbox', { name: 'Redirect URI' })).toHaveValue(
+      'https://oauth.example.com/api/v1/oauth-callback/acme'
+    )
+    expect(api.getOAuthCallbackConfig).toHaveBeenCalled()
+    expect(screen.queryByText(/is not configured/i)).toBeNull()
+  })
+
+  it('renders the redirect URI for the generic carril too', async () => {
+    vi.mocked(api.getOAuthCredentialManifest).mockResolvedValue(GENERIC_MANIFEST)
+    renderForm({ provider: 'generic', grantScope: 'user', scopes: [] })
+    await waitForLoaded()
+
+    expect(await screen.findByRole('textbox', { name: 'Redirect URI' })).toHaveValue(
+      'https://oauth.example.com/api/v1/oauth-callback/acme'
+    )
+  })
+
+  it('surfaces a load failure distinctly and keeps install blocked', async () => {
+    vi.mocked(api.getOAuthCallbackConfig).mockRejectedValue(new Error('callback boom'))
+    renderForm({ provider: 'google', grantScope: 'user', scopes: ['a.read'] })
+    await waitForLoaded()
+
+    expect(await screen.findByText(/callback boom/)).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Redirect URI' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.change(screen.getByLabelText('Client ID', { exact: false }), {
+      target: { value: 'cid' },
+    })
+    fireEvent.change(screen.getByLabelText('Client Secret', { exact: false }), {
+      target: { value: 'csecret' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
+  })
+})
+
 describe('OAuthInstallForm — callback base URL not configured', () => {
   it('shows the not-configured notice and disables install', async () => {
-    vi.stubEnv('NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL', '')
+    vi.mocked(api.getOAuthCallbackConfig).mockResolvedValue({ configured: false })
     renderForm({ provider: 'google', grantScope: 'user', scopes: ['a.read'] })
     await waitForLoaded()
 
     // Step 0 shows the not-configured warning instead of a (broken) redirect URI.
-    expect(screen.getByText(/public OAuth callback URL is not configured/i)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/public OAuth callback URL is not configured/i)
+    ).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.change(screen.getByLabelText('Client ID', { exact: false }), {
