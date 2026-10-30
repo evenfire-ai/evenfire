@@ -17437,11 +17437,40 @@ pre {
 }
 
 .chat-view-tabs__scroller {
+  flex: 1 1 0;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  transform: rotateX(180deg);
-  width: 100%;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.chat-view-tabs__scroller::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
+.chat-view-tabs__scroll-button {
+  align-self: center;
+  flex: 0 0 auto;
+  margin-bottom: var(--space-0-5);
+}
+
+.chat-view-tabs__scroll-button[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.chat-view-tabs__scroll-button[aria-disabled='true']:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.chat-view-tabs__scroll-button svg {
+  height: 14px;
+  width: 14px;
 }
 
 .chat-view-tabs__list {
@@ -17449,7 +17478,6 @@ pre {
   gap: var(--space-1);
   min-width: 100%;
   position: relative;
-  transform: rotateX(180deg);
   width: 100%;
 }
 
