@@ -364,13 +364,15 @@ async function hashCapturedGfsDownload(
 
 async function expectGfsDownload(
   page: Page,
-  button: Locator,
+  controls: ReturnType<typeof fileResourceControls>,
   filename: string,
   expected: { bytes: number; sha256: string }
 ): Promise<void> {
   await installGfsDownloadCapture(page)
-  await expect(button).toBeVisible()
-  await button.click()
+  // Row actions stay hidden and ignore the pointer until the row is hovered
+  // (`.da-gfs-drive__grid .da-gfs-list__actions` in styles.css), as for a user.
+  await controls.name.hover()
+  await controls.download.click()
   await expect(page.getByText(`Downloaded ${filename}`, { exact: true })).toBeVisible({
     timeout: 300_000,
   })
@@ -517,7 +519,7 @@ test.describe('attachment-gfs-save fixture', () => {
       const { browser } = await browseToFolder(page, folder.name)
       const controls = fileResourceControls(browser, fileName)
       await expect(controls.name).toBeVisible()
-      await expectGfsDownload(page, controls.download, fileName, {
+      await expectGfsDownload(page, controls, fileName, {
         bytes: png.length,
         sha256: sha256Hex(png),
       })
@@ -607,7 +609,7 @@ test.describe('attachment-gfs-save fixture', () => {
       const { browser } = await browseToFolder(page, folder.name)
       const controls = fileResourceControls(browser, fileName)
       await expect(controls.name).toBeVisible()
-      await expectGfsDownload(page, controls.download, fileName, {
+      await expectGfsDownload(page, controls, fileName, {
         bytes: blob.length,
         sha256: sha256Hex(blob),
       })
