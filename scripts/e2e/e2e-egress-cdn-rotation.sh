@@ -120,6 +120,9 @@ SERVER="e2e-cdn-rotation"
 CONTROL="e2e-cdn-rotation-dev-control"
 MANAGED_CONTEXT="context1"
 TRANSPORT_PORT=3000
+# The egress binding port: HCC names the exact-host policy
+# ext-egress-<server>-<dns>-<binding port> (networkPolicyReconciler.ts).
+UPSTREAM_PORT=443
 OVERRIDE_ANNOTATION="clerum.io/e2e-temporary-override"
 OVERRIDE_VALUE="e2e-egress-cdn-rotation"
 STATE_ANNOTATION="clerum.io/egress-fqdn-state"
@@ -759,7 +762,7 @@ phase0() {
   EXPECTED_B_CIDRS="$(cidrs_of "${SET_B[@]}")"
   EXPECTED_A_JSON="$(jq -cn '$ARGS.positional' --args "${SET_A[@]}")"
   EXPECTED_B_JSON="$(jq -cn '$ARGS.positional' --args "${SET_B[@]}")"
-  POLICY_NAME="ext-egress-${SERVER}-${CDN_HOST}-${TRANSPORT_PORT}"
+  POLICY_NAME="ext-egress-${SERVER}-${CDN_HOST}-${UPSTREAM_PORT}"
   ok "inputs accepted: host ${CDN_HOST}, set A ${CSV_A}, set B ${CSV_B}"
 
   if [ -z "${KUBECONTEXT:-}" ] || [ "$KUBECONTEXT" != "$E2E_KUBECONTEXT" ]; then
@@ -1087,7 +1090,7 @@ spec:
     baseUrl: https://${CDN_HOST}/mcp
   egressBindings:
     - dns: ${CDN_HOST}
-      port: 443
+      port: ${UPSTREAM_PORT}
       protocol: TCP
 YAML
 }
