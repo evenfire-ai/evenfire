@@ -22,6 +22,7 @@ export type OidcProtocolAttemptBinding = Readonly<{
 export type OidcProtocolAttemptWrite = OidcProtocolAttemptBinding &
   Readonly<{
     state: string
+    browserBinding: string
     pkceVerifier: string
     nonce: string
     expiresAt: Date
@@ -146,8 +147,9 @@ export async function insertOidcProtocolAttempt(
   encryptionKeyHex: string,
   input: OidcProtocolAttemptWrite
 ): Promise<{ id: string; expiresAt: Date }> {
-  if (!input.state || !input.pkceVerifier || !input.nonce) {
-    throw new Error('OIDC protocol attempt requires state, PKCE verifier, and nonce')
+  const browserBindingHash = hashBrowserBinding(input.browserBinding)
+  if (!input.state || !browserBindingHash || !input.pkceVerifier || !input.nonce) {
+    throw new Error('OIDC protocol attempt requires state, browser binding, verifier, and nonce')
   }
   const key = deriveOAuthEncryptionKey(encryptionKeyHex)
   const id = randomUUID()
@@ -171,9 +173,9 @@ export async function insertOidcProtocolAttempt(
   const result = await db.query(
     `INSERT INTO oidc_protocol_attempts (
        id, state_hash, registration_id, configuration_generation, issuer, client_id,
-       redirect_uri, response_mode, purpose, pkce_verifier_encrypted,
+       redirect_uri, response_mode, purpose, browser_binding_hash, pkce_verifier_encrypted,
        nonce_encrypted, status, expires_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12)
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', $13)
      RETURNING id, expires_at`,
     [
       id,
@@ -185,6 +187,7 @@ export async function insertOidcProtocolAttempt(
       input.redirectUri,
       input.responseMode,
       ATTEMPT_PURPOSE,
+      browserBindingHash,
       encryptAttemptSecret(key, id, 'pkce-verifier', input.pkceVerifier),
       encryptAttemptSecret(key, id, 'nonce', input.nonce),
       input.expiresAt,
@@ -200,9 +203,11 @@ export async function claimOidcProtocolAttempt(
   db: Pick<DbClient, 'query'>,
   encryptionKeyHex: string,
   state: string,
+  browserBinding: string,
   binding: OidcProtocolAttemptBinding
 ): Promise<ClaimedOidcProtocolAttempt | null> {
-  if (!state || state.length > 512) return null
+  const browserBindingHash = hashBrowserBinding(browserBinding)
+  if (!state || state.length > 512 || !browserBindingHash) return null
   const stateHash = createHash('sha256').update(state, 'utf8').digest('hex')
   const result = await db.query(
     `WITH candidate AS (
@@ -210,14 +215,15 @@ export async function claimOidcProtocolAttempt(
          FROM oidc_protocol_attempts
         WHERE state_hash = $1
           AND status = 'pending'
+          AND browser_binding_hash = $2
           AND expires_at > now()
-          AND registration_id = $2
-          AND configuration_generation = $3
-          AND issuer = $4
-          AND client_id = $5
-          AND redirect_uri = $6
-          AND response_mode = $7
-          AND purpose = $8
+          AND registration_id = $3
+          AND configuration_generation = $4
+          AND issuer = $5
+          AND client_id = $6
+          AND redirect_uri = $7
+          AND response_mode = $8
+          AND purpose = $9
         FOR UPDATE
      ), claimed AS (
        UPDATE oidc_protocol_attempts AS attempt
@@ -235,6 +241,7 @@ export async function claimOidcProtocolAttempt(
      SELECT * FROM claimed`,
     [
       stateHash,
+      browserBindingHash,
       binding.registrationId,
       binding.configurationGeneration,
       binding.issuer,
@@ -283,9 +290,11 @@ export async function finishOidcProtocolAttempt(
 export async function cancelOidcProtocolAttempt(
   db: Pick<DbClient, 'query'>,
   state: string,
+  browserBinding: string,
   binding: OidcProtocolAttemptBinding
 ): Promise<boolean> {
-  if (!state || state.length > 512) return false
+  const browserBindingHash = hashBrowserBinding(browserBinding)
+  if (!state || state.length > 512 || !browserBindingHash) return false
   const stateHash = createHash('sha256').update(state, 'utf8').digest('hex')
   const result = await db.query(
     `UPDATE oidc_protocol_attempts
@@ -295,15 +304,17 @@ export async function cancelOidcProtocolAttempt(
             nonce_encrypted = NULL
       WHERE state_hash = $1
         AND status = 'pending'
-        AND registration_id = $2
-        AND configuration_generation = $3
-        AND issuer = $4
-        AND client_id = $5
-        AND redirect_uri = $6
-        AND response_mode = $7
-        AND purpose = $8`,
+        AND browser_binding_hash = $2
+        AND registration_id = $3
+        AND configuration_generation = $4
+        AND issuer = $5
+        AND client_id = $6
+        AND redirect_uri = $7
+        AND response_mode = $8
+        AND purpose = $9`,
     [
       stateHash,
+      browserBindingHash,
       binding.registrationId,
       binding.configurationGeneration,
       binding.issuer,
@@ -314,6 +325,111 @@ export async function cancelOidcProtocolAttempt(
     ]
   )
   return (result.rowCount ?? 0) === 1
+}
+
+/** Read-only browser/state preflight. The later conditional claim remains authoritative. */
+export async function preflightOidcProtocolAttempt(
+  db: Pick<DbClient, 'query'>,
+  state: string,
+  browserBinding: string,
+  binding: OidcProtocolAttemptBinding
+): Promise<boolean> {
+  const browserBindingHash = hashBrowserBinding(browserBinding)
+  if (!state || state.length > 512 || !browserBindingHash) return false
+  const stateHash = createHash('sha256').update(state, 'utf8').digest('hex')
+  const result = await db.query(
+    `SELECT 1
+       FROM oidc_protocol_attempts
+      WHERE state_hash = $1
+        AND browser_binding_hash = $2
+        AND registration_id = $3
+        AND configuration_generation = $4
+        AND issuer = $5
+        AND client_id = $6
+        AND redirect_uri = $7
+        AND response_mode = $8
+        AND purpose = $9
+        AND status = 'pending'
+        AND expires_at > now()
+      LIMIT 1`,
+    [
+      stateHash,
+      browserBindingHash,
+      binding.registrationId,
+      binding.configurationGeneration,
+      binding.issuer,
+      binding.clientId,
+      binding.redirectUri,
+      binding.responseMode,
+      ATTEMPT_PURPOSE,
+    ]
+  )
+  return result.rows.length === 1
+}
+
+/** Additive schema upgrade: old unbound attempts are terminalized, never grandfathered. */
+export async function applyOidcProtocolAttemptBrowserBindingSchema(
+  db: Pick<DbClient, 'query'>
+): Promise<void> {
+  const table = await db.query(
+    `SELECT to_regclass('public.oidc_protocol_attempts')::text AS relation`
+  )
+  const relation = table.rows[0] as { relation?: string | null } | undefined
+  if (!relation?.relation) await applyOidcProtocolAttemptSchema(db)
+
+  await db.query(`
+    ALTER TABLE public.oidc_protocol_attempts
+      ADD COLUMN IF NOT EXISTS browser_binding_hash TEXT;
+
+    UPDATE public.oidc_protocol_attempts
+       SET status = 'cancelled',
+           finished_at = now(),
+           pkce_verifier_encrypted = NULL,
+           nonce_encrypted = NULL
+     WHERE status = 'pending'
+       AND browser_binding_hash IS NULL;
+
+    UPDATE public.oidc_protocol_attempts
+       SET status = 'failed',
+           finished_at = now()
+     WHERE status = 'redeeming'
+       AND browser_binding_hash IS NULL;
+  `)
+  await db.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'oidc_protocol_attempts_browser_binding_hash_format'
+           AND conrelid = 'public.oidc_protocol_attempts'::regclass
+      ) THEN
+        ALTER TABLE public.oidc_protocol_attempts
+          ADD CONSTRAINT oidc_protocol_attempts_browser_binding_hash_format
+          CHECK (browser_binding_hash IS NULL OR browser_binding_hash ~ '^[0-9a-f]{64}$');
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'oidc_protocol_attempts_pending_requires_browser_binding'
+           AND conrelid = 'public.oidc_protocol_attempts'::regclass
+      ) THEN
+        ALTER TABLE public.oidc_protocol_attempts
+          ADD CONSTRAINT oidc_protocol_attempts_pending_requires_browser_binding
+          CHECK (status <> 'pending' OR browser_binding_hash IS NOT NULL);
+      END IF;
+    END $$;
+  `)
+  await db.query(`
+    REVOKE ALL PRIVILEGES ON TABLE oidc_protocol_attempts FROM PUBLIC;
+    REVOKE ALL PRIVILEGES ON TABLE oidc_protocol_attempts
+      FROM trace_maintenance_runtime, workflow_recipes_runtime;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE oidc_protocol_attempts TO control_api_runtime;
+    REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE oidc_protocol_attempts FROM control_api_runtime;
+  `)
+}
+
+function hashBrowserBinding(value: string): string | null {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) return null
+  return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
 function asDate(value: Date | string): Date {

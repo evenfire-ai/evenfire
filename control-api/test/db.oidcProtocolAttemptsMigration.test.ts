@@ -22,7 +22,9 @@ describe(`${VERSION} migration`, () => {
     expect(CONTROL_API_MIGRATIONS[migrationIndex]?.legacyVersions).toEqual([
       '0130_oidc_protocol_attempts',
     ])
-    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe('0132_oidc_protocol_attempt_expiry_index')
+    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(
+      '0133_oidc_protocol_attempt_browser_binding'
+    )
   })
 
   it('creates only purpose-bound OIDC protocol attempts with encrypted transient proof inputs', async () => {

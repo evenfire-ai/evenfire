@@ -1,4 +1,10 @@
-import { type KeyObject, createHash, createSign, generateKeyPairSync } from 'node:crypto'
+import {
+  type KeyObject,
+  createHash,
+  createSign,
+  generateKeyPairSync,
+  randomBytes,
+} from 'node:crypto'
 import type { DbClient } from '../../src/db.js'
 import type {
   PinnedRawResponse,
@@ -23,6 +29,7 @@ type StoredAttempt = {
   clientId: string
   redirectUri: string
   responseMode: string
+  browserBindingHash: string
   verifierEncrypted: string | null
   nonceEncrypted: string | null
   status: string
@@ -50,25 +57,43 @@ export class OidcR5MemoryAttemptDb {
           clientId: String(values[5]),
           redirectUri: String(values[6]),
           responseMode: String(values[7]),
-          verifierEncrypted: String(values[9]),
-          nonceEncrypted: String(values[10]),
+          browserBindingHash: String(values[9]),
+          verifierEncrypted: String(values[10]),
+          nonceEncrypted: String(values[11]),
           status: 'pending',
-          expiresAt: new Date(values[11] as Date),
+          expiresAt: new Date(values[12] as Date),
           createdAt: new Date(),
         }
         this.rows.set(row.id, row)
         return { rows: [{ id: row.id, expires_at: row.expiresAt }], rowCount: 1 }
       }
+      if (sql.includes('SELECT 1') && sql.includes('browser_binding_hash = $2')) {
+        const row = [...this.rows.values()].find(
+          candidate =>
+            candidate.stateHash === values[0] &&
+            candidate.browserBindingHash === values[1] &&
+            candidate.registrationId === values[2] &&
+            candidate.configurationGeneration === values[3] &&
+            candidate.issuer === values[4] &&
+            candidate.clientId === values[5] &&
+            candidate.redirectUri === values[6] &&
+            candidate.responseMode === values[7] &&
+            candidate.status === 'pending' &&
+            candidate.expiresAt.getTime() > Date.now()
+        )
+        return { rows: row ? [{ '?column?': 1 }] : [], rowCount: row ? 1 : 0 }
+      }
       if (sql.includes('WITH candidate AS')) {
         const row = [...this.rows.values()].find(
           candidate =>
             candidate.stateHash === values[0] &&
-            candidate.registrationId === values[1] &&
-            candidate.configurationGeneration === values[2] &&
-            candidate.issuer === values[3] &&
-            candidate.clientId === values[4] &&
-            candidate.redirectUri === values[5] &&
-            candidate.responseMode === values[6] &&
+            candidate.browserBindingHash === values[1] &&
+            candidate.registrationId === values[2] &&
+            candidate.configurationGeneration === values[3] &&
+            candidate.issuer === values[4] &&
+            candidate.clientId === values[5] &&
+            candidate.redirectUri === values[6] &&
+            candidate.responseMode === values[7] &&
             candidate.status === 'pending' &&
             candidate.expiresAt.getTime() > Date.now()
         )
@@ -98,7 +123,10 @@ export class OidcR5MemoryAttemptDb {
         }
       }
       if (sql.includes("SET status = 'cancelled'")) {
-        const row = [...this.rows.values()].find(candidate => candidate.stateHash === values[0])
+        const row = [...this.rows.values()].find(
+          candidate =>
+            candidate.stateHash === values[0] && candidate.browserBindingHash === values[1]
+        )
         if (!row || row.status !== 'pending') return { rows: [], rowCount: 0 }
         row.status = 'cancelled'
         row.verifierEncrypted = null
@@ -139,6 +167,7 @@ export function createRsaPublicJwk(publicKey: KeyObject, kid: string): Record<st
 
 export type OidcR5FixtureOptions = {
   hostPrefix?: string
+  redirectUri?: string
   clientAuthenticationMethod?: 'client_secret_basic' | 'client_secret_post'
   advertisedClientAuthenticationMethods?: string[]
   modulusLength?: number
@@ -159,7 +188,7 @@ export function createOidcR5ProtocolFixture(options: OidcR5FixtureOptions = {}) 
       CONTROL_API_OIDC_CLIENT_ID: CLIENT_ID,
       CONTROL_API_OIDC_CLIENT_SECRET: CLIENT_SECRET,
       CONTROL_API_OIDC_CLIENT_AUTH_METHOD: clientAuthenticationMethod,
-      CONTROL_API_OIDC_REDIRECT_URI: REDIRECT_URI,
+      CONTROL_API_OIDC_REDIRECT_URI: options.redirectUri ?? REDIRECT_URI,
       CONTROL_API_OIDC_RESPONSE_MODE: 'query',
       CONTROL_API_OIDC_TRUST_GENERATION: 'r5-test-generation',
     },
@@ -234,6 +263,7 @@ export function createOidcR5ProtocolFixture(options: OidcR5FixtureOptions = {}) 
     throw new Error(`Unexpected fixture request to ${input.url}`)
   }
   const db = new OidcR5MemoryAttemptDb()
+  const browserBindings = new Map<string, string>()
   const engine = new OidcProtocolEngine(provider, {
     db: db.client,
     getClientSecret: () => CLIENT_SECRET,
@@ -260,15 +290,27 @@ export function createOidcR5ProtocolFixture(options: OidcR5FixtureOptions = {}) 
     setKeys(next: Record<string, unknown>[]) {
       keys = next
     },
-    async begin() {
-      const attempt = await engine.beginIdentityProofAttempt()
-      const params = new URL(attempt.authorizationUrl).searchParams
+    expectAuthorizationResponse(authorizationUrl: string) {
+      const params = new URL(authorizationUrl).searchParams
       nonce = params.get('nonce') ?? ''
       challenge = params.get('code_challenge') ?? ''
-      return { state: params.get('state')! }
+    },
+    async begin() {
+      const browserBinding = randomBytes(32).toString('base64url')
+      const attempt = await engine.beginIdentityProofAttempt({ browserBinding })
+      this.expectAuthorizationResponse(attempt.authorizationUrl)
+      const params = new URL(attempt.authorizationUrl).searchParams
+      const state = params.get('state')!
+      browserBindings.set(state, browserBinding)
+      return { state, browserBinding }
     },
     async complete(state: string) {
-      return engine.completeIdentityProofAttempt({ state, code: 'r5-fixture-code', issuer })
+      return engine.completeIdentityProofAttempt({
+        state,
+        browserBinding: browserBindings.get(state),
+        code: 'r5-fixture-code',
+        issuer,
+      })
     },
   }
 }

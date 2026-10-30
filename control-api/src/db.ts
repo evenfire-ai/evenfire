@@ -7,6 +7,7 @@ import {
 import { config } from './config.js'
 import { rootLogger } from './observability/logger.js'
 import {
+  applyOidcProtocolAttemptBrowserBindingSchema,
   applyOidcProtocolAttemptExpiryIndexMigration,
   applyOidcProtocolAttemptSchema,
 } from './oidc/protocolAttemptStore.js'
@@ -6400,6 +6401,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0132_oidc_protocol_attempt_expiry_index',
     apply: applyOidcProtocolAttemptExpiryIndexMigration,
+  },
+  {
+    version: '0133_oidc_protocol_attempt_browser_binding',
+    apply: applyOidcProtocolAttemptBrowserBindingSchema,
   },
 ]
 
