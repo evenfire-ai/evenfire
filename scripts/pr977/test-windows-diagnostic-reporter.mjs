@@ -9,6 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -20,6 +21,8 @@ if (
   throw new Error('Expected absolute dependency, application Desktop and scratch roots')
 }
 const here = path.dirname(fileURLToPath(import.meta.url))
+const requireFromDesktop = createRequire(path.join(applicationRoot, 'package.json'))
+const { load: loadYaml } = requireFromDesktop('js-yaml')
 const scratchDirectory = path.join(scratchRoot, 'evenfire')
 mkdirSync(scratchDirectory, { recursive: true })
 const directory = mkdtempSync(path.join(scratchDirectory, 'pr977-reporter-proof-'))
@@ -433,16 +436,59 @@ describe('Windows plugin storage DACL privacy', () => {
     path.join(here, '../../.github/workflows/pr977-exact-source-windows-full-sharded.yml'),
     'utf8'
   )
-  const expectedSourceSha = focusedWorkflow.match(/^\s*PR977_SOURCE_SHA:\s*([0-9a-f]{40})$/m)?.[1]
-  const sourceCheckout = focusedWorkflow.match(
-    /- name: Check out exact application source([\s\S]*?)(?=\n      - name:)/
-  )?.[1]
-  assert.ok(expectedSourceSha, 'Focused workflow must pin an exact application source SHA')
-  assert.ok(sourceCheckout, 'Focused workflow must check out the pinned application source')
-  assert.match(
-    sourceCheckout,
-    new RegExp(`ref:\\s*${expectedSourceSha}`),
-    'Focused workflow checkout must use the exact source SHA enforced by its guard'
+  const expectedSourceSha = '7b9770947126def942fdca2a12eab2a12c24e653'
+  const expectedValidationRef = '${{ github.sha }}'
+  const focusedConfig = loadYaml(focusedWorkflow)
+  const fullConfig = loadYaml(fullWorkflow)
+  const getCheckoutSteps = (workflow, checkoutPath) =>
+    Object.values(workflow.jobs)
+      .flatMap(job => job.steps ?? [])
+      .filter(
+        step => step.uses?.startsWith('actions/checkout@') && step.with?.path === checkoutPath
+      )
+  const assertPinnedCheckouts = (workflow, label, expectedSourceCheckouts) => {
+    assert.equal(workflow.env.PR977_SOURCE_SHA, expectedSourceSha, `${label} source guard SHA`)
+    const sourceCheckouts = getCheckoutSteps(workflow, 'source')
+    const validationCheckouts = getCheckoutSteps(workflow, 'validation')
+    assert.equal(sourceCheckouts.length, expectedSourceCheckouts, `${label} source checkout count`)
+    assert.equal(
+      validationCheckouts.length,
+      expectedSourceCheckouts,
+      `${label} validation checkout count`
+    )
+    for (const step of sourceCheckouts) {
+      assert.equal(step.with.ref, expectedSourceSha, `${label} source checkout ref`)
+    }
+    for (const step of validationCheckouts) {
+      assert.equal(step.with.ref, expectedValidationRef, `${label} validation checkout ref`)
+    }
+    const verificationRuns = Object.values(workflow.jobs)
+      .flatMap(job => job.steps ?? [])
+      .filter(step => /Verify .*source/i.test(step.name ?? ''))
+      .map(step => step.run ?? '')
+    assert.ok(
+      verificationRuns.some(run => run.includes('$sourceSha -ne $env:PR977_SOURCE_SHA')),
+      `${label} must compare the checked-out source with its source SHA guard`
+    )
+  }
+  assert.equal(focusedConfig.on.push.branches[0], 'test/pr977-windows-68b8ea74-20261030-r24l11')
+  assert.equal(fullConfig.on.push.branches[0], 'test/pr977-windows-68b8ea74-20261030-r24l11')
+  assert.deepEqual(fullConfig.on.push.paths, ['.validation/windows/pr977-r24m7-run-2.trigger'])
+  assertPinnedCheckouts(focusedConfig, 'Focused workflow', 1)
+  assertPinnedCheckouts(fullConfig, 'Full workflow', 4)
+  const staleFocusedConfig = structuredClone(focusedConfig)
+  getCheckoutSteps(staleFocusedConfig, 'source')[0].with.ref =
+    '68b8ea7430ade92e1107381f0d08d76a2c72ec71'
+  assert.throws(
+    () => assertPinnedCheckouts(staleFocusedConfig, 'Focused workflow', 1),
+    /Focused workflow source checkout ref/
+  )
+  const staleFullConfig = structuredClone(fullConfig)
+  getCheckoutSteps(staleFullConfig, 'source')[2].with.ref =
+    '68b8ea7430ade92e1107381f0d08d76a2c72ec71'
+  assert.throws(
+    () => assertPinnedCheckouts(staleFullConfig, 'Full workflow', 4),
+    /Full workflow source checkout ref/
   )
   assert.match(focusedWorkflow, /timeout-minutes:\s*12/)
   assert.match(focusedWorkflow, /--maximum-runtime-ms=360000/)
