@@ -10,10 +10,11 @@
  * Both providers run this file as its own `model-step-retry` lane suite
  * (`APPROVED_TOOLS_SUITE=model-step-retry`), with no dependency on
  * `codex-subscription-approved-tools.spec.ts`. The first test is the visible
- * setup: Codex creates the fixture grant (`prepareSubscriptionVisible`) and both
- * providers bind the 83-tool agent to its subscription model in the Control UI;
- * the suite's cases depend on that one project, so the grant capture runs once.
- * Codex runs C1–C11, Grok runs C1, C2 and C11.
+ * setup: Codex creates the fixture grant (`prepareSubscriptionVisible`), both
+ * providers bind the 83-tool agent to its subscription model in the Control UI,
+ * and that same test attaches the receipt connector once. The suite's cases
+ * depend on that one project, so setup runs once. Codex runs C1–C12, Grok runs
+ * C1, C2 and C11.
  * Deterministic upstream only: a real provider cannot be made to fail on a chosen
  * model step.
  *
@@ -24,12 +25,18 @@
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
+import { expectAgentConnectorRunning } from '../helpers/agent-connectors'
 import {
   readAgentDeploymentGeneration,
   restartAgentPod,
   waitForAgentRollout,
 } from '../helpers/agent-rollout'
-import { newAgentResponses, openAgentChat, send } from '../helpers/approved-tools-chat'
+import {
+  newAgentResponses,
+  openNewAgentChat,
+  send,
+  signInDesktop,
+} from '../helpers/approved-tools-chat'
 import {
   assertConfirmedToolNotReexecuted,
   toolExecutions,
@@ -47,7 +54,7 @@ import {
   scenarios,
 } from '../helpers/approved-tools-scenarios'
 import { prepareSubscriptionVisible } from '../helpers/approved-tools-subscription'
-import { signOutDesktop } from '../helpers/desktop-session'
+import { attachDesktopBeforeTeardown, signOutDesktop } from '../helpers/desktop-session'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
@@ -61,14 +68,28 @@ function failureLabel(): string {
     approvedToolsProvider() === 'grok' ? 'GROK-SUBSCRIPTION' : 'CODEX-SUBSCRIPTION'
   }`
 }
-// Every journey that ends on the resumable notice fails its model step twice:
-// the Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=1 retries that step once by
-// itself, so the first 503 is absorbed and the second one stands. C2 injects a
-// single outage before any tool: with no confirmed tool there is nothing to
-// resume, so the Host never retries it and Resend is the only action.
+// Every journey that ends on the resumable notice fails its model step four
+// times: the Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=3 retries that step
+// three times by itself, so the first three 503s are absorbed and the fourth one
+// stands. C2 injects a single outage before any tool: with no confirmed tool
+// there is nothing to resume, so the Host never retries it and Resend is the only
+// action. C11 injects exactly the three absorbed outages, and C12 holds its one
+// retried call past the Host's 60 s cap.
 const RESEND_LABEL = 'Retry last send'
 const KEPT_TOOL_NOTICE = '1 tool call already completed and will not run again.'
 const TURN_TIMEOUT = 120_000
+const NOTICE_OUTAGES = 4
+const ABSORBED_OUTAGES = 3
+// The notice is measured from the send with this test's own clock: the cap ends
+// the held retry 60 s after the step's first failure, and the search and the
+// render add a few seconds. The window leaves room for both and nothing else.
+const CAP_NOTICE_MIN_MS = 58_000
+const CAP_NOTICE_MAX_MS = 75_000
+
+/** `count` copies of one repeated stage name. */
+function repeatedStage(count: number, stage: string): string[] {
+  return Array.from({ length: count }, () => stage)
+}
 
 type Snapshot = { counts: ModelStepRetryEvidence; stages: string[]; rejected: number }
 type Checkpoint = {
@@ -210,7 +231,10 @@ async function expectContinued(desktop: Page, responses: Locator, value: string)
 }
 
 /** One signed-in Desktop chat with the scenario's agent, signed out on exit. */
-async function withDesktopChat(run: (desktop: Page) => Promise<void>) {
+async function withDesktopChat(
+  run: (desktop: Page) => Promise<void>,
+  options: { connector?: boolean } = {}
+) {
   if (required('APPROVED_TOOLS_UPSTREAM_MODE') !== 'deterministic')
     throw new Error('The model-step retry cases need the deterministic upstream')
   if (process.env.PLAYWRIGHT_DESKTOP_BUILT !== 'true')
@@ -219,10 +243,16 @@ async function withDesktopChat(run: (desktop: Page) => Promise<void>) {
   let journeyPassed = false
   try {
     const desktop = await app.firstWindow()
-    await openAgentChat(desktop, scenario())
+    await signInDesktop(desktop)
+    // The connector witness opens its own page, so it runs before the chat.
+    if (options.connector) await expectAgentConnectorRunning(desktop, scenario())
+    await openNewAgentChat(desktop, scenario())
     await run(desktop)
     journeyPassed = true
   } finally {
+    // The window state at the failure point, before sign-out replaces it with
+    // the login form: a passing journey has nothing to capture.
+    if (!journeyPassed) await attachDesktopBeforeTeardown(await app.firstWindow())
     // Sign out on every path, so the journey ends its session.
     let cleanupError: string | undefined
     try {
@@ -241,15 +271,49 @@ async function withDesktopChat(run: (desktop: Page) => Promise<void>) {
   }
 }
 
+/**
+ * Attaches the receipt connector visibly, once, after the model binding was
+ * rolled out. Both suites prepare their agent with an empty connector list
+ * (`mcpServers: []`), so the empty state below is the fixture's own, not a
+ * leftover from another journey. The attach itself needs no rollout: the Host
+ * loads a Context `mcpServers` change through its own poll, and every case that
+ * needs the connector witnesses its live status before its first send
+ * (`expectAgentConnectorRunning`).
+ */
+async function attachReceiptConnector(page: Page) {
+  const active = scenario()
+  await page.getByRole('tab', { name: 'Connectors', exact: true }).click()
+  await expect(page).toHaveURL(new RegExp(`/agents/${active.agentName}/connectors$`))
+  await expect(page.getByText('No connectors attached yet.', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Add connector', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Add connectors' })
+  // The picker is MultiSelectActionDialog: one checkbox per connector.
+  await dialog.getByRole('checkbox', { name: active.connectorName, exact: true }).check()
+  const savedResponse = page.waitForResponse(
+    response =>
+      new URL(response.url()).pathname ===
+        browserApiPath(`/api/v1/admin/contexts/${active.contextName}`) &&
+      response.request().method() === 'PUT'
+  )
+  await dialog.getByRole('button', { name: 'Add connector', exact: true }).click()
+  const saved = await savedResponse
+  expect(saved.ok()).toBe(true)
+  const body = await saved.json()
+  expect(body.metadata.name).toBe(active.contextName)
+  expect(body.spec.mcpServers).toContain(active.connectorName)
+  await expect(page.getByText('Connectors updated.', { exact: true })).toBeVisible()
+}
+
 // #1044: preparation creates the agent unbound (`connectionRef: 'unassigned'`)
 // and without connectors. This setup test is the one source of the visible
-// grant (Codex) and of the model binding (both providers), and it is its own
-// project, which the suite's cases depend on: a `beforeAll` would run again in
-// every worker Playwright restarts after a case failure, and the second Codex
-// grant capture refuses to open its journal entry. C1 then attaches the receipt
-// connector through restoreReceiptConnector, for both providers.
-// The Host save and the connector save each start their own rollout, so each is
-// awaited against its own generation baseline.
+// grant (Codex), of the model binding (both providers) and of the receipt
+// connector (both providers); it is its own project, which the suite's cases
+// depend on: a `beforeAll` would run again in every worker Playwright restarts
+// after a case failure, and the second Codex grant capture refuses to open its
+// journal entry.
+// Only the model binding changes the runtime-token contract, so only its save
+// rolls the Deployment and is awaited against a generation baseline. The Host
+// learns a Context `mcpServers` change by polling (`mcp-host/src/main.ts`).
 test('model step retry setup: the subscription grant and the model binding are visible', async ({
   page,
 }) => {
@@ -290,125 +354,89 @@ test('model step retry setup: the subscription grant and the model binding are v
     expect(host.spec?.model?.connectionRef).not.toBe('unassigned')
   }
   await waitForAgentRollout(active.agentName, generation)
+  await attachReceiptConnector(page)
 })
-
-/**
- * Attaches the receipt connector visibly. Both suites prepare their agent with
- * an empty connector list (`mcpServers: []`), so the empty state below is the
- * fixture's own, not a leftover from another journey.
- */
-async function restoreReceiptConnector(page: Page) {
-  const active = scenario()
-  // E2E_GUARDIAN_ENTRY_POINT: Control UI root starts the visible admin journey.
-  await page.goto('/')
-  await loginControlUiVisible(page)
-  await new ControlUiShell(page).openAgents()
-  await new AgentListPage(page).openNamed(active.agentName)
-  await page.getByRole('tab', { name: 'Connectors', exact: true }).click()
-  await expect(page).toHaveURL(new RegExp(`/agents/${active.agentName}/connectors$`))
-  await expect(page.getByText('No connectors attached yet.', { exact: true })).toBeVisible()
-  const generation = readAgentDeploymentGeneration(active.agentName)
-  await page.getByRole('button', { name: 'Add connector', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'Add connectors' })
-  // The picker is MultiSelectActionDialog: one checkbox per connector.
-  await dialog.getByRole('checkbox', { name: active.connectorName, exact: true }).check()
-  const savedResponse = page.waitForResponse(
-    response =>
-      new URL(response.url()).pathname ===
-        browserApiPath(`/api/v1/admin/contexts/${active.contextName}`) &&
-      response.request().method() === 'PUT'
-  )
-  await dialog.getByRole('button', { name: 'Add connector', exact: true }).click()
-  const saved = await savedResponse
-  expect(saved.ok()).toBe(true)
-  const body = await saved.json()
-  expect(body.metadata.name).toBe(active.contextName)
-  expect(body.spec.mcpServers).toContain(active.connectorName)
-  await expect(page.getByText('Connectors updated.', { exact: true })).toBeVisible()
-  await waitForAgentRollout(active.agentName, generation)
-}
 
 // Vacuity mutations (Codex and Grok): drop the provider's `provider_unavailable`
 // classification (Grok: `mcp-host/src/llm/grokSubscription.ts:357-365`) → no
 // resumable checkpoint, no notice; or run with CLERUM_MODEL_STEP_AUTO_RETRIES=0 →
-// one injected 503 instead of two, so `unavailableResponses: 2` fails.
-test('model step retry C1: a 503 after a confirmed tool continues once without re-running the tool', async ({
-  page,
-}) => {
-  await restoreReceiptConnector(page)
-  await withDesktopChat(async desktop => {
-    const value = marker('c1')
-    const prompt = `model step retry receipt ${value}`
-    const start = await snapshot()
-    const physicalBefore = await readEvidence(scenario())
-    await test.step('The receipt physically executes before the model step meets a 503', async () => {
-      const responses = await newAgentResponses(desktop)
-      await send(desktop, prompt)
-      const pending = desktop.getByTestId('progress-stepper').filter({
-        has: desktop.getByTestId('approval-approve-btn'),
+// one injected 503 instead of four, so `unavailableResponses: 4` fails.
+test('model step retry C1: a 503 after a confirmed tool continues once without re-running the tool', async () => {
+  await withDesktopChat(
+    async desktop => {
+      const value = marker('c1')
+      const prompt = `model step retry receipt ${value}`
+      const start = await snapshot()
+      const physicalBefore = await readEvidence(scenario())
+      await test.step('The receipt physically executes before the model step meets a 503', async () => {
+        const responses = await newAgentResponses(desktop)
+        await send(desktop, prompt)
+        const pending = desktop.getByTestId('progress-stepper').filter({
+          has: desktop.getByTestId('approval-approve-btn'),
+        })
+        // Both providers label the pending approval with the connector, not the
+        // tool; the receipt this case approves is proven by the execution below.
+        await expect(pending).toContainText(connectorApprovalLabel(scenario()), {
+          timeout: TURN_TIMEOUT,
+        })
+        await expect(pending).toContainText('requires approval')
+        expect(toolExecutions(await readEvidence(scenario()), 'workitem_read_receipt')).toBe(
+          toolExecutions(physicalBefore, 'workitem_read_receipt')
+        )
+        await pending.getByTestId('approval-approve-btn').click()
+        await expect(responses.filter({ hasText: failureLabel() })).toHaveCount(1, {
+          timeout: TURN_TIMEOUT,
+        })
+        await expectResumable(desktop, 4)
       })
-      // Both providers label the pending approval with the connector, not the
-      // tool; the receipt this case approves is proven by the execution below.
-      await expect(pending).toContainText(connectorApprovalLabel(scenario()), {
-        timeout: TURN_TIMEOUT,
-      })
-      await expect(pending).toContainText('requires approval')
-      expect(toolExecutions(await readEvidence(scenario()), 'workitem_read_receipt')).toBe(
-        toolExecutions(physicalBefore, 'workitem_read_receipt')
+      const physicalKept = await readEvidence(scenario())
+      expect(toolExecutions(physicalKept, 'workitem_read_receipt')).toBe(
+        toolExecutions(physicalBefore, 'workitem_read_receipt') + 1
       )
-      await pending.getByTestId('approval-approve-btn').click()
-      await expect(responses.filter({ hasText: failureLabel() })).toHaveCount(1, {
-        timeout: TURN_TIMEOUT,
+      expect(physicalKept.calls.at(-1)).toMatchObject({
+        runId: scenario().runId,
+        tool: 'workitem_read_receipt',
+        businessId: expect.any(String),
       })
-      await expectResumable(desktop, 4)
-    })
-    const physicalKept = await readEvidence(scenario())
-    expect(toolExecutions(physicalKept, 'workitem_read_receipt')).toBe(
-      toolExecutions(physicalBefore, 'workitem_read_receipt') + 1
-    )
-    expect(physicalKept.calls.at(-1)).toMatchObject({
-      runId: scenario().runId,
-      tool: 'workitem_read_receipt',
-      businessId: expect.any(String),
-    })
-    const kept = await readCurrentSession(desktop, prompt)
-    expect(kept.modelStepCheckpoint).toMatchObject({
-      status: 'resumable',
-      retryAvailable: true,
-      tools: { confirmed: 4 },
-    })
-    expect(kept.modelStepCheckpoint?.checkpointId).toBeTruthy()
-    expect(kept.modelStepCheckpoint?.version).toBeGreaterThan(0)
-    const failed = await expectDelta(
-      start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
-      [
-        'model_step_search',
-        'model_step_receipt_tool',
-        'model_step_receipt_tool',
-        'model_step_receipt_tool',
-        'model_step_unavailable',
-        'model_step_unavailable',
-      ]
-    )
-    await test.step('Retry model step continues from the kept tool result', async () => {
-      const responses = await newAgentResponses(desktop)
-      await notice(desktop).getByTestId('model-step-retry-btn').click()
-      await expectContinued(desktop, responses, value)
-    })
-    const completed = await expectSessionState(desktop, prompt, 'idle')
-    expect(completed.chatId).toBe(kept.chatId)
-    expect(completed.modelStepCheckpoint).toBeUndefined()
-    expect(completed.turns.some(turn => turn.response?.includes(`continued ${value}`))).toBe(true)
-    assertConfirmedToolNotReexecuted(
-      physicalBefore,
-      physicalKept,
-      await readEvidence(scenario()),
-      'workitem_read_receipt'
-    )
-    // The continuation also carried the original marker search's one result.
-    await expectDelta(failed, { continuations: 1, toolResults: 1 }, ['model_step_continued'])
-  })
+      const kept = await readCurrentSession(desktop, prompt)
+      expect(kept.modelStepCheckpoint).toMatchObject({
+        status: 'resumable',
+        retryAvailable: true,
+        tools: { confirmed: 4 },
+      })
+      expect(kept.modelStepCheckpoint?.checkpointId).toBeTruthy()
+      expect(kept.modelStepCheckpoint?.version).toBeGreaterThan(0)
+      const failed = await expectDelta(
+        start,
+        { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
+        [
+          'model_step_search',
+          'model_step_receipt_tool',
+          'model_step_receipt_tool',
+          'model_step_receipt_tool',
+          ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable'),
+        ]
+      )
+      await test.step('Retry model step continues from the kept tool result', async () => {
+        const responses = await newAgentResponses(desktop)
+        await notice(desktop).getByTestId('model-step-retry-btn').click()
+        await expectContinued(desktop, responses, value)
+      })
+      const completed = await expectSessionState(desktop, prompt, 'idle')
+      expect(completed.chatId).toBe(kept.chatId)
+      expect(completed.modelStepCheckpoint).toBeUndefined()
+      expect(completed.turns.some(turn => turn.response?.includes(`continued ${value}`))).toBe(true)
+      assertConfirmedToolNotReexecuted(
+        physicalBefore,
+        physicalKept,
+        await readEvidence(scenario()),
+        'workitem_read_receipt'
+      )
+      // The continuation also carried the original marker search's one result.
+      await expectDelta(failed, { continuations: 1, toolResults: 1 }, ['model_step_continued'])
+    },
+    { connector: true }
+  )
 })
 
 // Vacuity mutation: drop both `this.currentFence !== null` and
@@ -472,8 +500,8 @@ test('model step retry C3: a new message instead of the retry abandons the check
     expect(kept.modelStepCheckpoint).toMatchObject({ status: 'resumable', retryAvailable: true })
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
-      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
+      ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
     )
     await test.step('The follow-up is answered and Retry model step is gone', async () => {
       const responses = await newAgentResponses(desktop)
@@ -505,8 +533,8 @@ test('model step retry C4: a double click on Retry model step runs one continuat
     const retry = await expectResumable(desktop)
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
-      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
+      ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
     )
     await test.step('Both clicks land; only one continuation runs', async () => {
       const responses = await newAgentResponses(desktop)
@@ -535,8 +563,8 @@ test('model step retry C5: a continuation that meets a 503 again is offered for 
     expect(first.modelStepCheckpoint?.checkpointId).toBeTruthy()
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
-      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
+      ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
     )
     const failedAgain = await test.step('The first continuation meets a 503 too', async () => {
       const responses = await newAgentResponses(desktop)
@@ -547,10 +575,11 @@ test('model step retry C5: a continuation that meets a 503 again is offered for 
         timeout: TURN_TIMEOUT,
       })
       await expectResumable(desktop)
-      return expectDelta(failed, { unavailableResponses: 2, continuationUnavailable: 2 }, [
-        'model_step_continuation_unavailable',
-        'model_step_continuation_unavailable',
-      ])
+      return expectDelta(
+        failed,
+        { unavailableResponses: NOTICE_OUTAGES, continuationUnavailable: NOTICE_OUTAGES },
+        repeatedStage(NOTICE_OUTAGES, 'model_step_continuation_unavailable')
+      )
     })
     const second = await readCurrentSession(desktop, prompt)
     expect(second.chatId).toBe(first.chatId)
@@ -580,8 +609,8 @@ test('model step retry C6: sending the same prompt starts a new turn instead of 
     await expectResumable(desktop)
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
-      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
+      ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
     )
     await test.step('The user sends the same text as a new message', async () => {
       const responses = await newAgentResponses(desktop)
@@ -598,159 +627,170 @@ test('model step retry C6: sending the same prompt starts a new turn instead of 
 })
 
 test('model step retry C7: approval inside a continuation executes the receipt once', async () => {
-  await withDesktopChat(async desktop => {
-    const value = marker('c7')
-    const prompt = `model step retry approval ${value}`
-    const start = await snapshot()
-    const callsBefore = (await readEvidence(scenario())).calls
-    await sendUntilUnavailable(desktop, prompt)
-    await expectResumable(desktop)
-    const failedRead = await readCurrentSession(desktop, prompt)
-    expect(failedRead.modelStepCheckpoint).toMatchObject({
-      status: 'resumable',
-      retryAvailable: true,
-    })
-    const failed = await expectDelta(
-      start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
-      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
-    )
-    await test.step('Retry discovers the receipt and waits for the user decision', async () => {
+  await withDesktopChat(
+    async desktop => {
+      const value = marker('c7')
+      const prompt = `model step retry approval ${value}`
+      const start = await snapshot()
+      const callsBefore = (await readEvidence(scenario())).calls
+      await sendUntilUnavailable(desktop, prompt)
+      await expectResumable(desktop)
+      const failedRead = await readCurrentSession(desktop, prompt)
+      expect(failedRead.modelStepCheckpoint).toMatchObject({
+        status: 'resumable',
+        retryAvailable: true,
+      })
+      const failed = await expectDelta(
+        start,
+        { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
+        ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
+      )
+      await test.step('Retry discovers the receipt and waits for the user decision', async () => {
+        await notice(desktop).getByTestId('model-step-retry-btn').click()
+        const pending = desktop.getByTestId('progress-stepper').filter({
+          has: desktop.getByTestId('approval-approve-btn'),
+        })
+        // The connector label is the approval's own name; the receipt is proven
+        // by the execution this case asserts after the decision.
+        await expect(pending).toContainText(connectorApprovalLabel(scenario()), {
+          timeout: TURN_TIMEOUT,
+        })
+        await expect(pending).toContainText('requires approval')
+        const waiting = await expectSessionState(desktop, prompt, 'awaiting_approval')
+        expect(waiting.chatId).toBe(failedRead.chatId)
+        expect(waiting.modelStepCheckpoint?.checkpointId).toBe(
+          failedRead.modelStepCheckpoint?.checkpointId
+        )
+        expect(waiting.modelStepCheckpoint?.version).toBeGreaterThan(
+          failedRead.modelStepCheckpoint!.version
+        )
+        expect(waiting.modelStepCheckpoint).toMatchObject({
+          status: 'claimed',
+          retryAvailable: false,
+        })
+        expect((await readEvidence(scenario())).calls).toEqual(callsBefore)
+        await pending.getByTestId('approval-approve-btn').click()
+        await expect(pending).toHaveCount(0)
+      })
+      await test.step('The receipt is visible and the checkpoint is closed', async () => {
+        await expect
+          .poll(async () => (await readEvidence(scenario())).calls.length, {
+            timeout: TURN_TIMEOUT,
+          })
+          .toBe(callsBefore.length + 1)
+        const call = (await readEvidence(scenario())).calls.at(-1)!
+        expect(call).toMatchObject({ runId: scenario().runId, tool: 'workitem_read_receipt' })
+        await expect(
+          desktop.getByTestId('agent-response').filter({
+            hasText: `approved ${value} businessId=${call.businessId} toolResults=1`,
+          })
+        ).toBeVisible({ timeout: TURN_TIMEOUT })
+        await expect(notice(desktop)).toHaveCount(0)
+        await expectIdle(desktop)
+        expect((await readEvidence(scenario())).calls).toHaveLength(callsBefore.length + 1)
+        const completed = await expectSessionState(desktop, prompt, 'idle')
+        expect(completed.chatId).toBe(failedRead.chatId)
+        expect(completed.modelStepCheckpoint).toBeUndefined()
+        expect(completed.turns.some(turn => turn.response?.includes(`approved ${value}`))).toBe(
+          true
+        )
+      })
+      await expectDelta(
+        failed,
+        { approvalRequests: 1, approvalFinals: 1, continuations: 1, toolResults: 1 },
+        [
+          'model_step_approval_tool',
+          'model_step_approval_tool',
+          'model_step_approval_tool',
+          'model_step_approval_final',
+        ]
+      )
+    },
+    { connector: true }
+  )
+})
+
+async function decisionJourney(decision: 'deny' | 'cancel') {
+  await withDesktopChat(
+    async desktop => {
+      const value = marker(decision)
+      const prompt = `model step retry approval ${value}`
+      const start = await snapshot()
+      const callsBefore = (await readEvidence(scenario())).calls
+      await sendUntilUnavailable(desktop, prompt)
+      await expectResumable(desktop)
+      const failedRead = await readCurrentSession(desktop, prompt)
+      expect(failedRead.modelStepCheckpoint).toMatchObject({
+        status: 'resumable',
+        retryAvailable: true,
+      })
+      const failed = await expectDelta(
+        start,
+        { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
+        ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
+      )
       await notice(desktop).getByTestId('model-step-retry-btn').click()
       const pending = desktop.getByTestId('progress-stepper').filter({
-        has: desktop.getByTestId('approval-approve-btn'),
+        has: desktop.getByTestId(decision === 'deny' ? 'approval-deny-btn' : 'progress-cancel-btn'),
       })
-      // The connector label is the approval's own name; the receipt is proven
-      // by the execution this case asserts after the decision.
+      // Connector label, as for C1 and C7; the decision itself and the unchanged
+      // execution count below are the witnesses, and no upstream request follows.
       await expect(pending).toContainText(connectorApprovalLabel(scenario()), {
         timeout: TURN_TIMEOUT,
       })
       await expect(pending).toContainText('requires approval')
       const waiting = await expectSessionState(desktop, prompt, 'awaiting_approval')
-      expect(waiting.chatId).toBe(failedRead.chatId)
       expect(waiting.modelStepCheckpoint?.checkpointId).toBe(
         failedRead.modelStepCheckpoint?.checkpointId
-      )
-      expect(waiting.modelStepCheckpoint?.version).toBeGreaterThan(
-        failedRead.modelStepCheckpoint!.version
       )
       expect(waiting.modelStepCheckpoint).toMatchObject({
         status: 'claimed',
         retryAvailable: false,
       })
       expect((await readEvidence(scenario())).calls).toEqual(callsBefore)
-      await pending.getByTestId('approval-approve-btn').click()
+      await pending
+        .getByTestId(decision === 'deny' ? 'approval-deny-btn' : 'progress-cancel-btn')
+        .click()
       await expect(pending).toHaveCount(0)
-    })
-    await test.step('The receipt is visible and the checkpoint is closed', async () => {
-      await expect
-        .poll(async () => (await readEvidence(scenario())).calls.length, {
-          timeout: TURN_TIMEOUT,
-        })
-        .toBe(callsBefore.length + 1)
-      const call = (await readEvidence(scenario())).calls.at(-1)!
-      expect(call).toMatchObject({ runId: scenario().runId, tool: 'workitem_read_receipt' })
-      await expect(
-        desktop.getByTestId('agent-response').filter({
-          hasText: `approved ${value} businessId=${call.businessId} toolResults=1`,
-        })
-      ).toBeVisible({ timeout: TURN_TIMEOUT })
+      if (decision === 'deny') {
+        await expect(
+          desktop.getByTestId('agent-response').filter({
+            hasText: 'was denied by the user. The operation was not performed.',
+          })
+        ).toBeVisible({ timeout: TURN_TIMEOUT })
+      } else {
+        await expect(
+          desktop.getByTestId('progress-stepper').filter({ hasText: 'Cancelled' })
+        ).toBeVisible({ timeout: TURN_TIMEOUT })
+      }
       await expect(notice(desktop)).toHaveCount(0)
       await expectIdle(desktop)
-      expect((await readEvidence(scenario())).calls).toHaveLength(callsBefore.length + 1)
-      const completed = await expectSessionState(desktop, prompt, 'idle')
-      expect(completed.chatId).toBe(failedRead.chatId)
-      expect(completed.modelStepCheckpoint).toBeUndefined()
-      expect(completed.turns.some(turn => turn.response?.includes(`approved ${value}`))).toBe(true)
-    })
-    await expectDelta(
-      failed,
-      { approvalRequests: 1, approvalFinals: 1, continuations: 1, toolResults: 1 },
-      [
+      expect((await readEvidence(scenario())).calls).toEqual(callsBefore)
+      const released = await expectSessionState(desktop, prompt, 'idle')
+      expect(released.chatId).toBe(failedRead.chatId)
+      expect(released.modelStepCheckpoint).toBeUndefined()
+      const decided = await expectDelta(failed, { approvalRequests: 1 }, [
         'model_step_approval_tool',
         'model_step_approval_tool',
         'model_step_approval_tool',
-        'model_step_approval_final',
-      ]
-    )
-  })
-})
-
-async function decisionJourney(decision: 'deny' | 'cancel') {
-  await withDesktopChat(async desktop => {
-    const value = marker(decision)
-    const prompt = `model step retry approval ${value}`
-    const start = await snapshot()
-    const callsBefore = (await readEvidence(scenario())).calls
-    await sendUntilUnavailable(desktop, prompt)
-    await expectResumable(desktop)
-    const failedRead = await readCurrentSession(desktop, prompt)
-    expect(failedRead.modelStepCheckpoint).toMatchObject({
-      status: 'resumable',
-      retryAvailable: true,
-    })
-    const failed = await expectDelta(
-      start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
-      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
-    )
-    await notice(desktop).getByTestId('model-step-retry-btn').click()
-    const pending = desktop.getByTestId('progress-stepper').filter({
-      has: desktop.getByTestId(decision === 'deny' ? 'approval-deny-btn' : 'progress-cancel-btn'),
-    })
-    // Connector label, as for C1 and C7; the decision itself and the unchanged
-    // execution count below are the witnesses, and no upstream request follows.
-    await expect(pending).toContainText(connectorApprovalLabel(scenario()), {
-      timeout: TURN_TIMEOUT,
-    })
-    await expect(pending).toContainText('requires approval')
-    const waiting = await expectSessionState(desktop, prompt, 'awaiting_approval')
-    expect(waiting.modelStepCheckpoint?.checkpointId).toBe(
-      failedRead.modelStepCheckpoint?.checkpointId
-    )
-    expect(waiting.modelStepCheckpoint).toMatchObject({ status: 'claimed', retryAvailable: false })
-    expect((await readEvidence(scenario())).calls).toEqual(callsBefore)
-    await pending
-      .getByTestId(decision === 'deny' ? 'approval-deny-btn' : 'progress-cancel-btn')
-      .click()
-    await expect(pending).toHaveCount(0)
-    if (decision === 'deny') {
-      await expect(
-        desktop.getByTestId('agent-response').filter({
-          hasText: 'was denied by the user. The operation was not performed.',
-        })
-      ).toBeVisible({ timeout: TURN_TIMEOUT })
-    } else {
-      await expect(
-        desktop.getByTestId('progress-stepper').filter({ hasText: 'Cancelled' })
-      ).toBeVisible({ timeout: TURN_TIMEOUT })
-    }
-    await expect(notice(desktop)).toHaveCount(0)
-    await expectIdle(desktop)
-    expect((await readEvidence(scenario())).calls).toEqual(callsBefore)
-    const released = await expectSessionState(desktop, prompt, 'idle')
-    expect(released.chatId).toBe(failedRead.chatId)
-    expect(released.modelStepCheckpoint).toBeUndefined()
-    const decided = await expectDelta(failed, { approvalRequests: 1 }, [
-      'model_step_approval_tool',
-      'model_step_approval_tool',
-      'model_step_approval_tool',
-    ])
-    const responses = await newAgentResponses(desktop)
-    await send(desktop, `model step retry followup ${value}`)
-    await expect(responses.filter({ hasText: `followup ${value} answered` })).toHaveCount(1, {
-      timeout: TURN_TIMEOUT,
-    })
-    await expectIdle(desktop)
-    expect((await readEvidence(scenario())).calls).toEqual(callsBefore)
-    const followUp = await expectSessionState(desktop, prompt, 'idle')
-    expect(followUp.chatId).toBe(failedRead.chatId)
-    expect(followUp.modelStepCheckpoint).toBeUndefined()
-    expect(followUp.turns.some(turn => turn.response?.includes(`followup ${value} answered`))).toBe(
-      true
-    )
-    await expectDelta(decided, { followUps: 1 }, ['model_step_followup'])
-  })
+      ])
+      const responses = await newAgentResponses(desktop)
+      await send(desktop, `model step retry followup ${value}`)
+      await expect(responses.filter({ hasText: `followup ${value} answered` })).toHaveCount(1, {
+        timeout: TURN_TIMEOUT,
+      })
+      await expectIdle(desktop)
+      expect((await readEvidence(scenario())).calls).toEqual(callsBefore)
+      const followUp = await expectSessionState(desktop, prompt, 'idle')
+      expect(followUp.chatId).toBe(failedRead.chatId)
+      expect(followUp.modelStepCheckpoint).toBeUndefined()
+      expect(
+        followUp.turns.some(turn => turn.response?.includes(`followup ${value} answered`))
+      ).toBe(true)
+      await expectDelta(decided, { followUps: 1 }, ['model_step_followup'])
+    },
+    { connector: true }
+  )
 }
 
 test('model step retry C9: denying an approval inside a continuation releases the session', async () => {
@@ -776,8 +816,8 @@ test('model step retry C8: the checkpoint survives a Host restart between the 50
     expect(beforeRestart.modelStepCheckpoint?.checkpointId).toBeTruthy()
     const failed = await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 2 },
-      ['model_step_search', 'model_step_unavailable', 'model_step_unavailable']
+      { turns: 1, markerSearches: 1, unavailableResponses: NOTICE_OUTAGES },
+      ['model_step_search', ...repeatedStage(NOTICE_OUTAGES, 'model_step_unavailable')]
     )
     await test.step('The Host pod is replaced while the turn waits for its retry', async () => {
       await restartAgentPod(scenario().agentName)
@@ -809,17 +849,17 @@ test('model step retry C8: the checkpoint survives a Host restart between the 50
 })
 
 // Vacuity mutations (Codex and Grok): drop the provider's `provider_unavailable`
-// classification, or run with CLERUM_MODEL_STEP_AUTO_RETRIES=0 → the single 503
+// classification, or run with CLERUM_MODEL_STEP_AUTO_RETRIES=2 → the third 503
 // reaches the user as a failure and the absorbed answer never arrives, red.
-test('model step retry C11: one 503 after a confirmed search is absorbed by the automatic retry', async () => {
+test('model step retry C11: three 503s after a confirmed search are absorbed by the automatic retries', async () => {
   await withDesktopChat(async desktop => {
     const value = marker('c11')
     const prompt = `model step retry absorbed ${value}`
     const start = await snapshot()
     const responses = await newAgentResponses(desktop)
     await send(desktop, prompt)
-    // The Host retried that step by itself; its answer is the witness that the
-    // single outage never reached the user as a failure to recover from.
+    // The Host retried that step three times by itself; its answer is the witness
+    // that the three outages never reached the user as a failure to recover from.
     await expect(responses.filter({ hasText: `absorbed ${value} toolResults=1` })).toHaveCount(1, {
       timeout: TURN_TIMEOUT,
     })
@@ -831,15 +871,70 @@ test('model step retry C11: one 503 after a confirmed search is absorbed by the 
     const completed = await expectSessionState(desktop, prompt, 'idle')
     expect(completed.modelStepCheckpoint).toBeUndefined()
     expect(completed.turns.some(turn => turn.response?.includes(`absorbed ${value}`))).toBe(true)
-    // The turn ran its one search before the outage and the answer carried its one
-    // result back, so the absorbed step neither re-ran the tool nor kept the turn
-    // resumable. This kind's only tool is the search bridge, so the "called once"
-    // witness is `markerSearches: 1`; a physical connector call would be a
+    // The turn ran its one search before the outages and the answer carried its
+    // one result back, so the absorbed step neither re-ran the tool nor kept the
+    // turn resumable. This kind's only tool is the search bridge, so the "called
+    // once" witness is `markerSearches: 1`; a physical connector call would be a
     // different turn kind.
     await expectDelta(
       start,
-      { turns: 1, markerSearches: 1, unavailableResponses: 1, absorbed: 1 },
-      ['model_step_search', 'model_step_unavailable', 'model_step_absorbed_final']
+      { turns: 1, markerSearches: 1, unavailableResponses: ABSORBED_OUTAGES, absorbed: 1 },
+      [
+        'model_step_search',
+        ...repeatedStage(ABSORBED_OUTAGES, 'model_step_unavailable'),
+        'model_step_absorbed_final',
+      ]
     )
+  })
+})
+
+// #1043 D5 / #1044 C12: the 60 s cap, end to end. The fixture answers the step's
+// first 503 at once and then holds the retried call; the Host cancels that
+// attempt 60 s after the step's first failure, the notice appears, and Retry
+// model step answers from the kept search. Vacuity mutation (by hand): raise the
+// cap to 600 s → the held call answers at 120 s, the next retry gets the final
+// text and no notice ever appears, red.
+test('model step retry C12: the 60 s cap ends a held retry and Retry model step completes the turn', async () => {
+  // One send, the 60 s cap and the continuation: 150 s is the floor, and the
+  // per-test default of 480 s stays above it.
+  test.setTimeout(180_000)
+  await withDesktopChat(async desktop => {
+    const value = marker('c12')
+    const prompt = `model step retry capped ${value}`
+    const start = await snapshot()
+    const responses = await newAgentResponses(desktop)
+    const sentAt = Date.now()
+    await send(desktop, prompt)
+    // The test's own clock only: the cap ends the step 60 s after its first
+    // failure, which follows the send, so the notice cannot appear before that
+    // and must appear long before the held answer at 120 s.
+    await expectResumable(desktop)
+    const elapsed = Date.now() - sentAt
+    expect(elapsed).toBeGreaterThanOrEqual(CAP_NOTICE_MIN_MS)
+    expect(elapsed).toBeLessThanOrEqual(CAP_NOTICE_MAX_MS)
+    const failedRead = await readCurrentSession(desktop, prompt)
+    expect(failedRead.modelStepCheckpoint).toMatchObject({
+      status: 'resumable',
+      retryAvailable: true,
+    })
+    // Two outages: the immediate one and the held one, counted when it arrived.
+    // The cap added no third call, which the stage list below also pins.
+    const failed = await expectDelta(
+      start,
+      { turns: 1, markerSearches: 1, unavailableResponses: 2, cappedHeld: 1 },
+      ['model_step_search', 'model_step_unavailable', 'model_step_capped_held']
+    )
+    await test.step('Retry model step answers from the kept search', async () => {
+      await notice(desktop).getByTestId('model-step-retry-btn').click()
+      await expectContinued(desktop, responses, value)
+    })
+    const completed = await expectSessionState(desktop, prompt, 'idle')
+    expect(completed.chatId).toBe(failedRead.chatId)
+    expect(completed.modelStepCheckpoint).toBeUndefined()
+    expect(completed.turns.some(turn => turn.response?.includes(`continued ${value}`))).toBe(true)
+    // The continuation's reply is `continued <marker> toolResults=1` and the turn
+    // emitted one search in total (`markerSearches` above): the kept tool was not
+    // run again.
+    await expectDelta(failed, { continuations: 1, toolResults: 1 }, ['model_step_continued'])
   })
 })

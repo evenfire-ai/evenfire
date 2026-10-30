@@ -62,7 +62,7 @@ test('the tool-call limit cases are mandatory only in deterministic approved-too
   assert.equal(deterministic.length, 8)
   assert.equal(expectedTitles('real', 'codex', 'approved-tools').length, 6)
   assert.deepEqual(expectedTitles('real-hybrid', 'codex', 'approved-tools'), hybridRetryTitles)
-  assert.equal(modelStepRetryTitles.length, 11)
+  assert.equal(modelStepRetryTitles.length, 12)
   for (const title of [toolCallLimitTitle, toolCallLimitBoundaryTitle]) {
     assert.ok(deterministic.includes(title))
     assert.ok(!expectedTitles('real', 'codex', 'approved-tools').includes(title))
@@ -75,9 +75,9 @@ test('the tool-call limit cases are mandatory only in deterministic approved-too
     /Select deterministic, real or real-hybrid upstream mode explicitly/
   )
 })
-test('the suite splits the registry: a Codex model-step run is the setup case plus C1-C11', () => {
+test('the suite splits the registry: a Codex model-step run is the setup case plus C1-C12', () => {
   const modelStep = expectedTitles('deterministic', 'codex', 'model-step-retry')
-  assert.equal(modelStep.length, 12)
+  assert.equal(modelStep.length, 13)
   assert.deepEqual(modelStep, [modelStepRetrySetupTitle, ...modelStepRetryTitles])
   for (const title of modelStep) {
     assert.equal(specFileFor(title), 'model-step-retry-codex.spec.ts', title)
@@ -124,7 +124,7 @@ test('refuses every suite, provider and mode combination the lane does not run',
 test('a model-step report without its setup case, or with it twice, is refused', () => {
   const report = greenReport('deterministic', 'codex', 'model-step-retry')
   assert.deepEqual(validateReport(report, 'deterministic', 'codex', 'model-step-retry'), {
-    tests: 12,
+    tests: 13,
     skipped: 0,
     failed: 0,
   })
@@ -194,7 +194,7 @@ test('the model-step upstream evidence block is read only by its own suite', () 
     /deterministic, real or real-hybrid/
   )
 })
-test('real-hybrid evidence requires two R1 and R2 injections plus real forwarding', () => {
+test('real-hybrid evidence requires four R1 and R2 injections plus real forwarding', () => {
   const before = {
     forwarded: 10,
     injected503: 0,
@@ -205,16 +205,16 @@ test('real-hybrid evidence requires two R1 and R2 injections plus real forwardin
   }
   const after = {
     forwarded: 14,
-    injected503: 4,
-    r1: 2,
-    r2: 2,
+    injected503: 8,
+    r1: 4,
+    r2: 4,
     r1DistinctToolResults: 3,
     r2DistinctToolResults: 6,
   }
-  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 4 })
+  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 8 })
   assert.throws(
-    () => validateHybridEvidence(before, { ...after, injected503: 2 }),
-    /injected503 did not move by 4/
+    () => validateHybridEvidence(before, { ...after, injected503: 4 }),
+    /injected503 did not move by 8/
   )
   assert.throws(
     () => validateHybridEvidence(before, { ...after, forwarded: 10 }),
@@ -313,6 +313,28 @@ test('accepts exactly the expected model-step evidence change', () => {
     )
   )
   assert.deepEqual(validateModelStepEvidence(before, after), modelStepRetryExpectedDelta)
+})
+
+// The frozen literals are the lane's contract: three automatic retries per
+// failed step, three absorbed outages in C11 and the C12 cap case. A count that
+// drifts without this table changing must not pass.
+test('the Codex model-step delta is the frozen literal for three retries and C12', () => {
+  assert.deepEqual(modelStepRetryExpectedDelta, {
+    turns: 12,
+    markerSearches: 11,
+    unavailableResponses: 46,
+    zeroToolUnavailable: 1,
+    continuationUnavailable: 4,
+    continuations: 6,
+    toolResults: 6,
+    resends: 2,
+    followUps: 3,
+    unexpectedRetries: 0,
+    approvalRequests: 3,
+    approvalFinals: 1,
+    absorbed: 1,
+    cappedHeld: 1,
+  })
 })
 
 for (const field of Object.keys(modelStepRetryExpectedDelta)) {
@@ -437,13 +459,13 @@ test('R2 evidence rejects missing, reset and unexpected distinct tool result del
   }
   const after = {
     forwarded: 14,
-    injected503: 4,
-    r1: 2,
-    r2: 2,
+    injected503: 8,
+    r1: 4,
+    r2: 4,
     r1DistinctToolResults: 4,
     r2DistinctToolResults: 8,
   }
-  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 4 })
+  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 8 })
   for (const value of [undefined, 1, 2, 7, 9]) {
     assert.throws(
       () => validateHybridEvidence(before, { ...after, r2DistinctToolResults: value }),
@@ -482,11 +504,11 @@ test('Grok requires precisely the setup case and C1 C2 C11 in their physical spe
   assert.throws(() => expectedTitles('deterministic', 'unknown', 'model-step-retry'), /provider/)
 })
 
-test('Grok evidence requires all thirteen exact counters for the three recovery cases', () => {
+test('Grok evidence requires all fourteen exact counters for the three recovery cases', () => {
   const expected = {
     turns: 3,
     markerSearches: 2,
-    unavailableResponses: 4,
+    unavailableResponses: 8,
     zeroToolUnavailable: 1,
     continuationUnavailable: 0,
     continuations: 1,
@@ -497,6 +519,7 @@ test('Grok evidence requires all thirteen exact counters for the three recovery 
     approvalRequests: 0,
     approvalFinals: 0,
     absorbed: 1,
+    cappedHeld: 0,
   }
   const before = modelStepEvidence(zeroCounts)
   assert.deepEqual(validateModelStepEvidence(before, modelStepEvidence(expected), 'grok'), expected)

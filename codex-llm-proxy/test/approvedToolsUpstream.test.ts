@@ -666,6 +666,11 @@ describe('approved-tools model-step retry probe (#1044)', () => {
   const marker = 'msr-0123abcd'
   const probe = { role: 'user', content: `model step retry probe ${marker}` }
   const searchResult = JSON.stringify({ found: 0, returned: 0, results: [] })
+  // The Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=3 absorbs the first three
+  // outages of a step, so a step that must end on the resumable notice fails
+  // four times, and an `absorbed` turn fails three times.
+  const OUTAGES = [1, 2, 3, 4]
+  const ABSORBED = [1, 2, 3]
 
   // Completion 1: the one search call of the turn, answered by the Host.
   async function searched(simulator: ReturnType<typeof createApprovedToolsUpstream>) {
@@ -692,12 +697,18 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       keptCall,
       { type: 'function_call_output', call_id: keptCall.call_id, output: searchResult },
     ]
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
+    for (const outage of OUTAGES) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     const outputs = [
       { found: 1, returned: 1, results: [{ name: target, server: 'fixture' }] },
       { found: true, name: target, parameters: { type: 'object', properties: {} } },
-      { runId: 'fixture-run', tool: 'workitem_read_receipt', callId: randomUUID(), businessId: randomUUID() },
+      {
+        runId: 'fixture-run',
+        tool: 'workitem_read_receipt',
+        callId: randomUUID(),
+        businessId: randomUUID(),
+      },
     ]
     for (let index = 0; index < outputs.length; index++) {
       const step = await request(simulator, history)
@@ -735,8 +746,9 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       keptCall,
       { type: 'function_call_output', call_id: keptCall.call_id, output: searchResult },
     ]
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
+    for (const outage of OUTAGES) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     const discovery = await request(simulator, history)
     expect(discovery.event.item.name).toBe(bridges[0])
     // Desktop's deny/cancel resolves the suspended task locally, so no tool
@@ -753,7 +765,7 @@ describe('approved-tools model-step retry probe (#1044)', () => {
     })
   })
 
-  it('serves one marker search, then two 503s for that step, then the continued answer', async () => {
+  it('serves one marker search, then four 503s for that step, then the continued answer', async () => {
     const simulator = createApprovedToolsUpstream()
     const { call, history } = await searched(simulator)
     expect(call).toMatchObject({
@@ -762,10 +774,11 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       arguments: JSON.stringify({ query: marker, limit: 1 }),
     })
 
-    // The Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=1 retries the step once,
-    // so two outages are needed for one to stand.
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
+    // The Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=3 retries the step three
+    // times, so four outages are needed for one to stand.
+    for (const outage of OUTAGES) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
 
     const continued = await request(simulator, history)
     expect(continued.response.status).toBe(200)
@@ -777,18 +790,20 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       modelStepRetry: {
         turns: 1,
         markerSearches: 1,
-        unavailableResponses: 2,
+        unavailableResponses: 4,
         continuations: 1,
         toolResults: 1,
         followUps: 0,
         unexpectedRetries: 0,
       },
-      completions: 4,
+      completions: 6,
       searchCalls: 0,
       rejected: 0,
     })
     expect(simulator.evidence().requests.map(row => row.stage)).toEqual([
       'model_step_search',
+      'model_step_unavailable',
+      'model_step_unavailable',
       'model_step_unavailable',
       'model_step_unavailable',
       'model_step_continued',
@@ -798,8 +813,9 @@ describe('approved-tools model-step retry probe (#1044)', () => {
   it('reports a duplicated result of the original search in the continued answer', async () => {
     const simulator = createApprovedToolsUpstream()
     const { history } = await searched(simulator)
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
+    for (const outage of OUTAGES) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     const duplicated = await request(simulator, [...history, history[2]!])
     expect(duplicated.response.status).toBe(200)
     expect(duplicated.event.delta).toBe(`continued ${marker} toolResults=2`)
@@ -825,8 +841,9 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       [repeatedSearch, lostCall, changedCall, failedSearch].map(result => result.response.status)
     ).toEqual([422, 422, 422, 422])
     // Liveness witness: the rejected requests did not consume the turn.
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
+    for (const outage of OUTAGES) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     expect((await request(simulator, history)).response.status).toBe(200)
     const secondContinuation = await request(simulator, history)
     expect(secondContinuation.response.status).toBe(422)
@@ -834,7 +851,7 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       modelStepRetry: {
         turns: 1,
         markerSearches: 1,
-        unavailableResponses: 2,
+        unavailableResponses: 4,
         continuations: 1,
         toolResults: 1,
         unexpectedRetries: 2,
@@ -940,7 +957,7 @@ describe('approved-tools model-step retry probe (#1044)', () => {
     ])
   })
 
-  it('answers a turn whose single 503 the Host retried by itself', async () => {
+  it('answers a turn whose three 503s the Host retried by itself', async () => {
     const simulator = createApprovedToolsUpstream()
     const absorbed = { role: 'user', content: `model step retry absorbed ${marker}` }
     const first = await request(simulator, [absorbed])
@@ -951,9 +968,11 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       call,
       { type: 'function_call_output', call_id: call.call_id, output: searchResult },
     ] as Entry[]
-    // One outage only: the Host's own retry outlasts it, so there is nothing for
-    // the user to resume.
-    expect((await request(simulator, history)).response.status).toBe(503)
+    // Three outages only: the Host's own three retries outlast them, so there is
+    // nothing for the user to resume.
+    for (const outage of ABSORBED) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     const answered = await request(simulator, history)
     expect(answered.response.status).toBe(200)
     expect(answered.event).toEqual({
@@ -965,7 +984,7 @@ describe('approved-tools model-step retry probe (#1044)', () => {
     expect(simulator.evidence().modelStepRetry).toMatchObject({
       turns: 1,
       markerSearches: 1,
-      unavailableResponses: 1,
+      unavailableResponses: 3,
       continuations: 0,
       resends: 0,
       absorbed: 1,
@@ -973,6 +992,8 @@ describe('approved-tools model-step retry probe (#1044)', () => {
     })
     expect(simulator.evidence().requests.map(row => row.stage)).toEqual([
       'model_step_search',
+      'model_step_unavailable',
+      'model_step_unavailable',
       'model_step_unavailable',
       'model_step_absorbed_final',
     ])
@@ -989,12 +1010,11 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       call,
       { type: 'function_call_output', call_id: call.call_id, output: searchResult },
     ] as Entry[]
-    // Both failing steps take two outages: the step after the search and the
-    // first continuation, each with its own automatic retry.
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
+    // Both failing steps take four outages: the step after the search and the
+    // first continuation, each with its own three automatic retries.
+    for (const outage of [...OUTAGES, ...OUTAGES]) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     const continued = await request(simulator, history)
     expect(continued.response.status).toBe(200)
     expect(continued.event.delta).toBe(`continued ${marker} toolResults=1`)
@@ -1003,8 +1023,8 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       modelStepRetry: {
         turns: 1,
         markerSearches: 1,
-        unavailableResponses: 4,
-        continuationUnavailable: 2,
+        unavailableResponses: 8,
+        continuationUnavailable: 4,
         continuations: 1,
         toolResults: 1,
         unexpectedRetries: 1,
@@ -1015,20 +1035,25 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       'model_step_search',
       'model_step_unavailable',
       'model_step_unavailable',
+      'model_step_unavailable',
+      'model_step_unavailable',
+      'model_step_continuation_unavailable',
+      'model_step_continuation_unavailable',
       'model_step_continuation_unavailable',
       'model_step_continuation_unavailable',
       'model_step_continued',
     ])
   })
 
-  it('keeps a probe turn on two outages: its first continuation is answered', async () => {
+  it('keeps a probe turn on four outages: its first continuation is answered', async () => {
     const simulator = createApprovedToolsUpstream()
     const { history } = await searched(simulator)
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
+    for (const outage of OUTAGES) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     expect((await request(simulator, history)).response.status).toBe(200)
     expect(simulator.evidence().modelStepRetry).toMatchObject({
-      unavailableResponses: 2,
+      unavailableResponses: 4,
       continuationUnavailable: 0,
       continuations: 1,
     })
@@ -1037,15 +1062,16 @@ describe('approved-tools model-step retry probe (#1044)', () => {
   it('rejects a marker reused with another kind', async () => {
     const simulator = createApprovedToolsUpstream()
     const { history } = await searched(simulator)
-    expect((await request(simulator, history)).response.status).toBe(503)
     const reused = await request(simulator, [
       { role: 'user', content: `model step retry twice ${marker}` },
       ...history.slice(1),
     ])
     expect(reused.response.status).toBe(422)
-    // Liveness witness: the probe turn itself still continues, after the second
-    // outage of its failing step.
-    expect((await request(simulator, history)).response.status).toBe(503)
+    // Liveness witness: the probe turn itself still takes its four outages and
+    // continues after them.
+    for (const outage of OUTAGES) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     expect((await request(simulator, history)).response.status).toBe(200)
     expect(simulator.evidence().rejected).toBe(1)
   })
@@ -1089,19 +1115,22 @@ describe('approved-tools model-step retry probe (#1044)', () => {
     expect(failedStep.finalize).toHaveBeenCalledTimes(1)
     expect(failedStep.emitted).toEqual([])
 
-    // The Host retries that step once by itself before any checkpoint settles.
-    const automaticRetry = transport(
-      simulator,
-      probe.content,
-      'model-step-auto-retry',
-      'error',
-      messages
-    )
-    await expect(automaticRetry.pending).rejects.toMatchObject({
-      name: 'CodexTransportError',
-      code: 'provider_unavailable',
-    })
-    expect(automaticRetry.finalize).toHaveBeenCalledTimes(1)
+    // The Host retries that step three times by itself before any checkpoint
+    // settles; the fourth failure is the one that stands.
+    for (const attempt of [1, 2, 3]) {
+      const automaticRetry = transport(
+        simulator,
+        probe.content,
+        `model-step-auto-retry-${attempt}`,
+        'error',
+        messages
+      )
+      await expect(automaticRetry.pending).rejects.toMatchObject({
+        name: 'CodexTransportError',
+        code: 'provider_unavailable',
+      })
+      expect(automaticRetry.finalize).toHaveBeenCalledTimes(1)
+    }
 
     const continuation = transport(
       simulator,
@@ -1116,7 +1145,7 @@ describe('approved-tools model-step retry probe (#1044)', () => {
       text: `continued ${marker} toolResults=1`,
     })
     expect(simulator.evidence().modelStepRetry).toMatchObject({
-      unavailableResponses: 2,
+      unavailableResponses: 4,
       continuations: 1,
       toolResults: 1,
       unexpectedRetries: 0,
@@ -1158,8 +1187,9 @@ describe('physical receipt before the model-step outage', () => {
         output: JSON.stringify(outputs[index]),
       })
     }
-    expect((await request(simulator, history)).response.status).toBe(503)
-    expect((await request(simulator, history)).response.status).toBe(503)
+    for (const outage of [1, 2, 3, 4]) {
+      expect((await request(simulator, history)).response.status, `outage ${outage}`).toBe(503)
+    }
     const continued = await request(simulator, history)
     expect(continued.response.status).toBe(200)
     expect(continued.event.delta).toBe(`continued ${marker} toolResults=1`)
@@ -1172,11 +1202,138 @@ describe('physical receipt before the model-step outage', () => {
   })
 })
 
+describe('approved-tools capped model-step retry (#1044 C12)', () => {
+  const marker = 'msr-capped-1234'
+  const capped = { role: 'user', content: `model step retry capped ${marker}` }
+  const searchResult = JSON.stringify({ found: 0, returned: 0, results: [] })
+
+  function body(input: Entry[]) {
+    return {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-5.3-codex',
+        stream: true,
+        store: false,
+        input,
+        tools,
+      }),
+    }
+  }
+
+  // Completion 1 is the turn's one search, answered by the Host.
+  async function searched(simulator: ReturnType<typeof createApprovedToolsUpstream>) {
+    const first = await request(simulator, [capped])
+    expect(first.response.status).toBe(200)
+    const call = first.event.item as Entry
+    return [
+      capped,
+      call,
+      { type: 'function_call_output', call_id: call.call_id, output: searchResult },
+    ] as Entry[]
+  }
+
+  it('counts the held retry on arrival and settles it at once when the client aborts', async () => {
+    vi.useFakeTimers()
+    try {
+      const simulator = createApprovedToolsUpstream()
+      const history = await searched(simulator)
+      expect((await request(simulator, history)).response.status).toBe(503)
+      const arrival = simulator.evidence().modelStepRetry
+      const controller = new AbortController()
+      const pending = simulator.fetchFn(URL, { ...body(history), signal: controller.signal })
+      // Counted when the call arrives, before any answer: these are the values
+      // the runner reads even when the Host cuts the call at its cap.
+      const counted = simulator.evidence().modelStepRetry
+      expect(counted.unavailableResponses).toBe(arrival.unavailableResponses + 1)
+      expect(counted.cappedHeld).toBe(1)
+      const reason = new Error('client gave up on the held retry')
+      controller.abort(reason)
+      await expect(pending).rejects.toBe(reason)
+      // Nothing moves after arrival except the boolean that records the abort.
+      expect(simulator.evidence().modelStepRetry).toMatchObject({
+        unavailableResponses: counted.unavailableResponses,
+        cappedHeld: 1,
+        cappedAbortedEarly: true,
+        continuations: 0,
+      })
+      expect(simulator.evidence().rejected).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
+      // Every later call of the turn is its continuation, with the kept result.
+      const continued = await request(simulator, history)
+      expect(continued.response.status).toBe(200)
+      expect(continued.event.delta).toBe(`continued ${marker} toolResults=1`)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('answers the held retry with a 503 after two minutes when the client waits', async () => {
+    vi.useFakeTimers()
+    try {
+      const simulator = createApprovedToolsUpstream()
+      const history = await searched(simulator)
+      expect((await request(simulator, history)).response.status).toBe(503)
+      const pending = simulator.fetchFn(URL, body(history))
+      expect(simulator.evidence().modelStepRetry).toMatchObject({
+        unavailableResponses: 2,
+        cappedHeld: 1,
+        cappedAbortedEarly: false,
+      })
+      await vi.advanceTimersByTimeAsync(119_999)
+      // Still held one millisecond before the hold ends, with its timer still
+      // armed: the witness for the answer asserted right after.
+      expect(vi.getTimerCount()).toBe(1)
+      expect(await Promise.race([pending.then(() => 'answered'), Promise.resolve('held')])).toBe(
+        'held'
+      )
+      await vi.advanceTimersByTimeAsync(1)
+      const response = await pending
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({
+        error: { code: 'server_is_overloaded', message: 'fixture provider unavailable' },
+      })
+      expect(simulator.evidence().modelStepRetry.cappedAbortedEarly).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
+      const continued = await request(simulator, history)
+      expect(continued.event.delta).toBe(`continued ${marker} toolResults=1`)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses the capped kind on the Grok boundary', async () => {
+    const simulator = createApprovedToolsUpstream('grok')
+    const asGrok = (content: string) => ({
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'grok-4.6',
+        stream: true,
+        store: false,
+        input: [{ role: 'user', content }],
+        tools,
+      }),
+    })
+    const url = 'https://cli-chat-proxy.grok.com/v1/responses'
+    expect((await simulator.fetchFn(url, asGrok(`model step retry capped ${marker}`))).status).toBe(
+      422
+    )
+    // Liveness witness: the same boundary serves a kind Grok allows.
+    expect((await simulator.fetchFn(url, asGrok(`model step retry zero ${marker}`))).status).toBe(
+      503
+    )
+    expect(simulator.evidence().modelStepRetry).toMatchObject({ turns: 1, cappedHeld: 0 })
+  })
+})
 
 describe('Grok approved-tools recovery boundary', () => {
   const grokUrl = 'https://cli-chat-proxy.grok.com/v1/responses'
-  const factory = createApprovedToolsUpstream as (provider: 'grok') => ReturnType<typeof createApprovedToolsUpstream>
-  const payload = (history: Entry[]) => ({ method: 'POST', body: JSON.stringify({ model: 'grok-4.6', stream: true, store: false, input: history, tools }) })
+  const factory = createApprovedToolsUpstream as (
+    provider: 'grok'
+  ) => ReturnType<typeof createApprovedToolsUpstream>
+  const payload = (history: Entry[]) => ({
+    method: 'POST',
+    body: JSON.stringify({ model: 'grok-4.6', stream: true, store: false, input: history, tools }),
+  })
   async function grokRequest(simulator: ReturnType<typeof factory>, history: Entry[]) {
     const response = await simulator.fetchFn(grokUrl, payload(history))
     const body = await response.text()
@@ -1186,47 +1343,93 @@ describe('Grok approved-tools recovery boundary', () => {
     const simulator = factory('grok')
     const catalog = await simulator.fetchFn('https://cli-chat-proxy.grok.com/v1/models')
     expect(catalog.status).toBe(200)
-    expect(await catalog.json()).toEqual({ models: [{ slug: 'grok-4.6', displayName: 'Grok isolated tool test' }] })
-    expect((await grokRequest(simulator, [{ role: 'user', content: 'model step retry zero grok-origin-1234' }])).response.status).toBe(503)
-    for (const url of [URL, 'https://cli-chat-proxy.grok.com/v1/responses?other=1', 'https://auth.x.ai/oauth2/token'])
+    expect(await catalog.json()).toEqual({
+      models: [{ slug: 'grok-4.6', displayName: 'Grok isolated tool test' }],
+    })
+    expect(
+      (
+        await grokRequest(simulator, [
+          { role: 'user', content: 'model step retry zero grok-origin-1234' },
+        ])
+      ).response.status
+    ).toBe(503)
+    for (const url of [
+      URL,
+      'https://cli-chat-proxy.grok.com/v1/responses?other=1',
+      'https://auth.x.ai/oauth2/token',
+    ])
       expect((await simulator.fetchFn(url, payload([]))).status).toBe(422)
-    expect((await grokRequest(simulator, [{ role: 'user', content: 'verification receipt' }])).response.status).toBe(422)
+    expect(
+      (await grokRequest(simulator, [{ role: 'user', content: 'verification receipt' }])).response
+        .status
+    ).toBe(422)
   })
-  it.each(['receipt', 'zero', 'absorbed'] as const)('preserves the exact %s outage schedule and rejects an automatic replay', async kind => {
-    const simulator = factory('grok')
-    const marker = `grok-${kind}-1234`
-    const user = { role: 'user', content: `model step retry ${kind} ${marker}` }
-    const history: Entry[] = [user]
-    if (kind !== 'zero') {
-      const first = await grokRequest(simulator, history)
-      expect(first.response.status).toBe(200)
-      history.push(first.event.item, { type: 'function_call_output', call_id: first.event.item.call_id, output: JSON.stringify({ found: 0, returned: 0, results: [] }) })
-    }
-    if (kind === 'receipt') {
-      const outputs = [
-        { found: 1, returned: 1, results: [{ name: target, server: 'fixture' }] },
-        { found: true, name: target, parameters: { type: 'object', properties: {} } },
-        { content: [{ type: 'text', text: JSON.stringify({ runId: 'grok-fixture', tool: 'workitem_read_receipt', callId: 'physical-1', businessId: 'grok-receipt-1' }) }] },
-      ]
-      for (const [index, output] of outputs.entries()) {
-        const step = await grokRequest(simulator, history)
-        expect(step.response.status).toBe(200)
-        expect(step.event.item.name).toBe(bridges[index])
-        history.push(step.event.item, { type: 'function_call_output', call_id: step.event.item.call_id, output: JSON.stringify(output) })
+  it.each(['receipt', 'zero', 'absorbed'] as const)(
+    'preserves the exact %s outage schedule and rejects an automatic replay',
+    async kind => {
+      const simulator = factory('grok')
+      const marker = `grok-${kind}-1234`
+      const user = { role: 'user', content: `model step retry ${kind} ${marker}` }
+      const history: Entry[] = [user]
+      if (kind !== 'zero') {
+        const first = await grokRequest(simulator, history)
+        expect(first.response.status).toBe(200)
+        history.push(first.event.item, {
+          type: 'function_call_output',
+          call_id: first.event.item.call_id,
+          output: JSON.stringify({ found: 0, returned: 0, results: [] }),
+        })
       }
-    }
-    const outages = kind === 'receipt' ? 2 : 1
-    for (let index = 0; index < outages; index++) expect((await grokRequest(simulator, history)).response.status).toBe(503)
-    if (kind === 'zero') {
+      if (kind === 'receipt') {
+        const outputs = [
+          { found: 1, returned: 1, results: [{ name: target, server: 'fixture' }] },
+          { found: true, name: target, parameters: { type: 'object', properties: {} } },
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  runId: 'grok-fixture',
+                  tool: 'workitem_read_receipt',
+                  callId: 'physical-1',
+                  businessId: 'grok-receipt-1',
+                }),
+              },
+            ],
+          },
+        ]
+        for (const [index, output] of outputs.entries()) {
+          const step = await grokRequest(simulator, history)
+          expect(step.response.status).toBe(200)
+          expect(step.event.item.name).toBe(bridges[index])
+          history.push(step.event.item, {
+            type: 'function_call_output',
+            call_id: step.event.item.call_id,
+            output: JSON.stringify(output),
+          })
+        }
+      }
+      // The receipt step fails four times: one outage plus the three automatic
+      // retries of the Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=3; the
+      // absorbed step fails three times, which those retries alone outlast.
+      const outages = kind === 'receipt' ? 4 : kind === 'absorbed' ? 3 : 1
+      for (let index = 0; index < outages; index++)
+        expect((await grokRequest(simulator, history)).response.status).toBe(503)
+      if (kind === 'zero') {
+        expect((await grokRequest(simulator, history)).response.status).toBe(422)
+        expect(simulator.evidence().modelStepRetry.unexpectedRetries).toBe(1)
+        history.push(user)
+      }
+      const answered = await grokRequest(simulator, history)
+      expect(answered.response.status).toBe(200)
+      expect(answered.event.delta).toBe(
+        kind === 'zero'
+          ? `resent ${marker} answered`
+          : `${kind === 'receipt' ? 'continued' : 'absorbed'} ${marker} toolResults=1`
+      )
+      expect(simulator.evidence().modelStepRetry.unavailableResponses).toBe(outages)
       expect((await grokRequest(simulator, history)).response.status).toBe(422)
-      expect(simulator.evidence().modelStepRetry.unexpectedRetries).toBe(1)
-      history.push(user)
+      expect(simulator.evidence().modelStepRetry.unexpectedRetries).toBeGreaterThan(0)
     }
-    const answered = await grokRequest(simulator, history)
-    expect(answered.response.status).toBe(200)
-    expect(answered.event.delta).toBe(kind === 'zero' ? `resent ${marker} answered` : `${kind === 'receipt' ? 'continued' : 'absorbed'} ${marker} toolResults=1`)
-    expect(simulator.evidence().modelStepRetry.unavailableResponses).toBe(outages)
-    expect((await grokRequest(simulator, history)).response.status).toBe(422)
-    expect(simulator.evidence().modelStepRetry.unexpectedRetries).toBeGreaterThan(0)
-  })
+  )
 })

@@ -19,7 +19,7 @@ const specFile = 'codex-subscription-approved-tools.spec.ts'
 const modelStepSpecFile = 'model-step-retry-codex.spec.ts'
 const hybridSpecFile = 'model-step-retry-codex-hybrid.spec.ts'
 export const hybridRetryTitles = [
-  'real hybrid R1: a confirmed fixture read survives two injected 503s and Retry completes',
+  'real hybrid R1: a confirmed fixture read survives four injected 503s and Retry completes',
   'real hybrid R2: approval inside the continuation executes the receipt once',
 ]
 export const toolCallLimitTitle =
@@ -47,43 +47,47 @@ export const modelStepRetryTitles = [
   'model step retry C9: denying an approval inside a continuation releases the session',
   'model step retry C10: cancelling an approval inside a continuation releases the session',
   'model step retry C8: the checkpoint survives a Host restart between the 503 and the retry',
-  'model step retry C11: one 503 after a confirmed search is absorbed by the automatic retry',
+  'model step retry C11: three 503s after a confirmed search are absorbed by the automatic retries',
+  'model step retry C12: the 60 s cap ends a held retry and Retry model step completes the turn',
 ]
-// Aggregate business signals from the eleven deterministic Desktop journeys.
-// Every journey that ends on the resumable notice fails its model step twice
-// (the Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=1 absorbs the first 503):
-// C5 four times, C2 once before any tool, and C11's single outage is absorbed.
+// Aggregate business signals from the twelve deterministic Desktop journeys.
+// Every journey that ends on the resumable notice fails its model step four
+// times (the Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=3 absorbs the first
+// three 503s): C5 eight times, C2 once before any tool, C11's three outages are
+// absorbed and C12 adds its one immediate and its one held outage.
 export const modelStepRetryExpectedDelta = Object.freeze({
-  turns: 11,
-  markerSearches: 10,
-  unavailableResponses: 22,
+  turns: 12,
+  markerSearches: 11,
+  unavailableResponses: 46,
   zeroToolUnavailable: 1,
-  continuationUnavailable: 2,
-  continuations: 5,
-  toolResults: 5,
+  continuationUnavailable: 4,
+  continuations: 6,
+  toolResults: 6,
   resends: 2,
   followUps: 3,
   unexpectedRetries: 0,
   approvalRequests: 3,
   approvalFinals: 1,
   absorbed: 1,
+  cappedHeld: 1,
 })
 
 // The Grok lane runs only the three cases that prove something Grok-specific:
 // C1 (a dispatched 503 after a confirmed tool, then Retry model step), C2 (a 503
-// before any tool, only Resend) and C11 (one 503 absorbed by the Host's
-// automatic retry). The other cases exercise provider-independent Host and UI code.
+// before any tool, only Resend) and C11 (three 503s absorbed by the Host's
+// automatic retries). The other cases exercise provider-independent Host and UI code.
 export const grokModelStepRetryTitles = [
   modelStepRetryTitles[0],
   modelStepRetryTitles[1],
   modelStepRetryTitles[10],
 ]
-// C1 fails its step twice and continues once; C2 fails once before any tool and
-// answers through Resend; C11's single outage is absorbed.
+// C1 fails its step four times and continues once; C2 fails once before any tool
+// and answers through Resend; C11's three outages are absorbed. Grok has no C12,
+// so its held-retry counter stays where it was.
 export const grokModelStepRetryExpectedDelta = Object.freeze({
   turns: 3,
   markerSearches: 2,
-  unavailableResponses: 4,
+  unavailableResponses: 8,
   zeroToolUnavailable: 1,
   continuationUnavailable: 0,
   continuations: 1,
@@ -94,6 +98,7 @@ export const grokModelStepRetryExpectedDelta = Object.freeze({
   approvalRequests: 0,
   approvalFinals: 0,
   absorbed: 1,
+  cappedHeld: 0,
 })
 
 function validateProvider(provider) {
@@ -220,11 +225,11 @@ export function validateHybridEvidence(before, after) {
       throw new Error(`Real-hybrid evidence missing or reset: ${field}`)
   }
   for (const [field, expected] of Object.entries({
-    // Three journeys fail one model step each; the counters move per injected
-    // response, so R1 and R2 move by two.
-    injected503: 4,
-    r1: 2,
-    r2: 2,
+    // R1 and R2 each fail one model step four times; the counters move per
+    // injected response, so both journeys move by four.
+    injected503: 8,
+    r1: 4,
+    r2: 4,
     // R1: search, describe, physical read. R2 also discovers and calls a new receipt.
     r1DistinctToolResults: 3,
     r2DistinctToolResults: 6,
@@ -234,7 +239,7 @@ export function validateHybridEvidence(before, after) {
   }
   if (after.forwarded <= before.forwarded)
     throw new Error('Real-hybrid mode did not forward real provider requests')
-  return { forwarded: after.forwarded - before.forwarded, injected503: 4 }
+  return { forwarded: after.forwarded - before.forwarded, injected503: 8 }
 }
 
 /**

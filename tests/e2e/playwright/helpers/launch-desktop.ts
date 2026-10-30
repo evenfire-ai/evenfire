@@ -1,9 +1,12 @@
-import { type ElectronApplication, _electron as electron } from '@playwright/test'
+import { type ElectronApplication, _electron as electron, test } from '@playwright/test'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 
+// E2E_GUARDIAN_IPC_FLOW: the Desktop app and its session live in the main
+// process; this helper starts and inspects it through Playwright's Electron
+// API, so there is no renderer HTTP request to await.
 const DESKTOP_APP_DIR = path.resolve(__dirname, '../../../../desktop-app')
 const MAIN_JS = path.join(DESKTOP_APP_DIR, 'dist/main.js')
 const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
@@ -85,6 +88,12 @@ export async function launchDesktopApp(): Promise<ElectronApplication> {
       executablePath,
       args: [`--user-data-dir=${userDataDir}`, MAIN_JS],
       cwd: DESKTOP_APP_DIR,
+      // Playwright records the Desktop window itself. The directory is the
+      // test's own output path (under the config's `outputDir`, the lane's
+      // artifacts directory), never `runDir`: that directory is deleted when the
+      // app closes (below), which would take the video with it. Every caller is
+      // a test body, so `test.info()` exists here.
+      recordVideo: { dir: test.info().outputPath('desktop-video') },
       env: {
         ...process.env,
         [DEV_ISOLATION_ENV.enable]: '1',

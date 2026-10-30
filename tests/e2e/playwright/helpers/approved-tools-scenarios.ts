@@ -87,6 +87,9 @@ export const modelStepRetryFields = [
   'approvalRequests',
   'approvalFinals',
   'absorbed',
+  // #1044 C12: `capped` retried calls held open, counted when they arrive. The
+  // `cappedAbortedEarly` flag is a boolean and stays out of these deltas.
+  'cappedHeld',
 ] as const
 export type ModelStepRetryEvidence = Record<(typeof modelStepRetryFields)[number], number>
 export function required(name: string): string {

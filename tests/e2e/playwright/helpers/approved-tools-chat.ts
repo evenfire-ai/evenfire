@@ -27,12 +27,20 @@ export async function newAgentResponses(page: Page) {
   return responses.and(page.locator(`[data-chat-message-id]${exclusions}`))
 }
 
-export async function openAgentChat(desktop: Page, scenario: Scenario) {
+/** Signs the isolated Desktop app in; the session stays open for the caller. */
+export async function signInDesktop(desktop: Page) {
   await expectSignedOutLaunch(desktop)
   await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
   await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
   await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
   await expect(desktop.getByTestId('nav-chat')).toBeVisible()
+}
+
+/**
+ * Opens a new chat with the scenario's agent from an already signed-in app. The
+ * sign-in is separate so a caller can observe the agent before the chat opens.
+ */
+export async function openNewAgentChat(desktop: Page, scenario: Scenario) {
   await desktop.getByTestId('nav-chat').click()
   await desktop.getByTestId('nav-new-chat').click()
   await expect(
@@ -43,7 +51,18 @@ export async function openAgentChat(desktop: Page, scenario: Scenario) {
   await expect(
     desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
   ).toContainText(scenario.agentDisplayName)
-  await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
+  // The interactive chip is the only state that carries no model id and the
+  // `Model — Select model` name: while the list loads it is absent, a failed read
+  // shows "Models unavailable — retry loading the model list", a degraded
+  // allowlist renders a static `Model Select model (selection unavailable)` chip,
+  // and a bound agent shows `Model — <name>` (ModelSelector.tsx). Asserting the
+  // state before the click names which one the run found instead of timing out on
+  // the locator alone.
+  const modelChip = desktop.getByTestId('selected-chat-model')
+  await expect(modelChip).toBeVisible()
+  await expect(modelChip).toHaveAttribute('data-model-id', '')
+  await expect(modelChip).toHaveAccessibleName('Model — Select model')
+  await modelChip.click()
   // The menu labels an option with the allowlist entry's displayName and
   // falls back to the model id when there is none (ModelSelector.tsx:276).
   // Which of the two renders depends on catalog metadata this test does not
@@ -60,4 +79,10 @@ export async function openAgentChat(desktop: Page, scenario: Scenario) {
     scenario.modelName
   )
   await expect(desktop.getByTestId('agent-response')).toHaveCount(0)
+}
+
+/** Signs in and opens a new chat with the scenario's agent. */
+export async function openAgentChat(desktop: Page, scenario: Scenario) {
+  await signInDesktop(desktop)
+  await openNewAgentChat(desktop, scenario)
 }

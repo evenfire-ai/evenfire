@@ -1,5 +1,9 @@
-import { type Page, expect } from '@playwright/test'
+import { type Page, expect, test } from '@playwright/test'
 
+// E2E_GUARDIAN_IPC_FLOW: the Desktop session lives in the main process, so
+// sign-out and the pre-teardown capture are observed through Playwright's
+// Electron page, never through a renderer HTTP response.
+//
 // `launchDesktopApp` starts every Desktop dev-isolated in a new run directory,
 // so the session token is stored only inside that run's user-data directory
 // (`desktop-app/src/tokenStore.ts`, isolated mode: no keytar) and is removed
@@ -10,6 +14,27 @@ export async function signOutDesktop(desktop: Page): Promise<void> {
   // The login form is the witness that logout cleared the session: the renderer
   // mounts `AuthPage` only when no session remains.
   await expect(desktop.getByLabel('Email', { exact: true })).toBeVisible()
+}
+
+/**
+ * Attaches a Desktop screenshot and an aria snapshot of the window to the
+ * running test, before the lane tears the app down.
+ *
+ * A failure screenshot taken after sign-out shows only the login form, which is
+ * why run14's model-step failures could not name the window state they found.
+ * Password fields expose no value in an aria snapshot and the signed-in address
+ * is a fixture one.
+ */
+export async function attachDesktopBeforeTeardown(desktop: Page): Promise<void> {
+  const info = test.info()
+  await info.attach('desktop-before-teardown.png', {
+    body: await desktop.screenshot(),
+    contentType: 'image/png',
+  })
+  await info.attach('desktop-before-teardown.aria.yml', {
+    body: await desktop.locator('body').ariaSnapshot(),
+    contentType: 'text/yaml',
+  })
 }
 
 // A launch that inherits a session is a cleanup failure in an earlier test, not

@@ -26,7 +26,7 @@ function completion(input: unknown[]) {
 }
 
 describe('real Codex hybrid upstream', () => {
-  it('injects two 503s after a correlated confirmed tool result', async () => {
+  it('injects four 503s after a correlated confirmed tool result', async () => {
     const forwarded = Response.json({ real: true })
     const realFetch = vi.fn<typeof fetch>(async () => forwarded)
     const hybrid = createRealHybridUpstream(realFetch)
@@ -36,9 +36,10 @@ describe('real Codex hybrid upstream', () => {
 
     expect(await hybrid.fetchFn(url, before)).toBe(forwarded)
     expect(await hybrid.fetchFn(url, uncorrelated)).toBe(forwarded)
-    // The Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=1 retries the step once,
-    // so the journey that must end on the resumable notice needs two outages.
-    for (const attempt of [1, 2]) {
+    // The Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=3 retries the step three
+    // times, so the journey that must end on the resumable notice needs four
+    // outages.
+    for (const attempt of [1, 2, 3, 4]) {
       const failure = await hybrid.fetchFn(url, after)
       expect(failure.status, `outage ${attempt}`).toBe(503)
       expect(await failure.json()).toEqual({
@@ -51,8 +52,8 @@ describe('real Codex hybrid upstream', () => {
     expect(realFetch).toHaveBeenNthCalledWith(3, url, after)
     expect(hybrid.evidence()).toEqual({
       forwarded: 3,
-      injected503: 2,
-      r1: 2,
+      injected503: 4,
+      r1: 4,
       r2: 0,
       r1DistinctToolResults: 1,
       r2DistinctToolResults: 0,
@@ -82,14 +83,17 @@ describe('real Codex hybrid upstream', () => {
     const hybrid = createRealHybridUpstream(realFetch)
     const second = { role: 'user', content: 'model step retry hybrid r2 another-marker-1234' }
     expect((await hybrid.fetchFn(url, completion([user, call, output, second]))).status).toBe(200)
-    expect((await hybrid.fetchFn(url, completion([second, call, output]))).status).toBe(503)
-    expect((await hybrid.fetchFn(url, completion([second, call, output]))).status).toBe(503)
+    for (const attempt of [1, 2, 3, 4])
+      expect(
+        (await hybrid.fetchFn(url, completion([second, call, output]))).status,
+        `outage ${attempt}`
+      ).toBe(503)
     expect((await hybrid.fetchFn(url, completion([second, call, output]))).status).toBe(200)
     expect(hybrid.evidence()).toMatchObject({
       forwarded: 2,
-      injected503: 2,
+      injected503: 4,
       r1: 0,
-      r2: 2,
+      r2: 4,
       r2DistinctToolResults: 1,
     })
   })
@@ -133,8 +137,8 @@ it('forwards discovery until the physical fixture read is confirmed before the 5
   }
   expect((await hybrid.fetchFn(url, completion([...history, physical]))).status).toBe(200)
   const confirmed = completion([...history, physical, result])
-  expect((await hybrid.fetchFn(url, confirmed)).status).toBe(503)
-  expect((await hybrid.fetchFn(url, confirmed)).status).toBe(503)
+  for (const attempt of [1, 2, 3, 4])
+    expect((await hybrid.fetchFn(url, confirmed)).status, `outage ${attempt}`).toBe(503)
   expect((await hybrid.fetchFn(url, confirmed)).status).toBe(200)
   expect(realFetch).toHaveBeenCalledTimes(3)
 })

@@ -1,8 +1,8 @@
 /**
  * Real Codex subscription with injected test-image 503s after a confirmed tool.
- * The Host's default `CLERUM_MODEL_STEP_AUTO_RETRIES=1` retries a failed model
- * step once by itself, so R1 and R2 fail the step that must end on the
- * resumable notice twice: the retry absorbs the first outage.
+ * The Host's default `CLERUM_MODEL_STEP_AUTO_RETRIES=3` retries a failed model
+ * step three times by itself, so R1 and R2 fail the step that must end on the
+ * resumable notice four times: the retries absorb the first three outages.
  * E2E_GUARDIAN_STRICT_NETWORK: no browser request is intercepted or fulfilled.
  * E2E_GUARDIAN_IPC_FLOW: Desktop login and chat use the real main-process IPC;
  * read-only IPC and external fixture counters observe the resulting business state.
@@ -22,7 +22,7 @@ import {
   required,
   scenarios,
 } from '../helpers/approved-tools-scenarios'
-import { signOutDesktop } from '../helpers/desktop-session'
+import { attachDesktopBeforeTeardown, signOutDesktop } from '../helpers/desktop-session'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 
 const TIMEOUT = 180_000
@@ -46,7 +46,7 @@ type Session = {
 type HybridEvidence = {
   forwarded: number
   injected503: number
-  // Counted per injected response: the journey fails one step twice.
+  // Counted per injected response: the journey fails one step four times.
   r1: number
   r2: number
   r1DistinctToolResults: number
@@ -113,6 +113,9 @@ async function withDesktopChat(run: (desktop: Page) => Promise<void>): Promise<v
     await run(desktop)
     passed = true
   } finally {
+    // The window state at the failure point, before sign-out replaces it with
+    // the login form.
+    if (!passed) await attachDesktopBeforeTeardown(await app.firstWindow())
     try {
       await signOutDesktop(await app.firstWindow())
     } catch {
@@ -150,7 +153,7 @@ async function unavailable(desktop: Page, prompt: string) {
   return notice
 }
 
-test('real hybrid R1: a confirmed fixture read survives two injected 503s and Retry completes', async () => {
+test('real hybrid R1: a confirmed fixture read survives four injected 503s and Retry completes', async () => {
   await withDesktopChat(async desktop => {
     const prompt = `model step retry hybrid r1 r1-${randomUUID()}. Use clerum__tool_search once to find workitem_read_000, clerum__tool_describe once for its schema, then clerum__tool_call once with empty arguments. Wait for my approval. After that read completes, answer without calling another tool.`
     const before = await evidence()
@@ -174,7 +177,7 @@ test('real hybrid R1: a confirmed fixture read survives two injected 503s and Re
     })
     expect(kept.modelStepCheckpoint?.checkpointId).toBeTruthy()
     expect(kept.modelStepCheckpoint?.version).toBeGreaterThan(0)
-    await expect.poll(async () => (await evidence()).r1, { timeout: TIMEOUT }).toBe(before.r1 + 2)
+    await expect.poll(async () => (await evidence()).r1, { timeout: TIMEOUT }).toBe(before.r1 + 4)
     await test.step('Retry produces a real model answer from the kept result', async () => {
       const responses = await newAgentResponses(desktop)
       await desktop.getByTestId('model-step-retry-btn').click()
@@ -211,10 +214,10 @@ test('real hybrid R1: a confirmed fixture read survives two injected 503s and Re
       )
     ).toBe(true)
     const after = await evidence()
-    // Two injected responses for the one step: the automatic retry met the first
-    // and Retry model step met the second.
-    expect(after.r1).toBe(before.r1 + 2)
-    expect(after.injected503).toBe(before.injected503 + 2)
+    // Four injected responses for the one step: the original call and its three
+    // automatic retries.
+    expect(after.r1).toBe(before.r1 + 4)
+    expect(after.injected503).toBe(before.injected503 + 4)
     expect(after.r1DistinctToolResults).toBe(before.r1DistinctToolResults + 3)
     expect(after.forwarded).toBeGreaterThan(before.forwarded)
     assertConfirmedToolNotReexecuted(
@@ -295,8 +298,8 @@ test('real hybrid R2: approval inside the continuation executes the receipt once
       'workitem_read_000'
     )
     expect(after.r2DistinctToolResults).toBe(before.r2DistinctToolResults + 6)
-    expect(after.r2).toBe(before.r2 + 2)
-    expect(after.injected503).toBe(before.injected503 + 2)
+    expect(after.r2).toBe(before.r2 + 4)
+    expect(after.injected503).toBe(before.injected503 + 4)
     expect(after.forwarded).toBeGreaterThan(before.forwarded)
   })
 })

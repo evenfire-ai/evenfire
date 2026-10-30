@@ -1,11 +1,12 @@
 /** Provider outages in the isolated E2E proxy image; all other requests use Codex. */
 const COMPLETIONS = 'https://chatgpt.com/backend-api/codex/responses'
 const HYBRID_TURN = /\bmodel step retry hybrid (r1|r2) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/i
-// The Host retries one failed model step by itself when that failure would leave
-// a resumable checkpoint (`CLERUM_MODEL_STEP_AUTO_RETRIES` defaults to 1). R1 and
-// R2 must end on the resumable notice, so each fails the step after the fixture
-// read twice: the automatic retry absorbs the first outage and the second stands.
-const HYBRID_OUTAGES = 2
+// The Host retries one failed model step three times by itself when that failure
+// would leave a resumable checkpoint (`CLERUM_MODEL_STEP_AUTO_RETRIES` defaults
+// to 3). R1 and R2 must end on the resumable notice, so each fails the step after
+// the fixture read four times: the three automatic retries absorb the first three
+// outages and the fourth stands.
+const HYBRID_OUTAGES = 4
 
 type Row = Record<string, unknown>
 
@@ -139,7 +140,7 @@ export function createRealHybridUpstream(forward: typeof fetch) {
           const served = injected.get(key) ?? 0
           if (confirmedFixtureRead(history.slice(lastUser + 1)) && served < HYBRID_OUTAGES) {
             injected.set(key, served + 1)
-            // Both counters move per injected response: the journey measured two
+            // Both counters move per injected response: the journey measured four
             // outages, however many attempts the Host needed to outlast them.
             counts.injected503++
             counts[kind]++

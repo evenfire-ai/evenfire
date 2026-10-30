@@ -74,7 +74,9 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
     baseURL: localUrl(required('CONTROL_UI_URL')),
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    // This lane records the Control UI pages too, so a failure can be read from
+    // the page that produced it (`e2e-recording-is-playwright-only`).
+    video: 'on',
     // Login inputs must not be persisted in Playwright action traces.
     trace: 'off',
   },
