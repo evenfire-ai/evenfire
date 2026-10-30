@@ -1,11 +1,10 @@
 // control-ui/e2e/qa-recorder-connector-edit.spec.ts
 //
 // MUTATING journey: stages a context through the Control API, creates a stdio
-// discovery connector through the create-connector wizard (which also
-// provisions the connector's own private access scope), then edits the
-// connector to add external CIDR egress. Guarded by
-// QA_RECORDER_CONFIRM_MUTATIONS; the connector and both contexts are deleted
-// via the Control API in a finally.
+// discovery connector through the create-connector wizard (which creates no
+// Context of its own), then edits the connector to add external CIDR egress.
+// Guarded by QA_RECORDER_CONFIRM_MUTATIONS; the connector and the context are
+// deleted via the Control API in a finally.
 import { type Page, expect, test } from '@playwright/test'
 import { type SecretIdentity, requireSecretIdentity } from '../test-utils/secretIdentity'
 import {
@@ -75,18 +74,17 @@ async function createDiscoveryConnector(page: Page, connectorName: string): Prom
 
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
 
-  // Access step: the agents multi-select is optional — skip it.
-  await expect(page.getByRole('heading', { name: 'Agent access', exact: true })).toBeVisible({
-    timeout: 20_000,
-  })
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
-
   // Secrets step: explicitly pick the keyless credential mode — the wizard
   // keeps Create connector disabled until a credential choice is made.
   await page.getByText('No credentials required', { exact: true }).click()
 
   await page.getByRole('button', { name: 'Create connector', exact: true }).click()
-  await expect(page.getByText('Connector created successfully.', { exact: true })).toBeVisible({
+  await expect(
+    page.getByText(
+      'Connector created. Give agents access from the Installed Connectors list whenever you’re ready.',
+      { exact: true }
+    )
+  ).toBeVisible({
     timeout: 20_000,
   })
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
@@ -114,7 +112,6 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
     const credentials = adminCredentials()
     const contextName = uniqueE2EName('qa-recorder-context')
     const connectorName = uniqueE2EName('qa-recorder-connector')
-    let connectorContextName = ''
 
     try {
       await loginThroughUi(page, credentials)
@@ -122,18 +119,13 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       await createEmptyContext(page, contextName)
       await createDiscoveryConnector(page, connectorName)
 
-      // The wizard provisions the connector's private access scope out of
-      // band; capture its name so the finally can tear it down too.
       const createdRes = await api(
         page.request,
         'GET',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
       expect(createdRes.status, `read connector: ${JSON.stringify(createdRes.data)}`).toBe(200)
-      connectorContextName = String(
-        (createdRes.data.spec as { contextRef?: string } | undefined)?.contextRef || ''
-      )
-      expect(connectorContextName).toMatch(new RegExp(`^${connectorName}-[0-9]{5}$`))
+      expect(createdRes.data.spec as Record<string, unknown>).not.toHaveProperty('contextRef')
 
       await openConnectorEditor(page, connectorName)
       await expect(
@@ -173,8 +165,6 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       const meta = page.locator('.cu-connector-edit-meta')
       await expect(meta).toBeVisible({ timeout: 20_000 })
       await expect(meta.getByText('qa-recorder/example:dev')).toBeVisible()
-      // The private scope slug must NOT surface anywhere on this page.
-      await expect(meta.getByText(connectorContextName)).toHaveCount(0)
 
       // The connector starts closed, so the following persistence check proves a
       // real edit rather than re-reading setup data.
@@ -212,13 +202,6 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
-      if (connectorContextName) {
-        await api(
-          page.request,
-          'DELETE',
-          `/api/v1/admin/contexts/${encodeURIComponent(connectorContextName)}`
-        )
-      }
       await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
     }
   })
@@ -289,7 +272,6 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         metadata: { name: connectorName },
         spec: {
           image: MOCK_MCP_IMAGE,
-          contextRef: contextName,
           description: 'issue #223 credential-rotation e2e connector',
           transport: {
             type: 'streamableHttp',

@@ -46,7 +46,8 @@ export default function HostsPage() {
 
       const map: Record<string, string[]> = {}
       for (const ctx of contextsResponse.items || []) {
-        const ref = String(ctx.spec?.contextId || ctx.metadata?.name || '').trim()
+        // Keyed by name: a Host's contextRef names its Context exactly, never an alias.
+        const ref = ctx.metadata?.name ?? ''
         if (!ref) continue
         const servers = Array.isArray(ctx.spec?.mcpServers)
           ? ctx.spec.mcpServers

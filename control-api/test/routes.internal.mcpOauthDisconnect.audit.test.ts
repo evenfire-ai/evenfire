@@ -126,7 +126,7 @@ describe('DELETE /internal/mcp-oauth/grant — revocation audit (R1-M1)', () => 
     childSpy.mockRestore()
   })
 
-  it('logs userId + contextRef + deleted:false on a 0-row (idempotent) revoke', async () => {
+  it('logs userId + deleted:false (and no Context, for a per-user grant) on a 0-row revoke', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
     mockDb({ memberContexts: ['ctx-9'], deleteRowCount: 0 })
 
@@ -138,9 +138,10 @@ describe('DELETE /internal/mcp-oauth/grant — revocation audit (R1-M1)', () => 
     expect(payload).toMatchObject({
       event: 'mcp_oauth_grant_revoked',
       userId: 'user-7',
-      contextRef: 'ctx-9',
       deleted: false,
     })
+    expect(payload).not.toHaveProperty('contextRef')
+    expect(payload).not.toHaveProperty('contextName')
   })
 
   it('records deleted:true when a row was actually removed', async () => {

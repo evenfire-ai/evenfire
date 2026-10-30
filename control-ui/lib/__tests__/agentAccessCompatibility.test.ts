@@ -5,28 +5,18 @@ import {
   effectiveAgentNamesForAccess,
   planAgentAccessUpdate,
 } from '../agentAccessCompatibility'
-import type { ContextResource, HostResource } from '../api'
+import type { HostResource } from '../api'
 
 const hosts: HostResource[] = [
   { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha' } },
   { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
 ]
-const contexts: ContextResource[] = [
-  { metadata: { name: 'ctx-alpha' }, spec: { contextId: 'ctx-alpha', mcpServers: [] } },
-  { metadata: { name: 'ctx-beta' }, spec: { contextId: 'ctx-beta', mcpServers: [] } },
-  {
-    metadata: { name: 'member-private-scope' },
-    spec: { contextId: 'member-private-scope', mcpServers: [] },
-  },
-]
-
 describe('planAgentAccessUpdate', () => {
   it('derives the effective Agent grant set from direct and Context-only access', () => {
     expect(
       effectiveAgentNamesForAccess({
         assignedAgentNames: ['agent-beta'],
         assignedContextIds: ['ctx-alpha', 'member-private-scope'],
-        contexts,
         hosts,
       })
     ).toEqual(['agent-alpha', 'agent-beta'])
@@ -71,27 +61,24 @@ describe('planAgentAccessUpdate', () => {
     })
   })
 
-  it.each(['member', 'team'])(
-    'preserves existing %s access through mismatched Context aliases',
-    () => {
-      const aliasedContexts: ContextResource[] = [
-        {
-          metadata: { name: 'ctx-resource' },
-          spec: { contextId: 'ctx-wire', mcpServers: [] },
-        },
-      ]
-      const aliasedHosts: HostResource[] = [
-        { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-wire' } },
-      ]
+  it('matches a Host to a membership only by the exact Context name it references', () => {
+    const paddedHosts: HostResource[] = [
+      { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha ' } },
+    ]
 
-      expect(
-        planAgentAccessUpdate(['ctx-resource'], ['agent-alpha'], aliasedHosts, aliasedContexts)
-      ).toEqual({ agentNames: ['agent-alpha'], contextIds: ['ctx-resource'] })
-      expect(agentNamesForContextAccess(['ctx-resource'], aliasedHosts, aliasedContexts)).toEqual([
-        'agent-alpha',
-      ])
-    }
-  )
+    expect(planAgentAccessUpdate([], ['agent-alpha'], paddedHosts).contextIds).not.toContain(
+      'ctx-alpha'
+    )
+    expect(agentNamesForContextAccess(['ctx-alpha'], paddedHosts)).toEqual([])
+  })
+
+  it('keeps a membership stored under a name no Host references while granting by name', () => {
+    expect(planAgentAccessUpdate(['ctx-wire'], ['agent-alpha'], hosts)).toEqual({
+      agentNames: ['agent-alpha'],
+      contextIds: ['ctx-alpha', 'ctx-wire'],
+    })
+    expect(agentNamesForContextAccess(['ctx-wire'], hosts)).toEqual([])
+  })
 })
 
 describe('applyAgentAccessCompatibilityUpdate', () => {
@@ -105,7 +92,6 @@ describe('applyAgentAccessCompatibilityUpdate', () => {
 
       await expect(
         applyAgentAccessCompatibilityUpdate({
-          contexts,
           hosts,
           loadCurrentContextIds,
           nextGrantedAgentNames: ['agent-alpha'],
@@ -129,7 +115,6 @@ describe('applyAgentAccessCompatibilityUpdate', () => {
       })
 
       const result = await applyAgentAccessCompatibilityUpdate({
-        contexts,
         hosts,
         loadCurrentContextIds: async () => {
           calls.push('refresh-contexts')
@@ -155,7 +140,6 @@ describe('applyAgentAccessCompatibilityUpdate', () => {
   it('writes refreshed Context compatibility state only after the Agent CAS succeeds', async () => {
     const calls: string[] = []
     const result = await applyAgentAccessCompatibilityUpdate({
-      contexts,
       hosts,
       loadCurrentContextIds: async () => {
         calls.push('refresh-contexts')

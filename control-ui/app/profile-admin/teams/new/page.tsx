@@ -13,6 +13,7 @@ import { IconUsers } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { Button, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { planAgentAccessUpdate } from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import {
   addAdminTeamMember,
@@ -193,15 +194,9 @@ export default function CreateTeamPage() {
       const teamId = createdTeamId
       const selectedMemberRoles = overrides?.memberRoles ?? memberRoleDrafts
       const selectedAgentValues = overrides?.agentNames ?? selectedAgentNames
-      // D8 composite: the wizard's Access step picks AGENTS; both mappings are
-      // written so scope-based and agent-based enforcement agree.
-      const agentRefs = selectedAgentValues
-        .map(agentName => hosts.find(host => host.metadata?.name === agentName))
-        .map(host =>
-          String((host?.spec as { contextRef?: string } | undefined)?.contextRef || '').trim()
-        )
-        .filter(Boolean)
-      const selectedContextValues = Array.from(new Set([...agentRefs]))
+      // The wizard picks agents; both mappings are written so scope-based and
+      // agent-based enforcement agree.
+      const selectedContextValues = planAgentAccessUpdate([], selectedAgentValues, hosts).contextIds
 
       await Promise.all(
         Object.entries(selectedMemberRoles).map(([userId, role]) =>

@@ -10,6 +10,7 @@ import {
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { rootLogger } from '../../observability/logger.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
@@ -114,9 +115,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         try {
           active = new Set(await listActiveContextIds(gateway))
         } catch (err) {
-          console.warn(
-            `[external/teams] context reconciliation failed for ${req.params.teamId}:`,
-            err
+          ;(req.log ?? rootLogger).warn(
+            { err, module: 'external-teams', teamId: req.params.teamId },
+            'context reconciliation failed'
           )
         }
         return res.status(200).json({
@@ -146,6 +147,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           // agent access as the gate — no context-level scoping needed.
           agents = await resolveMcpServersForAgents(gateway, {
             mcpServersNamespace: config.mcpServersNamespace,
+            contextsNamespace: config.contextsNamespace,
             hostsNamespace: config.hostsNamespace,
             agentNames: authorizedAgentNames,
           })
@@ -156,9 +158,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           // Spec §7.2: never fail the catalog purely because Kubernetes is
           // unavailable. Preserve the names authorized by the directory DB;
           // omit enriched DTOs because their live Host identity is unverified.
-          console.warn(
-            `[external/teams] MCP server enrichment failed for team ${req.params.teamId}:`,
-            err
+          ;(req.log ?? rootLogger).warn(
+            { err, module: 'external-teams', teamId: req.params.teamId },
+            'MCP server enrichment failed'
           )
           agents = []
         }

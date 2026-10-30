@@ -37,8 +37,8 @@ const KNOBS = {
   grantScope: 'user' as const,
 }
 
-function serverFrom(oauth: Record<string, unknown>, contextRef = 'ctx-a'): McpServerOAuthSpecInput {
-  return { spec: { oauth, contextRef } }
+function serverFrom(oauth: Record<string, unknown>): McpServerOAuthSpecInput {
+  return { spec: { oauth } }
 }
 
 describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
@@ -161,7 +161,6 @@ describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
     expect(r).toEqual({
       oauthClientId: 'my-generic-client',
       grantScope: 'context',
-      contextRef: 'ctx-a',
     })
     // Only a baked CR may see unsealed legacy grants.
     expect(r).not.toHaveProperty('legacyProvider')
