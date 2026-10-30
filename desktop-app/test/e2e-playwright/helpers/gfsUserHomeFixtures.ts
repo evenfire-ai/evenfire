@@ -234,6 +234,50 @@ export class UserHomeFixtures {
       })
   }
 
+  /**
+   * The user's recorded file activity, in the list's own order
+   * (`last_activity_at DESC, resource_id DESC`). Read-only business signal.
+   */
+  recentActivity(userId: string): Array<{ resourceId: string; lastActivityAt: string }> {
+    const out = runControlPostgresSql(`
+      SELECT resource_id::text, to_char(last_activity_at AT TIME ZONE 'UTC',
+                                        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+        FROM gfs_user_file_activity
+       WHERE user_id = ${sqlLiteral(userId)}::uuid
+       ORDER BY last_activity_at DESC, resource_id DESC;
+    `)
+    return out
+      .split('\n')
+      .filter(line => line.trim())
+      .map(line => {
+        const [resourceId, lastActivityAt] = splitSqlRow(line)
+        return { resourceId: resourceId!, lastActivityAt: lastActivityAt! }
+      })
+  }
+
+  /**
+   * The direct-chat run bindings of one user for one Host, grouped by the
+   * namespace control-api verified (D14). Exactly one group is expected: a run
+   * bound twice in different namespaces would mean two Control APIs.
+   */
+  directRunBinding(userId: string, hostRef: string): { hostNamespace: string; count: number }[] {
+    const out = runControlPostgresSql(`
+      SELECT coalesce(host_namespace, '<null>'), count(*)::text
+        FROM governed_run_attribution_bindings
+       WHERE user_id = ${sqlLiteral(userId)}::uuid
+         AND host_ref = ${sqlLiteral(hostRef)}
+         AND origin = 'direct_chat'
+       GROUP BY 1 ORDER BY 1;
+    `)
+    return out
+      .split('\n')
+      .filter(line => line.trim())
+      .map(line => {
+        const [hostNamespace, count] = splitSqlRow(line)
+        return { hostNamespace: hostNamespace!, count: Number(count) }
+      })
+  }
+
   accessFor(resourceId: string, subjectType: string, subjectId: string): AccessRow | null {
     return (
       this.accessRows(resourceId).find(

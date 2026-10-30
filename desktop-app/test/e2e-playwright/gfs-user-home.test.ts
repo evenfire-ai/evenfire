@@ -1309,6 +1309,375 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     }
   })
 
+  test('J7a Recent files are per user: own opens, agent reads, writes and copies for that user only', async ({}, testInfo) => {
+    test.setTimeout(5 * RESPONSE_TIMEOUT_MS + 45 * 60_000)
+    const fx = new UserHomeFixtures(runTagFor(testInfo))
+    const [agent] = discoverManagedGfsAgents()
+    const owner = fx.createUser('j7a-owner')
+    const a = fx.createUser('j7a-a')
+    const b = fx.createUser('j7a-b')
+    const folder = `j7a-shared-${fx.runTag}`
+    const destination = `j7a-dest-${fx.runTag}`
+    const f1 = `j7a-f1-${fx.runTag}.txt`
+    const f2 = `j7a-f2-${fx.runTag}.txt`
+    const f3 = `j7a-f3-${fx.runTag}.txt`
+    const copyName = `j7a-f1-copy-${fx.runTag}.txt`
+    const written = `J7a written ${fx.runTag}`
+    let ownerS: DesktopSession | null = null
+    let aS: DesktopSession | null = null
+    let bS: DesktopSession | null = null
+    try {
+      fx.associateAgent(owner, agent)
+      fx.associateAgent(a, agent)
+      fx.associateAgent(b, agent)
+      const ownerHome = await fx.waitForHomeState(owner.id, 'ready')
+      await fx.waitForHomeState(a.id, 'ready')
+      await fx.waitForHomeState(b.id, 'ready')
+
+      ownerS = await launchDesktopAs(testInfo, owner)
+      await test.step('J7a-1 O writes three files and a destination folder, then shares the folder', async () => {
+        const page = ownerS!.page
+        const nav = new DesktopFilesNav(page)
+        const view = new DesktopResourceView(page)
+        await openHomeFolder(page, ownerHome)
+        await view.createFolder(folder)
+        await enterFolder(page, folder)
+        for (const [name, sentinel] of [
+          [f1, `J7a f1 ${fx.runTag}`],
+          [f2, `J7a f2 ${fx.runTag}`],
+          [f3, `J7a f3 ${fx.runTag}`],
+        ]) {
+          await view.uploadFile(name, Buffer.from(sentinel))
+        }
+        await view.createFolder(destination)
+        await openHomeFolder(page, ownerHome)
+        await view.openShare(folder)
+        const dialog = new DesktopShareDialog(page)
+        await dialog.grant(a.name, 'Read', { includeContents: true })
+        await dialog.grant(b.name, 'Read', { includeContents: true })
+        await dialog.grant(agent.name, 'Editor', { includeContents: true })
+        await dialog.close()
+        const folderId = fx.childId(ownerHome.resourceId!, folder)
+        expect(fx.accessFor(folderId, 'user', a.id)).toBeTruthy()
+        expect(fx.accessFor(folderId, 'user', b.id)).toBeTruthy()
+        expect(fx.accessFor(folderId, 'host', agent.subjectId)).toBeTruthy()
+      })
+      const folderId = fx.childId(ownerHome.resourceId!, folder)
+      const f1Id = fx.childId(folderId, f1)
+      const f2Id = fx.childId(folderId, f2)
+      const f3Id = fx.childId(folderId, f3)
+      const folderUri = `gfs://${ownerHome.drive}/${ridOf(folderId)}`
+      const f2Uri = `gfs://${ownerHome.drive}/${ridOf(f2Id)}`
+      const f3Uri = `gfs://${ownerHome.drive}/${ridOf(f3Id)}`
+
+      await test.step("J7a-2 O's own uploads are his recent files, newest first", async () => {
+        const page = ownerS!.page
+        const nav = new DesktopFilesNav(page)
+        await nav.expectRecentFiles([f3, f2, f1])
+        expect(fx.recentActivity(owner.id).map(row => row.resourceId)).toEqual([f3Id, f2Id, f1Id])
+        await nav.expectRecentGridMatchesBrowser()
+      })
+      const ownerActivity = fx.recentActivity(owner.id)
+      const ownerTimestamps = new Map(
+        ownerActivity.map(row => [row.resourceId, row.lastActivityAt])
+      )
+
+      aS = await launchDesktopAs(testInfo, a)
+      await test.step('J7a-3 a listing is not activity, and the card is overview-only', async () => {
+        const page = aS!.page
+        const nav = new DesktopFilesNav(page)
+        await nav.expectNoRecentCardInSharedWithMe()
+        await nav.openSharedWithMe()
+        await enterFolder(page, folder)
+        await expect(page.getByRole('button', { name: `Open ${f1}` })).toBeVisible()
+        await nav.expectNoRecentFiles()
+        expect(fx.recentActivity(a.id)).toEqual([])
+      })
+      await test.step("J7a-4 A's open counts for A", async () => {
+        const page = aS!.page
+        const nav = new DesktopFilesNav(page)
+        await nav.openSharedWithMe()
+        await enterFolder(page, folder)
+        await page.getByRole('button', { name: `Open ${f1}` }).click()
+        await expect(page.getByRole('article', { name: `Text preview of ${f1}` })).toBeVisible({
+          timeout: 60_000,
+        })
+        await nav.expectRecentFiles([f1])
+        expect(fx.recentActivity(a.id).map(row => row.resourceId)).toEqual([f1Id])
+      })
+
+      bS = await launchDesktopAs(testInfo, b)
+      await test.step('J7a-5 B has access without activity, then an open of the same file', async () => {
+        const page = bS!.page
+        const nav = new DesktopFilesNav(page)
+        await nav.expectNoRecentFiles()
+        await nav.openSharedWithMe()
+        await enterFolder(page, folder)
+        await expect(page.getByRole('button', { name: `Open ${f1}` })).toBeVisible()
+        await nav.expectNoRecentFiles()
+        await page.getByRole('button', { name: `Open ${f1}` }).click()
+        await expect(page.getByRole('article', { name: `Text preview of ${f1}` })).toBeVisible({
+          timeout: 60_000,
+        })
+        await nav.expectRecentFiles([f1])
+      })
+
+      await test.step("J7a-6 other users do not reorder O's list", async () => {
+        const page = ownerS!.page
+        const nav = new DesktopFilesNav(page)
+        await nav.expectRecentFiles([f3, f2, f1])
+        const now = new Map(
+          fx.recentActivity(owner.id).map(row => [row.resourceId, row.lastActivityAt])
+        )
+        expect(now.get(f1Id)).toBe(ownerTimestamps.get(f1Id))
+        expect(now.get(f2Id)).toBe(ownerTimestamps.get(f2Id))
+        expect(now.get(f3Id)).toBe(ownerTimestamps.get(f3Id))
+      })
+
+      await test.step('J7a-7 D9 agent read: f2 becomes recent for A only, and the binding names the namespace', async () => {
+        const page = aS!.page
+        await page.getByRole('navigation', { name: 'Main navigation' }).getByText('Chat').click()
+        const stepper = await openExactAgent(page, getManagedAgentDisplayName(agent))
+        await sendAgentTurn(page, readPrompt(f2Uri))
+        await expectReadWithSentinel(stepper, `J7a f2 ${fx.runTag}`)
+        const binding = fx.directRunBinding(a.id, agent.name)
+        expect(binding).toHaveLength(1)
+        expect(binding[0]!.count).toBeGreaterThanOrEqual(1)
+        expect(binding[0]!.hostNamespace).toBe(agent.subjectId.split('/')[0]!.replace('1st:', ''))
+        const nav = new DesktopFilesNav(page)
+        await nav.expectRecentFiles([f2, f1])
+        await nav.expectRecentFiles([f2, f1])
+        const bNav = new DesktopFilesNav(bS!.page)
+        await bNav.expectRecentFiles([f1])
+        // Witness: B really can read f2 in the shared folder.
+        await bNav.openSharedWithMe()
+        await enterFolder(bS!.page, folder)
+        await expect(bS!.page.getByRole('button', { name: `Open ${f2}` })).toBeVisible()
+        const now = new Map(
+          fx.recentActivity(owner.id).map(row => [row.resourceId, row.lastActivityAt])
+        )
+        expect(now.get(f3Id)).toBe(ownerTimestamps.get(f3Id))
+      })
+
+      await test.step("J7a-8 D9 agent write: f3 becomes A's newest file only", async () => {
+        const page = aS!.page
+        const stepper = await openExactAgent(page, getManagedAgentDisplayName(agent))
+        await sendAgentTurn(page, writePrompt(f3Uri, written))
+        await expectToolSuccess(stepper, 'gfs_write')
+        const nav = new DesktopFilesNav(page)
+        await nav.expectRecentFiles([f3, f2, f1])
+        const bNav = new DesktopFilesNav(bS!.page)
+        await bNav.expectRecentFiles([f1])
+        const now = new Map(
+          fx.recentActivity(owner.id).map(row => [row.resourceId, row.lastActivityAt])
+        )
+        expect(now.get(f3Id)).toBe(ownerTimestamps.get(f3Id))
+      })
+
+      let copyId = ''
+      await test.step("J7a-9 D16 agent copy: every file the copy created is A's activity", async () => {
+        const page = aS!.page
+        const stepper = await openExactAgent(page, getManagedAgentDisplayName(agent))
+        await sendAgentTurn(
+          page,
+          `Read ${f1} from ${folderUri} with clerum__gfs_list and clerum__gfs_read, then copy ` +
+            `that file into ${destination} with clerum__gfs_copy under the name ${copyName}. ` +
+            `Use only the native GFS tools.`
+        )
+        await expectToolSuccess(stepper, 'gfs_read')
+        await expectToolSuccess(stepper, 'gfs_copy')
+        const destinationId = fx.childId(folderId, destination)
+        copyId = fx.childId(destinationId, copyName)
+        const nav = new DesktopFilesNav(page)
+        await nav.expectRecentFiles([copyName, f1, f3, f2])
+        expect(
+          fx
+            .recentActivity(a.id)
+            .map(row => row.resourceId)
+            .slice(0, 4)
+        ).toEqual([copyId, f1Id, f3Id, f2Id])
+        const bNav = new DesktopFilesNav(bS!.page)
+        await bNav.expectRecentFiles([f1])
+        // Witness: B sees the copy inside the destination folder.
+        await bNav.openSharedWithMe()
+        await enterFolder(bS!.page, folder)
+        await enterFolder(bS!.page, destination)
+        await expect(bS!.page.getByRole('button', { name: `Open ${copyName}` })).toBeVisible()
+        const now = new Map(
+          fx.recentActivity(owner.id).map(row => [row.resourceId, row.lastActivityAt])
+        )
+        expect(now.get(f3Id)).toBe(ownerTimestamps.get(f3Id))
+      })
+
+      await test.step("J7a-10 opening from the card records again and shows the agent's write", async () => {
+        const page = aS!.page
+        const nav = new DesktopFilesNav(page)
+        const before = fx.recentActivity(a.id).find(row => row.resourceId === f3Id)!.lastActivityAt
+        await nav.openEvenDriveOverview()
+        await nav.openRecentFile(f3)
+        await expect(page.getByRole('article', { name: `Text preview of ${f3}` })).toBeVisible({
+          timeout: 60_000,
+        })
+        await expect(page.getByText(written, { exact: false })).toBeVisible()
+        const after = fx.recentActivity(a.id)
+        expect(after[0]!.resourceId).toBe(f3Id)
+        expect(after[0]!.lastActivityAt > before).toBe(true)
+      })
+
+      await test.step("J7a-11 revoking A's share hides its rows without deleting them", async () => {
+        const page = ownerS!.page
+        const view = new DesktopResourceView(page)
+        await openHomeFolder(page, ownerHome)
+        await view.openShare(folder)
+        const dialog = new DesktopShareDialog(page)
+        await dialog.revoke(a.name)
+        await dialog.close()
+        expect(fx.accessFor(folderId, 'user', a.id)).toBeNull()
+
+        const aNav = new DesktopFilesNav(aS!.page)
+        await aNav.expectNoRecentFiles()
+        expect(fx.recentActivity(a.id)).toHaveLength(4)
+        const bNav = new DesktopFilesNav(bS!.page)
+        await bNav.expectRecentFiles([f1])
+      })
+
+      await test.step('J7a-12 deleting the file hides it from every list', async () => {
+        const page = ownerS!.page
+        const view = new DesktopResourceView(page)
+        await openHomeFolder(page, ownerHome)
+        await enterFolder(page, folder)
+        await view.deleteResource(f1)
+
+        const bNav = new DesktopFilesNav(bS!.page)
+        await bNav.expectNoRecentFiles()
+        expect(fx.recentActivity(b.id).map(row => row.resourceId)).toEqual([f1Id])
+        const oNav = new DesktopFilesNav(ownerS!.page)
+        await oNav.expectRecentFiles([f3, f2])
+      })
+    } finally {
+      await aS?.close()
+      await bS?.close()
+      await ownerS?.close()
+      fx.cleanup()
+    }
+  })
+
+  test('J7b Recent files: uploads fill the card, Load more reveals the rest, the page scrolls; a ZIP export records nothing', async ({}, testInfo) => {
+    test.setTimeout(4 * RESPONSE_TIMEOUT_MS + 30 * 60_000)
+    const fx = new UserHomeFixtures(runTagFor(testInfo))
+    const owner = fx.createUser('j7b-owner')
+    const a = fx.createUser('j7b-a')
+    const folder = `j7b-zip-${fx.runTag}`
+    const names = Array.from(
+      { length: 24 },
+      (_, index) => `j7b-z${String(index + 1).padStart(2, '0')}-${fx.runTag}.txt`
+    )
+    let ownerS: DesktopSession | null = null
+    let aS: DesktopSession | null = null
+    try {
+      const ownerHome = await fx.waitForHomeState(owner.id, 'ready')
+      await fx.waitForHomeState(a.id, 'ready')
+      ownerS = await launchDesktopAs(testInfo, owner)
+      const page = ownerS.page
+      await test.step('J7b-1 O uploads 24 files and shares the folder', async () => {
+        const nav = new DesktopFilesNav(page)
+        const view = new DesktopResourceView(page)
+        await openHomeFolder(page, ownerHome)
+        await view.createFolder(folder)
+        await enterFolder(page, folder)
+        for (const [index, name] of names.entries()) {
+          await view.uploadFile(name, Buffer.from(`J7b z${index + 1} ${fx.runTag}`))
+        }
+        await openHomeFolder(page, ownerHome)
+        await view.openShare(folder)
+        const dialog = new DesktopShareDialog(page)
+        await dialog.grant(a.name, 'Read', { includeContents: true })
+        await dialog.close()
+        const folderId = fx.childId(ownerHome.resourceId!, folder)
+        expect(fx.accessFor(folderId, 'user', a.id)).toBeTruthy()
+        const activity = fx.recentActivity(owner.id)
+        expect(activity).toHaveLength(24)
+        expect(activity.map(row => row.resourceId)).toEqual(
+          [...names].reverse().map(name => fx.childId(folderId, name))
+        )
+        const timestamps = activity.map(row => row.lastActivityAt)
+        expect(new Set(timestamps).size).toBe(24)
+      })
+      await test.step('J7b-2 the first page and "Load more" reveal ten rows at a time', async () => {
+        const nav = new DesktopFilesNav(page)
+        const newest = [...names].reverse()
+        await nav.expectRecentFiles(newest.slice(0, 10))
+        await expect(nav.recentLoadMore()).toBeVisible()
+        await nav.recentLoadMore().click()
+        await expect(nav.recentRows()).toHaveCount(20)
+        await expect(nav.recentRows().nth(19)).toHaveAccessibleName(`Open ${newest[19]}`)
+        await nav.recentLoadMore().click()
+        await expect(nav.recentRows()).toHaveCount(24)
+        await expect(nav.recentRows().nth(23)).toHaveAccessibleName(`Open ${newest[23]}`)
+        await expect(nav.recentLoadMore()).toHaveCount(0)
+      })
+      await test.step('J7b-3 the card grows and the page scrolls, with no internal cap', async () => {
+        const nav = new DesktopFilesNav(page)
+        const heading = nav.recentFiles().getByRole('heading', { name: 'Recent files' })
+        await heading.scrollIntoViewIfNeeded()
+        const lastRow = nav.recentRows().last()
+        // Precondition: the default window cannot show all 24 rows at once.
+        await expect(lastRow).not.toBeInViewport()
+        await lastRow.scrollIntoViewIfNeeded()
+        await expect(lastRow).toBeInViewport()
+        await expect(heading).not.toBeInViewport()
+        const order = await page.evaluate(() => {
+          const regions = Array.from(document.querySelectorAll('[role="region"]'))
+          return regions.map(node => node.getAttribute('aria-label')).filter(Boolean)
+        })
+        expect(order.indexOf('Recent files')).toBeGreaterThanOrEqual(0)
+        expect(order.indexOf('EvenDrive browser')).toBeGreaterThan(order.indexOf('Recent files'))
+      })
+
+      aS = await launchDesktopAs(testInfo, a)
+      await test.step('J7b-4 a ZIP export records nothing (D10)', async () => {
+        const aPage = aS!.page
+        const nav = new DesktopFilesNav(aPage)
+        await nav.expectNoRecentFiles()
+        const zipPath = testInfo.outputPath('j7b.zip')
+        await stubSaveDialog(aS!.app, zipPath)
+        await nav.openSharedWithMe()
+        await new DesktopResourceView(aPage).downloadZip(folder)
+        await expect(aPage.getByText(/^Downloaded .*\(24 files\)$/)).toBeVisible({
+          timeout: 120_000,
+        })
+        // Liveness: the archive reached the disk with content, so every entry
+        // really was read by the export.
+        await expect
+          .poll(() => fs.existsSync(zipPath) && fs.statSync(zipPath).size > 0, {
+            timeout: 60_000,
+          })
+          .toBe(true)
+        await nav.expectNoRecentFiles()
+        expect(fx.recentActivity(a.id)).toEqual([])
+      })
+      await test.step("J7b-5 A's own recording path is live", async () => {
+        const aPage = aS!.page
+        const nav = new DesktopFilesNav(aPage)
+        await nav.openSharedWithMe()
+        await enterFolder(aPage, folder)
+        await aPage.getByRole('button', { name: `Open ${names[0]}` }).click()
+        await expect(
+          aPage.getByRole('article', { name: `Text preview of ${names[0]}` })
+        ).toBeVisible({ timeout: 60_000 })
+        await nav.expectRecentFiles([names[0]!])
+        const folderId = fx.childId(ownerHome.resourceId!, folder)
+        expect(fx.recentActivity(a.id).map(row => row.resourceId)).toEqual([
+          fx.childId(folderId, names[0]!),
+        ])
+      })
+    } finally {
+      await aS?.close()
+      await ownerS?.close()
+      fx.cleanup()
+    }
+  })
+
   test('Guards: refused link, logout and retirement never show stale Files content', async ({
     browser,
   }, testInfo) => {

@@ -93,6 +93,85 @@ export class DesktopFilesNav {
     await humanRecordedPause([600, 1200])
   }
 
+  /** The EvenDrive overview: the files tab with no folder selected. */
+  async openEvenDriveOverview(): Promise<void> {
+    await this.openFiles()
+    await expect(this.page.getByRole('region', { name: 'My home' })).toBeVisible()
+    await expect(this.recentFiles()).toBeVisible()
+    await humanRecordedPause([600, 1200])
+  }
+
+  recentFiles(): ReturnType<Page['getByRole']> {
+    return this.page.getByRole('region', { name: 'Recent files' })
+  }
+
+  /** The card's rows: `aria-label="Open <name>"`, never its inner name button. */
+  recentRows(): ReturnType<Page['getByRole']> {
+    return this.recentFiles().getByRole('button', { name: /^Open / })
+  }
+
+  recentLoadMore(): ReturnType<Page['getByRole']> {
+    return this.recentFiles().getByRole('button', { name: 'Load more', exact: true })
+  }
+
+  /** At most one page of names (ten); the caller asserts the rest by count. */
+  async expectRecentFiles(names: string[]): Promise<void> {
+    await this.openEvenDriveOverview()
+    await expect(this.recentFiles()).toHaveAttribute('aria-busy', 'false')
+    await expect(this.recentRows()).toHaveCount(names.length)
+    for (const [index, name] of names.entries()) {
+      await expect(this.recentRows().nth(index)).toHaveAccessibleName(`Open ${name}`)
+    }
+    await humanRecordedPause([400, 800])
+  }
+
+  async expectNoRecentFiles(): Promise<void> {
+    await this.openEvenDriveOverview()
+    await expect(this.recentFiles()).toHaveAttribute('aria-busy', 'false')
+    await expect(this.recentFiles().getByText('No recent files', { exact: true })).toBeVisible()
+    await expect(this.recentRows()).toHaveCount(0)
+    await humanRecordedPause([400, 800])
+  }
+
+  async openRecentFile(name: string): Promise<void> {
+    await this.recentFiles()
+      .getByRole('button', { name: `Open ${name}`, exact: true })
+      .click()
+    await humanRecordedPause([600, 1200])
+  }
+
+  /**
+   * The card is overview-only. The Shared with me view is asserted through its
+   * own active crumb, so a card rendered there would be caught.
+   */
+  async expectNoRecentCardInSharedWithMe(): Promise<void> {
+    await this.openSharedWithMe()
+    await expect(this.recentFiles()).toHaveCount(0)
+    await humanRecordedPause([400, 800])
+  }
+
+  /**
+   * The card and the browser card declare the same column template. Compared as
+   * the `--da-grid-cols` value they declare, not as resolved pixel tracks: the
+   * two cards have different frames (the browser card has no padding or border)
+   * and the same template resolves to different pixel widths inside them.
+   */
+  async expectRecentGridMatchesBrowser(): Promise<void> {
+    const declared = (locator: ReturnType<Page['locator']>) =>
+      locator.evaluate(element =>
+        getComputedStyle(element).getPropertyValue('--da-grid-cols').trim()
+      )
+    const recent = await declared(this.recentFiles().locator('.da-grid.da-gfs-drive__grid'))
+    const browser = await declared(
+      this.page
+        .getByRole('region', { name: 'EvenDrive browser' })
+        .locator('.da-grid.da-gfs-drive__grid')
+    )
+    expect(recent.length).toBeGreaterThan(0)
+    expect(browser).toBe(recent)
+    await humanRecordedPause([200, 400])
+  }
+
   async openSharedWithMe(): Promise<void> {
     await this.page.getByRole('treeitem', { name: 'Shared with me' }).click()
     await expect(

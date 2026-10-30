@@ -66,6 +66,31 @@ export class DesktopResourceView {
     await humanRecordedPause([600, 1200])
   }
 
+  /** Delete a row through its own menu and the confirmation dialog. */
+  async deleteResource(name: string): Promise<void> {
+    await this.page.getByRole('button', { name: `Options for ${name}` }).click()
+    await this.page
+      .getByRole('menu', { name: `Actions for ${name}` })
+      .getByRole('menuitem', { name: 'Delete', exact: true })
+      .click()
+    const confirmation = this.page.getByRole('dialog', { name: `Delete ${name}?` })
+    await expect(confirmation).toBeVisible()
+    await confirmation.getByRole('button', { name: 'Delete', exact: true }).click()
+    await expect(confirmation).toBeHidden()
+    await expect(this.page.getByRole('button', { name: `Open ${name}` })).toHaveCount(0)
+    await humanRecordedPause([600, 1200])
+  }
+
+  /** Folder ZIP export through the row's own menu entry (`Download as zip`). */
+  async downloadZip(name: string): Promise<void> {
+    await this.page.getByRole('button', { name: `Options for ${name}` }).click()
+    await this.page
+      .getByRole('menu', { name: `Actions for ${name}` })
+      .getByRole('menuitem', { name: 'Download as zip' })
+      .click()
+    await humanRecordedPause([600, 1200])
+  }
+
   /** The open folder accepts writes: its header offers New folder only with write access. */
   async expectWritable(): Promise<void> {
     const browser = this.page.getByRole('region', { name: 'EvenDrive browser' })
