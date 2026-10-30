@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  type PluginStorageNativeDiagnostic,
   PluginStoragePrivacyError,
   inspectWindowsPluginStoragePaths,
   validateWindowsPluginStorageEvidence,
@@ -23,6 +24,42 @@ function prepareWindowsInspection(): void {
 }
 
 describe('Windows plugin storage native evidence contract', () => {
+  it('keeps the exported native error type union aligned with the runtime allowlist', () => {
+    const errorTypes: NonNullable<PluginStorageNativeDiagnostic['nativeErrorType']>[] = [
+      'ArgumentException',
+      'FileNotFoundException',
+      'FormatException',
+      'IOException',
+      'InvalidDataException',
+      'InvalidOperationException',
+      'PlatformNotSupportedException',
+      'ReflectionTypeLoadException',
+      'RuntimeException',
+      'SecurityException',
+      'TypeLoadException',
+      'TypeInitializationException',
+      'UnauthorizedAccessException',
+      'Win32Exception',
+    ]
+
+    expect(errorTypes).toHaveLength(14)
+  })
+
+  it('keeps the exported native reason type limited to fixed inspector outcomes', () => {
+    const nativeReasons: NonNullable<PluginStorageNativeDiagnostic['nativeReason']>[] = [
+      'current-user-access-insufficient',
+      'inspection-failed',
+      'native-helper-path-missing',
+      'object-identity-or-owner-invalid',
+      'request-missing',
+      'unauthorized-principal-access',
+      'unsupported-ace',
+      'user-access-not-inherited',
+    ]
+
+    expect(nativeReasons).toHaveLength(8)
+  })
+
   it('accepts only complete affirmative native evidence', () => {
     expect(
       validateWindowsPluginStorageEvidence({
@@ -179,6 +216,76 @@ describe('Windows plugin storage native evidence contract', () => {
       },
     })
     expect(JSON.stringify(inspectionError)).not.toMatch(/private loader output|fixture/)
+  })
+
+  it('classifies request preparation failures separately from helper loading', () => {
+    prepareWindowsInspection()
+    spawnSyncMock.mockReturnValue({
+      error: undefined,
+      signal: null,
+      status: 2,
+      stdout: JSON.stringify({
+        ok: false,
+        phase: 'prepare-request',
+        errorType: 'FormatException',
+        hresult: '0x80131537',
+        reason: 'request-missing',
+      }),
+      stderr: 'private request details',
+    })
+
+    let inspectionError: unknown
+    try {
+      inspectWindowsPluginStoragePaths([
+        { path: 'C:\\fixture\\file', directory: false, requireInherited: true },
+      ])
+    } catch (error) {
+      inspectionError = error
+    }
+    expect(inspectionError).toBeInstanceOf(PluginStoragePrivacyError)
+    expect(inspectionError).toMatchObject({
+      reason: 'native-inspection-request-setup-failed',
+      diagnostic: {
+        failure: 'request-setup-failed',
+        exitStatus: 2,
+        nativePhase: 'prepare-request',
+        nativeErrorType: 'FormatException',
+        hresult: '0x80131537',
+        nativeReason: 'request-missing',
+      },
+    })
+    expect(JSON.stringify(inspectionError)).not.toMatch(/private request details|fixture/)
+  })
+
+  it('treats response-generation errors as generic rejections', () => {
+    prepareWindowsInspection()
+    spawnSyncMock.mockReturnValue({
+      error: undefined,
+      signal: null,
+      status: 2,
+      stdout: JSON.stringify({
+        ok: false,
+        phase: 'verification',
+        errorType: 'RuntimeException',
+        reason: 'private-token-value',
+      }),
+      stderr: '',
+    })
+
+    let inspectionError: unknown
+    try {
+      inspectWindowsPluginStoragePaths([
+        { path: 'C:\\fixture\\file', directory: false, requireInherited: true },
+      ])
+    } catch (error) {
+      inspectionError = error
+    }
+    expect(inspectionError).toBeInstanceOf(PluginStoragePrivacyError)
+    expect(inspectionError).toMatchObject({
+      reason: 'native-inspection-response-rejected',
+      diagnostic: { failure: 'response-rejected', nativePhase: 'verification' },
+    })
+    expect(JSON.stringify(inspectionError)).not.toContain('private-token-value')
   })
 
   it('does not label an unrecognized native failure phase as a DACL rejection', () => {
