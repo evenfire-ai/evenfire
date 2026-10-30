@@ -75,10 +75,6 @@ function makeApp(gateway: MockGateway) {
 
 function makeInstallApp() {
   const gw = new MockGateway('mcp-server')
-  gw.createResource('contexts', {
-    metadata: { name: 'default-context' },
-    spec: { contextId: 'default-context', mcpServers: [] },
-  })
   return { app: makeApp(gw), gw }
 }
 
@@ -165,7 +161,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -205,7 +200,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -236,7 +230,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
         .post('/admin/registry/install')
         .send({
           serverName: names[i],
-          contextRef: 'default-context',
           registryEntryName: 'gmail-mcp',
           registryEntryVersion: '1.0.0',
           oauth: {
@@ -260,7 +253,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { secret: { mode: 'managed', clientId: 'id', clientSecret: 'sec' } },
@@ -279,7 +271,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'ms-server',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { secret: { mode: 'managed', clientId: 'id', clientSecret: 'sec' } },
@@ -298,7 +289,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -325,7 +315,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -351,7 +340,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -385,7 +373,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -407,7 +394,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -437,7 +423,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { secret: { mode: 'managed', clientId: 'id', clientSecret: 'sec' } },
@@ -467,7 +452,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { secret: { mode: 'managed', clientId: 'id', clientSecret: 'sec' } },
@@ -489,7 +473,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-generic',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { secret: { mode: 'managed', clientId: 'id', clientSecret: 'sec' } },
@@ -508,7 +491,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -615,7 +597,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -638,7 +619,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-gmail',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -663,7 +643,6 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'plain-server',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
       })
@@ -702,7 +681,6 @@ describe('generic carril install (S3-B4)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-idp',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { scopes: ['read', 'write'], generic: VALID_KNOBS },
@@ -735,7 +713,6 @@ describe('generic carril install (S3-B4)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-idp',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -778,7 +755,6 @@ describe('generic carril install (S3-B4)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-idp',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: {
@@ -803,7 +779,6 @@ describe('generic carril install (S3-B4)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-idp',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { scopes: ['read'], generic: { ...VALID_KNOBS, tokenAuthMethod: 'basic' } },
@@ -820,7 +795,6 @@ describe('generic carril install (S3-B4)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-idp',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { generic: { ...VALID_KNOBS, sendScope: true } },
@@ -837,7 +811,6 @@ describe('generic carril install (S3-B4)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-idp',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { generic: { ...VALID_KNOBS, sendScope: false } },
@@ -863,7 +836,6 @@ describe('generic carril install (S3-B4)', () => {
       .post('/admin/registry/install')
       .send({
         serverName: 'my-idp',
-        contextRef: 'default-context',
         registryEntryName: 'gmail-mcp',
         registryEntryVersion: '1.0.0',
         oauth: { scopes: ['read'], generic: VALID_KNOBS },

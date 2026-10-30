@@ -24,7 +24,6 @@ import type { McpServerInfo } from '../types'
 function readyServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
   return {
     name: 'secured-server',
-    contextRef: 'production',
     transport: { type: 'streamableHttp', url: 'http://secured-server.test/mcp' },
     auth: { type: 'bearer', secretRef: 'secured-server-auth' },
     enabled: true,
@@ -1955,7 +1954,6 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
         url: 'http://secured-server.test/mcp',
         type: 'streamableHttp',
       },
-      contextRef: 'production',
       name: 'secured-server',
       auth: { secretKey: 'token', secretRef: 'secured-server-auth', type: 'bearer' },
       status: { ready: true, deployed: true },

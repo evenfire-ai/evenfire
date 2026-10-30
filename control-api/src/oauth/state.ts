@@ -29,8 +29,8 @@ interface OAuthStateCommonClaims {
   oauthClientId: string
   /**
    * `user` — embed/mcp Connect flow, grant owned by `userId` (or, for a
-   * context-identity mcp-server, bootstrapped by `userId` — resolved on the
-   * callback from the server's authoritative `spec.contextRef`).
+   * context-identity mcp-server, bootstrapped by `userId` for the Context named
+   * by the mcp claims' `contextId`).
    * `service` — admin "connect for the recipe" flow (Path B). `userId` is the
    * initiating admin, recorded for audit only and NOT written to the grant.
    */
@@ -57,6 +57,12 @@ export interface OAuthRecipeStateClaims extends OAuthStateCommonClaims {
 export interface OAuthMcpStateClaims extends OAuthStateCommonClaims {
   subjectKind: 'mcp'
   mcpServerName: string
+  /**
+   * The Context a `grantScope='context'` consent was validated for at mint time
+   * (its `metadata.name`). The callback has no other trustworthy source for it,
+   * so a context-scope state without it is refused. Absent on per-user states.
+   */
+  contextId?: string
 }
 
 export type OAuthStateClaims = OAuthRecipeStateClaims | OAuthMcpStateClaims
@@ -101,6 +107,8 @@ export type SignStateInput =
       oauthClientId: string
       grantKind: 'user' | 'service'
       background: boolean
+      /** The validated Context of a context-scope consent; omitted otherwise. */
+      contextId?: string
     }
 
 /**
@@ -126,6 +134,7 @@ export function signOAuthState(secret: string, input: SignStateInput): string {
       background: input.background,
       expiresAt,
       nonce,
+      ...(input.contextId !== undefined ? { contextId: input.contextId } : {}),
     }
   } else {
     // FROZEN recipe subject — this object literal (field set + order) MUST stay
@@ -265,7 +274,18 @@ function decodePayload(payload: string): OAuthStateClaims {
     if (typeof obj.mcpServerName !== 'string' || obj.mcpServerName.length === 0) {
       throw new Error('decodePayload: malformed mcp claims')
     }
-    return { subjectKind: 'mcp', mcpServerName: obj.mcpServerName, ...common }
+    if (obj.contextId === undefined) {
+      return { subjectKind: 'mcp', mcpServerName: obj.mcpServerName, ...common }
+    }
+    if (typeof obj.contextId !== 'string' || obj.contextId.length === 0) {
+      throw new Error('decodePayload: malformed mcp contextId')
+    }
+    return {
+      subjectKind: 'mcp',
+      mcpServerName: obj.mcpServerName,
+      ...common,
+      contextId: obj.contextId,
+    }
   }
 
   // Recipe subject — the ONLY shape allowed to omit `subjectKind`. Requires the

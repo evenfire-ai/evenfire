@@ -95,7 +95,6 @@ metadata:
   name: airtable-server
   namespace: mcp-server
 spec:
-  contextRef: context1
   description: 'Airtable MCP server for data operations'
   image: your-registry.example.com/evenfire/airtable-mcp-server:latest
   imagePullPolicy: Always
@@ -122,6 +121,10 @@ spec:
     type: none
   enabled: true
 ```
+
+An `McpServer` does not name a Context. A Context exposes the server by listing it in
+`Context.spec.mcpServers` (for example `charts/clerum-crds/examples/context1.yaml`), and several
+Contexts can list the same server.
 
 ### Secrets
 
@@ -327,7 +330,7 @@ Validate CRD specifications, environment variable mappings, resource requirement
 **What they test:**
 
 - CRD metadata (API version, kind, names)
-- Context references
+- No `contextRef` on the server (Context membership lives in `Context.spec.mcpServers`)
 - Transport configuration (StreamableHTTP)
 - Environment variable mappings
 - Secret references and key mappings

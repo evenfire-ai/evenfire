@@ -474,7 +474,6 @@ export function makeResources(scenarios) {
         kind: 'McpServer',
         metadata: { name: s.connectorName, namespace: 'mcp-server', labels },
         spec: {
-          contextRef: s.contextName,
           image: fixtureImage,
           imagePullPolicy: 'Never',
           enabled: true,
