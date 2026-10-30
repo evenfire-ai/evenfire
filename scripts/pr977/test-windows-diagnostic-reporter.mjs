@@ -417,7 +417,8 @@ describe('Windows plugin storage DACL privacy', () => {
     'utf8'
   )
   const focusedRunner = readFileSync(path.join(here, 'run-focused-windows-processes.mjs'), 'utf8')
-  const expectedSourceSha = '0725bd5b872682c49c231225eda98aaea21fc16a'
+  const expectedFocusedSourceSha = '585ab1466433c3bbb5120152baca17daafe7ef6f'
+  const expectedFullSourceSha = '0725bd5b872682c49c231225eda98aaea21fc16a'
   const expectedValidationRef = '${{ github.sha }}'
   const focusedConfig = loadYaml(focusedWorkflow)
   const fullConfig = loadYaml(fullWorkflow)
@@ -427,7 +428,7 @@ describe('Windows plugin storage DACL privacy', () => {
       .filter(
         step => step.uses?.startsWith('actions/checkout@') && step.with?.path === checkoutPath
       )
-  const assertPinnedCheckouts = (workflow, label, expectedSourceCheckouts) => {
+  const assertPinnedCheckouts = (workflow, label, expectedSourceCheckouts, expectedSourceSha) => {
     assert.equal(workflow.env.PR977_SOURCE_SHA, expectedSourceSha, `${label} source guard SHA`)
     const sourceCheckouts = getCheckoutSteps(workflow, 'source')
     const validationCheckouts = getCheckoutSteps(workflow, 'validation')
@@ -472,20 +473,21 @@ describe('Windows plugin storage DACL privacy', () => {
   assert.equal(focusedConfig.on.push.branches[0], 'test/pr977-windows-68b8ea74-20261030-r24l11')
   assert.equal(fullConfig.on.push.branches[0], 'test/pr977-windows-68b8ea74-20261030-r24l11')
   assert.deepEqual(fullConfig.on.push.paths, ['.validation/windows/pr977-r24m7-run-2.trigger'])
-  assertPinnedCheckouts(focusedConfig, 'Focused workflow', 1)
-  assertPinnedCheckouts(fullConfig, 'Full workflow', 4)
+  assertPinnedCheckouts(focusedConfig, 'Focused workflow', 1, expectedFocusedSourceSha)
+  assertPinnedCheckouts(fullConfig, 'Full workflow', 4, expectedFullSourceSha)
   const staleFocusedConfig = structuredClone(focusedConfig)
   getCheckoutSteps(staleFocusedConfig, 'source')[0].with.ref =
     '68b8ea7430ade92e1107381f0d08d76a2c72ec71'
   assert.throws(
-    () => assertPinnedCheckouts(staleFocusedConfig, 'Focused workflow', 1),
+    () =>
+      assertPinnedCheckouts(staleFocusedConfig, 'Focused workflow', 1, expectedFocusedSourceSha),
     /Focused workflow source checkout ref/
   )
   const staleFullConfig = structuredClone(fullConfig)
   getCheckoutSteps(staleFullConfig, 'source')[2].with.ref =
     '68b8ea7430ade92e1107381f0d08d76a2c72ec71'
   assert.throws(
-    () => assertPinnedCheckouts(staleFullConfig, 'Full workflow', 4),
+    () => assertPinnedCheckouts(staleFullConfig, 'Full workflow', 4, expectedFullSourceSha),
     /Full workflow source checkout ref/
   )
   assert.match(focusedWorkflow, /timeout-minutes:\s*12/)
