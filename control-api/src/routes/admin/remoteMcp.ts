@@ -315,6 +315,59 @@ export function buildRemoteOAuthSpec(
   return oauth
 }
 
+/** Labels every object the remote install saga creates carries (CR and client Secret). */
+export function remoteMcpManagedLabels(): Record<string, string> {
+  return {
+    'clerum.io/managed-by': 'control-api',
+    'clerum.io/server-mode': 'remote',
+  }
+}
+
+/**
+ * The McpServer resource the remote install saga creates. Pure, so tests that need a
+ * remote-OAuth CR derive it from the same builder the saga uses instead of retyping
+ * its shape.
+ */
+export function buildRemoteMcpServerResource(input: {
+  serverName: string
+  namespace: string
+  /** Already kernel-validated; persisted literally. */
+  baseUrl: string
+  oauth: RemoteOAuthSpec
+}): {
+  metadata: { name: string; labels: Record<string, string> }
+  spec: Record<string, unknown>
+} {
+  const { serverName, namespace, baseUrl, oauth } = input
+  const upstreamPath = new URL(baseUrl).pathname || '/'
+  return {
+    metadata: { name: serverName, labels: remoteMcpManagedLabels() },
+    spec: {
+      image: REMOTE_MCP_EGRESS_PROXY_IMAGE,
+      enabled: true,
+      managed: true,
+      transport: {
+        type: 'streamableHttp',
+        port: REMOTE_MCP_PROXY_PORT,
+        url: `http://${serverName}.${namespace}.svc.cluster.local:${REMOTE_MCP_PROXY_PORT}${upstreamPath}`,
+      },
+      remote: { baseUrl },
+      // The CRD requires auth.type 'oauth' whenever spec.oauth is set, and vice versa.
+      auth: { type: 'oauth' },
+      oauth,
+      // The proxy egresses to the remote MCP host; NetworkPolicy is generated from this.
+      egressBindings: [
+        {
+          egressClass: 'exact-host',
+          dns: new URL(baseUrl).hostname,
+          port: 443,
+          protocol: 'TCP',
+        },
+      ],
+    },
+  }
+}
+
 /**
  * DCR client mode is derived from the AS metadata, NOT the operator body: a public
  * client when the AS lists `none` in `token_endpoint_auth_methods_supported`, else
@@ -1001,10 +1054,7 @@ export function createAdminRemoteMcpRouter(
       const serverName = body.serverName
       const grantScope = body.grantScope ?? 'user'
 
-      const managedLabels: Record<string, string> = {
-        'clerum.io/managed-by': 'control-api',
-        'clerum.io/server-mode': 'remote',
-      }
+      const managedLabels = remoteMcpManagedLabels()
 
       // ── Saga step 0 (DCR only): register a dynamic client against the AS and
       // persist its credentials in the encrypted store BEFORE any K8s writes. The
@@ -1325,9 +1375,6 @@ export function createAdminRemoteMcpRouter(
         )
       }
 
-      // Build the McpServer spec. transport routes through the HCC nginx egress proxy
-      // (D-2); the pinned oauth block is the C3 CRD contract.
-      const upstreamPath = new URL(body.baseUrl).pathname || '/'
       // A K8s Secret is created ONLY for pre-registered confidential clients. A
       // DCR-confidential client's secret lives in the encrypted store (DEC-8), so it
       // never gets a Secret name and never references one on the CR.
@@ -1365,29 +1412,14 @@ export function createAdminRemoteMcpRouter(
         scopes,
       })
 
-      const mcpServerSpec: Record<string, unknown> = {
-        image: REMOTE_MCP_EGRESS_PROXY_IMAGE,
-        enabled: true,
-        managed: true,
-        transport: {
-          type: 'streamableHttp',
-          port: REMOTE_MCP_PROXY_PORT,
-          url: `http://${serverName}.${targetNs}.svc.cluster.local:${REMOTE_MCP_PROXY_PORT}${upstreamPath}`,
-        },
-        remote: { baseUrl: body.baseUrl },
-        // Bicondicional (D-10): remote+oauth MUST carry auth.type:'oauth'.
-        auth: { type: 'oauth' },
+      // Transport routes through the HCC nginx egress proxy; the pinned oauth block is
+      // the CRD contract for the remote carril.
+      const mcpServerResource = buildRemoteMcpServerResource({
+        serverName,
+        namespace: targetNs,
+        baseUrl: body.baseUrl,
         oauth: oauthSpec,
-        // The proxy egresses to the remote MCP host; NetworkPolicy is generated from this.
-        egressBindings: [
-          {
-            egressClass: 'exact-host',
-            dns: new URL(body.baseUrl).hostname,
-            port: 443,
-            protocol: 'TCP',
-          },
-        ],
-      }
+      })
 
       // ── Saga step 1: create the client Secret (confidential only) ─────────
       // Fenced rollback (P1): capture the created objects' server identities so
@@ -1431,11 +1463,7 @@ export function createAdminRemoteMcpRouter(
 
       // ── Saga step 2: create the McpServer CR (rollback Secret on failure) ──
       try {
-        createdServer = await gateway.createResource(
-          'mcpservers',
-          { metadata: { name: serverName, labels: managedLabels }, spec: mcpServerSpec },
-          targetNs
-        )
+        createdServer = await gateway.createResource('mcpservers', mcpServerResource, targetNs)
         createdServerPreconditions = resourcePreconditionsFrom(createdServer)
         createdServerUid = resourceUidFrom(createdServer)
       } catch (err) {

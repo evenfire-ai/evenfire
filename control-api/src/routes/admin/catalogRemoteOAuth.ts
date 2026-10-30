@@ -543,3 +543,136 @@ export function catalogInstanceIdentityChanges(
   }
   return changes
 }
+
+/** What occupies one install slot (catalog entry × grant scope) of a remote-OAuth entry. */
+export type RemoteOAuthSlotState =
+  | {
+      kind: 'instance'
+      serverName: string
+      version: string
+      /** False when the CR carries the catalog id under a name other than the slot's. */
+      canonical: boolean
+      /** Being deleted: the slot frees up only once the CR is gone. */
+      terminating: boolean
+    }
+  /** The slot's canonical name is taken by a CR that was not installed into this slot. */
+  | { kind: 'foreign'; serverName: string }
+
+export type RemoteOAuthSlots = Record<
+  string,
+  Partial<Record<RemoteOAuthGrantScope, RemoteOAuthSlotState>>
+>
+
+export interface ManualRemoteOAuthServer {
+  serverName: string
+  baseUrl: string
+  grantScope: RemoteOAuthGrantScope
+}
+
+/** The parts of a listed McpServer the slot classification reads. */
+export interface ListedMcpServer {
+  metadata?: {
+    name?: string
+    deletionTimestamp?: string
+    annotations?: Record<string, string>
+  } | null
+  spec?: Record<string, unknown> | null
+}
+
+function crGrantScope(cr: ListedMcpServer): RemoteOAuthGrantScope {
+  // The apiserver defaults a missing grantScope to `user`.
+  return specOAuth(cr)?.grantScope === 'context' ? 'context' : 'user'
+}
+
+/** A remote-discovered OAuth McpServer, catalog instance or manual. */
+export function isRemoteOAuthServer(cr: ListedMcpServer): boolean {
+  return specOAuth(cr)?.source === 'remote'
+}
+
+/**
+ * Install state of remote-OAuth connectors, derived from the listed McpServers and
+ * the catalog entries being shown. No I/O and no registry call per entry.
+ *
+ * - A catalog instance fills the slot of its catalog id and grant scope. If two CRs
+ *   claim one slot (only reachable by writing the annotation by hand), the one with
+ *   the canonical name wins, otherwise the first by name, so the answer is stable.
+ * - `foreign`: for every grant scope a valid entry allows, a slot nobody filled whose
+ *   canonical name is taken by some other McpServer. Installing would only collide
+ *   on that name, so the slot is reported as occupied instead of free.
+ * - `manual`: remote-OAuth servers without a catalog id (installed by URL).
+ * - A CR whose catalog id is not a name the registry accepts is left out of slots
+ *   and of `manual`: it still counts in `serverNames`, so a slot it squats is foreign.
+ *
+ * `entries` are expected to be already resolved (`resolveRemoteOAuthEntry`): only
+ * entries marked valid are evaluated for `foreign`, and their allowed grant scopes
+ * are read from the validated block.
+ */
+export function classifyRemoteOAuthSlots(
+  servers: readonly ListedMcpServer[],
+  entries: readonly CatalogEntryInput[]
+): { remoteOAuthSlots: RemoteOAuthSlots; manualRemoteOAuth: ManualRemoteOAuthServer[] } {
+  // Keyed by strings read from annotations and registry rows: a Map, so no key can
+  // reach an object prototype however it is spelled.
+  const slots = new Map<string, Partial<Record<RemoteOAuthGrantScope, RemoteOAuthSlotState>>>()
+  const manual: ManualRemoteOAuthServer[] = []
+  const serverNames = new Set<string>()
+
+  const sorted = [...servers].sort((a, b) =>
+    String(a.metadata?.name ?? '').localeCompare(String(b.metadata?.name ?? ''))
+  )
+  for (const cr of sorted) {
+    const serverName = String(cr.metadata?.name ?? '').trim()
+    if (!serverName) continue
+    serverNames.add(serverName)
+    if (!isRemoteOAuthServer(cr)) continue
+    const grantScope = crGrantScope(cr)
+    if (!isCatalogRemoteOAuthInstance(cr)) {
+      const baseUrl = nested(cr, 'remote', 'baseUrl')
+      manual.push({
+        serverName,
+        baseUrl: typeof baseUrl === 'string' ? baseUrl : '',
+        grantScope,
+      })
+      continue
+    }
+    const annotations = cr.metadata?.annotations ?? {}
+    const catalogId = annotations[CATALOG_ID_ANNOTATION] as string
+    // No catalog slot exists for a name the registry would not have accepted, so a
+    // hand-written annotation such as `__proto__` is not classified at all.
+    if (parseRegistryEntryName(catalogId) === null) continue
+    const canonical = serverName === deriveCatalogRemoteServerName(catalogId, grantScope)
+    let bySlot = slots.get(catalogId)
+    if (!bySlot) slots.set(catalogId, (bySlot = {}))
+    const current = bySlot[grantScope]
+    if (current?.kind === 'instance' && (current.canonical || !canonical)) continue
+    bySlot[grantScope] = {
+      kind: 'instance',
+      serverName,
+      version: annotations[CATALOG_VERSION_ANNOTATION] ?? '',
+      canonical,
+      terminating: Boolean(cr.metadata?.deletionTimestamp),
+    }
+  }
+
+  for (const entry of entries) {
+    const resolution = (entry as { remoteOAuth?: RemoteOAuthResolution }).remoteOAuth
+    if (resolution?.valid !== true) continue
+    if (parseRegistryEntryName(entry.name) === null) continue
+    const allowed = oauthBlockOf(entry)?.allowedGrantScopes
+    if (!Array.isArray(allowed)) continue
+    for (const grantScope of REMOTE_OAUTH_GRANT_SCOPES) {
+      if (!allowed.includes(grantScope)) continue
+      const bySlot = slots.get(entry.name)
+      if (bySlot?.[grantScope]) continue
+      const canonicalName = deriveCatalogRemoteServerName(entry.name, grantScope)
+      if (!serverNames.has(canonicalName)) continue
+      const foreign: RemoteOAuthSlotState = { kind: 'foreign', serverName: canonicalName }
+      if (bySlot) bySlot[grantScope] = foreign
+      else slots.set(entry.name, { [grantScope]: foreign })
+    }
+  }
+
+  // Object.fromEntries defines own properties, so serializing the Map cannot invoke
+  // an inherited setter either.
+  return { remoteOAuthSlots: Object.fromEntries(slots), manualRemoteOAuth: manual }
+}
