@@ -208,9 +208,7 @@ test('the Playwright verdict is PASS only for a complete, clean report from the 
 
 test('the attachment-gfs-save verdict requires its lane minimum of expected tests', () => {
   const lane = 'attachment-gfs-save'
-  // The save-lane config file belongs to another lane and is not in this tree.
-  // The verdict only checks that the report names the same real path it was given.
-  const configFile = laneConfigFile('image')
+  const configFile = laneConfigFile(lane)
   const options = { lane, configFile }
   const reportFor = count => {
     const titles = Array.from(
