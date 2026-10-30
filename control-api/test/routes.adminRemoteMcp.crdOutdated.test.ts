@@ -134,9 +134,10 @@ describe('remote install on an apiserver that prunes spec.oauth.asProfile', () =
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject(CRD_OUTDATED)
     expect(created).toHaveLength(1)
+    // Fenced by uid only: a status write between the create and the rollback must not
+    // keep the CR alive.
     expect(deleteResource).toHaveBeenCalledWith('mcpservers', 'workiq', NS, {
       uid: created[0].uid,
-      resourceVersion: created[0].resourceVersion,
     })
     expect(secrets).toHaveLength(1)
     expect(deleteSecret).toHaveBeenCalledWith('workiq-oauth-client', NS, secrets[0])

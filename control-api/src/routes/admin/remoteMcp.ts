@@ -58,10 +58,23 @@ import {
   remoteCallbackVariant,
 } from '../../oauth/remoteCallback.js'
 import { rootLogger } from '../../observability/logger.js'
+import { type RegistryEntry, reportInstall } from '../../services/registryClient.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import type { SecretSnapshot } from '../../services/secretRepository.js'
-import type { ResourcePreconditions } from '../../types.js'
 import { normalizeConfiguredOrigin } from '../external/oauthCallback.js'
+import { getCatalogEntryVersion } from './catalogEntryReads.js'
+import {
+  NOT_REMOTE_OAUTH_REASONS,
+  type RemoteOAuthCatalogBlock,
+  type RemoteOAuthGrantScope,
+  type RemoteOAuthInvalidReason,
+  type RemoteOAuthResolution,
+  deriveCatalogRemoteServerName,
+  isRemoteOAuthEntry,
+  normalizeRemoteBaseUrl,
+} from './catalogRemoteOAuth.js'
+// registry.ts does not import this module, so there is no import cycle.
+import { catalogAnnotations } from './registry.js'
 
 /**
  * Admin "C-install" routes for the remote MCP-OAuth carril (spec 02 C1.5, DEC-12).
@@ -79,6 +92,10 @@ import { normalizeConfiguredOrigin } from '../external/oauthCallback.js'
  *     (confidential only) + McpServer CR, with compensating rollback that preserves
  *     the original error. The install owns no Context: enabling the server for an
  *     agent is a later Context allowlist edit.
+ *
+ * Both routes also accept a catalog mode (`catalogEntry` + `grantScope`): the base URL
+ * and the server name are then taken from the registry entry, never from the caller,
+ * and the rest of the pipeline runs unchanged.
  *
  * The written `spec.oauth` remote shape is the C3 CRD contract (see
  * {@link buildRemoteOAuthSpec}). It is NOT admissible by the current CRD — C3
@@ -149,30 +166,201 @@ const installBodySchema = z.object({
 
 type InstallBody = z.infer<typeof installBodySchema>
 
+// Catalog mode: the request names a catalog entry and a slot. The URL and the server
+// name come from the entry, never from the caller.
+const catalogEntryRefSchema = z.object({
+  name: z.string().min(1).max(256),
+  version: z.string().min(1).max(128),
+})
+
+const catalogDiscoverBodySchema = z.object({
+  catalogEntry: catalogEntryRefSchema,
+  grantScope: z.enum(['user', 'context']),
+  // Only compared against the entry's URL; never used.
+  baseUrl: z.string().min(1).optional(),
+  authorizationServer: authorizationServerSchema.optional(),
+})
+
+const catalogInstallBodySchema = installBodySchema
+  .omit({ serverName: true, baseUrl: true, grantScope: true })
+  .extend({
+    catalogEntry: catalogEntryRefSchema,
+    grantScope: z.enum(['user', 'context']),
+    // Only compared against the entry's URL; never used.
+    baseUrl: z.string().min(1).optional(),
+  })
+
+/** Whether the request selects catalog mode; the manual body never carries the key. */
+function isCatalogModeBody(body: unknown): boolean {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    (body as { catalogEntry?: unknown }).catalogEntry !== undefined
+  )
+}
+
+/** Whether the raw body names a server, which catalog mode never accepts. */
+function bodyCarriesServerName(body: unknown): boolean {
+  return (body as { serverName?: unknown }).serverName !== undefined
+}
+
+/** What a catalog-mode request installs, all of it taken from the registry entry. */
+interface CatalogInstallTarget {
+  /** The name and version the registry returned; they key the annotations and the name. */
+  entryName: string
+  entryVersion: string
+  /** `remoteEndpoints[0].url`, literal: the only URL any later step may use. */
+  baseUrl: string
+  block: RemoteOAuthCatalogBlock
+  serverName: string
+}
+
+type CatalogResolution =
+  | { ok: true; target: CatalogInstallTarget }
+  | { ok: false; body: Record<string, unknown> }
+
+/**
+ * Resolve a catalog-mode request against the registry entry, with the same resolution
+ * the catalog reads apply (provenance, strip, validate). One registry read per request.
+ */
+async function resolveCatalogInstallTarget(input: {
+  catalogEntry: { name: string; version: string }
+  grantScope: RemoteOAuthGrantScope
+  bodyBaseUrl: string | undefined
+}): Promise<CatalogResolution> {
+  const entry = (await getCatalogEntryVersion(
+    input.catalogEntry.name,
+    input.catalogEntry.version
+  )) as RegistryEntry & { remoteOAuth?: RemoteOAuthResolution }
+
+  // A non-remote-OAuth entry comes back from the resolution as the registry sent it, so
+  // a `remoteOAuth` field on it is registry data, not a verdict of ours.
+  const verdict = isRemoteOAuthEntry(entry) ? entry.remoteOAuth : undefined
+  if (
+    verdict === undefined ||
+    (!verdict.valid && NOT_REMOTE_OAUTH_REASONS.has(verdict.reason as RemoteOAuthInvalidReason))
+  ) {
+    return { ok: false, body: { error: 'catalog_entry_not_remote_oauth' } }
+  }
+  if (!verdict.valid) {
+    return { ok: false, body: { error: 'catalog_entry_invalid', reason: verdict.reason } }
+  }
+
+  // The registry may resolve an alias (`x` → `@clerum/x`), a different case or
+  // `latest`. The slot name is hashed from the raw string, so accepting a request
+  // spelled differently from the entry would give one item two names per slot.
+  if (entry.name !== input.catalogEntry.name || entry.version !== input.catalogEntry.version) {
+    return {
+      ok: false,
+      body: {
+        error: 'catalog_entry_name_mismatch',
+        entry: { name: entry.name, version: entry.version },
+      },
+    }
+  }
+
+  // A valid verdict means the oauth block was validated and rebuilt, and the first
+  // endpoint URL was validated as https; nothing else of the endpoint list is read.
+  const meta = entry.mcp_server_meta as {
+    oauth: RemoteOAuthCatalogBlock
+    remoteEndpoints: Array<{ url: string }>
+  }
+  const block = meta.oauth
+  if (!block.allowedGrantScopes.includes(input.grantScope)) {
+    return {
+      ok: false,
+      body: {
+        error: 'catalog_grant_scope_not_allowed',
+        allowedGrantScopes: block.allowedGrantScopes,
+      },
+    }
+  }
+
+  const baseUrl = meta.remoteEndpoints[0].url
+  if (input.bodyBaseUrl !== undefined) {
+    const requested = normalizeRemoteBaseUrl(input.bodyBaseUrl)
+    if (requested === null || requested !== normalizeRemoteBaseUrl(baseUrl)) {
+      return { ok: false, body: { error: 'catalog_base_url_mismatch' } }
+    }
+  }
+
+  return {
+    ok: true,
+    target: {
+      entryName: entry.name,
+      entryVersion: entry.version,
+      baseUrl,
+      block,
+      serverName: deriveCatalogRemoteServerName(entry.name, input.grantScope),
+    },
+  }
+}
+
+/**
+ * Whether the discovered registration mode differs from the one the entry expects.
+ * Without a client of its own, discovery reports a pre-registered-only AS as `manual`,
+ * which is exactly what an entry expecting `pre-registered` describes.
+ */
+function catalogRegistrationDrifts(
+  expected: RemoteOAuthCatalogBlock['expectedRegistration'],
+  detected: DiscoveryResult['registrationMode']
+): boolean {
+  const normalizedDetected = detected === 'manual' ? 'pre-registered' : detected
+  return normalizedDetected !== expected
+}
+
+/**
+ * A client Secret younger than this may belong to an install still in flight: between
+ * its Secret create and its CR create, or inside its rollback (CR deleted and awaited,
+ * Secret not yet). Only an older Secret without a live CR is reported as residue,
+ * because the repair that answer suggests (deleting the Secret) would break a live
+ * install. The dynamic-client store already bounds a saga by this TTL.
+ */
+const CATALOG_SLOT_RESIDUE_MIN_AGE_MS = PENDING_TTL_MS
+
+/** The client deserializes `creationTimestamp` to a Date; anything else is unknown. */
+function creationTimeMs(value: unknown): number {
+  if (value instanceof Date) return value.getTime()
+  return Number.NaN
+}
+
+/**
+ * Why a catalog install lost the create of its client Secret: another install of the
+ * slot is in flight (or already holds it), or an old Secret without a CR is left over.
+ * Anything not proven to be residue is reported as in progress, which is retryable and
+ * never prompts a destructive repair.
+ */
+async function classifyCatalogClientSecretConflict(
+  gateway: K8sGateway,
+  serverName: string,
+  secretName: string,
+  namespace: string,
+  nowMs: number
+): Promise<'install_in_progress' | 'catalog_slot_residue'> {
+  if ((await readLiveMcpServerUid(gateway, serverName, namespace)) !== undefined) {
+    return 'install_in_progress'
+  }
+  let secret: { metadata?: { creationTimestamp?: unknown } }
+  try {
+    secret = (await gateway.getSecret(secretName, namespace)) as typeof secret
+  } catch (err) {
+    // Gone since the conflict: its owner rolled back or is finishing; a retry decides.
+    if (extractK8sError(err)?.status === 404) return 'install_in_progress'
+    throw err
+  }
+  const createdMs = creationTimeMs(secret.metadata?.creationTimestamp)
+  if (!Number.isFinite(createdMs) || nowMs - createdMs < CATALOG_SLOT_RESIDUE_MIN_AGE_MS) {
+    return 'install_in_progress'
+  }
+  return 'catalog_slot_residue'
+}
+
 /** Kernel §4 on the operator's authorization-server override, before any fetch. */
 async function authorizationServerKernelErrors(
   authorizationServer: string | undefined
 ): Promise<ValidationError[]> {
   if (authorizationServer === undefined) return []
   return validateOAuthEndpointUrl(authorizationServer, 'authorizationServer')
-}
-
-/**
- * Fenced-delete preconditions from a just-created object, or undefined when the
- * apiserver response carried no complete identity. A rollback bound by
- * uid+resourceVersion cannot raze a homonymous object that a concurrent
- * uninstall+reinstall recreated in the compensation window — the fenced pattern
- * the baked carril (`registry.ts`) and uninstall (`resources.ts`) already use.
- */
-function resourcePreconditionsFrom(resource: unknown): ResourcePreconditions | undefined {
-  const metadata = (resource as { metadata?: { uid?: unknown; resourceVersion?: unknown } } | null)
-    ?.metadata
-  const uid = metadata?.uid
-  const resourceVersion = metadata?.resourceVersion
-  if (typeof uid !== 'string' || !uid || typeof resourceVersion !== 'string' || !resourceVersion) {
-    return undefined
-  }
-  return { uid, resourceVersion }
 }
 
 /** The server-assigned `metadata.uid`, or undefined when the response carried none. */
@@ -334,14 +522,20 @@ export function buildRemoteMcpServerResource(input: {
   /** Already kernel-validated; persisted literally. */
   baseUrl: string
   oauth: RemoteOAuthSpec
+  /** Catalog provenance, set only by a catalog install; a manual install carries none. */
+  annotations?: Record<string, string>
 }): {
-  metadata: { name: string; labels: Record<string, string> }
+  metadata: { name: string; labels: Record<string, string>; annotations?: Record<string, string> }
   spec: Record<string, unknown>
 } {
-  const { serverName, namespace, baseUrl, oauth } = input
+  const { serverName, namespace, baseUrl, oauth, annotations } = input
   const upstreamPath = new URL(baseUrl).pathname || '/'
   return {
-    metadata: { name: serverName, labels: remoteMcpManagedLabels() },
+    metadata: {
+      name: serverName,
+      labels: remoteMcpManagedLabels(),
+      ...(annotations ? { annotations } : {}),
+    },
     spec: {
       image: REMOTE_MCP_EGRESS_PROXY_IMAGE,
       enabled: true,
@@ -611,12 +805,39 @@ export function createAdminRemoteMcpRouter(
   router.post(
     `${BASE}/discover`,
     asyncHandler(async (req: UiAuthedRequest, res) => {
-      const parsed = discoverBodySchema.safeParse(req.body)
-      if (!parsed.success) {
-        res.status(400).json({ error: 'invalid_request', detail: parsed.error.issues })
-        return
+      let baseUrl: string
+      let authorizationServer: string | undefined
+      let catalogTarget: CatalogInstallTarget | undefined
+      if (isCatalogModeBody(req.body)) {
+        if (bodyCarriesServerName(req.body)) {
+          res.status(400).json({ error: 'catalog_server_name_not_allowed' })
+          return
+        }
+        const catalogParsed = catalogDiscoverBodySchema.safeParse(req.body)
+        if (!catalogParsed.success) {
+          res.status(400).json({ error: 'invalid_request', detail: catalogParsed.error.issues })
+          return
+        }
+        const resolution = await resolveCatalogInstallTarget({
+          catalogEntry: catalogParsed.data.catalogEntry,
+          grantScope: catalogParsed.data.grantScope,
+          bodyBaseUrl: catalogParsed.data.baseUrl,
+        })
+        if (!resolution.ok) {
+          res.status(400).json(resolution.body)
+          return
+        }
+        catalogTarget = resolution.target
+        baseUrl = catalogTarget.baseUrl
+        authorizationServer = catalogParsed.data.authorizationServer
+      } else {
+        const parsed = discoverBodySchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ error: 'invalid_request', detail: parsed.error.issues })
+          return
+        }
+        ;({ baseUrl, authorizationServer } = parsed.data)
       }
-      const { baseUrl, authorizationServer } = parsed.data
 
       // Kernel §4: the admin-typed URL is untrusted input of origin — validate before
       // any fetch (discovery also kernel-guards internally, but a clean 400 here gives
@@ -659,9 +880,25 @@ export function createAdminRemoteMcpRouter(
       }
 
       const callback = previewRemoteCallback(r)
+      // Informational: the provider changed its configuration since the entry was
+      // published. The install still follows what discovery resolves.
+      const catalogDrift =
+        catalogTarget &&
+        catalogRegistrationDrifts(catalogTarget.block.expectedRegistration, r.registrationMode)
+          ? {
+              catalogDrift: {
+                expected: catalogTarget.block.expectedRegistration,
+                detected: r.registrationMode,
+              },
+            }
+          : {}
       res.status(200).json({
         transport,
         callback,
+        // The wizard shows the name the install will use and builds the per-server
+        // redirect URI from it; in catalog mode only the server knows it.
+        ...(catalogTarget ? { serverName: catalogTarget.serverName } : {}),
+        ...catalogDrift,
         detected: {
           registrationMode: r.registrationMode,
           // DCR is available in C2. Echo the resolved client mode (derived from the
@@ -703,12 +940,40 @@ export function createAdminRemoteMcpRouter(
     // Namespace is server-determined; strip/audit any caller-supplied value.
     enforceNamespace(config.mcpServersNamespace),
     asyncHandler(async (req: UiAuthedRequest, res) => {
-      const parsed = installBodySchema.safeParse(req.body)
-      if (!parsed.success) {
-        res.status(400).json({ error: 'invalid_request', detail: parsed.error.issues })
-        return
+      let body: InstallBody
+      let catalogTarget: CatalogInstallTarget | undefined
+      if (isCatalogModeBody(req.body)) {
+        if (bodyCarriesServerName(req.body)) {
+          res.status(400).json({ error: 'catalog_server_name_not_allowed' })
+          return
+        }
+        const catalogParsed = catalogInstallBodySchema.safeParse(req.body)
+        if (!catalogParsed.success) {
+          res.status(400).json({ error: 'invalid_request', detail: catalogParsed.error.issues })
+          return
+        }
+        const { catalogEntry, baseUrl: bodyBaseUrl, ...rest } = catalogParsed.data
+        const resolution = await resolveCatalogInstallTarget({
+          catalogEntry,
+          grantScope: rest.grantScope,
+          bodyBaseUrl,
+        })
+        if (!resolution.ok) {
+          res.status(400).json(resolution.body)
+          return
+        }
+        catalogTarget = resolution.target
+        // From here on the saga reads only `body`: the entry's literal URL and the
+        // derived name replace anything the caller sent.
+        body = { ...rest, serverName: catalogTarget.serverName, baseUrl: catalogTarget.baseUrl }
+      } else {
+        const parsed = installBodySchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ error: 'invalid_request', detail: parsed.error.issues })
+          return
+        }
+        body = parsed.data
       }
-      const body: InstallBody = parsed.data
 
       // The server name becomes a segment of its per-server redirect URI, so it is held
       // to the same rule the callback route applies to that segment.
@@ -1419,15 +1684,18 @@ export function createAdminRemoteMcpRouter(
         namespace: targetNs,
         baseUrl: body.baseUrl,
         oauth: oauthSpec,
+        ...(catalogTarget
+          ? { annotations: catalogAnnotations(catalogTarget.entryName, catalogTarget.entryVersion) }
+          : {}),
       })
 
       // ── Saga step 1: create the client Secret (confidential only) ─────────
       // Fenced rollback (P1): capture the created objects' server identities so
-      // every compensating delete is bound by uid+resourceVersion. A by-name
-      // delete would raze a Secret/CR that a concurrent uninstall+reinstall of
-      // the same serverName recreated between the create and the rollback.
+      // every compensating delete is bound to them (the Secret by uid+resourceVersion,
+      // the CR by uid). A by-name delete would raze a Secret/CR that a concurrent
+      // uninstall+reinstall of the same serverName recreated between the create and
+      // the rollback.
       let createdClientSecretSnapshot: SecretSnapshot | null = null
-      let createdServerPreconditions: ResourcePreconditions | undefined
       let createdServerUid: string | undefined
       let createdServer: unknown
       if (effectiveClientMode === 'confidential' && clientSecretName) {
@@ -1444,6 +1712,33 @@ export function createAdminRemoteMcpRouter(
           })
         } catch (err) {
           const k8sErr = extractK8sError(err)
+          // A catalog slot has a single name, so this conflict is either another
+          // install of the slot or a leftover the admin must remove by hand. Nothing
+          // was created yet, so there is nothing to roll back.
+          if (catalogTarget && k8sErr?.status === 409) {
+            const conflict = await classifyCatalogClientSecretConflict(
+              gateway,
+              serverName,
+              clientSecretName,
+              targetNs,
+              Date.now()
+            )
+            reqLog.warn(
+              { event: 'remote_install_catalog_secret_conflict', serverName, conflict },
+              'catalog remote install lost the client Secret create'
+            )
+            res.status(409).json(
+              conflict === 'catalog_slot_residue'
+                ? {
+                    error: 'catalog_slot_residue',
+                    secretName: clientSecretName,
+                    message:
+                      'a client Secret left by an earlier install blocks this slot; delete it to free the slot',
+                  }
+                : { error: 'install_in_progress' }
+            )
+            return
+          }
           if (k8sErr) {
             res.status(k8sErr.status).json({ error: `Secret creation failed: ${k8sErr.message}` })
             return
@@ -1464,7 +1759,6 @@ export function createAdminRemoteMcpRouter(
       // ── Saga step 2: create the McpServer CR (rollback Secret on failure) ──
       try {
         createdServer = await gateway.createResource('mcpservers', mcpServerResource, targetNs)
-        createdServerPreconditions = resourcePreconditionsFrom(createdServer)
         createdServerUid = resourceUidFrom(createdServer)
       } catch (err) {
         if (createdClientSecretSnapshot && clientSecretName) {
@@ -1480,6 +1774,13 @@ export function createAdminRemoteMcpRouter(
         // Compensate a DCR registration made in step 0 (local delete + best-effort 7592).
         await rollbackDynamicClient()
         const k8sErr = extractK8sError(err)
+        // In catalog mode the name is the slot, so losing the create means the slot is
+        // taken (a racing install of another registration mode, or a CR that appeared
+        // after the pre-check).
+        if (catalogTarget && k8sErr?.status === 409) {
+          res.status(409).json({ error: 'server_name_in_use' })
+          return
+        }
         if (k8sErr) {
           res.status(k8sErr.status).json({ error: k8sErr.message })
           return
@@ -1502,14 +1803,19 @@ export function createAdminRemoteMcpRouter(
         )
       }
 
-      /** Fenced delete of the CR this install created; false when it could not be removed. */
+      /**
+       * Delete the CR this install created; false when it could not be removed. Fenced
+       * by uid only: the uid alone identifies this install's object (a homonym recreated
+       * meanwhile has another one), while a resourceVersion fence would refuse the delete
+       * as soon as anything, such as a status write, touched the object.
+       */
       const rollbackCreatedServer = async (): Promise<boolean> => {
         try {
           await gateway.deleteResource(
             'mcpservers',
             serverName,
             targetNs,
-            createdServerPreconditions
+            createdServerUid ? { uid: createdServerUid } : undefined
           )
           await waitForDeletion(
             () => gateway.getResource('mcpservers', serverName, targetNs),
@@ -1623,6 +1929,13 @@ export function createAdminRemoteMcpRouter(
           res.status(503).json({ error: 'install_superseded' })
           return
         }
+      }
+
+      if (catalogTarget) {
+        // Best-effort install count for the registry; it never affects the install.
+        reportInstall(catalogTarget.entryName, randomUUID(), catalogTarget.entryVersion).catch(
+          () => {}
+        )
       }
 
       log.info(
