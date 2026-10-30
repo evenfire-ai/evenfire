@@ -285,6 +285,25 @@ describe('GET /admin/registry/catalog — remote-OAuth install slots', () => {
     expect(installed.remoteOAuthSlots).toEqual({})
   })
 
+  it('a verdict on an entry that is not remote-OAuth opens no slot', async () => {
+    const gw = new MockGateway(NS)
+    await seedCr(gw, { serverName: canonical(LINEAR, 'user'), namespace: NS, grantScope: 'user' })
+
+    // Defence in depth: the registry never emits a top-level `remoteOAuth`, and
+    // resolution leaves non-remote-OAuth entries untouched, so a verdict found
+    // there must not be trusted.
+    const row = remoteOAuthRow(LINEAR, ['user'])
+    const meta = row.mcp_server_meta as { oauth: Record<string, unknown> }
+    const notRemote = {
+      ...row,
+      mcp_server_meta: { ...meta, oauth: { ...meta.oauth, source: 'generic' } },
+      remoteOAuth: { valid: true },
+    }
+    const installed = await getInstalledRegistryState(gw as unknown as K8sGateway, [notRemote])
+
+    expect(installed.remoteOAuthSlots).toEqual({})
+  })
+
   it.each([
     ['canonical sorts last', ['aaa-first-by-name']],
     ['canonical sorts first', ['zzz-later']],

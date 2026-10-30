@@ -655,6 +655,7 @@ export function classifyRemoteOAuthSlots(
   }
 
   for (const entry of entries) {
+    if (!isRemoteOAuthEntry(entry)) continue
     const resolution = (entry as { remoteOAuth?: RemoteOAuthResolution }).remoteOAuth
     if (resolution?.valid !== true) continue
     if (parseRegistryEntryName(entry.name) === null) continue
