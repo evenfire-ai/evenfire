@@ -5,7 +5,7 @@ import type { EmbedViewState } from './embedOwnershipView.types'
 export function embedViewState(state: EmbedOwnershipState): EmbedViewState {
   const owner = state.owner === null ? undefined : state.views.get(state.owner)
   if (owner) {
-    return owner.phase === 'mounted'
+    return owner.phase === 'mounted' || owner.phase === 'closeFailed'
       ? { kind: 'mounted', launch: owner }
       : { kind: 'minting', launch: owner }
   }

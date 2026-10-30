@@ -1,8 +1,10 @@
 import type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
+import type { GfsResourceDeepLinkEnvelope } from '@clerum/desktop-app-links'
 import type { SandboxUiConversationOrigin } from '@pages/SandboxUiPage.types'
 import type { ActiveSandboxUiApp } from '@/uiTypes'
 
 export type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
+export type { GfsResourceDeepLinkEnvelope } from '@clerum/desktop-app-links'
 
 export type PendingSandboxUiDeepLink = {
   link: SandboxUiDeepLinkEnvelope
@@ -12,6 +14,7 @@ export type PendingSandboxUiDeepLink = {
   retryCount?: number
   nextRetryAt?: number
   failedMessage?: string
+  failedMessageDismissed?: boolean
 }
 
 /**

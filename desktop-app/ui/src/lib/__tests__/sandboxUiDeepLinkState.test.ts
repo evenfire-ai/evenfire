@@ -6,13 +6,17 @@ import { SandboxUiDeepLinkQueue } from '../../../../src/sandboxUiDeepLinkQueue.j
 import {
   MAX_PENDING_SANDBOX_UI_DEEP_LINKS,
   MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS,
+  clearSandboxUiDeepLinkProcessingOwner,
   confirmPendingSandboxUiDeepLink,
   deferPendingSandboxUiDeepLink,
+  dismissPendingSandboxUiDeepLinkFailure,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
   findPendingSandboxUiDeepLinkAwaitingConfirmation,
+  getSandboxUiDeepLinkMetadataIdsToPrune,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
+  isSandboxUiDeepLinkProcessingOwner,
   nextSandboxUiDeepLinkRetryDelayMs,
   removePendingSandboxUiDeepLink,
   resetPendingSandboxUiDeepLinkFailure,
@@ -176,6 +180,119 @@ describe('shouldPurgeSandboxUiDeepLinks', () => {
 })
 
 describe('pending sandbox UI deep-link state', () => {
+  it('clears only the matching processing owner', () => {
+    expect(clearSandboxUiDeepLinkProcessingOwner(1, 1)).toBeNull()
+    expect(clearSandboxUiDeepLinkProcessingOwner(2, 1)).toBe(2)
+    expect(clearSandboxUiDeepLinkProcessingOwner(null, 1)).toBeNull()
+  })
+
+  it('models accepted intent, admission, supersession, and exact settlement', () => {
+    type Event =
+      | { kind: 'confirm' | 'admit' | 'cancel' | 'settle'; linkId: number }
+      | { kind: 'user-navigation' }
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.oneof(
+            fc.record({
+              kind: fc.constantFrom<'confirm' | 'admit' | 'cancel' | 'settle'>(
+                'confirm',
+                'admit',
+                'cancel',
+                'settle'
+              ),
+              linkId: fc.integer({ min: 1, max: 8 }),
+            }),
+            fc.constant({ kind: 'user-navigation' } as const)
+          ),
+          { maxLength: 100 }
+        ),
+        events => {
+          // Reference behavior follows the transaction contract, not App's
+          // helper implementation: accepted intent determines eligibility;
+          // admission takes an empty owner; supersession preserves an unsettled
+          // owner's turn; and only that exact transaction can release it.
+          const pendingLinks = new Set<number>()
+          let latestIntentLinkId: number | null = null
+          let actualOwner: number | null = null
+          let expectedOwner: number | null = null
+
+          for (const event of events) {
+            switch (event.kind) {
+              case 'confirm':
+                pendingLinks.add(event.linkId)
+                latestIntentLinkId = event.linkId
+                break
+              case 'user-navigation':
+                latestIntentLinkId = null
+                break
+              case 'admit':
+                if (
+                  expectedOwner === null &&
+                  pendingLinks.has(event.linkId) &&
+                  latestIntentLinkId === event.linkId
+                ) {
+                  expectedOwner = event.linkId
+                  actualOwner = event.linkId
+                }
+                break
+              case 'cancel': {
+                // A non-owner can be removed now. A canceled active link is
+                // stale but still owns its unresolved asynchronous operation.
+                const canceledOwnerIsActive =
+                  actualOwner !== null &&
+                  isSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
+                if (!canceledOwnerIsActive) {
+                  actualOwner = clearSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
+                  pendingLinks.delete(event.linkId)
+                  if (latestIntentLinkId === event.linkId) latestIntentLinkId = null
+                }
+                break
+              }
+              case 'settle':
+                actualOwner = clearSandboxUiDeepLinkProcessingOwner(actualOwner, event.linkId)
+                pendingLinks.delete(event.linkId)
+                if (expectedOwner === event.linkId) expectedOwner = null
+                if (latestIntentLinkId === event.linkId) latestIntentLinkId = null
+                break
+            }
+
+            expect(actualOwner).toBe(expectedOwner)
+          }
+        }
+      ),
+      { numRuns: 5_000 }
+    )
+  })
+
+  it('prunes only absent metadata that is not owned by the active processor', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.integer({ min: 1, max: 100 }), { maxLength: 50 }),
+        fc.uniqueArray(fc.integer({ min: 1, max: 100 }), { maxLength: 50 }),
+        fc.option(fc.integer({ min: 1, max: 100 }), { nil: null }),
+        (metadataIds, pendingIds, processingOwnerId) => {
+          const pending = new Set(pendingIds)
+          const expected = new Set<number>()
+          for (const linkId of metadataIds) {
+            if (pending.has(linkId) || linkId === processingOwnerId) continue
+            expected.add(linkId)
+          }
+
+          const actual = getSandboxUiDeepLinkMetadataIdsToPrune(
+            metadataIds,
+            pendingIds,
+            processingOwnerId
+          )
+
+          expect(new Set(actual)).toEqual(expected)
+          expect(actual).toHaveLength(expected.size)
+        }
+      ),
+      { numRuns: 10_000 }
+    )
+  })
+
   it('merges live and cold-start links in FIFO order', () => {
     let pending = enqueuePendingSandboxUiDeepLink([], { id: 2, appRef: 'ns/two' }, null, null)
     pending = enqueuePendingSandboxUiDeepLink(pending, { id: 1, appRef: 'ns/one' }, null, 'user-a')
@@ -275,9 +392,24 @@ describe('pending sandbox UI deep-link state', () => {
     expect(pending[0]?.failedMessage).toBe('native mount failed')
     expect(pending[0]?.nextRetryAt).toBeUndefined()
 
+    pending = dismissPendingSandboxUiDeepLinkFailure(pending, 1)
+    expect(pending[0]?.failedMessageDismissed).toBe(true)
+
     pending = resetPendingSandboxUiDeepLinkFailure(pending, 1)
     expect(pending[0]?.failedMessage).toBeUndefined()
+    expect(pending[0]?.failedMessageDismissed).toBe(false)
     expect(pending[0]?.retryCount).toBe(0)
+  })
+
+  it('shows a new failure after a dismissed failure is replaced', () => {
+    let pending = enqueuePendingSandboxUiDeepLink([], { id: 1, appRef: 'ns/app' }, null, 'user-a')
+    pending = failPendingSandboxUiDeepLink(pending, 1, 'first failure')
+    pending = dismissPendingSandboxUiDeepLinkFailure(pending, 1)
+
+    pending = failPendingSandboxUiDeepLink(pending, 1, 'replacement failure')
+
+    expect(pending[0]?.failedMessage).toBe('replacement failure')
+    expect(pending[0]?.failedMessageDismissed).toBe(false)
   })
 
   it('matches the retention model for arbitrary producer-backed interleavings', () => {

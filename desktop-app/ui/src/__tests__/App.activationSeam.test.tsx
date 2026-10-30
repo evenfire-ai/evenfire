@@ -161,6 +161,13 @@ function makeController(writes: StoreWrite[]): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
+  let navigationIntentSequence = 0
+  const beginNavigationIntent = () => {
+    navigationIntentSequence += 1
+    controller.navigationIntentSequence = navigationIntentSequence
+    forceControllerRender()
+    return navigationIntentSequence
+  }
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   const setWorkspaceTabs = vi.fn((updater: unknown) => {
     const previous = controller.workspaceTabs
@@ -219,6 +226,30 @@ function makeController(writes: StoreWrite[]): AppController {
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
+    navigationIntentSequence,
+    beginUserNavigationIntent: vi.fn(beginNavigationIntent),
+    isNavigationIntentCurrent: vi.fn(sequence => sequence === navigationIntentSequence),
+    captureWorkspaceNavigation: vi.fn(() => ({
+      workspaceTabs: controller.workspaceTabs,
+      selectedAgent: controller.selectedAgent,
+      selectedAgentRoute: controller.selectedAgentRoute,
+      appsPickerActive: controller.appsPickerActive,
+      lastActiveChatTabId:
+        activeWorkspaceTab(controller.workspaceTabs)?.kind === 'chat'
+          ? (activeWorkspaceTab(controller.workspaceTabs)?.id ?? null)
+          : null,
+    })),
+    restoreWorkspaceNavigation: vi.fn((snapshot, expectedIntentSequence) => {
+      if (expectedIntentSequence !== navigationIntentSequence) return null
+      const restoredIntent = beginNavigationIntent()
+      controller.workspaceTabs = snapshot.workspaceTabs
+      controller.selectedAgent = snapshot.selectedAgent
+      controller.selectedAgentRoute = snapshot.selectedAgentRoute
+      controller.appsPickerActive = snapshot.appsPickerActive
+      controller.lastActiveChatTabId = snapshot.lastActiveChatTabId
+      forceControllerRender()
+      return restoredIntent
+    }),
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
     selectedAgentRoute: null,
