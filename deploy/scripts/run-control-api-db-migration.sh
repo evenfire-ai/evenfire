@@ -124,6 +124,23 @@ create_job() {
 OVERLAY=""
 JOB_NAME="${JOB_NAME:-control-api-db-migrate}"
 TIMEOUT="${TIMEOUT:-300s}"
+MIGRATION_ACTIVE_DEADLINE_SECONDS=""
+
+timeout_seconds() {
+  local value="$1"
+  local number multiplier
+  case "$value" in
+    *s) number="${value%s}"; multiplier=1 ;;
+    *m) number="${value%m}"; multiplier=60 ;;
+    *h) number="${value%h}"; multiplier=3600 ;;
+    *) number="$value"; multiplier=1 ;;
+  esac
+  [[ "$number" =~ ^[0-9]+$ ]] || die "unsupported migration timeout: $value"
+  number=$((10#$number))
+  local seconds=$((number * multiplier))
+  (( seconds > 0 && seconds <= 1800 )) || die "migration timeout must be 1s..1800s"
+  printf '%s' "$seconds"
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -157,6 +174,7 @@ done
 context_is_allowed || die "CONTEXT=$CONTEXT is not in ALLOWED_CONTEXTS"
 
 JOB_NAME="$(build_effective_job_name "$JOB_NAME")"
+MIGRATION_ACTIVE_DEADLINE_SECONDS="$(timeout_seconds "$TIMEOUT")"
 
 RENDERED_MANIFEST_FILE="$(mktemp)"
 cleanup() {
@@ -296,6 +314,7 @@ extract_control_api_image() {
 build_job_manifest() {
   ruby -ryaml -rjson -e '
     job_name = ENV.fetch("JOB_NAME")
+    active_deadline_seconds = Integer(ARGV[1], 10)
     docs = []
     YAML.load_stream(File.read(ARGV[0])) do |doc|
       next unless doc.is_a?(Hash)
@@ -350,6 +369,10 @@ build_job_manifest() {
         },
       },
       "spec" => {
+        # Bound the migration process itself to the same budget as the caller
+        # kubectl wait. A detached drain must not keep migrating after the deploy
+        # gate has timed out and reported failure.
+        "activeDeadlineSeconds" => active_deadline_seconds,
         # Retry a transient migration abort instead of failing the whole deploy.
         # Migration 0090_plugin_workload_sdk_runtime_contract_reconciliation takes an EXCLUSIVE lock on agent_run_events with a bounded
         # lock_timeout; if a concurrent writer (e.g. the trace-retention prune
@@ -394,7 +417,7 @@ build_job_manifest() {
     end
 
     puts JSON.generate(job)
-  ' "$RENDERED_MANIFEST_FILE"
+  ' "$RENDERED_MANIFEST_FILE" "$MIGRATION_ACTIVE_DEADLINE_SECONDS"
 }
 
 db_query() {
