@@ -21,6 +21,7 @@ import {
   projectOperationalObject,
 } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
+import { parseWorkflowTriggerIntent } from '../src/services/userApprovalRequestService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -214,6 +215,117 @@ describeRealPostgres('catalog producer SQL on real PostgreSQL', () => {
     expectVisible(await observe(outsider, 'workflow_approval', [allowed, denied]), [])
     await databasePool.query(`DELETE FROM workflow_recipe_allowed_teams WHERE team_id = $1`, [team])
     expectVisible(await observe(member, 'workflow_approval', [allowed, denied]), [])
+  })
+
+  it('S3 I7 binds the team approval candidate to the trigger requester', async () => {
+    const requester = await insertUser()
+    const teammate = await insertUser()
+    const team = randomUUID()
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Requester Team')`, [team])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active'), ($1, $3, 'member', 'active')`,
+      [team, requester, teammate]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_recipe_allowed_teams(recipe_namespace, recipe_name, team_id)
+       VALUES ('s3', 'requester', $1)`,
+      [team]
+    )
+    const trigger = (requesterUserId?: unknown) => ({
+      namespace: 's3',
+      name: 'requester-trigger',
+      caller: `user:${requester}`,
+      ...(requesterUserId === undefined ? {} : { requesterUserId }),
+    })
+    const variants: ReadonlyArray<{
+      name: string
+      payload: Record<string, unknown>
+      requesterVisible: boolean
+      teammateVisible: boolean
+    }> = [
+      {
+        name: 'requester B',
+        payload: { metadata: { workflowTrigger: trigger(requester) } },
+        requesterVisible: true,
+        teammateVisible: false,
+      },
+      {
+        name: 'no workflowTrigger',
+        payload: { metadata: {} },
+        requesterVisible: true,
+        teammateVisible: true,
+      },
+      {
+        name: "requester '  B  '",
+        payload: { metadata: { workflowTrigger: trigger(`  ${requester}  `) } },
+        requesterVisible: true,
+        teammateVisible: false,
+      },
+      {
+        name: 'requester U+00A0/U+3000 padded',
+        payload: { metadata: { workflowTrigger: trigger(`\u00a0${requester}\u3000`) } },
+        requesterVisible: true,
+        teammateVisible: false,
+      },
+      {
+        name: 'whitespace-only requester',
+        payload: { metadata: { workflowTrigger: trigger(' \u00a0\u3000 ') } },
+        requesterVisible: true,
+        teammateVisible: true,
+      },
+      {
+        name: "requester ''",
+        payload: { metadata: { workflowTrigger: trigger('') } },
+        requesterVisible: true,
+        teammateVisible: true,
+      },
+      {
+        name: 'requester 123',
+        payload: { metadata: { workflowTrigger: trigger(123) } },
+        requesterVisible: true,
+        teammateVisible: true,
+      },
+    ]
+    const authorityFor = async (user: string, approvalId: string) =>
+      (await observe(user, 'workflow_approval', [approvalId])).authority
+
+    try {
+      for (const variant of variants) {
+        const approvalId = randomUUID()
+        await databasePool.query(
+          `INSERT INTO workflow_approval_requests(
+             id, recipe_namespace, recipe_name, expires_at, status, target_team_id,
+             payload, idempotency_key, payload_hash
+           ) VALUES ($1, 's3', 'requester', NOW() + INTERVAL '1 hour', 'pending', $2,
+             $3::jsonb, $4, 'hash')`,
+          [approvalId, team, JSON.stringify(variant.payload), `i7-${approvalId}`]
+        )
+        // The candidate SQL must agree with the parser the decide guard uses.
+        const parsedRequester = parseWorkflowTriggerIntent(variant.payload)?.requesterUserId ?? null
+        expect(parsedRequester === null || parsedRequester === requester).toBe(
+          variant.requesterVisible
+        )
+        expect(parsedRequester === null || parsedRequester === teammate).toBe(
+          variant.teammateVisible
+        )
+        expect(await authorityFor(requester, approvalId)).toEqual(
+          variant.requesterVisible ? [approvalId] : []
+        )
+        expect(await authorityFor(teammate, approvalId)).toEqual(
+          variant.teammateVisible ? [approvalId] : []
+        )
+      }
+    } finally {
+      await databasePool.query(`DELETE FROM workflow_approval_requests WHERE target_team_id = $1`, [
+        team,
+      ])
+      await databasePool.query(`DELETE FROM workflow_recipe_allowed_teams WHERE team_id = $1`, [
+        team,
+      ])
+      await databasePool.query(`DELETE FROM team_members WHERE team_id = $1`, [team])
+      await databasePool.query(`DELETE FROM teams WHERE id = $1`, [team])
+    }
   })
 
   it('orders and resumes arbitrary PostgreSQL text by exact UTF-8 bytes', async () => {
