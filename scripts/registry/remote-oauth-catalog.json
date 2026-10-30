@@ -1,0 +1,319 @@
+[
+  {
+    "name": "clickup-remote",
+    "version": "1.0.0",
+    "description": "ClickUp's hosted MCP server: tasks, lists, docs and spaces of the user's ClickUp workspace.",
+    "category": "project-management",
+    "url": "https://mcp.clickup.com/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "verified",
+      "checkedAt": "2026-09-25",
+      "note": "ClickUp issues no refresh token: users authorize again when the access token expires."
+    }
+  },
+  {
+    "name": "vercel-remote",
+    "version": "1.0.0",
+    "description": "Vercel's hosted MCP server: projects, deployments and logs of the user's Vercel teams.",
+    "category": "developer-tools",
+    "url": "https://mcp.vercel.com/",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "verified",
+      "checkedAt": "2026-09-25"
+    }
+  },
+  {
+    "name": "notion-remote",
+    "version": "1.0.0",
+    "description": "Notion's hosted MCP server: search, read and edit pages and databases the user can access.",
+    "category": "productivity",
+    "url": "https://mcp.notion.com/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "cimd",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "canva-remote",
+    "version": "1.0.0",
+    "description": "Canva's hosted MCP server: find, create and export designs in the user's Canva account.",
+    "category": "design",
+    "url": "https://mcp.canva.com/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "atlassian-remote",
+    "version": "1.0.0",
+    "description": "Atlassian's hosted MCP server: Jira issues and Confluence pages of the user's Atlassian sites.",
+    "category": "project-management",
+    "url": "https://mcp.atlassian.com/v2/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "asana-remote",
+    "version": "1.0.0",
+    "description": "Asana's hosted MCP server: tasks, projects and portfolios in the user's Asana workspaces.",
+    "category": "project-management",
+    "url": "https://mcp.asana.com/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "linear-remote",
+    "version": "1.0.0",
+    "description": "Linear's hosted MCP server: issues, projects and cycles of the user's Linear workspace.",
+    "category": "project-management",
+    "url": "https://mcp.linear.app/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "cimd",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "sentry-remote",
+    "version": "1.0.0",
+    "description": "Sentry's hosted MCP server: issues, events and releases of the user's Sentry organizations.",
+    "category": "monitoring",
+    "url": "https://mcp.sentry.dev/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "cimd",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "figma-remote",
+    "version": "1.0.0",
+    "description": "Figma's hosted MCP server: read design files, components and variables the user can access.",
+    "category": "design",
+    "url": "https://mcp.figma.com/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "monday-remote",
+    "version": "1.0.0",
+    "description": "monday.com's hosted MCP server: boards, items and updates in the user's monday.com account.",
+    "category": "project-management",
+    "url": "https://mcp.monday.com/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "cimd",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "miro-remote",
+    "version": "1.0.0",
+    "description": "Miro's hosted MCP server: read and create content on the user's Miro boards.",
+    "category": "productivity",
+    "url": "https://mcp.miro.com/",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "paypal-remote",
+    "version": "1.0.0",
+    "description": "PayPal's hosted MCP server: invoices, orders and transactions of the user's PayPal business account.",
+    "category": "payments",
+    "url": "https://mcp.paypal.com/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "stripe-remote",
+    "version": "1.0.0",
+    "description": "Stripe's hosted MCP server: customers, payments, invoices and products of the user's Stripe account.",
+    "category": "payments",
+    "url": "https://mcp.stripe.com/",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "facebook-ads-remote",
+    "version": "1.0.0",
+    "description": "Meta's hosted MCP server for Facebook Ads: campaigns, ad sets and insights of the user's ad accounts.",
+    "category": "marketing",
+    "url": "https://mcp.facebook.com/ads",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "datadog-us-remote",
+    "version": "1.0.0",
+    "description": "Datadog's hosted MCP server for the US1 site (datadoghq.com): logs, metrics, monitors and incidents.",
+    "category": "monitoring",
+    "url": "https://mcp.datadoghq.com/api/unstable/mcp-server/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested",
+      "note": "Datadog serves this endpoint under an 'unstable' path, so it may move."
+    }
+  },
+  {
+    "name": "datadog-eu-remote",
+    "version": "1.0.0",
+    "description": "Datadog's hosted MCP server for the EU1 site (datadoghq.eu): logs, metrics, monitors and incidents.",
+    "category": "monitoring",
+    "url": "https://mcp.datadoghq.eu/api/unstable/mcp-server/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "dcr",
+    "verification": {
+      "status": "untested",
+      "note": "Datadog serves this endpoint under an 'unstable' path, so it may move."
+    }
+  },
+  {
+    "name": "workiq-remote",
+    "version": "1.0.0",
+    "description": "Microsoft Work IQ: ask questions about the user's Microsoft 365 mail, calendar, files and Teams. Read-only.",
+    "category": "productivity",
+    "url": "https://workiq.svc.cloud.microsoft/mcp",
+    "allowedGrantScopes": ["user"],
+    "scopes": ["api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask"],
+    "authorizationServerHint": "entra-v2",
+    "expectedRegistration": "pre-registered",
+    "providerConsoleUrl": "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+    "setupGuide": "Work IQ signs users in with your Microsoft Entra ID tenant, so you register the OAuth app there. Steps 1 and 2 need a Global Administrator; the rest needs an Application Administrator.\n\n1. Block user consent: Enterprise applications > Consent and permissions > User consent settings > \"Do not allow user consent\". Otherwise a user could consent at sign-in to permissions the app does not declare, and a token could reach another API. This setting applies to the whole tenant, so coordinate it if the tenant is shared.\n2. Make sure the tenant has the Work IQ service principal (application ID fdcc1f02-fc51-4226-8753-f668596af7f7) and a Work IQ billing plan with the users who will connect assigned to it. Without the plan, sign-in works but the ask tool fails.\n3. App registrations > New registration. Supported account types: \"Accounts in this organizational directory only (Single tenant)\". Redirect URI: platform Web, and paste the redirect URI below exactly.\n4. From Overview, copy the Application (client) ID into Client ID, and enter the Directory (tenant) ID in the Tenant ID field below. Use the GUID, not a domain name.\n5. Certificates & secrets > New client secret. Copy its Value (not the Secret ID) into Client secret; certificates are not supported. Write down the expiry date: after it, users can no longer sign in or refresh.\n6. API permissions: remove the default Microsoft Graph User.Read, then Add a permission > APIs my organization uses > Work IQ > Delegated permissions > WorkIQAgent.Ask, and grant admin consent. The list must end up with that single permission.\n\nThis connector installs for individual users only: each person authorizes access to their own Microsoft 365 data. Use a dedicated app registration: another connector cannot reuse its client ID.",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "gmail-remote",
+    "version": "1.0.0",
+    "description": "Google's hosted Gmail MCP server: search, read and draft email in the user's own mailbox.",
+    "category": "communication",
+    "url": "https://gmailmcp.googleapis.com/mcp/v1",
+    "allowedGrantScopes": ["user"],
+    "expectedRegistration": "pre-registered",
+    "providerConsoleUrl": "https://console.cloud.google.com/apis/credentials",
+    "setupGuide": "Gmail's MCP server signs users in with Google, so you create an OAuth client in a Google Cloud project you control.\n\n1. In the Google Cloud console, select or create the project that will own the OAuth client.\n2. In APIs & Services > Library, enable the Gmail API and the Gmail MCP API (gmailmcp.googleapis.com). Calls fail with 403 when they are not enabled in the client's project.\n3. Configure the OAuth consent screen. For a Google Workspace organization choose Internal, so only your users can authorize. If you choose External, publish the app: while it is in Testing, Google expires refresh tokens after 7 days and users have to sign in again.\n4. Add the scopes your agents need to the consent screen. Prefer the narrowest ones, such as gmail.readonly, unless agents must draft or send email.\n5. In Credentials, create an OAuth client ID of type Web application. Under Authorized redirect URIs, add the redirect URI below exactly.\n6. Copy the Client ID and Client secret into the fields below.\n\nThis connector installs for individual users only: each person authorizes access to their own account.",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "google-drive-remote",
+    "version": "1.0.0",
+    "description": "Google's hosted Drive MCP server: search and read files in the user's own Google Drive.",
+    "category": "productivity",
+    "url": "https://drivemcp.googleapis.com/mcp/v1",
+    "allowedGrantScopes": ["user"],
+    "expectedRegistration": "pre-registered",
+    "providerConsoleUrl": "https://console.cloud.google.com/apis/credentials",
+    "setupGuide": "Google Drive's MCP server signs users in with Google, so you create an OAuth client in a Google Cloud project you control.\n\n1. In the Google Cloud console, select or create the project that will own the OAuth client.\n2. In APIs & Services > Library, enable the Google Drive API and the Drive MCP API (drivemcp.googleapis.com). Calls fail with 403 when they are not enabled in the client's project.\n3. Configure the OAuth consent screen. For a Google Workspace organization choose Internal, so only your users can authorize. If you choose External, publish the app: while it is in Testing, Google expires refresh tokens after 7 days and users have to sign in again.\n4. Add the scopes your agents need to the consent screen. Prefer drive.readonly or drive.file over full drive access unless agents must change files.\n5. In Credentials, create an OAuth client ID of type Web application. Under Authorized redirect URIs, add the redirect URI below exactly.\n6. Copy the Client ID and Client secret into the fields below.\n\nThis connector installs for individual users only: each person authorizes access to their own account.",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "google-calendar-remote",
+    "version": "1.0.0",
+    "description": "Google's hosted Calendar MCP server: read and manage events in the user's own Google Calendar.",
+    "category": "productivity",
+    "url": "https://calendarmcp.googleapis.com/mcp/v1",
+    "allowedGrantScopes": ["user"],
+    "expectedRegistration": "pre-registered",
+    "providerConsoleUrl": "https://console.cloud.google.com/apis/credentials",
+    "setupGuide": "Google Calendar's MCP server signs users in with Google, so you create an OAuth client in a Google Cloud project you control.\n\n1. In the Google Cloud console, select or create the project that will own the OAuth client.\n2. In APIs & Services > Library, enable the Google Calendar API and the Calendar MCP API (calendarmcp.googleapis.com). Calls fail with 403 when they are not enabled in the client's project.\n3. Configure the OAuth consent screen. For a Google Workspace organization choose Internal, so only your users can authorize. If you choose External, publish the app: while it is in Testing, Google expires refresh tokens after 7 days and users have to sign in again.\n4. Add the scopes your agents need to the consent screen. Prefer calendar.readonly or calendar.events.readonly unless agents must create or change events.\n5. In Credentials, create an OAuth client ID of type Web application. Under Authorized redirect URIs, add the redirect URI below exactly.\n6. Copy the Client ID and Client secret into the fields below.\n\nThis connector installs for individual users only: each person authorizes access to their own account.",
+    "verification": {
+      "status": "known-issue",
+      "checkedAt": "2026-09-25",
+      "note": "End-to-end test on 2026-09-25: sign-in and initialize succeeded, but tools/call returned 403. The likely cause is the Calendar MCP API not being enabled in the Google Cloud project of the OAuth client."
+    }
+  },
+  {
+    "name": "slack-remote",
+    "version": "1.0.0",
+    "description": "Slack's hosted MCP server: search messages and read or post in channels the user can access.",
+    "category": "communication",
+    "url": "https://mcp.slack.com/mcp",
+    "allowedGrantScopes": ["user", "context"],
+    "scopes": [
+      "channels:history",
+      "channels:read",
+      "groups:history",
+      "groups:read",
+      "im:history",
+      "mpim:history",
+      "search:read.public",
+      "users:read"
+    ],
+    "expectedRegistration": "pre-registered",
+    "providerConsoleUrl": "https://api.slack.com/apps",
+    "setupGuide": "Slack's MCP server needs a Slack app that you own. Create one app per install slot: the user slot and the context slot cannot share a client ID, so if you install both, repeat these steps for a second app.\n\n1. In Your Apps on api.slack.com, choose Create New App > From scratch, and pick the workspace your agents work in.\n2. OAuth & Permissions > Redirect URLs: add the redirect URI below exactly and save.\n3. In the same page, under User Token Scopes, add every scope this connector requests (listed below; the suggested set is read-only). Slack only grants scopes the app declares, so if you change the list below, change the app to match.\n4. Basic Information > App Credentials: copy the Client ID and Client Secret into the fields below.\n5. If your workspace requires app approval, a workspace admin has to approve the app before users can authorize it.",
+    "verification": {
+      "status": "known-issue",
+      "checkedAt": "2026-09-25",
+      "note": "End-to-end test on 2026-09-25: the token was issued, but initialize with it returned 400. Lead under review: Slack's protected-resource metadata names https://mcp.slack.com, without /mcp, as the resource."
+    }
+  },
+  {
+    "name": "hubspot-remote",
+    "version": "1.0.0",
+    "description": "HubSpot's hosted MCP server: contacts, companies and deals of the user's HubSpot CRM.",
+    "category": "crm",
+    "url": "https://mcp.hubspot.com/",
+    "allowedGrantScopes": ["user", "context"],
+    "scopes": [
+      "oauth",
+      "crm.objects.contacts.read",
+      "crm.objects.companies.read",
+      "crm.objects.deals.read"
+    ],
+    "expectedRegistration": "pre-registered",
+    "providerConsoleUrl": "https://developers.hubspot.com/",
+    "setupGuide": "HubSpot's remote MCP server only accepts OAuth clients created in a HubSpot developer account. Create one app per install slot: the user slot and the context slot cannot share a client ID, so if you install both, repeat these steps for a second app.\n\n1. Sign in to your HubSpot developer account and create an app for the remote MCP server (HubSpot calls these MCP auth apps).\n2. Set the app's redirect URL to the redirect URI below exactly.\n3. HubSpot publishes no scope list for this server, so this connector suggests read-only CRM scopes (listed below). If the app lets you choose scopes, include the same ones; otherwise adjust the list below to what the app grants. HubSpot rejects an authorization that asks for scopes the app does not have.\n4. Copy the app's Client ID and Client secret into the fields below.\n\nUsers authorize with their own HubSpot account and only reach the records their HubSpot permissions allow.",
+    "verification": {
+      "status": "untested"
+    }
+  },
+  {
+    "name": "github-remote",
+    "version": "1.0.0",
+    "description": "GitHub's hosted MCP server: repositories, issues, pull requests and code search for the user's GitHub account.",
+    "category": "developer-tools",
+    "url": "https://api.githubcopilot.com/mcp/",
+    "allowedGrantScopes": ["user", "context"],
+    "expectedRegistration": "pre-registered",
+    "providerConsoleUrl": "https://github.com/settings/developers",
+    "setupGuide": "GitHub's MCP server accepts tokens from a GitHub OAuth app that you own. Create one app per install slot: the user slot and the context slot cannot share a client ID, so if you install both, repeat these steps for a second app. An OAuth app also allows a single callback URL.\n\n1. In GitHub, open Settings > Developer settings > OAuth Apps (for an app owned by an organization, use the organization's settings instead) and choose New OAuth App.\n2. Give it a name your users will recognize, and use your Evenfire console address as the Homepage URL.\n3. Authorization callback URL: paste the redirect URI below exactly.\n4. Register the application, then generate a new client secret. Copy the Client ID and the secret into the fields below; GitHub shows the secret only once.\n5. If your organization restricts third-party OAuth app access, an organization owner has to approve the app before users can reach its repositories.",
+    "verification": {
+      "status": "untested"
+    }
+  }
+]

@@ -7,6 +7,7 @@
  * resolves it through these functions, so there is a single implementation.
  */
 import { createHash } from 'node:crypto'
+import type { RegistrationMode } from '../../oauth/discovery.js'
 import { mergeAnnotationsForReplace } from '../../services/annotationMerge.js'
 import type { RegistryEntry } from '../../services/registryClient.js'
 import { OFFICIAL_EVENFIRE_SCOPES, registryNameSlug } from './registryNaming.js'
@@ -320,6 +321,20 @@ export function parseRemoteOAuthCatalogBlock(
     ...(verification ? { verification } : {}),
   }
   return { valid: true, block, url: first.url }
+}
+
+/**
+ * Whether the registration mode discovery resolved differs from the one a catalog
+ * entry expects. Without a client of its own, discovery reports a pre-registered-only
+ * AS as `manual`, which is exactly what an entry expecting `pre-registered` describes.
+ * Shared with the catalog seed script, which refuses to publish a drifting entry.
+ */
+export function catalogRegistrationDrifts(
+  expected: RemoteOAuthRegistration,
+  detected: RegistrationMode
+): boolean {
+  const normalizedDetected = detected === 'manual' ? 'pre-registered' : detected
+  return normalizedDetected !== expected
 }
 
 /**

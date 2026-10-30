@@ -70,6 +70,7 @@ import {
   type RemoteOAuthGrantScope,
   type RemoteOAuthInvalidReason,
   type RemoteOAuthResolution,
+  catalogRegistrationDrifts,
   deriveCatalogRemoteServerName,
   isRemoteOAuthEntry,
   normalizeRemoteBaseUrl,
@@ -295,19 +296,6 @@ async function resolveCatalogInstallTarget(input: {
       serverName: deriveCatalogRemoteServerName(entry.name, input.grantScope),
     },
   }
-}
-
-/**
- * Whether the discovered registration mode differs from the one the entry expects.
- * Without a client of its own, discovery reports a pre-registered-only AS as `manual`,
- * which is exactly what an entry expecting `pre-registered` describes.
- */
-function catalogRegistrationDrifts(
-  expected: RemoteOAuthCatalogBlock['expectedRegistration'],
-  detected: DiscoveryResult['registrationMode']
-): boolean {
-  const normalizedDetected = detected === 'manual' ? 'pre-registered' : detected
-  return normalizedDetected !== expected
 }
 
 /**
