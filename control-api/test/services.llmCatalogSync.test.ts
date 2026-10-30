@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { registry } from '../src/observability/metrics.js'
+import { AllowlistPublishRetry } from '../src/services/llmAllowlistPublishRetry.js'
 import { syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
 import type { RawModelsDevCatalog } from '../src/services/modelsDevClient.js'
 
@@ -7,13 +8,18 @@ type Row = Record<string, unknown>
 
 /**
  * The sync REQUIRES a ConfigMap materializer (#654) — it can change what runtime
- * is served. Most tests here assert SQL shape on rows the run never publishes,
- * so this spy stays uncalled; the publication tests assert on it directly.
+ * is served. These tests assert SQL shape and call order only; what a publish
+ * writes is covered against the real writer in services.llmAllowlistPublication.
  */
-const materializer = { materialize: vi.fn(async () => {}) }
+const materializer = {
+  materialize: vi.fn(async () => {}),
+  materializeIfChanged: vi.fn(async () => 'unchanged' as 'written' | 'unchanged'),
+}
 
 beforeEach(() => {
   materializer.materialize.mockReset()
+  materializer.materializeIfChanged.mockReset()
+  materializer.materializeIfChanged.mockResolvedValue('unchanged')
 })
 
 /**
@@ -352,8 +358,8 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(/WHEN t\.enabled THEN t\.image_input/.test(sql)).toBe(false)
   })
 
-  it('materializes the ConfigMap after COMMIT when an enabled row changed image_input', async () => {
-    const { connector, calls, query } = makeConnector(
+  it('publishes by state after COMMIT and after releasing the run client', async () => {
+    const { connector, calls, query, release } = makeConnector(
       { claude: [{ id: 'd1', model: 'claude-opus-4-5', source: 'discovery' }] },
       { enabled: true, image_input_changed: true }
     )
@@ -363,20 +369,26 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
       connector
     )
 
-    expect(materializer.materialize).toHaveBeenCalledTimes(1)
+    // The state-gated entry point, never the unconditional one.
+    expect(materializer.materializeIfChanged).toHaveBeenCalledTimes(1)
+    expect(materializer.materialize).not.toHaveBeenCalled()
     // AFTER commit, never inside the transaction: a ConfigMap write held open
     // would keep the advisory lock for the length of a call to the cluster.
     const commitCall = query.mock.calls.findIndex(c => /^COMMIT$/.test(String(c[0])))
     expect(commitCall).toBeGreaterThanOrEqual(0)
-    expect(materializer.materialize.mock.invocationCallOrder[0]).toBeGreaterThan(
-      query.mock.invocationCallOrder[commitCall]
-    )
+    const publishOrder = materializer.materializeIfChanged.mock.invocationCallOrder[0]
+    expect(publishOrder).toBeGreaterThan(query.mock.invocationCallOrder[commitCall])
+    // The run's client is back in the pool before the publish waits on its own
+    // lock and connection.
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(publishOrder).toBeGreaterThan(release.mock.invocationCallOrder[0])
     expect(res.enabledImageInputChanged).toBe(1)
-    expect(res.materialized).toBe(true)
+    // `materialized` reports what the writer did, not the counter.
+    expect(res.materialized).toBe(false)
     expect(CALL_FOR(calls, /SET last_seen_at/)).toHaveLength(1)
   })
 
-  it('does not materialize when only disabled rows changed', async () => {
+  it('still publishes by state when no enabled row changed (the counter only observes)', async () => {
     const { connector, calls } = makeConnector(
       { claude: [{ id: 'd1', model: 'claude-opus-4-5', source: 'discovery' }] },
       { enabled: false, image_input_changed: true }
@@ -387,9 +399,10 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
       connector
     )
 
-    expect(materializer.materialize).not.toHaveBeenCalled()
-    // Witness: the write the assertion above denies publishing DID happen — a
-    // disabled row is not in the ConfigMap, so changing it publishes nothing.
+    // A run that changed nothing served still compares the CM with Postgres: an
+    // earlier failed publish, or another writer's older snapshot, is repaired
+    // here instead of never.
+    expect(materializer.materializeIfChanged).toHaveBeenCalledTimes(1)
     expect(CALL_FOR(calls, /SET last_seen_at/)).toHaveLength(1)
     expect(res.updated).toBe(1)
     expect(res.enabledImageInputChanged).toBe(0)
@@ -403,11 +416,18 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     )
     const catalog = catalogWith({ 'claude-opus-4-5': { id: 'claude-opus-4-5' } })
     const before = await configMapWriteFailures('sync')
-    materializer.materialize.mockRejectedValueOnce(new Error('apiserver unreachable'))
+    materializer.materializeIfChanged.mockRejectedValueOnce(new Error('apiserver unreachable'))
+    const publishRetry = new AllowlistPublishRetry()
 
     await expect(
-      syncDiscoveredModels({ materializer, loadCatalog: loadStub(catalog) }, connector)
+      syncDiscoveredModels(
+        { materializer, publishRetry, loadCatalog: loadStub(catalog) },
+        connector
+      )
     ).rejects.toThrow('apiserver unreachable')
+    // Only the publication is owed a retry; the run itself is not repeated.
+    expect(publishRetry.isPending()).toBe(true)
+    publishRetry.stop()
 
     // The rows are durable: the failure happened after COMMIT, and nothing rolls
     // back (that COMMIT is also the witness that the run reached the publish).

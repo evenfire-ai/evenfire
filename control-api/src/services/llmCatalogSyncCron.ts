@@ -28,6 +28,7 @@
  */
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { stopLlmAllowlistPublishRetry } from './llmAllowlistPublishRetry.js'
 import type { CatalogSyncResult } from './llmCatalogSync.js'
 
 const log = rootLogger.child({ service: 'llm_catalog_sync_cron' })
@@ -191,7 +192,14 @@ export function startLlmCatalogSyncCron(deps: LlmCatalogSyncCronDeps, intervalMs
   )
 }
 
+/**
+ * Also stops the sync's pending ConfigMap publish retry: it belongs to the same
+ * process lifecycle and must not fire against a pool that shutdown is closing.
+ * Called on shutdown whether or not the cron was started, so a retry owed by an
+ * on-demand sync is cleared too.
+ */
 export function stopLlmCatalogSyncCron(): void {
+  stopLlmAllowlistPublishRetry()
   if (firstRunHandle) {
     clearTimeout(firstRunHandle)
     firstRunHandle = null

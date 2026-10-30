@@ -11,8 +11,14 @@
  * models the exact statement semantics the sync depends on. It intentionally
  * implements ONLY those statements; anything else returns an empty result.
  */
-import { type Mock, vi } from 'vitest'
+import { type Mock, type MockInstance, vi } from 'vitest'
 import type { ImageInputCapability } from '@clerum/llm-providers'
+import { listEnabledGroupedByProvider } from '../../src/services/llmAllowedModels.js'
+import {
+  LlmAllowedModelsConfigMapWriter,
+  buildConfigMapData,
+} from '../../src/services/llmAllowedModelsConfigMap.js'
+import { FakeConfigMapApi, poolFromQuery } from './fakeAllowlistCluster.js'
 
 /** The statement spy's exact signature, so `connector` satisfies SyncConnector. */
 type FakeQuery = Mock<
@@ -51,11 +57,19 @@ export interface FakeDb {
   /** Row lookup by (provider, model), for terse assertions. */
   get: (provider: string, model: string) => FakeRow | undefined
   /**
-   * The ConfigMap materializer the sync now requires (#654). Every suite that
-   * drives a run needs one; building it here keeps the call sites uniform and
-   * makes "was the ConfigMap republished?" a one-line assertion.
+   * The ConfigMap materializer the sync requires: the REAL writer, reading this
+   * fake table through its own pool and writing to `cluster`. Its two entry
+   * points are spied so "did the run publish?" stays a one-line assertion, while
+   * what was published is read from `cluster`.
    */
-  materializer: { materialize: Mock<(db?: unknown) => Promise<void>> }
+  materializer: LlmAllowedModelsConfigMapWriter & {
+    materialize: MockInstance<LlmAllowedModelsConfigMapWriter['materialize']>
+    materializeIfChanged: MockInstance<LlmAllowedModelsConfigMapWriter['materializeIfChanged']>
+  }
+  /** The fake apiserver the materializer publishes to. */
+  cluster: FakeConfigMapApi
+  /** `build(DB)`: what the CM must hold for the current table, from the real producers. */
+  expectedConfigMap: () => Promise<ReturnType<typeof buildConfigMapData>>
   /**
    * Every statement the run issued, in order. The row state above is the primary
    * assertion surface; this exists so a test that asserts a row is UNCHANGED can
@@ -246,11 +260,18 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
   })
 
   const connector = { connect: vi.fn(async () => ({ query, release: vi.fn() })) }
+  const cluster = new FakeConfigMapApi()
+  const writer = new LlmAllowedModelsConfigMapWriter(cluster, 'mcp-host', 3, poolFromQuery(query))
+  vi.spyOn(writer, 'materialize')
+  vi.spyOn(writer, 'materializeIfChanged')
   return {
     connector,
     rows,
     get: (provider, model) => rows.find(r => r.provider === provider && r.model === model),
-    materializer: { materialize: vi.fn(async () => {}) },
+    materializer: writer as FakeDb['materializer'],
+    cluster,
+    expectedConfigMap: async () =>
+      buildConfigMapData(await listEnabledGroupedByProvider({ query })),
     calls,
   }
 }

@@ -10,6 +10,7 @@ import {
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
+import { rootLogger } from '../../observability/logger.js'
 import { llmAllowlistConfigMapWriteFailuresTotal } from '../../observability/metrics.js'
 import {
   LlmAllowedModelConflictError,
@@ -87,6 +88,8 @@ function actorOf(req: Request): string {
   return (req as UiAuthedRequest).adminAuth?.sub ?? 'admin'
 }
 
+const log = rootLogger.child({ module: 'admin-llm-models' })
+
 export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   const router = Router()
 
@@ -102,9 +105,13 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
       return false
     } catch (err) {
       llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'mutation' })
-      console.error(
-        '[Admin] llm allowed-models ConfigMap write failed after mutation:',
-        err instanceof Error ? err.message : String(err)
+      log.error(
+        {
+          event: 'llm_allowlist_configmap_write_failed',
+          phase: 'mutation',
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'llm allowed-models ConfigMap write failed after mutation'
       )
       res.status(503).json({
         error: 'configmap_write_failed',
@@ -205,12 +212,11 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // only; a scheduled trigger is a follow-up). These routes inherit the same
   // control-ui admin auth gate as the rest of `/admin/*` (app.ts).
   //
-  // The sync owns the re-materialization decision (#654): it publishes only when
-  // it changed `image_input` on an enabled row, and never touches `enabled` or
-  // any other serialized column of one. The route hands it the same gateway
-  // materializer every mutation route uses; a failed write is reported by the
-  // service and surfaces here as a 500 (the DB commit is already durable and the
-  // boot reconcile converges).
+  // The sync owns the publication decision: after its commit it compares the
+  // ConfigMap with what Postgres projects and writes only on a difference. The
+  // route hands it the same gateway writer every mutation route uses; a failed
+  // write is reported by the service and surfaces here as a 500 (the DB commit
+  // is already durable, and the sync's publish retry converges).
   router.post(
     '/admin/llm-models/discovery/sync',
     asyncHandler(async (_req: Request, res: Response) => {

@@ -58,7 +58,8 @@ import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
 import { MAX_CONTEXT_WINDOW_TOKENS } from './llmAllowedModels.js'
-import type { AllowedModelsConfigMapMaterializer } from './llmAllowedModelsConfigMap.js'
+import type { AllowedModelsConfigMapPublisher } from './llmAllowedModelsConfigMap.js'
+import { type AllowlistPublishRetry, llmAllowlistPublishRetry } from './llmAllowlistPublishRetry.js'
 import { acquireCatalogSyncLock } from './llmCatalogSyncLock.js'
 import {
   type DiscoveredModel,
@@ -141,7 +142,7 @@ export interface CatalogSyncResult {
   staled: number
   /** Enabled rows whose `image_input` this run actually changed (#654). */
   enabledImageInputChanged: number
-  /** True when that count forced a ConfigMap re-materialization. */
+  /** True when this run wrote the ConfigMap (false: it already matched Postgres). */
   materialized: boolean
 }
 
@@ -405,7 +406,9 @@ export async function syncDiscoveredModels(
      * served, and a run that changes served capability with no way to publish it
      * would be a silent failure. Every production caller has a gateway.
      */
-    materializer: AllowedModelsConfigMapMaterializer
+    materializer: AllowedModelsConfigMapPublisher
+    /** Where a failed post-commit publish is retried (default: the process-wide one). */
+    publishRetry?: AllowlistPublishRetry
     /** Image-evidence validity window (default from config). */
     imageEvidenceTtlMs?: number
   },
@@ -445,6 +448,74 @@ export async function syncDiscoveredModels(
     )
   }
 
+  const committed = await reconcileCatalogInTransaction(connector, {
+    byProvider,
+    markStale: sourceIsLive && !globallyImplausible,
+    providerMinLive,
+    imageEvidence,
+    source,
+  })
+  const { counters } = committed
+
+  // Published after COMMIT and after the run's client went back to the pool:
+  // the publish waits on its own lock and holds its own connection, and holding
+  // the sync's idle client meanwhile would only shrink the pool.
+  //
+  // Published by STATE, unconditionally: the writer compares the CM's content
+  // hash with what Postgres projects now and writes only on a difference. A
+  // decision based on what this run changed would leave the CM wrong forever
+  // after a failed publish or a publish from another writer that read before
+  // this commit, because the next run changes nothing and would never publish.
+  // `enabledImageInputChanged` stays as an observability counter only.
+  const publishRetry = opts.publishRetry ?? llmAllowlistPublishRetry
+  const ticket = publishRetry.begin()
+  let materialized: boolean
+  try {
+    materialized = (await opts.materializer.materializeIfChanged()) === 'written'
+    publishRetry.succeeded(ticket)
+  } catch (err) {
+    llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'sync' })
+    log.error(
+      {
+        event: 'llm_catalog_sync_configmap_write_failed',
+        enabledImageInputChanged: counters.enabledImageInputChanged,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      'llm allowed-models ConfigMap write failed after catalog sync commit; publish retry scheduled'
+    )
+    publishRetry.failed(ticket, opts.materializer)
+    // The rows are committed either way; the caller still sees the run as
+    // failed (the on-demand route answers 500) while the retry converges.
+    throw err
+  }
+
+  // `fetchedAt` is the catalog acquisition time (from the loader) — how fresh
+  // the source data is; `ranAt` is the DB commit time of this run.
+  return {
+    source,
+    fetchedAt,
+    ranAt: committed.ranAt,
+    added: counters.added,
+    updated: counters.updated,
+    staled: counters.staled,
+    enabledImageInputChanged: counters.enabledImageInputChanged,
+    materialized,
+  }
+}
+
+async function reconcileCatalogInTransaction(
+  connector: SyncConnector,
+  run: {
+    byProvider: ReturnType<typeof mapCatalogToProviders>
+    markStale: boolean
+    providerMinLive: number
+    imageEvidence: { capturedAt: string; ttlMs: number }
+    source: 'live' | 'vendored'
+  }
+): Promise<{
+  ranAt: string
+  counters: { added: number; updated: number; staled: number; enabledImageInputChanged: number }
+}> {
   const client = await connector.connect()
   let inTransaction = false
   try {
@@ -454,19 +525,18 @@ export async function syncDiscoveredModels(
     await acquireCatalogSyncLock(client)
 
     // Layer 1 (source==='live') AND layer 3 (global plausibility) both gate the
-    // vanished→stale inference for the whole run; layer 2 (per-provider floor)
-    // is applied inside reconcileProvider. A vendored fallback must not stale
-    // live models (see reconcileProvider).
-    const markStale = sourceIsLive && !globallyImplausible
+    // vanished→stale inference for the whole run (`markStale`); layer 2
+    // (per-provider floor) is applied inside reconcileProvider. A vendored
+    // fallback must not stale live models (see reconcileProvider).
     const counters = { added: 0, updated: 0, staled: 0, enabledImageInputChanged: 0 }
     for (const provider of PROVIDER_IDS) {
       await reconcileProvider(
         client,
         provider,
-        byProvider[provider] ?? [],
-        markStale,
-        providerMinLive,
-        imageEvidence,
+        run.byProvider[provider] ?? [],
+        run.markStale,
+        run.providerMinLive,
+        run.imageEvidence,
         counters
       )
     }
@@ -478,50 +548,14 @@ export async function syncDiscoveredModels(
       `INSERT INTO llm_catalog_sync_runs (source, added, updated, staled)
        VALUES ($1, $2, $3, $4)
        RETURNING ran_at`,
-      [source, counters.added, counters.updated, counters.staled]
+      [run.source, counters.added, counters.updated, counters.staled]
     )
     await client.query('COMMIT')
     inTransaction = false
 
     const rawRanAt = (runRes.rows[0] as { ran_at?: unknown } | undefined)?.ran_at
     const ranAt = rawRanAt instanceof Date ? rawRanAt.toISOString() : String(rawRanAt)
-
-    // After COMMIT, never inside it: the rows are durable either way, and a
-    // ConfigMap write held inside the transaction would keep the advisory lock
-    // for the length of an API call to the cluster. On failure the run is
-    // reported as failed (the caller surfaces it) and the boot reconcile
-    // converges on restart — the write is never retried silently.
-    let materialized = false
-    if (counters.enabledImageInputChanged > 0) {
-      try {
-        await opts.materializer.materialize()
-        materialized = true
-      } catch (err) {
-        llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'sync' })
-        log.error(
-          {
-            event: 'llm_catalog_sync_configmap_write_failed',
-            enabledImageInputChanged: counters.enabledImageInputChanged,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          'llm allowed-models ConfigMap write failed after catalog sync commit'
-        )
-        throw err
-      }
-    }
-
-    // `fetchedAt` is the catalog acquisition time (from the loader) — how fresh
-    // the source data is; `ranAt` is the DB commit time of this run.
-    return {
-      source,
-      fetchedAt,
-      ranAt,
-      added: counters.added,
-      updated: counters.updated,
-      staled: counters.staled,
-      enabledImageInputChanged: counters.enabledImageInputChanged,
-      materialized,
-    }
+    return { ranAt, counters }
   } catch (err) {
     if (inTransaction) {
       try {

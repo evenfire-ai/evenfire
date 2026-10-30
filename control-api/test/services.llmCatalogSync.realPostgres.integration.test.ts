@@ -3,7 +3,13 @@ import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import type { ImageInputCapability } from '@clerum/llm-providers'
 import { initDb } from '../src/db.js'
+import { listEnabledGroupedByProvider } from '../src/services/llmAllowedModels.js'
+import {
+  LlmAllowedModelsConfigMapWriter,
+  buildConfigMapData,
+} from '../src/services/llmAllowedModelsConfigMap.js'
 import { type CatalogSyncResult, syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
+import { FakeConfigMapApi } from './helpers/fakeAllowlistCluster.js'
 import { loadStub, trimSnapshot, withModalities } from './helpers/modelsDevFixtures.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
@@ -150,7 +156,8 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
   const database = `control_api_catalog_sync_${randomBytes(6).toString('hex')}`
   let adminPool: Pool
   let dbPool: Pool
-  const materializer = { materialize: vi.fn(async () => {}) }
+  const cluster = new FakeConfigMapApi()
+  let materializer: LlmAllowedModelsConfigMapWriter
   let manualBefore: DbRow
   let firstRun: CatalogSyncResult
 
@@ -185,6 +192,8 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
     dbPool = new Pool({ connectionString: databaseUrl(adminUrl!, database) })
     await initDb({ connect: () => dbPool.connect() })
+    materializer = new LlmAllowedModelsConfigMapWriter(cluster, 'mcp-host', 3, dbPool)
+    vi.spyOn(materializer, 'materializeIfChanged')
 
     // initDb seeds the static allowlist as `source='manual'` rows. Start from
     // an empty table so the seed below is the whole universe the sync sees.
@@ -238,7 +247,11 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
     expect(firstRun.enabledImageInputChanged).toBe(2)
     expect(firstRun.materialized).toBe(true)
     expect(firstRun.added).toBe(1)
-    expect(materializer.materialize).toHaveBeenCalledTimes(1)
+    expect(materializer.materializeIfChanged).toHaveBeenCalledTimes(1)
+    expect(cluster.writes).toBe(1)
+    expect(cluster.data).toEqual(
+      buildConfigMapData(await listEnabledGroupedByProvider(dbPool)).data
+    )
 
     const rows = await readRows()
     expect(rows.get('claude-opus-4-6')!.image_input).toEqual(discovered('unsupported'))
@@ -249,7 +262,7 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
     expect(inserted.image_input).toEqual(discovered('supported'))
   })
 
-  it('an immediate re-run reports no change and does not republish', async () => {
+  it('an immediate re-run reports no change and writes nothing to the ConfigMap', async () => {
     const runsBefore = await countRuns()
     const rerun = await runSync(CAPTURED_AT)
 
@@ -261,8 +274,11 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
     expect(rerun.updated).toBe(SEED.filter(r => r.source === 'discovery').length + 1)
 
     expect(rerun.enabledImageInputChanged).toBe(0)
+    // The run still compares the CM with Postgres, and writes nothing because
+    // they already match.
     expect(rerun.materialized).toBe(false)
-    expect(materializer.materialize).toHaveBeenCalledTimes(1)
+    expect(materializer.materializeIfChanged).toHaveBeenCalledTimes(2)
+    expect(cluster.writes).toBe(1)
     const rows = await readRows()
     expect(rows.get('claude-opus-4-6')!.image_input).toEqual(discovered('unsupported'))
     expect(rows.get('claude-fable-5-1')!.image_input).toEqual(discovered('supported'))
@@ -277,7 +293,8 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
     const olderRun = await runSync('2026-08-01T00:00:00Z', 'vendored')
     expect(olderRun.updated).toBeGreaterThan(0)
     expect(olderRun.enabledImageInputChanged).toBe(0)
-    expect(materializer.materialize).toHaveBeenCalledTimes(1)
+    expect(olderRun.materialized).toBe(false)
+    expect(cluster.writes).toBe(1)
     const after = await readRows()
     expect(after.get('claude-sonnet-4-5')!.image_input).toEqual(newerDiscovery)
     expect(after.get('claude-opus-4-6')!.image_input).toEqual(discovered('unsupported'))

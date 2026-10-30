@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { DbClient } from '../src/db.js'
 import type { CodexSubscriptionSafeConnection } from '../src/services/codexSubscriptionConnection.js'
+import { listEnabledGroupedByProvider } from '../src/services/llmAllowedModels.js'
 import {
   ALLOWED_MODELS_CONFIGMAP_NAME,
   CATALOG_REVISION_ANNOTATION,
@@ -15,6 +16,7 @@ import {
   mapCodexConnectionStatusForSnapshot,
   publishAllowedModelsConfigMapAfterGrantChange,
 } from '../src/services/llmAllowedModelsConfigMap.js'
+import { FakeConfigMapApi, poolFromQuery } from './helpers/fakeAllowlistCluster.js'
 
 function fakeDb(
   rows: Record<string, unknown>[],
@@ -170,51 +172,75 @@ describe('LlmAllowedModelsConfigMapWriter', () => {
     },
   ]
 
+  function writerOver(
+    cluster: FakeConfigMapApi,
+    db: DbClient,
+    maxAttempts = 3
+  ): LlmAllowedModelsConfigMapWriter {
+    return new LlmAllowedModelsConfigMapWriter(
+      cluster,
+      'mcp-host',
+      maxAttempts,
+      poolFromQuery(db.query)
+    )
+  }
+
+  function enabledReads(db: DbClient): number {
+    return (db.query as ReturnType<typeof vi.fn>).mock.calls.filter(call =>
+      /FROM llm_allowed_models\s+WHERE enabled/.test(String(call[0]))
+    ).length
+  }
+
   it('creates the ConfigMap with the content-hash annotation', async () => {
-    const coreApi = {
-      createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
-      readNamespacedConfigMap: vi.fn(),
-      replaceNamespacedConfigMap: vi.fn(),
-    }
-    const writer = new LlmAllowedModelsConfigMapWriter(coreApi, 'mcp-host')
-    await writer.materialize(fakeDb(rows))
-    expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledTimes(1)
-    const arg = coreApi.createNamespacedConfigMap.mock.calls[0][0]
-    expect(arg.namespace).toBe('mcp-host')
-    expect(arg.body.metadata.name).toBe(ALLOWED_MODELS_CONFIGMAP_NAME)
-    expect(arg.body.metadata.annotations[CONTENT_HASH_ANNOTATION]).toMatch(/^[0-9a-f]{64}$/)
-    expect(arg.body.metadata.annotations[CODEX_ENABLED_ANNOTATION]).toBe('false')
-    expect(arg.body.metadata.annotations[CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('disconnected')
-    expect(arg.body.metadata.annotations[CATALOG_REVISION_ANNOTATION]).toBeUndefined()
-    expect(arg.body.metadata.annotations[CONNECTION_REVISION_ANNOTATION]).toBeUndefined()
-    expect(JSON.parse(arg.body.data.zai)[0].model).toBe('glm-4.7')
+    const cluster = new FakeConfigMapApi()
+    await writerOver(cluster, fakeDb(rows)).materialize()
+    expect(cluster.writes).toBe(1)
+    const cm = cluster.current!
+    expect(cm.metadata!.name).toBe(ALLOWED_MODELS_CONFIGMAP_NAME)
+    expect(cm.metadata!.namespace).toBe('mcp-host')
+    expect(cm.metadata!.annotations![CONTENT_HASH_ANNOTATION]).toMatch(/^[0-9a-f]{64}$/)
+    expect(cm.metadata!.annotations![CODEX_ENABLED_ANNOTATION]).toBe('false')
+    expect(cm.metadata!.annotations![CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('disconnected')
+    expect(cm.metadata!.annotations![CATALOG_REVISION_ANNOTATION]).toBeUndefined()
+    expect(cm.metadata!.annotations![CONNECTION_REVISION_ANNOTATION]).toBeUndefined()
+    expect(JSON.parse(cm.data!.zai)[0].model).toBe('glm-4.7')
+  })
+
+  it('reads the database on the lock connection, inside one bounded transaction', async () => {
+    const cluster = new FakeConfigMapApi()
+    const db = fakeDb(rows)
+    await writerOver(cluster, db).materialize()
+    const sql = (db.query as ReturnType<typeof vi.fn>).mock.calls.map(call => String(call[0]))
+    const begin = sql.indexOf('BEGIN')
+    const bound = sql.findIndex(q => q.includes('idle_in_transaction_session_timeout'))
+    const lock = sql.findIndex(q => q.includes('pg_advisory_xact_lock'))
+    const read = sql.findIndex(q => /FROM llm_allowed_models\s+WHERE enabled/.test(q))
+    const commit = sql.indexOf('COMMIT')
+    expect(begin).toBeGreaterThanOrEqual(0)
+    expect(begin).toBeLessThan(bound)
+    expect(bound).toBeLessThan(lock)
+    expect(lock).toBeLessThan(read)
+    expect(read).toBeLessThan(commit)
+    const lockCall = (db.query as ReturnType<typeof vi.fn>).mock.calls[lock]
+    expect(lockCall[1]).toEqual(['llm-allowlist-cm-v1'])
   })
 
   it('adds readiness annotations without changing the data contract', async () => {
-    const coreApi = {
-      createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
-      readNamespacedConfigMap: vi.fn(),
-      replaceNamespacedConfigMap: vi.fn(),
-    }
-    const writer = new LlmAllowedModelsConfigMapWriter(coreApi, 'mcp-host')
-    await writer.materialize(fakeDb(rows, [connectedRow()]))
-    const arg = coreApi.createNamespacedConfigMap.mock.calls[0][0]
-    expect(JSON.parse(arg.body.data.zai)[0]).toEqual({
+    const cluster = new FakeConfigMapApi()
+    await writerOver(cluster, fakeDb(rows, [connectedRow()])).materialize()
+    const cm = cluster.current!
+    expect(JSON.parse(cm.data!.zai)[0]).toEqual({
       model: 'glm-4.7',
       vendor: 'Zhipu',
     })
-    expect(arg.body.metadata.annotations[CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('connected')
-    expect(arg.body.metadata.annotations[CATALOG_REVISION_ANNOTATION]).toBe('7')
-    expect(arg.body.metadata.annotations[CONNECTION_REVISION_ANNOTATION]).toBe('4')
-    expect(JSON.stringify(arg.body.data)).not.toMatch(/catalogRevision|credentialRevision|status/)
+    expect(cm.metadata!.annotations![CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('connected')
+    expect(cm.metadata!.annotations![CATALOG_REVISION_ANNOTATION]).toBe('7')
+    expect(cm.metadata!.annotations![CONNECTION_REVISION_ANNOTATION]).toBe('4')
+    expect(JSON.stringify(cm.data)).not.toMatch(/catalogRevision|credentialRevision|status/)
   })
 
   it('indexes the live deployment-default row after 0105 reuse, not the tombstone', async () => {
-    const coreApi = {
-      createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
-      readNamespacedConfigMap: vi.fn(),
-      replaceNamespacedConfigMap: vi.fn(),
-    }
+    const cluster = new FakeConfigMapApi()
     const tombstone = {
       ...connectedRow(),
       id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
@@ -230,66 +256,122 @@ describe('LlmAllowedModelsConfigMapWriter', () => {
       catalog_revision: 9,
       revoked_at: null,
     }
-    const writer = new LlmAllowedModelsConfigMapWriter(coreApi, 'mcp-host')
     const db = fakeDb(rows, [tombstone, live])
-    await writer.materialize(db)
+    await writerOver(cluster, db).materialize()
     const connectionSql = (db.query as ReturnType<typeof vi.fn>).mock.calls
       .map(call => String(call[0]))
       .find(sql => sql.includes('codex_subscription_connections'))
     expect(connectionSql).toContain('revoked_at IS NULL')
-    const arg = coreApi.createNamespacedConfigMap.mock.calls.at(-1)?.[0]
-    expect(arg.body.metadata.annotations[CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('connected')
-    expect(arg.body.metadata.annotations[CATALOG_REVISION_ANNOTATION]).toBe('9')
-    expect(arg.body.metadata.annotations[CONNECTION_REVISION_ANNOTATION]).toBe('8')
-    const map = JSON.parse(arg.body.metadata.annotations[CODEX_CONNECTIONS_ANNOTATION] as string)
+    const annotations = cluster.annotations!
+    expect(annotations[CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('connected')
+    expect(annotations[CATALOG_REVISION_ANNOTATION]).toBe('9')
+    expect(annotations[CONNECTION_REVISION_ANNOTATION]).toBe('8')
+    const map = JSON.parse(annotations[CODEX_CONNECTIONS_ANNOTATION] as string)
     expect(Object.keys(map)).toEqual(['deployment-default'])
     expect(map['deployment-default'].catalogRevision).toBe(9)
     expect(map['deployment-default'].connectionRevision).toBe(8)
     expect(map['deployment-default'].status).toBe('connected')
   })
 
-  it('falls back to read + replace on a 409 conflict', async () => {
-    const coreApi = {
-      createNamespacedConfigMap: vi
-        .fn()
-        .mockRejectedValue(Object.assign(new Error('exists'), { code: 409 })),
-      readNamespacedConfigMap: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '42' } }),
-      replaceNamespacedConfigMap: vi.fn().mockResolvedValue({}),
-    }
-    const writer = new LlmAllowedModelsConfigMapWriter(coreApi, 'mcp-host')
-    await writer.materialize(fakeDb(rows))
-    expect(coreApi.replaceNamespacedConfigMap).toHaveBeenCalledTimes(1)
-    const arg = coreApi.replaceNamespacedConfigMap.mock.calls[0][0]
-    expect(arg.body.metadata.resourceVersion).toBe('42')
+  it('replaces an existing ConfigMap with the resourceVersion it read', async () => {
+    const cluster = new FakeConfigMapApi()
+    await writerOver(cluster, fakeDb([])).materialize()
+    const before = cluster.resourceVersion
+    await writerOver(cluster, fakeDb(rows)).materialize()
+    expect(cluster.writes).toBe(2)
+    expect(cluster.conflicts).toBe(0)
+    expect(cluster.resourceVersion).not.toBe(before)
+    expect(JSON.parse(cluster.data!.zai)[0].model).toBe('glm-4.7')
   })
 
-  it('retries a transient write failure and eventually succeeds', async () => {
-    const create = vi
-      .fn()
-      .mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 500 }))
-      .mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 500 }))
-      .mockResolvedValueOnce({})
-    const coreApi = {
-      createNamespacedConfigMap: create,
-      readNamespacedConfigMap: vi.fn(),
-      replaceNamespacedConfigMap: vi.fn(),
-    }
-    const writer = new LlmAllowedModelsConfigMapWriter(coreApi, 'mcp-host', 3)
-    await writer.materialize(fakeDb(rows))
-    expect(create).toHaveBeenCalledTimes(3)
+  it('retries a transient write failure, re-reading the database on every attempt', async () => {
+    const cluster = new FakeConfigMapApi()
+    cluster.failNextWrites(2)
+    const db = fakeDb(rows)
+    await writerOver(cluster, db, 3).materialize()
+    expect(cluster.writes).toBe(1)
+    // A retry never reuses data read in an earlier attempt.
+    expect(enabledReads(db)).toBe(3)
   })
 
   it('throws after exhausting retries', async () => {
-    const coreApi = {
-      createNamespacedConfigMap: vi
-        .fn()
-        .mockRejectedValue(Object.assign(new Error('down'), { code: 500 })),
-      readNamespacedConfigMap: vi.fn(),
-      replaceNamespacedConfigMap: vi.fn(),
-    }
-    const writer = new LlmAllowedModelsConfigMapWriter(coreApi, 'mcp-host', 2)
-    await expect(writer.materialize(fakeDb(rows))).rejects.toThrow('down')
-    expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledTimes(2)
+    const cluster = new FakeConfigMapApi()
+    cluster.failNextWrites(5, Object.assign(new Error('down'), { code: 500 }))
+    await expect(writerOver(cluster, fakeDb(rows), 2).materialize()).rejects.toThrow('down')
+    expect(cluster.writes).toBe(0)
+  })
+
+  it('aborts without writing when the lock session can no longer read the database', async () => {
+    const cluster = new FakeConfigMapApi()
+    const db = fakeDb(rows)
+    const base = (db.query as ReturnType<typeof vi.fn>).getMockImplementation()!
+    ;(db.query as ReturnType<typeof vi.fn>).mockImplementation(
+      (sql: string, params?: unknown[]) => {
+        if (/FROM llm_allowed_models\s+WHERE enabled/.test(String(sql))) {
+          return Promise.reject(
+            Object.assign(new Error('terminating connection due to idle-in-transaction timeout'), {
+              code: '25P03',
+            })
+          )
+        }
+        return base(sql, params)
+      }
+    )
+    await expect(writerOver(cluster, db).materialize()).rejects.toThrow(/idle-in-transaction/)
+    expect(cluster.writes).toBe(0)
+    // No retry with a dead session: one read attempt, then abort.
+    expect(enabledReads(db)).toBe(1)
+  })
+
+  it('refuses to replace without a resourceVersion (the write would lose its CAS)', async () => {
+    const cluster = new FakeConfigMapApi()
+    await writerOver(cluster, fakeDb([])).materialize()
+    cluster.omitResourceVersionOnRead = true
+    await expect(writerOver(cluster, fakeDb(rows), 2).materialize()).rejects.toThrow(
+      /no resourceVersion/
+    )
+    expect(cluster.writes).toBe(1)
+    expect(cluster.data).toEqual({})
+  })
+
+  it('a K8s call that never answers is a failed attempt, bounded per call', async () => {
+    const cluster = new FakeConfigMapApi()
+    cluster.hooks.before = () => new Promise<void>(() => undefined)
+    const writer = new LlmAllowedModelsConfigMapWriter(
+      cluster,
+      'mcp-host',
+      2,
+      poolFromQuery(fakeDb(rows).query),
+      50
+    )
+    const started = Date.now()
+    await expect(writer.materialize()).rejects.toThrow(/read timed out after 50 ms/)
+    // Two bounded GETs plus one 100 ms backoff, never the hang.
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(cluster.writes).toBe(0)
+  })
+
+  it('materializeIfChanged skips the write when the CM hash already matches the database', async () => {
+    const cluster = new FakeConfigMapApi()
+    const writer = writerOver(cluster, fakeDb(rows))
+    expect(await writer.materializeIfChanged()).toBe('written')
+    expect(await writer.materializeIfChanged()).toBe('unchanged')
+    expect(cluster.writes).toBe(1)
+    expect(cluster.annotations![CONTENT_HASH_ANNOTATION]).toBe(
+      buildConfigMapData(await listEnabledGroupedByProvider(fakeDb(rows))).contentHash
+    )
+  })
+
+  it('materialize writes even when the data hash already matches (readiness-only change)', async () => {
+    const cluster = new FakeConfigMapApi()
+    await writerOver(cluster, fakeDb(rows)).materialize()
+    const hashBefore = cluster.annotations![CONTENT_HASH_ANNOTATION]
+    // Same enabled rows, a connected Codex grant: only readiness annotations move.
+    const writer = writerOver(cluster, fakeDb(rows, [connectedRow()]))
+    await writer.materialize()
+    expect(cluster.writes).toBe(2)
+    expect(cluster.annotations![CONTENT_HASH_ANNOTATION]).toBe(hashBefore)
+    expect(cluster.annotations![CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('connected')
   })
 })
 

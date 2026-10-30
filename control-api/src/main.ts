@@ -191,9 +191,9 @@ async function main(): Promise<void> {
   // seconds after start (not awaited — boot never waits on models.dev), then
   // every interval. Non-destructive: inserts disabled discovery rows, only
   // stale-flags vanished ones under the §4.5 guards.
-  // Started AFTER the gateway exists (#654): the sync publishes the allowlist
-  // ConfigMap when it changes image-input evidence on an enabled row, so it
-  // needs a materializer — the same one the admin routes use.
+  // Started AFTER the gateway exists (#654): every run publishes the allowlist
+  // ConfigMap when it differs from Postgres, so it needs a materializer — the
+  // same one the admin routes use.
   if (config.llmCatalogSyncCronEnabled) {
     startLlmCatalogSyncCron(
       { sync: () => syncDiscoveredModels({ materializer: gateway.llmAllowedModelsConfigMap() }) },
