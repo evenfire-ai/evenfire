@@ -336,6 +336,38 @@ assert_prepare_release_can_retain_compatible_builds() {
   rm -rf "$d"
 }
 
+assert_invalid_compatibility_flags_leave_all_coordinates_unchanged() {
+  local scenario d before after problems=""
+  for scenario in malformed duplicate missing-target higher-target; do
+    d="$(mktemp -d)"
+    make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+    cp -R "$REPO_ROOT/scripts" "$d/scripts"
+    before="$(shasum -a 256 "$d/desktop-app/package.json" "$d/desktop-app/package-lock.json" \
+      "$d/deploy/components/ghcr-images/kustomization.yaml" \
+      "$d/external-rest-api/src/releaseManifest.ts")"
+    case "$scenario" in
+      malformed) args=(--compatible-desktop-version bad) ;;
+      duplicate) args=(--compatible-desktop-version 0.6.0 --compatible-desktop-version 0.6.0) ;;
+      missing-target) args=(--compatible-desktop-version 0.5.0) ;;
+      higher-target) args=(--compatible-desktop-version 0.6.0 --compatible-desktop-version 0.7.0) ;;
+    esac
+    ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 \
+      --release-id test-3333333 "${args[@]}" >/dev/null 2>&1 )
+    local rc=$?
+    after="$(shasum -a 256 "$d/desktop-app/package.json" "$d/desktop-app/package-lock.json" \
+      "$d/deploy/components/ghcr-images/kustomization.yaml" \
+      "$d/external-rest-api/src/releaseManifest.ts")"
+    [ "$rc" -ne 0 ] || problems+="$scenario request was accepted; "
+    [ "$before" = "$after" ] || problems+="$scenario changed one or more release coordinates; "
+    rm -rf "$d"
+  done
+  if [ -z "$problems" ]; then
+    pass "invalid compatibility requests fail before changing any release coordinate"
+  else
+    fail "$problems"
+  fi
+}
+
 assert_manifest_requires_the_highest_compatible_target() {
   local d; d="$(mktemp -d)"
   make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
@@ -995,6 +1027,7 @@ assert_previous_ref_does_not_revert_a_raised_floor
 assert_ordering_check_fails_against_unpatched_script
 assert_prepare_release_writes_every_coordinate
 assert_prepare_release_can_retain_compatible_builds
+assert_invalid_compatibility_flags_leave_all_coordinates_unchanged
 assert_manifest_requires_the_highest_compatible_target
 assert_prepare_release_leaves_a_same_string_dependency_alone
 assert_prepare_release_rejects_a_non_greater_version

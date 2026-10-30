@@ -44,8 +44,12 @@ const version = argValue('--version')
 const releaseId = argValue('--release-id')
 const compatibleDesktopVersions = []
 for (let index = 0; index < process.argv.length; index += 1) {
-  if (process.argv[index] === '--compatible-desktop-version' && process.argv[index + 1]) {
-    compatibleDesktopVersions.push(process.argv[index + 1])
+  if (process.argv[index] === '--compatible-desktop-version') {
+    const requested = process.argv[index + 1]
+    if (!requested || requested.startsWith('--')) {
+      die('--compatible-desktop-version requires a MAJOR.MINOR.PATCH value')
+    }
+    compatibleDesktopVersions.push(requested)
   }
 }
 
@@ -64,6 +68,21 @@ if (process.argv.includes('--minimum-desktop-version')) {
   die(
     'minimumDesktopVersion is frozen for already-shipped clients; do not raise the legacy update floor'
   )
+}
+
+if (compatibleDesktopVersions.length > 0) {
+  if (compatibleDesktopVersions.some(value => !SEMVER_RE.test(value))) {
+    die('--compatible-desktop-version values must be MAJOR.MINOR.PATCH')
+  }
+  if (new Set(compatibleDesktopVersions).size !== compatibleDesktopVersions.length) {
+    die('--compatible-desktop-version values must be unique')
+  }
+  if (!compatibleDesktopVersions.includes(version)) {
+    die('the compatible Desktop version set must include the requested --version')
+  }
+  if (compatibleDesktopVersions.some(value => compareVersions(value, version) > 0)) {
+    die('compatible Desktop versions cannot be greater than the requested --version')
+  }
 }
 
 const onDisk = COORDINATES.find(c => c.name === 'desktop-app/package.json').read(ROOT)
