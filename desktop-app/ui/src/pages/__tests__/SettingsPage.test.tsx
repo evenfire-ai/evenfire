@@ -101,10 +101,13 @@ const defaultSettingsProps: SettingsPageProps = {
   onSaveChannelNotificationPreferences: vi.fn(async () => undefined),
 }
 
-function renderSettingsPage(auth?: Partial<AuthContextValue>) {
+function renderSettingsPage(
+  auth?: Partial<AuthContextValue>,
+  settingsProps: SettingsPageProps = defaultSettingsProps
+) {
   return render(
     <AuthContext.Provider value={makeAuthValue(auth)}>
-      <SettingsPage {...defaultSettingsProps} />
+      <SettingsPage {...settingsProps} />
     </AuthContext.Provider>
   )
 }
@@ -127,11 +130,14 @@ describe('SettingsPage', () => {
             checked: true,
             currentVersion: '0.1.249',
             latestVersion: '0.1.250',
+            compatibleVersions: ['0.1.250'],
+            compatible: false,
+            updateAvailable: true,
             minimumVersion: '0.1.250',
             updateRequired: true,
-            releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250',
+            releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/v0.1.250',
             releaseId: 'master-abc123',
-            releaseTag: 'desktop-app-0.1.250',
+            releaseTag: 'v0.1.250',
             externalRestApiVersion: '0.1.50',
             rpcProxyVersion: '0.1.36',
           })),
@@ -184,8 +190,24 @@ describe('SettingsPage', () => {
     expect(screen.getByText('0.1.36')).toBeTruthy()
     expect(screen.getByText('http://127.0.0.1:8091')).toBeTruthy()
     expect(screen.getByText('http://127.0.0.1:8094')).toBeTruthy()
+    const updateButton = screen.getByRole('button', { name: 'Check for updates' })
+    const diagnosticTable = screen.getByText('Desktop app version').closest('dl')
+    expect(updateButton.parentElement?.classList.contains('settings-control-width')).toBe(true)
+    expect(diagnosticTable?.classList.contains('settings-control-width')).toBe(true)
 
     expect(vi.mocked(window.clerum.auth.getDesktopReleaseStatus)).toHaveBeenCalledTimes(1)
+  })
+
+  it('starts a manual desktop update check from Information settings', async () => {
+    const user = userEvent.setup()
+    const onCheckForUpdates = vi.fn()
+
+    renderSettingsPage(undefined, { ...defaultSettingsProps, onCheckForUpdates })
+
+    await user.click(screen.getByRole('tab', { name: 'Information' }))
+    await user.click(await screen.findByRole('button', { name: 'Check for updates' }))
+
+    expect(onCheckForUpdates).toHaveBeenCalledOnce()
   })
 
   it('renders the read-only Shortcuts tab from the authoritative registry', async () => {

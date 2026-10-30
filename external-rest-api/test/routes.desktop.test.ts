@@ -3,9 +3,6 @@ import express from 'express'
 import request from 'supertest'
 import desktopEnvironmentFixture from '../../profile-ui/test/fixtures/desktop-environment-response.json'
 
-const authTokenMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
-vi.mock('../src/authToken.js', () => authTokenMock)
-
 const originalEnv = {
   publicBaseUrl: process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL,
   rpcProxyBaseUrl: process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL,
@@ -23,7 +20,6 @@ async function buildApp() {
 describe('routes/desktop', () => {
   beforeEach(() => {
     vi.resetModules()
-    authTokenMock.verifyToken.mockReset()
     process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL = 'https://api.example.com/'
     process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL = 'https://rpc.example.com/'
     process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME = 'Example Tenant'
@@ -68,25 +64,10 @@ describe('routes/desktop', () => {
     expect(res.body).toEqual({ ...desktopEnvironmentFixture, appName: 'Evenfire' })
   })
 
-  it('requires auth before returning desktop release policy', async () => {
-    await request(await buildApp())
-      .get('/api/v1/desktop/release')
-      .expect(401)
-  })
-
-  it('returns the active desktop release policy for authenticated sessions', async () => {
+  it('returns the non-secret desktop compatibility policy without authentication', async () => {
     const { releaseManifest } = await import('../src/releaseManifest.js')
-    authTokenMock.verifyToken.mockReturnValue({
-      userId: 'u1',
-      email: 'u@example.com',
-      teamId: 'team-1',
-      role: 'member',
-      exp: 9_999_999_999,
-    })
-
     const res = await request(await buildApp())
       .get('/api/v1/desktop/release')
-      .set('authorization', 'Bearer session-xyz')
       .expect(200)
 
     expect(res.body).toEqual({
@@ -94,6 +75,7 @@ describe('routes/desktop', () => {
       externalRestApiVersion: releaseManifest.externalRestApiVersion,
       rpcProxyVersion: releaseManifest.rpcProxyVersion,
       desktopVersion: releaseManifest.desktopVersion,
+      compatibleDesktopVersions: releaseManifest.compatibleDesktopVersions,
       minimumDesktopVersion: releaseManifest.minimumDesktopVersion,
       releaseTag: `v${releaseManifest.desktopVersion}`,
       releaseUrl: `https://github.com/example/evenfire/releases/tag/v${releaseManifest.desktopVersion}`,

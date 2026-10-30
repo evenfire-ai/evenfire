@@ -3250,7 +3250,7 @@ h3 {
 }
 
 .settings-form > .settings-field,
-.settings-form > .settings-runtime-details--diagnostics,
+.settings-form > .settings-control-width,
 .settings-form > .settings-runtime-diagnostic-error {
   width: min(100%, var(--settings-control-width));
 }
@@ -6687,16 +6687,16 @@ h3 {
 
 .desktop-update-dialog-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--space-5) var(--space-5) auto auto;
   z-index: 2400;
-  display: grid;
-  place-items: center;
-  padding: var(--space-4);
-  background: rgba(var(--overlay-rgb), 0.58);
+  display: flex;
+  justify-content: flex-end;
+  padding: 0;
+  pointer-events: none;
 }
 
 .desktop-update-dialog {
-  width: min(560px, 100%);
+  width: min(480px, calc(100vw - var(--space-5) * 2));
   display: grid;
   gap: var(--space-4);
   border-radius: var(--radius-md);
@@ -6704,6 +6704,40 @@ h3 {
   background: var(--surface-strong);
   box-shadow: var(--shadow-hard);
   padding: var(--space-5);
+  pointer-events: auto;
+}
+
+.desktop-update-dialog__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.desktop-update-dialog__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(var(--edge-rgb), 0.48);
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--font-size-lg);
+  cursor: pointer;
+}
+
+.desktop-update-dialog__dismiss:hover {
+  color: var(--text-primary);
+}
+
+.desktop-update-dialog progress {
+  width: 100%;
+  accent-color: var(--accent);
 }
 
 .desktop-update-dialog h3 {
@@ -6784,11 +6818,13 @@ h3 {
 }
 
 .desktop-update-dialog__actions {
-  display: block;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .desktop-update-dialog__actions .ui-button {
-  width: 100%;
+  flex: 1 1 160px;
 }
 
 .agent-dedicated-sessions-footer {

@@ -3,6 +3,9 @@ import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.j
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DesktopRuntimeConfigHandoffSelection,
+  DesktopUpdateDownloadResult,
+  DesktopUpdateDownloadedEvent,
+  DesktopUpdateProgress,
   EntityChangeStreamEvent,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
@@ -158,6 +161,37 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('auth:desktopEnvironmentSetup', listener)
     },
     getDesktopReleaseStatus: () => ipcRenderer.invoke('auth:getDesktopReleaseStatus'),
+    getPendingDesktopUpdate: () => ipcRenderer.invoke('auth:getPendingDesktopUpdate'),
+    downloadDesktopUpdate: (expectedVersion: string, restartAfterDownload = false) =>
+      ipcRenderer.invoke('auth:downloadDesktopUpdate', { expectedVersion, restartAfterDownload }),
+    cancelDesktopUpdate: () => ipcRenderer.invoke('auth:cancelDesktopUpdate'),
+    installDesktopUpdate: (expectedVersion: string) =>
+      ipcRenderer.invoke('auth:installDesktopUpdate', { expectedVersion }),
+    onDesktopUpdateCheckRequested: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('desktopUpdate:checkRequested', listener)
+      return () => ipcRenderer.off('desktopUpdate:checkRequested', listener)
+    },
+    onDesktopUpdateProgress: (callback: (progress: DesktopUpdateProgress) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: { progress: DesktopUpdateProgress }
+      ) => callback(payload.progress)
+      ipcRenderer.on('desktopUpdate:progress', listener)
+      return () => ipcRenderer.off('desktopUpdate:progress', listener)
+    },
+    onDesktopUpdateDownloaded: (callback: (payload: DesktopUpdateDownloadedEvent) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: DesktopUpdateDownloadedEvent) =>
+        callback(payload)
+      ipcRenderer.on('desktopUpdate:downloaded', listener)
+      return () => ipcRenderer.off('desktopUpdate:downloaded', listener)
+    },
+    onDesktopUpdateError: (callback: (message: string) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { message: string }) =>
+        callback(payload.message)
+      ipcRenderer.on('desktopUpdate:error', listener)
+      return () => ipcRenderer.off('desktopUpdate:error', listener)
+    },
     getDesktopAppInfo: () => ipcRenderer.invoke('auth:getDesktopAppInfo'),
     openDesktopRelease: (releaseUrl: string) =>
       ipcRenderer.invoke('auth:openDesktopRelease', { releaseUrl }),

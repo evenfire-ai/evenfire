@@ -195,6 +195,30 @@ export function useAppController() {
     logoutForEnvironmentMismatch,
   })
 
+  const desktopReleaseBackendRef = useRef<string | null>(null)
+  useEffect(() => {
+    const runtimeConfig = auth.runtimeConfigState
+    const selectedOption = runtimeConfig?.options.find(
+      option => option.id === runtimeConfig.activeOptionId
+    )
+    const backendUrl =
+      selectedOption?.externalRestApiBaseUrl ?? runtimeConfig?.currentConfig?.externalRestApiBaseUrl
+    if (!runtimeConfig?.configured) {
+      desktopReleaseBackendRef.current = null
+      auth.setDesktopReleaseStatus(null)
+      return
+    }
+
+    const backendKey = [
+      runtimeConfig.envKey,
+      runtimeConfig.activeOptionId ?? '',
+      backendUrl?.replace(/\/+$/, '') ?? '',
+    ].join(':')
+    if (desktopReleaseBackendRef.current === backendKey) return
+    desktopReleaseBackendRef.current = backendKey
+    void auth.refreshDesktopReleaseStatus()
+  }, [auth.runtimeConfigState, auth.refreshDesktopReleaseStatus, auth.setDesktopReleaseStatus])
+
   // ─── First-run onboarding ───
   const onboarding = useOnboardingController()
   // Onboarding owns the unauthenticated screen only while the app has no
@@ -825,7 +849,6 @@ export function useAppController() {
 
         if (!authenticated || !sessionState.me) {
           setPostPaintDataReady(false)
-          auth.setDesktopReleaseStatus(null)
           await chat.stopAllActivityStreams()
           agentsData.reset()
           contextsData.reset()
@@ -844,7 +867,6 @@ export function useAppController() {
 
         auth.setPassword('')
         auth.setEmail(sessionState.me.email || '')
-        void auth.refreshDesktopReleaseStatus()
         const sessionIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
         activeAuthenticatedSessionIdentityRef.current = sessionIdentity
         if (authenticatedSessionIdentityRef.current !== sessionIdentity) {

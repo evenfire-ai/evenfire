@@ -52,6 +52,7 @@ import {
   ContextBreakdownResult,
   DependencyHealth,
   DesktopAppInfo,
+  DesktopReleasePolicy,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
@@ -291,25 +292,21 @@ const PREWARM_COOLDOWN_MAX_HOSTS = 256
 const PREWARM_REEMIT_MAX_ATTEMPTS = 2
 const PREWARM_REEMIT_INTERVAL_MS = 10_000
 
-function compareSemverLike(left: string, right: string): number {
-  const parse = (value: string) =>
-    value
-      .split(/[.-]/)
-      .slice(0, 3)
-      .map(part => Number.parseInt(part.replace(/\D.*/, ''), 10))
-      .map(part => (Number.isFinite(part) ? part : 0))
-  const a = parse(left)
-  const b = parse(right)
-  for (let index = 0; index < 3; index += 1) {
-    const delta = (a[index] ?? 0) - (b[index] ?? 0)
-    if (delta !== 0) return delta > 0 ? 1 : -1
-  }
-  return 0
-}
-
 function normalizeVersion(value: unknown): string | null {
   const version = String(value || '').trim()
   return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version) ? version : null
+}
+
+function compareStableDesktopVersions(left: string, right: string): number {
+  const leftParts = left.split('.').map(BigInt)
+  const rightParts = right.split('.').map(BigInt)
+  for (let index = 0; index < 3; index += 1) {
+    const leftPart = leftParts[index] ?? 0n
+    const rightPart = rightParts[index] ?? 0n
+    if (leftPart === rightPart) continue
+    return leftPart > rightPart ? 1 : -1
+  }
+  return 0
 }
 
 function readDesktopPackageVersion(): string | null {
@@ -2641,15 +2638,43 @@ export class AppService {
   async getDesktopReleaseStatus(): Promise<DesktopReleaseStatus> {
     const { app } = await import('electron')
     const currentVersion = resolveDesktopAppVersion(app)
-    const token = this.requireSessionToken()
-    const policy = await this.authClient.getDesktopReleasePolicy(token)
-    const updateRequired = compareSemverLike(currentVersion, policy.minimumDesktopVersion) < 0
+    let policy: DesktopReleasePolicy
+    try {
+      policy = await this.authClient.getDesktopReleasePolicy()
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status <= 599) {
+        const message =
+          error.status >= 500
+            ? 'The selected API could not complete the Desktop release check'
+            : 'The selected API rejected the Desktop release check'
+        throw new Error(`${message} (HTTP ${error.status}).`)
+      }
+      throw new Error('The Desktop release check failed before a usable response was received.')
+    }
+    if (
+      !Array.isArray(policy.compatibleDesktopVersions) ||
+      policy.compatibleDesktopVersions.length === 0 ||
+      new Set(policy.compatibleDesktopVersions).size !== policy.compatibleDesktopVersions.length ||
+      policy.compatibleDesktopVersions.some(version => !/^\d+\.\d+\.\d+$/.test(version)) ||
+      !policy.compatibleDesktopVersions.includes(policy.desktopVersion) ||
+      !/^\d+\.\d+\.\d+$/.test(policy.desktopVersion) ||
+      policy.compatibleDesktopVersions.some(
+        version => compareStableDesktopVersions(version, policy.desktopVersion) > 0
+      )
+    ) {
+      throw new Error('The selected backend returned an invalid Desktop compatibility policy.')
+    }
+    const compatible = policy.compatibleDesktopVersions.includes(currentVersion)
+    const updateAvailable = currentVersion !== policy.desktopVersion
     return {
       checked: true,
       currentVersion,
       latestVersion: policy.desktopVersion,
+      compatibleVersions: policy.compatibleDesktopVersions,
+      compatible,
+      updateAvailable,
       minimumVersion: policy.minimumDesktopVersion,
-      updateRequired,
+      updateRequired: !compatible,
       releaseUrl: policy.releaseUrl,
       releaseId: policy.releaseId,
       releaseTag: policy.releaseTag,

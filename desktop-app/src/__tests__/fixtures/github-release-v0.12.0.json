@@ -1,0 +1,49 @@
+{
+  "tag_name": "v0.12.0",
+  "draft": false,
+  "prerelease": false,
+  "assets": [
+    {
+      "name": "evenfire-desktop-v0.12.0-linux-arm64.zip",
+      "size": 311107175,
+      "digest": "sha256:2206e9fe0cebe11c477a60da079f3a6fd41dc9fd9c8f3f85f2c84c0649e52885",
+      "browser_download_url": "https://github.com/evenfire-ai/evenfire/releases/download/v0.12.0/evenfire-desktop-v0.12.0-linux-arm64.zip",
+      "state": "uploaded"
+    },
+    {
+      "name": "evenfire-desktop-v0.12.0-linux-x64.zip",
+      "size": 317175287,
+      "digest": "sha256:90351099009f23bc15ed1318f7344524241a2f3a4c0291d69b66b390bb48e869",
+      "browser_download_url": "https://github.com/evenfire-ai/evenfire/releases/download/v0.12.0/evenfire-desktop-v0.12.0-linux-x64.zip",
+      "state": "uploaded"
+    },
+    {
+      "name": "evenfire-desktop-v0.12.0-mac-arm64.zip",
+      "size": 236336444,
+      "digest": "sha256:858666e54d93b8e73672ec78145af53f7b0aa523cb8706866d574e6d19b54018",
+      "browser_download_url": "https://github.com/evenfire-ai/evenfire/releases/download/v0.12.0/evenfire-desktop-v0.12.0-mac-arm64.zip",
+      "state": "uploaded"
+    },
+    {
+      "name": "evenfire-desktop-v0.12.0-mac-x64.zip",
+      "size": 251549154,
+      "digest": "sha256:fe53acb255bae2868cecf22a2eae3122acc09562548dc465aa4b8e50c99ef695",
+      "browser_download_url": "https://github.com/evenfire-ai/evenfire/releases/download/v0.12.0/evenfire-desktop-v0.12.0-mac-x64.zip",
+      "state": "uploaded"
+    },
+    {
+      "name": "evenfire-desktop-v0.12.0-windows-arm64.zip",
+      "size": 434112193,
+      "digest": "sha256:794855ef733372dc59ed5a93dfac33558d302f68e82b4040abc6247d0f8191fa",
+      "browser_download_url": "https://github.com/evenfire-ai/evenfire/releases/download/v0.12.0/evenfire-desktop-v0.12.0-windows-arm64.zip",
+      "state": "uploaded"
+    },
+    {
+      "name": "evenfire-desktop-v0.12.0-windows-x64.zip",
+      "size": 440030343,
+      "digest": "sha256:74317450e6f452aa03470dd4e62eb0bcbbf74192283b29b963c1115e39b5425f",
+      "browser_download_url": "https://github.com/evenfire-ai/evenfire/releases/download/v0.12.0/evenfire-desktop-v0.12.0-windows-x64.zip",
+      "state": "uploaded"
+    }
+  ]
+}

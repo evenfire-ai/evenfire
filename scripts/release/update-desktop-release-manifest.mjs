@@ -64,12 +64,14 @@ function renderManifest(manifest) {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
 export const releaseManifest: ReleaseManifest = ${JSON.stringify(manifest, null, 2)
     .replace(/"([^"]+)":/g, '$1:')
     .replace(/: "([^"]*)"/g, ": '$1'")
+    .replace(/"([^"]*)"/g, "'$1'")
     .replace(/\n}$/, ',\n}')}
 `
 }
@@ -93,14 +95,47 @@ function validate(manifest, versions, options = {}) {
       `minimumDesktopVersion=${manifest.minimumDesktopVersion} is greater than desktopVersion=${manifest.desktopVersion}`
     )
   }
+  const compatibleDesktopVersions = manifest.compatibleDesktopVersions
+  if (
+    !Array.isArray(compatibleDesktopVersions) ||
+    compatibleDesktopVersions.length === 0 ||
+    compatibleDesktopVersions.some(version => !SEMVER_RE.test(version)) ||
+    new Set(compatibleDesktopVersions).size !== compatibleDesktopVersions.length
+  ) {
+    throw new Error(
+      'compatibleDesktopVersions must be a non-empty list of unique MAJOR.MINOR.PATCH versions'
+    )
+  }
+  if (!compatibleDesktopVersions.includes(manifest.desktopVersion)) {
+    throw new Error('compatibleDesktopVersions must include desktopVersion')
+  }
+  if (
+    compatibleDesktopVersions.some(version => compareVersions(version, manifest.desktopVersion) > 0)
+  ) {
+    throw new Error('desktopVersion must be the highest version in compatibleDesktopVersions')
+  }
+}
+
+function argValues(name) {
+  const values = []
+  for (let i = 0; i < process.argv.length; i += 1) {
+    if (process.argv[i] === name && process.argv[i + 1]) values.push(process.argv[i + 1])
+  }
+  return values
 }
 
 function main() {
   const previousRef = argValue('--previous')
   const releaseId = argValue('--release-id') || 'local'
-  const minimumDesktopVersion = argValue('--minimum-desktop-version')
+  const requestedCompatibleVersions = argValues('--compatible-desktop-version')
   const validateOnly = process.argv.includes('--validate-only')
   const deferDesktopRelease = process.argv.includes('--defer-desktop-release')
+
+  if (process.argv.includes('--minimum-desktop-version')) {
+    throw new Error(
+      'minimumDesktopVersion is frozen for already-shipped clients; do not raise the legacy update floor'
+    )
+  }
 
   const versions = currentVersions()
   const manifestAtHead = currentManifest()
@@ -121,10 +156,9 @@ function main() {
   // say so explicitly.
   const inherited = manifestAtHead?.minimumDesktopVersion || previous?.minimumDesktopVersion
 
-  if (!inherited && !minimumDesktopVersion) {
+  if (!inherited) {
     throw new Error(
-      'no minimumDesktopVersion could be read; pass ' +
-        '--minimum-desktop-version explicitly rather than ' +
+      'no minimumDesktopVersion could be read; repair the existing manifest rather than ' +
         'defaulting it to desktopVersion'
     )
   }
@@ -135,7 +169,7 @@ function main() {
       externalRestApiVersion: versions.externalRestApiVersion,
       rpcProxyVersion: versions.rpcProxyVersion,
       desktopVersion: versions.desktopVersion,
-      minimumDesktopVersion: inherited || minimumDesktopVersion,
+      minimumDesktopVersion: inherited,
     }
   }
   const prevVersions = previousVersions(previousRef)
@@ -164,19 +198,27 @@ function main() {
     changed = true
   }
 
-  // The floor is a compatibility control, not a version. It moves ONLY when the
-  // operator asks. Advancing it with every release would show "update required"
-  // to every user of the previous release. See appService.ts:840.
-  //
-  // `previous` may carry a floor copied from an old --previous ref; always
-  // re-apply `inherited` (HEAD-first) before letting an explicit flag win, so
-  // a floor already raised on HEAD is never silently reverted.
-  if (inherited && next.minimumDesktopVersion !== inherited) {
-    next.minimumDesktopVersion = inherited
+  const desktopVersionChanged = Boolean(
+    !deferDesktopRelease &&
+    (!prevVersions.desktopVersion || prevVersions.desktopVersion !== versions.desktopVersion)
+  )
+  const compatibleDesktopVersions = requestedCompatibleVersions.length
+    ? requestedCompatibleVersions
+    : desktopVersionChanged
+      ? [versions.desktopVersion]
+      : (manifestAtHead?.compatibleDesktopVersions ??
+        previous.compatibleDesktopVersions ?? [versions.desktopVersion])
+  if (
+    JSON.stringify(next.compatibleDesktopVersions) !== JSON.stringify(compatibleDesktopVersions)
+  ) {
+    next.compatibleDesktopVersions = compatibleDesktopVersions
     changed = true
   }
-  if (minimumDesktopVersion) {
-    next.minimumDesktopVersion = minimumDesktopVersion
+
+  // Preserve the legacy floor for clients that still consume it. New clients
+  // use compatibleDesktopVersions; this field must never be raised to gate use.
+  if (inherited && next.minimumDesktopVersion !== inherited) {
+    next.minimumDesktopVersion = inherited
     changed = true
   }
 

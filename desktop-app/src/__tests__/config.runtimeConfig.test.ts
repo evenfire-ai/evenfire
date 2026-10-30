@@ -90,6 +90,10 @@ describe('desktop runtime config', () => {
       )
       expect(first).toBeDefined()
       expect(second).toBeDefined()
+      expect(first!.id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      )
+      expect(first!.id).not.toContain('example')
       expect(first!.id).not.toBe(second!.id)
 
       await runtimeConfig.selectDesktopRuntimeConfigOption(first!.id)
@@ -110,6 +114,40 @@ describe('desktop runtime config', () => {
     } finally {
       clock.mockRestore()
     }
+  })
+
+  it('rotates the local update binding when a saved profile changes RPC origin', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: true,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+      },
+    }))
+
+    const runtimeConfig = await import('../config.js')
+    const restApi = 'https://production-api.example.test'
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      appName: 'Production',
+      externalRestApiBaseUrl: restApi,
+      rpcProxyBaseUrl: 'https://production-rpc.example.test',
+    })
+    const originalId = runtimeConfig.getDesktopRuntimeConfigState().activeOptionId
+
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      appName: 'Production',
+      externalRestApiBaseUrl: restApi,
+      rpcProxyBaseUrl: 'https://replacement-rpc.example.test',
+    })
+
+    const state = runtimeConfig.getDesktopRuntimeConfigState()
+    expect(originalId).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(state.activeOptionId).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(state.activeOptionId).not.toBe(originalId)
   })
 
   it('keeps localhost selectable in packaged builds with prod env defaults', async () => {

@@ -1,7 +1,7 @@
 # Desktop App
 
 Desktop App is an Electron client with a React renderer (built with Vite),
-packaged with electron-forge as **Evenfire**. It is the end-user surface: how
+packaged as **Evenfire** with Electron Forge. It is the end-user surface: how
 a person who is not the platform admin actually drives an agent, with no
 Telegram bot and no curl in sight. It authenticates through
 `external-rest-api`, obtains short-lived scoped RPC tokens, and does
@@ -34,7 +34,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    input and output token counts for the thread.
 
    ![Evenfire Desktop App chat with the chatllm agent: the agent's answer sits above a collapsed "More details · 1 tool" summary, with thread token counts in the header](../assets/desktop-app-chat.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 5. **Watch it work.** `ProgressStepper` renders the tool calls as they run —
    each step's tool name, how long it took, and the payload it returned.
@@ -46,7 +46,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    never used to submit messages, only to observe what is already running.
 
    ![ProgressStepper in the Desktop App: a completed sqlite-mcp list_tables step showing its 21 ms duration, the tool-call row collapsed beneath the agent's answer](../assets/desktop-app-progress-stepper.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 6. **Approve the gated call.** When a tool call needs a human decision, the
    `ProgressStepper` suspends the step in place and shows an in-chat
@@ -56,7 +56,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    Required / Skip / Default policy behind that prompt is set.
 
    ![In-chat approval gate in the Desktop App: an MCP tool call is held with the message "requires approval" and Approve / Deny buttons](../assets/desktop-app-approval.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 7. **Collect the artifact.** Completed work surfaces through the
    `ArtifactsBadge`, alongside two related file surfaces: shared files
@@ -122,8 +122,8 @@ Two screens worth calling out specifically:
   a real interface; it does not get a second client to install.
 
   ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail surrounds a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.webp)
-  *Dev cluster, demo tenant. Captured before the "Back to apps" bar was
-  removed; the sidebar now returns you to the app picker.*
+  _Dev cluster, demo tenant. Captured before the "Back to apps" bar was
+  removed; the sidebar now returns you to the app picker._
 
 ## How it is wired
 
@@ -142,7 +142,7 @@ one scope set per capability the app is about to use. `external-rest-api`
 mints it via `control-api`, but the desktop app itself never talks to
 `control-api` and never stores one of its service tokens. The full endpoint
 and scope table lives in
-[`desktop-app/README.md` § Host Runtime Contract](../../desktop-app/README.md#host-runtime-contract-via-rpc-proxy) —
+[`desktop-app/README.md` ` Host Runtime Contract](../../desktop-app/README.md#host-runtime-contract-via-rpc-proxy) —
 it is linked here rather than copied so the two cannot drift apart.
 
 ## Electron security posture
@@ -172,8 +172,8 @@ the frontend process, and tear every port-forward down together on exit.
 
 ## Ship it to your users
 
-`electron-forge` (`desktop-app/forge.config.js`) is configured with these
-makers:
+Release packaging uses electron-forge (`desktop-app/forge.config.js`). The
+updater consumes the same ZIPs and native packages produced by this process.
 
 - **zip** — macOS, Windows, and Linux
 - **dmg** — macOS
@@ -206,14 +206,14 @@ Six `npm` scripts in `desktop-app/package.json` drive the makers, each running
 has no packaging targets — only install, build, dev, start, clean,
 reinstall, and port-forward helpers — so use the scripts directly:
 
-| Script               | Platform | Arch  | Makers                |
-| -------------------- | -------- | ----- | --------------------- |
-| `make:mac:x64`       | darwin   | x64   | zip, dmg              |
-| `make:mac:arm64`     | darwin   | arm64 | zip, dmg              |
-| `make:windows:x64`   | win32    | x64   | zip, squirrel         |
-| `make:windows:arm64` | win32    | arm64 | zip, squirrel         |
-| `make:linux:x64`     | linux    | x64   | zip, deb, rpm         |
-| `make:linux:arm64`   | linux    | arm64 | zip, deb, rpm         |
+| Script               | Platform | Arch  | Makers        |
+| -------------------- | -------- | ----- | ------------- |
+| `make:mac:x64`       | darwin   | x64   | zip, dmg      |
+| `make:mac:arm64`     | darwin   | arm64 | zip, dmg      |
+| `make:windows:x64`   | win32    | x64   | zip, squirrel |
+| `make:windows:arm64` | win32    | arm64 | zip, squirrel |
+| `make:linux:x64`     | linux    | x64   | zip, deb, rpm |
+| `make:linux:arm64`   | linux    | arm64 | zip, deb, rpm |
 
 Output lands in `desktop-app/out/` (git-ignored). Run the macOS scripts on a
 macOS host. Signing and notarization run only when the **build host** is macOS
@@ -227,54 +227,62 @@ the `RunAsNode`, `NODE_OPTIONS`, and inspector-argument fuses turned off.
 
 ### Signing and notarization
 
-| Platform | What the config supports                                                                                                    |
-| -------- | --------------------------------------------------------------------------------------------------------------------------- |
-| macOS    | Opt-in code signing and notarization, enabled only when `ENABLE_APPLE_CODESIGN=1` on a macOS build host. Off by default.    |
-| Windows  | No signing configuration. Squirrel and zip output is unsigned.                                                              |
-| Linux    | No signing configuration for deb, rpm, or zip.                                                                              |
+| Platform | What the config supports                                                                                                 |
+| -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| macOS    | Opt-in code signing and notarization, enabled only when `ENABLE_APPLE_CODESIGN=1` on a macOS build host. Off by default. |
+| Windows  | No signing configuration. Squirrel and zip output is unsigned.                                                           |
+| Linux    | No signing configuration for deb, rpm, or zip.                                                                           |
 
 macOS variables (names only — keep the values in your keychain or CI secrets):
 
-| Variable                                                  | Effect                                                                                       |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `ENABLE_APPLE_CODESIGN`                                   | `1` turns on `osxSign` and `osxNotarize`. Any other value leaves the build unsigned.          |
-| `APPLE_CODESIGN_IDENTITY`                                 | Optional signing identity passed to `osxSign`.                                               |
-| `APPLE_KEYCHAIN`                                          | Optional keychain for signing and for keychain-profile notarization.                         |
-| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`   | Notarize with an App Store Connect API key. All three are needed together.                   |
-| `APPLE_KEYCHAIN_PROFILE`                                  | Notarize with a stored `notarytool` keychain profile instead of the API key.                 |
-| `APPLE_BUNDLE_ID`                                         | Bundle identifier. Default `ai.evenfire.desktop`.                                            |
+| Variable                                                | Effect                                                                               |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `ENABLE_APPLE_CODESIGN`                                 | `1` turns on `osxSign` and `osxNotarize`. Any other value leaves the build unsigned. |
+| `APPLE_CODESIGN_IDENTITY`                               | Optional signing identity passed to `osxSign`.                                       |
+| `APPLE_KEYCHAIN`                                        | Optional keychain for signing and for keychain-profile notarization.                 |
+| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | Notarize with an App Store Connect API key. All three are needed together.           |
+| `APPLE_KEYCHAIN_PROFILE`                                | Notarize with a stored `notarytool` keychain profile instead of the API key.         |
+| `APPLE_BUNDLE_ID`                                       | Bundle identifier. Default `ai.evenfire.desktop`.                                    |
 
 With `ENABLE_APPLE_CODESIGN=1`, the build fails at config load unless one of the
 two notarization credential sets is present.
 
-**There is no published build pipeline in this repo.** No workflow in
-`.github/workflows` runs `electron-forge make` or attaches installers to a
-release: CI only runs `verify:electron`, the build, and the tests. (The
-`mcp-host-desktop` image built there is a container image, not the Electron
-app.) Signed installers are produced by whoever runs the scripts above with
-their own Apple credentials.
+The updater reads the selected backend's exact compatible version, resolves
+the matching `evenfire-desktop-v<VERSION>-<PLATFORM>-<ARCH>.zip` asset from
+that GitHub release, and verifies the SHA-256 digest in the GitHub Release API
+before inspecting the archive. The Forge release process remains the publisher;
+the updater does not require electron-builder metadata or a separate pipeline.
 
 ### Versions and updates
 
-The Desktop version is the `version` in `desktop-app/package.json`.
-`scripts/release/prepare-release.mjs --version <x.y.z> --release-id <id>
-[--minimum-desktop-version <x.y.z>]` bumps it together with the release
-manifest in `external-rest-api/src/releaseManifest.ts`. There is no separate
-desktop tag: the update link targets `v<desktopVersion>`, the platform release
-tag of the release that last bumped the Desktop version.
+The Desktop version is the version in `desktop-app/package.json`.
+`scripts/release/prepare-release.mjs` updates it and the External REST API
+manifest. The release writer sets the compatible-version list to the new
+version by default; repeated `--compatible-desktop-version` flags retain other
+builds certified for that backend. The historic minimum is frozen because the
+new client checks exact compatible-set membership. Automatic update targets
+start at v0.8.0; older release tags are outside the supported update range and
+receive no compatibility adapters or backports.
 
-Updates are **detected, not installed**. After sign-in the app calls the
-selected environment's External REST API `GET /api/v1/desktop/release`, which
-returns the manifest's `desktopVersion` and `minimumDesktopVersion`, a
-`releaseTag` of `v<desktopVersion>`, and a `releaseUrl` of
-`<EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL>/tag/<releaseTag>` (default base
-`https://github.com/evenfire-ai/evenfire/releases`). If the installed version is
-below `minimumDesktopVersion`, the app shows **Desktop update required**;
-**Download update** opens `releaseUrl` in the browser. The app has no
-`autoUpdater` and never downloads or installs a build itself. Point
-`EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL` at wherever you publish your own
-installers. The user-facing flow is in
-[Desktop setup & updates](../how-to/desktop-setup-and-updates.md).
+At startup, a packaged Desktop app checks the selected External REST API
+deployment, before sign-in when an environment is configured. A compatible
+build remains usable without an update prompt. A mismatch shows a dismissible
+notice with **Update and restart**; dismissing it does not restrict app use.
+Failures are reported as unverified and leave the app usable.
+
+Use **Evenfire → Check for Updates** on macOS, **Help → Check for Updates** on
+Windows/Linux, or **Settings → Information → Check for updates** to download
+the backend's recommended compatible build. Desktop shows download progress and
+then offers **Restart now** or **Restart later**. Deferred installation is
+revalidated against the selected backend before restart. The updater uses the
+exact release tag returned by that backend, never GitHub's global latest.
+
+The release response is public and contains only non-secret version/release
+metadata. Each External REST API deployment selects its own target and
+compatible list in its compiled manifest. Do not deploy a target before its
+exact-tag release ZIPs and GitHub SHA-256 asset metadata have been published.
+See the how-to guide for the user flow and the compatibility roadmap for
+native validation still required.
 
 ### Point the app at an instance
 
@@ -335,11 +343,10 @@ above for why leaving it unset is silently wrong rather than loudly broken.
 - The activity stream never carries internal reasoning / chain-of-thought
   content, and it is read-only — message submission always goes through the
   `/messages` endpoint, never the stream.
-- macOS code signing and notarization are opt-in (`ENABLE_APPLE_CODESIGN=1`
-  on a macOS build host); Windows and Linux packages are unsigned. This repo
-  publishes no installers, and the app only detects required updates — it
-  never downloads or installs them. See
-  [Ship it to your users](#ship-it-to-your-users).
+- Release builds require macOS signing/notarization and Windows signing
+  credentials. Linux updater formats use platform metadata and package-manager
+  flows. Native install validation is still required across all six
+  OS/architecture combinations.
 - For the complete environment variable reference, the E2E test suites
   (Vitest IPC-harness and Playwright/Electron phases), and the full
   endpoint/scope table, see

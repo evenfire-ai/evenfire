@@ -102,9 +102,13 @@ export function useAuthController({
     null
   )
   const [dependencyHealth, setDependencyHealth] = useState<DependencyHealth | null>(null)
-  const [desktopReleaseStatus, setDesktopReleaseStatus] = useState<DesktopReleaseStatus | null>(
-    null
-  )
+  const desktopReleaseStatusRequestIdRef = useRef(0)
+  const [desktopReleaseStatus, setDesktopReleaseStatusState] =
+    useState<DesktopReleaseStatus | null>(null)
+  const setDesktopReleaseStatus = useCallback((status: DesktopReleaseStatus | null) => {
+    desktopReleaseStatusRequestIdRef.current += 1
+    setDesktopReleaseStatusState(status)
+  }, [])
   const [backendSwitchHint, setBackendSwitchHint] = useState<LoginBackendHint | null>(null)
   const [desktopEnvironmentSetupComplete, setDesktopEnvironmentSetupComplete] = useState(false)
   const [pendingDesktopEnvironmentSetup, setPendingDesktopEnvironmentSetup] =
@@ -737,15 +741,27 @@ export function useAuthController({
     }
   }
 
-  const refreshDesktopReleaseStatus = async (): Promise<DesktopReleaseStatus | null> => {
-    try {
-      const status = await window.clerum.auth.getDesktopReleaseStatus()
-      setDesktopReleaseStatus(status)
-      return status
-    } catch {
-      return null
-    }
-  }
+  const refreshDesktopReleaseStatus =
+    useCallback(async (): Promise<DesktopReleaseStatus | null> => {
+      const requestId = desktopReleaseStatusRequestIdRef.current + 1
+      desktopReleaseStatusRequestIdRef.current = requestId
+      setDesktopReleaseStatusState(null)
+      try {
+        const status = await window.clerum.auth.getDesktopReleaseStatus()
+        if (requestId !== desktopReleaseStatusRequestIdRef.current) return null
+        setDesktopReleaseStatusState(status)
+        return status
+      } catch {
+        if (requestId !== desktopReleaseStatusRequestIdRef.current) return null
+        setStatus(
+          'Could not verify this Desktop build with the selected backend. The app remains available; try again later or restart to retry.',
+          'info',
+          undefined,
+          { toast: true }
+        )
+        return null
+      }
+    }, [setStatus])
 
   const handleOpenDesktopRelease = async () => {
     const releaseUrl = desktopReleaseStatus?.releaseUrl || ''

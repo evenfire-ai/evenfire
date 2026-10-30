@@ -127,31 +127,30 @@ npm run start
 
 ## Package and Sign
 
-Desktop builds need Node 24.22.1 or later in the Node 24 line, an `npm ci` with lifecycle scripts enabled (never
-`--ignore-scripts`, never `ELECTRON_SKIP_BINARY_DOWNLOAD`), and a passing
-`npm run verify:electron` before any build or test result counts.
+Desktop release packaging requires Node 24.22.1 or later in the Node 24 line,
+an npm install with lifecycle scripts enabled (never `--ignore-scripts` or
+`ELECTRON_SKIP_BINARY_DOWNLOAD`), and a passing `npm run verify:electron`.
 
-```bash
-npm ci
-npm run verify:electron
-npm run make:mac:arm64   # or make:mac:x64, make:windows:x64, make:windows:arm64, make:linux:x64, make:linux:arm64
-```
+`npm ci` and `npm run build` are used to prepare the local app.
 
-Each `make:*` script runs `electron-forge make` for one platform/arch and builds
-first via the forge `prePackage` hook (`EVENFIRE_SKIP_PACKAGE_BUILD=1` skips that).
-Output goes to `out/`. The makers are zip (all platforms), dmg (macOS), squirrel
-(Windows), and deb/rpm (Linux). This directory's `Makefile` has no packaging
-targets.
+The `make:*` scripts invoke Electron Forge for the same macOS, Windows, and
+Linux release artifacts used by the existing publishing process. Each release
+contains platform/architecture ZIPs; the updater selects the exact ZIP from the
+GitHub release tag chosen by the active backend and verifies its GitHub
+SHA-256 digest before reading it. It does not use electron-builder feed files
+or GitHub's global latest release.
 
-macOS signing and notarization are opt-in and run only on a macOS build host:
-set `ENABLE_APPLE_CODESIGN=1`, optionally `APPLE_CODESIGN_IDENTITY` and
-`APPLE_KEYCHAIN`, plus either `APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`
-or `APPLE_KEYCHAIN_PROFILE` (the config throws if neither is set).
-`APPLE_BUNDLE_ID` overrides the default `ai.evenfire.desktop`. Windows and Linux
-packages are unsigned. No workflow in this repo builds or publishes installers.
+Updates support macOS and Windows x64/arm64 and Linux x64/arm64. Installation
+uses the detected app bundle, Squirrel, native Linux package, or user-owned ZIP
+install. The app leaves the current installation intact when it cannot prove a
+safe install path or obtain required OS authorization. Releases before the
+updater was introduced (currently v0.8.0 through v0.12.0) do not contain the
+updater. The external helper still installs and relaunches those targets after
+the normal update consent; future in-app updates require an updater-capable build.
 
-Signing details, release tags, and how the app detects required updates are in
-[Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users).
+The backend policy and user flows are documented in
+[Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users)
+and [Desktop setup & updates](../docs/how-to/desktop-setup-and-updates.md).
 
 ## Port-forward Remote Cluster Services
 
@@ -253,3 +252,27 @@ npm run test:e2e:all          # Phase 1 + Phase 2
   - `contextIsolation: true`
   - `nodeIntegration: false`
 - API access is exposed via preload IPC only (`window.clerum.*`).
+
+## Updater physical filesystem regression
+
+Updater archive bytes use the physical filesystem (`original-fs` in Electron), while
+`@electron/asar` inspects logical archive contents. Do not set `process.noAsar` globally.
+
+After `npm run build:main`, run the native regression on macOS arm64 with Node 24.22.1 or later:
+
+```sh
+EVENFIRE_DESKTOP_UNSIGNED_SOURCE_APP=/Applications/Evenfire.app \
+EVENFIRE_DESKTOP_RELEASE_FIXTURE_DIR=/path/to/verified-release-fixtures \
+node --test scripts/tests/updater-physical-filesystem.test.mjs
+```
+
+Set `CODEX_SCRATCH_ROOT` to a writable scratch directory outside the repository. The fixture directory
+must contain the official `mac-v0.12.0.zip`; its SHA-256 is checked against the recorded GitHub
+release metadata. Use an actual Forge source app with a version different from `0.12.0`.
+The test runs Node and real Electron without windows, reads the source app, verifies the signed
+target, stages it, and invalidates the staged backend binding to verify permanent cleanup. It also
+checks wrong-digest and cancellation cleanup and rejects ASAR symlinks. It never launches an
+installer or changes the source app/session. Missing native fixtures are reported as skipped;
+these tests do not qualify replacement, restart, or native rollback.
+Set `EVENFIRE_DESKTOP_LIVE_RELEASE=1` to additionally stage directly from the public GitHub release
+instead of replaying its recorded metadata and verified fixture bytes.

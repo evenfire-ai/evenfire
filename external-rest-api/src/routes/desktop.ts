@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { config } from '../config.js'
-import { requireAuth } from '../middleware/auth.js'
+import { buildDesktopReleasePolicy } from '../desktopReleasePolicy.js'
 import { releaseManifest } from '../releaseManifest.js'
 
 export function createDesktopRouter(): Router {
@@ -16,19 +16,10 @@ export function createDesktopRouter(): Router {
     })
   })
 
-  router.get('/desktop/release', requireAuth, (_req, res) => {
+  router.get('/desktop/release', (_req, res) => {
     // Real tags are v0.1.0 … v0.5.0. The old desktop-app-<version> shape has
     // never existed, so every update prompt linked to a 404.
-    const tag = `v${releaseManifest.desktopVersion}`
-    res.status(200).json({
-      releaseId: releaseManifest.releaseId,
-      externalRestApiVersion: releaseManifest.externalRestApiVersion,
-      rpcProxyVersion: releaseManifest.rpcProxyVersion,
-      desktopVersion: releaseManifest.desktopVersion,
-      minimumDesktopVersion: releaseManifest.minimumDesktopVersion,
-      releaseTag: tag,
-      releaseUrl: `${config.desktopReleaseBaseUrl}/tag/${encodeURIComponent(tag)}`,
-    })
+    res.status(200).json(buildDesktopReleasePolicy(releaseManifest, config.desktopReleaseBaseUrl))
   })
 
   return router

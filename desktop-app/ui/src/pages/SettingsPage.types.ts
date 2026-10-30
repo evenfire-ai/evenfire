@@ -12,6 +12,7 @@ export type SettingsPageProps = {
   desktopNotificationPermission: DesktopNotificationPermission
   themeMode: ThemeMode
   onNotify: (message: string, tone: Tone) => void
+  onCheckForUpdates?: () => void
   onThemeModeChange: (themeMode: ThemeMode) => void
   onNotificationSoundVolumeChange: (volume: number) => void
   onPlayNotificationSoundPreview: (volume: number) => void

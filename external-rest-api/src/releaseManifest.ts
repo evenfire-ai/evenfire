@@ -3,13 +3,15 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
 export const releaseManifest: ReleaseManifest = {
   releaseId: 'v0.12.0',
-  externalRestApiVersion: '0.1.136',
-  rpcProxyVersion: '0.1.127',
+  externalRestApiVersion: '0.1.139',
+  rpcProxyVersion: '0.1.128',
   desktopVersion: '0.12.0',
+  compatibleDesktopVersions: ['0.12.0'],
   minimumDesktopVersion: '0.1.252',
 }
