@@ -15,6 +15,7 @@ export type OidcServerMetadata = {
   response_modes_supported?: unknown
   grant_types_supported?: unknown
   scopes_supported?: unknown
+  id_token_signing_alg_values_supported?: unknown
   token_endpoint_auth_methods_supported?: unknown
   code_challenge_methods_supported?: unknown
   authorization_response_iss_parameter_supported?: unknown
@@ -114,6 +115,10 @@ export function validateOidcProviderProfile(
   )
   const grantTypes = metadataStringArray(metadata.grant_types_supported, 'grant_types_supported')
   const scopes = metadataStringArray(metadata.scopes_supported, 'scopes_supported')
+  const idTokenAlgorithms = metadataStringArray(
+    metadata.id_token_signing_alg_values_supported,
+    'id_token_signing_alg_values_supported'
+  )
   const authenticationMethods = metadataStringArray(
     metadata.token_endpoint_auth_methods_supported,
     'token_endpoint_auth_methods_supported'
@@ -129,6 +134,11 @@ export function validateOidcProviderProfile(
   }
   if (scopes && !['openid', 'profile', 'email'].every(scope => scopes.includes(scope))) {
     throw new OidcProviderIncompatibleError('OIDC provider does not support required scopes')
+  }
+  if (idTokenAlgorithms && !idTokenAlgorithms.includes(OIDC_ID_TOKEN_ALGORITHM)) {
+    throw new OidcProviderIncompatibleError(
+      `OIDC provider does not support the configured ${OIDC_ID_TOKEN_ALGORITHM} ID-token algorithm`
+    )
   }
   if (responseModes && !responseModes.includes('query')) {
     throw new OidcProviderIncompatibleError(
