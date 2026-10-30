@@ -171,6 +171,7 @@ describe('mapCatalogToProviders — out-of-domain catalog values', () => {
 
   it.each([
     ['a negative component', costWith({ input: -0.5 })],
+    ['a tiny negative component that rounds to -0', costWith({ input: -1e-10 })],
     ['NaN', costWith({ output: Number.NaN })],
     ['Infinity', costWith({ cache_read: Number.POSITIVE_INFINITY })],
     ['a value at the NUMERIC(20,8) bound', costWith({ input: 1e12 })],
