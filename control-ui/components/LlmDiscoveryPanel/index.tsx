@@ -9,6 +9,7 @@ import {
   TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
+import { LlmCatalogAutoEnableDialog } from '@components/LlmCatalogAutoEnableDialog'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
 import { TableHeaderRow } from '@components/TableHeaderRow'
@@ -25,7 +26,12 @@ import {
   syncDiscovery,
   updateLlmModel,
 } from '@lib/api'
-import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
+import {
+  catalogGroupKey,
+  formatContextWindow,
+  formatLocalTimestamp,
+  getProviderDisplayLabel,
+} from '@lib/llm'
 import type { LlmDiscoveryPanelProps } from './types'
 
 const CONFIGMAP_DEFERRED_WARNING =
@@ -35,12 +41,6 @@ type ReviewSortKey = 'provider' | 'model' | 'vendor' | 'contextWindow'
 
 function modelLabel(model: LlmAllowedModel): string {
   return `${getProviderDisplayLabel(model.provider)}/${model.model}`
-}
-
-function formatRunAt(value: string | null | undefined): string {
-  if (!value) return ''
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
 export function LlmDiscoveryPanel({
@@ -57,6 +57,7 @@ export function LlmDiscoveryPanel({
   const [syncing, setSyncing] = useState(false)
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [bulkEnabling, setBulkEnabling] = useState(false)
+  const [autoEnableOpen, setAutoEnableOpen] = useState(false)
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [enableConfirmation, setEnableConfirmation] = useState<
@@ -333,28 +334,37 @@ export function LlmDiscoveryPanel({
               LLM Models
             </>
           }
-          subtitle="Newly synced models land here disabled. Enable only the models you want available to agents and runtime."
+          subtitle="Newly synced models land here disabled unless they qualify for their provider's auto-enable setting. Enable only the models you want available to agents and runtime."
           secondaryActions={
-            selectedCount > 0 ? (
-              <>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                  onClick={() => setSelectedIds(new Set())}
-                  disabled={bulkEnabling}
-                >
-                  Unselect all
-                </button>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => setEnableConfirmation({ kind: 'bulk' })}
-                  disabled={bulkEnabling}
-                >
-                  {bulkEnabling ? 'Enabling…' : `Enable ${selectedCount} selected`}
-                </button>
-              </>
-            ) : undefined
+            <>
+              <button
+                type="button"
+                className="cu-btn cu-btn--ghost cu-btn--sm"
+                onClick={() => setAutoEnableOpen(true)}
+              >
+                Auto-enable settings
+              </button>
+              {selectedCount > 0 ? (
+                <>
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--ghost cu-btn--sm"
+                    onClick={() => setSelectedIds(new Set())}
+                    disabled={bulkEnabling}
+                  >
+                    Unselect all
+                  </button>
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--primary cu-btn--sm"
+                    onClick={() => setEnableConfirmation({ kind: 'bulk' })}
+                    disabled={bulkEnabling}
+                  >
+                    {bulkEnabling ? 'Enabling…' : `Enable ${selectedCount} selected`}
+                  </button>
+                </>
+              ) : null}
+            </>
           }
           primaryAction={
             <button
@@ -387,7 +397,7 @@ export function LlmDiscoveryPanel({
           <div className="cu-discovery-status" role="status">
             <span>
               {status
-                ? `Last synced ${formatRunAt(status.ranAt)}`
+                ? `Last synced ${formatLocalTimestamp(status.ranAt)}`
                 : 'Not synced yet. Run a sync to pull the latest catalog.'}
             </span>
             {status ? (
@@ -521,6 +531,10 @@ export function LlmDiscoveryPanel({
           </DataTable>
         </TableViewport>
       </div>
+      <LlmCatalogAutoEnableDialog
+        open={autoEnableOpen}
+        onDismiss={() => setAutoEnableOpen(false)}
+      />
       <ConfirmationDialog
         open={enableConfirmation !== null}
         onCancel={() => setEnableConfirmation(null)}

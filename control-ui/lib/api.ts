@@ -5,7 +5,7 @@ import {
   METADATA_READ_CACHE_MAX_ENTRIES,
   METADATA_READ_TTL_MS,
 } from '@constants/readRequests'
-import type { ApiRequestError, ApiRequestOptions } from './api.types'
+import type { ApiRequestError, ApiRequestOptions, LlmProviderCatalogPolicy } from './api.types'
 import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
 import type {
   McpSecretSummary,
@@ -2558,8 +2558,10 @@ export type LlmDiscoveryStatus = {
   staled: number
 }
 
-// Runs the catalog sync. Rows are inserted disabled — this never changes what
-// the runtime serves; it only refreshes the review queue.
+// Runs the catalog sync. New rows start disabled; only eligible models from a
+// live catalog, for a provider whose auto-enable policy is on (and with the
+// deployment's auto-enable switch on), start enabled. Existing rows are never
+// re-evaluated.
 export async function syncDiscovery() {
   return apiSend(
     'POST',
@@ -2582,6 +2584,40 @@ export async function getDiscoveryStatus(): Promise<LlmDiscoveryStatus | null> {
     if ((e as { status?: number })?.status === 404) return null
     throw e
   }
+}
+
+// ── Catalog auto-enable policy (per provider) ─────────────────────────────
+// Decides whether eligible models a live catalog sync inserts from now on start
+// enabled (subject to the deployment switch). Existing rows are untouched and
+// nothing is ever disabled by the policy.
+
+export async function getLlmProviderCatalogPolicies(): Promise<LlmProviderCatalogPolicy[]> {
+  const res = (await apiGet('/api/v1/admin/llm-providers/catalog-policy')) as {
+    providers?: LlmProviderCatalogPolicy[]
+  } | null
+  return res?.providers ?? []
+}
+
+export async function setLlmProviderCatalogAutoEnable(
+  provider: string,
+  autoEnable: boolean
+): Promise<LlmProviderCatalogPolicy> {
+  return apiSend(
+    'PUT',
+    `/api/v1/admin/llm-providers/${encodeURIComponent(provider)}/catalog-policy`,
+    { auto_enable: autoEnable }
+  ) as Promise<LlmProviderCatalogPolicy>
+}
+
+/**
+ * True when the toggle was refused because a catalog sync holds the policy
+ * lock (503 `catalog_sync_in_progress`). Nothing was saved and retrying is
+ * safe. Matches only the machine-readable code: a bare gateway 503 has no
+ * code and stays a generic failure.
+ */
+export function isCatalogSyncInProgressError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return (err as ApiRequestError).code === 'catalog_sync_in_progress'
 }
 
 // ── Token budgets (token-budgets P0c) ─────────────────────────────────────

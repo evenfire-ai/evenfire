@@ -12094,6 +12094,26 @@ td.cu-registry-description {
   gap: var(--cu-space-2);
 }
 
+/* Discovery: per-provider catalog auto-enable dialog. */
+.cu-llm-auto-enable__provider {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  font-weight: var(--cu-font-weight-semibold);
+}
+
+.cu-llm-auto-enable__setting {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+}
+
+.cu-llm-auto-enable__hint {
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-xs);
+}
+
 /* Discovery: bulk-enable toolbar shown when review rows are selected. */
 .cu-discovery-bulkbar {
   flex: 0 0 auto;

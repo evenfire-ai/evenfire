@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import * as api from '../../lib/api'
 import type { LlmAllowedModel } from '../../lib/api'
+import { buildCatalogPolicy } from '../../test/fixtures/llmProviderCatalogPolicy'
 import { LlmDiscoveryPanel } from '../LlmDiscoveryPanel'
 import { ToastProvider } from '../Toast'
 
@@ -14,6 +15,7 @@ vi.mock('../../lib/api', async importOriginal => {
     ...actual,
     deleteLlmModel: vi.fn(),
     getDiscoveryStatus: vi.fn(),
+    getLlmProviderCatalogPolicies: vi.fn(),
     syncDiscovery: vi.fn(),
     updateLlmModel: vi.fn(),
   }
@@ -91,7 +93,11 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     )
 
     expect(screen.getByText('LLM Models')).toBeInTheDocument()
-    expect(screen.getByText(/Newly synced models land here disabled/)).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        /Newly synced models land here disabled unless they qualify for their provider's auto-enable setting\./
+      )
+    ).toBeInTheDocument()
 
     expect(screen.getByRole('columnheader', { name: /Provider/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Expand OpenAI review models' })).toHaveAttribute(
@@ -113,6 +119,28 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     expect(screen.getByText('+3 new')).toBeInTheDocument()
     expect(screen.getByText('14 refreshed')).toBeInTheDocument()
     expect(screen.getByText('1 stale')).toBeInTheDocument()
+  })
+
+  it('opens the per-provider auto-enable settings from the header', async () => {
+    vi.mocked(api.getLlmProviderCatalogPolicies).mockResolvedValue([buildCatalogPolicy('openai')])
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+
+    expect(api.getLlmProviderCatalogPolicies).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-enable settings' }))
+
+    expect(screen.getByRole('dialog', { name: 'Auto-enable new models' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('checkbox', { name: 'Auto-enable new OpenAI models' })
+    ).toBeChecked()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(screen.queryByRole('dialog', { name: 'Auto-enable new models' })).toBeNull()
   })
 
   it('enables a reviewed row and refreshes the shared inventory', async () => {
@@ -159,7 +187,7 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     const actions = document.querySelector('.cu-table-panel__actions')
     expect(
       Array.from(actions?.querySelectorAll('button') ?? []).map(button => button.textContent)
-    ).toEqual(['Unselect all', 'Enable 1 selected', '', 'Sync catalog'])
+    ).toEqual(['Auto-enable settings', 'Unselect all', 'Enable 1 selected', '', 'Sync catalog'])
     expect(screen.queryByText('1 selected')).not.toBeInTheDocument()
   })
 
