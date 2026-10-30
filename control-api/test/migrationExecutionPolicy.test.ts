@@ -110,11 +110,13 @@ describe('D34 migration execution policy', () => {
     // an UPDATE that changes none of the columns catalog consumers read, so
     // reconciler heartbeats stop bumping team and user revisions; the GFS
     // resource trigger does the same for content saves that keep its identity,
-    // name, parent and tombstone.
+    // name, parent and tombstone, and the notification trigger does the same
+    // for delivery-state writes that keep its id, event type, audience and
+    // expiry.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        '3d40cc6e9d131a86b484c1f5eb9ef047dd00ffff794cd8c0a62b199ecc94dd4b',
+        'f86f9d57136a6925196bca2312a33fad4dfceef77517823fe445a24a028b4316',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',

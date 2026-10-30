@@ -784,6 +784,21 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
+      -- Catalog producers, hydration and the live resolver read only these
+      -- columns (catalogProducerSql.ts:313-336, catalogHydrationSql.ts:599-648,
+      -- databaseAuthorityCandidates.ts:182-198). Delivery claims, acks and
+      -- terminal writes change only status, attempts, next_attempt_at and
+      -- delivered_medium (notificationDeliveryQueueService.ts:315-321,698-704,
+      -- 725-776, notificationDeliveryTerminalService.ts:47-50,74-78,
+      -- notificationAckService.ts:21-30), so they need no revision bump. Same
+      -- in-function TG_OP idiom as the run guard above.
+      IF TG_OP = 'UPDATE' AND (
+        OLD.id, OLD.event_type, OLD.audience, OLD.expires_at
+      ) IS NOT DISTINCT FROM (
+        NEW.id, NEW.event_type, NEW.audience, NEW.expires_at
+      ) THEN
+        RETURN NEW;
+      END IF;
       IF TG_OP <> 'DELETE' THEN
         PERFORM authorization_bump_subject_revision('user', NEW.audience->>'userId');
         PERFORM authorization_bump_subject_revision('team', NEW.audience->>'teamId');

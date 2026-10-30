@@ -645,4 +645,182 @@ describeRealPostgres('revision writers share one lock order on real PostgreSQL',
       })
     }
   })
+
+  it('a delivery claim takes no revision row while a run INSERT holds its subjects', async () => {
+    const {
+      users: [user],
+      teams: [team],
+    } = await fixture()
+    // Two deliveries, one per audience an approval delivery can name
+    // (notificationEmitter.ts:18-23). The user row is older, so the claim's
+    // ORDER BY visits it first: the cycle shape the review probe reproduced as
+    // P1/P2.
+    const inserted = await databasePool.query<{ id: string; event_type: string }>(
+      `INSERT INTO notification_deliveries(
+         event_type, dedupe_key, audience, payload, status, next_attempt_at, created_at
+       ) VALUES
+         ('approval.requested', $1, jsonb_build_object('userId', $2::text), '{}'::jsonb,
+          'queued', NOW() - INTERVAL '1 minute', NOW() - INTERVAL '2 minutes'),
+         ('approval.requested', $3, jsonb_build_object('teamId', $4::text), '{}'::jsonb,
+          'queued', NOW() - INTERVAL '1 minute', NOW() - INTERVAL '1 minute')
+       RETURNING id::text`,
+      [`claim-user-${randomUUID()}`, user, `claim-team-${randomUUID()}`, team]
+    )
+    const deliveryIds = inserted.rows.map(row => row.id)
+
+    // The claim tail, copied from notificationDeliveryQueueService.ts:299-321
+    // (`locked` + `claimed`); only the candidates source is a test fixture.
+    const claim = `
+      WITH candidates AS (
+        SELECT nd.id,
+               'telegram'::text AS medium,
+               'provider-user'::text AS provider_user_id,
+               NULL::text AS provider_workspace_id,
+               'provider-channel'::text AS provider_channel_id,
+               NULL::text AS communication_channel_ref,
+               'sandbox-recipes/claim'::text AS mcp_host_ref,
+               1 AS sort_priority,
+               nd.created_at
+          FROM notification_deliveries nd
+         WHERE nd.id = ANY($1::uuid[])
+      ),
+      locked AS (
+        SELECT nd.id,
+               c.medium,
+               c.provider_user_id,
+               c.provider_workspace_id,
+               c.provider_channel_id,
+               c.communication_channel_ref,
+               c.mcp_host_ref
+          FROM notification_deliveries nd
+          JOIN candidates c ON c.id = nd.id
+         ORDER BY c.sort_priority ASC,
+                  c.created_at ASC,
+                  nd.id ASC
+         LIMIT $2
+         FOR UPDATE OF nd SKIP LOCKED
+      ),
+      claimed AS (
+        UPDATE notification_deliveries nd
+           SET status = 'retrying',
+               attempts = nd.attempts + 1,
+               next_attempt_at = NOW() + INTERVAL '30 seconds'
+          FROM locked c
+         WHERE nd.id = c.id
+      RETURNING nd.id
+      )
+      SELECT id::text FROM claimed`
+
+    async function revisionRowHeld(table: string, column: string, id: string): Promise<string> {
+      const witness = await databasePool.connect()
+      try {
+        await witness.query('BEGIN')
+        await witness.query(`SELECT 1 FROM ${table} WHERE ${column} = $1 FOR UPDATE NOWAIT`, [id])
+        return 'acquired'
+      } catch (error) {
+        return String((error as { code?: string }).code)
+      } finally {
+        await witness.query('ROLLBACK').catch(() => undefined)
+        witness.release()
+      }
+    }
+
+    const beforeUser = await revision('user', user!)
+    const beforeTeam = await revision('team', team!)
+    const runInsert = await databasePool.connect()
+    const claimSession = await databasePool.connect()
+    let claimSettled = false
+    try {
+      // Session B: the competing run INSERT of (team, user), uncommitted. The
+      // run trigger takes the team revision before the user revision.
+      await begin(runInsert, 'claim-run-insert')
+      const runOutcome = observe(
+        createRun(
+          {
+            recipe_namespace: 'test',
+            recipe_name: 'claim-order',
+            actor_type: 'user',
+            team_id: team,
+            usage_team_id: team,
+            actor_id: user,
+            idempotency_key: null,
+            trigger_source: 'onDemand',
+            ttl_seconds_after_finished: 2_592_000,
+          },
+          runInsert
+        )
+      )
+      // N8 witness: before the claim runs, the uncommitted run INSERT really
+      // holds both revision rows. `FOR UPDATE NOWAIT` is the direct probe.
+      const deadline = Date.now() + 5_000
+      let held = ['', '']
+      while (Date.now() < deadline) {
+        held = [
+          await revisionRowHeld('authorization_user_revisions', 'user_id', user!),
+          await revisionRowHeld('authorization_team_revisions', 'team_id', team!),
+        ]
+        if (held.every(code => code === '55P03')) break
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(held).toEqual(['55P03', '55P03'])
+
+      // Session A: the claim with a 1 s lock timeout. Without the guard the
+      // claim's first row (the user audience) waits for the run INSERT's user
+      // revision and fails with 55P03, as probe P2 measured at 1.5 s (57014).
+      await begin(claimSession, 'claim-session')
+      await claimSession.query("SET LOCAL lock_timeout = '1s'")
+      const claimOutcome = claimSession.query<{ id: string }>(claim, [deliveryIds, 2]).then(
+        result => ({ status: 'fulfilled' as const, ids: result.rows.map(row => row.id) }),
+        error => ({
+          status: 'rejected' as const,
+          code: String((error as { code?: string }).code),
+          ids: [] as string[],
+        })
+      )
+      const claimResult = await claimOutcome
+      await claimSession.query(claimResult.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+      claimSettled = true
+      const runResult = await runOutcome
+      await runInsert.query('ROLLBACK')
+      console.info('DELIVERY_CLAIM_OUTCOMES', {
+        claim: claimResult,
+        runInsert: runResult.status,
+      })
+      expect(claimResult.status).toBe('fulfilled')
+      expect(claimResult.ids.sort()).toEqual([...deliveryIds].sort())
+      expect(runResult.status).toBe('fulfilled')
+
+      // Write witness: the claim really claimed both rows.
+      const claimedRows = await databasePool.query<{
+        id: string
+        status: string
+        attempts: number
+      }>(
+        `SELECT id::text, status, attempts FROM notification_deliveries
+          WHERE id = ANY($1::uuid[])`,
+        [deliveryIds]
+      )
+      expect(
+        Object.fromEntries(
+          claimedRows.rows.map(row => [row.id, { status: row.status, attempts: row.attempts }])
+        )
+      ).toEqual({
+        [deliveryIds[0]!]: { status: 'retrying', attempts: 1 },
+        [deliveryIds[1]!]: { status: 'retrying', attempts: 1 },
+      })
+      // Negative witness: the claim took no revision row, and the run INSERT
+      // rolled back, so both subjects stay where the fixture left them.
+      expect(await revision('user', user!)).toBe(beforeUser)
+      expect(await revision('team', team!)).toBe(beforeTeam)
+    } finally {
+      await Promise.resolve()
+      if (!claimSettled) await claimSession.query('ROLLBACK').catch(() => undefined)
+      await runInsert.query('ROLLBACK').catch(() => undefined)
+      claimSession.release()
+      runInsert.release()
+      await databasePool.query('DELETE FROM notification_deliveries WHERE id = ANY($1::uuid[])', [
+        deliveryIds,
+      ])
+    }
+  })
 })

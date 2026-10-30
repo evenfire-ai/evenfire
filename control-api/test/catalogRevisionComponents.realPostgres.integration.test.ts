@@ -8,6 +8,12 @@ import { GFS_HYDRATION_SQL } from '../src/services/access/catalogHydrationSql.js
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { applyComposableCatalogRevisionSchema } from '../src/services/access/userAccessFoundationSchema.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
+import { acknowledgeDesktopNotificationDelivery } from '../src/services/notificationAckService.js'
+import {
+  markUserBoundNotificationDeliveryFailed,
+  markUserBoundNotificationDeliverySent,
+  markUserBoundNotificationDeliverySkippedNoBot,
+} from '../src/services/notificationDeliveryQueueService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -636,6 +642,150 @@ describeRealPostgres('composable catalog revisions on real PostgreSQL', () => {
     )
     expect(await resourceRevision(resourceId)).toBe(beforeResource + 1)
     expect(await userRevision(userIds[0])).toBe(beforeUser + 1)
+  })
+
+  it('leaves notification subject revisions unchanged on delivery state writes and bumps them when a catalog column changes', async () => {
+    const notificationUser = userIds[0]
+    const notificationTeam = teamIds[0]
+    async function delivery(
+      eventType: string,
+      audience: Record<string, string>,
+      payload: Record<string, unknown>
+    ): Promise<string> {
+      const result = await databasePool.query<{ id: string }>(
+        `INSERT INTO notification_deliveries(
+           event_type, dedupe_key, audience, payload, status, next_attempt_at
+         ) VALUES ($1, $2, $3::jsonb, $4::jsonb, 'queued', NOW() - INTERVAL '1 minute')
+         RETURNING id::text`,
+        [
+          eventType,
+          `notification-revision-${randomUUID()}`,
+          JSON.stringify(audience),
+          JSON.stringify(payload),
+        ]
+      )
+      return result.rows[0]!.id
+    }
+
+    // One row per writer (N6): every mark* only writes while its row is still
+    // queued/retrying, so a row reused after `sent` would make the next call a
+    // silent no-op and its negative assertion vacuous.
+    const sentRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    const failedRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    // At least one state write targets a team audience, so the team negative
+    // has a write witness of its own.
+    const skippedRow = await delivery('approval.requested', { teamId: notificationTeam }, {})
+    const claimRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    // No `notificationId` in the payload: the ack then skips
+    // markSdkNotificationDelivered, which writes through the module pool
+    // instead of the test client (notificationAckService.ts:36-39).
+    const desktopRow = await delivery(
+      'plugin_workload_sdk.notification',
+      { userId: notificationUser },
+      { origin: 'plugin_workload_sdk', title: 'no invocation' }
+    )
+    const beforeUser = await userRevision(notificationUser)
+    const beforeTeam = await teamRevision(notificationTeam)
+
+    // The real exported writers, each against the test pool as their `db`.
+    expect(await markUserBoundNotificationDeliverySent(sentRow, databasePool)).toBe(true)
+    expect(await markUserBoundNotificationDeliveryFailed(failedRow, databasePool)).toBe(true)
+    expect(await markUserBoundNotificationDeliverySkippedNoBot(skippedRow, databasePool)).toBe(true)
+    expect(
+      await acknowledgeDesktopNotificationDelivery(notificationUser, desktopRow, databasePool)
+    ).toEqual({ status: 'acked' })
+    // The claims' literal SET clause (notificationDeliveryQueueService.ts:315-321,
+    // :698-704); both claims change only these three columns.
+    await databasePool.query(
+      `UPDATE notification_deliveries nd
+          SET status = 'retrying',
+              attempts = nd.attempts + 1,
+              next_attempt_at = NOW() + INTERVAL '30 seconds'
+        WHERE nd.id = $1`,
+      [claimRow]
+    )
+
+    // Write witness: the state writes really changed the rows.
+    const written = await databasePool.query<{
+      id: string
+      status: string
+      attempts: number
+      delivered_medium: string | null
+    }>(
+      `SELECT id::text, status, attempts, delivered_medium
+         FROM notification_deliveries
+        WHERE id = ANY($1::uuid[])`,
+      [[sentRow, failedRow, skippedRow, claimRow, desktopRow]]
+    )
+    expect(Object.fromEntries(written.rows.map(row => [row.id, row]))).toEqual({
+      [sentRow]: { id: sentRow, status: 'sent', attempts: 0, delivered_medium: null },
+      [failedRow]: { id: failedRow, status: 'retrying', attempts: 0, delivered_medium: null },
+      [skippedRow]: {
+        id: skippedRow,
+        status: 'skipped_no_bot',
+        attempts: 0,
+        delivered_medium: null,
+      },
+      [claimRow]: { id: claimRow, status: 'retrying', attempts: 1, delivered_medium: null },
+      [desktopRow]: { id: desktopRow, status: 'sent', attempts: 0, delivered_medium: 'desktop' },
+    })
+    // Negative witness: none of the delivery state writes is a catalog change.
+    expect(await userRevision(notificationUser)).toBe(beforeUser)
+    expect(await teamRevision(notificationTeam)).toBe(beforeTeam)
+
+    // Liveness in the same test. Each step starts from a fresh row, and each
+    // UPDATE bumps the NEW and the OLD subject of its own row.
+    const expiresRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    let userBefore = await userRevision(notificationUser)
+    await databasePool.query(
+      `UPDATE notification_deliveries
+          SET expires_at = NOW() + INTERVAL '1 hour'
+        WHERE id = $1`,
+      [expiresRow]
+    )
+    // One user audience: NEW user +1 and OLD user +1.
+    expect(await userRevision(notificationUser)).toBe(userBefore + 2)
+
+    const eventTypeRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    userBefore = await userRevision(notificationUser)
+    await databasePool.query(
+      `UPDATE notification_deliveries SET event_type = 'approval.updated' WHERE id = $1`,
+      [eventTypeRow]
+    )
+    // event_type is the hydration display name (catalogHydrationSql.ts:629).
+    expect(await userRevision(notificationUser)).toBe(userBefore + 2)
+
+    const audienceRow = await delivery('approval.requested', { userId: notificationUser }, {})
+    userBefore = await userRevision(notificationUser)
+    let teamBefore = await teamRevision(notificationTeam)
+    await databasePool.query(
+      `UPDATE notification_deliveries SET audience = $2::jsonb WHERE id = $1`,
+      [audienceRow, JSON.stringify({ teamId: notificationTeam })]
+    )
+    // user -> team: OLD user +1, NEW team +1.
+    expect(await userRevision(notificationUser)).toBe(userBefore + 1)
+    expect(await teamRevision(notificationTeam)).toBe(teamBefore + 1)
+    userBefore = await userRevision(notificationUser)
+    teamBefore = await teamRevision(notificationTeam)
+    await databasePool.query(
+      `UPDATE notification_deliveries SET audience = $2::jsonb WHERE id = $1`,
+      [audienceRow, JSON.stringify({ userId: notificationUser })]
+    )
+    // team -> user: OLD team +1, NEW user +1; the round trip is user +2, team +2.
+    expect(await userRevision(notificationUser)).toBe(userBefore + 1)
+    expect(await teamRevision(notificationTeam)).toBe(teamBefore + 1)
+
+    const deleteRow = await delivery('approval.requested', { teamId: notificationTeam }, {})
+    teamBefore = await teamRevision(notificationTeam)
+    await databasePool.query('DELETE FROM notification_deliveries WHERE id = $1', [deleteRow])
+    // DELETE bumps the removed row's subject once.
+    expect(await teamRevision(notificationTeam)).toBe(teamBefore + 1)
+
+    userBefore = await userRevision(notificationUser)
+    await delivery('approval.requested', { userId: notificationUser }, {})
+    // A new delivery has a random id that can sort before a client cursor, so
+    // INSERT keeps bumping once.
+    expect(await userRevision(notificationUser)).toBe(userBefore + 1)
   })
 
   it('preserves concurrent GFS invalidation increments on one resource component', async () => {
