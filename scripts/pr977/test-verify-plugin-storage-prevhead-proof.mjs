@@ -12,7 +12,12 @@ const report = {
   testResults: [
     {
       status: 'failed',
-      failure: { phase: 'test' },
+      failure: {
+        phase: 'test',
+        category: 'assertion',
+        errorType: 'AssertionError',
+        failedHooks: [],
+      },
       assertionResults: [
         {
           status: 'failed',
@@ -45,6 +50,20 @@ for (const invalid of [
   { ...report, counterConsistency: { valid: false } },
   { ...report, numFailedTests: 0 },
   { ...report, numPendingTests: 1 },
+  {
+    ...report,
+    testResults: [
+      {
+        ...report.testResults[0],
+        failure: {
+          phase: 'setup',
+          category: 'fixture',
+          errorType: 'Error',
+          failedHooks: ['beforeEach'],
+        },
+      },
+    ],
+  },
   {
     ...report,
     testResults: [

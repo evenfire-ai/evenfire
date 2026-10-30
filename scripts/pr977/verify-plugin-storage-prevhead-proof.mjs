@@ -21,8 +21,21 @@ export function verifyPreviousHeadReport(report) {
     'rejects a new audit append after an unsafe DACL is added',
     'refuses to trust an existing consent grant after an unsafe DACL is added',
   ])
-  if (file?.status !== 'failed' || file?.failure?.phase !== 'test') {
+  if (file?.status !== 'failed') {
     throw new Error('Previous-head proof did not fail at the intended privacy assertion')
+  }
+  const fileFailures = file.failures ?? (file.failure ? [file.failure] : [])
+  if (
+    !Array.isArray(fileFailures) ||
+    fileFailures.some(
+      failure =>
+        failure?.phase !== 'test' ||
+        failure?.category !== 'assertion' ||
+        failure?.errorType !== 'AssertionError' ||
+        failure?.failedHooks?.length !== 0
+    )
+  ) {
+    throw new Error('Previous-head proof includes a non-assertion file-level failure')
   }
   const assertions = file?.assertionResults ?? []
   if (
