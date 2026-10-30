@@ -12,9 +12,18 @@ const nav = vi.hoisted(() => ({
   handleSelectChatAgent: vi.fn(),
   selectedAgent: null as string | null,
 }))
+const auth = vi.hoisted(() => ({ teamId: 'team-a' as string | null }))
+const teamData = vi.hoisted(() => ({
+  currentTeamId: '',
+  teams: [] as Array<{ id: string; name: string }>,
+}))
+const agentData = vi.hoisted(() => ({ teamAgentNames: [] as string[] }))
 
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => nav,
+}))
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({ me: { teamId: auth.teamId } }),
 }))
 vi.mock('@contexts/AgentActivityContext', () => ({
   useAgentActivityContext: () => ({ agentLastActiveByAgent: {} }),
@@ -27,13 +36,13 @@ vi.mock('@hooks/domain/useAgentsDataController', () => ({
     agentNames: ['agent-x'],
     agentDisplayByName: { 'agent-x': 'Agent X' },
     userAgentNames: ['agent-x'],
-    teamAgentNames: [],
+    teamAgentNames: agentData.teamAgentNames,
   }),
 }))
 vi.mock('@hooks/domain/useTeamsDataController', () => ({
   useTeamsDataController: () => ({
-    teams: [],
-    currentTeamId: '',
+    teams: teamData.teams,
+    currentTeamId: teamData.currentTeamId,
     teamDirectory: {},
     ensureHydrated: vi.fn(async () => undefined),
   }),
@@ -50,6 +59,10 @@ describe('FleetBoard — deep-link to the Connectors tab', () => {
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
+    auth.teamId = 'team-a'
+    teamData.currentTeamId = ''
+    teamData.teams = []
+    agentData.teamAgentNames = []
   })
 
   it('clicking a fleet row opens the agent workspace on the Connectors (mcp-servers) tab', () => {
@@ -73,5 +86,15 @@ describe('FleetBoard — deep-link to the Connectors tab', () => {
     expect(screen.getByText('Agent X', { selector: '.agent-row-main-copy strong' })).toBeTruthy()
     expect(screen.getByText('agent-x', { selector: '.agent-row-description' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Open agent Agent X' })).toBeTruthy()
+  })
+
+  it('does not assign directory team-agent data to a session with no active team', () => {
+    auth.teamId = null
+    teamData.currentTeamId = 'directory-team'
+    agentData.teamAgentNames = ['agent-x']
+
+    render(<FleetBoard />)
+
+    expect(screen.queryByText('Workspace team')).toBeNull()
   })
 })

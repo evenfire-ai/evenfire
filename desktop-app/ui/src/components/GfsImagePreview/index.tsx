@@ -1,7 +1,7 @@
-import { useEffect, useId, useRef } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@components/Common'
-import { IconClose } from '@components/SidebarNav/icons'
+import { IconClose, IconCopy } from '@components/SidebarNav/icons'
 import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { GfsImagePreviewBody } from './Body'
 import type { GfsImagePreviewProps } from './types'
@@ -25,7 +25,50 @@ export function GfsImagePreview({
 }: GfsImagePreviewProps) {
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
+  const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
+  const copiedResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [copyContentReady, setCopyContentReady] = useState(false)
+  const [copied, setCopied] = useState(false)
   const backdropStyle = useWorkspaceModalStyle()
+
+  const clearCopiedResetTimeout = useCallback(() => {
+    if (copiedResetTimeoutRef.current !== null) {
+      clearTimeout(copiedResetTimeoutRef.current)
+      copiedResetTimeoutRef.current = null
+    }
+  }, [])
+
+  const handleCopyContentReady = useCallback(
+    (copy: (() => Promise<boolean>) | null) => {
+      copyContentRef.current = copy
+      setCopyContentReady(Boolean(copy))
+      if (!copy) {
+        clearCopiedResetTimeout()
+        setCopied(false)
+      }
+    },
+    [clearCopiedResetTimeout]
+  )
+
+  const handleCopy = async () => {
+    const copy = copyContentRef.current
+    if (!copy) return
+    clearCopiedResetTimeout()
+    setCopied(false)
+    try {
+      if (!(await copy())) return
+      clearCopiedResetTimeout()
+      setCopied(true)
+      copiedResetTimeoutRef.current = setTimeout(() => {
+        copiedResetTimeoutRef.current = null
+        setCopied(false)
+      }, 2_000)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  useEffect(() => clearCopiedResetTimeout, [clearCopiedResetTimeout])
 
   useEffect(() => {
     closeButtonRef.current?.focus()
@@ -49,6 +92,23 @@ export function GfsImagePreview({
       <IconClose width={18} height={18} />
     </Button>
   )
+
+  // This modal is also used by plugin-provided GFS resources, which do not mount
+  // FilePreviewPage's shared toolbar. Keep Copy beside Close for both sources.
+  const copyButton =
+    dataBase64 !== undefined || gfsUri !== undefined ? (
+      <Button
+        className="da-gfs-image-preview-dialog__copy"
+        aria-label={copied ? 'Copied image to clipboard' : 'Copy image to clipboard'}
+        color="neutral"
+        disabled={!copyContentReady}
+        onClick={() => void handleCopy()}
+        variant="ghost"
+      >
+        <IconCopy width={18} height={18} />
+        <span className="da-gfs-preview-button__label">{copied ? 'Copied' : 'Copy'}</span>
+      </Button>
+    ) : null
 
   return createPortal(
     <div
@@ -86,8 +146,14 @@ export function GfsImagePreview({
             dataBase64={dataBase64}
             mimeType={mimeType}
             onDownloadError={onDownloadError}
+            onCopyContentReady={handleCopyContentReady}
             titleId={titleId}
-            headerActions={closeButton}
+            headerActions={
+              <>
+                {copyButton}
+                {closeButton}
+              </>
+            }
           />
         )}
       </section>

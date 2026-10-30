@@ -47,6 +47,7 @@ export type EmbedOwnershipMachineDeps = {
   /** Writes into the tab store; the updater is a no-op for a tab that no longer exists. */
   updateTabs: (updater: EmbedTabsUpdater) => void
   onHandoffReady?: (requestId: number) => void
+  onHandoffFailed?: (requestId: number) => void
   /** Only refresh failures of the launch that owns the embed when they arrive. */
   onOwnerRefreshError?: (event: EmbedRefreshErrorEvent) => void
   /** Only recoveries of the launch that owns the embed when they arrive. */

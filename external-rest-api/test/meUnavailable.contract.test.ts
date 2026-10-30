@@ -57,4 +57,36 @@ describe('External REST /me unavailable producer contract', () => {
       expect.objectContaining({ userSessionToken: 'synthetic-session-token' })
     )
   })
+
+  it('preserves an authenticated /me response with no active team', async () => {
+    mocks.controlApiRequest.mockResolvedValue({
+      id: 'synthetic-member-id',
+      email: 'member@example.invalid',
+      name: 'Member',
+      picture: null,
+      teamId: null,
+      teamName: null,
+      role: null,
+      profile: { displayName: 'Member', channels: {} },
+    })
+    const app = express()
+    app.use(createMeRouter())
+
+    const response = await request(app)
+      .get('/me')
+      .set('authorization', 'Bearer synthetic-session-token')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      id: 'synthetic-member-id',
+      teamId: null,
+      teamName: null,
+      role: null,
+    })
+    expect(mocks.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/users/synthetic-member-id/me',
+      expect.objectContaining({ query: { teamId: '' } })
+    )
+  })
 })

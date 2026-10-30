@@ -15,6 +15,7 @@ import {
   ChatMessage,
   ChatMetadata,
   ContextBreakdownResult,
+  DeepLinkAcknowledgmentAuthority,
   DesktopAppInfo,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
@@ -123,6 +124,28 @@ declare global {
         switch: (teamId: string) => Promise<SessionState>
       }
       gfs: {
+        getUserNavigationGeneration?: () => number | null
+        advanceUserNavigationGeneration?: () => number | null
+        copyDeepLink?: (uri: string) => Promise<{ url: string }>
+        listPendingDeepLinks?: () => Promise<{
+          links: Array<{
+            id: number
+            uri: string
+            userNavigationGenerationAtActivation: number
+          }>
+        }>
+        clearPendingDeepLinks?: () => Promise<number>
+        acknowledgeDeepLink?: {
+          (id: number): Promise<void>
+          (id: number, authority: DeepLinkAcknowledgmentAuthority): Promise<boolean>
+        }
+        onDeepLink?: (
+          callback: (link: {
+            id: number
+            uri: string
+            userNavigationGenerationAtActivation: number
+          }) => void
+        ) => () => void
         resolve: (uri: string) => Promise<{
           drive: string
           resourceId: string
@@ -405,9 +428,10 @@ declare global {
         moveResource: (
           resourceId: string,
           destinationId: string,
-          drive?: string,
-          ifMatch?: number,
-          newName?: string
+          drive: string | undefined,
+          ifMatch: number | undefined,
+          newName: string | undefined,
+          expectedSessionGeneration: number
         ) => Promise<{ resourceId: string; version: number }>
         deleteResource: (
           resourceId: string,
@@ -802,9 +826,14 @@ declare global {
         // Reloads that launch's view in place only if it is still the live one.
         reload: (args: { launchId: string }) => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
-        listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
+        listPendingDeepLinks: () => Promise<{
+          links: Array<SandboxUiDeepLinkEnvelope & { userNavigationGenerationAtActivation: number }>
+        }>
         clearPendingDeepLinks: () => Promise<void>
-        acknowledgeDeepLink: (id: number) => Promise<void>
+        acknowledgeDeepLink: {
+          (id: number): Promise<void>
+          (id: number, authority: DeepLinkAcknowledgmentAuthority): Promise<boolean>
+        }
         setBounds: (bounds: {
           x: number
           y: number
@@ -838,7 +867,18 @@ declare global {
             finalUpdate: boolean
           }) => void
         ) => () => void
-        onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
+        onDeepLink: (
+          callback: (
+            args: SandboxUiDeepLinkEnvelope & { userNavigationGenerationAtActivation: number }
+          ) => void
+        ) => () => void
+        onSessionInvalidated: (
+          callback: (event: {
+            sessionGeneration: number
+            appDeepLinkMinimumId: number
+            gfsDeepLinkMinimumId: number
+          }) => void
+        ) => () => void
         // Once per view main tears down, whatever the reason, with the route it
         // represented (`null`: unreadable, keep the last known one).
         onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void
