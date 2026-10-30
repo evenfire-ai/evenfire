@@ -536,11 +536,10 @@ describe('FilesPage delegation request lifecycle', () => {
     setNextPermissionRefresh(positive.promise)
     await startPermissionRefresh(queryClient)
     await act(async () => positive.resolve(freshPositive))
-    expect(
-      within(restoredDialog).getByRole('combobox', {
-        name: 'Add people, teams, or agents',
-      })
-    ).toBeTruthy()
+    const restoredPicker = await within(restoredDialog).findByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
+    expect((restoredPicker as HTMLInputElement).disabled).toBe(false)
     expect(within(restoredDialog).getByText('People with access')).toBeTruthy()
     expect(within(restoredDialog).queryByText('chatllm')).toBeNull()
     expect(within(restoredDialog).queryByRole('button', { name: 'Share' })).toBeNull()
