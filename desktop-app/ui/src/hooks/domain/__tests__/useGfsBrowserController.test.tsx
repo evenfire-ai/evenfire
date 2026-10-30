@@ -673,7 +673,7 @@ describe('useGfsBrowserController', () => {
     }
 
     render(<Probe />, { wrapper: EnvironmentHarness })
-    const previousMainKey = desktopQueryKeys.gfsAccessible('env-a:user-a:team-a', 'main')
+    const previousMainKey = desktopQueryKeys.gfsAccessible('env-a:user-a:team-a', 'main', 1)
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(1)
       expect(lastHarnessQueryClient?.getQueryState(previousMainKey)?.fetchStatus).toBe('fetching')
@@ -683,7 +683,7 @@ describe('useGfsBrowserController', () => {
     await act(async () => {
       screen.getByRole('button', { name: 'switch environment' }).click()
     })
-    const currentMainKey = desktopQueryKeys.gfsAccessible('env-b:user-a:team-a', 'main')
+    const currentMainKey = desktopQueryKeys.gfsAccessible('env-b:user-a:team-a', 'main', 1)
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(2)
       expect(screen.getByTestId('session-scope').textContent).toBe('env-b:user-a:team-a')
@@ -691,7 +691,7 @@ describe('useGfsBrowserController', () => {
       expect(screen.getByRole('button', { name: 'open Current environment file' })).toBeTruthy()
     })
 
-    const otherDriveKey = desktopQueryKeys.gfsAccessible('env-b:user-a:team-a', 'secondary')
+    const otherDriveKey = desktopQueryKeys.gfsAccessible('env-b:user-a:team-a', 'secondary', 1)
     lastHarnessQueryClient?.setQueryData(otherDriveKey, {
       pages: [otherDrivePage],
       pageParams: [undefined],
@@ -754,7 +754,7 @@ describe('useGfsBrowserController', () => {
     })
 
     render(<Probe />, { wrapper: Harness })
-    const previousTeamKey = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main')
+    const previousTeamKey = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main', 1)
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(1)
       expect(lastHarnessQueryClient?.getQueryState(previousTeamKey)?.fetchStatus).toBe('fetching')
@@ -763,7 +763,7 @@ describe('useGfsBrowserController', () => {
     await act(async () => {
       screen.getByRole('button', { name: 'switch team' }).click()
     })
-    const currentTeamKey = desktopQueryKeys.gfsAccessible(':user-a:team-b', 'main')
+    const currentTeamKey = desktopQueryKeys.gfsAccessible(':user-a:team-b', 'main', 1)
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(2)
       expect(screen.getByTestId('session-scope').textContent).toBe(':user-a:team-b')
@@ -836,7 +836,7 @@ describe('useGfsBrowserController', () => {
     }
 
     render(<Probe />, { wrapper: UserIdentityHarness })
-    const previousUserKey = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main')
+    const previousUserKey = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main', 1)
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(1)
       expect(lastHarnessQueryClient?.getQueryState(previousUserKey)?.fetchStatus).toBe('fetching')
@@ -846,7 +846,7 @@ describe('useGfsBrowserController', () => {
     await act(async () => {
       screen.getByRole('button', { name: 'switch user' }).click()
     })
-    const currentUserKey = desktopQueryKeys.gfsAccessible(':user-c:team-a', 'main')
+    const currentUserKey = desktopQueryKeys.gfsAccessible(':user-c:team-a', 'main', 1)
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(2)
       expect(screen.getByTestId('session-scope').textContent).toBe(':user-c:team-a')
@@ -2360,7 +2360,7 @@ describe('useGfsBrowserController', () => {
       screen.getByRole('button', { name: 'open' }).click()
     })
 
-    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
     await waitFor(() => {
       expect(listChildren).toHaveBeenCalledOnce()
       expect(lastHarnessQueryClient?.getQueryState(childrenKey)?.status).toBe('error')

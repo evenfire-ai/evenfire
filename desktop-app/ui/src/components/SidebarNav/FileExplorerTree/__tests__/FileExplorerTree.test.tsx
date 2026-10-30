@@ -133,7 +133,7 @@ describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
 
     const { queryClient } = renderTree({}, true)
     const emptyState = await screen.findByText('No shared files yet.')
-    const accessibleKey = desktopQueryKeys.gfsAccessible('test:user-1:team-1', 'main')
+    const accessibleKey = desktopQueryKeys.gfsAccessible('test:user-1:team-1', 'main', 7)
 
     act(() => {
       void queryClient.invalidateQueries({ exact: true, queryKey: accessibleKey })
