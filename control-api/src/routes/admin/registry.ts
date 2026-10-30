@@ -92,6 +92,7 @@ import {
   shouldAttachEvenfirePullSecret,
 } from './registryImagePullSecret.js'
 import { checkEvenfireImageRefMatchesEntry } from './registryImageRefIdentity.js'
+import { OFFICIAL_EVENFIRE_SCOPES, entryNameScope, registryNameSlug } from './registryNaming.js'
 import {
   pullSecretErrorResponse,
   recipeReferencesPlatformImage,
@@ -108,11 +109,7 @@ function isValidK8sName(name: string): boolean {
 
 /** Generate a spec-compliant name: mcp-{slug}-v{version}-{hash8} (max 63 chars). */
 export function generateRegistryName(entryName: string, version: string): string {
-  const slug = entryName
-    .replace(/[^a-z0-9-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40)
+  const slug = registryNameSlug(entryName)
   const vSlug = version.replace(/\./g, '-')
   const hash = createHash('sha256').update(`${entryName}:${version}`).digest('hex').slice(0, 8)
   return `mcp-${slug}-v${vSlug}-${hash}`.slice(0, 63).replace(/-$/, '')
@@ -278,19 +275,6 @@ type HostShape = {
   spec?: { guardrails?: HostGuardrailsShape } & Record<string, unknown>
 }
 
-/** The `@org` scope from an org-scoped entry name (`@org/name`), or null. */
-function hookOrgScope(entryName: string): string | null {
-  const m = /^@([^/]+)\//.exec(entryName)
-  return m ? `@${m[1]}` : null
-}
-
-/**
- * Official evenfire scopes — always curated (the platform's own reserved orgs).
- * Hardcoded so a misconfigured `CONTROL_API_CURATED_HOOK_ORGS` can never drop
- * platform trust, and so the env list is reserved for extra THIRD-PARTY orgs.
- */
-const OFFICIAL_EVENFIRE_HOOK_ORGS = ['@clerum', '@evenfire']
-
 /**
  * Authoritative trust level for an installed hook (§8.4 / registry gap #1).
  * `entries.trust_level` is publisher-influenced (trigger-computed from
@@ -310,11 +294,14 @@ export function resolveHookTrustLevel(
   clusterOrgScope: string | null
 ): string {
   const column = (entry.trust_level || 'low').toLowerCase()
-  const org = hookOrgScope(entry.name)
+  const org = entryNameScope(entry.name)
   const curated =
     !!org &&
     (org === clusterOrgScope ||
-      OFFICIAL_EVENFIRE_HOOK_ORGS.includes(org) ||
+      // The official scopes are hardcoded (not read from the env) so a misconfigured
+      // `CONTROL_API_CURATED_HOOK_ORGS` can never drop platform trust; the env list
+      // is reserved for extra third-party orgs.
+      OFFICIAL_EVENFIRE_SCOPES.includes(org) ||
       config.curatedHookOrgs.includes(org))
   if (curated) return column
   const cap = config.defaultHookTrustCap
