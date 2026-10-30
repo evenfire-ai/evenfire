@@ -24,6 +24,18 @@ vi.mock('electron', () => ({
     decryptString: (value: Buffer) => value.toString().slice('encrypted:'.length),
   },
 }))
+vi.mock('../windowsSessionAuthorityAcl.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityAcl.js')>()
+  const { createWindowsSessionAuthorityAclUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityAclUnitFixture.js')
+  return createWindowsSessionAuthorityAclUnitFixture(actual)
+})
+vi.mock('../windowsSessionAuthorityFileOps.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityFileOps.js')>()
+  const { createWindowsSessionAuthorityFileOpsUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityFileOpsUnitFixture.js')
+  return createWindowsSessionAuthorityFileOpsUnitFixture(actual)
+})
 const ENV = 'guards-111111111111'
 const file = () => path.join(fixture.directory, `session-token-${ENV}.enc`)
 const conditionalOperations = ['discard', 'repair'] as const

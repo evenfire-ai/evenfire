@@ -4,6 +4,19 @@ import os from 'node:os'
 import path from 'node:path'
 import { testLoginResult, testSessionTokenWithExpiry } from '../../testSupport/authTestFixtures.js'
 
+vi.mock('../windowsSessionAuthorityAcl.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityAcl.js')>()
+  const { createWindowsSessionAuthorityAclUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityAclUnitFixture.js')
+  return createWindowsSessionAuthorityAclUnitFixture(actual)
+})
+vi.mock('../windowsSessionAuthorityFileOps.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityFileOps.js')>()
+  const { createWindowsSessionAuthorityFileOpsUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityFileOpsUnitFixture.js')
+  return createWindowsSessionAuthorityFileOpsUnitFixture(actual)
+})
+
 const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
 const originalPreview = process.env.EVENFIRE_ONBOARDING_PREVIEW
 let directory = ''

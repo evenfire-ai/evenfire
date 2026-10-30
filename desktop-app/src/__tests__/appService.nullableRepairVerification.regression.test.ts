@@ -34,6 +34,18 @@ vi.mock('../pluginSdkRuntime.js', () => ({
     unpinAllSandboxUiSurfaces: vi.fn(),
   }),
 }))
+vi.mock('../windowsSessionAuthorityAcl.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityAcl.js')>()
+  const { createWindowsSessionAuthorityAclUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityAclUnitFixture.js')
+  return createWindowsSessionAuthorityAclUnitFixture(actual)
+})
+vi.mock('../windowsSessionAuthorityFileOps.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityFileOps.js')>()
+  const { createWindowsSessionAuthorityFileOpsUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityFileOpsUnitFixture.js')
+  return createWindowsSessionAuthorityFileOpsUnitFixture(actual)
+})
 
 const homeToken = 'fixture-journal-home'
 const homeMe = {

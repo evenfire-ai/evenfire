@@ -48,7 +48,7 @@ describe('LocalConsentStore', () => {
     expect(found?.revision).toBe(1)
   })
 
-  it('writes the file 0600 so other local accounts cannot read it', async () => {
+  it.skipIf(process.platform === 'win32')('writes the file with POSIX mode 0600', async () => {
     await store.put(grant())
     const stat = await fs.stat(path.join(tmpDir, `${ENV_A}.json`))
     expect(stat.mode & 0o777).toBe(0o600)

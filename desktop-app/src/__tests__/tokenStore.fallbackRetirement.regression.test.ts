@@ -26,6 +26,18 @@ vi.mock('keytar', () => ({
   }),
   deletePassword: vi.fn(async (_service, account) => fixture.keychain.delete(account)),
 }))
+vi.mock('../windowsSessionAuthorityAcl.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityAcl.js')>()
+  const { createWindowsSessionAuthorityAclUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityAclUnitFixture.js')
+  return createWindowsSessionAuthorityAclUnitFixture(actual)
+})
+vi.mock('../windowsSessionAuthorityFileOps.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityFileOps.js')>()
+  const { createWindowsSessionAuthorityFileOpsUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityFileOpsUnitFixture.js')
+  return createWindowsSessionAuthorityFileOpsUnitFixture(actual)
+})
 const ENV = 'active-111111111111'
 const LEGACY_ENV = 'legacy-222222222222'
 const GLOBAL_PRODUCER_ENV = 'global-333333333333'
@@ -138,30 +150,33 @@ describe('R21-M8 whole fallback-retirement contract regressions', () => {
     expect(await new TokenStore().getSafeStorageSessionToken(ENV)).toBe('fixture-independent-new')
   })
 
-  it('requires a durable directory sync on retry after a prior unlink succeeded', async () => {
-    const store = new TokenStore()
-    await store.setSafeStorageSessionToken('fixture-old-user', ENV)
-    const snapshot = await store.snapshotSessionTokenFallbackFiles(ENV)
-    const open = fs.open.bind(fs)
-    let rejectedSyncs = 0
-    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
-      const handle = await open(...args)
-      if (String(args[0]) === fixture.directory && args[1] === 'r' && rejectedSyncs < 2) {
-        vi.spyOn(handle, 'sync').mockImplementationOnce(async () => {
-          rejectedSyncs += 1
-          throw new Error('fixture-directory retirement sync failed')
-        })
-      }
-      return handle
-    })
-    await expect(store.retireSessionTokenFallbackFilesIfUnchanged(snapshot)).rejects.toThrow(
-      'retirement sync failed'
-    )
-    expect(await store.getSafeStorageSessionToken(ENV)).toBeNull()
-    await expect(store.retireSessionTokenFallbackFilesIfUnchanged(snapshot)).rejects.toThrow(
-      'retirement sync failed'
-    )
-    expect(rejectedSyncs).toBe(2)
-    await expect(store.retireSessionTokenFallbackFilesIfUnchanged(snapshot)).resolves.toBe(true)
-  })
+  it.skipIf(process.platform === 'win32')(
+    'requires a durable directory sync on retry after a prior unlink succeeded',
+    async () => {
+      const store = new TokenStore()
+      await store.setSafeStorageSessionToken('fixture-old-user', ENV)
+      const snapshot = await store.snapshotSessionTokenFallbackFiles(ENV)
+      const open = fs.open.bind(fs)
+      let rejectedSyncs = 0
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await open(...args)
+        if (String(args[0]) === fixture.directory && args[1] === 'r' && rejectedSyncs < 2) {
+          vi.spyOn(handle, 'sync').mockImplementationOnce(async () => {
+            rejectedSyncs += 1
+            throw new Error('fixture-directory retirement sync failed')
+          })
+        }
+        return handle
+      })
+      await expect(store.retireSessionTokenFallbackFilesIfUnchanged(snapshot)).rejects.toThrow(
+        'retirement sync failed'
+      )
+      expect(await store.getSafeStorageSessionToken(ENV)).toBeNull()
+      await expect(store.retireSessionTokenFallbackFilesIfUnchanged(snapshot)).rejects.toThrow(
+        'retirement sync failed'
+      )
+      expect(rejectedSyncs).toBe(2)
+      await expect(store.retireSessionTokenFallbackFilesIfUnchanged(snapshot)).resolves.toBe(true)
+    }
+  )
 })
