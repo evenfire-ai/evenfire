@@ -7,13 +7,19 @@ import {
   GFS_DRIVE_MAIN,
   GFS_RESOURCE_DRAG_TYPE,
 } from '@constants/gfsBrowser'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  isGfsSessionAuthorityCurrent,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import {
   type GfsBrowserChild,
   type GfsCrumb,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
+import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
+import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
@@ -29,7 +35,7 @@ import {
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
-import { suggestNumberedMoveName } from '@/gfs/moveCommit'
+import { toastMoveOutcome } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
@@ -80,6 +86,7 @@ function FileExplorerNode({
   node,
   level,
   scope,
+  sessionGeneration,
   accessActive,
   expandedIds,
   selectedId,
@@ -112,7 +119,12 @@ function FileExplorerNode({
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
 
-  const childQueryKey = desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN)
+  const childQueryKey = desktopQueryKeys.gfsChildren(
+    scope,
+    node.resourceId,
+    GFS_DRIVE_MAIN,
+    sessionGeneration
+  )
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
@@ -120,7 +132,7 @@ function FileExplorerNode({
     // Gate on live access as the controller's own children query does: a revoked
     // session fetches nothing (the subtree also unmounts as accessibleResources
     // empties, but this keeps the guard robust to future refactors).
-    enabled: isExpanded && accessActive,
+    enabled: isExpanded && accessActive && isGfsSessionGeneration(sessionGeneration),
     // Folder contents change out-of-band: agents with host grants, other
     // sessions, and operator writes never pass through this client. The sidebar
     // is a persistent surface, so under the app's Infinity staleTime an expanded
@@ -143,10 +155,18 @@ function FileExplorerNode({
   )
 
   useEffect(() => {
-    if (!childQuery.error) return
+    if (!childQuery.error || !isGfsSessionGeneration(sessionGeneration)) return
     purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure(childError)
-  }, [childError, childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
+    if (childError) onAuthorityFailure(childError, scope, sessionGeneration)
+  }, [
+    childError,
+    childQuery.error,
+    childQueryKey,
+    onAuthorityFailure,
+    queryClient,
+    scope,
+    sessionGeneration,
+  ])
 
   // Deferred folder toggle: cancelled by a double-click within the window.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -413,6 +433,7 @@ function FileExplorerNode({
               onRequestMove={onRequestMove}
               onToggle={onToggle}
               scope={scope}
+              sessionGeneration={sessionGeneration}
               selectedId={selectedId}
             />
           ))}
@@ -462,11 +483,13 @@ export function FileExplorerTree({
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
     scope: ctrl.sessionScope,
+    sessionGeneration: ctrl.sessionGeneration,
     drive: GFS_DRIVE_MAIN,
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
-    handleAuthorityFailure: (message: string) => ctrl.handleAuthorityFailure(message, 'operation'),
+    handleAuthorityFailure: (message, scope, sessionGeneration) =>
+      ctrl.handleAuthorityFailure(message, 'operation', scope, sessionGeneration),
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -494,31 +517,56 @@ export function FileExplorerTree({
     source: GfsDragSource
     gestureGeneration: number
     sessionGeneration: number | null
+    authoritativeSessionGeneration: number
     destination: { resourceId: string; name: string }
-    allowNumberedRename: boolean
-    suggestedName?: string
   } | null>(null)
   const [moveDialogTarget, setMoveDialogTarget] = useState<{
     node: GfsBrowserChild
     initialCrumbs: GfsCrumb[]
   } | null>(null)
+  const moveDialogTargetRef = useRef(moveDialogTarget)
+  moveDialogTargetRef.current = moveDialogTarget
+  const mountedRef = useRef(false)
+  const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | 'failed' | null>(
+    null
+  )
 
-  useEffect(
-    () => () => {
+  const closeMoveDialog = useCallback(() => {
+    moveDialogTargetRef.current = null
+    setMovePermissionStatus(null)
+    setMoveDialogTarget(null)
+  }, [])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
       dragSessionEpochRef.current += 1
       hoverOwnerRef.current = null
       adjudication.endDragSession()
-    },
-    [adjudication.endDragSession]
-  )
+    }
+  }, [adjudication.endDragSession])
 
   const liveDragScope = ctrl.accessState === 'revoked' ? null : (ctrl.sessionScope ?? 'anonymous')
   const liveDragScopeRef = useRef(liveDragScope)
   liveDragScopeRef.current = liveDragScope
-  const previousDragScopeRef = useRef(liveDragScope)
+  const liveAuthorityRef = useRef({ scope: ctrl.sessionScope, generation: ctrl.sessionGeneration })
+  liveAuthorityRef.current = { scope: ctrl.sessionScope, generation: ctrl.sessionGeneration }
+  const previousDragAuthorityRef = useRef({
+    scope: liveDragScope,
+    generation: ctrl.sessionGeneration,
+  })
   useEffect(() => {
-    if (previousDragScopeRef.current === liveDragScope) return
-    previousDragScopeRef.current = liveDragScope
+    if (
+      previousDragAuthorityRef.current.scope === liveDragScope &&
+      previousDragAuthorityRef.current.generation === ctrl.sessionGeneration
+    ) {
+      return
+    }
+    previousDragAuthorityRef.current = {
+      scope: liveDragScope,
+      generation: ctrl.sessionGeneration,
+    }
     dragSessionEpochRef.current += 1
     draggingSourceRef.current = null
     hoverOwnerRef.current = null
@@ -526,11 +574,14 @@ export function FileExplorerTree({
     setPendingFolderMove(null)
     setDropStatesByResourceId({})
     setDragSourceName(null)
+    moveDialogTargetRef.current = null
+    setMoveDialogTarget(null)
+    setMovePermissionStatus(null)
     // A NEW live session makes any session-ended refusal stale. A transition
     // TO revoked (scope null) must NOT clear it: that is exactly when the
     // message has to survive (A11), and the revoked surface below carries it.
     if (liveDragScope !== null) setDropSessionLost(false)
-  }, [adjudication.endDragSession, liveDragScope])
+  }, [adjudication.endDragSession, ctrl.sessionGeneration, liveDragScope])
 
   const ownsDrop = useCallback(
     (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
@@ -552,18 +603,22 @@ export function FileExplorerTree({
    * the same shared children cache the Files page seeds its commit from. */
   const cachedDestinationNames = useCallback(
     (destinationId: string): Set<string> => {
+      if (!ctrl.sessionScope || !isGfsSessionGeneration(ctrl.sessionGeneration)) {
+        return new Set()
+      }
       const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsBrowserChild[] }> }>(
         desktopQueryKeys.gfsChildren(
-          ctrl.sessionScope ?? 'anonymous',
+          ctrl.sessionScope,
           destinationId,
-          GFS_DRIVE_MAIN
+          GFS_DRIVE_MAIN,
+          ctrl.sessionGeneration
         )
       )
       return new Set(
         (cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? [])
       )
     },
-    [ctrl.sessionScope, queryClient]
+    [ctrl.sessionScope, ctrl.sessionGeneration, queryClient]
   )
 
   const handleToggle = useCallback((resourceId: string) => {
@@ -766,31 +821,61 @@ export function FileExplorerTree({
     async (
       source: GfsDragSource,
       destination: { resourceId: string; name: string },
-      allowNumberedRename: boolean,
-      isCurrent?: () => boolean
+      isCurrent?: () => boolean,
+      isPresentationCurrent?: () => boolean,
+      reportOutcomes = true,
+      authoritativeSessionGeneration?: number
     ) => {
       movingResourceIdRef.current = source.resourceId
       setMovingResourceId(source.resourceId)
       try {
         return await runGfsMoveCommit(
           {
-            moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
-              ctrl.moveResource(resourceId, destinationId, ifMatch, newName, oldParentId),
-            handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
-            convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
-            pushToast,
+            moveResource: (
+              resourceId,
+              destinationId,
+              ifMatch,
+              newName,
+              oldParentId,
+              expectedSessionGeneration
+            ) =>
+              ctrl.moveResource(
+                resourceId,
+                destinationId,
+                ifMatch,
+                newName,
+                oldParentId,
+                source.scope,
+                true,
+                expectedSessionGeneration
+              ),
+            handleAuthorityFailure: message =>
+              ctrl.handleAuthorityFailure(message, 'operation', source.scope),
+            convergeCommittedMove: (input, receipt) =>
+              ctrl.convergeCommittedMove(input, receipt, source.scope),
+            ...(reportOutcomes
+              ? {
+                  pushToast: (message, tone) => {
+                    if (!isPresentationCurrent || isPresentationCurrent()) {
+                      pushToast(message, tone)
+                    }
+                  },
+                }
+              : {}),
           },
           {
             source,
             destination,
-            allowNumberedRename,
             occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+            ...(authoritativeSessionGeneration !== undefined
+              ? { sessionGeneration: authoritativeSessionGeneration }
+              : {}),
             ...(isCurrent ? { isCurrent } : {}),
           }
         )
       } finally {
         movingResourceIdRef.current = null
-        setMovingResourceId(null)
+        if (mountedRef.current) setMovingResourceId(null)
       }
     },
     [cachedDestinationNames, ctrl, pushToast]
@@ -812,13 +897,31 @@ export function FileExplorerTree({
       const epoch = dragSessionEpochRef.current
       const sessionGeneration = dragSession?.currentGeneration() ?? null
       const scopeAtDrop = liveDragScopeRef.current
+      const publishedGeneration = ctrl.sessionGeneration
+      const ownsPublishedAuthority = () =>
+        isGfsSessionAuthorityCurrent(
+          source.scope,
+          publishedGeneration,
+          liveAuthorityRef.current.scope,
+          liveAuthorityRef.current.generation
+        )
+      if (!ownsPublishedAuthority()) return
       try {
+        const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
+        if (authoritativeSessionGeneration !== publishedGeneration || !ownsPublishedAuthority())
+          return
         const decision = await adjudication.adjudicateDrop(source, {
           resourceId: node.resourceId,
           name: node.name,
           kind: node.kind,
           ancestorIds,
         })
+        if (
+          !ownsPublishedAuthority() ||
+          (await window.clerum.auth.getSessionGeneration()) !== authoritativeSessionGeneration
+        ) {
+          return
+        }
         if (!decision.allowed && decision.reason === 'session-lost') {
           // Presented BEFORE the ownership guard: the revocation that caused
           // this refusal has already invalidated the gesture's ownership, so
@@ -854,23 +957,25 @@ export function FileExplorerTree({
           return
         }
         if (source.kind === 'directory') {
-          const occupied = cachedDestinationNames(node.resourceId)
-          const suggested = suggestNumberedMoveName(source.name, occupied)
           setPendingFolderMove({
             source,
             gestureGeneration: epoch,
             sessionGeneration,
+            authoritativeSessionGeneration,
             destination: { resourceId: node.resourceId, name: node.name },
-            allowNumberedRename: decision.allowNumberedRename,
-            ...(suggested !== undefined ? { suggestedName: suggested } : {}),
           })
           return
         }
         await commitMove(
           source,
           { resourceId: node.resourceId, name: node.name },
-          decision.allowNumberedRename,
-          () => ownsDrop(source, epoch, sessionGeneration)
+          () => ownsPublishedAuthority() && ownsDrop(source, epoch, sessionGeneration),
+          () =>
+            ownsPublishedAuthority() &&
+            mountedRef.current &&
+            liveDragScopeRef.current === source.scope,
+          true,
+          authoritativeSessionGeneration
         )
       } finally {
         finishNodeDropCleanup(source, epoch, sessionGeneration)
@@ -881,6 +986,8 @@ export function FileExplorerTree({
       cachedDestinationNames,
       finishNodeDropCleanup,
       commitMove,
+      ctrl.sessionGeneration,
+      ctrl.sessionScope,
       dragSession,
       ownsDrop,
       pushToast,
@@ -890,10 +997,114 @@ export function FileExplorerTree({
 
   const handleRequestMove = useCallback(
     (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => {
-      setMoveDialogTarget({ node, initialCrumbs: [...ancestorCrumbs] })
+      const target = { node, initialCrumbs: [...ancestorCrumbs] }
+      moveDialogTargetRef.current = target
+      setMovePermissionStatus(null)
+      setMoveDialogTarget(target)
     },
     []
   )
+
+  const handleRetryMovePermission = async (
+    destinationId: string,
+    _destinationName: string,
+    isDialogCurrent: () => boolean
+  ) => {
+    const target = moveDialogTarget
+    if (!target || !isDialogCurrent()) return
+    const scope = ctrl.sessionScope
+    const expectedScope = scope ?? 'anonymous'
+    const expectedGeneration = ctrl.sessionGeneration
+    const ownsRetry = () =>
+      moveDialogTargetRef.current === target &&
+      liveDragScopeRef.current === expectedScope &&
+      isGfsSessionAuthorityCurrent(
+        scope,
+        expectedGeneration,
+        liveAuthorityRef.current.scope,
+        liveAuthorityRef.current.generation
+      ) &&
+      isDialogCurrent()
+    const drive = target.node.drive || GFS_DRIVE_MAIN
+    setMovePermissionStatus('checking')
+
+    try {
+      if (!scope || !isGfsSessionGeneration(expectedGeneration)) {
+        throw new Error('Could not verify the source folder for this move.')
+      }
+      const destinationKey = desktopQueryKeys.gfsAffordances(
+        scope,
+        destinationId,
+        drive,
+        expectedGeneration
+      )
+      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
+
+      if (!ownsRetry()) {
+        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
+        return
+      }
+      const resolvedSource = await window.clerum.gfs.resolve(target.node.gfsUri)
+      if (!ownsRetry()) {
+        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
+        return
+      }
+      if (resolvedSource.resourceId !== target.node.resourceId) {
+        throw new Error('Could not verify the source folder for this move.')
+      }
+      const sourceParentId = resolvedSource.parentResourceId
+      if (!sourceParentId) {
+        throw new Error('Could not verify the source folder for this move.')
+      }
+      const sourceKey = desktopQueryKeys.gfsAffordances(
+        scope,
+        sourceParentId,
+        drive,
+        expectedGeneration
+      )
+      assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
+      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
+
+      const [source, destination] = await Promise.all([
+        queryClient.fetchQuery({
+          queryKey: sourceKey,
+          queryFn: () => window.clerum.gfs.affordances(sourceParentId, drive),
+          staleTime: 0,
+          retry: false,
+        }),
+        queryClient.fetchQuery({
+          queryKey: destinationKey,
+          queryFn: () => window.clerum.gfs.affordances(destinationId, drive),
+          staleTime: 0,
+          retry: false,
+        }),
+      ])
+      if (!ownsRetry()) {
+        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
+        return
+      }
+      if (!hasGfsMoveSourcePermissions(source.held)) {
+        throw new Error('You do not have write and delete access to the source folder.')
+      }
+      if (!destination.held.includes('write')) {
+        throw new Error('You do not have write access to the destination folder.')
+      }
+      setMovePermissionStatus(null)
+    } catch (retryError) {
+      if (moveDialogTargetRef.current !== target) return
+      if (!ownsRetry()) {
+        setMovePermissionStatus(null)
+        return
+      }
+      const message = errorMessage(retryError) ?? String(retryError)
+      if (ctrl.handleAuthorityFailure(message, 'operation', scope, expectedGeneration)) {
+        closeMoveDialog()
+        return
+      }
+      setMovePermissionStatus('failed')
+      throw retryError
+    }
+  }
 
   const handleActivateFolder = useCallback(
     (node: GfsBrowserChild) => {
@@ -911,9 +1122,8 @@ export function FileExplorerTree({
 
   const authorityFailure = ctrl.handleAuthorityFailure
   const handleAuthorityFailure = useCallback(
-    (message: string) => {
-      authorityFailure(message, 'operation')
-    },
+    (message: string, scope: string, sessionGeneration: number) =>
+      authorityFailure(message, 'operation', scope, sessionGeneration),
     [authorityFailure]
   )
 
@@ -1030,6 +1240,7 @@ export function FileExplorerTree({
               onRequestMove={handleRequestMove}
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
+              sessionGeneration={ctrl.sessionGeneration}
               selectedId={selectedId}
             />
           ))}
@@ -1054,21 +1265,23 @@ export function FileExplorerTree({
           request={{
             sourceName: displayName(pendingFolderMove.source.name),
             destinationName: displayName(pendingFolderMove.destination.name),
-            canRename: pendingFolderMove.allowNumberedRename,
-            ...(pendingFolderMove.suggestedName !== undefined
-              ? { suggestedName: pendingFolderMove.suggestedName }
-              : {}),
           }}
           onCancel={() => setPendingFolderMove(null)}
-          onConfirm={({ allowNumberedRename }) => {
+          onConfirm={() => {
             const pending = pendingFolderMove
             setPendingFolderMove(null)
             if (
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void commitMove(pending.source, pending.destination, allowNumberedRename, () =>
-                ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
+              void commitMove(
+                pending.source,
+                pending.destination,
+                () =>
+                  ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration),
+                () => mountedRef.current && liveDragScopeRef.current === pending.source.scope,
+                true,
+                pending.authoritativeSessionGeneration
               )
             }
           }}
@@ -1077,12 +1290,23 @@ export function FileExplorerTree({
 
       {moveDialogTarget ? (
         <GfsMoveDialog
-          busy={ctrl.mutating}
+          busy={ctrl.mutating || movePermissionStatus === 'checking'}
           initialCrumbs={moveDialogTarget.initialCrumbs}
-          onClose={() => setMoveDialogTarget(null)}
-          onMove={async (destinationId, destinationName) => {
-            const target = moveDialogTarget
-            const allowNumberedRename = await adjudication.probeSourceWrite(target.node.resourceId)
+          onClose={closeMoveDialog}
+          onMoveWithOwnership={async (destinationId, destinationName, isDialogCurrent) => {
+            setMovePermissionStatus(null)
+            const target = moveDialogTargetRef.current
+            if (!target) return
+            const publishedGeneration = ctrl.sessionGeneration
+            const publishedScope = ctrl.sessionScope
+            const ownsPublishedAuthority = () =>
+              isGfsSessionAuthorityCurrent(
+                publishedScope,
+                publishedGeneration,
+                liveAuthorityRef.current.scope,
+                liveAuthorityRef.current.generation
+              )
+            if (!ownsPublishedAuthority()) return
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,
@@ -1099,31 +1323,61 @@ export function FileExplorerTree({
               scope: ctrl.sessionScope ?? 'anonymous',
               generation: dragSessionEpochRef.current,
             }
+            const isCurrent = () =>
+              ownsPublishedAuthority() &&
+              mountedRef.current &&
+              moveDialogTargetRef.current === target &&
+              liveDragScopeRef.current === source.scope &&
+              isDialogCurrent()
+            const isPresentationCurrent = () =>
+              ownsPublishedAuthority() &&
+              mountedRef.current &&
+              liveDragScopeRef.current === source.scope
+            const authoritativeSessionGeneration = await window.clerum.auth.getSessionGeneration()
+            if (authoritativeSessionGeneration !== publishedGeneration || !isCurrent()) return
             const outcome = await commitMove(
               source,
               { resourceId: destinationId, name: destinationName },
-              allowNumberedRename
+              isCurrent,
+              isPresentationCurrent,
+              false,
+              authoritativeSessionGeneration
             )
-            if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
-              setMoveDialogTarget(null)
+            if (outcome.status === 'gesture-lost') return
+            if (outcome.status === 'session-lost') {
+              if (moveDialogTargetRef.current === target) closeMoveDialog()
+              return
+            }
+            if (!isCurrent()) {
+              if (isPresentationCurrent()) {
+                toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
+              }
               return
             }
             if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
+              if (
+                moveDialogTargetRef.current === target &&
+                outcome.status === 'unconfirmed' &&
+                outcome.retryPermissionCheck === true
+              ) {
+                setMovePermissionStatus('failed')
+              }
               throw new Error(outcome.message)
             }
-            setMoveDialogTarget(null)
+            toastMoveOutcome(pushToast, outcome, source.name, destinationName, source.kind)
+            if (moveDialogTargetRef.current === target) closeMoveDialog()
           }}
-          onAuthorityFailure={message => {
-            handleAuthorityFailure(message)
-            return false
-          }}
+          onRetryPermissionCheck={handleRetryMovePermission}
+          onAuthorityFailure={handleAuthorityFailure}
           sessionScope={ctrl.sessionScope}
+          sessionGeneration={ctrl.sessionGeneration}
           target={{
             resourceId: moveDialogTarget.node.resourceId,
             name: moveDialogTarget.node.name,
             kind: moveDialogTarget.node.kind === 'directory' ? 'directory' : 'file',
             parentResourceId: moveDialogTarget.node.parentResourceId ?? null,
           }}
+          permissionStatus={movePermissionStatus}
         />
       ) : null}
     </div>

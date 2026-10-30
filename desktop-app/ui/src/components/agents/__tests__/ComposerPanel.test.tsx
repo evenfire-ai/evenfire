@@ -13,6 +13,7 @@ import {
   GROK_COMPOSER_MAX_IMAGE_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
+import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
 import { readComposerFile } from '@lib/composerFileAdmission'
 import {
   type ImageInputDecision,
@@ -42,12 +43,16 @@ const composerState: ChatComposerStateContextValue = {
   agentError: null,
   failedAgentSend: null,
   activeChatId: null,
+  workspaceChatTabId: null,
   activeMessageCount: 0,
   composerFocusRequestId: 0,
   requestComposerFocus: vi.fn(),
 }
 
-const draftState = { value: '', set: vi.fn() }
+const draftState = {
+  value: '',
+  set: vi.fn<(value: string) => ComposerDraftWriteResult>(() => ({ accepted: true })),
+}
 
 /** Stable action spies so guard tests can assert what did (not) reach the controller. */
 const actionsMock = {
@@ -78,8 +83,21 @@ vi.mock('@contexts/McpRuntimeContext', () => ({
   useMcpRuntimeContext: () => ({ hostRuntimeStatus: null, activeLlmProvider: null }),
 }))
 
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({ me: { id: 'user-1', teamId: 'team-1' } }),
+}))
+
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({ selectedAgent: 'agent-1' }),
+}))
+
+vi.mock('@hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({
+    accessCatalog: { userId: 'user-1', teamId: 'team-1' },
+    agentNames: ['agent-1'],
+    loading: false,
+    error: null,
+  }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
@@ -95,7 +113,7 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
 }))
 
 vi.mock('@hooks/useComposerDraft', () => ({
-  useComposerDraft: () => [draftState.value, draftState.set],
+  useComposerDraft: () => [draftState.value, draftState.set, null],
 }))
 
 /**
@@ -193,6 +211,7 @@ afterEach(() => {
     agentError: null,
     failedAgentSend: null,
     activeChatId: null,
+    workspaceChatTabId: null,
     activeMessageCount: 0,
     composerFocusRequestId: 0,
   })
@@ -1207,6 +1226,19 @@ describe('ComposerPanel with a pending image after a model switch', () => {
     expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledTimes(2)
   })
 
+  it('sends the exact workspace chat-tab owner with its draft', () => {
+    composerState.workspaceChatTabId = 'chat-owner-a'
+    draftState.value = 'gfs://main/0123456789abcdef0123456789abcdef'
+    render(<ComposerPanel inline />)
+
+    fireEvent.click(screen.getByTestId('send-button'))
+
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith(
+      'gfs://main/0123456789abcdef0123456789abcdef',
+      'chat-owner-a'
+    )
+  })
+
   it('renders the pending image chip and dispatches removal with its id', () => {
     render(<ComposerPanel inline />)
 
@@ -1296,6 +1328,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
   it('offers explicit recovery and dispatch and routes each action to the controller', () => {
     composerState.failedAgentSend = failedSend
     composerState.agentError = 'Sending failed'
+    composerState.workspaceChatTabId = 'owner-tab'
     render(<ComposerPanel inline />)
 
     expect(screen.getByText('Sending failed')).toBeTruthy()
@@ -1303,6 +1336,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Recover input' }))
     expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledTimes(1)
+    expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledWith('owner-tab')
     expect(actionsMock.handleDiscardFailedAgentSend).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Discard failed input' }))

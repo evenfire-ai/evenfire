@@ -49,7 +49,7 @@ function seedChildren(
   parentId: string,
   items: Array<{ resourceId: string; name?: string }>
 ) {
-  queryClient.setQueryData(desktopQueryKeys.gfsChildren(SCOPE, parentId, DRIVE), {
+  queryClient.setQueryData(desktopQueryKeys.gfsChildren(SCOPE, parentId, DRIVE, 1), {
     pages: [{ items: items.map(item => ({ ...item, name: item.name ?? item.resourceId })) }],
   })
 }
@@ -59,7 +59,7 @@ describe('collectKnownChildParents', () => {
     const queryClient = new QueryClient()
     seedChildren(queryClient, 'A', [{ resourceId: 'x' }, { resourceId: 'M' }])
     seedChildren(queryClient, 'M', [{ resourceId: 'c1' }])
-    expect(collectKnownChildParents(queryClient, SCOPE, DRIVE)).toEqual(
+    expect(collectKnownChildParents(queryClient, SCOPE, DRIVE, 1)).toEqual(
       new Map([
         ['x', 'A'],
         ['M', 'A'],
@@ -71,13 +71,13 @@ describe('collectKnownChildParents', () => {
   it('ignores other scopes, drives and key families', () => {
     const queryClient = new QueryClient()
     seedChildren(queryClient, 'A', [{ resourceId: 'x' }])
-    queryClient.setQueryData(desktopQueryKeys.gfsChildren('other-scope', 'A', DRIVE), {
+    queryClient.setQueryData(desktopQueryKeys.gfsChildren('other-scope', 'A', DRIVE, 1), {
       pages: [{ items: [{ resourceId: 'foreign' }] }],
     })
-    queryClient.setQueryData(desktopQueryKeys.gfsAffordances(SCOPE, 'x', DRIVE), {
+    queryClient.setQueryData(desktopQueryKeys.gfsAffordances(SCOPE, 'x', DRIVE, 1), {
       held: ['read'],
     })
-    const links = collectKnownChildParents(queryClient, SCOPE, DRIVE)
+    const links = collectKnownChildParents(queryClient, SCOPE, DRIVE, 1)
     expect(links.has('x')).toBe(true)
     expect(links.has('foreign')).toBe(false)
   })
@@ -90,20 +90,26 @@ describe('applyMoveConvergence', () => {
     seedChildren(queryClient, 'M', [{ resourceId: 'c1' }, { resourceId: 'c2', name: 'nested' }])
     seedChildren(queryClient, 'c1', [{ resourceId: 'c3' }])
     seedChildren(queryClient, 'B', [{ resourceId: 'unrelated' }])
-    queryClient.setQueryData(desktopQueryKeys.gfsAccessible(SCOPE, DRIVE), {
+    queryClient.setQueryData(desktopQueryKeys.gfsAccessible(SCOPE, DRIVE, 1), {
       pages: [{ items: [] }],
     })
     for (const id of ['M', 'c1', 'c3', 'B']) {
-      queryClient.setQueryData(desktopQueryKeys.gfsAffordances(SCOPE, id, DRIVE), {
+      queryClient.setQueryData(desktopQueryKeys.gfsAffordances(SCOPE, id, DRIVE, 1), {
         held: ['read'],
       })
     }
 
-    applyMoveConvergence(queryClient, SCOPE, DRIVE, {
-      resourceId: 'M',
-      oldParentId: 'A',
-      newParentId: 'B',
-    })
+    applyMoveConvergence(
+      queryClient,
+      SCOPE,
+      DRIVE,
+      {
+        resourceId: 'M',
+        oldParentId: 'A',
+        newParentId: 'B',
+      },
+      { sessionGeneration: 1 }
+    )
 
     // Let microtasks settle (invalidations are fire-and-forget promises).
     await Promise.resolve()
@@ -112,17 +118,17 @@ describe('applyMoveConvergence', () => {
     // data is now marked stale (isInvalidated true).
     const stale = (key: readonly unknown[]) =>
       queryClient.getQueryCache().find({ queryKey: key })?.state.isInvalidated === true
-    expect(stale(desktopQueryKeys.gfsChildren(SCOPE, 'A', DRIVE))).toBe(true)
-    expect(stale(desktopQueryKeys.gfsChildren(SCOPE, 'B', DRIVE))).toBe(true)
-    expect(stale(desktopQueryKeys.gfsAccessible(SCOPE, DRIVE))).toBe(true)
+    expect(stale(desktopQueryKeys.gfsChildren(SCOPE, 'A', DRIVE, 1))).toBe(true)
+    expect(stale(desktopQueryKeys.gfsChildren(SCOPE, 'B', DRIVE, 1))).toBe(true)
+    expect(stale(desktopQueryKeys.gfsAccessible(SCOPE, DRIVE, 1))).toBe(true)
     // The moved resource and its KNOWN descendants' permission data were
     // invalidated with refetchType none — stale, not eagerly refetched.
-    expect(stale(desktopQueryKeys.gfsAffordances(SCOPE, 'M', DRIVE))).toBe(true)
-    expect(stale(desktopQueryKeys.gfsAffordances(SCOPE, 'c1', DRIVE))).toBe(true)
-    expect(stale(desktopQueryKeys.gfsAffordances(SCOPE, 'c3', DRIVE))).toBe(true)
+    expect(stale(desktopQueryKeys.gfsAffordances(SCOPE, 'M', DRIVE, 1))).toBe(true)
+    expect(stale(desktopQueryKeys.gfsAffordances(SCOPE, 'c1', DRIVE, 1))).toBe(true)
+    expect(stale(desktopQueryKeys.gfsAffordances(SCOPE, 'c3', DRIVE, 1))).toBe(true)
     // Unknown-descendant guarantee: nothing outside the known subtree was touched.
-    expect(stale(desktopQueryKeys.gfsChildren(SCOPE, 'M', DRIVE))).toBe(false)
-    expect(stale(desktopQueryKeys.gfsAffordances(SCOPE, 'B', DRIVE))).toBe(false)
+    expect(stale(desktopQueryKeys.gfsChildren(SCOPE, 'M', DRIVE, 1))).toBe(false)
+    expect(stale(desktopQueryKeys.gfsAffordances(SCOPE, 'B', DRIVE, 1))).toBe(false)
   })
 
   it('re-reads the inherited access of the moved resource and of an ancestry-dependent one', async () => {
@@ -130,7 +136,7 @@ describe('applyMoveConvergence', () => {
     // The OPEN Share/Manage dialog observes this resource's inherited rows.
     // An active observer is what makes the query "active" for the
     // invalidation below.
-    const openKey = desktopQueryKeys.gfsInheritedAccess(SCOPE, 'open', DRIVE)
+    const openKey = desktopQueryKeys.gfsInheritedAccess(SCOPE, 'open', DRIVE, 1)
     let openReads = 0
     const openObserver = new QueryObserver(queryClient, {
       queryKey: openKey,
@@ -149,7 +155,7 @@ describe('applyMoveConvergence', () => {
       SCOPE,
       DRIVE,
       { resourceId: 'ancestor', oldParentId: 'A', newParentId: 'B' },
-      { ancestryDependentResourceIds: ['open'] }
+      { sessionGeneration: 1, ancestryDependentResourceIds: ['open'] }
     )
 
     // The dialog's rows were derived from an ancestry that no longer exists:
@@ -174,7 +180,7 @@ describe('applyMoveConvergence', () => {
       ancestorResourceIds: ['P', 'root'],
     })
 
-    const leafKey = desktopQueryKeys.gfsInheritedAccess(SCOPE, 'L', DRIVE)
+    const leafKey = desktopQueryKeys.gfsInheritedAccess(SCOPE, 'L', DRIVE, 1)
     let leafReads = 0
     const observer = new QueryObserver(queryClient, {
       queryKey: leafKey,
@@ -192,11 +198,17 @@ describe('applyMoveConvergence', () => {
     const readsBefore = leafReads
 
     // Move 1: the sidebar moves A under B.
-    applyMoveConvergence(queryClient, SCOPE, DRIVE, {
-      resourceId: 'A',
-      oldParentId: 'X',
-      newParentId: 'B',
-    })
+    applyMoveConvergence(
+      queryClient,
+      SCOPE,
+      DRIVE,
+      {
+        resourceId: 'A',
+        oldParentId: 'X',
+        newParentId: 'B',
+      },
+      { sessionGeneration: 1 }
+    )
     await Promise.resolve()
 
     // The leaf's chain now names B, so the SECOND move claims it.
@@ -213,7 +225,7 @@ describe('applyMoveConvergence', () => {
       SCOPE,
       DRIVE,
       { resourceId: 'B', oldParentId: 'P', newParentId: 'Q' },
-      { ancestryDependentResourceIds: ancestryDependent }
+      { sessionGeneration: 1, ancestryDependentResourceIds: ancestryDependent }
     )
 
     await vi.waitFor(() => expect(leafReads).toBeGreaterThan(readsBefore))
@@ -222,7 +234,7 @@ describe('applyMoveConvergence', () => {
 
   it('leaves an unrelated open inherited-access query alone', async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const openKey = desktopQueryKeys.gfsInheritedAccess(SCOPE, 'open', DRIVE)
+    const openKey = desktopQueryKeys.gfsInheritedAccess(SCOPE, 'open', DRIVE, 1)
     let openReads = 0
     const openObserver = new QueryObserver(queryClient, {
       queryKey: openKey,
@@ -236,14 +248,64 @@ describe('applyMoveConvergence', () => {
     await vi.waitFor(() => expect(openQuery.state.fetchStatus).toBe('idle'))
     expect(openReads).toBe(1)
 
-    applyMoveConvergence(queryClient, SCOPE, DRIVE, {
-      resourceId: 'unrelated',
-      oldParentId: 'A',
-      newParentId: 'B',
-    })
+    applyMoveConvergence(
+      queryClient,
+      SCOPE,
+      DRIVE,
+      {
+        resourceId: 'unrelated',
+        oldParentId: 'A',
+        newParentId: 'B',
+      },
+      { sessionGeneration: 1 }
+    )
 
     await Promise.resolve()
     expect(openReads).toBe(1)
     unsubscribe()
+  })
+})
+
+describe('generation-scoped Move convergence', () => {
+  it('invalidates only the captured generation and derives descendants only from that generation', () => {
+    const queryClient = new QueryClient()
+    for (const generation of [1, 2]) {
+      queryClient.setQueryData(desktopQueryKeys.gfsChildren(SCOPE, 'M', DRIVE, generation), {
+        pages: [{ items: [{ resourceId: generation === 1 ? 'old-child' : 'new-child' }] }],
+      })
+      for (const id of ['M', 'old-child', 'new-child']) {
+        queryClient.setQueryData(desktopQueryKeys.gfsAffordances(SCOPE, id, DRIVE, generation), {
+          held: ['read'],
+        })
+      }
+      queryClient.setQueryData(desktopQueryKeys.gfsChildren(SCOPE, 'A', DRIVE, generation), {
+        pages: [{ items: [] }],
+      })
+    }
+    applyMoveConvergence(
+      queryClient,
+      SCOPE,
+      DRIVE,
+      { resourceId: 'M', oldParentId: 'A', newParentId: 'B' },
+      { sessionGeneration: 1 }
+    )
+    const invalidated = (resourceId: string, generation: number) =>
+      queryClient.getQueryState(
+        desktopQueryKeys.gfsAffordances(SCOPE, resourceId, DRIVE, generation)
+      )?.isInvalidated
+    expect(invalidated('M', 1)).toBe(true)
+    expect(invalidated('old-child', 1)).toBe(true)
+    expect(invalidated('new-child', 1)).toBe(false)
+    expect(invalidated('M', 2)).toBe(false)
+    expect(invalidated('old-child', 2)).toBe(false)
+    expect(invalidated('new-child', 2)).toBe(false)
+    expect(
+      queryClient.getQueryState(desktopQueryKeys.gfsChildren(SCOPE, 'A', DRIVE, 1))?.isInvalidated
+    ).toBe(true)
+    expect(
+      queryClient.getQueryState(desktopQueryKeys.gfsChildren(SCOPE, 'A', DRIVE, 2))?.isInvalidated
+    ).toBe(false)
+    expect(collectKnownChildParents(queryClient, SCOPE, DRIVE, null).size).toBe(0)
+    queryClient.clear()
   })
 })

@@ -263,7 +263,7 @@ describe('decision table rows', () => {
   it('H1: handoff waits for every view main still holds', () => {
     const out = reduceEmbedOwnership(stateOf(mountedSeq), ev.handoff(7))
     expect(out.state.owner).toBeNull()
-    expect(out.state.handoffs).toEqual([{ requestId: 7, waitFor: new Set([A]) }])
+    expect(out.state.handoffs).toEqual([{ requestId: 7, waitFor: new Set([A]), ownerLaunchId: A }])
     expect(out.effects).toEqual([{ type: 'close', launchId: A }])
     const done = reduceEmbedOwnership(out.state, ev.released(A))
     expect(done.state.handoffs).toEqual([])
@@ -283,7 +283,7 @@ describe('decision table rows', () => {
     expect(phaseOf(s, B)).toBe('measuring')
     const out = reduceEmbedOwnership(s, ev.handoff(9))
     expect(out.state.views.has(B)).toBe(false)
-    expect(out.state.handoffs).toEqual([{ requestId: 9, waitFor: new Set([A]) }])
+    expect(out.state.handoffs).toEqual([{ requestId: 9, waitFor: new Set([A]), ownerLaunchId: B }])
     expect(out.effects).toEqual([{ type: 'launchSettled', launchId: B, outcome: 'abandoned' }])
   })
 
@@ -593,12 +593,13 @@ describe('decision table rows', () => {
     expectNoop(stateOf(mountedSeq), ev.released(C, 'crashed', null))
   })
 
-  it('X1: a failed CAS close drops the closing record', () => {
+  it('X1: a failed CAS close retains the closing record', () => {
     const s = stateOf([...mountedSeq, ev.relaunch(LB)])
     const out = reduceEmbedOwnership(s, ev.closeFailed(A))
-    expect(out.state.views.has(A)).toBe(false)
-    expect(phaseOf(out.state, B)).toBe('measuring')
-    expect(out.effects).toEqual([{ type: 'measure', launchId: B }])
+    expect(phaseOf(out.state, A)).toBe('closeFailed')
+    expect(phaseOf(out.state, B)).toBe('waiting')
+    expect(out.state.owner).toBe(B)
+    expect(out.effects).toEqual([])
   })
 
   it('T1: a title from the owner updates its tab', () => {
@@ -796,13 +797,17 @@ describe('level rules', () => {
       ev.mounted(B),
       ev.handoff(1),
     ])
-    expect(s.handoffs).toEqual([{ requestId: 1, waitFor: new Set([A, B]) }])
+    expect(s.handoffs).toEqual([{ requestId: 1, waitFor: new Set([A, B]), ownerLaunchId: B }])
     const first = reduceEmbedOwnership(s, ev.released(A))
-    expect(first.state.handoffs).toEqual([{ requestId: 1, waitFor: new Set([A, B]) }])
+    expect(first.state.handoffs).toEqual([
+      { requestId: 1, waitFor: new Set([A, B]), ownerLaunchId: B },
+    ])
     expect(first.effects).toEqual([])
     const second = reduceEmbedOwnership(first.state, ev.closeFailed(B))
     expect(second.state.handoffs).toEqual([])
-    expect(second.effects).toEqual([{ type: 'handoffReady', requestId: 1 }])
+    expect(second.state.views.has(B)).toBe(true)
+    expect(second.state.owner).toBe(B)
+    expect(second.effects).toEqual([{ type: 'handoffFailed', requestId: 1 }])
   })
 
   it('R-handoff: a later launch does not hold an earlier handoff', () => {
