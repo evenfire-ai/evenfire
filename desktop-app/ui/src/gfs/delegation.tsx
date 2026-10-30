@@ -88,9 +88,11 @@ export function GfsDelegationPanel({
     ? 'Checking permissions…'
     : permissionError
       ? `Could not verify sharing permissions: ${permissionError}`
-      : !affordances.canDelegate && subjectKeys.length > 0
-        ? 'Your sharing permission changed. Your edits are preserved, but cannot be submitted.'
-        : null
+      : permissionCheckFailed
+        ? null
+        : !affordances.canDelegate && subjectKeys.length > 0
+          ? 'Your sharing permission changed. Your edits are preserved, but cannot be submitted.'
+          : null
 
   const permissionDenied = !affordances.canDelegate && !checkPending && !checkFailed
   const draftGenerationRef = useRef(0)

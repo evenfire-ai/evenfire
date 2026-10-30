@@ -36,15 +36,18 @@ describe('GfsDelegationPanel', () => {
       <GfsDelegationPanel
         affordances={{ canDelegate: false, grantableBits: [], canCreateShare: false }}
         permissionCheckFailed
-        permissionError="Could not verify sharing permissions."
-        subjectOptions={[]}
+        subjectOptions={[{ type: 'user', id: 'user-u', label: 'User U' }]}
         isDirectory={false}
         onGrant={onGrant}
       />
     )
 
+    const picker = screen.getByRole('combobox', { name: PICKER_LABEL })
+    fireEvent.focus(picker)
+    fireEvent.click(screen.getByRole('option', { name: /User U/ }))
     expect(screen.queryByRole('note')).toBeNull()
-    expect(screen.getByText(/Could not verify sharing permissions\./)).toBeTruthy()
+    expect(screen.queryByText(/Your sharing permission changed/)).toBeNull()
+    expect(screen.getByText('User U')).toBeTruthy()
     expect(screen.getByRole('combobox', { name: 'Add people, teams, or agents' })).toBeTruthy()
     expect(container.firstChild).not.toBeNull()
     expect(onGrant).not.toHaveBeenCalled()
