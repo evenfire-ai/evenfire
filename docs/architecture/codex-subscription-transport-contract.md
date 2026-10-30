@@ -962,8 +962,8 @@ and tool descriptions. `auto` lists the 3 bridge tools in every Codex mode, even
 `direct` and even before MCP connects. It removes from `tools[]` each native whose
 serialized definition exceeds `CLERUM_NATIVE_TOOL_DISCOVERY_BYTES` (positive
 integer, default 2048; `0` is rejected at startup). At the default that is the
-pdf, xlsx, pptx, chart and dashboard generators. A removed native stays reachable:
-`clerum__tool_search` lists natives under the `native` server,
+pdf, docx, xlsx, pptx, chart and dashboard generators. A removed native stays
+reachable: `clerum__tool_search` lists natives under the `native` server,
 `clerum__tool_describe` returns their schema, and `clerum__tool_call` runs them
 by their real name, so the admission checks of a direct call (safety parameter
 checks, guardrails, approval) apply to that name. Neither path validates native

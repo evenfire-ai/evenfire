@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../httpClient.js'
 import { RpcProxyClient, SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
 
-// Mock the config module so the module-level url() helper uses a fixed base URL
+// Mock the config module so default clients use a fixed persisted base URL.
 vi.mock('../config.js', () => ({
   config: {
     rpcProxyBaseUrl: 'http://proxy',
@@ -12,6 +12,52 @@ vi.mock('../config.js', () => ({
     appName: 'test',
   },
 }))
+
+describe('RpcProxyClient endpoint provider', () => {
+  it('uses its supplied endpoint provider instead of the persisted configuration', async () => {
+    const client = new RpcProxyClient(() => 'https://effective-rpc.example.test/')
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: 'ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(client.health()).resolves.toEqual({ status: 'ok' })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://effective-rpc.example.test/health',
+      expect.any(Object)
+    )
+  })
+
+  it('uses its supplied endpoint for a Desktop session exchange', async () => {
+    const client = new RpcProxyClient(() => 'https://effective-rpc.example.test/')
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, hostRef: 'chatllm' }),
+      headers: {
+        get: (name: string) =>
+          name === 'set-cookie'
+            ? 'clerum_desktop_session=effective-cookie; Path=/api/v1/desktop/chatllm'
+            : null,
+      },
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(client.postDesktopSession('rpc-token', 'chatllm')).resolves.toEqual({
+      ok: true,
+      hostRef: 'chatllm',
+      setCookie: ['clerum_desktop_session=effective-cookie; Path=/api/v1/desktop/chatllm'],
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://effective-rpc.example.test/api/v1/desktop/chatllm/session',
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
+})
 
 describe('RpcProxyClient.listSessions', () => {
   let client: RpcProxyClient

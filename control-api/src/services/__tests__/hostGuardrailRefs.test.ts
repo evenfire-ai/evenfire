@@ -115,7 +115,7 @@ describe('hostGuardrailRefs', () => {
     expect(store.get('b')!.spec.guardrails?.hooks).toEqual({})
   })
 
-  it('syncHookRefsInHosts sets the ref to exactly the new phases + digest', async () => {
+  it('syncHookRefsInHosts keeps the Host phases still supported, bumping the digest', async () => {
     const { gateway, store } = gatewayWith([
       // referenced today in preCall+moderate at the old digest.
       host('a', {
@@ -131,11 +131,67 @@ describe('hostGuardrailRefs', () => {
       'mcp-host'
     )
     const hooks = store.get('a')!.spec.guardrails?.hooks
-    // moderate dropped, postCallSuccess added, new digest everywhere.
+    // moderate dropped (no longer supported); postCallSuccess NOT added (the Host
+    // never placed the hook there); new digest on what remains.
     expect(hooks).toEqual({
       preCall: [{ id: 'hook-x', digest: 'sha256:NEW' }],
-      postCallSuccess: [{ id: 'hook-x', digest: 'sha256:NEW' }],
     })
+  })
+
+  it('syncHookRefsInHosts does not re-add a phase the admin removed', async () => {
+    const { gateway, store } = gatewayWith([
+      // hook-x declares preCall+moderate; the admin removed it from moderate.
+      host('a', {
+        preCall: [{ id: 'other' }, { id: 'hook-x', digest: 'sha256:OLD' }],
+        moderate: [{ id: 'other' }],
+      }),
+    ])
+    await syncHookRefsInHosts(gateway, 'hook-x', ['preCall', 'moderate'], 'sha256:NEW', 'mcp-host')
+    expect(store.get('a')!.spec.guardrails?.hooks).toEqual({
+      preCall: [{ id: 'other' }, { id: 'hook-x', digest: 'sha256:NEW' }],
+      moderate: [{ id: 'other' }],
+    })
+  })
+
+  it('syncHookRefsInHosts keeps per-Host placements independent', async () => {
+    const { gateway, store } = gatewayWith([
+      host('a', { preCall: [{ id: 'hook-x', digest: 'sha256:OLD' }] }),
+      host('b', { moderate: [{ id: 'hook-x', digest: 'sha256:OLD' }] }),
+    ])
+    const touched = await syncHookRefsInHosts(
+      gateway,
+      'hook-x',
+      ['preCall', 'moderate'],
+      'sha256:NEW',
+      'mcp-host'
+    )
+    expect(touched.sort()).toEqual(['a', 'b'])
+    expect(store.get('a')!.spec.guardrails?.hooks).toEqual({
+      preCall: [{ id: 'hook-x', digest: 'sha256:NEW' }],
+    })
+    expect(store.get('b')!.spec.guardrails?.hooks).toEqual({
+      moderate: [{ id: 'hook-x', digest: 'sha256:NEW' }],
+    })
+  })
+
+  it('syncHookRefsInHosts falls back to the new phases when none of the Host phases survive', async () => {
+    // Leaving the hook unreferenced would silently stop a guardrail the admin
+    // placed on this Host, so re-reference it at the upgraded hook's phases.
+    const { gateway, store } = gatewayWith([
+      host('a', { moderate: [{ id: 'hook-x', digest: 'sha256:OLD' }] }),
+    ])
+    await syncHookRefsInHosts(gateway, 'hook-x', ['preToolUse'], 'sha256:NEW', 'mcp-host')
+    expect(store.get('a')!.spec.guardrails?.hooks).toEqual({
+      preToolUse: [{ id: 'hook-x', digest: 'sha256:NEW' }],
+    })
+  })
+
+  it('syncHookRefsInHosts drops a digest when the upgrade has none', async () => {
+    const { gateway, store } = gatewayWith([
+      host('a', { preCall: [{ id: 'hook-x', digest: 'sha256:OLD' }] }),
+    ])
+    await syncHookRefsInHosts(gateway, 'hook-x', ['preCall'], undefined, 'mcp-host')
+    expect(store.get('a')!.spec.guardrails?.hooks).toEqual({ preCall: [{ id: 'hook-x' }] })
   })
 
   // ── lost-update guards ────────────────────────────────────────────────────

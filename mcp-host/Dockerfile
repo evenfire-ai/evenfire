@@ -5,10 +5,10 @@
 # build must COPY packages/ alongside mcp-host/. Mirrors control-api /
 # workflow-recipes. Build invocations pass `-f mcp-host/Dockerfile .`.
 #
-# Pinned to Node 24.16.0 by digest: Node 24.17.0 ships an undici bump that
-# regresses node-fetch@2 (ERR_STREAM_PREMATURE_CLOSE). Keep the runtime frozen
-# so a floating `node:24-alpine` tag can't move the patch out from under us.
-FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
+# Pinned to Node 24.22.1 by digest for the October 2026 Node.js security
+# release. The HTTP regression covers the SDK and native fetch separately;
+# the CI runtime image gate also checks the effective version and native modules.
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS builder
 
 WORKDIR /app
 
@@ -34,9 +34,14 @@ COPY mcp-host/src ./src
 RUN npm run build && npm prune --omit=dev
 
 # Production image
-FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53
 
 WORKDIR /app
+
+# The chart and PDF renderers carry a face for Latin, Greek and Cyrillic; these
+# fonts add the arrows, check marks, CJK, Arabic and Hebrew it lacks. Alpine
+# packages Arabic and Hebrew apart from font-noto.
+RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew
 
 # Copy the shared package + package files + the already-pruned install
 COPY packages/llm-providers ./packages/llm-providers

@@ -21,7 +21,7 @@ Control UI is that loop, and it is the only place in the platform where all
 five steps live together.
 
 1. **See it** — `UsageDashboard` (`components/UsageDashboard`), at
-   `/cost/usage`. A stacked-area chart of input/output tokens over time, with
+   `/cost-and-usage/usage`. A stacked-area chart of input/output tokens over time, with
    **8 group-by dimensions**: team, model, agent (host), desktop user, recipe,
    provider, LLM secret, and source kind
    (`components/UsageDashboard/types.ts`). The desktop-user dimension is what
@@ -31,8 +31,8 @@ five steps live together.
    ![Control UI usage dashboard: stacked-area token usage over time, grouped by agent](../assets/control-ui-usage-dashboard.webp)
    _Dev cluster, demo tenant._
 
-2. **Cap it** — `TokenBudgetTable` (`/cost/token-budgets`) and
-   `LlmPriceTable` (`/cost/llm-prices`): per-1M-token model prices (input,
+2. **Cap it** — `TokenBudgetTable` (`/cost-and-usage/token-budgets`) and
+   `LlmPriceTable` (`/cost-and-usage/llm-prices`): per-1M-token model prices (input,
    output, cache read/write) and budgets with a scope, a period, and a
    progress bar against the limit. Budgets are cost control and are **not** a
    security boundary. A budget can be set to `warn` (observation only, never
@@ -77,12 +77,12 @@ five steps live together.
    _Dev cluster, demo tenant._
 
 5. **Govern what gets installed** — `RegistryCatalog`
-   (`components/RegistryCatalog.tsx`), at `/registry`: marketplace entries
-   (connectors and plugins) with trust levels (high / mid / low) and a
-   guided install flow, plus org-scoped publish API keys (create / reveal /
-   revoke) at `/registry/keys`. Connector images are checked against an
-   allowlist, audit-mode by default, on both the direct `/mcp-servers`
-   Create form and registry installs — but that check is a no-op unless an
+   (`components/RegistryCatalog.tsx`), under **Marketplace** (`/marketplace`):
+   entries (connectors, plugins, guardrails) with trust levels
+   (high / mid / low) and a guided install flow, plus org-scoped publish API
+   keys (create / reveal / revoke) at `/marketplace/keys`. Connector images are
+   checked against an allowlist, audit-mode by default, on both the direct
+   `/connectors` Create form and registry installs — but that check is a no-op unless an
    operator turns on enforcement, since the shipped default is off. The
    audit signal instead comes later, at reconcile: for a non-allowlisted
    image, `host-context-controller` logs a would-be denial ("audit mode,
@@ -96,7 +96,7 @@ five steps live together.
    registry) before it can install or
    [publish](../how-to/publish-plugin-to-registry.md) under its own org.
 
-   ![Control UI registry catalog at /registry showing trust levels and the install flow](../assets/control-ui-registry-install.webp)
+   ![Control UI marketplace catalog showing trust levels and the install flow (screenshot predates the current sidebar)](../assets/control-ui-registry-install.webp)
    _Dev cluster, demo tenant._
 
 ## Every screen writes a CRD
@@ -111,30 +111,31 @@ caveat to the heading: the `GlobalFileSystem` CRD itself is applied out of band
 (kustomize), and the Global File System screen only manages the brokered gfs
 resources and grants inside it — it never writes that CR.
 
-| Sidebar label      | Route                                                                                  | CRD / control-api resource                            |
-| ------------------ | -------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| Agent Files        | `/agent-files`                                                                         | `SharedFileSystem`                                    |
-| Agent Outputs      | `/agent-outputs/recipe-artifacts`                                                      | outputs (non-CRD)                                     |
-| Agents             | `/agents`                                                                              | `Host`                                                |
-| Connectors         | `/connectors`                                                                          | `McpServer`                                           |
-| Contexts           | `/contexts`                                                                            | `Context`                                             |
-| Cost & Usage       | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets` | cost (non-CRD)                                        |
-| External Channels  | `/external-channels`                                                                   | `CommunicationChannel`                                |
-| Global File System | `/global-file-system`                                                                  | gfs resources & grants (non-CRD)                      |
-| LLM Models         | `/llm-models`, `/llm-models/discovery`                                                 | tabbed model allowlist and discovery review (non-CRD) |
-| Marketplace        | `/marketplace/connectors`                                                              | registry (non-CRD)                                    |
-| Plugins            | `/plugins`                                                                             | `WorkflowRecipe`                                      |
-| Publisher          | `/publisher`                                                                           | publisher (non-CRD)                                   |
-| Secrets            | `/secrets/llm`                                                                         | secrets (non-CRD)                                     |
-| Settings           | `/settings/ui`                                                                         | settings (non-CRD)                                    |
-| Users & Teams      | `/users-and-teams/users`                                                               | users/teams (non-CRD)                                 |
+| Sidebar label         | Route                                                                                    | CRD / control-api resource                            |
+| --------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Users & Teams         | `/users-and-teams/users`                                                                 | users/teams (non-CRD)                                 |
+| Agents                | `/agents`                                                                                | `Host` (plus a private `Context` created per agent)   |
+| Marketplace           | `/marketplace/connectors`; your org's entries and credentials under `/marketplace/org/*` | registry (non-CRD)                                    |
+| Installed Connectors  | `/connectors`                                                                            | `McpServer`                                           |
+| Installed Plugins     | `/plugins`                                                                               | `WorkflowRecipe`                                      |
+| Installed Guardrails  | `/guardrails`                                                                            | `LlmHook`                                             |
+| Files                 | `/agent-files`                                                                           | `SharedFileSystem`                                    |
+| Files › EvenDrive     | `/global-file-system`                                                                    | gfs resources & grants (non-CRD)                      |
+| Files › Agent Outputs | `/agent-outputs/recipe-artifacts`                                                        | outputs (non-CRD)                                     |
+| External Channels     | `/external-channels`                                                                     | `CommunicationChannel`                                |
+| LLM Models            | `/llm-models`, `/llm-models/discovery`                                                   | tabbed model allowlist and discovery review (non-CRD) |
+| Secrets               | `/secrets/llm`                                                                           | secrets (non-CRD)                                     |
+| Cost & Usage          | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets`   | cost (non-CRD)                                        |
+| Settings              | `/settings/ui`                                                                           | settings (non-CRD)                                    |
+
+Contexts no longer have their own screen: the agent wizard creates a private
+`Context` per agent, connector installs create their own private access scope,
+and old `/contexts` links redirect to Agents. The former **Publisher** screens now live under
+**Marketplace › your org** (`/publisher/*` redirects there). A **Traces**
+section (`/traces/*`) exists but is hidden from the sidebar.
 
 Secret **values are write-only from the UI**: the Secrets screen lets an
 admin create or replace a value, but never displays one back.
-
-The **Publisher** entry appears in the sidebar only when publishing is enabled
-for the org (`isPublisherEnabled`, `components/Sidebar/index.tsx`); it is hidden
-otherwise.
 
 ## How it is wired
 

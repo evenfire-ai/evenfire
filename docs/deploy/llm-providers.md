@@ -5,9 +5,10 @@ credentials (including the multi-slot providers **Google Vertex AI** and
 **Amazon Bedrock**), how to manage the operator-declared model allowlist, and how
 the per-session model selector behaves in the desktop app.
 
-The canonical provider set — **23 providers**, from `openai`, `claude`
+The canonical provider set — **24 providers**, from `openai`, `claude`
 (Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock` to the
-OpenAI-compatible additions and `azure` — and their credential slots live in the
+OpenAI-compatible additions, `azure`, and the two sign-in subscription providers
+(`codex-subscription`, `grok-subscription`, off by default in `deploy/base`) — and their credential slots live in the
 shared `@clerum/llm-providers` package, which the Control UI, control-api,
 mcp-host, and the workflow runtime all consume. See the
 [providers overview](../llm-providers/README.md) for the full list and the
@@ -58,7 +59,9 @@ returns key names only). To rotate a key, re-enter it.
    - The driver builds GCP credentials **from the JSON in memory** — it never
      writes a key file and does not use `GOOGLE_APPLICATION_CREDENTIALS`.
 3. On the Host, open **Host → Environment** and set:
-   - `VERTEX_PROJECT_ID` — the GCP project id (required).
+   - `VERTEX_PROJECT_ID` — the GCP project id. Set it explicitly: when it is
+     unset, the driver silently falls back to the service-account JSON's
+     `project_id`, and fails only if both are missing.
    - `VERTEX_LOCATION` — the region, e.g. `us-central1` (optional; provider
      default applies if unset).
 4. Set the Host `spec.model.provider: vertex` and pick a Vertex model from the
@@ -79,6 +82,16 @@ returns key names only). To rotate a key, re-enter it.
    allowlist. Bedrock model ids are runtime-qualified, e.g.
    `anthropic.claude-sonnet-4-6-v1:0`.
 
+## 3a. Configuring Azure OpenAI
+
+1. In Control UI, open **Secrets → LLM**, expand the **Azure OpenAI** group,
+   and enter `azure-openai-api-key`.
+2. On the Host, open **Host → Environment** and set `AZURE_OPENAI_ENDPOINT`
+   (required, must be `https://`; the driver fails closed otherwise) and optionally
+   `AZURE_OPENAI_API_VERSION`.
+3. Set the Host `spec.model.provider: azure`. The model name is your **Azure
+   deployment name**, not a catalog id, so allowlist the deployment name.
+
 ### Bedrock and Azure in workflows
 
 `bedrock` and `azure` are **not admissible in WorkflowRecipe steps**: they are
@@ -86,18 +99,19 @@ deliberately absent from the recipe CRD's provider enum, so a recipe pinning
 either is rejected at admission. The workflow `configure` transport carries a
 single credential string, which can deliver neither Bedrock's key pair nor
 Azure's required endpoint. Both remain fully supported for interactive Hosts;
-the other 20 providers are admissible in recipes — see the
+the other 22 providers are admissible in recipes — see the
 [providers overview](../llm-providers/README.md) for the per-surface matrix and
 the `clerum-model-secret-mapping` caveat.
 
-> **Dev-mode note.** When mcp-host runs in dev mode with no explicit
-> `spec.model`, it auto-detects the provider from whichever credential env vars
-> are present, in canonical id order (`openai` → `claude` → `zai` → `bailian` →
-> `vertex` → `bedrock` → the rest). Because Bedrock's slots are the standard AWS variables
-> (`aws-access-key-id` / `aws-secret-access-key`), a shell that already exports
-> generic AWS credentials — with `AWS_REGION` also set — can auto-select
-> `bedrock` when no higher-priority provider key is exported. Set `spec.model`
-> explicitly (or unset the AWS vars) if that is not what you want in dev.
+> **Dev-mode note.** Single-service dev mode (`CLERUM_DEV_MODE=true`, no
+> Kubernetes) reads credentials from env vars. If `CLERUM_MODEL_PROVIDER` is
+> unset, mcp-host auto-detects the first provider whose keys are present.
+> Because Bedrock's env vars are the standard `AWS_ACCESS_KEY_ID` /
+> `AWS_SECRET_ACCESS_KEY`, a shell that already exports AWS credentials can
+> auto-select `bedrock`; set `CLERUM_MODEL_PROVIDER` explicitly to avoid that.
+> Selection needs only the two keys, but Bedrock still needs `AWS_REGION` to
+> run; without it the provider fails to construct and mcp-host runs degraded. See
+> [Local development](../llm-providers/README.md#46-local-development-no-kubernetes).
 
 ## 4. Extra credential slots (for provider fallback, R5)
 
@@ -122,11 +136,20 @@ Fail-closed semantics: a model is usable only if a row exists for
 `(provider, model)` with `enabled = true`. A provider with no enabled rows is
 unusable and is flagged in the wizard.
 
+**Discovery review.** `/llm-models` (Catalog) and `/llm-models/discovery`
+(Discovery Review) are two tabs of the same screen. A models.dev catalog sync
+adds new rows as **disabled** for you to review; it never enables anything on
+its own. Models that disappear from the latest live catalog stay in Catalog
+with a **Stale** marker and a per-provider stale count.
+
+Per-model image-input capability (`image_input`) is covered in the
+[providers overview](../llm-providers/README.md#image-input-capability-image_input).
+
 ### Propagation to runtime (ConfigMap)
 
 control-api materializes the allowlist into the **`clerum-llm-allowed-models`**
 ConfigMap in the `mcp-host` namespace (`<provider>` → JSON array of
-`{ model, displayName?, contextWindowTokens? }`). mcp-host and the workflow
+`{ model, displayName?, contextWindowTokens?, vendor?, imageInput? }`). mcp-host and the workflow
 runtime read it — there is no hot call from mcp-host to control-api (the
 NetworkPolicy denies it by design). Changes therefore propagate **without a
 redeploy**: edit the allowlist, and the wizard, the host editor, and the runtime

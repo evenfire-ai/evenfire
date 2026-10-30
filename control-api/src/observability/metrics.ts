@@ -188,10 +188,23 @@ export const oauthBrokerJwtIssueTotal = getOrCreateCounter({
   labelNames: ['result'] as const as Array<'result'>, // issued | recipe_not_found | not_background_access
 })
 
+// Refresh endpoint outcomes (also the label of the duration histogram below).
+// The 401 body stays opaque; the label is emitted server-side in a `finally`.
+// Label values (binding outcomes share their names with the re-issue counter):
+//   success                  — token rotated, fresh token set minted
+//   failed                   — missing bearer; signature/claims/expiry rejected;
+//                              replay of a jti already consumed at verify time;
+//                              unhandled error
+//   host_unavailable         — Host lookup failed transiently (503, jti not consumed)
+//   host_mismatch            — HCC chain's Host is gone or was recreated (new uid)
+//   lineage_without_audience — hosts-namespace standalone chain without HCC audience
+//   race_lost                — jti consumed concurrently between verify and consume
+//                              (not the re-issue `revoked`, which also covers replay)
+// Rate-limited requests never reach the handler and are not counted here.
 export const mcpHostJwtRefreshTotal = getOrCreateCounter({
   name: 'workflow_auth_refresh_total',
   help: 'Count of workflow refresh attempts labelled by result.',
-  labelNames: ['result'] as const as Array<'result'>, // success | failed | rotated
+  labelNames: ['result'] as const as Array<'result'>,
 })
 
 export const mcpHostJwtRefreshDurationSeconds = getOrCreateHistogram({
@@ -210,14 +223,28 @@ export const mcpHostJwtRefreshDurationSeconds = getOrCreateHistogram({
 //   invalid_sig    — JWT signature / iss / aud / scope / format rejected
 //   invalid_claims — JWT verified but failed refresh-token claim validation
 //   expired_beyond_reissue_grace — signed refresh token is too old to reissue
-//   revoked        — jti already present in workflow_revoked_refresh_jtis
+//   revoked        — jti already present in workflow_revoked_refresh_jtis at verify
+//                    time, or consumed concurrently between verify and consume
 //   mismatch       — recipe_name body did not match JWT sub's recipe component
-//   rate_limited   — limiter denied before handler ran (emitted in middleware)
 //   bad_request    — missing/malformed body or bearer token
+//   host_unavailable — Host lookup failed transiently (503, jti not consumed)
+//   host_mismatch  — HCC chain's Host is gone or was recreated (new uid)
+//   lineage_without_audience — hosts-namespace standalone chain without HCC audience
+// Rate-limited requests never reach the handler and are not counted here.
 export const mcpHostJwtReissueTotal = getOrCreateCounter({
   name: 'workflow_auth_reissue_requests_total',
   help: 'Count of workflow auth re-issue attempts labelled by result.',
   labelNames: ['result'] as const as Array<'result'>,
+})
+
+// OAuth mcp-server broker refused a caller on its Host binding. reason:
+// lineage | unauthenticated | host_not_bound | server_not_found |
+// no_grant | unavailable. route: user_token |
+// grants_exists. The mcp-server and Host go to the log, never a label.
+export const mcpOauthBrokerDeniedTotal = getOrCreateCounter({
+  name: 'mcp_oauth_broker_denied_total',
+  help: 'Count of OAuth broker requests denied by the Host binding, by reason and route.',
+  labelNames: ['reason', 'route'] as const as Array<'reason' | 'route'>,
 })
 
 // MCP server uninstall: a cleanup step failed. Every stage except
@@ -668,4 +695,20 @@ export const llmAllowlistConfigMapWriteFailuresTotal = getOrCreateCounter({
   name: 'clerum_llm_allowlist_configmap_write_failures_total',
   help: 'Count of failed clerum-llm-allowed-models ConfigMap writes, labelled by phase.',
   labelNames: ['phase'] as const as Array<'phase'>, // mutation | boot | sync
+})
+
+export type PasswordAdmissionDenialReason =
+  | 'source_rate'
+  | 'identifier_attempts'
+  | 'identifier_cooldown'
+  | 'identifier_migration_hold'
+  | 'identifier_operation_busy'
+  | 'global_pace'
+  | 'verification_busy'
+  | 'authority_failure'
+
+export const passwordAdmissionDenialsTotal = getOrCreateCounter({
+  name: 'password_admission_denials_total',
+  help: 'Password admission denials by bounded internal reason; never labelled by identity.',
+  labelNames: ['reason'] as const as Array<'reason'>,
 })

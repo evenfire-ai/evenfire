@@ -8,7 +8,10 @@ import { config } from '../../config.js'
 import { type DbClient, pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { extractK8sError, k8sSafeFailureMessage } from '../../http/k8sError.js'
-import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
+import {
+  stripLegacyMcpServerSpecFields,
+  validateMcpServerSpecPreflight,
+} from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
@@ -22,7 +25,6 @@ import {
 import { getOAuthProviderAdapter, isKnownOAuthProvider } from '../../oauth/providers.js'
 import { rootLogger } from '../../observability/logger.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
-import { attachServerToContext } from '../../services/contextAllowlist.js'
 import {
   addHookRefToHost,
   listHostsReferencingHook,
@@ -354,8 +356,7 @@ function assertHookAdmissible(
       status: 400,
       body: {
         error: 'content_access_conflict',
-        reason:
-          'contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError (§8.4)',
+        reason: `contentAccess: metadata is not allowed for a hook using ${[...INHERENTLY_CONTENT_POINTS].join('/')} (§8.4)`,
       },
     }
   }
@@ -1633,7 +1634,6 @@ async function waitForDeletion(
 export interface RegistryInstallRequest {
   serverName?: string
   namespace?: string
-  contextRef: string
   registryEntryName: string
   registryEntryVersion: string
   credentials?: Record<string, string>
@@ -2026,10 +2026,6 @@ export function createAdminRegistryRouter(
           })
           return
         }
-        if (!body.contextRef || typeof body.contextRef !== 'string' || !body.contextRef.trim()) {
-          res.status(400).json({ error: 'contextRef is required' })
-          return
-        }
         if (!body.registryEntryName || typeof body.registryEntryName !== 'string') {
           res.status(400).json({ error: 'registryEntryName is required' })
           return
@@ -2044,7 +2040,6 @@ export function createAdminRegistryRouter(
           body.serverName?.trim() ||
           generateRegistryName(body.registryEntryName, body.registryEntryVersion)
         const targetNs = body.namespace || config.mcpServersNamespace
-        const contextRef = body.contextRef.trim()
 
         // ── Step 1: Fetch entry metadata from registry ────────────────────
         const entry = await getEntryVersion(body.registryEntryName, body.registryEntryVersion)
@@ -2139,7 +2134,6 @@ export function createAdminRegistryRouter(
 
         const mcpServerSpec: Record<string, unknown> = {
           image: isLocal ? ((meta?.imageRef as string) ?? '') : REMOTE_MCP_EGRESS_PROXY_IMAGE,
-          contextRef,
           description: entry.description || undefined,
           enabled: true,
           managed: true,
@@ -2607,8 +2601,8 @@ export function createAdminRegistryRouter(
 
         // ── Step 3b: Create the managed OAuth client Secret (D-B3) ────────
         // Only for managed mode; reference mode was verified above and creates
-        // nothing. Written before the CR that references it, and rolled back with
-        // the CR/context on any later failure via its snapshot (same UID/RV-fenced
+        // nothing. Written before the CR that references it, and rolled back when
+        // the CR create fails, via its snapshot (same UID/RV-fenced
         // mechanism dev uses for the envSecret) so a failed install leaves no
         // orphaned Secret (H-2/H-3).
         if (managedOAuthSecret) {
@@ -2678,8 +2672,10 @@ export function createAdminRegistryRouter(
           })
         }
 
-        // ── Step 4: Create McpServer CRD (rollback by UID on failure) ────
-        let createdMcpServerSnapshot: RegistryResourceSnapshot | null = null
+        // ── Step 4: Create the McpServer CR ───────────────────────────────
+        // A create response without uid/resourceVersion does not prove what was
+        // persisted, so it is answered as an ambiguous outcome (503) rather than a
+        // success; only a deterministic rejection lets the credential Secrets roll back.
         try {
           const created = await gateway.createResource(
             'mcpservers',
@@ -2693,7 +2689,7 @@ export function createAdminRegistryRouter(
             },
             targetNs
           )
-          createdMcpServerSnapshot = normalizeRegistryResourceSnapshot(
+          const createdMcpServerSnapshot = normalizeRegistryResourceSnapshot(
             created,
             serverName,
             targetNs
@@ -2754,105 +2750,7 @@ export function createAdminRegistryRouter(
           throw err
         }
 
-        // ── Step 5: Update Context allowlist ──────────────────────────────
-        // The Context allowlist is authoritative for host discovery. If this
-        // step fails, the McpServer exists but is unreachable, so the install
-        // must roll back rather than return a false success.
-        // Contexts live in their own namespace, never in the McpServer's target
-        // namespace. Naming it explicitly at every site keeps the read, the
-        // write, the snapshot and the readback addressed to ONE object: while
-        // the read and write relied on the gateway default and the snapshot and
-        // readback used `targetNs`, any install with an explicit
-        // `body.namespace` fenced against a different object than it wrote, so
-        // a committed association could never classify as committed. The Host
-        // association path below already passes `config.hostsNamespace` this way.
-        const contextsNs = config.contextsNamespace
-        let contextBefore: RegistryResourceSnapshot | null = null
-        try {
-          // The before-image for the ambiguous-outcome readback below is the snapshot
-          // the LAST attempt edited: an earlier one is stale after a 409 retry.
-          await attachServerToContext(
-            gateway,
-            { name: contextRef, namespace: contextsNs },
-            serverName,
-            {
-              onRead: ctx => {
-                contextBefore = normalizeRegistryResourceSnapshot(ctx, contextRef, contextsNs)
-              },
-            }
-          )
-        } catch (err) {
-          let associationOutcome: RegistryMutationOutcome = isDeterministicRegistryNoCommit(err)
-            ? 'not-committed'
-            : 'ambiguous'
-          if (contextBefore && associationOutcome === 'ambiguous') {
-            associationOutcome = await readRegistryAssociationOutcome(
-              gateway,
-              'contexts',
-              contextRef,
-              contextsNs,
-              contextBefore,
-              spec =>
-                Array.isArray(spec.mcpServers) &&
-                (spec.mcpServers as unknown[]).includes(serverName)
-            )
-          }
-          if (contextBefore && associationOutcome === 'ambiguous') {
-            res.status(503).json({
-              error: 'registry_install_outcome_ambiguous',
-              outcome: 'repair_required',
-              resourceName: contextRef,
-              resourceType: 'context',
-              namespace: contextsNs,
-            })
-            return
-          }
-          if (associationOutcome !== 'committed') {
-            let resourceRollbackFailed = false
-            try {
-              await rollbackCreatedResource(
-                gateway,
-                'mcpservers',
-                createdMcpServerSnapshot!,
-                `McpServer/${serverName}`
-              )
-            } catch {
-              resourceRollbackFailed = true
-            }
-            if (resourceRollbackFailed) {
-              res.status(500).json({
-                error: 'registry_install_rollback_incomplete',
-                outcome: 'compensation_failed',
-              })
-              return
-            }
-            if (createdSecretSnapshot || createdOAuthClientSecretSnapshot) {
-              // The CR was live during this saga. There is no Kubernetes
-              // transaction that atomically proves its absence and deletes a
-              // separately named Secret (the envSecret or the managed OAuth
-              // client Secret). Preserve the dependency for repair; deleting it
-              // after the CR rollback would permit a replacement CR to race into
-              // the same name and reference. The compensation_failed 500 flags
-              // the leftover Secret for the operator, so a failed install never
-              // silently orphans one (H-2/H-3).
-              res.status(500).json({
-                error: 'registry_install_rollback_incomplete',
-                outcome: 'compensation_failed',
-              })
-              return
-            }
-            const k8sErr = extractK8sError(err)
-            const message =
-              k8sErr?.message ||
-              (err instanceof Error ? err.message : 'Failed to update Context allowlist')
-            res
-              .status(k8sErr?.status ?? 500)
-              .json({ error: `Context allowlist update failed: ${message}` })
-            return
-          }
-        }
-
-        // ── Step 6: Report install to registry (fire-and-forget) ──────────
+        // ── Step 5: Report install to registry (fire-and-forget) ──────────
         const correlationId = crypto.randomUUID()
         reportInstall(body.registryEntryName, correlationId, body.registryEntryVersion).catch(
           () => {}
@@ -2861,8 +2759,6 @@ export function createAdminRegistryRouter(
         res.status(201).json({
           serverName,
           namespace: targetNs,
-          contextRef,
-          contextUpdated: true,
           registryEntry: body.registryEntryName,
           registryVersion: body.registryEntryVersion,
           correlationId,
@@ -4219,8 +4115,9 @@ export function createAdminRegistryRouter(
           return
         }
 
-        // 3. Build updated spec (preserve contextRef from existing)
-        const existingSpec = existingServer.spec ?? {}
+        // 3. Build updated spec. The spread carries every other field of the existing
+        // spec forward, so the fields control-api no longer writes are dropped here.
+        const existingSpec = stripLegacyMcpServerSpecFields(existingServer.spec ?? {})
         const transport = (entry.transport ?? 'streamableHttp') as string
         const port = (meta?.port as number) ?? 3000
         let remoteBaseUrl: string | undefined

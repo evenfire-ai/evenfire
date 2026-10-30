@@ -26,6 +26,7 @@ import {
 } from '../../core/types'
 import type { ProviderCredentials } from '../../types'
 import { classifyUnknown } from '../errorClassification'
+import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
 
@@ -361,7 +362,9 @@ export interface VertexClientOptions {
 }
 
 /**
- * Pure: derive the Vertex client options from the credential bag + pod env,
+ * Pure: derive the Vertex client options from the credential bag + the
+ * non-secret provider env (`env`: per-Host `host-<ref>-env` via ConfigStore in a
+ * Host pod, `process.env` by default),
  * constructing the auth credentials IN MEMORY from the service-account JSON —
  * never via a `GOOGLE_APPLICATION_CREDENTIALS` file. `VERTEX_PROJECT_ID`
  * (falling back to the JSON's `project_id`) is required; `VERTEX_LOCATION`
@@ -370,7 +373,10 @@ export interface VertexClientOptions {
  * {@link buildGoogleGenerativeDriver} so all the wiring is testable without the
  * SDK.
  */
-export function buildVertexClientOptions(credentials: ProviderCredentials): VertexClientOptions {
+export function buildVertexClientOptions(
+  credentials: ProviderCredentials,
+  env: ProviderEnvLookup = processEnvLookup
+): VertexClientOptions {
   const rawJson = credentials['vertex-service-account-json']
   if (!rawJson) throw new Error('vertex: missing service-account JSON credential')
 
@@ -385,9 +391,9 @@ export function buildVertexClientOptions(credentials: ProviderCredentials): Vert
     throw new Error('vertex: service-account JSON missing client_email/private_key')
   }
 
-  const projectId = process.env.VERTEX_PROJECT_ID || sa.project_id
+  const projectId = env('VERTEX_PROJECT_ID')?.trim() || sa.project_id
   if (!projectId) throw new Error('vertex: VERTEX_PROJECT_ID is required')
-  const location = process.env.VERTEX_LOCATION || 'us-central1'
+  const location = env('VERTEX_LOCATION')?.trim() || 'us-central1'
 
   return {
     vertexai: true,
@@ -409,9 +415,10 @@ export function buildVertexClientOptions(credentials: ProviderCredentials): Vert
  */
 export function buildGoogleGenerativeDriver(
   credentials: ProviderCredentials,
-  model: string
+  model: string,
+  env: ProviderEnvLookup = processEnvLookup
 ): SingleTurnProvider {
-  const options = buildVertexClientOptions(credentials)
+  const options = buildVertexClientOptions(credentials, env)
 
   // Lazy CommonJS require — only reached for a Vertex Host.
 

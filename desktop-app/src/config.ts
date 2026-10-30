@@ -524,6 +524,13 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+export function validateRpcProxyBaseUrl(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || !isHttpUrl(value.trim())) {
+    throw new Error('rpcProxyBaseUrl must be a valid http(s) URL')
+  }
+  return value.trim()
+}
+
 function validateRuntimeConfig(next: DesktopRuntimeConfig): DesktopRuntimeConfig {
   const normalized = {
     externalRestApiBaseUrl: next.externalRestApiBaseUrl.trim(),
@@ -534,8 +541,8 @@ function validateRuntimeConfig(next: DesktopRuntimeConfig): DesktopRuntimeConfig
   if (!isHttpUrl(normalized.externalRestApiBaseUrl)) {
     throw new Error('externalRestApiBaseUrl must be a valid http(s) URL')
   }
-  if (normalized.rpcProxyBaseUrl && !isHttpUrl(normalized.rpcProxyBaseUrl)) {
-    throw new Error('rpcProxyBaseUrl must be a valid http(s) URL')
+  if (normalized.rpcProxyBaseUrl) {
+    normalized.rpcProxyBaseUrl = validateRpcProxyBaseUrl(normalized.rpcProxyBaseUrl)
   }
   return normalized
 }
@@ -829,6 +836,12 @@ export function resolveEnvKey(externalRestApiBaseUrl: string, rpcProxyBaseUrl = 
     .slice(0, 48)
   const hash = createHash('sha256').update(identity).digest('hex').slice(0, 12)
   return `${slug || 'env'}-${hash}`
+}
+
+/** Hydrated active profile identity without constructing the diagnostics projection. */
+export function getActiveRuntimeConfigOptionId(): string | null {
+  hydrateDesktopRuntimeConfig()
+  return activeRuntimeOptionId
 }
 
 /** Env key for the CURRENTLY active runtime config (main-process surfaces). */

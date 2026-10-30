@@ -13,6 +13,7 @@ import { IconKey } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
 import { Button, Field, FormSection, SelectInput, TextInput } from '@components/ui'
+import { MCP_SECRET_NAME_PATTERN } from '@constants/connectorCredentials'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
@@ -23,6 +24,7 @@ import {
   createRecipeSecret,
   getRecipes,
   getRegistryCredentialSchema,
+  listMcpSecrets,
 } from '@lib/api'
 import { isValidDNSSubdomain } from '@lib/k8sValidation'
 import { createEmptyLlmKeyDraft, validateLlmSecretData } from '@lib/llm'
@@ -34,7 +36,6 @@ import type { CredentialDraftRow } from '@lib/registryCredentialDraft.types'
 
 const HOST_SECRET_LABEL_KEY = 'clerum.io/host-secret'
 const HOST_SECRET_LABEL_VALUE = 'true'
-const MCP_SECRET_NAME_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
 const LLM_SECRET_NAME_FIELD_ID = 'llm-secret-name'
 const LLM_SECRET_NAME_ERROR_ID = `${LLM_SECRET_NAME_FIELD_ID}-error`
 const LLM_SECRET_NAME_ERROR =
@@ -92,6 +93,7 @@ function CreateSecretPageContent() {
   const registryEntryVersion =
     scope === 'mcp' ? (searchParams.get('registryVersion') ?? '').trim() : ''
   const [mcpName, setMcpName] = useState(prefillMcpName)
+  const [mcpNameTaken, setMcpNameTaken] = useState(false)
   const [mcpRows, setMcpRows] = useState<CredentialDraftRow[]>(() => [
     createSecretDraftRow('mcp-secret-row-0'),
   ])
@@ -192,9 +194,37 @@ function CreateSecretPageContent() {
     return Object.values(llmKeyDraft).some(value => value.trim().length > 0) && !saving
   }, [llmKeyDraft, llmName, saving])
 
+  // Creating a connector secret whose name already exists can only 409 —
+  // the backend refuses duplicates by design. Check the provisioned listing
+  // while the operator types so the wizard never walks them into that wall.
+  useEffect(() => {
+    if (scope !== 'mcp') return
+    const candidate = mcpName.trim()
+    if (!candidate || !MCP_SECRET_NAME_PATTERN.test(candidate)) {
+      setMcpNameTaken(false)
+      return
+    }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      listMcpSecrets()
+        .then(result => {
+          if (cancelled) return
+          setMcpNameTaken((result.items ?? []).some(item => item.name === candidate))
+        })
+        .catch(() => {
+          if (!cancelled) setMcpNameTaken(false)
+        })
+    }, 300)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [mcpName, scope])
+
   const mcpCanSubmit = useMemo(() => {
     if (!mcpName.trim()) return false
     if (!MCP_SECRET_NAME_PATTERN.test(mcpName.trim()) || mcpName.trim().length > 253) return false
+    if (mcpNameTaken) return false
     const hasValues = mcpRows.some(
       row => row.secretKey.trim().length > 0 && row.value.trim().length > 0
     )
@@ -202,7 +232,7 @@ function CreateSecretPageContent() {
       !mcpCredentialSchema?.required ||
       areRequiredCredentialRowsComplete(mcpRows, mcpCredentialSchema.keys)
     return hasValues && schemaComplete && !saving
-  }, [mcpCredentialSchema, mcpName, mcpRows, saving])
+  }, [mcpCredentialSchema, mcpName, mcpNameTaken, mcpRows, saving])
 
   const recipeCanSubmit = useMemo(() => {
     if (!recipeName.trim()) return false
@@ -241,6 +271,7 @@ function CreateSecretPageContent() {
     step === 0
       ? activeSecretName.length > 0 &&
         activeNameValid &&
+        (scope !== 'mcp' || !mcpNameTaken) &&
         (scope !== 'recipe' ||
           recipeOwnershipKind === 'shared' ||
           recipeOwnerName.trim().length > 0)
@@ -315,6 +346,10 @@ function CreateSecretPageContent() {
     }
   }
 
+  function nameTakenMessage(secretName: string): string {
+    return `A connector secret named "${secretName}" already exists. Rotate its values instead of creating it again.`
+  }
+
   async function saveMcpSecretResource() {
     const secretName = mcpName.trim()
     if (!secretName) {
@@ -336,6 +371,18 @@ function CreateSecretPageContent() {
       setError('Provide at least one key and value.')
       return
     }
+    // Re-check at submit: a secret may have been created after the debounced
+    // availability check ran, and POSTing a duplicate can only 409.
+    try {
+      const provisioned = await listMcpSecrets()
+      if ((provisioned.items ?? []).some(item => item.name === secretName)) {
+        setMcpNameTaken(true)
+        setError(nameTakenMessage(secretName))
+        return
+      }
+    } catch {
+      // Availability is advisory; let the create attempt surface real errors.
+    }
 
     setSaving(true)
     setError('')
@@ -344,7 +391,8 @@ function CreateSecretPageContent() {
       showToast(`Secret ${secretName} created.`, { tone: 'success' })
       router.push(secretsListPath)
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Failed to create secret')
+      const message = saveError instanceof Error ? saveError.message : 'Failed to create secret'
+      setError(/already exists/i.test(message) ? nameTakenMessage(secretName) : message)
     } finally {
       setSaving(false)
     }
@@ -509,9 +557,11 @@ function CreateSecretPageContent() {
                   <Field
                     description="Kubernetes resource name: lowercase alphanumeric and hyphens, max 253 chars."
                     error={
-                      activeNameInvalid
-                        ? 'Name must match the Kubernetes DNS name format.'
-                        : undefined
+                      mcpNameTaken
+                        ? `A connector secret named "${mcpName.trim()}" already exists.`
+                        : activeNameInvalid
+                          ? 'Name must match the Kubernetes DNS name format.'
+                          : undefined
                     }
                     errorId="mcp-secret-name-error"
                     htmlFor="mcp-secret-name"
@@ -520,9 +570,11 @@ function CreateSecretPageContent() {
                   >
                     <TextInput
                       id="mcp-secret-name"
-                      invalid={activeNameInvalid}
-                      aria-invalid={activeNameInvalid || undefined}
-                      aria-describedby={activeNameInvalid ? 'mcp-secret-name-error' : undefined}
+                      invalid={activeNameInvalid || mcpNameTaken}
+                      aria-invalid={activeNameInvalid || mcpNameTaken || undefined}
+                      aria-describedby={
+                        activeNameInvalid || mcpNameTaken ? 'mcp-secret-name-error' : undefined
+                      }
                       monospace
                       value={mcpName}
                       onChange={event => setMcpName(event.target.value)}
@@ -531,6 +583,19 @@ function CreateSecretPageContent() {
                       autoFocus
                     />
                   </Field>
+                  {mcpNameTaken ? (
+                    <div>
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--ghost cu-btn--sm"
+                        onClick={() =>
+                          router.push(CONTROL_ROUTES.secrets.editConnector(mcpName.trim()))
+                        }
+                      >
+                        Rotate its values instead
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 

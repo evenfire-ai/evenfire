@@ -6,9 +6,10 @@ name: Build & Publish
 # ghcr -> GCP Artifact Registry (digest-identical) and deploys by digest.
 #
 # Change-detected like the legacy deploy build: only images whose source paths
-# changed since the previous commit are (re)built. A manual run with
-# build_all=true rebuilds the whole matrix (use this for the first publish, or
-# to repopulate ghcr).
+# changed since the last dev push whose run succeeded are (re)built — not
+# since the previous commit, so a failed run's images are rebuilt by the next
+# push instead of being stranded. A manual run with build_all=true rebuilds
+# the whole matrix (use this for the first publish, or to repopulate ghcr).
 #
 # Every image is built multi-arch (amd64 + arm64), not amd64-only: minikube
 # pulls these images directly onto arm64 hardware (Apple Silicon laptops), so
@@ -59,6 +60,11 @@ jobs:
     # build-push, notify-infra needs merge, so a fork skips the whole
     # workflow cleanly.
     if: github.repository == 'evenfire-ai/evenfire'
+    # Still read-only: actions: read only lets Resolve build mode look up the
+    # last successful run of this workflow.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       force_all: ${{ steps.base.outputs.force_all }}
       channel-reader: ${{ steps.filter.outputs.channel-reader }}
@@ -95,16 +101,45 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BUILD_ALL: ${{ inputs.build_all }}
-          BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
         run: |
-          if [ "$EVENT" = "workflow_dispatch" ] && [ "$BUILD_ALL" = "true" ]; then
+          set -euo pipefail
+          if [ "$EVENT" != "push" ]; then
+            # build_all=true, or a manual run with no push to diff against —
+            # build everything (only build_all dispatches the infra deploy)
             echo "force_all=true" >> "$GITHUB_OUTPUT"
-          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            # first push / new branch / unknown base — build everything
-            echo "force_all=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "force_all=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # Diff against the newest commit whose push run succeeded, not
+          # github.event.before. A failed run never merges manifests or
+          # dispatches, so diffing against the previous push strands every
+          # image that run should have shipped until someone runs build_all.
+          # Only push runs count: a manual run without build_all publishes but
+          # never dispatches. GITHUB_SHA is skipped so a rerun of a green run still
+          # rebuilds against the publish before it. Assigned before the loop so
+          # a failed lookup fails this step instead of reading as "no runs".
+          SHAS="$(gh run list --repo "$REPO" --workflow build-publish.yml \
+            --branch "$BRANCH" --event push --status success --limit 20 \
+            --json headSha --jq '.[].headSha')"
+          BASE=""
+          for sha in $SHAS; do
+            [ "$sha" = "$GITHUB_SHA" ] && continue
+            if git merge-base --is-ancestor "$sha" "$GITHUB_SHA"; then
+              BASE="$sha"
+              break
+            fi
+          done
+          if ! [[ "$BASE" =~ ^[0-9a-f]{40}$ ]]; then
+            # first push / no successful ancestor run — build everything
+            echo "No successful push run found among ancestors; building everything"
+            echo "force_all=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Diffing against $BASE, the last push whose run succeeded"
+          echo "force_all=false" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
       - name: Detect changed paths
         id: filter
@@ -113,7 +148,7 @@ jobs:
         # hijacked tag can't run arbitrary code in a job that has repo write.
         uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
         with:
-          base: ${{ github.event.before }}
+          base: ${{ steps.base.outputs.base }}
           filters: |
             channel-reader:
               - 'channel-reader/**'
@@ -392,6 +427,8 @@ jobs:
           MATRIX_PATH: ${{ matrix.path }}
           MATRIX_DOCKERFILE: ${{ matrix.dockerfile }}
           MATRIX_ROOTED: ${{ matrix.rooted }}
+          MATRIX_IMAGE: ${{ matrix.image }}
+          PROFILE_DESKTOP_HANDOFF_ENABLED: ${{ vars.PROFILE_DESKTOP_HANDOFF_ENABLED }}
         run: |
           # Rooted services COPY from sibling directories (packages/*) so their
           # Docker build context must be the repo root and the Dockerfile path
@@ -404,6 +441,15 @@ jobs:
             echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
           fi
 
+          if [ "$MATRIX_IMAGE" = "profile-ui" ]; then
+            handoff_enabled="${PROFILE_DESKTOP_HANDOFF_ENABLED:-false}"
+            case "$handoff_enabled" in
+              true|false) ;;
+              *) echo "PROFILE_DESKTOP_HANDOFF_ENABLED must be true or false" >&2; exit 1 ;;
+            esac
+            echo "build_args=PROFILE_DESKTOP_HANDOFF_ENABLED=$handoff_enabled" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push by digest
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
         id: build
@@ -411,6 +457,7 @@ jobs:
         with:
           context: ${{ steps.buildargs.outputs.context }}
           file: ${{ steps.buildargs.outputs.file }}
+          build-args: ${{ steps.buildargs.outputs.build_args }}
           platforms: linux/${{ matrix.arch }}
           # Attestations are disabled per-leg. Provenance attestations don't
           # push cleanly in push-by-digest mode (they need a repo:tag target,

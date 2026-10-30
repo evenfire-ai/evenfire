@@ -260,7 +260,7 @@ function buildSnippetRecipeManifest(name: string): Record<string, unknown> {
 
 async function controlUiLogin(page: Page): Promise<void> {
   const password = requireAdminPassword()
-  // E2E_GUARDIAN_ENTRY_POINT: enter the public Control UI root before UI login.
+  // E2E_GUARDIAN_NAVIGATION: root-entry — enter the public Control UI before login
   await page.goto('/')
   const usernameInput = page.getByLabel('Username')
   const passwordInput = page.getByLabel('Password')

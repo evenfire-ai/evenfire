@@ -108,8 +108,9 @@ spec:
                       maxLength: 63
                       pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
                       description: >-
-                        Named Codex subscription key this Host is assigned to.
-                        Absent or empty Codex Hosts persist unassigned and must
+                        Named oauth-broker subscription connection key (Codex or
+                        Grok) this Host is assigned to. Absent or empty broker
+                        Hosts persist unassigned and must
                         not spend a grant. Do not invent deployment-default.
                         ROLLOUT ORDER — CRD FIRST: apiextensions/v1 prunes unknown
                         fields, so this property must be applied before control-api
@@ -399,7 +400,7 @@ spec:
                   # being pruned.
                   type: object
                   description: >-
-                    Guardrail policy for this Host: ordered tool-lane rules,
+                    Guardrail policy for this Host: tool-lane rules,
                     installed LlmHook references grouped by lifecycle phase,
                     first-party built-ins, and the capability/trust ceilings that
                     bound the installed hooks.
@@ -407,7 +408,9 @@ spec:
                     rules:
                       type: array
                       description: >-
-                        Ordered tool-lane allow/ask/deny rules, evaluated top-down.
+                        Tool-lane allow/ask/deny rules. Every matching rule
+                        contributes and the engine aggregates them (strictest
+                        wins); array order is not precedence.
                         Each entry: { id, action: allow|ask|deny, reasonCode,
                         match{ tool, arguments[] } } — shape validated by
                         mcp-host/control-api (§6.1).

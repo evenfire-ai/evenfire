@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { ToolIdentity } from '../../tool/provenance'
+import { HookBreakerRegistry } from '../hookBreaker'
 import { RemoteToolHook } from '../remoteToolHook'
 import type { HookDescriptor, HookFetcher, HookHttpResult } from '../types'
 
@@ -145,5 +146,151 @@ describe('RemoteToolHook.postToolUse', () => {
       fetcher({ status: 200, body: { updatedResult: { content: 'x' } }, unavailable: false })
     )
     expect(await h.postToolUse(id, {}, result)).toBeNull()
+  })
+})
+
+/** A fetcher that counts its dials and returns whatever `getResult` yields. */
+function countingFetcher(getResult: () => HookHttpResult) {
+  let calls = 0
+  const fetch: HookFetcher = async () => {
+    calls += 1
+    return getResult()
+  }
+  return { fetch, calls: () => calls }
+}
+
+const ok: HookHttpResult = { status: 200, body: {}, unavailable: false }
+const unavailable: HookHttpResult = { status: 0, body: undefined, unavailable: true }
+const toolResult = { content: 'secret=abc123', isError: false }
+
+describe('quarantine (§8.2) — tool lane matches the LLM lane', () => {
+  it('quarantined may_deny + fail-closed pre_tool_use → deny hook_unavailable, never dialed', async () => {
+    const cf = countingFetcher(() => ok)
+    const h = new RemoteToolHook(
+      desc({ capabilities: ['may_deny'], failMode: 'closed', quarantined: true }),
+      cf.fetch
+    )
+    const c = await h.preToolUse(id, {})
+    expect(c?.decision).toBe('deny')
+    expect(c?.reasonCode).toBe('hook_unavailable')
+    expect(cf.calls()).toBe(0)
+  })
+
+  it('quarantined advisory pre_tool_use → no contribution, never dialed', async () => {
+    const cf = countingFetcher(() => ({
+      status: 200,
+      body: { updatedInput: { command: ['ls'] } },
+      unavailable: false,
+    }))
+    const h = new RemoteToolHook(
+      desc({ capabilities: ['may_rewrite'], failMode: 'open', quarantined: true }),
+      cf.fetch
+    )
+    expect(await h.preToolUse(id, { command: ['pwd'] })).toBeNull()
+    expect(cf.calls()).toBe(0)
+  })
+
+  it('quarantined fail-closed post_tool_use redactor → withholds content, never dialed', async () => {
+    const cf = countingFetcher(() => ok)
+    const h = new RemoteToolHook(
+      desc({
+        lifecyclePoints: ['post_tool_use'],
+        capabilities: ['may_rewrite'],
+        failMode: 'closed',
+        quarantined: true,
+      }),
+      cf.fetch
+    )
+    const v = await h.postToolUse(id, {}, toolResult)
+    expect(v?.content).not.toContain('abc123')
+    expect(v?.isError).toBe(false)
+    expect(cf.calls()).toBe(0)
+  })
+
+  it('quarantined fail-open post_tool_use → no change, never dialed', async () => {
+    const cf = countingFetcher(() => ({
+      status: 200,
+      body: { updatedResult: { content: 'x' } },
+      unavailable: false,
+    }))
+    const h = new RemoteToolHook(
+      desc({
+        lifecyclePoints: ['post_tool_use'],
+        capabilities: ['may_rewrite'],
+        failMode: 'open',
+        quarantined: true,
+      }),
+      cf.fetch
+    )
+    expect(await h.postToolUse(id, {}, toolResult)).toBeNull()
+    expect(cf.calls()).toBe(0)
+  })
+})
+
+describe('circuit breaker (§8.6) — tool lane', () => {
+  const advisory = (over: Partial<HookDescriptor> = {}): HookDescriptor =>
+    desc({
+      capabilities: ['may_rewrite'],
+      failMode: 'open',
+      lifecyclePoints: ['pre_tool_use', 'post_tool_use'],
+      onUnavailable: { mode: 'breaker', failureThreshold: 2, cooldownMs: 1000 },
+      ...over,
+    })
+
+  it('advisory breaker-mode hook trips and stops dialing during cooldown', async () => {
+    const reg = new HookBreakerRegistry()
+    const cf = countingFetcher(() => unavailable)
+    const h = new RemoteToolHook(advisory(), cf.fetch, reg, () => 0)
+    expect(await h.preToolUse(id, {})).toBeNull()
+    expect(await h.postToolUse(id, {}, toolResult)).toBeNull()
+    expect(cf.calls()).toBe(2) // tripped
+    expect(await h.preToolUse(id, {})).toBeNull()
+    expect(await h.postToolUse(id, {}, toolResult)).toBeNull()
+    expect(cf.calls()).toBe(2) // short-circuited
+  })
+
+  it('re-probes after cooldown and closes on success', async () => {
+    const reg = new HookBreakerRegistry()
+    let t = 0
+    let healthy = false
+    const cf = countingFetcher(() => (healthy ? ok : unavailable))
+    const h = new RemoteToolHook(advisory(), cf.fetch, reg, () => t)
+    await h.preToolUse(id, {})
+    await h.preToolUse(id, {})
+    await h.preToolUse(id, {}) // open → no dial
+    expect(cf.calls()).toBe(2)
+    t = 1000
+    healthy = true
+    await h.preToolUse(id, {})
+    await h.preToolUse(id, {})
+    expect(cf.calls()).toBe(4)
+  })
+
+  it('may_deny hook ignores breaker mode — always dials and fails closed', async () => {
+    const reg = new HookBreakerRegistry()
+    const cf = countingFetcher(() => unavailable)
+    const h = new RemoteToolHook(
+      advisory({ capabilities: ['may_deny'], failMode: 'closed' }),
+      cf.fetch,
+      reg,
+      () => 0
+    )
+    for (let i = 0; i < 5; i++) {
+      expect((await h.preToolUse(id, {}))?.decision).toBe('deny')
+    }
+    expect(cf.calls()).toBe(5)
+  })
+
+  it('strict mode never trips', async () => {
+    const reg = new HookBreakerRegistry()
+    const cf = countingFetcher(() => unavailable)
+    const h = new RemoteToolHook(
+      advisory({ onUnavailable: { mode: 'strict', failureThreshold: 2, cooldownMs: 1000 } }),
+      cf.fetch,
+      reg,
+      () => 0
+    )
+    for (let i = 0; i < 5; i++) await h.preToolUse(id, {})
+    expect(cf.calls()).toBe(5)
   })
 })

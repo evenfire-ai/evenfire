@@ -440,6 +440,29 @@ and is pruned by the API server.
 
 Without `spec.coordinatorImage`, each step must set exactly one of `instruction` or `run`. With `spec.coordinatorImage`, id-only steps are allowed. `run + instruction` and `run + agent` are always rejected. Snippet steps require `run.type: snippet`, `run.language: typescript`, and inline `run.code`.
 
+Step fields (`spec.steps[]`, max 100 steps):
+
+| Field                    | Type     | Default | Description                                                                                                                                                  |
+| ------------------------ | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`                     | string   | --      | **Required.** `^[a-z][a-z0-9-]*$`, max 63.                                                                                                                   |
+| `instruction`            | string   | --      | Agentic step prompt. Max 10000 characters.                                                                                                                   |
+| `run`                    | object   | --      | Snippet invocation (`type`, `language`, `code` max 20000, optional `capabilities`).                                                                          |
+| `dependsOn`              | string[] | --      | Step ids that must complete first. Max 100.                                                                                                                  |
+| `mcpServers`             | string[] | --      | MCP server ids available during this step. Max 20.                                                                                                           |
+| `timeoutSeconds`         | integer  | `300`   | Min 1. Step execution timeout.                                                                                                                               |
+| `maxRetries`             | integer  | `2`     | 1–5. Retry attempts for transient failures (connection reset, timeout).                                                                                      |
+| `backoffSeconds`         | integer  | `30`    | 1–3600. Base delay before retrying a failed step.                                                                                                            |
+| `allowedTools.include`   | string[] | --      | Tool allowlist in `serverName__toolName` form. Only listed tools are presented to the LLM. Max 100.                                                          |
+| `toolChoice`             | string   | --      | `auto` \| `none` \| `required`. LLM tool-choice policy for this step.                                                                                       |
+| `maxIterations`          | integer  | `50`    | 1–100. Maximum LLM tool-calling iterations for this step.                                                                                                    |
+| `agent.provider`         | string   | --      | Per-step provider override. Same enum as [`spec.agent.provider`](#39-agent-configuration-specagent).                                                        |
+| `agent.model`            | string   | --      | Per-step model override. `^[A-Za-z0-9._:/-]{1,128}$`.                                                                                                        |
+| `agent.soul`             | string   | --      | Per-step SOUL content, passed inline to the coordinator for this step.                                                                                       |
+| `requiresApproval`       | object   | --      | Human approval gate. See [§3.1.2](#312-step-approval-gates-stepsrequiresapproval).                                                                           |
+
+`step.agent` cannot be combined with `run` (CEL). Defaults above are CRD
+schema defaults.
+
 ```yaml
 steps:
   - id: merge
@@ -1031,12 +1054,12 @@ Resolution happens at reconciliation time only:
 
 ### 3.9 Agent Configuration (`spec.agent`)
 
-The **default LLM configuration** for every agentic (`instruction`) step. Steps may override `model` / `provider` via `steps[].agent`. The reconciler resolves the recipe's `mcp-host` agent from `spec.agent` first, then falls back to the first step declaring a _complete_ agent.
+The **default LLM configuration** for every agentic (`instruction`) step. Steps may override `model` / `provider` (and supply inline `soul` content) via `steps[].agent`. The reconciler resolves the recipe's `mcp-host` agent from `spec.agent` first, then falls back to the first step declaring a _complete_ agent.
 
 | Field                 | Type   | Required | Description                                                                                                                                                                                                                             |
 | --------------------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `model`               | string | No\*     | LLM model name (e.g. `gpt-4o`, `claude-3-opus`).                                                                                                                                                                                        |
-| `provider`            | string | No\*     | Enum: `openai`, `claude`, `zai`, `bailian`, `vertex`, `bedrock`, `openrouter`, `gemini`, `deepseek`, `groq`, `together`, `fireworks`, `mistral`, `xai`, `cerebras`, `deepinfra`, `perplexity`, `moonshot`, `nebius`, `novita`, `minimax`, `azure`. |
+| `provider`            | string | No\*     | Enum (22 values): `openai`, `claude`, `zai`, `bailian`, `vertex`, `openrouter`, `gemini`, `deepseek`, `groq`, `together`, `fireworks`, `mistral`, `xai`, `cerebras`, `deepinfra`, `perplexity`, `moonshot`, `nebius`, `novita`, `minimax`, `codex-subscription`, `grok-subscription`. `bedrock` and `azure` are deliberately excluded: the WRC credential transport carries one secret value and cannot deliver Bedrock's key pair or Azure's required endpoint. The same enum applies to `steps[].agent.provider`. |
 | `secretRef.name`      | string | No       | Secret holding the API key.                                                                                                                                                                                                             |
 | `secretRef.namespace` | string | No       | Secret namespace.                                                                                                                                                                                                                       |
 | `soulRef.storageRef`  | object | No       | `SOUL.md` in object storage: `bucket`, `key`, `provider` (`s3`\|`gcs`\|`spaces`\|`minio`), `region`, `endpoint`.                                                                                                                        |
@@ -1059,6 +1082,7 @@ spec:
 
 - **CEL R1** — `agent requires non-empty workflow steps or spec.pluginWorkloadSdk.promptBridge`. An agent remains invalid for an ordinary workloads-only recipe, but a stepless `promptBridge` recipe uses `spec.agent` as the eager mcp-host bootstrap binding rather than as a workflow agent.
 - A `provider` outside the canonical provider enum.
+- CEL: `spec.agent.secretRef is not allowed for oauth-broker providers` — `codex-subscription` and `grok-subscription` take no `secretRef`. See [Connect an LLM subscription](../how-to/connect-llm-subscription.md).
 - An `instruction` step with no resolvable agent: _"step requires an agent configuration"_.
 
 ### 3.10 MCP Servers (`spec.mcpServers`)
@@ -1386,11 +1410,18 @@ Declaring this block forces an always-on `mcp-host`. Runtime enforcement is addi
 | `promptBridge.maxRequestsPerRun`             | integer  | No        | Min 1. **Deprecated:** accepted but ignored; platform per-minute rate limits apply. Removal planned. |
 | `promptBridge.maxConcurrentInvocations`      | integer  | No        | Min 1. Runtime default 5.                                                   |
 | `promptBridge.maxInvocationsPerMinute`       | integer  | No        | Min 1. Platform default 600 when unset (ENV `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN`, issue #348). |
+| `promptBridge.maxRequestContentBytes`        | integer  | No        | Min 1. Max total bytes across `messages[].content`. **Not read at runtime in this release:** mcp-host applies a fixed 128 KiB cap. |
+| `promptBridge.resultRetentionHours`          | integer  | No        | Min 1. Schema description says default 24. **Not read at runtime in this release.** |
+| `promptBridge.maxAttachments`                | integer  | No        | Min 0. Schema description says default 0 (no attachments in v1). **Not read at runtime in this release.** |
+| `promptBridge.maxAttachmentBytes`            | integer  | No        | Min 0. Schema description says default 0. **Not read at runtime in this release.** |
 | `clientNotifications.allowedEventTypes`      | string[] | **Yes**\† | 1–64 entries.                                                               |
 | `clientNotifications.allowedTargetRefs`      | string[] | No        | Max 64.                                                                     |
 | `clientNotifications.allowedUserRefs`        | boolean  | No        | Whether `userRef` targets are permitted.                                    |
 | `clientNotifications.maxNotificationsPerRun` | integer  | No        | Min 1. **Deprecated:** accepted but ignored; platform per-minute rate limits apply. Removal planned. |
 | `clientNotifications.maxNotificationsPerMinute` | integer  | No        | Min 1. Platform default 750 when unset (ENV `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN`, issue #348). |
+| `clientNotifications.maxTitleBytes`          | integer  | No        | Min 1. **Not read at runtime in this release:** mcp-host applies a fixed 256-byte title cap. |
+| `clientNotifications.maxBodyBytes`           | integer  | No        | Min 1. **Not read at runtime in this release:** mcp-host applies a fixed 4096-byte body cap. |
+| `clientNotifications.resultRetentionHours`   | integer  | No        | Min 1. Schema description says default 72. **Not read at runtime in this release.** |
 | `allowedCallers`                             | string[] | No        | Workload ids permitted to call the SDK. **Empty = all declared workloads.** |
 | `idempotencyKeyPattern`                      | string   | No        | Regex; runtime default `^[a-zA-Z0-9_-]{1,128}$`. Must compile.              |
 
@@ -3081,18 +3112,20 @@ rolling-back --> rollback-failed         (rollback itself fails)
 - `failed` --> `active` (must go through `candidate` for retry)
 - `rollback-failed` --> any state (terminal; manual cleanup required)
 
-**Recovery from `failed` state**: Unlike `rollback-failed` (which is terminal), the `failed` state supports a retry path via `failed` --> `candidate`. The operator triggers this transition by annotating the WorkflowRecipe with `clerum.io/retry: "true"`. The controller:
+**Recovery from `failed` state**: Unlike `rollback-failed` (which is terminal), the `failed` state supports a retry path via `failed` --> `candidate`. The operator triggers this transition with the control-api admin endpoint `POST /api/v1/admin/recipes/<name>/retry` (`control-api/src/routes/admin/recipes.ts`). No annotation triggers a retry. The endpoint:
 
-1. Resets `status.workloads[].phase` to `pending` for all workloads
-2. Preserves existing PVCs and Secrets (does not recreate)
-3. Transitions to `candidate`, re-entering the approval flow
+1. Returns `409 invalid_transition` unless `status.phase` is `failed`
+2. Patches only the status subresource to `phase: candidate`, `message: "Manual retry requested by operator"`; the spec and existing resources are not touched
+3. Leaves the rest to WRC: the next reconcile evaluates WorkflowRecipePolicies again and reconciles the workloads, and the phase settles from their readiness
+
+A recipe that failed a policy check (`message` starting `Policy violation:`) needs this retry after the spec or policy is fixed; editing the spec alone does not re-run enforcement (see [WorkflowRecipePolicy](workflowrecipepolicy.md)).
 
 Retry counting is controller-internal. There is **no** `status.retryCount`
 property in the CRD status schema (§12.2) — the status object is structural with
 no `x-kubernetes-preserve-unknown-fields`, so such a key would be pruned — and
 there is no `WorkflowRecipePolicy.governance.maxRetries` field.
 
-This avoids the overhead of deleting and recreating the entire recipe (which loses status history and correlation ID) while still requiring re-approval for safety.
+This avoids deleting and recreating the entire recipe, which loses status history and correlation ID.
 
 #### 12.1.1 Simplified Visible States (CLI/Dashboard Layer)
 
@@ -3161,6 +3194,33 @@ status:
 
 The active profile is read from **`spec.activeProfile`** (the recipe's own input),
 not from status.
+
+**`status.steps[]` fields** (written by WRC from coordinator step updates):
+
+| Field                                                       | Description                                                                                                                                                                                                                |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`, `phase`, `executor`, `startedAt`, `completedAt`, `error` | Step identity and lifecycle. `phase`: `pending` \| `running` \| `completed` \| `failed` \| `skipped`. `executor`: `agentic` \| `snippet` \| `custom`.                                                                 |
+| `output`, `outputTruncated`, `outputLength`, `outputPreviewMaxChars` | Bounded output preview (see §3.1.1).                                                                                                                                                                                 |
+| `modelUsed`                                                 | Model the step ran with.                                                                                                                                                                                                   |
+| `approvalBindingSha256`                                     | Set only for steps with `requiresApproval` (§3.1.2): the SHA-256 of a one-time proof the coordinator generates for that approval gate.                                                                                     |
+| `toolsCalled[]`                                             | Tool calls made by the step: `serverName` and `toolName` (required), `args`, `result`, `durationMs`. WRC stores at most the first 50 calls. An `args` or `result` value longer than 1024 serialized characters is replaced by `{truncated: true, preview: "<first 1024 chars>"}`. |
+| `toolsCalledTruncated`                                      | Boolean in the schema. WRC does not set it in this release, so a list capped at 50 is not flagged.                                                                                                                         |
+
+**`status.pluginWorkloadSdk`** (written by WRC when `spec.pluginWorkloadSdk` is
+declared; control-api reads it to know which SDK families are active):
+
+| Field                                                   | Description                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `state`                                                 | `validated` (reconciled with an active prompt policy) \| `disabled` (`PLUGIN_WORKLOAD_SDK_ENABLED` is off) \| `degraded` (for example provider unavailable or bootstrap not ready) \| `awaiting_policy` (host identity ready, but the operator prompt policy is absent or unusable). |
+| `promptBridge`, `clientNotifications`                   | Booleans: which capability families the spec declares.                                                                                                                                                                                                                 |
+| `message`, `validatedAt`                                | Human-readable state and the time it was first validated.                                                                                                                                                                                                              |
+| `bootstrapContractVersion`                              | `2` (static-credential SDK bootstrap) or `3` (Codex reservation-only binding). WRC writes `3` when the eagerly resolved agent provider is `codex-subscription`.                                                                                                         |
+| `bootstrapPodUid`, `bootstrapProvider`, `bootstrapModel` | The mcp-host pod and provider/model the bootstrap was proven against.                                                                                                                                                                                                  |
+| `policyRevision`, `policyHash`, `defaultTargetRef`, `verifiedAt` | The operator prompt policy the capability was verified against (`policyRevision` min 1, `policyHash` 64-hex).                                                                                                                                                   |
+
+A matching `conditions[]` entry records the reason (for example
+`FeatureFlagDisabled`, `ProviderUnavailable`, `BootstrapNotReady`,
+`PolicyNotConfigured`).
 
 ### 12.3 Printer Columns
 
@@ -3325,6 +3385,11 @@ This section describes the `WorkflowRecipePolicy` CRD and the approval workflow.
 ### 15.1 WorkflowRecipePolicy CRD
 
 **This is the single source of truth for the WorkflowRecipePolicy schema.**
+
+> Not every field below is enforced. WRC checks only `allowContextRef`, the
+> five `governance` fields, and `detection.imageAllowlist`/`imageDenylist`; the
+> rest are stored but unread. See the per-field table in
+> [WorkflowRecipePolicy](workflowrecipepolicy.md#spec-fields).
 
 `spec` is the only required top-level field. The complete `spec` property set is:
 `description`, `allowContextRef`, `governance`, `detection`, `publication`,

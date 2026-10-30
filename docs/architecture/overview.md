@@ -8,11 +8,11 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 > `channel-reader` → `mcp-host` → MCP servers, plus the `host-context-controller`
 > that provisions them — and on the end-to-end message lifecycle, dev mode, and
 > the tool approval system. It is **not** a complete service reference: the
-> platform has ~18 services, and this document details four of them.
+> platform has more than 20 services, and this document details four of them.
 >
 > - For every service and which controller creates it → [/ARCHITECTURE.md](../../ARCHITECTURE.md)
 > - For namespaces, trust boundaries, NetworkPolicy layers and the WRC → [platform-topology.md](platform-topology.md)
-> - For all eight CRDs → [docs/crds/](../crds/)
+> - For all nine CRDs → [docs/crds/](../crds/)
 
 ---
 
@@ -36,7 +36,7 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 
 ### System Diagram
 
-Scoped to the four services this document covers — for the full 12-namespace platform (all ~18 services), see [platform-topology.md §1](platform-topology.md#1-platform-architecture-12-namespaces).
+Scoped to the four services this document covers — for the full 13-namespace platform (every service), see [platform-topology.md §1](platform-topology.md#1-platform-architecture-13-namespaces).
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
@@ -88,6 +88,19 @@ validation flow are documented in [Desktop GFS operator parity](gfs-desktop-oper
 | **host-context-controller** | `/host-context-controller` | `control-plane` | 8081 | K8s operator managing MCP server Deployments/Services/NetworkPolicies; REST API for server discovery |
 | **MCP Servers**             | `/mcp-servers`             | `mcp-server`    | 3000 | First-party MCP servers (airtable, alphavantage, doc-generator, mongodb, playwright, web-search)     |
 
+Other services and directories this document does not detail (full list in
+[/ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Service                                                  | Namespace         | Role                                                                                                     |
+| -------------------------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------- |
+| [webhook-proxy](../../webhook-proxy/README.md)           | `webhook-ingress` | Shared public webhook router; looks the webhook up in control-api and streams it to the recipe's gateway |
+| [webhook-gateway](../../webhook-gateway/README.md)       | `sandbox-recipes` | Per-recipe webhook signature verifier; WRC creates one per recipe, no static manifest                    |
+| [nginx-egress-proxy](../../nginx-egress-proxy/README.md) | `mcp-server`      | Image only: the `egress-proxy` container HCC adds to remote (`spec.remote`) McpServer pods               |
+| [profile-ui](../../profile-ui/README.md)                 | `profiles`        | End-user profile, invitations, Desktop App setup and app-link handoff                                    |
+| [codex-llm-proxy](../../codex-llm-proxy/README.md)       | `control-plane`   | Broker for `codex-subscription` model calls; off by default (`CODEX_LLM_PROXY_EXECUTION_ENABLED`)        |
+| [grok-llm-proxy](../../grok-llm-proxy/README.md)         | `control-plane`   | Broker for `grok-subscription` model calls; off by default (`GROK_LLM_PROXY_EXECUTION_ENABLED`)          |
+| [monitoring](../../monitoring/README.md)                 | `monitoring`      | Not a service: optional Helm values and dashboards for Grafana and Loki, installed with its own Makefile |
+
 ### Human surfaces
 
 The message path above is one of two ways into the platform. The other is the
@@ -117,9 +130,9 @@ matrix, including the Profile UI.
 
 All CRDs belong to the `clerum.io` API group, version `v1alpha1`. They are installed via the Helm chart at `charts/clerum-crds`.
 
-The platform ships **eight** CRDs. This section covers the four on the message
-path in depth. The other four — `WorkflowRecipe`, `WorkflowRecipePolicy`,
-`SharedFileSystem`, `GlobalFileSystem` — have reference pages under
+The platform ships **nine** CRDs. This section covers the four on the message
+path in depth. The other five — `LlmHook`, `WorkflowRecipe`,
+`WorkflowRecipePolicy`, `SharedFileSystem`, `GlobalFileSystem` — have reference pages under
 [docs/crds/](../crds/), which is the complete set.
 
 ### 2.1 CommunicationChannel
@@ -220,6 +233,8 @@ spec:
 
 Declares an MCP server that should be deployed and managed by the host-context-controller operator. When this CRD is created, host-context-controller automatically creates a matching Deployment and Service.
 
+An McpServer names no Context. A Context exposes it by listing its name in `spec.mcpServers` (section 2.3), and several Contexts can list the same server.
+
 ```yaml
 apiVersion: clerum.io/v1alpha1
 kind: McpServer
@@ -227,7 +242,6 @@ metadata:
   name: mongodb-server
   namespace: mcp-server
 spec:
-  contextRef: 'context1'
   description: 'MongoDB MCP server for database access'
   image: 'mongodb/mongodb-mcp-server:latest'
   imagePullPolicy: 'Always'
@@ -312,7 +326,7 @@ flowchart TD
     CC["CommunicationChannel<br/>spec.hostRef"]
     HOST["Host<br/>spec.contextRef, spec.secretRef"]
     CTX["Context<br/>spec.mcpServers[] allowlist"]
-    MCS["McpServer<br/>spec.contextRef, spec.auth.secretRef"]
+    MCS["McpServer<br/>spec.auth.secretRef"]
     SEC1[("Secret: LLM API keys")]
     SEC2[("Secret: MCP server credentials")]
 
@@ -320,7 +334,6 @@ flowchart TD
     HOST -->|contextRef| CTX
     HOST -->|secretRef| SEC1
     CTX -->|"mcpServers[] names"| MCS
-    MCS -->|contextRef back-reference| CTX
     MCS -->|auth.secretRef| SEC2
 
     WCR["channel-reader watches"] -.-> CC
@@ -520,9 +533,11 @@ a `Set<string>` so an unchanged hostRef triggers exactly one reconcile.
 
 **RBAC:** HCC's `host-context-controller-channels-runtime` Role grants
 `get/list/watch` on `communicationchannels.clerum.io` in the `channels`
-namespace. **Applied out-of-band** via `make gcp-dev-bootstrap-rbac` /
-`make gcp-prod-bootstrap-rbac` because the CD service account intentionally
-cannot grant RBAC (see `deploy/scripts/post-deploy-sync.sh`).
+namespace. It lives in `deploy/base/channels/rbac.yaml`, so the overlay apply
+creates it. Where the CD identity is not allowed to patch Roles, apply it once
+out of band with
+[`deploy/scripts/bootstrap-rbac.sh`](../../deploy/scripts/bootstrap-rbac.sh)
+and an admin kubeconfig.
 
 ---
 
@@ -853,7 +868,7 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Purpose
 
-Kubernetes operator that manages the full lifecycle of MCP servers. When an McpServer CRD appears, it creates the corresponding Deployment and Service. When a Context CRD changes, it regenerates NetworkPolicies. Also provides a REST API for mcp-host to discover available servers.
+Kubernetes operator that manages the full lifecycle of MCP servers. When an McpServer CRD appears, it creates the corresponding Deployment and Service. When a Context CRD changes, it regenerates NetworkPolicies. Also provides a REST API for mcp-host to discover available servers. Beyond MCP servers, it creates the `mcp-host` pod for each Host, the file controllers for SharedFileSystem and GlobalFileSystem, and guardrail hook pods for image-target LlmHooks.
 
 ### Source Structure
 
@@ -869,6 +884,7 @@ host-context-controller/
 │   ├── hostReconciler.ts            # Host CRD → mcp-host Deployment
 │   ├── sharedFileSystemReconciler.ts # SharedFileSystem → PVC + workspace-files-controller
 │   ├── gfsReconciler.ts             # GlobalFileSystem → gfs-controller writer/reader roles
+│   ├── llmHookReconciler.ts         # LlmHook (image target) → hook Deployment/Service/NetworkPolicy in llm-hooks
 │   ├── bindingPolicyReconciler.ts   # Binding policy reconciliation
 │   ├── secretFactory.ts             # Secret projection for reconciled workloads
 │   ├── metrics.ts                   # Prometheus metrics
@@ -882,8 +898,10 @@ host-context-controller/
 > [`deploy/base/`](../../deploy/base/), grouped by namespace — HCC's are in
 > `deploy/base/control-plane/host-context-controller.yaml`.
 
-The controller reconciles five CRDs: `McpServer`, `Context`, `Host`,
-`SharedFileSystem`, and `GlobalFileSystem`.
+The controller reconciles six CRDs: `McpServer`, `Context`, `Host`,
+`SharedFileSystem`, `GlobalFileSystem`, and `LlmHook`. It also watches
+`CommunicationChannel` resources in the `channels` namespace to size each
+Host's channel-reader Deployment.
 
 ### Operator Reconciliation
 
@@ -1215,7 +1233,7 @@ For comprehensive testing documentation, see [mcp-servers/README.md §Testing](.
 
 ### Namespace Layout & NetworkPolicy Strategy
 
-Scoped to the four namespaces on the message path — for the full deny-all model across all 12 namespaces, see [platform-topology.md §2](platform-topology.md#2-security-architecture-deny-all-by-default).
+Scoped to the four namespaces on the message path — for the full deny-all model across all 13 namespaces, see [platform-topology.md §2](platform-topology.md#2-security-architecture-deny-all-by-default).
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
@@ -1237,7 +1255,7 @@ flowchart LR
     class HCC ctrl
 ```
 
-`deploy/base/namespaces.yaml` declares ten namespaces: `channels`, `control-plane`, `mcp-host`, `mcp-server`, `profiles`, `rpc-proxy`, `sandbox-recipes`, `sandbox-ui`, `webhook-ingress`, `gfs`. The core four for the message path are:
+`deploy/base/namespaces.yaml` declares eleven namespaces: `channels`, `control-plane`, `mcp-host`, `mcp-server`, `llm-hooks`, `profiles`, `rpc-proxy`, `sandbox-recipes`, `sandbox-ui`, `webhook-ingress`, `gfs` (the opt-in `ingress` namespace from `deploy/base/ingress/` and the minikube-only `registry` namespace bring the platform total to 13). The core four for the message path are:
 
 - `channels` - channel-reader (no inbound traffic needed)
 - `mcp-host` - mcp-host service (receives HTTP from channel-reader)
@@ -1365,9 +1383,10 @@ cd mcp-servers/airtable && docker run -p 3000:3000 -e AIRTABLE_API_KEY=pat... ai
 
 # Terminal 2: Run mcp-host
 cd mcp-host
+MCP_HOST=localhost
 CLERUM_DEV_MODE=true \
 OPENAI_API_KEY=sk-... \
-CLERUM_MCP_SERVERS='[{"name":"airtable","transport":{"type":"streamableHttp","url":"http://localhost:3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true},"contextRef":"dev"}]' \
+CLERUM_MCP_SERVERS='[{"name":"airtable","transport":{"type":"streamableHttp","url":"http://'"$MCP_HOST"':3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true}}]' \
 npm run dev
 
 # Terminal 3: Run channel-reader
@@ -1386,7 +1405,7 @@ npm run dev
 
 ### Helm Chart: clerum-crds
 
-Installs the eight CRDs. Must be installed before deploying any services.
+Installs the nine CRDs. Must be installed before deploying any services.
 
 ```bash
 helm install clerum-crds ./charts/clerum-crds
@@ -1407,11 +1426,11 @@ The chart contains:
 
 ### Docker Images
 
-All services use multi-stage builds with `node:24-alpine`:
+All services use multi-stage builds with `node:24.22.1-alpine`:
 
 ```dockerfile
 # Stage 1: Build
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -1419,7 +1438,7 @@ COPY tsconfig.json src/ ./
 RUN npm run build
 
 # Stage 2: Runtime
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY package*.json ./
@@ -1443,29 +1462,31 @@ Default: `your-registry.example.com/evenfire/`
 
 ### Full Production Deployment Sequence
 
+The service Makefiles only build and push images; they have no `deploy`
+target. The workloads ship as Kustomize manifests under `deploy/base`, applied
+through an overlay. [Production deployment](../deploy/production.md) gives the
+rollout order, and [minikube](../deploy/minikube.md) is the scripted reference
+(`make minikube-deploy-all`).
+
 ```bash
 # 1. Install CRDs
 helm install clerum-crds ./charts/clerum-crds
 
-# 2. Deploy host-context-controller (operator must run first)
-cd host-context-controller && make deploy
+# 2. Apply the platform manifests (namespaces, host-context-controller,
+#    mcp-host, channel-reader, ...). The services have no per-service
+#    `make deploy`; build your own kustomize overlay on deploy/base.
+kubectl apply -k <your-overlay>
 
-# 3. Deploy MCP server secrets and CRDs
-cd mcp-servers && make deploy-all
+# 3. Deploy the example MCP server secrets and McpServer CRDs
+make -C mcp-servers deploy-all
 
 # 4. Create Context CRD (defines which servers are accessible)
 kubectl apply -f charts/clerum-crds/examples/context1.yaml
 
-# 5. Deploy mcp-host
-cd mcp-host && make deploy
-
-# 6. Create Host CRD with API keys secret
+# 5. Create Host CRD with API keys secret
 kubectl apply -f charts/clerum-crds/examples/host-chatllm.yaml
 
-# 7. Deploy channel-reader
-cd channel-reader && make deploy
-
-# 8. Create CommunicationChannel CRD
+# 6. Create CommunicationChannel CRD
 kubectl apply -f charts/clerum-crds/examples/channels.yaml
 ```
 

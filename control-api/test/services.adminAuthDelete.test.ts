@@ -43,6 +43,7 @@ vi.mock('../src/services/tracing/environment.js', () => ({
 
 function queryResult(text: string) {
   state.queries.push(text)
+  if (text.includes('WITH revoked AS')) return { rows: [], rowCount: 0 }
   if (text.includes('FOR UPDATE') && text.includes('status')) {
     return {
       rows:

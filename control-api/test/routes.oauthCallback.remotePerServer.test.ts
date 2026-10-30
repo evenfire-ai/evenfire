@@ -11,6 +11,7 @@ import { attachServerToContext } from '../src/services/contextAllowlist.js'
 import { membershipResult } from './fixtures/contextAllowlist.js'
 import {
   discoverPilot,
+  enableServerInContext,
   installRemoteServer,
   seedContext,
   withRfc9207,
@@ -129,7 +130,7 @@ beforeEach(async () => {
   savedBaseUrl = config.oauthCallbackBaseUrl
   config.oauthCallbackBaseUrl = ORIGIN
   gateway = new MockGateway(NS)
-  await seedContext(gateway, NS, CONTEXT)
+  await seedContext(gateway, config.contextsNamespace, CONTEXT)
   db = makeInMemoryDynamicClientsDb().db
   dbHolder.db = db
   app = createApp(gateway as never)
@@ -153,7 +154,6 @@ async function install(
     discovery,
     body: {
       serverName: name,
-      contextRef: CONTEXT,
       baseUrl,
       mode,
       ...(mode === 'pre-registered'
@@ -162,6 +162,7 @@ async function install(
     },
   })
   if (res.status !== 201) throw new Error(`install failed: ${JSON.stringify(res.body)}`)
+  await enableServerInContext(gateway, CONTEXT, name)
   return String(res.body.redirectUri)
 }
 

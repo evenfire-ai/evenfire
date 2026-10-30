@@ -108,10 +108,11 @@ describe('chat store scope across a transient team hop', () => {
     const internals = service as unknown as {
       bindCurrentChatStore(userId: string): Promise<void>
       runWithTeamContext<T>(teamId: string, op: (token: string) => Promise<T>): Promise<T>
-      switchSessionToTeam(teamId: string): Promise<string>
       chatStoreTeamId(): string | null
       me: { teamId: string }
+      suspendDesktopGfsUploadsForAuthBoundary(): Promise<void>
     }
+    internals.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
     await internals.bindCurrentChatStore('user-1')
 
     const during: { sessionTeam?: string; chatStoreTeam?: string | null } = {}
@@ -128,7 +129,7 @@ describe('chat store scope across a transient team hop', () => {
 
     // A genuine team switch after the hop: the store team follows `me.teamId`, it
     // is not stuck on the team the finished hop was pinned to.
-    await internals.switchSessionToTeam('team-c')
+    await service.switchTeam('team-c')
 
     expect(internals.me.teamId).toBe('team-c')
     expect(internals.chatStoreTeamId()).toBe('team-c')
@@ -222,12 +223,13 @@ describe('chat store scope across a transient team hop', () => {
     const service = signedInService(['team-b'])
     const internals = service as unknown as {
       bindCurrentChatStore(userId: string): Promise<void>
-      switchSessionToTeam(teamId: string): Promise<string>
+      suspendDesktopGfsUploadsForAuthBoundary(): Promise<void>
     }
+    internals.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
     await internals.bindCurrentChatStore('user-1')
     expect(requireChatStore().getAuthorityScope()?.teamId).toBe('team-a')
 
-    await internals.switchSessionToTeam('team-b')
+    await service.switchTeam('team-b')
 
     expect(requireChatStore().getAuthorityScope()?.teamId).toBe('team-b')
     expect(service.getChatDeletionFenceAuthority().authorityScope.teamId).toBe('team-b')

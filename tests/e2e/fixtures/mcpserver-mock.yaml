@@ -4,7 +4,6 @@ metadata:
   name: mock-server
   namespace: mcp-server
 spec:
-  contextRef: context1
   description: Mock MCP server for E2E testing — provides echo, add, record, and recall tools
   image: clerum/mock-mcp-server:dev
   transport:

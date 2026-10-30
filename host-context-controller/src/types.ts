@@ -161,7 +161,6 @@ export interface McpServerSpec {
   // Ownership contract:
   // - managed:true or omitted => HCC owns the runtime.
   // - managed:false => WRC owns the runtime; HCC only exposes discovery/status.
-  contextRef: string
   description?: string
   image: string
   imagePullPolicy?: 'Always' | 'IfNotPresent' | 'Never'
@@ -556,7 +555,9 @@ export interface HostLifecycleStatus {
   state: HostLifecycleState
   /**
    * Highest observed Host generation whose wake trigger has been handled.
-   * Written by the mcp-host runtime; HCC only preserves it across writes.
+   * Written by HCC itself when it handles a wake (statelessLifecycleExecutor:
+   * the wake fast-path and the pre-scale-down wake guard); other lifecycle
+   * writes preserve it.
    */
   wakeHandledGeneration: number
   /** Human-readable rejection or temporary suspension-block reason. */
@@ -665,7 +666,6 @@ export interface McpServerStatus {
 export interface McpServerInfo {
   name: string
   description?: string
-  contextRef: string
   transport: McpServerTransport
   auth?: McpServerAuth
   // OAuth broker config; present iff auth.type === 'oauth'. Discovery metadata
@@ -682,6 +682,7 @@ export interface McpServerInfo {
  */
 export interface McpServersResponse {
   servers: McpServerInfo[]
+  // Legacy constant '*' of the v1 route; no consumer reads it. Goes away with that route.
   contextRef: string
   timestamp: string
 }

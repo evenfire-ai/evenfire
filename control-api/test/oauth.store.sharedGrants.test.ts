@@ -48,7 +48,6 @@ function bakedReaderKey(grantScope: 'user' | 'context', userId?: string) {
   const resolved = resolveServerOAuth({
     metadata: { uid: 'uid-1', name: 'gdrive' },
     spec: {
-      contextRef: 'ctx-9',
       oauth: { id: 'google-drive', provider: 'google', grantScope },
     },
   })
@@ -57,6 +56,7 @@ function bakedReaderKey(grantScope: 'user' | 'context', userId?: string) {
     mcpServerName: 'gdrive',
     mcpServersNamespace: 'mcp-server',
     userId,
+    contextId: 'ctx-9',
   })
   if (!key) throw new Error('fixture: no grant key')
   return key

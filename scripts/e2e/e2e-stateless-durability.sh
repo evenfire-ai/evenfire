@@ -18,7 +18,7 @@
 #     2. `node` + the app's own production `better-sqlite3` at
 #        /app/node_modules/better-sqlite3 (read-only open, busy_timeout).
 #   The DB path is resolved from the pod's CLERUM_SESSION_DB_DIR env
-#   (HCC sets it to the PVC state mount) + `state.db`. If neither reader
+#   (HCC sets it to the workspace PVC root on every Host) + `state.db`. If neither reader
 #   works, or the env/file is missing, the suite HARD FAILS — there is no
 #   silent downgrade to weaker text-only assertions.
 #
@@ -412,13 +412,13 @@ else
 fi
 
 # Resolve the state.db path from the pod env (HCC injects
-# CLERUM_SESSION_DB_DIR on stateless pods) and pick the row-count reader.
+# CLERUM_SESSION_DB_DIR on every Host pod) and pick the row-count reader.
 db_dir=$(kctl exec "$pod" -n "$MCP_HOST_NS" -- printenv CLERUM_SESSION_DB_DIR 2>/dev/null || echo "")
 if [ -n "$db_dir" ]; then
   DB_PATH="${db_dir%/}/state.db"
   ok "CLERUM_SESSION_DB_DIR=${db_dir} → DB_PATH=${DB_PATH}"
 else
-  fail "pod ${pod} has no CLERUM_SESSION_DB_DIR env — is this pod actually running the stateless lifecycle?"
+  fail "pod ${pod} has no CLERUM_SESSION_DB_DIR env — is this pod rendered by the current HCC?"
   print_results
   exit 1
 fi

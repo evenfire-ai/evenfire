@@ -7,17 +7,25 @@ import { AuthGate } from '@components/AuthGate'
 import { IconExternalLink } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
 import { getDesktopEnvironment } from '@lib/api'
-import { buildDesktopEnvironmentLink } from '@lib/desktopAppLinks'
+import {
+  buildDesktopEnvironmentLink,
+  isDesktopEnvironmentHandoffEnabled,
+} from '@lib/desktopAppLinks'
 
 function HomeContent() {
   const { authState } = useAuth()
   const me = authState.me
   const displayName = me?.profile?.displayName || me?.name || me?.email || 'there'
+  const desktopHandoffEnabled = isDesktopEnvironmentHandoffEnabled()
   const [desktopAppLink, setDesktopAppLink] = useState<
-    { state: 'loading' } | { state: 'ready'; href: string } | { state: 'unavailable' }
-  >({ state: 'loading' })
+    | { state: 'loading' }
+    | { state: 'ready'; href: string }
+    | { state: 'unavailable' }
+    | { state: 'disabled' }
+  >(() => (desktopHandoffEnabled ? { state: 'loading' } : { state: 'disabled' }))
 
   useEffect(() => {
+    if (!desktopHandoffEnabled) return
     let isCurrent = true
     void getDesktopEnvironment()
       .then(environment => {
@@ -32,7 +40,7 @@ function HomeContent() {
     return () => {
       isCurrent = false
     }
-  }, [])
+  }, [desktopHandoffEnabled])
 
   return (
     <section className="profile-page">
@@ -51,6 +59,8 @@ function HomeContent() {
           <p className="body-copy" role="status" aria-live="polite" aria-atomic="true">
             {desktopAppLink.state === 'loading' ? (
               'Checking desktop app setup…'
+            ) : desktopAppLink.state === 'disabled' ? (
+              'Automatic Desktop setup is not enabled yet. You can copy the REST API URL in Settings.'
             ) : desktopAppLink.state === 'unavailable' ? (
               <>
                 Desktop app setup is unavailable right now. Visit{' '}

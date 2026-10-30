@@ -56,7 +56,7 @@ function makeRecipe(overrides?: Partial<WorkflowRecipeCRD['metadata']>): Workflo
       ...overrides,
     },
     spec: {
-      workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+      workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
     },
   }
 }
@@ -67,7 +67,7 @@ describe('buildDeployment', () => {
   const workload: DeploymentDef = {
     id: 'nginx',
     type: 'deployment',
-    image: 'nginx:1.30.1-alpine',
+    image: 'nginx:1.30.6-alpine',
     port: 8080,
     replicas: 3,
   }
@@ -78,7 +78,7 @@ describe('buildDeployment', () => {
     expect(dep.kind).toBe('Deployment')
     expect(dep.metadata?.name).toBe('nginx')
     expect(dep.spec?.replicas).toBe(3)
-    expect(dep.spec?.template.spec?.containers[0].image).toBe('nginx:1.30.1-alpine')
+    expect(dep.spec?.template.spec?.containers[0].image).toBe('nginx:1.30.6-alpine')
   })
 
   it('sets standard labels (3.1b)', () => {
@@ -1007,7 +1007,7 @@ describe('buildDeployment - imagePullSecrets', () => {
     const workload: DeploymentDef = {
       id: 'test-deployment',
       type: 'deployment',
-      image: 'nginx:1.30.1-alpine',
+      image: 'nginx:1.30.6-alpine',
       replicas: 1,
     }
     const recipe = makeRecipe()
@@ -1020,7 +1020,7 @@ describe('buildDeployment - imagePullSecrets', () => {
     const workload: DeploymentDef = {
       id: 'test-deployment',
       type: 'deployment',
-      image: 'nginx:1.30.1-alpine',
+      image: 'nginx:1.30.6-alpine',
       imagePullSecrets: [],
       replicas: 1,
     }
@@ -1403,7 +1403,7 @@ describe('clerum.io/mcpserver label for transport workloads', () => {
     const w: DeploymentDef = {
       id: 'nginx',
       type: 'deployment',
-      image: 'nginx:1.30.1-alpine',
+      image: 'nginx:1.30.6-alpine',
       port: 8080,
     }
     const dep = buildDeployment(w, makeRecipe())
@@ -1502,7 +1502,7 @@ describe('resolveWorkloadResourceName', () => {
     kind: 'WorkflowRecipe',
     metadata: { name: 'simple-recipe', namespace: 'sandbox-recipes', uid: 'uid-plain' },
     spec: {
-      workloads: [{ id: 'web-server', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 80 }],
+      workloads: [{ id: 'web-server', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 80 }],
     },
   }
 
@@ -1694,7 +1694,7 @@ describe('sandbox-ui label injection', () => {
     const w: DeploymentDef = {
       id: 'app',
       type: 'deployment',
-      image: 'nginx:1.30.1-alpine',
+      image: 'nginx:1.30.6-alpine',
       port: 8080,
     }
     const dep = buildDeployment(w, makeRecipe())

@@ -4,6 +4,7 @@ import { requireInternalControlJwt } from '../../../middleware/internalControlJw
 import { mcpHostHttpMetrics } from '../../../middleware/mcpHostHttpMetrics.js'
 import {
   ALL_MCP_HOST_CONTROL_SCOPES,
+  HCC_STANDALONE_RECIPE_NAME,
   type McpHostControlScope,
   issueMcpHostAccessJwt,
   issueMcpHostControlJwt,
@@ -127,7 +128,7 @@ export function createAuthMcpHostIssueRoutes(): Router {
             return res.status(400).json({ error: 'invalid_issuance_namespace' })
           }
 
-          if (provisioner.iss === 'hcc' && recipeName !== 'standalone') {
+          if (provisioner.iss === 'hcc' && recipeName !== HCC_STANDALONE_RECIPE_NAME) {
             return res.status(403).json({ error: 'provisioner_target_mismatch' })
           }
 
@@ -163,7 +164,18 @@ export function createAuthMcpHostIssueRoutes(): Router {
           })
           const control = issueMcpHostControlJwt(recipeNamespace, recipeName, hostRefs, {
             scopes: controlScopes.scopes,
+            hccCredential,
           })
+          if (control.scopeStripped) {
+            req.log?.warn(
+              {
+                event: 'oauth_user_token_scope_stripped',
+                route: 'issue',
+                provisioner: provisioner.iss,
+              },
+              'oauth:user-token dropped from a non-HCC control token'
+            )
+          }
           req.log?.info(
             {
               event: 'mcp_host_credentials_issued',

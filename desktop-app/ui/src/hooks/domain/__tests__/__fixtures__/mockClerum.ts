@@ -2,7 +2,7 @@ import { type Mock, inject, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { ChatStore } from '../../../../../../src/chatStore'
-import type { ChatDeleteFence, ChatMessage } from '../../../../../../src/types'
+import type { ChatDeleteFence, ChatIndex, ChatMessage } from '../../../../../../src/types'
 import type {} from './mockClerumStoreRoot'
 
 /**
@@ -77,6 +77,10 @@ export interface MockClerum {
   hasActivityHandler: (hostRef: string) => boolean
   /** What the real store holds for one chat, read straight from it. */
   persistedMessages: (agentRef: string, chatId: string) => Promise<Array<Record<string, unknown>>>
+  /** The index a real ChatStore read produces for one agent. */
+  readIndex: (agentRef: string) => Promise<ChatIndex>
+  /** Persist selection through the same producer used by chat:setLastActive. */
+  persistLastActive: (agentRef: string, chatId: string) => Promise<void>
 }
 
 export function installMockClerum(): MockClerum {
@@ -178,6 +182,9 @@ export function installMockClerum(): MockClerum {
     hasActivityHandler: (hostRef: string) => activityHandlers.has(hostRef),
     persistedMessages: async (agentRef: string, chatId: string) =>
       (await store.loadMessages(agentRef, chatId)) as unknown as Array<Record<string, unknown>>,
+    readIndex: (agentRef: string) => store.getIndex(agentRef),
+    persistLastActive: (agentRef: string, chatId: string) =>
+      store.setLastActiveChatId(agentRef, chatId),
   }
 
   Object.defineProperty(window, 'clerum', {

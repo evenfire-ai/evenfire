@@ -29,7 +29,7 @@ records it to a hash-chained audit log.
   `gfs://<drive>/<resourceId>` URI (`gfs-controller/src/api/read.ts`), stable
   across renames/moves — usable for deep links and for sharing one resource
   with someone who has no access to its parent folder.
-- **Grant vs. share.** A **grant** authorizes a *folder* (and everything
+- **Grant vs. share.** A **grant** authorizes a _folder_ (and everything
   under it); a **share** authorizes a single resource by its reference, for
   someone without folder access. Both are rows in the permission store, not
   filesystem ACLs (`gfs-controller/src/authz/`).
@@ -43,14 +43,19 @@ records it to a hash-chained audit log.
 
 | Field                            | Type     | Required | Default           | Description                                                                                                                                                                                      |
 | --------------------------------- | -------- | -------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.storage.size`               | string   | yes      | --                 | PVC requested storage for the drive's flat blob layout (e.g. `"500Gi"`).                                                                                                                          |
+| `spec.storage`                    | object   | yes      | --                 | Persistent storage for the drive. The whole block is required.                                                                                                                                    |
+| `spec.storage.size`               | string   | yes      | --                 | PVC requested storage for the drive's flat blob layout (e.g. `"500Gi"`). No schema default.                                                                                                     |
 | `spec.storage.storageClassName`   | string   | no       | `standard-rwo`     | StorageClass for the drive PVC. RWX (`clerum-gcsfuse`) is a deferred escalation — set explicitly only when such a class exists.                                                                  |
 | `spec.storage.accessModes`        | string[] | no       | `[ReadWriteOnce]`  | The single-replica writer and co-located readers work on RWO-only StorageClasses; `ReadWriteMany` requires an RWX-capable class.                                                                 |
-| `spec.layout.rootDirectories`     | string[] | no       | `[]`               | Absolute seed paths (e.g. `/org`), max 64. Materialized as governed resources in the permission store by control-api once the writer reports `Ready` — not written directly by the reconciler. |
-| `spec.security.runAsUser`         | integer  | no       | --                 | POSIX UID applied to the gfsc pods and the init Job.                                                                                                                                              |
-| `spec.security.fsGroup`           | integer  | no       | --                 | Supplemental group applied so gfsc can read/write the mounted drive.                                                                                                                              |
-| `spec.readerReplicas`             | integer  | no       | `2`                | Number of read-only gfsc reader replicas. The writer is always exactly 1 — GFS is a single-writer drive; only readers scale.                                                                     |
-| `spec.retainOnDelete`             | boolean  | no       | `true`             | When `false`, deleting the CRD tears down the Deployments, Service, NetworkPolicies, and PVC (PVC last).                                                                                          |
+| `spec.layout.rootDirectories`     | string[] | no       | `[]`               | Absolute seed paths (e.g. `/org`), max 64 entries, each max 512 characters. Each segment must start with a letter, digit, or underscore and may contain letters, digits, underscores, dots, and hyphens; `..` and empty segments are rejected. Materialized as governed resources in the permission store by control-api once the writer reports `Ready` — not written directly by the reconciler. |
+| `spec.security.runAsUser`         | integer  | no       | `1000`             | Min 1. POSIX UID for the gfsc pods. The writer's root init container chowns the drive to this UID.                                                                                              |
+| `spec.security.fsGroup`           | integer  | no       | value of `runAsUser` | Min 1. Pod `fsGroup`, so gfsc can read/write the mounted drive. Also used as the pods' `runAsGroup` (the CRD has no separate `runAsGroup`). Root (0) is rejected.                                   |
+| `spec.readerReplicas`             | integer  | no       | `2`                | Min 0. Number of read-only gfsc reader replicas. The writer is always exactly 1 — GFS is a single-writer drive; only readers scale.                                                              |
+| `spec.retainOnDelete`             | boolean  | no       | `true`             | On delete, HCC always removes the writer and reader Deployments, the writer PodDisruptionBudget, the `gfsc-writer` and `gfsc` Services, and the NetworkPolicies. When `false`, it then deletes the PVC last; when `true`, the PVC is kept. |
+
+`storage.storageClassName`, `storage.accessModes`, `layout.rootDirectories`,
+`readerReplicas`, and `retainOnDelete` defaults come from the CRD schema. The
+`security` defaults are applied by HCC.
 
 Full OpenAPI schema: `charts/clerum-crds/crds/globalfilesystem.yaml`. The
 reconciler owns pod-level detail the CRD doesn't expose — securityContext
@@ -61,11 +66,11 @@ anything other than `readerReplicas`.
 
 | Field                 | Type     | Description                                                                                                                    |
 | ---------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `status.phase`         | string   | `Provisioning \| Initializing \| Ready \| Degraded \| Failed`.                                                                    |
-| `status.pvcName`       | string   | The provisioned PVC name.                                                                                                         |
-| `status.serviceName`   | string   | ClusterIP Service serving gfsc **reads** through the writer + readers.                                                            |
+| `status.phase`         | string   | Schema enum: `Provisioning \| Initializing \| Ready \| Degraded \| Failed`. The reconciler currently writes only `Initializing` (writer not yet available) and `Ready`. |
+| `status.pvcName`       | string   | The provisioned PVC name (always `gfs-drive`).                                                                                    |
+| `status.serviceName`   | string   | ClusterIP Service serving gfsc **reads** through the writer + readers (always `gfsc`).                                            |
 | `status.serviceUrl`    | string   | In-cluster base URL of the read Service (e.g. `http://gfsc.gfs.svc.cluster.local:8087`). Mutations go through a separate writer-only Service, not this URL. |
-| `status.conditions[]`  | object[] | Standard `{type, status, reason, message, lastTransitionTime}` condition list.                                                    |
+| `status.conditions[]`  | object[] | Standard `{type, status, reason, message, lastTransitionTime}` condition list. Defined in the schema; the reconciler does not write conditions in this release. |
 
 ## Additional Printer Columns
 

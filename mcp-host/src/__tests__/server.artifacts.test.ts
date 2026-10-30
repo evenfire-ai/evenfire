@@ -5,38 +5,67 @@ import * as os from 'os'
 import * as path from 'path'
 import type { RPCServer } from '../server'
 import { MAX_ARTIFACT_BYTES } from '../workflow/artifactPaths'
+import { CALLER_OUTPUTS_DIR, resolveRpcCallerOutputDir } from '../workspace/callerOutputs'
+import { deriveUserKeyFromSource } from '../workspace/userKey'
 
 const ORIGINAL_ENABLE_AUTH = process.env.CLERUM_ENABLE_AUTH
 const ORIGINAL_OUTPUT_DIR = process.env.CLERUM_OUTPUT_DIR
 const ORIGINAL_WORKFLOW_ENABLED = process.env.CLERUM_WORKFLOW_ENABLED
 
+/** The Host root the current test's callers live under. */
+let hostRoot = ''
+
 async function startServer(
-  outputDir: string,
+  _outputDir: string,
   secretEntries: Array<{ name: string; value: string }> = [],
-  options: { workflowEnabled?: boolean } = {}
+  options: { workflowEnabled?: boolean; resolver?: boolean; sharedOutputDir?: string } = {}
 ): Promise<{ server: RPCServer; baseUrl: string }> {
   process.env.CLERUM_ENABLE_AUTH = 'false'
   process.env.CLERUM_HOST_NAME = 'chatllm'
-  process.env.CLERUM_OUTPUT_DIR = outputDir
+  // The chat routes never read it; a test can point it at a populated folder.
+  if (options.sharedOutputDir) process.env.CLERUM_OUTPUT_DIR = options.sharedOutputDir
+  else delete process.env.CLERUM_OUTPUT_DIR
   if (options.workflowEnabled) process.env.CLERUM_WORKFLOW_ENABLED = 'true'
   else delete process.env.CLERUM_WORKFLOW_ENABLED
   vi.resetModules()
   const { RPCServer } = await import('../server')
   const server = new RPCServer(0)
   server.setArtifactSecretEntriesProvider(() => secretEntries)
+  // Wired as main.ts wires it.
+  const root = hostRoot
+  if (options.resolver !== false) {
+    server.setChatArtifactDirResolver(userId => resolveRpcCallerOutputDir(root, userId))
+  }
   await server.start()
   const address = (server as unknown as { server: { address: () => AddressInfo } }).server.address()
   return { server, baseUrl: `http://127.0.0.1:${address.port}` }
 }
 
-const rpcEdgeHeaders = {
-  'x-clerum-edge-caller': 'rpc-proxy',
-  'x-clerum-edge-host-ref': 'chatllm',
-  'x-clerum-edge-user-id': 'user-1',
+function edgeHeaders(userId: string): Record<string, string> {
+  return {
+    'x-clerum-edge-caller': 'rpc-proxy',
+    'x-clerum-edge-host-ref': 'chatllm',
+    'x-clerum-edge-user-id': userId,
+  }
 }
 
-function makeOutputDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-runtime-artifact-test-'))
+const rpcEdgeHeaders = edgeHeaders('user-1')
+
+/** The caller root of a Desktop user, keyed as their chat messages are. */
+function callerRootOf(userId: string): string {
+  return path.join(
+    hostRoot,
+    'users',
+    deriveUserKeyFromSource({ sender: userId, channelType: 'rpc' })
+  )
+}
+
+/** A user's folder of generated files, created on a fresh Host root for user-1. */
+function makeOutputDir(userId = 'user-1'): string {
+  if (!hostRoot) hostRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-runtime-artifact-test-'))
+  const dir = path.join(callerRootOf(userId), CALLER_OUTPUTS_DIR)
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  return dir
 }
 
 function restoreEnv(): void {
@@ -53,9 +82,10 @@ describe('RPCServer runtime artifact routes', () => {
   let outsideFile = ''
 
   afterEach(() => {
-    if (outputDir) {
-      fs.rmSync(outputDir, { recursive: true, force: true })
-      outputDir = ''
+    outputDir = ''
+    if (hostRoot) {
+      fs.rmSync(hostRoot, { recursive: true, force: true })
+      hostRoot = ''
     }
     if (outsideFile) {
       fs.rmSync(outsideFile, { force: true })
@@ -64,7 +94,7 @@ describe('RPCServer runtime artifact routes', () => {
     restoreEnv()
   })
 
-  it('downloads regular artifacts from the configured output directory', async () => {
+  it("downloads regular artifacts from the caller's own folder", async () => {
     outputDir = makeOutputDir()
     fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
     const { server, baseUrl } = await startServer(outputDir)
@@ -83,11 +113,12 @@ describe('RPCServer runtime artifact routes', () => {
     }
   })
 
-  it('lists only regular downloadable artifacts from the configured output directory', async () => {
+  it("lists only regular downloadable artifacts from the caller's own folder", async () => {
     outputDir = makeOutputDir()
     outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
     fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
     fs.writeFileSync(path.join(outputDir, '.clerum-state'), '{}')
+    fs.writeFileSync(path.join(outputDir, '.clerum-partial-in-progress'), 'half a file')
     fs.mkdirSync(path.join(outputDir, 'nested'))
     fs.writeFileSync(outsideFile, 'secret outside output')
     fs.symlinkSync(outsideFile, path.join(outputDir, 'leak.md'))
@@ -106,12 +137,17 @@ describe('RPCServer runtime artifact routes', () => {
         sizeBytes: 5,
       })
       expect(body.artifacts[0].createdAt).toMatch(/\d{4}-\d{2}-\d{2}T/)
+      const partial = await fetch(
+        `${baseUrl}/v1/runtime/artifacts/.clerum-partial-in-progress/download`,
+        { headers: rpcEdgeHeaders }
+      )
+      expect(partial.status).toBe(404)
     } finally {
       await server.stop()
     }
   })
 
-  it('does not download symlink artifacts from the output directory', async () => {
+  it("does not download symlink artifacts from the caller's folder", async () => {
     outputDir = makeOutputDir()
     outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
     fs.writeFileSync(outsideFile, 'secret outside output')
@@ -252,6 +288,145 @@ describe('RPCServer runtime artifact routes', () => {
       expect(list.status).toBe(404)
 
       const download = await fetch(`${baseUrl}/v1/runtime/artifacts/report.md/download`)
+      expect(download.status).toBe(404)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it("lists and downloads only the requesting user's own files, whatever the name", async () => {
+    outputDir = makeOutputDir('user-1')
+    fs.writeFileSync(path.join(outputDir, 'mine.md'), '# one\n')
+    fs.writeFileSync(path.join(makeOutputDir('user-2'), 'theirs.md'), '# two\n')
+    const { server, baseUrl } = await startServer(outputDir)
+
+    try {
+      const names = async (userId: string) => {
+        const res = await fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: edgeHeaders(userId) })
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { artifacts: Array<{ name: string }> }
+        return body.artifacts.map(a => a.name)
+      }
+      expect(await names('user-1')).toEqual(['mine.md'])
+      expect(await names('user-2')).toEqual(['theirs.md'])
+
+      const guessed = await fetch(`${baseUrl}/v1/runtime/artifacts/theirs.md/download`, {
+        headers: edgeHeaders('user-1'),
+      })
+      expect(guessed.status).toBe(404)
+      const own = await fetch(`${baseUrl}/v1/runtime/artifacts/theirs.md/download`, {
+        headers: edgeHeaders('user-2'),
+      })
+      expect(own.status).toBe(200)
+      expect(await own.text()).toBe('# two\n')
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('lists nothing and creates no folder for a user who has generated nothing', async () => {
+    outputDir = makeOutputDir('user-1')
+    const { server, baseUrl } = await startServer(outputDir)
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: edgeHeaders('user-3') })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ artifacts: [] })
+      const download = await fetch(`${baseUrl}/v1/runtime/artifacts/mine.md/download`, {
+        headers: edgeHeaders('user-3'),
+      })
+      expect(download.status).toBe(404)
+      expect(fs.existsSync(callerRootOf('user-3'))).toBe(false)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('answers 503, not another folder, when the caller folder is a link', async () => {
+    outputDir = makeOutputDir('user-1')
+    const elsewhere = path.join(hostRoot, 'elsewhere')
+    fs.mkdirSync(elsewhere)
+    fs.writeFileSync(path.join(elsewhere, 'report.md'), '# not yours\n')
+    fs.rmSync(outputDir, { recursive: true })
+    fs.symlinkSync(elsewhere, outputDir)
+    const { server, baseUrl } = await startServer(outputDir)
+
+    try {
+      const list = await fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: rpcEdgeHeaders })
+      expect(list.status).toBe(503)
+      expect(await list.json()).toMatchObject({ code: 'artifact_store_unavailable' })
+      const download = await fetch(`${baseUrl}/v1/runtime/artifacts/report.md/download`, {
+        headers: rpcEdgeHeaders,
+      })
+      expect(download.status).toBe(503)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('answers 503 and never serves the shared folder when no resolver is wired', async () => {
+    outputDir = makeOutputDir('user-1')
+    const shared = path.join(hostRoot, 'outputs')
+    fs.mkdirSync(shared)
+    fs.writeFileSync(path.join(shared, 'report.md'), '# shared\n')
+    const { server, baseUrl } = await startServer(outputDir, [], {
+      resolver: false,
+      sharedOutputDir: shared,
+    })
+
+    try {
+      const list = await fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: rpcEdgeHeaders })
+      expect(list.status).toBe(503)
+      const download = await fetch(`${baseUrl}/v1/runtime/artifacts/report.md/download`, {
+        headers: rpcEdgeHeaders,
+      })
+      expect(download.status).toBe(503)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('limits each caller on their own, so one cannot starve the others', async () => {
+    outputDir = makeOutputDir('user-1')
+    fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
+    const { server, baseUrl } = await startServer(outputDir)
+
+    try {
+      const list = (userId: string) =>
+        fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: edgeHeaders(userId) })
+      for (let call = 0; call < 600; call++) {
+        const res = await list('user-1')
+        expect(res.status).toBe(200)
+        await res.arrayBuffer()
+      }
+      const limited = await list('user-1')
+      expect(limited.status).toBe(429)
+      expect(await limited.json()).toEqual({ error: 'Too Many Requests', retryable: true })
+      const download = await fetch(`${baseUrl}/v1/runtime/artifacts/report.md/download`, {
+        headers: rpcEdgeHeaders,
+      })
+      expect(download.status).toBe(429)
+      // Another caller, through the same rpc-proxy address, is still served.
+      const other = await list('user-2')
+      expect(other.status).toBe(200)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('does not serve CLERUM_OUTPUT_DIR in chat when a resolver is wired', async () => {
+    outputDir = makeOutputDir('user-1')
+    const shared = path.join(hostRoot, 'outputs')
+    fs.mkdirSync(shared)
+    fs.writeFileSync(path.join(shared, 'report.md'), '# shared\n')
+    const { server, baseUrl } = await startServer(outputDir, [], { sharedOutputDir: shared })
+
+    try {
+      const list = await fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: rpcEdgeHeaders })
+      expect(await list.json()).toEqual({ artifacts: [] })
+      const download = await fetch(`${baseUrl}/v1/runtime/artifacts/report.md/download`, {
+        headers: rpcEdgeHeaders,
+      })
       expect(download.status).toBe(404)
     } finally {
       await server.stop()

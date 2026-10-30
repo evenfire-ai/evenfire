@@ -13,8 +13,8 @@ export function canonicalizeDesktopRestEndpoint(rawValue: string): string {
     url.hostname = hostnameWithoutRootDot
   }
 
-  const pathname = url.pathname === '/' ? '' : url.pathname
-  return `${url.origin}${pathname}${url.search}${url.hash}`
+  const pathname = url.pathname.replace(/\/+$/, '')
+  return `${url.origin}${pathname}${url.search}`
 }
 
 export function desktopRestEndpointOrigin(rawValue: string): string {

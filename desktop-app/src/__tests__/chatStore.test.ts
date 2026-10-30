@@ -1054,16 +1054,17 @@ describe('pending cleanup retry per agent', () => {
     const reads = recordIndexReads()
 
     await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-1')
-    // The sweep reads each agent's index to find its queue, and once more to
+    // The sweep reads each agent's index to find its queue, again to confirm the
+    // entry is still queued before removing its artifacts, and once more to
     // drop the finished entry.
-    expect(reads).toHaveLength(2 * AGENTS.length)
+    expect(reads).toHaveLength(3 * AGENTS.length)
     const afterSweep = reads.length
     for (const agentRef of AGENTS.slice(1)) {
       await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, agentRef)
     }
 
     expect(reads.slice(afterSweep)).toEqual(AGENTS.slice(1).map(indexPathOf))
-    expect(reads).toHaveLength(3 * AGENTS.length - 1)
+    expect(reads).toHaveLength(4 * AGENTS.length - 1)
     vi.restoreAllMocks()
     for (const agentRef of AGENTS) expect(await pendingOf(agentRef)).toEqual([])
   })
@@ -1086,8 +1087,13 @@ describe('pending cleanup retry per agent', () => {
     vi.restoreAllMocks()
     expect(await pendingOf('agent-3')).toEqual([])
     await expect(fs.access(join(tempDir, 'agent-3', 'chats', 'late-delete'))).rejects.toThrow()
-    // Only agent-3 was touched: read to find its queue, then to drop the entry.
-    expect(retryReads).toEqual([indexPathOf('agent-3'), indexPathOf('agent-3')])
+    // Only agent-3 was touched: read to find its queue, to confirm the entry is
+    // still queued, then to drop the entry.
+    expect(retryReads).toEqual([
+      indexPathOf('agent-3'),
+      indexPathOf('agent-3'),
+      indexPathOf('agent-3'),
+    ])
   })
 
   it('walks every agent again after the next bind', async () => {
@@ -2966,5 +2972,150 @@ describe('upsertServerSessions', () => {
   it('is a no-op for an empty session list', async () => {
     await store.createChat('agent-1', 'c1')
     expect(await store.upsertServerSessions('agent-1', [])).toBe(0)
+  })
+
+  it('stores the server title of a cached chat on disk without moving updatedAt', async () => {
+    await store.createChat('agent-1', 'c1')
+    const before = (await store.listChats('agent-1')).find(c => c.id === 'c1')!
+    expect(before.title).toBe('New Chat')
+
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'c1', lastActivityAt: before.updatedAt, title: 'Quarterly plan' },
+    ])
+
+    expect(changed).toBe(1)
+    const restarted = new ChatStore(tempDir)
+    const after = (await restarted.listChats('agent-1')).find(c => c.id === 'c1')!
+    expect(after.title).toBe('Quarterly plan')
+    expect(after.updatedAt).toBe(before.updatedAt)
+  })
+
+  it('creates no entry for a titled server-only session and does not resurrect a deleted chat', async () => {
+    await store.createChat('agent-1', 'c1')
+    await store.createChat('agent-1', 'gone')
+    await store.deleteChat('agent-1', 'gone', TEAM_A_SCOPE)
+
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'c1', title: 'Kept' },
+      { chatId: 'server-only', title: 'Remote' },
+      { chatId: 'gone', title: 'Deleted' },
+    ])
+
+    // Witness: the cached chat in the same call was updated.
+    expect(changed).toBe(1)
+    const chats = await new ChatStore(tempDir).listChats('agent-1')
+    expect(chats.map(c => [c.id, c.title])).toEqual([['c1', 'Kept']])
+  })
+
+  it('keeps the local title when the server reports none', async () => {
+    await store.createChat('agent-1', 'c1')
+    await store.upsertServerSessions('agent-1', [{ chatId: 'c1', title: 'First' }])
+
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'c1' },
+      { chatId: 'c1', title: '' },
+    ])
+
+    expect(changed).toBe(0)
+    expect((await store.listChats('agent-1')).find(c => c.id === 'c1')!.title).toBe('First')
+  })
+
+  it('saves the index once for a new title and not again for the same title', async () => {
+    await store.createChat('agent-1', 'c1')
+    const saveIndex = vi.spyOn(
+      store as unknown as { saveIndex: (agentRef: string, index: unknown) => Promise<void> },
+      'saveIndex'
+    )
+
+    expect(await store.upsertServerSessions('agent-1', [{ chatId: 'c1', title: 'Plan' }])).toBe(1)
+    expect(saveIndex).toHaveBeenCalledTimes(1)
+
+    expect(await store.upsertServerSessions('agent-1', [{ chatId: 'c1', title: 'Plan' }])).toBe(0)
+    expect(saveIndex).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── server-only titles reach the index at hydration (A19.1) ───────────────────
+
+describe('createChat after a catalog page reported the session', () => {
+  function rememberedTitles(): Map<string, Map<string, string>> {
+    return (store as unknown as { serverOnlyTitles: Map<string, Map<string, string>> })
+      .serverOnlyTitles
+  }
+
+  it('stores the server title on disk when a server-only chat is opened', async () => {
+    await store.upsertServerSessions('agent-1', [{ chatId: 'remote', title: 'Quarterly plan' }])
+
+    const meta = await store.createChat('agent-1', 'remote')
+
+    expect(meta.title).toBe('Quarterly plan')
+    const chats = await new ChatStore(tempDir).listChats('agent-1')
+    expect(chats.map(c => [c.id, c.title])).toEqual([['remote', 'Quarterly plan']])
+  })
+
+  it('keeps New Chat for an id the catalog never reported', async () => {
+    await store.upsertServerSessions('agent-1', [{ chatId: 'remote', title: 'Remote' }])
+
+    const fresh = await store.createChat('agent-1', 'fresh')
+    // Witness: the reported id in the same store does get its title.
+    const remote = await store.createChat('agent-1', 'remote')
+
+    expect(fresh.title).toBe('New Chat')
+    expect(remote.title).toBe('Remote')
+  })
+
+  it('forgets the remembered title when the session arrives without one', async () => {
+    await store.upsertServerSessions('agent-1', [
+      { chatId: 'renamed', title: 'Before rename' },
+      { chatId: 'kept', title: 'Kept' },
+    ])
+    // A pending local rename: the renderer omits the title for that chat only.
+    await store.upsertServerSessions('agent-1', [
+      { chatId: 'renamed' },
+      { chatId: 'kept', title: 'Kept' },
+    ])
+
+    const renamed = await store.createChat('agent-1', 'renamed')
+    // Witness: the sibling sent with a title in the same call keeps it.
+    const kept = await store.createChat('agent-1', 'kept')
+
+    expect(renamed.title).toBe('New Chat')
+    expect(kept.title).toBe('Kept')
+  })
+
+  it('keeps remembered titles per agent', async () => {
+    await store.upsertServerSessions('agent-1', [{ chatId: 'shared-id', title: 'Agent one' }])
+
+    const other = await store.createChat('agent-2', 'shared-id')
+    // Witness: the owning agent gets its title.
+    const own = await store.createChat('agent-1', 'shared-id')
+
+    expect(other.title).toBe('New Chat')
+    expect(own.title).toBe('Agent one')
+  })
+
+  it('does not reopen a chat deleted locally', async () => {
+    await store.createChat('agent-1', 'gone')
+    await store.deleteChat('agent-1', 'gone', TEAM_A_SCOPE)
+    await store.upsertServerSessions('agent-1', [
+      { chatId: 'gone', title: 'Deleted' },
+      { chatId: 'live', title: 'Live' },
+    ])
+
+    await expect(store.createChat('agent-1', 'gone')).rejects.toThrow('Chat was deleted locally')
+    // Witness: the live sibling from the same catalog page is created with its title.
+    expect((await store.createChat('agent-1', 'live')).title).toBe('Live')
+    const chats = await new ChatStore(tempDir).listChats('agent-1')
+    expect(chats.map(c => [c.id, c.title])).toEqual([['live', 'Live']])
+  })
+
+  it('drops the remembered title once hydration used it', async () => {
+    await store.upsertServerSessions('agent-1', [{ chatId: 'remote', title: 'Remote' }])
+    // Witness: the title is held before the chat is opened.
+    expect(rememberedTitles().get('agent-1')?.get('remote')).toBe('Remote')
+
+    await store.createChat('agent-1', 'remote')
+
+    expect(rememberedTitles().get('agent-1')?.has('remote')).toBe(false)
   })
 })

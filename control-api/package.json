@@ -1,10 +1,10 @@
 {
   "name": "clerum-control-api",
-  "version": "0.1.751",
+  "version": "0.1.866",
   "description": "Internal Clerum control plane REST API + UI for managing CRDs and secrets",
   "main": "dist/main.js",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "build": "tsc && node -e \"const fs=require('fs'); for (const file of ['dist/main.js','dist/migrate.js','dist/traceMaintenance.js']) { if (!fs.existsSync(file)) { throw new Error('Missing build artifact: ' + file); } }\"",

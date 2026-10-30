@@ -3,7 +3,7 @@
  * connector -> visible Control UI login/configuration/approval -> isolated
  * Desktop login/chat -> persisted MCP receipt -> visible revocation -> denial.
  * Every transition checks UI/state and the saved binding or actual MCP result.
- * E2E_GUARDIAN_ENTRY_POINT: Control UI starts at its application root.
+ * Entry contract: Control UI starts at its application root.
  * E2E_GUARDIAN_IPC_FLOW: Desktop uses real main-process login and chat IPC.
  * Completed messages and MCP evidence replace renderer response waits. Tests
  * never inject IPC calls or authentication. Only the external OAuth and model
@@ -153,8 +153,14 @@ async function receiptApproval(page: Page, scenario: Scenario, previousCalls: nu
 test('unauthenticated agent route guard prevents connector use', async ({ page }) => {
   const scenario = cases[0]!
   const before = await readEvidence(scenario)
-  // Negative protected-route guard: direct navigation must not open the editor.
+  const protectedRoute = `/agents/${scenario.agentName}/connectors`
+  const protectedRouteRequest = page.waitForRequest(
+    request => request.isNavigationRequest() && new URL(request.url()).pathname === protectedRoute
+  )
+  // E2E_GUARDIAN_NAVIGATION: fixture-agent-route-guard — prepared agent route stays protected
   await page.goto(`/agents/${scenario.agentName}/connectors`)
+  const visitedRoute = await protectedRouteRequest
+  expect(new URL(visitedRoute.url()).pathname).toBe(protectedRoute)
   await expect(page.getByLabel('Username or email')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Add connector', exact: true })).toHaveCount(0)

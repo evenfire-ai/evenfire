@@ -105,8 +105,9 @@ spec:
                 security:
                   type: object
                   description: >-
-                    POSIX identity applied by the reconciler to the gfsc pods
-                    and the init Job so they can read/write the mounted drive.
+                    POSIX identity applied by the reconciler to the gfsc pods;
+                    the writer's root init container chowns the mounted drive to
+                    it so the pods can read/write it.
                   properties:
                     runAsUser:
                       type: integer

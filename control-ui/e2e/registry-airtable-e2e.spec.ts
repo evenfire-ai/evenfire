@@ -72,6 +72,25 @@ async function api(
   return { status: resp.status, data }
 }
 
+// Installing a server no longer enables it anywhere; this is the API form of "Add to agents".
+async function enableServerInContext(
+  token: string,
+  contextName: string,
+  serverName: string
+): Promise<void> {
+  const path = `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
+  const { status, data } = await api(token, 'GET', path)
+  expect(status).toBe(200)
+  const metadata = data.metadata as { resourceVersion?: string }
+  const spec = data.spec as Record<string, unknown> & { mcpServers?: string[] }
+  const mcpServers = Array.from(new Set([...(spec.mcpServers ?? []), serverName]))
+  const updated = await api(token, 'PUT', path, {
+    metadata: { resourceVersion: metadata.resourceVersion },
+    spec: { ...spec, mcpServers },
+  })
+  expect(updated.status, JSON.stringify(updated.data)).toBe(200)
+}
+
 async function apiRaw(token: string, path: string): Promise<Response> {
   return fetch(`${BASE_API}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -213,13 +232,13 @@ test.describe('Airtable MCP E2E — Real Data', () => {
     await new Promise(r => setTimeout(r, 5_000))
     const { status, data } = await api(token, 'POST', '/api/v1/admin/registry/install', {
       serverName: SERVER_NAME,
-      contextRef: 'context1',
       registryEntryName: 'mcp-airtable',
       registryEntryVersion: '1.0.0',
       credentials: { AIRTABLE_API_KEY: AIRTABLE_API_KEY },
     })
     expect(status).toBe(201)
     expect(data.serverName).toBe(SERVER_NAME)
+    await enableServerInContext(token, 'context1', SERVER_NAME)
     console.log('  [PASS] Airtable MCP installed from registry')
   })
 
@@ -232,7 +251,7 @@ test.describe('Airtable MCP E2E — Real Data', () => {
     const spec = srv!.spec
     expect(spec.enabled).toBe(true)
     expect(spec.managed).toBe(true)
-    expect(spec.contextRef).toBe('context1')
+    expect(spec.contextRef).toBeUndefined()
     const transport = spec.transport as { type: string; port: number }
     expect(transport.type).toBe('streamableHttp')
     expect(transport.port).toBe(3000)

@@ -26,7 +26,11 @@ import {
   revokeAdminTeamInvitation,
 } from '../lib/api'
 import type { DeleteCandidateTeam } from '../lib/profileAdminDelete'
-import { formatTeamNames, getSoloMemberTeamsForUser } from '../lib/profileAdminDelete'
+import {
+  describeDeleteTeamError,
+  formatTeamNames,
+  getSoloMemberTeamsForUser,
+} from '../lib/profileAdminDelete'
 import { formatTeamRole } from '../lib/teamRoles'
 import { ControlAdminsPanel } from './ControlAdminsPanel'
 import type { ProfileAdminHomeProps, ProfileAdminTab } from './ProfileAdminHome.types'
@@ -345,7 +349,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       setTeamToDelete(null)
       await loadData()
     } catch (e) {
-      setDeleteDialogError(e instanceof Error ? e.message : 'Failed to delete team')
+      setDeleteDialogError(describeDeleteTeamError(e))
     } finally {
       setDeleteSubmitting(false)
     }
@@ -1021,8 +1025,9 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
               </button>
             </div>
             <p className="cu-muted" style={{ fontSize: '0.875rem', margin: '0 0 1rem' }}>
-              Permanently delete <strong>{teamToDelete.name}</strong> and all memberships, pending
-              invitations, and team context/agent mappings. This cannot be undone.
+              Permanently delete <strong>{teamToDelete.name}</strong> with its pending invitations
+              and team context/agent mappings. This cannot be undone. Only a team with no active
+              members can be deleted, and a team referenced by workflow audit history is kept.
             </p>
             {deleteDialogError ? (
               <div className="cu-banner cu-banner--error" style={{ marginBottom: '0.75rem' }}>

@@ -19,6 +19,8 @@ test('runtime exports and constant values stay aligned with the declaration file
   assert.equal(links.SANDBOX_UI_DEEP_LINK_PROTOCOL, 'evenfire:')
   assert.equal(links.SANDBOX_UI_DEEP_LINK_HOST, 'app')
   assert.equal(links.SANDBOX_UI_WEB_LINK_PATH, '/open/apps')
+  assert.equal(links.GFS_RESOURCE_DEEP_LINK_HOST, 'files')
+  assert.equal(links.GFS_RESOURCE_WEB_LINK_PATH, '/open/files')
   assert.match(
     declarations,
     /buildSandboxUiWebLink\(\s*profileUiBaseUrl: string,\s*parts: SandboxUiDeepLinkParts\s*\): string/
@@ -27,6 +29,87 @@ test('runtime exports and constant values stay aligned with the declaration file
     declarations,
     /parseSandboxUiDeepLink\(rawUrl: string\): SandboxUiDeepLinkTarget \| null/
   )
+  assert.match(
+    declarations,
+    /buildGfsResourceWebLink\(profileUiBaseUrl: string, uri: string\): string/
+  )
+  assert.match(
+    declarations,
+    /parseGfsResourceDeepLink\(rawUrl: string\): GfsResourceDeepLinkTarget \| null/
+  )
+})
+
+test('GFS resource links preserve canonical identity in web and desktop handoffs', () => {
+  const uri = 'gfs://main/0123456789abcdef0123456789ABCDEF'
+  const desktopLink = links.buildGfsResourceDeepLink(uri)
+  const webLink = links.buildGfsResourceWebLink('https://profile.example.com', uri)
+
+  assert.equal(
+    desktopLink,
+    'evenfire://files?uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef'
+  )
+  assert.equal(
+    webLink,
+    'https://profile.example.com/open/files?uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef'
+  )
+  assert.deepEqual(links.parseGfsResourceDeepLink(desktopLink), {
+    uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+  })
+})
+
+test('GFS resource-link parsing rejects malformed identities and untrusted URL components', () => {
+  for (const uri of [
+    'gfs://main/name-0123456789abcdef0123456789abcdef',
+    'gfs://main/0123456789abcdef0123456789abcdef/child',
+    'gfs://main/0123456789abcdef0123456789abcdef?token=secret',
+    'gfs://main/0123456789abcdef0123456789abcdef#fragment',
+    'https://profile.example.com/open/files?uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef',
+  ]) {
+    assert.equal(links.normalizeGfsResourceUri(uri), null)
+  }
+
+  for (const rawUrl of [
+    'evenfire://files:444?uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef',
+    'evenfire://files/extra?uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef',
+    'evenfire://files?uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef&uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef',
+    'evenfire://files?uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef&return=https%3A%2F%2Fevil.example',
+    'evenfire://files?uri=https%3A%2F%2Fevil.example',
+  ]) {
+    assert.equal(links.parseGfsResourceDeepLink(rawUrl), null)
+  }
+})
+
+test('resource-link parser accepts only canonical identities and the shared link producers', () => {
+  const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+  const desktopLink = links.buildGfsResourceDeepLink(uri)
+  const profileLink = links.buildGfsResourceWebLink('https://another-env.example', uri)
+
+  assert.deepEqual(links.parseGfsResourceLink(uri), { uri })
+  assert.deepEqual(links.parseGfsResourceLink(desktopLink), { uri })
+  assert.deepEqual(links.parseGfsResourceLink(profileLink), { uri })
+  assert.deepEqual(links.parseGfsResourceLink(profileLink.replace('main%2F', 'Main%2F')), {
+    uri: 'gfs://Main/0123456789abcdef0123456789abcdef',
+  })
+
+  for (const rawLink of [
+    'gfs://main/folder/report.md',
+    'gfs://main/name-0123456789abcdef0123456789abcdef',
+    'gfs://main/01234567-89ab-cdef-0123-456789abcdef',
+    `https://profile.example/open/files?uri=${encodeURIComponent(encodeURIComponent(uri))}`,
+    `${profileLink}#fragment`,
+    profileLink.replace('https://another-env.example', 'https://user:secret@another-env.example'),
+    `${profileLink}&uri=${encodeURIComponent(uri)}`,
+    profileLink.replace('/open/files?', '/wrong/path?'),
+    profileLink.replace('https:', 'ftp:'),
+  ]) {
+    assert.equal(links.parseGfsResourceLink(rawLink), null, rawLink)
+  }
+
+  assert.equal(
+    links.normalizeGfsResourceUri('gfs://Main/0123456789ABCDEF0123456789ABCDEF'),
+    'gfs://Main/0123456789abcdef0123456789abcdef'
+  )
+  assert.equal(links.parseGfsResourceLink(`${uri}/`), null)
 })
 
 test('web and desktop links use the same canonical route contract', () => {

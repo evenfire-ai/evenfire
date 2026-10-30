@@ -673,3 +673,104 @@ describe('late global catalog response', () => {
     }
   )
 })
+
+type ReconcileCall = [string, Array<{ chatId: string; lastActivityAt?: string; title?: string }>]
+
+describe('server titles persisted into the local index (spec 15 §5.3)', () => {
+  it('sends the server title of each session with the freshness write', async () => {
+    clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'chat-a', title: 'New Chat' }]))
+    clerum.rpc.listSessions.mockResolvedValue(
+      serverSessions([
+        { agent: 'agent-x', chatId: 'chat-a', title: 'Deploy staging' },
+        { agent: 'agent-x', chatId: 'chat-b' },
+      ])
+    )
+
+    renderController({ selectedAgent: 'agent-x', agentNames: ['agent-x'] })
+
+    await waitFor(() =>
+      expect(clerum.chat.reconcileServerSessions).toHaveBeenCalledWith('agent-x', [
+        { chatId: 'chat-a', lastActivityAt: expect.any(String), title: 'Deploy staging' },
+        { chatId: 'chat-b', lastActivityAt: expect.any(String) },
+      ])
+    )
+  })
+
+  it('persists the titles of a Host the user never selects', async () => {
+    clerum.chat.getIndex.mockResolvedValue(localIndex([]))
+    clerum.rpc.listSessions.mockImplementation(async (agentRef: string) =>
+      agentRef === 'agent-y'
+        ? serverSessions([{ agent: 'agent-y', chatId: 'chat-y', title: 'Cross-device title' }])
+        : serverSessions([{ agent: 'agent-x', chatId: 'chat-x', title: 'Selected title' }])
+    )
+
+    renderController({ selectedAgent: 'agent-x', agentNames: ['agent-x', 'agent-y'] })
+
+    // Witness: the selected Host's write went out too.
+    await waitFor(() =>
+      expect(
+        (clerum.chat.reconcileServerSessions.mock.calls as ReconcileCall[]).some(
+          ([agentRef]) => agentRef === 'agent-x'
+        )
+      ).toBe(true)
+    )
+    await waitFor(() =>
+      expect(clerum.chat.reconcileServerSessions).toHaveBeenCalledWith('agent-y', [
+        { chatId: 'chat-y', lastActivityAt: expect.any(String), title: 'Cross-device title' },
+      ])
+    )
+  })
+
+  it('paints the stored server title on the next start before any catalog arrives', async () => {
+    // A stateful index: the freshness write applies titles the way ChatStore does.
+    const index = localIndex([{ id: 'chat-a', title: 'New Chat' }])
+    clerum.chat.getIndex.mockImplementation(async () => ({
+      ...index,
+      chats: index.chats.map(chat => ({ ...chat })),
+    }))
+    clerum.chat.reconcileServerSessions.mockImplementation(
+      async (_agentRef: string, sessions: ReconcileCall[1]) => {
+        let changed = 0
+        for (const session of sessions) {
+          const chat = index.chats.find(c => c.id === session.chatId)
+          if (chat && session.title && chat.title !== session.title) {
+            chat.title = session.title
+            changed += 1
+          }
+        }
+        return changed
+      }
+    )
+    clerum.rpc.listSessions.mockResolvedValue(
+      serverSessions([{ agent: 'agent-x', chatId: 'chat-a', title: 'Deploy staging' }])
+    )
+
+    const first = renderController({ selectedAgent: 'agent-x', agentNames: ['agent-x'] })
+    await waitFor(() =>
+      expect(index.chats.find(c => c.id === 'chat-a')?.title).toBe('Deploy staging')
+    )
+    first.unmount()
+
+    // Second start: the catalog never answers while the cache paints. A new
+    // source function also drops the module-level catalog cache, as a restart does.
+    const catalog = deferred<SessionsListResult>()
+    clerum.rpc.listSessions = vi.fn(() => catalog.promise)
+    const titles: Array<string | undefined> = []
+    const second = renderController({ selectedAgent: 'agent-x', agentNames: ['agent-x'] })
+    titles.push(second.result.current.chatList.find(c => c.id === 'chat-a')?.title)
+
+    await waitFor(() =>
+      expect(second.result.current.chatList.find(c => c.id === 'chat-a')?.title).toBe(
+        'Deploy staging'
+      )
+    )
+    // Witness: the second start did ask for the catalog, which is still pending.
+    expect(clerum.rpc.listSessions).toHaveBeenCalled()
+    titles.push(second.result.current.chatList.find(c => c.id === 'chat-a')?.title)
+    expect(titles).not.toContain('New Chat')
+
+    await act(async () => {
+      catalog.resolve(serverSessions([]))
+    })
+  })
+})

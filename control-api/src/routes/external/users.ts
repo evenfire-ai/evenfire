@@ -8,7 +8,9 @@ import {
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { rootLogger } from '../../observability/logger.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
@@ -27,6 +29,11 @@ import {
   updateProfile,
   updateUserPassword,
 } from '../../services/directory/index.js'
+import { mapWithConcurrencyLimit } from '../../utils/mapWithConcurrencyLimit.js'
+import {
+  PASSWORD_CREDENTIAL_CHANGED_RESPONSE,
+  PASSWORD_NOT_SET_RESPONSE,
+} from './passwordErrorResponses.js'
 
 const MAX_TEAM_DIRECTORY_TEAMS = 50
 const TEAM_DIRECTORY_RATE_LIMIT_PER_MINUTE = 10
@@ -52,26 +59,6 @@ function projectTeamMembers(values: unknown): TeamDirectoryMember[] {
       status: String(row.status || ''),
     }
   })
-}
-
-async function mapWithConcurrencyLimit<T, R>(
-  items: T[],
-  limit: number,
-  mapper: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let nextIndex = 0
-  const workerCount = Math.min(limit, items.length)
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (nextIndex < items.length) {
-        const index = nextIndex
-        nextIndex += 1
-        results[index] = await mapper(items[index])
-      }
-    })
-  )
-  return results
 }
 
 export function createExternalUsersRouter(gateway: K8sGateway): Router {
@@ -126,7 +113,10 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           activeContextIds = new Set(contextIds)
           activeAgentNames = new Set(agentNames)
         } catch (err) {
-          console.warn('[external/users] access reconciliation failed for team directory:', err)
+          ;(req.log ?? rootLogger).warn(
+            { err, module: 'external-users', userId: req.params.userId },
+            'access reconciliation failed for team directory'
+          )
         }
 
         const items = await mapWithConcurrencyLimit(teams, 4, async team => {
@@ -143,7 +133,10 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
               agentNames: filterAccessValues(agents?.agentNames, activeAgentNames),
             }
           } catch (err) {
-            console.warn(`[external/users] team-directory fetch failed for team ${team.id}:`, err)
+            ;(req.log ?? rootLogger).warn(
+              { err, module: 'external-users', teamId: team.id },
+              'team-directory fetch failed'
+            )
             return {
               team,
               members: [],
@@ -203,9 +196,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         try {
           active = new Set(await listActiveContextIds(gateway))
         } catch (err) {
-          console.warn(
-            `[external/users] context reconciliation failed for ${req.params.userId}:`,
-            err
+          ;(req.log ?? rootLogger).warn(
+            { err, module: 'external-users', userId: req.params.userId },
+            'context reconciliation failed'
           )
         }
         return res.status(200).json({
@@ -236,6 +229,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           // access as the gate — no additional context-level scoping needed.
           agents = await resolveMcpServersForAgents(gateway, {
             mcpServersNamespace: config.mcpServersNamespace,
+            contextsNamespace: config.contextsNamespace,
             hostsNamespace: config.hostsNamespace,
             agentNames: authorizedAgentNames,
           })
@@ -246,9 +240,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           // Spec §7.2: never fail the catalog purely because Kubernetes is
           // unavailable. Preserve the names authorized by the directory DB;
           // omit enriched DTOs because their live Host identity is unverified.
-          console.warn(
-            `[external/users] MCP server enrichment failed for ${req.params.userId}:`,
-            err
+          ;(req.log ?? rootLogger).warn(
+            { err, module: 'external-users', userId: req.params.userId },
+            'MCP server enrichment failed'
           )
           agents = []
         }
@@ -304,15 +298,21 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         if ('error' in result) {
           if (result.error === 'not_found') return res.status(404).json({ error: 'not_found' })
           if (result.error === 'password_not_set') {
-            return res.status(409).json({ error: 'password_not_set' })
+            return res.status(PASSWORD_NOT_SET_RESPONSE.status).json(PASSWORD_NOT_SET_RESPONSE.body)
           }
           if (result.error === 'invalid_current_password') {
             return res.status(401).json({ error: 'invalid_current_password' })
+          }
+          if (result.error === 'credential_changed') {
+            return res
+              .status(PASSWORD_CREDENTIAL_CHANGED_RESPONSE.status)
+              .json(PASSWORD_CREDENTIAL_CHANGED_RESPONSE.body)
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
         return res.status(200).json(result)
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }

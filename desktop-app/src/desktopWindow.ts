@@ -11,8 +11,6 @@ export type OpenDesktopWindowArgs = {
 type WindowEntry = { window: BrowserWindow; hostRef: string }
 const windows = new Map<string, WindowEntry>()
 
-const client = new RpcProxyClient()
-
 /**
  * Parses one or more Set-Cookie header values and extracts the session cookie value.
  * Accepts either a single string or an array (as returned by getSetCookie()).
@@ -44,6 +42,7 @@ export async function openDesktopWindow(args: OpenDesktopWindowArgs): Promise<vo
   }
 
   // 1. Session exchange (Node-side fetch; no cookie-jar problem)
+  const client = new RpcProxyClient(() => rpcProxyUrl)
   const { setCookie } = await client.postDesktopSession(jwt, hostRef)
   const cookieValue = extractSessionCookie(setCookie, SESSION_COOKIE_NAME)
   if (!cookieValue) {

@@ -7,13 +7,13 @@
  * blocks the event loop. Pushing all DB work into a worker keeps the main
  * thread responsive for HTTP/SSE/timers.
  */
-import Database from 'better-sqlite3'
 import * as fs from 'node:fs'
-import * as path from 'node:path'
 import { parentPort, workerData } from 'node:worker_threads'
+import { logger } from '../../logger'
 import { runMigrations } from '../migrate'
 import { applyPragmas } from '../pragmas'
 import { createDispatcher, dispatch } from './dispatcher'
+import { openConversationDatabase } from './openDatabase'
 import {
   HEARTBEAT_ID,
   type HeartbeatPayload,
@@ -47,11 +47,7 @@ async function main(): Promise<void> {
     throw new Error('dbWorker.ts: workerData.dbPath is required')
   }
 
-  // Ensure parent directory exists (tmpdir fallback in dev may need it).
-  const dir = path.dirname(data.dbPath)
-  fs.mkdirSync(dir, { recursive: true })
-
-  const db = new Database(data.dbPath)
+  const db = openConversationDatabase(data.dbPath)
   const pragmaResult = applyPragmas(db, { barrierMode: data.barrierMode === true })
   if (!pragmaResult.walAvailable) {
     parentPort.postMessage({
@@ -79,17 +75,20 @@ async function main(): Promise<void> {
           try {
             db.pragma('wal_checkpoint(PASSIVE)')
           } catch (err) {
-            console.warn('[dbWorker] PASSIVE checkpoint failed:', err)
+            logger.warn({ err }, '[dbWorker] PASSIVE checkpoint failed')
           }
           writesSinceCheckpoint = 0
         }
       }
-      const reply: WorkerReply = { id: msg.id, ok: true, result }
-      parentPort.postMessage(reply)
       if (msg.op.kind === 'shutdown') {
+        // Close (and checkpoint) before the ACK: the main thread terminates
+        // the worker as soon as it sees the reply.
         db.close()
+        parentPort.postMessage({ id: msg.id, ok: true, result } satisfies WorkerReply)
         process.exit(0)
       }
+      const reply: WorkerReply = { id: msg.id, ok: true, result }
+      parentPort.postMessage(reply)
     } catch (err) {
       const e = err as { code?: string; message?: string; stack?: string }
       const reply: WorkerReply = {
@@ -125,6 +124,9 @@ async function main(): Promise<void> {
 }
 
 main().catch(err => {
+  // The main thread does not read `__fatal__`; this line is the only record
+  // of why the worker stopped (for example an orphan-WAL refusal).
+  logger.error({ err }, '[dbWorker] fatal; exiting with code 1')
   if (parentPort) {
     parentPort.postMessage({
       id: '__fatal__',

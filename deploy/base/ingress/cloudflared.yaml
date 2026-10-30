@@ -6,10 +6,10 @@ metadata:
   labels:
     app.kubernetes.io/component: ingress
 ---
-# Sentinel Secret. Real credentials are written out-of-band by
-# deploy/scripts/apply-cloudflared-credentials.sh (kubectl patch outside the
-# last-applied envelope), so `kubectl apply -k` sees stringData: {} as desired
-# state and never clobbers the applied value.
+# Sentinel Secret. Real credentials must be written out-of-band by your
+# production deployment tooling (e.g. a kubectl patch outside the last-applied
+# envelope), so `kubectl apply -k` sees stringData: {} as desired state and
+# never clobbers the applied value. See docs/deploy/production.md.
 apiVersion: v1
 kind: Secret
 metadata:

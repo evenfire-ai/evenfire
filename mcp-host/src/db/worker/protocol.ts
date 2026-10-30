@@ -330,7 +330,8 @@ export type WorkerOp =
       since?: string
       limit: number
     }
-  | { kind: 'sweep_closed_sessions'; cutoffEpoch: number }
+  /** Deletes at most `limit` rows; the caller repeats until a batch deletes nothing. */
+  | { kind: 'sweep_closed_sessions'; cutoffEpoch: number; limit: number }
   | { kind: 'integrity_check' }
   | { kind: 'checkpoint' }
   | { kind: 'shutdown' }

@@ -20,15 +20,28 @@ export function statusPresentation(status: RpcConnector['status']): StatusPresen
     case 'requires_setup':
       return { label: 'Requires setup', tone: 'warning' }
     default:
-      return { label: 'No OAuth', tone: 'neutral' }
+      return { label: '—', tone: 'neutral' }
   }
+}
+
+export function authenticationLabel(connector: Pick<RpcConnector, 'authKind'>): string {
+  if (connector.authKind === 'oauth-user' || connector.authKind === 'oauth-context') {
+    return 'OAuth'
+  }
+  return connector.authKind === 'static' ? 'Static credentials' : ''
+}
+
+export function connectorScopeLabel(connector: RpcConnector): string {
+  if (isSharedConnector(connector)) return 'Shared'
+  if (connector.grantScope === 'user' || connector.authKind === 'oauth-user') return 'Personal'
+  return '—'
 }
 
 /**
  * The per-connector scope caption (spec §1.3 / D-1). A `oauth-user` grant is
  * global to `(server, userId)`, so acting under one agent flips the SAME server
  * across every agent that lists it; a `oauth-context` grant is shared by the
- * whole Context. Surfaced as a tooltip (title) on the status pill so the user
+ * whole Context. Surfaced as a tooltip (title) on the scope pill so the user
  * understands the blast radius before the derived state changes several rows at
  * once.
  */

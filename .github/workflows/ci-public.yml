@@ -36,9 +36,69 @@ jobs:
             exit 1
           fi
 
+  node-runtime-images:
+    name: Node image runtime (${{ matrix.variant.name }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        variant:
+          - name: host-alpine
+            dockerfile: mcp-host/Dockerfile
+            context: .
+            host: true
+          - name: host-slim
+            dockerfile: mcp-host/Dockerfile.slim
+            context: .
+            host: true
+          - name: host-full
+            dockerfile: mcp-host/Dockerfile.full
+            context: .
+            host: true
+          - name: host-desktop
+            dockerfile: mcp-host/Dockerfile.desktop
+            context: .
+            host: true
+          - name: playwright-test
+            dockerfile: mcp-servers/playwright/Dockerfile
+            context: mcp-servers/playwright
+          - name: reference-hook
+            dockerfile: hooks/reference-guardrail-hook/Dockerfile
+            context: hooks/reference-guardrail-hook
+          - name: sandbox-ui
+            dockerfile: workflow-recipes/samples/sandbox-ui-test-harness/Dockerfile
+            context: workflow-recipes/samples/sandbox-ui-test-harness
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the final runtime image
+        run: timeout 2400 docker build --pull -f '${{ matrix.variant.dockerfile }}' -t runtime-smoke '${{ matrix.variant.context }}'
+      - name: Verify the effective Node runtime
+        run: |
+          actual=$(timeout 30 docker run --rm --network none --entrypoint node runtime-smoke -p 'process.versions.node')
+          printf 'NODE_RUNTIME=%s\n' "$actual"
+          test "$actual" = "$(tr -d '[:space:]' < .nvmrc)"
+      - name: Verify Host native modules and default SDK transport
+        if: matrix.variant.host == true
+        run: |
+          timeout 60 docker run --rm -i --network none --entrypoint node --workdir /app/mcp-host runtime-smoke --input-type=commonjs < mcp-host/test/image-runtime-smoke.cjs
+
+      - name: Verify patched test Playwright with a real browser session
+        if: matrix.variant.name == 'playwright-test'
+        run: |
+          docker image inspect runtime-smoke --format '{{.Id}}'
+          timeout 90 docker run --rm -i --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --memory=1g --cpus=1 --entrypoint node --workdir /app runtime-smoke --input-type=commonjs < mcp-servers/playwright/test/runtime-smoke.cjs
+
+      - name: Verify HTTP payloads in the upgraded fixture images
+        if: matrix.variant.name == 'reference-hook' || matrix.variant.name == 'sandbox-ui'
+        run: timeout 45 docker run --rm -i --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --memory=256m --cpus=1 --entrypoint node runtime-smoke --input-type=commonjs - '${{ matrix.variant.name }}' < scripts/tests/http-fixture-image-smoke.cjs
+
   test:
     name: Build / test / typecheck (${{ matrix.service }})
-    runs-on: ubuntu-latest
+    # Pinned: Playwright 1.58 cannot install Chromium on ubuntu-26.04, which
+    # ubuntu-latest moves to from 2026-10-19. Unpin once Playwright supports it.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -83,8 +143,10 @@ jobs:
             pinned_suites: gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/mcp-host.json
           - service: control-api
-            pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
+            pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts passwordRecovery.http.contract.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
+          - service: external-rest-api
+            pinned_suites: invitations.passwordRecovery.public.test.ts
           - service: codex-llm-proxy
             pinned_suites: originPolicy.test.ts server.security.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/codex-llm-proxy.json
@@ -97,7 +159,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
 
@@ -129,9 +191,36 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      - name: Test Playwright MCP cluster probe (hermetic)
+        if: matrix.service == 'host-context-controller'
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/e2e/playwright-mcp-cluster-probe.test.mjs
+          scripts/e2e/test/playwright-mcp-cluster-runtime.test.mjs
+
+      # The mcp-host images ship these faces, and the tests that set Arabic,
+      # Hebrew and Han text in a PDF fail in CI instead of skipping without them.
+      - name: Install the mcp-host image fonts
+        if: matrix.service == 'mcp-host'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core fonts-noto-core fonts-noto-cjk
+
       - name: Install External REST contract-test dependencies
         if: matrix.service == 'control-api'
         working-directory: external-rest-api
+        run: npm ci
+
+      - name: Build External REST composed HTTP child
+        if: matrix.service == 'control-api'
+        working-directory: external-rest-api
+        run: npm run build
+
+      # Inherited entity-change contracts still import Control API sources.
+      # directly, so install the producer's dependencies in this isolated job.
+      - name: Install Control API producer dependencies
+        if: matrix.service == 'external-rest-api'
+        working-directory: control-api
         run: npm ci
 
       # Desktop strict-pixel fixture checks consume the Host's locked native
@@ -180,6 +269,11 @@ jobs:
         if: matrix.service == 'desktop-app'
         run: node --test scripts/tests/subscription-private-ui-input.test.mjs
 
+      # Hermetic node:test suite of the chat-open benchmark harness (#1091).
+      - name: Test the chat-open benchmark harness
+        if: matrix.service == 'desktop-app'
+        run: node scripts/tests/run-node-test-files.mjs desktop-app/scripts/bench-chat-open/benchmark.test.mjs
+
       # Hermetic subscription-image and Control API memory-calibration node:test
       # suites. Their only installed dependency is mcp-host's @napi-rs/canvas,
       # which this leg installs for the Desktop fixture checks above.
@@ -225,13 +319,42 @@ jobs:
             node ../scripts/ci/assert-pinned-vitest-suites.mjs --cases "$report" "$PINNED_CASES"
           fi
 
+      # This browser journey is part of the branch-protection-required External
+      # REST matrix context. Keep it here so its failure blocks the existing
+      # required check instead of creating an optional standalone CI job.
+      - name: Install frontend components for Profile UI recovery browser tests
+        if: matrix.service == 'external-rest-api'
+        working-directory: packages/frontend-components
+        run: npm ci
+
+      - name: Install Profile UI dependencies for recovery browser tests
+        if: matrix.service == 'external-rest-api'
+        working-directory: profile-ui
+        run: npm ci
+
+      - name: Install Profile UI recovery Playwright dependencies
+        if: matrix.service == 'external-rest-api'
+        working-directory: tests/e2e/playwright
+        run: npm ci
+
+      - name: Install Profile UI recovery Chromium
+        if: matrix.service == 'external-rest-api'
+        working-directory: tests/e2e/playwright
+        timeout-minutes: 15
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Profile UI recovery browser journeys
+        if: matrix.service == 'external-rest-api'
+        timeout-minutes: 25
+        run: make test-playwright-profile-ui-recovery
+
       - name: Test web-search image with isolated DNS TLS and MCP
         if: matrix.service == 'mcp-servers/web-search'
         working-directory: mcp-servers/web-search
         timeout-minutes: 10
         run: |
           node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 300 --heartbeat-seconds 20 --kill-grace-seconds 5 --label web-search-ci-image-build -- \
-            docker build -t issue198-ci-image:test .
+            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24.22.1-alpine -t issue198-ci-image:test .
           web_search_image_id="$(node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 10 --heartbeat-seconds 5 --kill-grace-seconds 5 --label web-search-ci-image-inspect -- \
             docker image inspect issue198-ci-image:test --format '{{.Id}}')"
           node test/run-network.mjs --image "$web_search_image_id"
@@ -297,22 +420,24 @@ jobs:
         run: npx tsc --noEmit
 
   # ─── real-Postgres integration suites ─────────────────────────────────────
-  # Runs EVERY *.realPostgres.integration suite against a real Postgres 16: the
-  # DB migration plus the GFS reader-role / blob-migration / blob-reconciler /
+  # Runs repository-local *.realPostgres.integration suites against real
+  # Postgres 16: the DB migration plus the GFS reader-role / blob-migration / blob-reconciler /
   # audit-evidence / copy / readiness / structural-integrity suites in
   # control-api, and the rename-publication concurrency suite in gfs-controller.
-  # All of them are gated on CONTROL_API_REAL_PG_ADMIN_URL and SKIP when it is
-  # unset, so the matrix `npm test` never exercises them — this job is the only
-  # place they actually run. Catches the exact class of failure (a config/env or
-  # role/credential gap surfacing at migration or query time) that otherwise
-  # only appears at deploy. Runs unconditionally in the public repo (no
-  # paths-filter): correctness over CI minutes on a low-volume repo.
+  # Repository-local suites are gated on CONTROL_API_REAL_PG_ADMIN_URL and skip
+  # when it is unset, so this job runs them against real PostgreSQL 16. The
+  # cross-service password-recovery suite using the private Member Registration
+  # producer is excluded below and runs in the owner-controlled integration
+  # environment with that producer and its database. Catches the exact class of
+  # failure (a config/env or role/credential gap surfacing at migration or query
+  # time) that otherwise only appears at deploy. Runs unconditionally in the
+  # public repo (no paths-filter): correctness over CI minutes on a low-volume repo.
   control-api-migration:
     name: Real Postgres integration (Postgres 16)
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_DB: postgres
@@ -328,7 +453,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: control-api/package-lock.json
 
@@ -348,6 +473,15 @@ jobs:
         working-directory: external-rest-api
         run: npm ci
 
+      - name: Build External REST composed HTTP child
+        working-directory: external-rest-api
+        run: npm run build
+
+      - name: Validate recovery suite selection contract
+        env:
+          CODEX_SCRATCH_ROOT: ${{ runner.temp }}
+        run: node --test scripts/tests/password-recovery-suite-contract.test.mjs
+
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
         env:
@@ -366,8 +500,23 @@ jobs:
           report="$(mktemp)"
           trap 'rm -f "$log_file" "$normalized_log" "$report"' EXIT
           test -n "${CONTROL_API_REAL_PG_ADMIN_URL}"
+          # These cross-service recovery suites use the private Member Registration
+          # producer and its database, neither of which is available to public CI.
+          # They run with the real producer and PostgreSQL in the dedicated local
+          # integration lane; do not replace them with a test-only token producer.
+          node ../scripts/ci/password-recovery-suite-contract.mjs verify
+          private_selection="$(node ../scripts/ci/password-recovery-suite-contract.mjs private all)"
+          mapfile -t private_suites <<< "$private_selection"
+          test "${#private_suites[@]}" -eq 2
+          exclude_args=()
+          for suite in "${private_suites[@]}"; do
+            test -s "$suite"
+            exclude_args+=(--exclude "$suite")
+          done
           FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres \
+            "${exclude_args[@]}" \
             --reporter=default --reporter=json --outputFile="$report" 2>&1 | tee "$log_file"
+          node ../scripts/ci/password-recovery-suite-contract.mjs report publicPostgres "$report"
           sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
           grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
             echo 'real-Postgres control-api lane executed zero passing test files' >&2
@@ -413,6 +562,19 @@ jobs:
             services.adminSubscriptionRateLimitMigration.realPostgres.integration.test.ts \
             pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts \
             entityChangeFeed.realPostgres.integration.test.ts \
+            routes.mcp-host.renewal.realPostgres.integration.test.ts \
+            routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
+            oauth.contextGrant.scenarios.realPostgres.integration.test.ts \
+            oauth.contextGrant.purge.scenarios.realPostgres.integration.test.ts \
+            oauth.contextGrantLifecycle.model.realPostgres.integration.test.ts \
+            routes.resources.contextGrantPurge.realPostgres.integration.test.ts \
+            oauth.mcpDisconnect.realPostgres.integration.test.ts \
+            services.access.mcpInvocable.grantGate.realPostgres.integration.test.ts \
+            services.access.mcpConnectors.realPostgres.integration.test.ts \
+            oauth.store.installIdentityFence.realPostgres.integration.test.ts \
+            oauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
+            routes.mcpOauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
+            oauth.dcrCredential.installIdentity.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts
 
       - name: Install gfs-controller dependencies
@@ -463,7 +625,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: control-ui/package-lock.json
       - name: Install frontend components dependencies
@@ -478,6 +640,12 @@ jobs:
       - name: Build (next build — typecheck + lint + compile)
         working-directory: control-ui
         run: npm run build
+      - name: Build Control UI image builder stage
+        # The next build above runs in the full checkout, where an import that
+        # leaves the image's Docker context (for example into control-api/)
+        # still resolves. Build & Publish builds the image only after a merge
+        # to dev, so build the same context here to fail the PR instead.
+        run: timeout 900s docker build --target builder -f control-ui/Dockerfile .
 
   e2e-vitest-node-unit:
     name: E2E Vitest node-unit (tests/e2e)
@@ -486,11 +654,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: tests/e2e/package-lock.json
       - name: Run descriptor-bound fixture unit suites
         run: E2E_VITEST_SUITE_GROUP=node-unit bash scripts/e2e/run-vitest-e2e.sh
+      - name: Run E2E static-audit regression matrix
+        run: python3 -m tools.test_e2e_static_audit_scope
+      - name: Audit live Profile UI recovery Playwright spec
+        run: >-
+          python3 tools/e2e_static_audit.py
+          tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/ordinary-invitation-onboarding.spec.ts
 
   # ─── Registry contract — boot evenfire-registry and drive the real client ──
   # Catches wire-format drift in clerumRegistryClient.ts before merge. Requires
@@ -503,7 +678,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -540,7 +715,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.token_check.outputs.skip != 'true'
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: 'npm'
           cache-dependency-path: |
             workflow-recipes/package-lock.json
@@ -599,7 +774,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
 
       - name: Run bash -n on all .sh files
         run: |
@@ -612,6 +787,9 @@ jobs:
             fi
           done < <(find deploy/scripts scripts -type f -name '*.sh' 2>/dev/null)
           exit $fail
+
+      - name: Verify Node security version policy
+        run: node --test scripts/tests/node-runtime-version.test.mjs
 
       - name: Validate governed tracing operations gate orchestration
         run: bash scripts/tests/test-governed-tracing-operations-gate.sh
@@ -743,6 +921,14 @@ jobs:
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
 
+      - name: Test the #825 gate context guards, report verdict, E2E helpers and layout merge check
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/e2e/playwright-report-gate.test.mjs
+          scripts/e2e/e2e-hcc-storage-layout-switch.test.mjs
+          scripts/e2e/e2e-stateless-suspend-wake.test.mjs
+          deploy/scripts/host-layout-merge.test.mjs
+
       # make test-service-matrix fails when Makefile TEST_SERVICES and the
       # `test` job's service matrix above drift apart.
       - name: Test local measurement gate and test-service parity
@@ -829,10 +1015,43 @@ jobs:
   nginx-image-guard:
     name: Validate platform NGINX images
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run NGINX image guard
         run: bash scripts/validate-nginx-images.sh
+      - name: Test NGINX image guard
+        run: bash scripts/tests/test-validate-nginx-images.sh
+      - name: Test NGINX digest verifier
+        run: bash scripts/tests/test-verify-nginx-image-digests.sh
+      - name: Verify pinned NGINX digests against the registry
+        env:
+          NGINX_REGISTRY_MIRROR: mirror.gcr.io
+        run: bash scripts/verify-nginx-image-digests.sh
+
+  # ─── Remote MCP egress proxy TLS contract (native amd64 + arm64) ──────────
+  nginx-egress-proxy-tls:
+    name: Egress proxy TLS (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: host-context-controller/package-lock.json
+      - name: Install host-context-controller dependencies
+        working-directory: host-context-controller
+        run: npm ci
+      - name: Run egress proxy TLS contract
+        env:
+          NGINX_REGISTRY_MIRROR: mirror.gcr.io
+        run: bash scripts/tests/test-nginx-egress-proxy-tls.sh
 
   # ─── Cf-Access header-read guard ──────────────────────────────────────────
   cf-access-header-guard:
@@ -854,6 +1073,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Every image shipping a TLS tool installs ca-certificates
         run: bash scripts/check-dockerfile-ca-certificates.sh
+
+  # ─── Dockerfile font guard ────────────────────────────────────────────────
+  # The renderers find their faces by file name and the packages that ship
+  # them are listed in each Dockerfile; an image missing one builds and runs,
+  # and its Arabic, Hebrew or Han text silently loses its face.
+  dockerfile-font-guard:
+    name: Validate mcp-host font packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Every mcp-host image and CI job installs the renderers' fonts
+        run: bash scripts/check-dockerfile-fonts.sh
+      - name: The font check passes complete lists and names what one misses
+        run: bash scripts/tests/test-check-dockerfile-fonts.sh
 
   # ─── Deploy manifest check (public overlays) ──────────────────────────────
   # The public repo carries base + minikube overlays only; the gcp-dev/gcp-prod
@@ -884,6 +1117,16 @@ jobs:
             > deploy/overlays/minikube/patches/k8s-api-ip.yaml
           kubectl kustomize deploy/overlays/minikube > /tmp/clerum-minikube.yaml
           kubectl kustomize deploy/overlays/minikube-no-uis > /tmp/clerum-minikube-no-uis.yaml
+          kubectl kustomize deploy/overlays/minikube-ghcr > /tmp/clerum-minikube-ghcr.yaml
+          kubectl kustomize deploy/overlays/minikube-no-uis-ghcr > /tmp/clerum-minikube-no-uis-ghcr.yaml
+
+      - name: Shipped overlays keep the HCC workspace layout merge on (#825)
+        run: |
+          bash scripts/tests/test-hcc-layout-merge-flag-render.sh \
+            minikube=/tmp/clerum-minikube.yaml \
+            minikube-no-uis=/tmp/clerum-minikube-no-uis.yaml \
+            minikube-ghcr=/tmp/clerum-minikube-ghcr.yaml \
+            minikube-no-uis-ghcr=/tmp/clerum-minikube-no-uis-ghcr.yaml
 
       - name: Validate NP-08 caller-bound HCC contract
         run: |

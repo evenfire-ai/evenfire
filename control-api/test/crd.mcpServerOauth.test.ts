@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse } from 'yaml'
+import { ENTRA_TENANT_ISSUER_PATTERN } from '../src/oauth/asProfiles.js'
 
 // CRD-admission invariants for the OAuth mcp-server surface (U1). These are
 // K8s-apiserver rules, not control-api code paths, so we assert the CRD YAML
@@ -237,20 +238,23 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     }
   })
 
-  it('makes spec.contextRef immutable for oauth servers via oldSelf-guarded transition rule (M1)', () => {
-    // M1 (@alfredolopez80, PR #317): contextRef is the authoritative
-    // shared-identity coordinate for a grantScope:'context' oauth server, so
-    // it must be pinned once oauth exists. oauth-guarded (!has(oldSelf.oauth)
-    // short-circuit) so non-oauth servers can still be re-parented by WRC.
-    // Presence-only assertion — CEL semantics are enforced by the apiserver
-    // at admission (verify with `kubectl --dry-run=server`), not here.
-    const rule = specRules.find(
-      r =>
-        r.rule.includes('self.contextRef == oldSelf.contextRef') &&
-        r.rule.includes('!has(oldSelf.oauth)')
-    )
-    expect(rule, 'contextRef immutability rule present and oauth/oldSelf-guarded').toBeDefined()
-    expect(rule?.message).toMatch(/contextRef is immutable/)
+  it('does not model Context membership on the McpServer (no spec.contextRef anywhere)', () => {
+    // Which Contexts expose a server is decided solely by Context.spec.mcpServers.
+    // A contextRef on the McpServer would be a second source of truth that can
+    // diverge from the allowlist, so the schema must not declare it at all.
+    expect(specSchema.properties).not.toHaveProperty('contextRef')
+    expect(specSchema.required ?? []).not.toContain('contextRef')
+    const offending = specRules.filter(r => r.rule.includes('contextRef'))
+    expect(offending, 'no CEL rule may reference contextRef').toEqual([])
+    const columns: Array<{ jsonPath: string }> = doc.spec.versions[0].additionalPrinterColumns ?? []
+    expect(columns.map(c => c.jsonPath)).not.toContain('.spec.contextRef')
+  })
+
+  it('requires only transport for WRC-owned servers (managed: false)', () => {
+    const rule = specRules.find(r => r.rule.startsWith('self.managed == true ||'))
+    expect(rule, 'managed:false transport rule present').toBeDefined()
+    expect(rule?.rule).toBe('self.managed == true || has(self.transport)')
+    expect(rule?.message).not.toMatch(/contextRef/)
   })
 
   // ---------------------------------------------------------------------------
@@ -545,6 +549,60 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
         r.rule.includes('!has(self.oauth.extraAuthorizeParams)')
     )
     expect(rule, 'BAKED-FORBID-REMOTE-FIELDS now forbids generic knobs').toBeDefined()
+  })
+
+  // --- spec.oauth.asProfile (closed authorization-server profile) -----------
+
+  it('declares asProfile as an optional string enum [entra-v2] with maxLength 32', () => {
+    const oauth = specSchema.properties.oauth
+    const asProfile = oauth.properties.asProfile
+    expect(asProfile.type).toBe('string')
+    expect(asProfile.enum).toEqual(['entra-v2'])
+    expect(asProfile.maxLength).toBe(32)
+    expect(asProfile).not.toHaveProperty('default')
+    expect(oauth.required).toBeUndefined()
+  })
+
+  it('forbids asProfile on the baked and generic carriles', () => {
+    const baked = specRules.find(r =>
+      r.message.startsWith('baked spec.oauth (no source) must not set remote-only fields')
+    )
+    expect(baked?.rule).toContain('!has(self.oauth.supportsRefresh) && !has(self.oauth.asProfile)')
+    const generic = specRules.find(r =>
+      r.message.startsWith('generic spec.oauth must not set remote-only fields')
+    )
+    expect(generic?.rule).toContain('!has(self.oauth.bearerInBody) && !has(self.oauth.asProfile))')
+    expect(generic?.message).toBe(
+      'generic spec.oauth must not set remote-only fields (clientMode, issuer, registrationEndpoint, issForCallback, bearerInBody, asProfile)'
+    )
+  })
+
+  it('pins asProfile presence and value in IMM-6', () => {
+    const imm6 = specRules.find(r =>
+      r.message.startsWith('remote spec.oauth pinned endpoints/clientMode/quirks')
+    )
+    expect(imm6?.rule).toContain('(has(oldSelf.oauth.asProfile) == has(self.oauth.asProfile))')
+    expect(imm6?.rule).toContain(
+      '(!has(oldSelf.oauth.asProfile) || oldSelf.oauth.asProfile == self.oauth.asProfile)'
+    )
+    expect(imm6?.message).toBe(
+      'remote spec.oauth pinned endpoints/clientMode/quirks/asProfile are immutable; delete and recreate to change them'
+    )
+  })
+
+  it('binds asProfile to a Microsoft Entra ID tenant issuer, right after REMOTE-BEARER-HEADER (AS-PROFILE-ISSUER)', () => {
+    const index = specRules.findIndex(r =>
+      r.message.startsWith('spec.oauth.asProfile entra-v2 requires')
+    )
+    expect(index, 'AS-PROFILE-ISSUER rule present').toBeGreaterThan(-1)
+    const rule = specRules[index]
+    expect(rule.rule).toBe(
+      `!has(self.oauth) || !has(self.oauth.asProfile) || (has(self.oauth.issuer) && self.oauth.issuer.matches('${ENTRA_TENANT_ISSUER_PATTERN}'))`
+    )
+    expect(rule.message).toBe(
+      'spec.oauth.asProfile entra-v2 requires spec.oauth.issuer to be a Microsoft Entra ID tenant authority'
+    )
+    expect(specRules[index - 1].rule).toContain('self.oauth.bearerInBody == false')
   })
 
   // --- FROZEN invariants still hold ----------------------------------------

@@ -69,7 +69,6 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 function oauthUserServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
   return {
     name: 'gh',
-    contextRef: 'ctx-1',
     transport: { type: 'streamableHttp', url: 'http://gh/mcp' },
     authKind: 'oauth-user',
     enabled: true,

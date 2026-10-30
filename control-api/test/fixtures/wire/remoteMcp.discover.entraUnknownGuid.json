@@ -1,0 +1,36 @@
+{
+  "status": 200,
+  "body": {
+    "transport": {
+      "status": "alive",
+      "probedUrl": "https://workiq.svc.cloud.microsoft/mcp",
+      "httpStatus": 401,
+      "challenge": true
+    },
+    "callback": {
+      "configured": true,
+      "variant": "per-server",
+      "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote/{serverName}"
+    },
+    "detected": {
+      "registrationMode": "manual",
+      "endpoints": {
+        "authorization": "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/authorize",
+        "token": "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token"
+      },
+      "resource": "https://workiq.svc.cloud.microsoft/mcp",
+      "issuer": "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0",
+      "asProfile": "entra-v2",
+      "unverifiedScopes": ["11111111-2222-3333-4444-555555555555/Tools.Read"],
+      "asEndpointHosts": {
+        "authorization": "login.microsoftonline.com",
+        "token": "login.microsoftonline.com"
+      },
+      "scopes": ["11111111-2222-3333-4444-555555555555/Tools.Read", "offline_access"],
+      "quirks": {
+        "bearerInBody": false,
+        "supportsRefresh": true
+      }
+    }
+  }
+}

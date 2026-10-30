@@ -2,7 +2,7 @@
  * Codex subscription — Host authoring journey.
  *
  * Contract:
- * - Entry point: application root `/` (E2E_GUARDIAN_ENTRY_POINT).
+ * - Entry point: application root `/` before visible login.
  * - Actions: visible login, open Agents, start Create agent, choose a ChatGPT grant.
  * - Route/state: `/agents/new` Model & Credentials step.
  * - UI: mixed Credential select (API key secret or ChatGPT subscription).
@@ -15,7 +15,7 @@ import { loginControlUiVisible } from '../helpers/visible-login'
 
 test.describe('Codex subscription host and workflow authoring', () => {
   test('operator can choose a ChatGPT subscription without a Host Secret', async ({ page }) => {
-    // E2E_GUARDIAN_ENTRY_POINT
+    // E2E_GUARDIAN_NAVIGATION: root-entry — public application root before login
     await page.goto('/')
     await loginControlUiVisible(page)
 

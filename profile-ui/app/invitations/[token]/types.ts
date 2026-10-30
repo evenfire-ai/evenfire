@@ -7,6 +7,6 @@ export type InvitationClientProps = {
 }
 
 export type InvitationPageProps = {
-  params: Promise<{ token?: string }> | { token?: string }
-  searchParams?: Promise<{ error?: string }> | { error?: string }
+  params: Promise<{ token: string }>
+  searchParams?: Promise<Record<string, string | string[] | undefined>>
 }

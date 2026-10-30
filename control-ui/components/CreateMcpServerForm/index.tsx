@@ -1,45 +1,39 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ExistingConnectorSecretFields } from '@components/ExistingConnectorSecretFields'
+import {
+  buildAttachPayload,
+  validateCredentialAttach,
+  verifyExistingCredentialSelection,
+} from '@lib/connectorCredentials'
+import type { ExistingCredentialSelection } from '@lib/connectorCredentials.types'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
-import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconX } from '@/components/icons'
 import { Button, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
-import { getAgentDisplayName } from '@/lib/agentName'
 import {
-  McpServerUninstallIncompleteError,
   createMcpSecret,
   createMcpServer,
   deleteMcpSecret,
-  deleteMcpServer,
-  getAgentTeams,
-  getAgentUsers,
-  getContext,
-  getHosts,
   getMcpSecretRollbackRepairIdentity,
   listOrgImages,
-  updateContext,
 } from '@/lib/api'
 import type {
   EgressBinding,
   EnvSecretKeyMapping,
   EnvVar,
-  HostResource,
   OrgImage,
   SecretIdentity,
 } from '@/lib/api'
-import { connectorContextAssignmentError } from '@/lib/connectorOAuthAccess'
-import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
-import { createPrivateContext } from '@/lib/privateContext'
 import { EgressEditor } from '../EgressEditor'
 import { DEFAULT_REGISTRY_HOST, buildImageCoordinate } from '../PublisherView/dockerCredential'
 import { MCP_SERVER_NAME_PATTERN, TRANSPORT_TYPES } from './constants'
 import type { CreateMcpServerFormProps, TransportType } from './types'
 
-const STEPS = ['Connector', 'Access', 'Secrets'] as const
+const STEPS = ['Connector', 'Secrets'] as const
 
 const STEP_DETAILS = [
   {
@@ -48,34 +42,11 @@ const STEP_DETAILS = [
     subtitle: 'Register the connector name, image, and runtime configuration.',
   },
   {
-    description: 'Choose connector access',
-    title: 'Access',
-    subtitle: 'Optionally choose the agents that can use this connector right away.',
-  },
-  {
     description: 'Environment and credentials',
     title: 'Secrets and environment',
     subtitle: 'Add environment variables and optional Secret-backed credentials.',
   },
 ] as const
-
-type AccessPreview = {
-  teams: Array<{ id: string; label: string }>
-  users: Array<{ id: string; label: string }>
-}
-
-const EMPTY_ACCESS_PREVIEW: AccessPreview = { teams: [], users: [] }
-
-const ACCESS_PREVIEW_GROUPS: Array<{ key: keyof AccessPreview; title: string }> = [
-  { key: 'users', title: 'Users' },
-  { key: 'teams', title: 'Teams' },
-]
-
-type AgentAccessTarget = {
-  name: string
-  label: string
-  contextRef: string
-}
 
 type OrgImageOption = {
   value: string
@@ -211,20 +182,17 @@ export function CreateMcpServerForm({
   const [transportType, setTransportType] = useState<TransportType>('streamableHttp')
   const [port, setPort] = useState(3000)
   const [description, setDescription] = useState('')
-  const [selectedAgentNames, setSelectedAgentNames] = useState<string[]>([])
-  const [agentTargets, setAgentTargets] = useState<AgentAccessTarget[]>([])
-  const [agentsLoading, setAgentsLoading] = useState(true)
-  const [agentsError, setAgentsError] = useState('')
-  const [accessPreview, setAccessPreview] = useState<AccessPreview>(EMPTY_ACCESS_PREVIEW)
-  const [accessPreviewError, setAccessPreviewError] = useState('')
-  const [loadingAccessPreview, setLoadingAccessPreview] = useState(false)
   const [orgImages, setOrgImages] = useState<OrgImage[]>([])
   const [orgImageScope, setOrgImageScope] = useState('')
   const [managed, setManaged] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [envVars, setEnvVars] = useState<EnvVar[]>([])
-  const [credentialMode, setCredentialMode] = useState<'secret' | 'none' | null>(null)
+  const [credentialMode, setCredentialMode] = useState<'secret' | 'existing' | 'none' | null>(null)
+  const [existingSelection, setExistingSelection] = useState<ExistingCredentialSelection>({
+    rows: [],
+    ready: false,
+  })
   const [envSecretName, setEnvSecretName] = useState('')
   const [envSecretKeys, setEnvSecretKeys] = useState<EnvSecretKeyMapping[]>([])
   const [secretValues, setSecretValues] = useState<string[]>([])
@@ -243,8 +211,21 @@ export function CreateMcpServerForm({
     const values = [row.secretKey.trim(), row.envVar.trim(), (secretValues[index] ?? '').trim()]
     return values.some(Boolean) && !values.every(Boolean)
   })
+  const existingServer = useMemo(() => ({ spec: { env: envVars } }), [envVars])
+  const existingValid =
+    existingSelection.ready &&
+    Boolean(existingSelection.secret) &&
+    !validateCredentialAttach(
+      'use-existing',
+      existingSelection.secret?.name ?? '',
+      existingSelection.rows,
+      existingServer,
+      existingSelection.secret,
+      { storedKeysOnly: true }
+    )
   const credentialsConfigured =
     credentialMode === 'none' ||
+    (credentialMode === 'existing' && existingValid) ||
     (credentialMode === 'secret' &&
       Boolean(envSecretName.trim()) &&
       hasCompleteSecretMapping &&
@@ -252,9 +233,6 @@ export function CreateMcpServerForm({
   const canSubmit =
     Boolean(name && image) && nameValid && egressValid && credentialsConfigured && !submitting
   const connectorComplete = Boolean(name && image && nameValid) && egressValid
-  // The Access step is optional: a connector with no agents selected is valid
-  // and simply is not reachable by any agent until one is granted from the
-  // Installed Connectors list.
   const canContinue = step === 0 ? connectorComplete : true
   const orgImageOptions = useMemo<OrgImageOption[]>(() => {
     if (!orgImageScope) return []
@@ -276,108 +254,6 @@ export function CreateMcpServerForm({
       })
     })
   }, [orgImageScope, orgImages])
-
-  useEffect(() => {
-    let cancelled = false
-    setAgentsLoading(true)
-    setAgentsError('')
-
-    getHosts()
-      .then(result => {
-        if (cancelled) return
-        const targets = ((result.items ?? []) as HostResource[])
-          .map(host => {
-            const agentName = host.metadata?.name || ''
-            const contextRef = String(host.spec?.contextRef ?? '').trim()
-            const label = getAgentDisplayName(agentName) || agentName
-            return { name: agentName, label, contextRef }
-          })
-          .filter(target => target.name && target.contextRef)
-          .sort((left, right) => left.label.localeCompare(right.label))
-        setAgentTargets(targets)
-      })
-      .catch(loadError => {
-        if (cancelled) return
-        setAgentTargets([])
-        setAgentsError(
-          loadError instanceof Error ? loadError.message : 'Failed to load available agents'
-        )
-      })
-      .finally(() => {
-        if (!cancelled) setAgentsLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // Preview: the users/teams that already have access to the selected agents.
-  // Adding this connector makes it usable by exactly those people.
-  useEffect(() => {
-    if (selectedAgentNames.length === 0) {
-      setAccessPreview(EMPTY_ACCESS_PREVIEW)
-      setAccessPreviewError('')
-      setLoadingAccessPreview(false)
-      return
-    }
-
-    let cancelled = false
-    setLoadingAccessPreview(true)
-    setAccessPreviewError('')
-
-    void (async () => {
-      const results = await Promise.all(
-        selectedAgentNames.map(async agentName => {
-          const [usersResult, teamsResult] = await Promise.allSettled([
-            getAgentUsers(agentName),
-            getAgentTeams(agentName),
-          ])
-          return { usersResult, teamsResult }
-        })
-      )
-      if (cancelled) return
-
-      const failed = results.some(
-        result =>
-          result.usersResult.status === 'rejected' || result.teamsResult.status === 'rejected'
-      )
-      const users = results.flatMap(result =>
-        result.usersResult.status === 'fulfilled'
-          ? (result.usersResult.value.items ?? []).map(user => ({
-              id: user.id,
-              label: user.displayName || user.name || user.email || user.id,
-            }))
-          : []
-      )
-      const teams = results.flatMap(result =>
-        result.teamsResult.status === 'fulfilled'
-          ? (result.teamsResult.value.items ?? []).map(team => ({
-              id: team.id,
-              label: team.name || team.id,
-            }))
-          : []
-      )
-      const byLabel = (left: { label: string }, right: { label: string }) =>
-        left.label.localeCompare(right.label)
-      const dedupe = <T extends { id: string }>(items: T[]): T[] =>
-        Array.from(new Map(items.map(item => [item.id, item])).values())
-      setAccessPreview({
-        users: dedupe(users).sort(byLabel),
-        teams: dedupe(teams).sort(byLabel),
-      })
-      setAccessPreviewError(
-        failed
-          ? 'Some access information could not be loaded. The lists below may be incomplete.'
-          : ''
-      )
-      setLoadingAccessPreview(false)
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [selectedAgentNames])
 
   useEffect(() => {
     let cancelled = false
@@ -464,13 +340,7 @@ export function CreateMcpServerForm({
     }
     if (!canSubmit) return
 
-    // ── Client-side envSecret validation (PR-A / A2) ─────────────────────────
-    // If the operator chose a Secret, they must provide
-    // at least one key-value pair so we actually create the Secret in-band.
-    // Referencing a pre-existing Secret from this form is not supported here:
-    // it's the exact "Secret missing → HCC silent hang" class we're closing.
-    // Operators who need to reference an existing Secret should manage it via
-    // kubectl or the API directly.
+    // New Secrets require values; existing references use metadata-only validation.
     if (useEnvSecret && envSecretName.trim()) {
       const builtSecretData: Record<string, string> = {}
       envSecretKeys.forEach((row, index) => {
@@ -494,38 +364,26 @@ export function CreateMcpServerForm({
     setSubmitting(true)
     setError('')
 
-    // Resolve the write targets: the distinct private scopes of the selected
-    // agents. With no selection the connector gets its own private scope (an
-    // implementation detail, same as Marketplace installs) so the resource
-    // contract stays satisfied without exposing any concept to the user.
-    const selectedTargets = selectedAgentNames
-      .map(agentName => agentTargets.find(target => target.name === agentName))
-      .filter((target): target is AgentAccessTarget => Boolean(target))
-    const selectedContextRefs = Array.from(
-      new Set(selectedTargets.map(target => target.contextRef))
-    )
-
-    let primaryContextRef: string
-    try {
-      primaryContextRef =
-        selectedContextRefs[0] ??
-        (await createPrivateContext(
-          {
-            subject: name,
-            description: `Connector access scope for ${name}`,
-            mcpServers: [name],
-          },
-          'We couldn’t finish creating this connector — please try again.'
-        ))
-    } catch (scopeError) {
-      setError(formatCreateError(scopeError))
-      setSubmitting(false)
-      return
+    if (credentialMode === 'existing') {
+      try {
+        await verifyExistingCredentialSelection(
+          existingSelection.secret?.name ?? '',
+          existingSelection.rows,
+          existingSelection.secret,
+          existingServer
+        )
+      } catch {
+        setError(
+          'The selected Secret or its keys could not be verified. Refresh Secrets and review the selection before creating the connector.'
+        )
+        setExistingSelection(current => ({ ...current, ready: false }))
+        setSubmitting(false)
+        return
+      }
     }
 
     const spec: Parameters<typeof createMcpServer>[0]['spec'] = {
       image,
-      contextRef: primaryContextRef,
       description: description || undefined,
       enabled: true,
       managed,
@@ -550,6 +408,13 @@ export function CreateMcpServerForm({
       if (envSecretName.trim() && filteredKeys.length > 0) {
         spec.envSecret = { name: envSecretName.trim(), keys: filteredKeys }
       }
+    }
+
+    if (credentialMode === 'existing') {
+      spec.envSecret = buildAttachPayload(
+        existingSelection.secret!.name,
+        existingSelection.rows
+      ).reference
     }
 
     const parsedCommand = parseCommaSeparated(command)
@@ -592,88 +457,15 @@ export function CreateMcpServerForm({
         }
       }
 
-      const createdServer = await createMcpServer({
+      await createMcpServer({
         metadata: { name },
         spec,
       })
 
-      const oauthScopeError = connectorContextAssignmentError(
-        createdServer.spec,
-        selectedContextRefs
+      showToast(
+        'Connector created. Give agents access from the Installed Connectors list whenever you’re ready.',
+        { tone: 'success' }
       )
-      if (oauthScopeError) {
-        const rollbackFailures: string[] = []
-        let incompleteUninstall: McpServerUninstallIncompleteError | null = null
-        try {
-          await deleteMcpServer(name)
-        } catch (rollbackError) {
-          if (rollbackError instanceof McpServerUninstallIncompleteError) {
-            incompleteUninstall = rollbackError
-          } else {
-            rollbackFailures.push('connector')
-          }
-        }
-        if (createdSecretName) {
-          try {
-            await deleteMcpSecret(createdSecretName, createdSecretIdentity)
-            createdSecretName = null
-            createdSecretIdentity = undefined
-          } catch {
-            rollbackFailures.push('Secret')
-          }
-        }
-        const rollbackNotes = [
-          incompleteUninstall
-            ? `Automatic cleanup of connector "${name}" is incomplete${incompleteUninstall.pendingSummary}; it ${incompleteUninstall.installState}. Delete it from the Installed Connectors list to finish.`
-            : '',
-          rollbackFailures.length > 0
-            ? `Automatic cleanup failed for the ${rollbackFailures.join(' and ')}; remove it before retrying.`
-            : '',
-        ].filter(Boolean)
-        setError([oauthScopeError, ...rollbackNotes].join(' '))
-        return
-      }
-
-      // Give the selected agents access. Each agent's private scope gets an
-      // additive write with its own loaded resourceVersion; failures are
-      // collected so the operator knows the connector itself was created.
-      const failedAgents: string[] = []
-      await Promise.all(
-        selectedContextRefs.map(async contextRef => {
-          try {
-            const context = await getContext(contextRef)
-            const existingServers = context.spec?.mcpServers ?? []
-
-            if (!existingServers.includes(name)) {
-              await updateContext(
-                contextRef,
-                buildContextUpdatePayload(context.metadata?.resourceVersion, {
-                  contextId: context.spec?.contextId ?? contextRef,
-                  description: context.spec?.description,
-                  mcpServers: [...existingServers, name],
-                  sharedFileSystems: context.spec?.sharedFileSystems ?? [],
-                })
-              )
-            }
-          } catch {
-            const affected = selectedTargets
-              .filter(target => target.contextRef === contextRef)
-              .map(target => target.label)
-            failedAgents.push(...affected)
-          }
-        })
-      )
-
-      if (failedAgents.length > 0) {
-        setError(
-          `Connector created, but we couldn't give access to ${failedAgents.join(', ')}. ` +
-            `Grant "${name}" to those agents from the Installed Connectors list.`
-        )
-        setSubmitting(false)
-        return
-      }
-
-      showToast('Connector created successfully.', { tone: 'success' })
       window.setTimeout(() => {
         onCreated()
       }, 600)
@@ -686,7 +478,7 @@ export function CreateMcpServerForm({
       let cleanupError: unknown
       let cleanupSecretName = createdSecretName
       let cleanupSecretIdentity = createdSecretIdentity
-      if (!cleanupSecretName) {
+      if (!cleanupSecretName && willCreateSecret) {
         const repairIdentity = getMcpSecretRollbackRepairIdentity(submitError, envSecretName.trim())
         if (repairIdentity) {
           cleanupSecretName = repairIdentity.name
@@ -744,7 +536,7 @@ export function CreateMcpServerForm({
       <form onSubmit={handleSubmit}>
         <CreateStepFlow
           ariaLabel="Create connector steps"
-          className="cu-create-step-flow--3"
+          className="cu-create-step-flow--2"
           currentStep={step}
           onStepChange={setStep}
           canSelectStep={canSelectStep}
@@ -900,111 +692,6 @@ export function CreateMcpServerForm({
 
           {step === 1 ? (
             <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
-              <section className="cu-form-section">
-                <div className="cu-form-section__header">
-                  <h3 className="cu-form-section__title">Agent access</h3>
-                  <p className="cu-form-section__description">
-                    Optionally choose the agents that can use this connector right away. You can
-                    also grant access later from the Installed Connectors list.
-                  </p>
-                </div>
-                <Field
-                  description={
-                    agentsLoading
-                      ? 'Loading available agents...'
-                      : selectedAgentNames.length > 0
-                        ? 'The connector will be usable by everyone who already has access to the selected agents.'
-                        : 'No agents selected: the connector is created but cannot be used by any agent until you grant access.'
-                  }
-                  error={agentsError || undefined}
-                  label="Agents"
-                >
-                  <SelectionDropdown
-                    id="create-connector-agents"
-                    multiple
-                    onChange={setSelectedAgentNames}
-                    disabled={submitting || agentsLoading}
-                    value={selectedAgentNames}
-                    options={agentTargets.map(target => ({
-                      value: target.name,
-                      label: target.label,
-                    }))}
-                    placeholder={agentsLoading ? 'Loading agents...' : 'Select agents...'}
-                    searchPlaceholder="Search agents..."
-                    emptyLabel="No agents available."
-                    selectionLabel="Selected agents"
-                  />
-                </Field>
-
-                {loadingAccessPreview ? (
-                  <p className="cu-muted">Loading agent access…</p>
-                ) : selectedAgentNames.length > 0 ? (
-                  <>
-                    {accessPreviewError ? (
-                      <p className="cu-banner cu-banner--warn" role="status">
-                        {accessPreviewError}
-                      </p>
-                    ) : null}
-                    <div className="cu-entity-access__intro">
-                      <span>Access preview</span>
-                      <p>
-                        These people already have access to the selected agents and will be able to
-                        use this connector.
-                      </p>
-                    </div>
-                    <section className="cu-entity-access" aria-label="Agent access preview">
-                      <section className="cu-entity-access__group" data-kind="agents">
-                        <div className="cu-entity-access__heading">
-                          <h4>Agents</h4>
-                          <span>{selectedAgentNames.length}</span>
-                        </div>
-                        <ul className="cu-entity-access__list">
-                          {selectedAgentNames.map(agentName => {
-                            const target = agentTargets.find(
-                              candidate => candidate.name === agentName
-                            )
-                            return (
-                              <li key={agentName}>
-                                <span>{target?.label ?? agentName}</span>
-                              </li>
-                            )
-                          })}
-                        </ul>
-                      </section>
-                      {ACCESS_PREVIEW_GROUPS.map(group => (
-                        <section
-                          className="cu-entity-access__group"
-                          data-kind={group.key}
-                          key={group.key}
-                        >
-                          <div className="cu-entity-access__heading">
-                            <h4>{group.title}</h4>
-                            <span>{accessPreview[group.key].length}</span>
-                          </div>
-                          {accessPreview[group.key].length > 0 ? (
-                            <ul className="cu-entity-access__list">
-                              {accessPreview[group.key].map(principal => (
-                                <li key={principal.id}>
-                                  <span>{principal.label}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          ) : (
-                            <p className="cu-muted">
-                              No {group.title.toLowerCase()} have access yet.
-                            </p>
-                          )}
-                        </section>
-                      ))}
-                    </section>
-                  </>
-                ) : null}
-              </section>
-            </div>
-          ) : null}
-
-          {step === 2 ? (
-            <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
               <FormSection
                 description="Additional environment variables injected into the container."
                 title="Environment Variables"
@@ -1072,6 +759,21 @@ export function CreateMcpServerForm({
                     <input
                       name="credential-mode"
                       type="radio"
+                      checked={credentialMode === 'existing'}
+                      disabled={submitting}
+                      onChange={() => setCredentialMode('existing')}
+                    />
+                    <span className="cu-agent-radio__copy">
+                      <span className="cu-agent-radio__title">Use an existing Secret</span>
+                      <span className="cu-agent-radio__description">
+                        Reuse stored credentials from Secrets → Connectors and map their keys.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="cu-agent-radio cu-agent-radio--card">
+                    <input
+                      name="credential-mode"
+                      type="radio"
                       checked={credentialMode === 'none'}
                       disabled={submitting}
                       onChange={() => setCredentialMode('none')}
@@ -1092,19 +794,29 @@ export function CreateMcpServerForm({
                   </p>
                 ) : null}
 
+                {credentialMode === 'existing' ? (
+                  <ExistingConnectorSecretFields
+                    server={existingServer}
+                    disabled={submitting}
+                    onChange={setExistingSelection}
+                  />
+                ) : null}
+
                 {useEnvSecret ? (
                   <>
                     <Field
                       description={
                         <>
-                          Name for the new Secret in the <code>mcp-server</code> namespace that will
-                          contain these credentials.
+                          Name for the new Secret. Choose “Use an existing Secret” to reuse stored
+                          credentials.
                         </>
                       }
                       label="Kubernetes Secret Name"
+                      htmlFor="connector-new-secret-name"
                     >
                       <TextInput
                         monospace
+                        id="connector-new-secret-name"
                         onChange={event => setEnvSecretName(event.target.value)}
                         placeholder="brave-search-credentials"
                         disabled={submitting}
@@ -1159,10 +871,9 @@ export function CreateMcpServerForm({
                     </Button>
 
                     <p className="cu-form-section__description">
-                      Enter each secret value here to create a Kubernetes Opaque Secret in the{' '}
-                      <code>mcp-server</code> namespace. All values are required — the form creates
-                      the Secret in-band before the connector resource to avoid a missing-Secret
-                      reconcile hang.
+                      Enter each value to create a reusable Secret before the connector. To use
+                      credentials already stored in Secrets → Connectors, choose “Use an existing
+                      Secret”.
                     </p>
                   </>
                 ) : null}
@@ -1170,7 +881,11 @@ export function CreateMcpServerForm({
             </div>
           ) : null}
 
-          {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
+          {error ? (
+            <div role="alert" className="cu-banner cu-banner--error">
+              {error}
+            </div>
+          ) : null}
 
           <div className={mode === 'page' ? 'cu-create-actions' : 'cu-modal-panel__foot'}>
             <Button

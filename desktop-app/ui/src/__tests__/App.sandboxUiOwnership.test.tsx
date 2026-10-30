@@ -1,30 +1,114 @@
 // @vitest-environment jsdom
-import { useReducer } from 'react'
+import { StrictMode, useEffect, useReducer } from 'react'
+import { flushSync } from 'react-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import type { EmbedEvent, Launch } from '@lib/embedOwnership.types'
+import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import { toActiveSandboxUiApps } from '@lib/sandboxUiAppSelection'
 import type { SandboxUiAppListing } from '@lib/sandboxUiAppSelection.types'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
+  newChatTab,
+  openAppTab,
   openFilesTab,
   openPreviewTab,
+  selectWorkspaceTab,
+  setAppTabSavedRoutePath,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
+import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
-// Ownership of the native sandbox-ui embed. The WebContentsView paints above the
-// renderer DOM, so whichever app tab owns it must emit `sandboxUi.close()` when
-// the user leaves it — even after an open on that tab failed, because main may
-// still hold a view (a failure before the open IPC never reaches main at all),
-// and also when the app was opened from the in-page picker grid, which must
-// create that owning tab. These cases drive the REAL SandboxUiPage
-// (its open/catch path is the producer under test) and the REAL tab strip; the
-// App harness in App.chatDrawer.test.tsx stubs SandboxUiPage and so cannot.
+// The sandbox-ui main fake runs the real main process; these are the
+// layers under it that the suite does not stand up.
+vi.mock(
+  'electron',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')).electronModule
+)
+vi.mock(
+  '../../../src/config',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).configModule
+)
+vi.mock(
+  '../../../src/sandboxUiPartitionGc',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).partitionGcModule
+)
+vi.mock(
+  '../../../src/rpcTokenManager',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .rpcTokenManagerModule
+)
+vi.mock(
+  '../../../src/authClient',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).authClientModule
+)
+vi.mock(
+  '../../../src/tokenStore',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).tokenStoreModule
+)
+
+// Wiring of App to the embed ownership machine: which event each gesture
+// dispatches, in which commit, and that the real SandboxUiPage paints what the
+// machine holds. Who owns the embed under every interleaving is not decided
+// here: the reducer's table and the property suite against the real main
+// process cover that.
+
+const machineHarness = vi.hoisted(() => ({
+  machine: null as null | EmbedOwnershipMachine,
+  // Every intent/relaunch App dispatched, with what the machine and the store
+  // held at that moment.
+  launches: [] as Array<{
+    type: 'intent' | 'relaunch'
+    launch: Launch
+    projectedTab: string | null
+    storeActiveTab: string | null
+  }>,
+  events: [] as EmbedEvent[],
+  afterDispatch: null as null | ((event: EmbedEvent) => void),
+  storeActiveTab: () => null as string | null,
+}))
+
+vi.mock('@lib/embedOwnershipMachine', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/embedOwnershipMachine')>()
+  return {
+    createEmbedOwnershipMachine: (
+      deps: Parameters<typeof actual.createEmbedOwnershipMachine>[0]
+    ) => {
+      const machine = actual.createEmbedOwnershipMachine(deps)
+      const dispatch = machine.dispatch
+      machine.dispatch = (event: EmbedEvent) => {
+        machineHarness.events.push(event)
+        if (event.type === 'intent' || event.type === 'relaunch') {
+          machineHarness.launches.push({
+            type: event.type,
+            launch: event.launch,
+            projectedTab: machine.getSnapshot().activeAppTabId,
+            storeActiveTab: machineHarness.storeActiveTab(),
+          })
+        }
+        dispatch(event)
+        machineHarness.afterDispatch?.(event)
+      }
+      machineHarness.machine = machine
+      return machine
+    },
+  }
+})
 
 let forceControllerRender: () => void = () => {}
 
@@ -40,9 +124,11 @@ function useReactiveController(controller: AppController): AppController {
 }
 
 type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
+type AppController = ReturnType<typeof useAppController>
 
 const sidebarHarness = vi.hoisted(() => ({
   props: null as null | {
+    activeSandboxUiApp?: { appRef: string } | null
     onSelect?: (item: string) => void
     onOpenSandboxUiApp?: (app: {
       appRef: string
@@ -52,6 +138,9 @@ const sidebarHarness = vi.hoisted(() => ({
     }) => void
   },
 }))
+const confirmDialogHarness = vi.hoisted(() => ({
+  props: null as null | { title?: string; onConfirm: () => void },
+}))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
 vi.mock('@hooks/useAgentChatActionsValue', () => ({ useAgentChatActionsValue: () => ({}) }))
@@ -59,7 +148,12 @@ vi.mock('@components/AppHeader', () => ({ AppHeader: () => null }))
 vi.mock('@components/ChatLocalSearch', () => ({ ChatLocalSearch: () => null }))
 vi.mock('@components/CommandPalette', () => ({ CommandPalette: () => null }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
-vi.mock('@components/ConfirmDialog', () => ({ ConfirmDialog: () => null }))
+vi.mock('@components/ConfirmDialog', () => ({
+  ConfirmDialog: (props: NonNullable<typeof confirmDialogHarness.props>) => {
+    confirmDialogHarness.props = props
+    return null
+  },
+}))
 vi.mock('@components/GfsImagePreview', () => ({ GfsImagePreview: () => null }))
 vi.mock('@components/PluginConsentModal', () => ({ PluginConsentModal: () => null }))
 vi.mock('@components/SidebarNav', () => ({
@@ -82,15 +176,21 @@ vi.mock('@pages/TeamsPage', () => ({ TeamsPage: () => null }))
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
 vi.mock('@pages/WorkflowsPage', () => ({ WorkflowsPage: () => null }))
 
-type AppController = ReturnType<typeof useAppController>
-
 // Store-faithful controller (same contract as App.chatDrawer.test.tsx): `navItem`
 // derives from the active tab, and every navigation drives the real store
-// producers.
+// producers. A write lands in the store at once and reaches App on its next
+// render, which is how a store update can be pending when a gesture runs.
 function makeController(): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
+  let navigationIntentSequence = 0
+  const beginNavigationIntent = () => {
+    navigationIntentSequence += 1
+    controller.navigationIntentSequence = navigationIntentSequence
+    forceControllerRender()
+    return navigationIntentSequence
+  }
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   const setWorkspaceTabs = vi.fn((updater: unknown) => {
     const next =
@@ -106,14 +206,8 @@ function makeController(): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
-  const openFilesSection = vi.fn((path: string | null = null) => {
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) =>
-      openFilesTab(state, { id: nextWorkspaceTabId(), path })
-    )
-    forceControllerRender()
-  })
   const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+    controller.beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
@@ -126,15 +220,21 @@ function makeController(): AppController {
         ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
       })
     )
-    forceControllerRender()
+  })
+  const openFilesSection = vi.fn((path: string | null = null) => {
+    controller.beginUserNavigationIntent()
+    clearAppsPicker()
+    setWorkspaceTabs((state: WorkspaceState) =>
+      openFilesTab(state, { id: nextWorkspaceTabId(), path })
+    )
   })
   const showAppsPicker = vi.fn(() => {
+    controller.beginUserNavigationIntent()
     if (controller.appsPickerActive) return
     if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
     controller.appsPickerActive = true
     forceControllerRender()
   })
-  const handleSelectChatAgent = vi.fn(() => forceControllerRender())
   controller = {
     booting: false,
     initialExperienceLoading: false,
@@ -145,6 +245,30 @@ function makeController(): AppController {
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
+    navigationIntentSequence,
+    beginUserNavigationIntent: vi.fn(beginNavigationIntent),
+    isNavigationIntentCurrent: vi.fn(sequence => sequence === navigationIntentSequence),
+    captureWorkspaceNavigation: vi.fn(() => ({
+      workspaceTabs: controller.workspaceTabs,
+      selectedAgent: controller.selectedAgent,
+      selectedAgentRoute: controller.selectedAgentRoute,
+      appsPickerActive: controller.appsPickerActive,
+      lastActiveChatTabId:
+        activeWorkspaceTab(controller.workspaceTabs)?.kind === 'chat'
+          ? (activeWorkspaceTab(controller.workspaceTabs)?.id ?? null)
+          : null,
+    })),
+    restoreWorkspaceNavigation: vi.fn((snapshot, expectedIntentSequence) => {
+      if (expectedIntentSequence !== navigationIntentSequence) return null
+      const restoredIntent = beginNavigationIntent()
+      controller.workspaceTabs = snapshot.workspaceTabs
+      controller.selectedAgent = snapshot.selectedAgent
+      controller.selectedAgentRoute = snapshot.selectedAgentRoute
+      controller.appsPickerActive = snapshot.appsPickerActive
+      controller.lastActiveChatTabId = snapshot.lastActiveChatTabId
+      forceControllerRender()
+      return restoredIntent
+    }),
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
     selectedAgentRoute: null,
@@ -188,10 +312,8 @@ function makeController(): AppController {
     handleEnsureTeamContext: vi.fn(async () => false),
     getCurrentTeamId: vi.fn(() => 'team-a'),
     isHostAccessBlocked: vi.fn(() => false),
-    handleSelectChatAgent,
+    handleSelectChatAgent: vi.fn(() => forceControllerRender()),
     handleOpenNotification: vi.fn(async () => undefined),
-    // Only the Apps entry matters here: like the real navigation controller it
-    // shows the instance-less picker instead of opening a tab.
     handleNavSelect: vi.fn((item: string) => {
       if (item === DESKTOP_ROUTES.apps) showAppsPicker()
     }),
@@ -225,18 +347,6 @@ const APP_LISTING: SandboxUiAppListing[] = [
 // listing it loaded.
 const [ALPHA, BETA] = toActiveSandboxUiApps(APP_LISTING)
 
-// Any rejection of the open IPC takes the same failure path; its text only
-// picks the banner copy, which these tests deliberately do not assert.
-const OPEN_REJECTED = new Error('open rejected')
-
-// The failure banner is prefixed with the appRef of the failed launch. Waiting
-// on that prefix (not on the copy) pins the moment the page has handled the
-// failure, before the test leaves the tab.
-async function waitForLaunchFailure(appRef: string) {
-  const prefix = `${appRef}: `
-  expect(await screen.findByText(text => text.startsWith(prefix))).toBeTruthy()
-}
-
 const MEASURED_SLOT = {
   x: 0,
   y: 0,
@@ -248,46 +358,67 @@ const MEASURED_SLOT = {
   height: 300,
   toJSON: () => ({}),
 } as DOMRect
-const UNMEASURED_SLOT = { ...MEASURED_SLOT, width: 0, height: 0, right: 16, bottom: 12 } as DOMRect
 
-function makeSandboxUiBridge() {
+function makeSandboxUiBridge(main: SandboxUiMainFake) {
   return {
+    ...main.bridge,
     listApps: vi.fn().mockResolvedValue({ apps: APP_LISTING }),
     listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
     clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+    acknowledgeDeepLink: vi.fn().mockResolvedValue(undefined),
     onDeepLink: vi.fn(() => vi.fn()),
-    onTitleChanged: vi.fn(() => vi.fn()),
-    onClosed: vi.fn(() => vi.fn()),
-    onRefreshError: vi.fn(() => vi.fn()),
     onFindResult: vi.fn(() => vi.fn()),
-    open: vi.fn().mockResolvedValue(undefined),
-    close: vi.fn().mockResolvedValue(undefined),
-    getLocation: vi.fn().mockResolvedValue(null),
     setVisible: vi.fn().mockResolvedValue(undefined),
     setBounds: vi.fn().mockResolvedValue(undefined),
     capturePreview: vi.fn().mockResolvedValue(null),
     stopFindInPage: vi.fn().mockResolvedValue(undefined),
     focusActive: vi.fn().mockResolvedValue(true),
-    reload: vi.fn().mockResolvedValue(undefined),
   }
 }
 
 type OpenGfsPayload = Awaited<ReturnType<typeof openGfsResourcePayload>>
 
-describe('App sandbox-ui embed always has an owning app tab', () => {
-  let currentController: AppController
+function latestListener<T>(subscribe: ReturnType<typeof vi.fn>): (event: T) => void {
+  const calls = subscribe.mock.calls as unknown as Array<[(event: T) => void]>
+  return calls[calls.length - 1]![0]
+}
+
+function flushMacrotask() {
+  return act(async () => {
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+  })
+}
+
+describe('App wires gestures and main events to the embed ownership machine', () => {
+  let controller: AppController
   let openGfsResourceCb: ((resource: OpenGfsPayload) => void) | null
   let shortcutCommandCb: ((commandId: string, source: string) => void) | null
   let sandboxUi: ReturnType<typeof makeSandboxUiBridge>
-  let slotRect: ReturnType<typeof vi.spyOn>
+  let main: SandboxUiMainFake
+  // A `flushSync` from inside a render or effect does not flush: React only
+  // warns about it. The seam depends on flushing, so the warning fails the test.
+  let flushSyncErrors: string[]
 
   beforeEach(() => {
     vi.clearAllMocks()
     sidebarHarness.props = null
+    confirmDialogHarness.props = null
+    machineHarness.machine = null
+    machineHarness.launches = []
+    machineHarness.events = []
+    machineHarness.afterDispatch = null
     openGfsResourceCb = null
     shortcutCommandCb = null
-    currentController = makeController()
-    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    flushSyncErrors = []
+    const consoleError = console.error.bind(console)
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      const text = args.map(String).join(' ')
+      if (text.includes('flushSync')) flushSyncErrors.push(text)
+      else consoleError(...args)
+    })
+    controller = makeController()
+    machineHarness.storeActiveTab = () => controller.workspaceTabs.activeTabId
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(controller))
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
       cb(0)
       return 1
@@ -300,10 +431,9 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
         disconnect = vi.fn()
       }
     )
-    slotRect = vi
-      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-      .mockReturnValue(MEASURED_SLOT)
-    sandboxUi = makeSandboxUiBridge()
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(MEASURED_SLOT)
+    main = createSandboxUiMainFake()
+    sandboxUi = makeSandboxUiBridge(main)
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -328,456 +458,767 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
   afterEach(async () => {
     cleanup()
     await new Promise(resolve => window.setTimeout(resolve, 0))
+    await main.dispose()
+    expect(flushSyncErrors).toEqual([])
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     delete (window as { clerum?: unknown }).clerum
   })
 
-  async function renderWithLiveApp(app: typeof ALPHA) {
-    render(<App />)
-    // The strip relaunch resolves the tab's app against the loaded listing.
-    await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
-    await act(async () => {
-      await Promise.resolve()
+  function machine(): EmbedOwnershipMachine {
+    const current = machineHarness.machine
+    if (!current) throw new Error('App did not create its embed machine')
+    return current
+  }
+
+  function owner() {
+    const state = machine().getSnapshot()
+    return state.owner === null ? undefined : state.views.get(state.owner)
+  }
+
+  // I-commit: every launch reaches the machine after the commit that activates
+  // its tab was projected, or names a tab the store did not leave active.
+  function expectLaunchesAfterTheirCommit(minLaunches: number) {
+    expect(machineHarness.launches.length).toBeGreaterThanOrEqual(minLaunches)
+    for (const entry of machineHarness.launches) {
+      if (entry.storeActiveTab === entry.launch.tabId) {
+        expect(entry.projectedTab).toBe(entry.launch.tabId)
+      }
+    }
+  }
+
+  async function renderApp() {
+    // App mounts GfsDragSessionProvider, which reads Query state: the render
+    // needs a real QueryClient (fresh per render, production cache defaults)
+    // instead of the app-level singleton provider it gets in production.
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(<App />, {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      ),
     })
+    await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
+    await flushMacrotask()
+  }
+
+  async function openFromSidebar(app: typeof ALPHA, openCount: number) {
     act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(app!))
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
-    await waitFor(() => expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(openCount))
+    await flushMacrotask()
   }
 
-  function clickActiveStripTab(label: string) {
-    const activeTab = currentController.workspaceTabs.tabs.find(
-      tab => tab.id === currentController.workspaceTabs.activeTabId
-    )
-    expect(activeTab?.kind).toBe('app')
-    // The strip marks the active tab with aria-pressed.
-    fireEvent.click(screen.getByRole('button', { name: label, pressed: true }))
-  }
-
-  async function handOffMarkdownFromPlugin() {
-    const payload = await openGfsResourcePayload(
-      resolvedFile('md1', 'README.md', { gfsUri: 'gfs://main/md1' })
-    )
-    act(() => openGfsResourceCb?.(payload))
-    expect(currentController.navItem).toBe(DESKTOP_ROUTES.preview)
-  }
-
-  it('closes the embed when a plugin handoff leaves the app tab after a relaunch rejected by main', async () => {
-    await renderWithLiveApp(ALPHA)
-    expect(sandboxUi.close).not.toHaveBeenCalled()
-
-    sandboxUi.open.mockRejectedValueOnce(OPEN_REJECTED)
-    clickActiveStripTab('Alpha')
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    await waitForLaunchFailure(ALPHA!.appRef)
-
-    await handOffMarkdownFromPlugin()
-
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
-  })
-
-  it('closes the embed when a relaunch fails before reaching main (slot never measured)', async () => {
-    await renderWithLiveApp(ALPHA)
-
-    slotRect.mockReturnValue(UNMEASURED_SLOT)
-    clickActiveStripTab('Alpha')
-    await waitForLaunchFailure(ALPHA!.appRef)
-    // The failure happened before the open IPC: main still holds the old view.
-    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
-
-    slotRect.mockReturnValue(MEASURED_SLOT)
-    await handOffMarkdownFromPlugin()
-
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
-  })
-
-  it('closes the embed when leaving an app tab whose open failed after an app-to-app switch', async () => {
-    await renderWithLiveApp(ALPHA)
-
-    sandboxUi.open.mockRejectedValueOnce(OPEN_REJECTED)
-    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    await waitForLaunchFailure(BETA!.appRef)
-    // app→app hands the embed over; it is never closed on the way in.
-    expect(sandboxUi.close).not.toHaveBeenCalled()
-
-    await handOffMarkdownFromPlugin()
-
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
-  })
-
-  it('opens an app from the in-page picker grid as its own active tab that closes the embed on leave', async () => {
-    // Reach the picker from a conversation through the sidebar, as a user does.
-    currentController.selectedAgent = 'agent-a'
-    currentController.activeChatId = 'chat-1'
-    ;(currentController as { chatList: unknown }).chatList = [{ id: 'chat-1', title: 'Planning' }]
-    render(<App />)
-    await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
-    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
-    expect(currentController.appsPickerActive).toBe(true)
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Open Alpha' }))
-
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
-    const activeTab = activeWorkspaceTab(currentController.workspaceTabs)
-    expect(activeTab?.kind).toBe('app')
-    expect(activeTab?.app?.appRef).toBe(ALPHA!.appRef)
-    expect(currentController.appsPickerActive).toBe(false)
-    // The drawer comes up with the conversation the picker was reached from.
-    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith(
-      'agent-a',
-      expect.objectContaining({ chatId: 'chat-1', keepNavItem: true })
-    )
-    expect(sandboxUi.close).not.toHaveBeenCalled()
-
-    await handOffMarkdownFromPlugin()
-
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
-  })
-
-  // main tags every per-view event with the appRef it composed from the open
-  // request (`${recipeNs}/${recipeName}` in the `sandboxUi:open` handler) and
-  // echoes that request's `launchId` (pinned main-side by
-  // ipc.sandboxUiLaunchId.test.ts). Derive both from the open() call the real
-  // page sent instead of restating them.
-  type ViewEventTag = { appRef: string; launchId: string }
-  function closedEventFor(openCall: number): ViewEventTag {
-    const request = sandboxUi.open.mock.calls[openCall]![0] as {
-      recipeNs: string
-      recipeName: string
-      launchId: string
-    }
-    return { appRef: `${request.recipeNs}/${request.recipeName}`, launchId: request.launchId }
-  }
-
-  function emitToSubscribed<T>(subscribe: ReturnType<typeof vi.fn>, event: T) {
-    const listeners = subscribe.mock.calls as unknown as Array<[(args: T) => void]>
-    const unsubscribed = new Set(
-      subscribe.mock.results
-        .map((result, index) =>
-          (result.value as ReturnType<typeof vi.fn>).mock.calls.length > 0 ? index : -1
-        )
-        .filter(index => index >= 0)
-    )
-    act(() => {
-      listeners.forEach(([listener], index) => {
-        if (!unsubscribed.has(index)) listener(event)
-      })
-    })
-  }
-
-  function emitSandboxUiClosed(event: ViewEventTag) {
-    emitToSubscribed(sandboxUi.onClosed, event)
-  }
-
-  function emitRefreshError(event: ViewEventTag & { message: string }) {
-    emitToSubscribed(sandboxUi.onRefreshError, event)
-  }
-
-  // Relaunches the live Alpha tab (open #2) and holds that open in flight, the
-  // window in which main is still tearing down the view of open #1.
-  function relaunchAlphaHeldOpen(): Promise<() => Promise<void>> {
-    return relaunchAlphaHeldOpenFrom('Alpha')
-  }
-
-  async function relaunchAlphaHeldOpenFrom(tabLabel: string): Promise<() => Promise<void>> {
-    let resolveOpen: () => void = () => {}
-    sandboxUi.open.mockImplementationOnce(
-      () => new Promise<undefined>(resolve => (resolveOpen = () => resolve(undefined)))
-    )
-    clickActiveStripTab(tabLabel)
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    expect(closedEventFor(1).appRef).toBe(ALPHA!.appRef)
-    return async () => {
-      await act(async () => {
-        resolveOpen()
-        await new Promise(resolve => window.setTimeout(resolve, 0))
-      })
-      expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
-    }
-  }
-
-  it('keeps a same-app relaunch owned when the replaced view reports closed while the relaunch is opening', async () => {
-    await renderWithLiveApp(ALPHA)
-    const finishRelaunch = await relaunchAlphaHeldOpen()
-
-    // The view of open #1 dies (crash / teardown) before open #2 resolves.
-    emitSandboxUiClosed(closedEventFor(0))
-    await finishRelaunch()
-
-    await handOffMarkdownFromPlugin()
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
-  })
-
-  it("ignores a same-app relaunch's predecessor refresh failure but shows the live view's", async () => {
-    await renderWithLiveApp(ALPHA)
-    const finishRelaunch = await relaunchAlphaHeldOpen()
-
-    emitRefreshError({ ...closedEventFor(0), message: 'stale failure' })
-    await finishRelaunch()
-    expect(screen.queryByText(text => text.startsWith('Session refresh failed'))).toBeNull()
-
-    emitRefreshError({ ...closedEventFor(1), message: 'live failure' })
-    expect(
-      await screen.findByText(text => text.startsWith('Session refresh failed: live failure'))
-    ).toBeTruthy()
-  })
-
-  it('keeps the live embed owned when a late closed event belongs to the app it replaced', async () => {
-    await renderWithLiveApp(ALPHA)
-    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+  async function shortcut(commandId: string) {
     await act(async () => {
+      shortcutCommandCb?.(commandId, 'host')
       await new Promise(resolve => window.setTimeout(resolve, 0))
     })
+  }
 
-    emitSandboxUiClosed(closedEventFor(0))
+  function tabOf(appRef: string) {
+    return controller.workspaceTabs.tabs.find(tab => tab.app?.appRef === appRef)
+  }
 
-    await handOffMarkdownFromPlugin()
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+  function lastLaunch() {
+    return machineHarness.launches.at(-1)!
+  }
+
+  it('launches a sidebar pick into its own new tab, named from the catalog', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+
+    const tab = tabOf(ALPHA!.appRef)!
+    expect(lastLaunch()).toMatchObject({
+      type: 'intent',
+      launch: {
+        tabId: tab.id,
+        appRef: ALPHA!.appRef,
+        route: { kind: 'tab' },
+        app: { label: 'Alpha', defaultPath: '/' },
+      },
+    })
+    expect(main.openCall(0)).toMatchObject({
+      launchId: lastLaunch().launch.launchId,
+      title: 'Alpha',
+    })
+    expect(owner()?.phase).toBe('mounted')
+    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+    expect(sidebarHarness.props?.activeSandboxUiApp?.appRef).toBe(ALPHA!.appRef)
   })
 
-  it('keeps the newer launch owned when a superseded open resolves late and its view then dies', async () => {
-    render(<App />)
-    await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
-    await act(async () => {
-      await Promise.resolve()
-    })
-    let resolveAlphaOpen: () => void = () => {}
-    sandboxUi.open.mockImplementationOnce(
-      () => new Promise<undefined>(resolve => (resolveAlphaOpen = () => resolve(undefined)))
-    )
+  it('launches a picker-grid pick into its own new tab', async () => {
+    await renderApp()
+    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Beta' }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+
+    expect(activeWorkspaceTab(controller.workspaceTabs)?.app?.appRef).toBe(BETA!.appRef)
+    expect(lastLaunch().launch.tabId).toBe(controller.workspaceTabs.activeTabId)
+    expectLaunchesAfterTheirCommit(1)
+  })
+
+  it('paints the launch as loading until main confirms the mount', async () => {
+    await renderApp()
+    const held = main.holdNextOpen()
     act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
-    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
 
-    // main serves the opens in order: Alpha mounts first, and its renderer dies
-    // before Beta's open replaces it.
-    await act(async () => {
-      resolveAlphaOpen()
-      await new Promise(resolve => window.setTimeout(resolve, 0))
-    })
-    emitSandboxUiClosed(closedEventFor(0))
+    expect(screen.getByText('Loading app')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Refresh app content' })).toBeNull()
 
-    await handOffMarkdownFromPlugin()
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+    await act(async () => held().resolve())
+    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+    expect(screen.queryByText('Loading app')).toBeNull()
   })
 
-  it('drops the owner when the closed event belongs to the live embed', async () => {
-    await renderWithLiveApp(ALPHA)
-    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
+  it('paints a rejected open as the failure banner of its tab', async () => {
+    await renderApp()
+    main.failNextOpen(new Error('open rejected'))
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+
+    expect(await screen.findByText(`${ALPHA!.appRef}: open rejected`)).toBeTruthy()
+    expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
+    expect(sidebarHarness.props?.activeSandboxUiApp ?? null).toBeNull()
+  })
+
+  it('closes the view when the user leaves its tab and reopens it at the route it was left on', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+    main.navigate('/inbox')
+
+    fireEvent.click(screen.getByRole('button', { name: 'New chat', pressed: false }))
+    await flushMacrotask()
+
+    expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
+    // The deactivation continuation persists the final route as main and both
+    // ownership lanes settle.
+    await act(() => main.settle())
+    expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    await act(async () => {
-      await new Promise(resolve => window.setTimeout(resolve, 0))
+    expect(lastLaunch()).toMatchObject({
+      type: 'intent',
+      launch: { route: { kind: 'tab', routePath: '/inbox' } },
     })
+    expect(main.openCall(1).routePath).toBe('/inbox')
+    expectLaunchesAfterTheirCommit(2)
+  })
 
-    emitSandboxUiClosed(closedEventFor(1))
+  it('leaves a live view alone when its active tab is clicked again (Q4)', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
 
-    await handOffMarkdownFromPlugin()
-    await act(async () => {
-      await new Promise(resolve => window.setTimeout(resolve, 0))
-    })
-    // main already tore the view down: nothing is left to close.
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: true }))
+    await flushMacrotask()
+
+    expect(lastLaunch().type).toBe('intent')
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
     expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(owner()?.launchId).toBe(main.openCall(0).launchId)
   })
 
-  it('opens a grid pick shown inside an app tab after back-to-apps as its own tab, leaving that tab intact', async () => {
-    await renderWithLiveApp(ALPHA)
-    const alphaTab = activeWorkspaceTab(currentController.workspaceTabs)
-    expect(alphaTab?.kind).toBe('app')
+  it('shows a crash with Reopen, which relaunches the tab through the seam', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
 
-    // The in-view "Back to apps" button is gone by design; the host shortcut
-    // command is the remaining real entry point.
-    act(() => shortcutCommandCb?.('app.backToApps', 'host'))
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
-    // Still inside the Alpha tab, now showing the picker grid.
-    expect(currentController.workspaceTabs.activeTabId).toBe(alphaTab!.id)
+    await act(() => main.crash())
+    expect(await screen.findByText('The app closed unexpectedly.')).toBeTruthy()
+    expect(sidebarHarness.props?.activeSandboxUiApp ?? null).toBeNull()
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Open Beta' }))
-
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen' }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    const activeTab = activeWorkspaceTab(currentController.workspaceTabs)
-    expect(activeTab?.id).not.toBe(alphaTab!.id)
-    expect(activeTab?.kind).toBe('app')
-    expect(activeTab?.app?.appRef).toBe(BETA!.appRef)
-    const alphaAfter = currentController.workspaceTabs.tabs.find(tab => tab.id === alphaTab!.id)
-    expect(alphaAfter?.app?.appRef).toBe(ALPHA!.appRef)
-    expect(alphaAfter?.title).toBe(alphaTab!.title)
+    expect(lastLaunch()).toMatchObject({
+      type: 'relaunch',
+      launch: { tabId: tabOf(ALPHA!.appRef)!.id, route: { kind: 'tab' } },
+    })
+    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+    expect(screen.queryByText('The app closed unexpectedly.')).toBeNull()
   })
-  // App resolves app tabs against its own listing, refreshed on window focus and
+
+  it('shows a crash while the app is still opening with Reopen (DEC-10)', async () => {
+    await renderApp()
+    const held = main.holdNextOpen()
+    main.crashNextMount()
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    expect(screen.getByText('Loading app')).toBeTruthy()
+
+    // The view mounts and its renderer dies before the open settles.
+    held().resolve()
+    expect(await screen.findByText('The app closed unexpectedly.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen' }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    expect(lastLaunch().type).toBe('relaunch')
+  })
+
+  it('relaunches a dead view when its tab is clicked again', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    await act(() => main.crash())
+    await screen.findByText('The app closed unexpectedly.')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: true }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    expect(lastLaunch().type).toBe('intent')
+  })
+
+  it('reloads a healthy view in place from Refresh: same view, same route, no relaunch', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+    main.navigate('/tickets/7')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh app content' }))
+    await act(() => main.settle())
+
+    expect(main.liveReloads()).toBe(1)
+    expect(main.live()).toEqual({ launchId: first, appRef: ALPHA!.appRef, routePath: '/tickets/7' })
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(main.reported('sandboxUi:released')).toEqual([])
+    expect(owner()?.launchId).toBe(first)
+    expect(screen.getByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+  })
+
+  it('reloads a healthy view in place from the app.refresh command', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+
+    await shortcut('app.refresh')
+    await act(() => main.settle())
+
+    expect(main.liveReloads()).toBe(1)
+    expect(main.live()?.launchId).toBe(first)
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(flushSyncErrors).toEqual([])
+  })
+
+  // Refresh is offered while the last render showed a mounted view, but the
+  // machine can move on before React renders again. Refresh then reopens the
+  // tab: it never reloads a view that is not mounted, gone or still opening.
+  it('relaunches from app.refresh when the view ended before React rendered it', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+
+    await act(async () => {
+      void main.crash()
+      const release = main.reported('sandboxUi:released').at(-1) as Parameters<
+        EmbedOwnershipMachine['onReleased']
+      >[0]
+      expect(release).toMatchObject({ launchId: first, reason: 'crashed' })
+      machineHarness.machine!.onReleased(release)
+      shortcutCommandCb?.('app.refresh', 'host')
+    })
+    await act(() => main.settle())
+
+    expect(sandboxUi.reload).not.toHaveBeenCalled()
+    expect(lastLaunch().type).toBe('relaunch')
+    expect(main.live()?.launchId).toBe(main.openCall(1).launchId)
+  })
+
+  it('relaunches from app.refresh while the relaunch before it is still opening', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+
+    act(() => {
+      fireEvent.click(retry)
+      shortcutCommandCb?.('app.refresh', 'host')
+    })
+    await act(() => main.settle())
+
+    expect(sandboxUi.reload).not.toHaveBeenCalled()
+    expect(machineHarness.launches.slice(-2).map(entry => entry.type)).toEqual([
+      'relaunch',
+      'relaunch',
+    ])
+    expect(main.live()?.launchId).toBe(machineHarness.launches.at(-1)!.launch.launchId)
+    expect(main.liveReloads()).toBe(0)
+  })
+
+  it("shows the live view's session failure with Retry, which relaunches it", async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    expect(await screen.findByText('Session refresh failed: mint failed.')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    expect(lastLaunch().type).toBe('relaunch')
+    expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
+    // The banner belonged to the view that was replaced.
+    await waitFor(() => expect(screen.queryByText(/Session refresh failed/)).toBeNull())
+  })
+
+  it('clears the session failure and its Retry once a resumed refresh of the same view succeeds', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+    main.navigate('/tickets/7')
+
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    expect(await screen.findByText('Session refresh failed: mint failed.')).toBeTruthy()
+    const liveBefore = main.live()
+
+    await act(() => main.hostReturned())
+    await act(() => main.settle())
+
+    expect(main.reported('sandboxUi:refreshRecovered')).toEqual([
+      { appRef: ALPHA!.appRef, launchId: first },
+    ])
+    await waitFor(() => expect(screen.queryByText(/Session refresh failed/)).toBeNull())
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(main.live()).toEqual(liveBefore)
+    expect(main.live()).toEqual({ launchId: first, appRef: ALPHA!.appRef, routePath: '/tickets/7' })
+  })
+
+  // The machine drops a recovery of a launch that no longer owns the embed, so a
+  // late one cannot take down the failure of the view that replaced it.
+  it("keeps a relaunched view's session failure when a recovery of the view it replaced arrives late", async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    await act(() => main.hostReturned())
+    await act(() => main.settle())
+    const staleRecovery = main.reported('sandboxUi:refreshRecovered').at(-1) as {
+      appRef: string
+      launchId: string
+    }
+    expect(staleRecovery).toEqual({ appRef: ALPHA!.appRef, launchId: first })
+
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    await act(() => main.settle())
+    const second = main.openCall(1).launchId
+    expect(main.live()?.launchId).toBe(second)
+    await act(() => main.refreshFailed(new Error('second view failed')))
+    expect(await screen.findByText('Session refresh failed: second view failed.')).toBeTruthy()
+
+    act(() => latestListener<typeof staleRecovery>(sandboxUi.onRefreshRecovered)(staleRecovery))
+    await flushMacrotask()
+
+    expect(screen.getByText('Session refresh failed: second view failed.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+  })
+
+  it('ignores the session failure of a view it already replaced', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+
+    // The replaced view's loop gives up before the open replacing it reaches main.
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
+    await act(() => main.refreshFailed(new Error('stale failure')))
+    await act(() => main.settle())
+
+    expect(main.reported('sandboxUi:refreshError')).toEqual([
+      expect.objectContaining({ launchId: first, message: 'stale failure' }),
+    ])
+    expect(screen.queryByText(/Session refresh failed/)).toBeNull()
+    expect(main.live()?.launchId).toBe(main.openCall(1).launchId)
+  })
+
+  it('goes back to apps on the app.backToApps command, keeping the tab', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const alphaTab = controller.workspaceTabs.activeTabId
+
+    await shortcut('app.backToApps')
+
+    expect(machineHarness.events.at(-1)).toEqual({ type: 'backToApps' })
+    expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
+    expect(controller.workspaceTabs.activeTabId).toBe(alphaTab)
+    expect(await screen.findByRole('button', { name: 'Open Beta' })).toBeTruthy()
+  })
+
+  it('renames the live tab after its title and ignores titles of other views', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+
+    await act(() => main.retitle('Alpha Inbox'))
+    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
+
+    // The view an open replaces retitles itself before that open reaches main.
+    const first = main.openCall(0).launchId
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
+    await act(() => main.retitle('Stale'))
+    await act(() => main.settle())
+
+    expect(main.reported('sandboxUi:titleChanged')).toContainEqual(
+      expect.objectContaining({ launchId: first, title: 'Stale' })
+    )
+    expect(main.live()?.launchId).toBe(main.openCall(1).launchId)
+    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: false })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Stale' })).toBeNull()
+  })
+
+  it('launches the app tab of a confirmed deep link at its explicit route and acks it once mounted', async () => {
+    await renderApp()
+    act(() =>
+      latestListener<SandboxUiDeepLinkEnvelope>(sandboxUi.onDeepLink)({
+        id: 1,
+        appRef: ALPHA!.appRef,
+        path: '/tasks/42',
+      })
+    )
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => confirmDialogHarness.props?.onConfirm())
+
+    await waitFor(() => expect(sandboxUi.acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(lastLaunch()).toMatchObject({
+      type: 'intent',
+      launch: { route: { kind: 'explicit', routePath: '/tasks/42' } },
+    })
+    expect(main.openCall(0).routePath).toBe('/tasks/42')
+    expectLaunchesAfterTheirCommit(1)
+  })
+
+  it('acks a deep link left before it mounted without retrying it, and keeps the queue moving (K23)', async () => {
+    await renderApp()
+    // The user leaves the deep link's tab through a shortcut in the very turn
+    // its launch reaches the machine, before anything else gets to render.
+    machineHarness.afterDispatch = event => {
+      if (event.type !== 'intent') return
+      machineHarness.afterDispatch = null
+      shortcutCommandCb?.('tabs.select1', 'host')
+    }
+    act(() =>
+      latestListener<SandboxUiDeepLinkEnvelope>(sandboxUi.onDeepLink)({
+        id: 1,
+        appRef: ALPHA!.appRef,
+      })
+    )
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => confirmDialogHarness.props?.onConfirm())
+
+    await waitFor(() => expect(sandboxUi.acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(sandboxUi.open).not.toHaveBeenCalled()
+    expect(controller.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(machine().getSnapshot().views.size).toBe(0)
+
+    act(() =>
+      latestListener<SandboxUiDeepLinkEnvelope>(sandboxUi.onDeepLink)({
+        id: 2,
+        appRef: BETA!.appRef,
+      })
+    )
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => confirmDialogHarness.props?.onConfirm())
+    await waitFor(() => expect(sandboxUi.acknowledgeDeepLink).toHaveBeenCalledWith(2))
+    expect(main.openCall(0).recipeName).toBe('beta')
+    expect(sandboxUi.acknowledgeDeepLink).toHaveBeenCalledTimes(2)
+  })
+
+  // App resolves app tabs against its own catalog, refreshed on window focus and
   // every 30 s. Firing the real focus listener drives that refresh.
-  async function refreshAppListingOnFocus() {
+  async function refreshCatalogOnFocus() {
     const calls = sandboxUi.listApps.mock.calls.length
     act(() => {
       window.dispatchEvent(new Event('focus'))
     })
     await waitFor(() => expect(sandboxUi.listApps.mock.calls.length).toBeGreaterThan(calls))
-    await act(async () => {
-      await new Promise(resolve => window.setTimeout(resolve, 0))
-    })
-  }
-
-  function emitTitleChanged(event: ViewEventTag & { title: string }) {
-    emitToSubscribed(sandboxUi.onTitleChanged, event)
-  }
-
-  it('renames the live app tab after its document.title, ignoring empty titles and titles from the view a relaunch replaces', async () => {
-    await renderWithLiveApp(ALPHA)
-    emitTitleChanged({ ...closedEventFor(0), title: 'Alpha Inbox' })
-    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
-    // A mid-navigation blank title keeps the last real one.
-    emitTitleChanged({ ...closedEventFor(0), title: '   ' })
-    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
-
-    const finishRelaunch = await relaunchAlphaHeldOpenFrom('Alpha Inbox')
-    // main only forwards titles of its active view; until the relaunch replaces
-    // it, that is still the view of open #1.
-    emitTitleChanged({ ...closedEventFor(0), title: 'Alpha Stale' })
-    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Alpha Stale' })).toBeNull()
-
-    await finishRelaunch()
-    emitTitleChanged({ ...closedEventFor(1), title: 'Alpha Fresh' })
-    expect(screen.getByRole('button', { name: 'Alpha Fresh', pressed: true })).toBeTruthy()
-  })
-
-  function tabByAppRef(appRef: string) {
-    return currentController.workspaceTabs.tabs.find(tab => tab.app?.appRef === appRef)
-  }
-
-  function openedAppRef(openCall: number): string {
-    return closedEventFor(openCall).appRef
+    await flushMacrotask()
   }
 
   const BETA_RESTARTING: SandboxUiAppListing[] = APP_LISTING.map(app =>
     app.appRef === BETA!.appRef ? { ...app, ready: false, phase: 'pending' } : app
   )
 
-  it('closes the live embed and shows the picker when the incoming app tab cannot be resolved, then relaunches it once the app is back', async () => {
-    await renderWithLiveApp(BETA)
-    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    expect(openedAppRef(1)).toBe(ALPHA!.appRef)
-    const betaTab = tabByAppRef(BETA!.appRef)!
+  it('closes the live view and shows the picker for an app tab the catalog cannot resolve, then relaunches it named from the catalog', async () => {
+    await renderApp()
+    await openFromSidebar(BETA, 1)
+    // The app renames its own tab; that title must never name it to main.
+    await act(() => main.retitle('Beta Inbox'))
+    await openFromSidebar(ALPHA, 2)
+    const alpha = main.openCall(1).launchId
+    const betaTab = tabOf(BETA!.appRef)!
 
     // Beta's pod restarts: App's next refresh drops it from the resolvable list.
     sandboxUi.listApps.mockResolvedValue({ apps: BETA_RESTARTING })
-    await refreshAppListingOnFocus()
+    await refreshCatalogOnFocus()
+    main.navigate('/inbox')
+    fireEvent.click(screen.getByRole('button', { name: 'Beta Inbox', pressed: false }))
+    // Alpha retitles itself before the close the click sent reaches main.
+    await act(() => main.retitle('Alpha Late'))
+    await act(() => main.settle())
 
-    sandboxUi.getLocation.mockResolvedValue({ appRef: ALPHA!.appRef, routePath: '/inbox' })
-    fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: false }))
-
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+    expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: alpha })
     expect(sandboxUi.open).toHaveBeenCalledTimes(2)
-    expect(currentController.workspaceTabs.activeTabId).toBe(betaTab.id)
-    // Tab B shows the picker instead of Alpha's chrome over an empty slot.
+    expect(controller.workspaceTabs.activeTabId).toBe(betaTab.id)
+    expect(owner()).toBeUndefined()
     expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
     expect(await screen.findByRole('button', { name: 'Open Alpha' })).toBeTruthy()
-    // A late title from Alpha must not relabel B.
-    emitTitleChanged({ ...closedEventFor(1), title: 'Alpha Inbox' })
-    const betaAfter = currentController.workspaceTabs.tabs.find(tab => tab.id === betaTab.id)
-    expect(betaAfter?.title).toBe('Beta')
-    expect(betaAfter?.app?.appRef).toBe(BETA!.appRef)
-    expect(betaAfter?.app?.savedRoutePath).toBeUndefined()
-    // Alpha's own route is still persisted on its tab.
-    await waitFor(() => expect(tabByAppRef(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox'))
+    // Alpha's late title does not relabel Beta, and Alpha keeps its route.
+    expect(main.reported('sandboxUi:titleChanged')).toContainEqual(
+      expect.objectContaining({ launchId: alpha, title: 'Alpha Late' })
+    )
+    expect(controller.workspaceTabs.tabs.find(tab => tab.id === betaTab.id)?.title).toBe(
+      'Beta Inbox'
+    )
+    expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox')
 
-    // Beta is ready again: reactivating its (still existing) tab relaunches it.
+    // Beta is ready again: clicking its tab relaunches it.
     sandboxUi.listApps.mockResolvedValue({ apps: APP_LISTING })
-    await refreshAppListingOnFocus()
-    clickActiveStripTab('Beta')
+    await refreshCatalogOnFocus()
+    fireEvent.click(screen.getByRole('button', { name: 'Beta Inbox', pressed: true }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
-    expect(openedAppRef(2)).toBe(BETA!.appRef)
-    expect(currentController.workspaceTabs.activeTabId).toBe(betaTab.id)
-    expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
-
-    // The relaunched Beta owns the embed again: leaving closes it.
-    await handOffMarkdownFromPlugin()
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(2))
+    expect(main.openCall(2)).toMatchObject({ recipeName: 'beta', title: 'Beta' })
+    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
   })
 
-  it('does not hand the embed to a grid-opened app tab that App has not resolved yet when the user returns to it', async () => {
-    // App's listing predates Beta becoming ready.
+  it('does not relaunch a grid-opened app tab App has not resolved yet when the user returns to it', async () => {
+    // App's catalog predates Beta becoming ready.
     sandboxUi.listApps.mockResolvedValue({ apps: BETA_RESTARTING })
-    await renderWithLiveApp(ALPHA)
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
 
     // Beta turns ready between App refreshes; the picker grid loads its own list.
     sandboxUi.listApps.mockResolvedValue({ apps: APP_LISTING })
     fireEvent.click(screen.getByRole('button', { name: 'New chat', pressed: false }))
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+    await flushMacrotask()
     act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
     fireEvent.click(await screen.findByRole('button', { name: 'Open Beta' }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    expect(openedAppRef(1)).toBe(BETA!.appRef)
-    const betaTab = activeWorkspaceTab(currentController.workspaceTabs)!
-    expect(betaTab.app?.appRef).toBe(BETA!.appRef)
-    // The grid launch itself is a real app tab, not torn down on the way in.
-    expect(sandboxUi.close).toHaveBeenCalledTimes(1)
+    expect(main.openCall(1)).toMatchObject({ recipeName: 'beta', title: 'Beta' })
+    const betaTab = activeWorkspaceTab(controller.workspaceTabs)!
+    await flushMacrotask()
 
-    // Alpha (resolvable) takes the embed over from Beta.
     fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
-    expect(openedAppRef(2)).toBe(ALPHA!.appRef)
-    expect(sandboxUi.close).toHaveBeenCalledTimes(1)
+    await flushMacrotask()
 
     // Back to Beta before App's next refresh: it cannot be relaunched yet.
     fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: false }))
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(2))
+    await flushMacrotask()
     expect(sandboxUi.open).toHaveBeenCalledTimes(3)
-    expect(currentController.workspaceTabs.activeTabId).toBe(betaTab.id)
+    expect(sandboxUi.close).toHaveBeenLastCalledWith({ launchId: main.openCall(2).launchId })
+    expect(controller.workspaceTabs.activeTabId).toBe(betaTab.id)
     expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
 
-    await refreshAppListingOnFocus()
-    clickActiveStripTab('Beta')
+    await refreshCatalogOnFocus()
+    fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: true }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(4))
-    expect(openedAppRef(3)).toBe(BETA!.appRef)
+    expect(main.openCall(3).recipeName).toBe('beta')
   })
-  it('hands the embed to a grid pick that App has not resolved yet while the app tab it replaces still owns the embed', async () => {
-    // App's own listing predates Beta becoming ready; the page's grid sees it ready.
+
+  it('opens a grid pick App has not resolved yet as its own tab, leaving the tab it was picked from intact', async () => {
+    // App's catalog predates Beta becoming ready; the page's grid sees it ready.
     sandboxUi.listApps.mockResolvedValueOnce({ apps: BETA_RESTARTING })
-    await renderWithLiveApp(ALPHA)
-    const alphaTab = activeWorkspaceTab(currentController.workspaceTabs)!
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const alphaTab = activeWorkspaceTab(controller.workspaceTabs)!
 
-    // A failed relaunch leaves the Alpha tab owning the embed and shows the grid.
-    sandboxUi.open.mockRejectedValueOnce(OPEN_REJECTED)
-    clickActiveStripTab('Alpha')
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    await waitForLaunchFailure(ALPHA!.appRef)
-
+    await shortcut('app.backToApps')
     fireEvent.click(await screen.findByRole('button', { name: 'Open Beta' }))
 
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
-    expect(openedAppRef(2)).toBe(BETA!.appRef)
-    const activeTab = activeWorkspaceTab(currentController.workspaceTabs)
-    expect(activeTab?.id).not.toBe(alphaTab.id)
-    expect(activeTab?.app?.appRef).toBe(BETA!.appRef)
-    expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
-    // app→app: the incoming open replaces the view; nothing closes it.
-    await act(async () => {
-      await new Promise(resolve => window.setTimeout(resolve, 0))
-    })
-    expect(sandboxUi.close).not.toHaveBeenCalled()
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    expect(main.openCall(1)).toMatchObject({ recipeName: 'beta', title: 'Beta' })
+    const active = activeWorkspaceTab(controller.workspaceTabs)!
+    expect(active.id).not.toBe(alphaTab.id)
+    expect(owner()?.tabId).toBe(active.id)
+    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+    const alphaAfter = controller.workspaceTabs.tabs.find(tab => tab.id === alphaTab.id)
+    expect(alphaAfter?.app?.appRef).toBe(ALPHA!.appRef)
   })
 
-  it('drops a failed relaunch banner when the user moves to an app tab that cannot be resolved', async () => {
-    await renderWithLiveApp(BETA)
+  // A store update can be pending when a gesture runs (here, one written while
+  // App had not rendered yet). The reveal is picked from App's last render, but
+  // the updater lands on the pending store: the launch must follow the store.
+  function seedTabs(): void {
+    let state = createWorkspaceTabsState('chat-tab-1')
+    state = openAppTab(state, { id: 'ws-tab-90', appRef: ALPHA!.appRef, title: 'Alpha' })
+    state = newChatTab(state, 'ws-tab-91', null)
+    controller.workspaceTabs = state
+  }
+
+  it('launches the app tab a relative shortcut lands on over a pending store update (DEC-9 a)', async () => {
+    seedTabs()
+    await renderApp()
+    // Tabs: [New chat, Alpha, New chat (active)]. From App's render, "next"
+    // wraps to the first chat; from the pending store it reaches Alpha.
+    act(() => {
+      controller.setWorkspaceTabs(state => selectWorkspaceTab(state, 'chat-tab-1'))
+      shortcutCommandCb?.('tabs.next', 'host')
+    })
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+
+    expect(controller.workspaceTabs.activeTabId).toBe('ws-tab-90')
+    expect(owner()?.tabId).toBe('ws-tab-90')
+    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+    expectLaunchesAfterTheirCommit(1)
+  })
+
+  it('launches the app neighbour of a tab closed right after a pending update activated it', async () => {
+    seedTabs()
+    await renderApp()
+    // Tabs: [New chat (chat-tab-1), Alpha, New chat (active)]. The pending update
+    // activates chat-tab-1; the user closes it from the strip App last rendered.
+    act(() => {
+      controller.setWorkspaceTabs(state => selectWorkspaceTab(state, 'chat-tab-1'))
+      fireEvent.click(screen.getAllByRole('button', { name: 'Close New chat' })[0]!)
+    })
+    await flushMacrotask()
+
+    expect(controller.workspaceTabs.activeTabId).toBe('ws-tab-90')
+    expect(owner()?.tabId).toBe('ws-tab-90')
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+  })
+
+  it('launches an app tab a pending update activated when the user closes another tab', async () => {
+    seedTabs()
+    await renderApp()
+    // Tabs: [New chat (chat-tab-1), Alpha, New chat (active)]. The pending update
+    // activates Alpha; the user closes chat-tab-1, which is active in neither.
+    act(() => {
+      controller.setWorkspaceTabs(state => selectWorkspaceTab(state, 'ws-tab-90'))
+      fireEvent.click(screen.getAllByRole('button', { name: 'Close New chat' })[0]!)
+    })
+    await flushMacrotask()
+
+    expect(controller.workspaceTabs.tabs.map(tab => tab.id)).toEqual(['ws-tab-90', 'ws-tab-91'])
+    expect(controller.workspaceTabs.activeTabId).toBe('ws-tab-90')
+    expect(owner()?.tabId).toBe('ws-tab-90')
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+    expect(main.openCall(0).recipeName).toBe('alpha')
+  })
+
+  it('does not relaunch a failed app tab when another tab is closed', async () => {
+    await renderApp()
+    main.failNextOpen(new Error('open rejected'))
     act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
-    sandboxUi.listApps.mockResolvedValue({ apps: BETA_RESTARTING })
-    await refreshAppListingOnFocus()
+    expect(await screen.findByText(`${ALPHA!.appRef}: open rejected`)).toBeTruthy()
 
-    sandboxUi.open.mockRejectedValueOnce(OPEN_REJECTED)
-    clickActiveStripTab('Alpha')
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
-    await waitForLaunchFailure(ALPHA!.appRef)
+    fireEvent.click(screen.getByRole('button', { name: 'Close New chat' }))
+    await flushMacrotask()
 
+    expect(controller.workspaceTabs.tabs.map(tab => tab.id)).toEqual([tabOf(ALPHA!.appRef)!.id])
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+    expect(machineHarness.launches).toHaveLength(1)
+    expect(screen.getByText(`${ALPHA!.appRef}: open rejected`)).toBeTruthy()
+  })
+
+  it('launches nothing when a pending reset removed the tab a shortcut picked (DEC-9 b)', async () => {
+    seedTabs()
+    await renderApp()
+    act(() => {
+      controller.setWorkspaceTabs(createWorkspaceTabsState('chat-tab-1'))
+      shortcutCommandCb?.('tabs.select2', 'host')
+    })
+    await flushMacrotask()
+
+    expect(controller.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(machineHarness.launches).toEqual([])
+    expect(sandboxUi.open).not.toHaveBeenCalled()
+    expect(sidebarHarness.props?.activeSandboxUiApp ?? null).toBeNull()
+  })
+
+  it('launches every tab shortcut and strip gesture after its commit (I-commit)', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    await openFromSidebar(BETA, 2)
+    // Tabs: [New chat, Alpha, Beta].
+    // After every gesture an active app tab has a launch that owns it (T4).
+    const expectActiveAppTabOwned = () => {
+      const active = activeWorkspaceTab(controller.workspaceTabs)
+      if (active?.kind !== 'app') return
+      expect(owner()?.tabId).toBe(active.id)
+      expect(owner()?.appRef).toBe(active.app?.appRef)
+    }
+    for (const commandId of [
+      'tabs.select1',
+      'tabs.select2',
+      'tabs.next',
+      'tabs.previous',
+      'tabs.selectLast',
+      'tabs.select1',
+      'chat.closeTab',
+    ]) {
+      await shortcut(commandId)
+      expectActiveAppTabOwned()
+    }
     fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: false }))
+    await flushMacrotask()
 
-    // The Alpha tab still owned the embed after its failed relaunch.
-    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
-    const alphaPrefix = `${ALPHA!.appRef}: `
-    await waitFor(() => expect(screen.queryByText(text => text.startsWith(alphaPrefix))).toBeNull())
-    expect(await screen.findByRole('button', { name: 'Open Alpha' })).toBeTruthy()
+    expect(owner()?.appRef).toBe(BETA!.appRef)
+    expectActiveAppTabOwned()
+    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+    expectLaunchesAfterTheirCommit(7)
+  })
+
+  it('closes the view when a plugin hands off to a preview tab', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const navigationIntentBeforePlugin = controller.navigationIntentSequence
+    const payload = await openGfsResourcePayload(
+      resolvedFile('md1', 'README.md', { gfsUri: 'gfs://main/md1' })
+    )
+    act(() => openGfsResourceCb?.(payload))
+    await flushMacrotask()
+
+    expect(controller.navItem).toBe(DESKTOP_ROUTES.preview)
+    expect(controller.navigationIntentSequence).toBe(navigationIntentBeforePlugin + 1)
+    expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
+    await act(() => main.settle())
+    expect(machine().getSnapshot().views.size).toBe(0)
+  })
+
+  it('opens a tab at the route the store kept for it when the machine has none', async () => {
+    // A route the store holds that no view of this renderer reported (the store
+    // outlived the views that left it).
+    let state = createWorkspaceTabsState('chat-tab-1')
+    state = openAppTab(state, { id: 'ws-tab-90', appRef: ALPHA!.appRef, title: 'Alpha' })
+    state = setAppTabSavedRoutePath(state, 'ws-tab-90', '/kept')
+    state = selectWorkspaceTab(state, 'chat-tab-1')
+    controller.workspaceTabs = state
+    await renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+
+    expect(lastLaunch().launch.route).toEqual({ kind: 'tab', routePath: '/kept' })
+    expect(main.openCall(0).routePath).toBe('/kept')
+  })
+
+  it('keeps its machine alive through StrictMode effect replay', async () => {
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+    await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
+    await flushMacrotask()
+
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+  })
+
+  it('fails the suite on a flushSync issued from inside an effect', () => {
+    function FlushesInAnEffect() {
+      useEffect(() => {
+        flushSync(() => {})
+      }, [])
+      return null
+    }
+    render(<FlushesInAnEffect />)
+    expect(flushSyncErrors.length).toBeGreaterThan(0)
+    flushSyncErrors = []
   })
 })

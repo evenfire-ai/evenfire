@@ -105,6 +105,7 @@ describe('POST /registry/identity-voucher', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     ;(config as Record<string, unknown>).registryConnectionMode = origMode
     ;(config as Record<string, unknown>).registryVoucherPrivateKey = origKey
     ;(config as Record<string, unknown>).registryVoucherKid = origKid
@@ -192,6 +193,9 @@ describe('POST /registry/identity-voucher', () => {
     app.use(createRegistryRouter())
 
     // Drain the bucket. Cap is 30/min (set in the route definition).
+    // Keep the burst in one quota window, including its final millisecond.
+    const fixedNow = Math.floor(Date.now() / 60_000) * 60_000 + 59_999
+    vi.spyOn(Date, 'now').mockReturnValue(fixedNow)
     for (let i = 0; i < 30; i += 1) {
       const ok = await request(app).post('/registry/identity-voucher')
       expect(ok.status).toBe(200)

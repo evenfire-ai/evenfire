@@ -193,12 +193,6 @@ export interface McpServerStatus {
 export interface McpServerInfo {
   name: string
   description?: string
-  /**
-   * Present only for development/legacy in-process configuration. The HCC v2
-   * Host inventory deliberately omits Context identity: HCC derives it from
-   * the authenticated Host JWT and never returns it to the caller.
-   */
-  contextRef?: string
   transport: McpServerTransport
   /** Legacy development shape. HCC v2 returns only authRequired. */
   auth?: McpServerAuth

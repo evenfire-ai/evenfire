@@ -83,16 +83,16 @@ spec:
             - name: http
               containerPort: 8095
               protocol: TCP
-            - name: metrics
+            - name: health
               containerPort: 9090
               protocol: TCP
           readinessProbe:
-            httpGet: { path: /healthz, port: metrics }
+            httpGet: { path: /healthz, port: health }
             initialDelaySeconds: 4
             periodSeconds: 8
             timeoutSeconds: 2
           livenessProbe:
-            httpGet: { path: /healthz, port: metrics }
+            httpGet: { path: /healthz, port: health }
             initialDelaySeconds: 8
             periodSeconds: 12
             timeoutSeconds: 2
@@ -130,7 +130,7 @@ spec:
       port: 8095
       protocol: TCP
       targetPort: http
-    - name: metrics
+    - name: health
       port: 9090
       protocol: TCP
-      targetPort: metrics
+      targetPort: health

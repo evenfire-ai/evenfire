@@ -13,6 +13,7 @@ import {
   DCR_CONFIDENTIAL_DETECTED,
   DCR_REDIRECT_MISMATCH_FAILURE,
   DROPBOX_DISCOVER_FAILURE,
+  ENTRA_UNKNOWN_TENANT_DISCOVER_FAILURE,
   ISSUER_PUBLIC_SUFFIX_DISCOVER_FAILURE,
   LINEAR_DETECTED,
   LINEAR_DISCOVER,
@@ -23,6 +24,12 @@ import {
   OLDER_CONTROL_API_LINEAR_DISCOVER,
   PRE_REGISTERED_PER_SERVER_DETECTED,
   PRE_REGISTERED_PER_SERVER_DISCOVER,
+  SCOPE_AUDIENCE_MISMATCH_FAILURE,
+  SCOPE_AUDIENCE_MISSING_FAILURE,
+  SCOPE_AUDIENCE_UNVERIFIED_FAILURE,
+  SCOPE_LIMIT_EXCEEDED_FAILURE,
+  WORKIQ_DISCOVER,
+  WORKIQ_DISCOVER_TENANT_REQUIRED,
   apiErrorFrom,
 } from '../../test/fixtures/remoteMcpWire'
 import {
@@ -30,17 +37,23 @@ import {
   describeDiscoveryError,
   describeTransportProbe,
   displayClientMode,
+  getEntraTenantIdError,
   getRemoteBaseUrlError,
   getRemoteServerNameError,
   installModeForRegistration,
   mapRemoteDiscoverError,
   mapRemoteInstallError,
+  parseRemoteScopesInput,
   remoteCallbackBlocker,
   remoteCallbackVariant,
   remotePreRegisteredRedirectUri,
+  remoteScopesOverride,
   requiresPreRegisteredCredentials,
   shouldWarnNoRefresh,
+  tenantAuthority,
+  tenantRequiredDetail,
   transportBlocksContinue,
+  unverifiedScopesFromInstallError,
 } from '../remoteMcp'
 import type { RemoteTransportProbe } from '../remoteMcp.types'
 
@@ -218,7 +231,6 @@ describe('buildRemoteInstallRequest', () => {
   it('omits credentials for non-pre-registered modes and trims fields', () => {
     const body = buildRemoteInstallRequest({
       serverName: '  notion-remote ',
-      contextRef: 'research',
       baseUrl: '  https://mcp.notion.com/mcp  ',
       mode: 'cimd',
       grantScope: 'user',
@@ -227,7 +239,6 @@ describe('buildRemoteInstallRequest', () => {
     })
     expect(body).toEqual({
       serverName: 'notion-remote',
-      contextRef: 'research',
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'cimd',
       grantScope: 'user',
@@ -239,7 +250,6 @@ describe('buildRemoteInstallRequest', () => {
   it('includes credentials for the pre-registered mode', () => {
     const body = buildRemoteInstallRequest({
       serverName: 'atlassian',
-      contextRef: 'research',
       baseUrl: 'https://mcp.atlassian.com/mcp',
       mode: 'pre-registered',
       grantScope: 'context',
@@ -251,6 +261,147 @@ describe('buildRemoteInstallRequest', () => {
     // The secret is passed through untrimmed (a secret may legitimately have edges).
     expect(body.clientSecret).toBe('super-secret')
     expect(body.grantScope).toBe('context')
+  })
+
+  it('sends the Entra fields only when set, and confirmations only when non-empty', () => {
+    const base = {
+      serverName: 'workiq',
+      baseUrl: 'https://workiq.svc.cloud.microsoft/mcp',
+      mode: 'pre-registered' as const,
+      grantScope: 'user' as const,
+      clientId: 'cid',
+      clientSecret: 'secret',
+    }
+    const bare = buildRemoteInstallRequest(base)
+    expect(bare).not.toHaveProperty('authorizationServer')
+    expect(bare).not.toHaveProperty('scopes')
+    expect(bare).not.toHaveProperty('confirmedUnverifiedScopes')
+
+    expect(
+      buildRemoteInstallRequest({ ...base, confirmedUnverifiedScopes: [] })
+    ).not.toHaveProperty('confirmedUnverifiedScopes')
+
+    const full = buildRemoteInstallRequest({
+      ...base,
+      authorizationServer: 'https://login.microsoftonline.com/t/v2.0',
+      scopes: ['a/b', 'offline_access'],
+      confirmedUnverifiedScopes: ['a/b'],
+    })
+    expect(full).toMatchObject({
+      authorizationServer: 'https://login.microsoftonline.com/t/v2.0',
+      scopes: ['a/b', 'offline_access'],
+      confirmedUnverifiedScopes: ['a/b'],
+    })
+  })
+})
+
+describe('getEntraTenantIdError', () => {
+  it('requires a value', () => {
+    expect(getEntraTenantIdError('')).toBe('Tenant ID is required.')
+    expect(getEntraTenantIdError('   ')).toBe('Tenant ID is required.')
+  })
+
+  it('accepts a GUID in either case, with surrounding spaces', () => {
+    expect(getEntraTenantIdError('72f988bf-86f1-41af-91ab-2d7cd011db47')).toBe('')
+    expect(getEntraTenantIdError(' 72F988BF-86F1-41AF-91AB-2D7CD011DB47 ')).toBe('')
+  })
+
+  it('rejects a domain name or a malformed GUID', () => {
+    for (const value of ['contoso.onmicrosoft.com', '72f988bf86f141af91ab2d7cd011db47', 'x']) {
+      expect(getEntraTenantIdError(value)).toMatch(/as a GUID/)
+    }
+  })
+})
+
+describe('tenantAuthority', () => {
+  const template = tenantRequiredDetail(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))
+    ?.tenantAuthorityTemplate as string
+
+  it('fills the backend template with the trimmed, lower-case tenant', () => {
+    expect(tenantAuthority(template, ' 72F988BF-86F1-41AF-91AB-2D7CD011DB47 ')).toBe(
+      'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+    )
+  })
+
+  it('produces the authority the Work IQ discovery pinned as issuer', () => {
+    expect(tenantAuthority(template, '72f988bf-86f1-41af-91ab-2d7cd011db47')).toBe(
+      WORKIQ_DISCOVER.detected.issuer
+    )
+  })
+})
+
+describe('tenantRequiredDetail', () => {
+  it('reads the tenant_required detail of a discover failure', () => {
+    expect(tenantRequiredDetail(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))).toEqual(
+      WORKIQ_DISCOVER_TENANT_REQUIRED.body &&
+        (WORKIQ_DISCOVER_TENANT_REQUIRED.body as { detail: unknown }).detail
+    )
+  })
+
+  it('is null for any other discovery failure', () => {
+    expect(tenantRequiredDetail(apiErrorFrom(DROPBOX_DISCOVER_FAILURE))).toBeNull()
+    expect(tenantRequiredDetail(apiErrorFrom(ENTRA_UNKNOWN_TENANT_DISCOVER_FAILURE))).toBeNull()
+    expect(tenantRequiredDetail(new Error('boom'))).toBeNull()
+  })
+})
+
+describe('parseRemoteScopesInput', () => {
+  it('reads an empty field as no scopes', () => {
+    expect(parseRemoteScopesInput('', 128)).toEqual({ scopes: [] })
+    expect(parseRemoteScopesInput('  \n\t ', 128)).toEqual({ scopes: [] })
+  })
+
+  it('splits on whitespace only, keeping order and dropping duplicates', () => {
+    expect(parseRemoteScopesInput(' a,b  c\nd c ', 128)).toEqual({ scopes: ['a,b', 'c', 'd'] })
+  })
+
+  it('names the first scope with characters OAuth does not allow', () => {
+    expect(parseRemoteScopesInput('ok bad"quote', 128)).toEqual({
+      error: 'Scope "bad"quote" contains characters OAuth does not allow.',
+    })
+    expect(parseRemoteScopesInput('back\\slash', 128)).toEqual({
+      error: 'Scope "back\\slash" contains characters OAuth does not allow.',
+    })
+  })
+
+  it('caps the count after removing duplicates', () => {
+    expect(parseRemoteScopesInput('a b c', 2)).toEqual({ error: 'At most 2 scopes.' })
+    expect(parseRemoteScopesInput('a b a', 2)).toEqual({ scopes: ['a', 'b'] })
+  })
+})
+
+describe('remoteScopesOverride', () => {
+  const detected = WORKIQ_DISCOVER.detected.scopes
+
+  it('sends nothing for an empty field or the advertised list', () => {
+    expect(remoteScopesOverride([], detected)).toBeUndefined()
+    expect(remoteScopesOverride([...detected], detected)).toBeUndefined()
+  })
+
+  it('sends the typed list when it differs, including only in order', () => {
+    const edited = ['api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask']
+    expect(remoteScopesOverride(edited, detected)).toEqual(edited)
+    const reordered = [...detected].reverse()
+    expect(remoteScopesOverride(reordered, detected)).toEqual(reordered)
+  })
+})
+
+describe('unverifiedScopesFromInstallError', () => {
+  it('returns the scopes of a scope_audience_unverified answer', () => {
+    expect(
+      unverifiedScopesFromInstallError(apiErrorFrom(SCOPE_AUDIENCE_UNVERIFIED_FAILURE))
+    ).toEqual((SCOPE_AUDIENCE_UNVERIFIED_FAILURE.body as { scopes: string[] }).scopes)
+  })
+
+  it('is null for other errors and for a body without a usable list', () => {
+    expect(
+      unverifiedScopesFromInstallError(apiErrorFrom(SCOPE_AUDIENCE_MISMATCH_FAILURE))
+    ).toBeNull()
+    const malformed = apiErrorFrom({
+      ...SCOPE_AUDIENCE_UNVERIFIED_FAILURE,
+      body: { ...(SCOPE_AUDIENCE_UNVERIFIED_FAILURE.body as object), scopes: [42] },
+    })
+    expect(unverifiedScopesFromInstallError(malformed)).toBeNull()
   })
 })
 
@@ -267,6 +418,8 @@ describe('describeDiscoveryError', () => {
       'prm_resource_mismatch',
       'issuer_mismatch',
       'as_endpoints_cross_site',
+      'tenant_required',
+      'authorization_server_override_rejected',
     ] as const
     const texts = kinds.map(describeDiscoveryError)
     expect(new Set(texts).size).toBe(kinds.length)
@@ -291,12 +444,47 @@ describe('mapRemoteDiscoverError', () => {
   })
 
   it('maps a discovery_failed detail kind', () => {
-    const err = Object.assign(new Error('502 ...'), {
-      status: 502,
+    const err = Object.assign(new Error('424 ...'), {
+      status: 424,
       code: 'discovery_failed',
       body: { error: 'discovery_failed', detail: { kind: 'fetch_failed' } },
     })
     expect(mapRemoteDiscoverError(err)).toBe(describeDiscoveryError('fetch_failed'))
+  })
+
+  it('maps an unknown Entra tenant to "did not recognize" instead of the reachability copy', () => {
+    const copy = mapRemoteDiscoverError(apiErrorFrom(ENTRA_UNKNOWN_TENANT_DISCOVER_FAILURE))
+    expect(ENTRA_UNKNOWN_TENANT_DISCOVER_FAILURE.status).toBe(424)
+    expect(copy).toBe(
+      'Microsoft Entra ID did not recognize this tenant ID. Check the Directory (tenant) ID and try again.'
+    )
+  })
+
+  it('keeps the reachability copy for a fetch failure outside Entra', () => {
+    const err = Object.assign(new Error('424'), {
+      code: 'discovery_failed',
+      body: {
+        error: 'discovery_failed',
+        detail: { kind: 'fetch_failed', status: 400, url: 'https://mcp.example.com/.well-known/x' },
+      },
+    })
+    expect(mapRemoteDiscoverError(err)).toBe(describeDiscoveryError('fetch_failed'))
+  })
+
+  it('maps tenant_required to its copy when it reaches the generic mapper', () => {
+    expect(mapRemoteDiscoverError(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))).toMatch(
+      /Enter your organization's tenant ID/
+    )
+  })
+
+  it('maps a discover invalid_request to a reload hint', () => {
+    const err = Object.assign(new Error('400'), {
+      code: 'invalid_request',
+      body: { error: 'invalid_request', detail: [] },
+    })
+    expect(mapRemoteDiscoverError(err)).toBe(
+      'The request was rejected as invalid. Reload the page and try again.'
+    )
   })
 
   it('surfaces the kernel §4 message verbatim', () => {
@@ -413,6 +601,50 @@ describe('mapRemoteInstallError', () => {
       body: { error: 'issuer_binding_required' },
     })
     expect(mapRemoteInstallError(bare)).toMatch(/does not advertise RFC 9207/)
+  })
+
+  it('names the scope that belongs to another API', () => {
+    const scope = (SCOPE_AUDIENCE_MISMATCH_FAILURE.body as { scope: string }).scope
+    expect(mapRemoteInstallError(apiErrorFrom(SCOPE_AUDIENCE_MISMATCH_FAILURE))).toBe(
+      `The scope "${scope}" belongs to another API, so a token for it must not be sent to this server. Remove it or use this server's own scope.`
+    )
+  })
+
+  it('maps scope_audience_mismatch without a scope name', () => {
+    const err = Object.assign(new Error('400'), {
+      code: 'scope_audience_mismatch',
+      body: { error: 'scope_audience_mismatch' },
+    })
+    expect(mapRemoteInstallError(err)).toBe(
+      "The scope belongs to another API, so a token for it must not be sent to this server. Remove it or use this server's own scope."
+    )
+  })
+
+  it('maps scope_audience_missing to "add this server\'s own scope"', () => {
+    expect(mapRemoteInstallError(apiErrorFrom(SCOPE_AUDIENCE_MISSING_FAILURE))).toBe(
+      'Add this server’s own scope. Sign-in scopes alone (openid, profile, email, offline_access) would send a Microsoft Graph token to the server.'
+    )
+  })
+
+  it('maps a scope_audience_unverified answer with no usable list to review copy', () => {
+    const err = Object.assign(new Error('400'), {
+      code: 'scope_audience_unverified',
+      body: { error: 'scope_audience_unverified' },
+    })
+    expect(mapRemoteInstallError(err)).toMatch(/cannot tie to the server/)
+  })
+
+  it('shows the server message of an invalid_request, else the reload hint', () => {
+    expect(mapRemoteInstallError(apiErrorFrom(SCOPE_LIMIT_EXCEEDED_FAILURE))).toBe(
+      (SCOPE_LIMIT_EXCEEDED_FAILURE.body as { message: string }).message
+    )
+    const bare = Object.assign(new Error('400'), {
+      code: 'invalid_request',
+      body: { error: 'invalid_request', detail: [] },
+    })
+    expect(mapRemoteInstallError(bare)).toBe(
+      'The install request was rejected as invalid. Reload the page and try again.'
+    )
   })
 
   it('maps a re-run discovery_failed at install', () => {

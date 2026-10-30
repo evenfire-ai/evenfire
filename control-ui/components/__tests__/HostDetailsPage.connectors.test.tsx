@@ -20,10 +20,11 @@ import { ToastProvider } from '../Toast'
 const replaceMock = vi.fn()
 const pushMock = vi.fn()
 let activeHostName = 'foo'
+let activeHostTab = 'connectors'
 
 vi.mock('next/navigation', () => ({
-  useParams: () => ({ name: activeHostName, tab: 'connectors' }),
-  usePathname: () => `/agents/${activeHostName}/connectors`,
+  useParams: () => ({ name: activeHostName, tab: activeHostTab }),
+  usePathname: () => `/agents/${activeHostName}/${activeHostTab}`,
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
   useSearchParams: () => new URLSearchParams(),
 }))
@@ -112,6 +113,7 @@ function renderPage() {
 afterEach(() => {
   cleanup()
   activeHostName = 'foo'
+  activeHostTab = 'connectors'
 })
 
 describe('HostDetailsPage connectors', () => {
@@ -145,6 +147,50 @@ describe('HostDetailsPage connectors', () => {
       })
     )
     expect(await screen.findByText('mcp-new')).toBeInTheDocument()
+  })
+
+  it('does not show Unknown authentication when the connector catalog fails to load', async () => {
+    vi.mocked(api.getMcpServers).mockRejectedValueOnce(new Error('Catalog unavailable'))
+
+    renderPage()
+
+    expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
+
+    const connectorRow = screen.getByText('mcp-existing').closest('tr')
+    const authenticationCell = connectorRow?.querySelector('td:nth-child(2)')
+    await waitFor(() => expect(authenticationCell?.textContent?.trim()).toBe(''))
+    expect(authenticationCell?.childElementCount).toBe(0)
+  })
+
+  it('retries the connector catalog when returning to the tab after a failed load', async () => {
+    vi.mocked(api.getMcpServers)
+      .mockRejectedValueOnce(new Error('Catalog unavailable'))
+      .mockResolvedValueOnce({
+        items: [
+          { metadata: { name: 'mcp-existing' }, spec: { auth: { type: 'oauth' } } },
+          { metadata: { name: 'mcp-new' }, spec: { auth: { type: 'bearer' } } },
+        ],
+      })
+
+    const { rerender } = renderPage()
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
+
+    activeHostTab = 'overview'
+    rerender(
+      <ToastProvider>
+        <HostDetailsPage />
+      </ToastProvider>
+    )
+    activeHostTab = 'connectors'
+    rerender(
+      <ToastProvider>
+        <HostDetailsPage />
+      </ToastProvider>
+    )
+
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('OAuth')).toBeInTheDocument()
   })
 
   // Re-homed from app/contexts/__tests__/ContextDetail.spec-preserve.test.tsx
@@ -301,8 +347,15 @@ describe('HostDetailsPage connectors', () => {
 
     cleanup()
     activeHostName = 'foo'
+    vi.mocked(api.getMcpServers).mockClear()
     renderPage()
     expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
+    const connectorRow = screen.getByText('mcp-existing').closest('tr')
+    const authenticationCell = connectorRow?.querySelector('td:nth-child(2)')
+    expect(authenticationCell).not.toBeNull()
+    await waitFor(() => expect(authenticationCell?.textContent?.trim()).toBe(''))
+    expect(authenticationCell?.childElementCount).toBe(0)
     fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
     await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
     fireEvent.click(await screen.findByRole('checkbox', { name: 'mcp-new' }))
@@ -332,5 +385,97 @@ describe('HostDetailsPage connectors', () => {
     expect(await screen.findByText('mcp-new')).toBeInTheDocument()
     expect(screen.queryByText('shared-connectors')).not.toBeInTheDocument()
     expect(api.getHostDetailBundle).toHaveBeenLastCalledWith('bar')
+  })
+
+  describe('Context resolution by name', () => {
+    function mockHostWithContexts(contexts: unknown[]) {
+      ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+        host: {
+          metadata: { name: activeHostName, resourceVersion: 'rv-host-1' },
+          spec: {
+            contextRef: contextName,
+            host: 'Foo',
+            model: { name: 'gpt-5.4-mini', provider: 'openai' },
+          },
+        },
+        contexts,
+        secrets: [],
+        users: [],
+        teams: [],
+        agentUsers: [],
+        agentTeams: [],
+      })
+    }
+
+    // The Context carrying the Host's contextRef only as its alias is listed first, so an
+    // alias-tolerant lookup would pick it before the Context that actually has that name.
+    const aliasedOther = buildContextResource({
+      metadata: { name: 'other-context', resourceVersion: 'rv-other' },
+      spec: { contextId: contextName, mcpServers: ['mcp-other'] },
+    })
+
+    it('adds connectors to the Context named by the Host, not to one aliased to it', async () => {
+      mockHostWithContexts([aliasedOther, baseContext])
+      renderPage()
+
+      expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
+      fireEvent.click(await screen.findByRole('checkbox', { name: 'mcp-new' }))
+      fireEvent.click(
+        within(screen.getByRole('dialog')).getByRole('button', { name: 'Add connector' })
+      )
+
+      await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
+      expect(api.updateContext).toHaveBeenCalledWith(
+        contextName,
+        expect.objectContaining({
+          metadata: { resourceVersion: 'rv-context-1' },
+          spec: expect.objectContaining({ mcpServers: ['mcp-existing', 'mcp-new'] }),
+        })
+      )
+    })
+
+    it('removes connectors from the Context named by the Host, not from one aliased to it', async () => {
+      mockHostWithContexts([aliasedOther, baseContext])
+      renderPage()
+
+      fireEvent.click(
+        await screen.findByRole('button', { name: 'Actions for connector mcp-existing' })
+      )
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove connector' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Remove connector' }))
+
+      await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
+      expect(api.updateContext).toHaveBeenCalledWith(
+        contextName,
+        expect.objectContaining({
+          metadata: { resourceVersion: 'rv-context-1' },
+          spec: expect.objectContaining({ mcpServers: [] }),
+        })
+      )
+    })
+
+    it('forwards an externally written alias exactly as stored', async () => {
+      const externalAlias = buildContextResource({
+        metadata: { name: contextName, resourceVersion: 'rv-context-1' },
+        spec: { contextId: ' x', mcpServers: ['mcp-existing'] },
+      })
+      mockHostWithContexts([externalAlias])
+      renderPage()
+
+      fireEvent.click(
+        await screen.findByRole('button', { name: 'Actions for connector mcp-existing' })
+      )
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove connector' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Remove connector' }))
+
+      await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
+      expect(api.updateContext).toHaveBeenCalledWith(
+        contextName,
+        expect.objectContaining({
+          spec: expect.objectContaining({ contextId: ' x', mcpServers: [] }),
+        })
+      )
+    })
   })
 })

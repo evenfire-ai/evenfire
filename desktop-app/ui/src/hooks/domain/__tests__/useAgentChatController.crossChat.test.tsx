@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useAgentChatController } from '@hooks/domain/useAgentChatController'
+import { useToastController } from '@hooks/domain/useToastController'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { TaskProgressStreamEvent } from '../../../../../src/types'
@@ -166,6 +167,7 @@ function AgentChatHarness() {
   const [sendState, setSendState] = React.useState('idle')
   const [selectedAgent, setSelectedAgent] = React.useState('trader')
   const hostAuthority = useHarnessHostAuthority(recordHold)
+  const { pushToast } = useToastController()
   const vm = useAgentChatController({
     selectedAgent,
     agentNames: ['trader', 'chatllm-stateless'],
@@ -181,7 +183,7 @@ function AgentChatHarness() {
     isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
     getHostAuthorityEpoch: hostAuthority.getHostAuthorityEpoch,
     hostAuthorityRevision: hostAuthority.revision,
-    pushToast: vi.fn(),
+    pushToast,
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,
     canDeliverChatResponseNotification: vi.fn(() => false),

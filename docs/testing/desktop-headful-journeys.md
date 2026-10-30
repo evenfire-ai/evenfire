@@ -48,10 +48,27 @@ journey always runs.
 ```bash
 cd desktop-app
 # dev Evenfire must be closed (process-wide single-instance lock)
-make gcp-dev-pf-desktop          # keep control-api/external-rest/rpc-proxy forwarded
+# keep control-api / external-rest-api / rpc-proxy port-forwarded to loopback
+# (standard single minikube profile: make -C .. minikube-pf-desktop,
+#  fixed ports 8090 / 8091 / 8094)
 
 npm run qa:recorder:navigation   # one journey
-npm run qa:recorder:all          # all 13 specs / 22 tests
+npm run qa:recorder:all          # all 14 specs / 23 tests
+```
+
+On a **branch-owned profile** the forwards use profile-owned ports instead of
+8091 / 8094. Hold them on the host and point the recorder at them:
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf    # from the repo root
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f scripts/minikube-profiles/branch.mk branch-profile-info  # prints the ports
+
+cd desktop-app
+EXTERNAL_REST_API_BASE_URL=http://127.0.0.1:<external-rest-api-port> \
+RPC_PROXY_BASE_URL=http://127.0.0.1:<rpc-proxy-port> \
+  npm run qa:recorder:navigation
 ```
 
 `qa:recorder:all` includes `qa-recorder-model-selector.spec.ts`, which fails loudly

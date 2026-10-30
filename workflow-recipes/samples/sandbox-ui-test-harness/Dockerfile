@@ -6,9 +6,9 @@
 #   into the recipe's view/* prefix per spec §9.4)
 # - /redirect-external returns 302 to https://example.com/ (proxy must
 #   strip the off-origin Location and coerce to 200 per Decision 5)
-FROM node:20-alpine
+FROM node:24.22.1-alpine
 
-# node:alpine ships a `node` user (UID 1000) — sandbox-ui ns enforces
+# node:24.22.1-alpine ships a `node` user (UID 1000) — sandbox-ui ns enforces
 # runAsNonRoot, this saves us a per-workload security override.
 USER node
 WORKDIR /home/node/app

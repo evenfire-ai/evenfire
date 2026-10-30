@@ -118,7 +118,6 @@ export async function installServer(
       metadata: { name },
       spec: {
         enabled: true,
-        contextRef: CONTEXT,
         auth: { type: 'oauth' },
         transport: { url: `http://${name}.${NS}.svc:3000/mcp` },
         oauth,
@@ -147,6 +146,7 @@ export function readerKey(server: ServerCR, userId?: string): OAuthGrantKey {
     mcpServerName: server.metadata.name,
     mcpServersNamespace: NS,
     userId,
+    contextId: CONTEXT,
   })
   if (!key) throw new Error('fixture: no grant key')
   return key
@@ -168,7 +168,13 @@ function tokenResponse(tokens: ConsentTokens) {
   }
 }
 
-function consentInput(name: string, userId: string, target?: CallbackTarget) {
+/**
+ * The consent request the mint would have signed: a context-scope server's state
+ * carries the Context it was validated for, a per-user one carries none.
+ */
+function consentInput(name: string, userId: string, server: ServerCR, target?: CallbackTarget) {
+  const contextScoped =
+    (server.spec as { oauth?: { grantScope?: unknown } }).oauth?.grantScope === 'context'
   return {
     target: target ?? {
       kind: 'client' as const,
@@ -183,6 +189,7 @@ function consentInput(name: string, userId: string, target?: CallbackTarget) {
       oauthClientId: OAUTH_ID,
       grantKind: 'user',
       background: false,
+      ...(contextScoped ? { contextId: CONTEXT } : {}),
     }),
   }
 }
@@ -210,7 +217,8 @@ export async function legacyConsent(
         text: async () => JSON.stringify(tokenResponse(tokens)),
       }) as Response
   )
-  const result = await handleOAuthCallback(consentInput(name, userId), {
+  const current = (await gateway.getResource('mcpservers', name, NS)) as ServerCR
+  const result = await handleOAuthCallback(consentInput(name, userId, current), {
     db,
     recipeReader: { read: async () => null },
     secretReader: { read: async () => ({ 'client-id': 'CID', 'client-secret': 'CSEC' }) },
@@ -222,7 +230,7 @@ export async function legacyConsent(
         return resolved ? { namespace: NS, ...resolved } : null
       },
     },
-    userContextsReader: async () => ({ contextIds: [CONTEXT] }),
+    contextAccessReader: async () => true,
     userServerAccessReader: async () => true,
     fetchFn: fetchFn as unknown as typeof fetch,
     stateSecret: STATE_SECRET,
@@ -255,7 +263,7 @@ export async function currentConsent(
       ? { kind: 'remote-shared', origin: 'https://control.example.com' }
       : undefined
   const result = await handleOAuthCallback(
-    { ...consentInput(name, userId, target), iss },
+    { ...consentInput(name, userId, cr, target), iss },
     {
       db,
       recipeReader: { read: async () => null },
@@ -267,7 +275,7 @@ export async function currentConsent(
           return resolved ? { namespace: NS, ...resolved } : null
         },
       },
-      userContextsReader: async () => ({ contextIds: [CONTEXT] }),
+      contextAccessReader: async () => true,
       userServerAccessReader: async () => true,
       fetchFn: (async () => {
         throw new Error('remote/generic consent must not use fetchFn')

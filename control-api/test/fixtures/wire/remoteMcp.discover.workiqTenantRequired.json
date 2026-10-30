@@ -1,0 +1,12 @@
+{
+  "status": 400,
+  "body": {
+    "error": "discovery_failed",
+    "detail": {
+      "kind": "tenant_required",
+      "authorizationServer": "https://login.microsoftonline.com/organizations/v2.0",
+      "tenantAuthorityTemplate": "https://login.microsoftonline.com/{tenantId}/v2.0",
+      "detail": "authorization server is the Microsoft Entra ID multi-tenant authority; name the tenant"
+    }
+  }
+}

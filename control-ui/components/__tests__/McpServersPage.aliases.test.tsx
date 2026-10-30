@@ -27,6 +27,7 @@ vi.mock('../McpServerTable', async () => {
   const React = await import('react')
   return {
     McpServerTable: (props: {
+      items: unknown[]
       agentBindingsByConnectorName: Record<
         string,
         Array<{
@@ -38,18 +39,12 @@ vi.mock('../McpServerTable', async () => {
         server: { name: string; namespace: string },
         agents: Array<{ name: string; contextRef: string }>
       ) => Promise<void>
-      onRemoveFromAgents: (
-        server: { name: string; namespace: string },
-        binding: {
-          agents: Array<{ id: string; label: string }>
-          contextRef: string
-        }
-      ) => Promise<void>
     }) => {
       const binding = props.agentBindingsByConnectorName.search?.[0]
       return React.createElement(
         'div',
         null,
+        React.createElement('span', null, `items:${props.items.length}`),
         React.createElement(
           'span',
           null,
@@ -60,23 +55,12 @@ vi.mock('../McpServerTable', async () => {
           {
             onClick: () =>
               props.onAddToAgents({ name: 'new-search', namespace: 'mcp-server' }, [
-                { name: 'agent-alpha', contextRef: 'ctx-wire' },
+                { name: 'agent-alpha', contextRef: 'ctx-resource' },
               ]),
             type: 'button',
           },
-          'add alias connector'
-        ),
-        binding
-          ? React.createElement(
-              'button',
-              {
-                onClick: () =>
-                  props.onRemoveFromAgents({ name: 'search', namespace: 'mcp-server' }, binding),
-                type: 'button',
-              },
-              'remove alias connector'
-            )
-          : null
+          'add connector'
+        )
       )
     },
   }
@@ -93,7 +77,7 @@ vi.mock('../../lib/api', () => ({
   updateContext: vi.fn().mockResolvedValue({}),
 }))
 
-describe('Installed Connectors Context aliases', () => {
+describe('Installed Connectors Context resolution', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(api.getMcpServers).mockResolvedValue({
@@ -114,18 +98,18 @@ describe('Installed Connectors Context aliases', () => {
       items: [
         {
           metadata: { name: 'agent-alpha' },
-          spec: { contextRef: 'ctx-wire', host: 'Agent Alpha' },
+          spec: { contextRef: 'ctx-resource', host: 'Agent Alpha' },
         },
       ],
     })
   })
 
-  it('shows the owner and uses the resource name for add and remove mutations', async () => {
+  it('shows the owner and writes to the named Context, forwarding its alias as stored', async () => {
     render(<McpServersPage />)
 
     expect(await screen.findByText('owners:Agent Alpha')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'add alias connector' }))
+    fireEvent.click(screen.getByRole('button', { name: 'add connector' }))
     await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
     expect(api.updateContext).toHaveBeenLastCalledWith(
       'ctx-resource',
@@ -137,16 +121,21 @@ describe('Installed Connectors Context aliases', () => {
         }),
       })
     )
+  })
 
-    vi.mocked(api.updateContext).mockClear()
-    fireEvent.click(screen.getByRole('button', { name: 'remove alias connector' }))
-    await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
-    expect(api.updateContext).toHaveBeenLastCalledWith(
-      'ctx-resource',
-      expect.objectContaining({
-        metadata: { resourceVersion: 'rv-1' },
-        spec: expect.objectContaining({ contextId: 'ctx-wire', mcpServers: [] }),
-      })
-    )
+  it('does not treat a Host that references the alias as an owner', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-alpha' },
+          spec: { contextRef: 'ctx-wire', host: 'Agent Alpha' },
+        },
+      ],
+    })
+    render(<McpServersPage />)
+
+    // Connectors and bindings are committed in the same render.
+    expect(await screen.findByText('items:2')).toBeInTheDocument()
+    expect(screen.getByText('owners:none')).toBeInTheDocument()
   })
 })

@@ -186,8 +186,13 @@ refused for it.
   in `PROVIDER_CREDENTIAL_SLOTS`. The credential-exclusion boundary
   (`userEnvSnapshot`) derives from the full slot set — never `primarySlot()`.
 - Non-secret, per-Host config (region, project, endpoint) goes in
-  `PROVIDER_NON_SECRET_ENV` and flows via the pod env (`host-<ref>-env`), surfaced
-  in the UI as a "configure in Host → Environment" hint, never a secret field.
+  `PROVIDER_NON_SECRET_ENV`, surfaced in the UI as a "configure in Host →
+  Environment" hint, never a secret field. It is not in the pod env: mcp-host
+  resolves it from the watched per-Host `host-<ref>-env` / `-env-secret` and
+  passes the driver a lookup (`ProviderEnvLookup`, `src/llm/providerEnv.ts`)
+  limited to the provider's declared names (`process.env` outside a Host pod,
+  e.g. dev mode). Read these values through that lookup, never `process.env`
+  directly.
 - **Exclude such providers from `workflowrecipe.yaml`** — the WRC `configure`
   transport is single-credential and doesn't carry non-secret env, so a
   multi-credential / endpoint-requiring provider must fail at admission, not
@@ -203,7 +208,8 @@ Azure is OpenAI-compatible in shape but not a `baseURL + Bearer` row:
 - **`model` is the deployment name**, not a catalog id.
   Its `RUNTIME_FIELDS.azure` carries a `defaultModel` + `tokenizer: 'openai'` but
   **no static baseURL**, so it takes the explicit `case 'azure':` arm and reads the
-  endpoint from `process.env` at construction. Fail-closed if the endpoint is absent.
+  endpoint from the non-secret env lookup at construction. Fail-closed if the
+  endpoint is absent.
 
 ---
 

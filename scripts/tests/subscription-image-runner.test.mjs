@@ -462,6 +462,8 @@ test('private JSON refuses wrong mode, symlink and hardlink without accepting an
 test('minimal source context excludes ignored/private/Git files and unrelated repository paths', () => {
   const packages = ['packages/llm-provider-attempt-contract']
   for (const filename of [
+    '.nvmrc',
+    'scripts/check-node-version.cjs',
     'desktop-app/src/main.ts',
     'desktop-app/ui/src/App.tsx',
     'packages/llm-provider-attempt-contract/testImageFixtures.cjs',
@@ -473,6 +475,7 @@ test('minimal source context excludes ignored/private/Git files and unrelated re
     'desktop-app/src/session.key',
     'desktop-app/src/__tests__/personal.test.ts',
     'control-api/src/main.ts',
+    'scripts/unreviewed-helper.mjs',
     'packages/not-in-closure/index.js',
     '../escape',
     '/outside',

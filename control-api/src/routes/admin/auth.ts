@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
+import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
@@ -38,6 +39,10 @@ import {
   provisionAdminDesktopWorkspace,
   setInvitationPasswordForUser,
 } from '../../services/directory/index.js'
+import {
+  type MemberPasswordWorkLease,
+  withMemberPasswordWorkLease,
+} from '../../services/directory/membership.js'
 import { setupInitialAdminWithDesktopWorkspace } from '../../services/initialAdminSetupService.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 import { signAdminToken } from '../../utils/auth/adminAuthToken.js'
@@ -483,60 +488,70 @@ export function createAdminAuthRouter(): Router {
 
         const validation = await validateControlAdminInvitationToken(token, email)
         const passwordHash = await bcrypt.hash(password, 12)
-        const result = await completeControlAdminInvitation({
-          email: validation.email,
-          invitationId: validation.invitationUuid,
-          username,
-          passwordHash,
-        })
-        if ('error' in result) {
-          const status = result.error === 'not_found' ? 404 : 409
-          res.status(status).json({ error: result.error })
-          return
-        }
+        const completeInvitation = async (passwordWorkLease?: MemberPasswordWorkLease) => {
+          const result = await completeControlAdminInvitation({
+            email: validation.email,
+            invitationId: validation.invitationUuid,
+            username,
+            passwordHash,
+          })
+          if ('error' in result) {
+            return {
+              status: result.error === 'not_found' ? 404 : 409,
+              body: { error: result.error },
+            }
+          }
 
-        const acceptedDesktopAccess = desktopAccess
-          ? await acceptInvitationById(validation.email, desktopAccess.id)
-          : null
-        if (acceptedDesktopAccess && 'error' in acceptedDesktopAccess) {
-          // The control-admin invitation is already committed. A failed desktop
-          // acceptance leaves that admin in place and, for a hand-over, the
-          // inviter already retired. Record the code without the invitee email.
-          rootLogger.error(
-            {
-              event: 'control_admin_desktop_acceptance_failed',
-              invitationId: validation.invitationUuid,
-              adminId: result.id,
-              errorCode: acceptedDesktopAccess.error,
+          const acceptedDesktopAccess = desktopAccess
+            ? await acceptInvitationById(validation.email, desktopAccess.id)
+            : null
+          if (acceptedDesktopAccess && 'error' in acceptedDesktopAccess) {
+            // The control-admin invitation is already committed. A failed desktop
+            // acceptance leaves that admin in place and, for a hand-over, the
+            // inviter already retired. Record the code without the invitee email.
+            rootLogger.error(
+              {
+                event: 'control_admin_desktop_acceptance_failed',
+                invitationId: validation.invitationUuid,
+                adminId: result.id,
+                errorCode: acceptedDesktopAccess.error,
+              },
+              'desktop invitation acceptance failed after the control admin invitation committed'
+            )
+            return { status: 409, body: { error: acceptedDesktopAccess.error } }
+          }
+          if (acceptedDesktopAccess?.data?.userId && desktopAccess) {
+            const passwordResult = await setInvitationPasswordForUser(
+              acceptedDesktopAccess.data.userId,
+              validation.email,
+              desktopAccess.id,
+              memberPassword,
+              passwordWorkLease
+            )
+            if ('error' in passwordResult) {
+              return { status: 409, body: { error: passwordResult.error } }
+            }
+          }
+
+          return {
+            status: 200,
+            body: {
+              completed: true,
+              desktopAccessCompleted: Boolean(
+                acceptedDesktopAccess && !('error' in acceptedDesktopAccess)
+              ),
+              login: {
+                username: result.email || result.username,
+              },
             },
-            'desktop invitation acceptance failed after the control admin invitation committed'
-          )
-          res.status(409).json({ error: acceptedDesktopAccess.error })
-          return
-        }
-        if (acceptedDesktopAccess?.data?.userId && desktopAccess) {
-          const passwordResult = await setInvitationPasswordForUser(
-            acceptedDesktopAccess.data.userId,
-            validation.email,
-            desktopAccess.id,
-            memberPassword
-          )
-          if ('error' in passwordResult) {
-            res.status(409).json({ error: passwordResult.error })
-            return
           }
         }
-
-        res.status(200).json({
-          completed: true,
-          desktopAccessCompleted: Boolean(
-            acceptedDesktopAccess && !('error' in acceptedDesktopAccess)
-          ),
-          login: {
-            username: result.email || result.username,
-          },
-        })
+        const completion = desktopAccess
+          ? await withMemberPasswordWorkLease(lease => completeInvitation(lease))
+          : await completeInvitation()
+        res.status(completion.status).json(completion.body)
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         next(error)
       }
     }

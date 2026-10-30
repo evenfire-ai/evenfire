@@ -107,10 +107,14 @@ vi.mock('@lib/approvalChannels', () => ({
   listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
 }))
 
-vi.mock('@lib/desktopAppLinks', () => ({
-  buildDesktopEnvironmentLink: mocks.buildDesktopEnvironmentLink,
-  navigateToDesktopApp: mocks.navigateToDesktopApp,
-}))
+vi.mock('@lib/desktopAppLinks', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/desktopAppLinks')>()
+  return {
+    ...actual,
+    buildDesktopEnvironmentLink: mocks.buildDesktopEnvironmentLink,
+    navigateToDesktopApp: mocks.navigateToDesktopApp,
+  }
+})
 
 vi.mock('@lib/releaseIdentity', () => ({
   refreshReleaseIdentity: mocks.refreshReleaseIdentity,
@@ -118,6 +122,7 @@ vi.mock('@lib/releaseIdentity', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'true')
   mocks.buildDesktopEnvironmentLink.mockReturnValue(null)
   mocks.getConfiguredExternalRestApiBaseUrl.mockReturnValue('https://api.example.com')
   mocks.getDesktopEnvironment.mockResolvedValue(desktopEnvironment)
@@ -127,7 +132,10 @@ beforeEach(() => {
   mocks.refreshApprovalTargets.mockResolvedValue([])
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllEnvs()
+})
 
 describe('Settings desktop setup handoff', () => {
   it('uses the shared desktop environment link builder', async () => {
@@ -150,5 +158,64 @@ describe('Settings desktop setup handoff', () => {
 
     expect(mocks.buildDesktopEnvironmentLink).toHaveBeenCalledWith(desktopEnvironment)
     expect(mocks.navigateToDesktopApp).toHaveBeenCalledWith(desktopHref)
+  })
+
+  it('keeps manual REST setup available while automatic handoff is disabled', async () => {
+    vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'false')
+
+    render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Setup desktop app' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Setup desktop app' })
+    expect(
+      within(dialog).getByText(/Automatic Desktop handoff is temporarily unavailable/)
+    ).toBeInTheDocument()
+    expect(
+      within(dialog).queryByRole('button', { name: 'Open desktop app and setup' })
+    ).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Copy External REST API URL' })).toBeEnabled()
+  })
+})
+
+describe('Settings password update recovery messaging', () => {
+  it('shows actionable guidance from the External REST credential-change response', async () => {
+    const publicMessage =
+      'Your password changed during this request. Sign in again with your new password.'
+    const publicResponse = { status: 409, body: { error: publicMessage } }
+    const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    mocks.updatePassword.mockImplementation(actualApi.updatePassword)
+    const upstreamFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(publicResponse.body), {
+        status: publicResponse.status,
+        statusText: 'Conflict',
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+
+    try {
+      render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+      const openButton = await screen.findByRole('button', { name: 'Update password' })
+      fireEvent.click(openButton)
+
+      const dialog = await screen.findByRole('dialog', { name: 'Update password' })
+      fireEvent.change(within(dialog).getByLabelText('Current password'), {
+        target: { value: 'Synthetic-current-password' },
+      })
+      fireEvent.change(within(dialog).getByLabelText('New password'), {
+        target: { value: 'Synthetic-next-password' },
+      })
+      fireEvent.change(within(dialog).getByLabelText('Confirm new password'), {
+        target: { value: 'Synthetic-next-password' },
+      })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Update password' }))
+
+      expect(await within(dialog).findByText(`409 Conflict - ${publicMessage}`)).toBeInTheDocument()
+      expect(mocks.logout).not.toHaveBeenCalled()
+      expect(mocks.routerReplace).not.toHaveBeenCalled()
+      expect(mocks.showToast).not.toHaveBeenCalled()
+    } finally {
+      upstreamFetch.mockRestore()
+    }
   })
 })
