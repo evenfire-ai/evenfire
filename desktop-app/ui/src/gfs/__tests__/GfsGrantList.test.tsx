@@ -308,57 +308,6 @@ describe('GfsGrantList', () => {
     expect(screen.getAllByText(HIDDEN_ACCESS_NOTICE_TEXT)).toHaveLength(1)
   })
 
-  it('shows out-of-directory home identities and preserves each row type’s actions', () => {
-    const onChangeRole = vi.fn()
-    const onRevoke = vi.fn()
-    const onRevokeShare = vi.fn()
-    render(
-      <GfsGrantList
-        agents={agents}
-        subjects={subjects}
-        items={[
-          grantItem({
-            id: 'outside-grant',
-            subject: { type: 'user', id: 'outside' },
-            subjectProfile: { name: 'Outside User', email: 'outside@example.test' },
-          }),
-          grantItem({
-            id: 'outside-team',
-            subject: { type: 'team', id: 'outside-team' },
-            subjectProfile: { name: 'Outside Team' },
-          }),
-          grantItem({ id: 'still-hidden', subject: { type: 'user', id: 'no-profile' } }),
-        ]}
-        shares={[
-          shareItem({
-            id: 'outside-share',
-            subject: { type: 'user', id: 'outside-share-user' },
-            subjectProfile: { name: null, email: 'share@example.test' },
-          }),
-        ]}
-        onChangeRole={onChangeRole}
-        onRevoke={onRevoke}
-        onRevokeShare={onRevokeShare}
-      />
-    )
-    const grant = screen.getByTestId('gfs-access-row-grant-outside-grant')
-    expect(within(grant).getByText('Outside User')).toBeTruthy()
-    expect(within(grant).getByText('outside@example.test')).toBeTruthy()
-    expect(within(grant).getByRole('button', { name: 'Access role for Outside User' })).toBeTruthy()
-    expect(within(grant).getByRole('button', { name: 'Actions for Outside User' })).toBeTruthy()
-    expect(screen.getByText('Outside Team')).toBeTruthy()
-    const share = screen.getByTestId('gfs-access-row-share-outside-share')
-    expect(within(share).getAllByText('share@example.test')).toHaveLength(2)
-    expect(
-      within(share).queryByRole('button', { name: 'Access role for share@example.test' })
-    ).toBeNull()
-    fireEvent.click(within(share).getByRole('button', { name: 'Actions for share@example.test' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
-    expect(onRevokeShare).toHaveBeenCalledOnce()
-    expect(screen.queryByTestId('gfs-access-row-grant-still-hidden')).toBeNull()
-    expect(screen.getByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeTruthy()
-  })
-
   it('protects another home owner grant while a manager grant retains its actions', () => {
     render(
       <GfsGrantList
@@ -389,7 +338,7 @@ describe('GfsGrantList', () => {
   })
 
   it.each(['direct', 'inherited', 'merged-direct'] as const)(
-    'shows an anonymous %s owner while hiding other directory-less subjects',
+    'hides a %s home owner row from a viewer outside the owner’s teams',
     source => {
       const owner = { type: 'user' as const, id: 'private-owner-id' }
       const other = { type: 'user' as const, id: 'private-other-id' }
@@ -404,12 +353,16 @@ describe('GfsGrantList', () => {
       render(
         <GfsGrantList
           agents={[]}
-          subjects={[]}
+          // The viewer has a home, but it is a different one: the owner row on
+          // `home` is not the caller's own grant.
+          isOwnHomeRoot={id => id === 'viewer-home'}
+          subjects={subjects}
           items={[
             ...(source !== 'inherited'
-              ? [grantItem({ id: 'owner', subject: owner, homeOwner: true })]
+              ? [grantItem({ id: 'owner', resourceId: 'home', subject: owner, homeOwner: true })]
               : []),
             grantItem({ id: 'other', subject: other }),
+            grantItem({ id: 'teammate', subject: { type: 'user', id: 'user-2' } }),
           ]}
           inheritedItems={
             source === 'direct' ? [] : [inherited(owner, source === 'inherited'), inherited(other)]
@@ -422,16 +375,85 @@ describe('GfsGrantList', () => {
         />
       )
 
+      // U1: an out-of-team viewer never gets the owner row — not as a row and
+      // not as an anonymous "Owner" label.
+      expect(
+        screen.queryByTestId(
+          source === 'direct'
+            ? 'gfs-access-row-grant-owner'
+            : 'gfs-access-row-inherited-user:private-owner-id'
+        )
+      ).toBeNull()
+      expect(screen.queryByText('Owner')).toBeNull()
+      expect(screen.queryByText('private-owner-id')).toBeNull()
+      expect(screen.getByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeTruthy()
+      // Witness: the in-directory member keeps its row and actions in the same
+      // list, so the absence above is not an empty render.
+      const teammate = screen.getByText('Test Two').closest('li')!
+      expect(within(teammate).getByRole('button', { name: 'Actions for Test Two' })).toBeTruthy()
+      expect(screen.queryByTestId('gfs-access-row-grant-other')).toBeNull()
+      expect(screen.queryByTestId('gfs-access-row-inherited-user:private-other-id')).toBeNull()
+    }
+  )
+
+  it.each(['direct', 'inherited'] as const)(
+    'shows the home owner their own Owner row without a team, and no hidden-members notice',
+    source => {
+      const owner = { type: 'user' as const, id: 'private-owner-id' }
+      const ownerPermissions = ['read', 'write', 'delete', 'share', 'manage_acl']
+      const inheritedOwner = {
+        ...mergeInheritedAccessItem(
+          null,
+          {
+            subject: owner,
+            permissions: ownerPermissions,
+            grantId: 'owner-grant',
+            shareIds: [],
+          },
+          { resourceId: 'home', name: 'Home' }
+        ),
+        homeOwner: true as const,
+      }
+      render(
+        <GfsGrantList
+          agents={[]}
+          isOwnHomeRoot={id => id === 'home'}
+          subjects={[]}
+          items={
+            source === 'direct'
+              ? [
+                  grantItem({
+                    id: 'owner',
+                    resourceId: 'home',
+                    subject: owner,
+                    homeOwner: true,
+                    permissions: ownerPermissions,
+                    inherit: true,
+                  }),
+                ]
+              : []
+          }
+          inheritedItems={source === 'inherited' ? [inheritedOwner] : []}
+          mergeInherited={source === 'inherited'}
+          onChangeRole={vi.fn()}
+          onChangeInheritedRole={vi.fn()}
+          onRemoveInherited={vi.fn()}
+          onRevoke={vi.fn()}
+        />
+      )
+
+      // Witness: the owner's own row is listed even though the directory is empty.
       const row = screen.getByTestId(
         source === 'direct'
           ? 'gfs-access-row-grant-owner'
           : 'gfs-access-row-inherited-user:private-owner-id'
       )
-      expect(within(row).getByText('Owner')).toBeTruthy()
+      // The identity span stays hidden (no name in the directory), so the row
+      // reads "Owner" and never the owner's UUID.
       expect(row.textContent).toBe('Owner')
       expect(within(row).queryByRole('button')).toBeNull()
-      expect(screen.queryByTestId('gfs-access-row-grant-other')).toBeNull()
-      expect(screen.queryByTestId('gfs-access-row-inherited-user:private-other-id')).toBeNull()
+      expect(screen.queryByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeNull()
+      expect(screen.queryByText('Only members outside your teams have access here.')).toBeNull()
     }
   )
 

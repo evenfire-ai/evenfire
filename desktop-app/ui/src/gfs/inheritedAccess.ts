@@ -2,11 +2,7 @@ import { classifyGfsAclReadFailure, worstGfsCoverageClass } from '@clerum/gfs-in
 import type { GfsCoverageClass } from '@clerum/gfs-interaction-policy'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
 import { isGfsSessionAuthorityFailure, parseHttpStatus } from '@lib/gfsGrantErrors'
-import type {
-  GfsInheritedAccessItem,
-  GfsInheritedAccessResult,
-  GfsSubjectProfile,
-} from './delegation.types'
+import type { GfsInheritedAccessItem, GfsInheritedAccessResult } from './delegation.types'
 import { inheritedSubjectKey, mergeInheritedAccessItem } from './inheritedAccessMerge'
 
 /**
@@ -176,21 +172,12 @@ export async function deriveGfsInheritedAccess(
         [],
         parent.resourceId,
         folderLabel,
-        grant.subjectProfile,
         grant.homeOwner
       )
     }
     for (const share of shares ?? []) {
       if (!share.includeDescendants) continue
-      merge(
-        share.subject,
-        share.permissions,
-        null,
-        [share.id],
-        parent.resourceId,
-        folderLabel,
-        share.subjectProfile
-      )
+      merge(share.subject, share.permissions, null, [share.id], parent.resourceId, folderLabel)
     }
     if (mustStop) {
       stopped = true
@@ -232,7 +219,6 @@ export async function deriveGfsInheritedAccess(
     shareIds: string[],
     folderResourceId: string,
     folderLabel: string,
-    subjectProfile?: GfsSubjectProfile,
     homeOwner?: true
   ): void {
     const key = inheritedSubjectKey(subject)
@@ -242,7 +228,6 @@ export async function deriveGfsInheritedAccess(
       { subject, permissions, grantId, shareIds },
       { resourceId: folderResourceId, name: folderLabel }
     )
-    merged.subjectProfile = subjectProfile ?? previous?.subjectProfile
     if (homeOwner || previous?.homeOwner) merged.homeOwner = true
     bySubject.set(key, merged)
   }

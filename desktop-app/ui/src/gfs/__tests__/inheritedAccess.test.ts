@@ -53,13 +53,6 @@ function installClerumGfs(
 }
 
 describe('deriveGfsInheritedAccess', () => {
-  // The producer only emits profile entries for UUID subjects: non-UUID user and
-  // team subjects are rejected on the write path (control-api grants.ts), so the
-  // fixture ids must be UUIDs to describe a response the server can produce.
-  const OUTSIDE_USER_ID = '11111111-1111-4111-8111-111111111111'
-  const OTHER_USER_ID = '22222222-2222-4222-8222-222222222222'
-  const OUTSIDE_TEAM_ID = '33333333-3333-4333-8333-333333333333'
-
   afterEach(() => {
     vi.restoreAllMocks()
   })
@@ -99,83 +92,6 @@ describe('deriveGfsInheritedAccess', () => {
       'owner-grant',
       'ancestor-grant',
     ])
-  })
-
-  it('retains home identity profiles for inherited grants and shares', async () => {
-    installClerumGfs(
-      async uri => {
-        if (uri.endsWith(FILE_ID.replace(/-/g, ''))) {
-          return resolveView(FILE_ID, 'report.md', FOLDER_ID, 'file')
-        }
-        if (uri.endsWith(FOLDER_ID.replace(/-/g, ''))) {
-          return resolveView(FOLDER_ID, 'team-docs', ROOT_ID)
-        }
-        return resolveView(ROOT_ID, '', null)
-      },
-      async resourceId =>
-        grantsListPage(
-          resourceId === FOLDER_ID
-            ? [
-                {
-                  id: 'profiled-user',
-                  drive: 'main',
-                  resourceId,
-                  subject: { type: 'user', id: OUTSIDE_USER_ID },
-                  subjectProfile: { name: 'Outside User', email: 'outside@example.test' },
-                  permissions: ['read'],
-                  inherit: true,
-                },
-                {
-                  id: 'unprofiled-user',
-                  drive: 'main',
-                  resourceId,
-                  subject: { type: 'user', id: OTHER_USER_ID },
-                  permissions: ['read'],
-                  inherit: true,
-                },
-              ]
-            : [
-                {
-                  id: 'ancestor-grant',
-                  drive: 'main',
-                  resourceId,
-                  subject: { type: 'user', id: OUTSIDE_USER_ID },
-                  permissions: ['read'],
-                  inherit: true,
-                },
-              ]
-        ),
-      async resourceId =>
-        sharesListPage(
-          resourceId === FOLDER_ID
-            ? [
-                {
-                  id: 'profiled-team',
-                  drive: 'main',
-                  resourceId,
-                  subject: { type: 'team', id: OUTSIDE_TEAM_ID },
-                  subjectProfile: { name: 'Outside Team' },
-                  permissions: ['read'],
-                  includeDescendants: true,
-                },
-              ]
-            : []
-        )
-    )
-
-    const result = await deriveGfsInheritedAccess(FILE_ID, 'main')
-
-    expect(result.coverage).toBe('complete')
-    expect(result.items.find(item => item.subject.id === OUTSIDE_USER_ID)?.subjectProfile).toEqual({
-      name: 'Outside User',
-      email: 'outside@example.test',
-    })
-    expect(result.items.find(item => item.subject.id === OUTSIDE_TEAM_ID)?.subjectProfile).toEqual({
-      name: 'Outside Team',
-    })
-    expect(
-      result.items.find(item => item.subject.id === OTHER_USER_ID)?.subjectProfile
-    ).toBeUndefined()
   })
 
   it('collects inheriting rows with their editable source folder, nearest first', async () => {

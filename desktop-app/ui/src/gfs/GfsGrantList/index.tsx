@@ -15,7 +15,6 @@ import type {
   GfsGrantListItem,
   GfsInheritedAccessItem,
   GfsShareListItem,
-  GfsSubjectProfile,
 } from '@/gfs/delegation.types'
 import { AccessRowMenu } from './AccessRowMenu'
 import type { GfsGrantListProps, GfsMergedAccessRow } from './types'
@@ -63,7 +62,9 @@ function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
  * that directory has no name this surface can act on, so its row is filtered
  * and one muted line explains what isn't listed and why; unresolved host ids
  * keep their raw identifier (the agent tail is meaningful). No row is ever
- * mislabeled, and a filtered list never claims to be empty.
+ * mislabeled, and a filtered list never claims to be empty. The home owner's
+ * row follows the same rule, except that the owner always sees their own row in
+ * their own home.
  */
 
 /** One informational banner explains the filter. The hidden-members sentence
@@ -82,10 +83,8 @@ function isHiddenSubject(
     | GfsGrantListItem['subject']
     | GfsShareListItem['subject']
     | GfsInheritedAccessItem['subject'],
-  subjects: GfsDelegationSubjectOption[],
-  profile?: GfsSubjectProfile
+  subjects: GfsDelegationSubjectOption[]
 ): boolean {
-  if (profile) return false
   if ((subject.type === 'user' || subject.type === 'team') && subject.id) {
     return !subjects.some(
       candidate => candidate.type === subject.type && candidate.id === subject.id
@@ -100,10 +99,8 @@ function subjectLabel(
     | GfsShareListItem['subject']
     | GfsInheritedAccessItem['subject'],
   agents: GfsAgentSubjectOption[],
-  subjects: GfsDelegationSubjectOption[],
-  profile?: GfsSubjectProfile
+  subjects: GfsDelegationSubjectOption[]
 ): string {
-  if (profile) return profile.name ?? profile.email ?? subject.id ?? subject.type
   if (subject.type === 'host' && subject.id) {
     const agent = agents.find(candidate => candidate.id === subject.id)
     // Visible agent name (spec.displayName); fall back to the id-based `name`
@@ -143,6 +140,7 @@ export function GfsGrantList({
   shareError = null,
   agents,
   subjects,
+  isOwnHomeRoot,
   onRevoke,
   onChangeRole,
   onChangeInheritedRole,
@@ -153,6 +151,15 @@ export function GfsGrantList({
   revokingShare = false,
   updatingRole = false,
 }: GfsGrantListProps) {
+  const ownHomeOwnerGrant = (grant: GfsGrantListItem | null | undefined) =>
+    grant?.homeOwner === true && isOwnHomeRoot?.(grant.resourceId) === true
+  const ownHomeOwnerRow = (
+    inherited: GfsInheritedAccessItem,
+    grant: GfsGrantListItem | null | undefined
+  ) =>
+    (inherited.homeOwner === true &&
+      inherited.sources.some(source => isOwnHomeRoot?.(source.resourceId) === true)) ||
+    ownHomeOwnerGrant(grant)
   // File dialogs dedupe to exactly one row per member across the direct
   // grant, direct shares, and derived ancestor access; the merged row keeps
   // the strongest effective role. Direct rows for a merged subject are
@@ -164,15 +171,7 @@ export function GfsGrantList({
       const key = subjectKey(inherited.subject)
       const grant = items.find(item => subjectKey(item.subject) === key) ?? null
       const subjectShares = shares.filter(share => subjectKey(share.subject) === key)
-      const profile =
-        inherited.subjectProfile ??
-        grant?.subjectProfile ??
-        subjectShares.find(share => share.subjectProfile)?.subjectProfile
-      if (
-        !inherited.homeOwner &&
-        !grant?.homeOwner &&
-        isHiddenSubject(inherited.subject, subjects, profile)
-      )
+      if (!ownHomeOwnerRow(inherited, grant) && isHiddenSubject(inherited.subject, subjects))
         continue
       merged.set(key, {
         subject: inherited.subject,
@@ -189,19 +188,19 @@ export function GfsGrantList({
       })
     }
     return merged
-  }, [inheritedItems, items, mergeInherited, shares, subjects])
+    // ownHomeOwnerRow reads `isOwnHomeRoot`; the dependency keeps the memo in
+    // step with a late-ready home.
+  }, [inheritedItems, isOwnHomeRoot, items, mergeInherited, shares, subjects])
 
   // Grants and shares are independent server surfaces with independent
   // failure modes (R4 spec §2): one list's error suppresses only its own rows
   // and never the other list's rows or revoke actions.
   const visibleItems = error
     ? []
-    : items.filter(
-        item => item.homeOwner || !isHiddenSubject(item.subject, subjects, item.subjectProfile)
-      )
+    : items.filter(item => ownHomeOwnerGrant(item) || !isHiddenSubject(item.subject, subjects))
   const visibleShares = shareError
     ? []
-    : shares.filter(share => !isHiddenSubject(share.subject, subjects, share.subjectProfile))
+    : shares.filter(share => !isHiddenSubject(share.subject, subjects))
   // How many rows the filter removed: drives the muted explanation line and
   // the honest empty state (a filtered list never claims to be empty). An
   // errored surface's rows are error-suppressed, not filtered — never count
@@ -210,14 +209,7 @@ export function GfsGrantList({
     ? inheritedItems.filter(item => {
         const key = subjectKey(item.subject)
         const grant = items.find(candidate => subjectKey(candidate.subject) === key)
-        const profile =
-          item.subjectProfile ??
-          grant?.subjectProfile ??
-          shares.find(share => subjectKey(share.subject) === key && share.subjectProfile)
-            ?.subjectProfile
-        return (
-          !item.homeOwner && !grant?.homeOwner && isHiddenSubject(item.subject, subjects, profile)
-        )
+        return !ownHomeOwnerRow(item, grant) && isHiddenSubject(item.subject, subjects)
       }).length
     : 0
   const hiddenCount =
@@ -275,7 +267,7 @@ export function GfsGrantList({
           {showGrantRows
             ? visibleItems.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
-                const label = subjectLabel(item.subject, agents, subjects, item.subjectProfile)
+                const label = subjectLabel(item.subject, agents, subjects)
                 const kind = subjectKind(item.subject)
                 const ownerProtected = item.homeOwner === true
                 return (
@@ -291,13 +283,9 @@ export function GfsGrantList({
                     >
                       <AccessSubjectIcon kind={kind} />
                     </span>
-                    {ownerProtected &&
-                    isHiddenSubject(item.subject, subjects, item.subjectProfile) ? null : (
+                    {ownerProtected && isHiddenSubject(item.subject, subjects) ? null : (
                       <span className="da-gfs-grant-list__identity">
                         <span className="da-gfs-grant-list__label">{label}</span>
-                        {item.subjectProfile?.email ? (
-                          <span className="muted">{item.subjectProfile.email}</span>
-                        ) : null}
                       </span>
                     )}
                     <span className="da-gfs-grant-list__meta">
@@ -335,11 +323,7 @@ export function GfsGrantList({
             : null}
           {showMergedRows
             ? [...mergedByKey.values()].map(row => {
-                const profile =
-                  row.inherited?.subjectProfile ??
-                  row.grant?.subjectProfile ??
-                  row.shares.find(share => share.subjectProfile)?.subjectProfile
-                const label = subjectLabel(row.subject, agents, subjects, profile)
+                const label = subjectLabel(row.subject, agents, subjects)
                 const kind = subjectKind(row.subject)
                 const ownerProtected =
                   row.grant?.homeOwner === true || row.inherited?.homeOwner === true
@@ -357,10 +341,9 @@ export function GfsGrantList({
                     >
                       <AccessSubjectIcon kind={kind} />
                     </span>
-                    {ownerProtected && isHiddenSubject(row.subject, subjects, profile) ? null : (
+                    {ownerProtected && isHiddenSubject(row.subject, subjects) ? null : (
                       <span className="da-gfs-grant-list__identity">
                         <span className="da-gfs-grant-list__label">{label}</span>
-                        {profile?.email ? <span className="muted">{profile.email}</span> : null}
                       </span>
                     )}
                     <span className="da-gfs-grant-list__meta">
@@ -401,7 +384,7 @@ export function GfsGrantList({
           {showShareRows
             ? visibleShares.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
-                const label = subjectLabel(item.subject, agents, subjects, item.subjectProfile)
+                const label = subjectLabel(item.subject, agents, subjects)
                 const kind = subjectKind(item.subject)
                 return (
                   <li
@@ -418,9 +401,6 @@ export function GfsGrantList({
                     </span>
                     <span className="da-gfs-grant-list__identity">
                       <span className="da-gfs-grant-list__label">{label}</span>
-                      {item.subjectProfile?.email ? (
-                        <span className="muted">{item.subjectProfile.email}</span>
-                      ) : null}
                     </span>
                     <span className="da-gfs-grant-list__meta">
                       {onRevokeShare &&

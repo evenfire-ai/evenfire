@@ -222,7 +222,6 @@ export interface GfsGrantListItem {
   drive: string
   resourceId: string
   subject: { type: string; id?: string }
-  subjectProfile?: { name: string | null; email?: string }
   homeOwner?: true
   permissions: string[]
   inherit: boolean
@@ -234,7 +233,6 @@ export interface GfsShareListItem {
   drive: string
   resourceId: string
   subject: { type: string; id?: string }
-  subjectProfile?: { name: string | null; email?: string }
   permissions: string[]
   includeDescendants: boolean
 }

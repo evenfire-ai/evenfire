@@ -3361,7 +3361,21 @@ describe('FilesPage', () => {
         configurable: true,
         value: {
           agents: { listMine: vi.fn(async () => []) },
-          team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+          team: {
+            directory: vi.fn(async () => ({
+              currentTeamId: 'team-1',
+              items: [
+                {
+                  team: { id: 'team-1', name: 'Core Team' },
+                  role: 'admin',
+                  members: [
+                    { id: 'user-editor', name: 'Editor User', email: 'editor@example.test' },
+                    { id: 'user-reader', name: 'Read User', email: 'reader@example.test' },
+                  ],
+                },
+              ],
+            })),
+          },
         },
       })
       const requestJson = vi.fn(async () => ({})) as GfsTransport['requestJson']
@@ -3412,7 +3426,6 @@ describe('FilesPage', () => {
             drive: 'main',
             resourceId: 'folder-1',
             subject: { type: 'user', id: 'user-editor' },
-            subjectProfile: { name: 'Editor User', email: 'editor@example.test' },
             permissions: existing,
             includeDescendants,
           },
@@ -3421,7 +3434,6 @@ describe('FilesPage', () => {
             drive: 'main',
             resourceId: 'folder-1',
             subject: { type: 'user', id: 'user-reader' },
-            subjectProfile: { name: 'Read User', email: 'reader@example.test' },
             permissions: ['read', 'share'],
             includeDescendants: true,
           },
@@ -3473,7 +3485,18 @@ describe('FilesPage', () => {
       configurable: true,
       value: {
         agents: { listMine: vi.fn(async () => []) },
-        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team' },
+                role: 'admin',
+                members: [{ id: 'user-editor', name: 'Editor User', email: 'editor@example.test' }],
+              },
+            ],
+          })),
+        },
       },
     })
     const requestJson = vi.fn(
@@ -3536,7 +3559,6 @@ describe('FilesPage', () => {
           drive: 'main',
           resourceId: 'folder-1',
           subject: { type: 'user', id: 'user-editor' },
-          subjectProfile: { name: 'Editor User', email: 'editor@example.test' },
           permissions: existing,
           includeDescendants: false,
         },
@@ -3570,7 +3592,21 @@ describe('FilesPage', () => {
       configurable: true,
       value: {
         agents: { listMine: vi.fn(async () => []) },
-        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team' },
+                role: 'admin',
+                members: [
+                  { id: 'user-write', name: 'Write User', email: 'write@example.test' },
+                  { id: 'user-lower', name: 'Lower User', email: 'lower@example.test' },
+                ],
+              },
+            ],
+          })),
+        },
       },
     })
     const revokeShare = vi.fn(async () => undefined)
@@ -3599,7 +3635,6 @@ describe('FilesPage', () => {
           drive: 'main',
           resourceId: 'folder-1',
           subject: { type: 'user', id: 'user-write' },
-          subjectProfile: { name: 'Write User', email: 'write@example.test' },
           permissions: ['write'],
           includeDescendants: false,
         },
@@ -3608,7 +3643,6 @@ describe('FilesPage', () => {
           drive: 'main',
           resourceId: 'folder-1',
           subject: { type: 'user', id: 'user-lower' },
-          subjectProfile: { name: 'Lower User', email: 'lower@example.test' },
           permissions: ['write', 'share'],
           includeDescendants: true,
         },
@@ -3647,7 +3681,18 @@ describe('FilesPage', () => {
       configurable: true,
       value: {
         agents: { listMine: vi.fn(async () => []) },
-        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team' },
+                role: 'admin',
+                members: [{ id: 'user-editor', name: 'Editor User', email: 'editor@example.test' }],
+              },
+            ],
+          })),
+        },
       },
     })
     const createShare = vi.fn().mockRejectedValue(new Error('403 escalation_rejected'))
@@ -3672,7 +3717,6 @@ describe('FilesPage', () => {
           drive: 'main',
           resourceId: 'folder-1',
           subject: { type: 'user', id: 'user-editor' },
-          subjectProfile: { name: 'Editor User', email: 'editor@example.test' },
           permissions: ['read', 'write'],
           includeDescendants: false,
         },
@@ -3691,6 +3735,73 @@ describe('FilesPage', () => {
         'error'
       )
     )
+  })
+
+  it('shows the home owner their own inherited Owner row when Share opens on a subfolder', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/owner' },
+      current: {
+        resourceId: 'sub-1',
+        gfsUri: 'gfs://main/sub',
+        name: 'Subfolder',
+        kind: 'directory',
+      },
+      // openManage() replaces the trail with the target when Share opens from a
+      // row; a subfolder target therefore has no home root in the crumbs. The
+      // own-home decision must come from the row's source folder, not the trail.
+      crumbs: [{ resourceId: 'sub-1', gfsUri: 'gfs://main/sub', name: 'Subfolder' }],
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      inheritedAccess: [
+        {
+          subject: { type: 'user', id: 'owner-1' },
+          homeOwner: true,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+          inheritedFrom: ['My home'],
+          sources: [
+            {
+              resourceId: 'home-1',
+              name: 'My home',
+              permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+              grantId: 'owner-grant',
+              shareIds: [],
+              grantPermissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+              grantInherit: true,
+              shareEntries: [],
+            },
+          ],
+        },
+      ],
+    })
+
+    renderFilesPage()
+    await openManageDialog('Subfolder')
+
+    // Witness: the Share dialog is open and listing access.
+    expect(screen.getByRole('heading', { name: 'People with access' })).toBeTruthy()
+    // The team directory is empty, yet the owner's own inherited row stays and
+    // reads "Owner" without controls.
+    const ownerRow = screen.getByTestId('gfs-access-row-inherited-user:owner-1')
+    expect(within(ownerRow).getByText('Owner')).toBeTruthy()
+    expect(ownerRow.textContent).toBe('Owner')
+    expect(within(ownerRow).queryByRole('button')).toBeNull()
+    expect(
+      screen.queryByText(
+        'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
+      )
+    ).toBeNull()
   })
 
   it('lists direct shares in the who-has-access list and revokes them', async () => {
