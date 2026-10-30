@@ -125,8 +125,18 @@ function relationshipRow(relationship: (typeof contextProjection.relationships)[
   }
 }
 
-function fakeTransaction(kind: 'host' | 'mcp_server', options: { behaviorSources?: boolean } = {}) {
+function fakeTransaction(
+  kind: 'host' | 'mcp_server',
+  options: { behaviorSources?: boolean; unresolvedHostContext?: boolean } = {}
+) {
   const query = vi.fn(async (text: string, values: unknown[] = []) => {
+    // A Host graph first checks that every configured Context reference
+    // resolves to one canonical Context (operationalAccessReader fail-closed).
+    if (text.includes('AS unresolved_host_context')) {
+      return options.unresolvedHostContext
+        ? { rows: [{ unresolved_host_context: 1 }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
     if (text.startsWith('SET TRANSACTION') || text.includes("set_config('statement_timeout'")) {
       return { rows: [], rowCount: 0 }
     }
@@ -281,12 +291,19 @@ const mcpResource = canonicalResourceIdentity({
   logicalId: `${config.mcpServersNamespace}/weather`,
 })
 
-async function resolve(input: Omit<LiveActionAuthorizationInput, 'session'>) {
-  const db = fakeTransaction(input.resource.type === 'mcp_server' ? 'mcp_server' : 'host')
+async function resolve(
+  input: Omit<LiveActionAuthorizationInput, 'session'>,
+  db = fakeTransaction(input.resource.type === 'mcp_server' ? 'mcp_server' : 'host')
+) {
   return resolveLiveActionAuthorization(
     { session, ...input },
     { transaction: db.transaction, gateway }
   )
+}
+
+function unresolvedHostContextChecks(db: ReturnType<typeof fakeTransaction>): number {
+  return db.query.mock.calls.filter(([text]) => String(text).includes('AS unresolved_host_context'))
+    .length
 }
 
 describe('canonical action live authorization', () => {
@@ -309,10 +326,31 @@ describe('canonical action live authorization', () => {
       capability: 'chat.message.invoke',
     },
   ])('resolves $operationId through the real selected-path resolver', async input => {
-    const result = await resolve(input)
+    const db = fakeTransaction('host')
+    const result = await resolve(input, db)
     expect(result.status, JSON.stringify(result)).toBe('allowed')
+    // Liveness witness: the Host graph ran its unresolved-Context check.
+    expect(unresolvedHostContextChecks(db)).toBeGreaterThan(0)
     if (result.status !== 'allowed') return
     expect(result.selectedPath.behavior.capabilities).toContain(input.capability)
+  })
+
+  it('fails a Host closed when its configured Context does not resolve', async () => {
+    const db = fakeTransaction('host', { unresolvedHostContext: true })
+    const result = await resolve(
+      {
+        operationId: 'host.status.read',
+        resource: hostResource,
+        operationTarget: { hostRef: `${config.hostsNamespace}/host-a` },
+      },
+      db
+    )
+    expect(unresolvedHostContextChecks(db)).toBeGreaterThan(0)
+    expect(result).toEqual({
+      status: 'unavailable',
+      dependencyClass: 'operational_resource_store',
+      retryable: true,
+    })
   })
 
   it('resolves an exact MCP tool target through a current context grant', async () => {
