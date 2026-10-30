@@ -12,6 +12,7 @@
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { desktopRuntimeLog } from './desktopRuntimeLog.js'
 import { PluginStoragePrivacyGuard } from './pluginStorageWindowsAcl.js'
 
 /** Same shape guard tokenStore.ts applies before interpolating into a path. */
@@ -75,7 +76,7 @@ export class PluginAuditLog {
    * Append one line. Never throws into the request path: an audit write failure
    * must not turn a legitimate capability call into an error for the plugin,
    * so failures are logged and swallowed. (A silently unwritable audit log is a
-   * real gap; it surfaces as a console warning rather than user-facing noise.)
+   * real gap; it surfaces as a redacted runtime warning rather than user-facing noise.)
    */
   async append(envKey: string, entry: AuditEntry): Promise<void> {
     try {
@@ -87,7 +88,7 @@ export class PluginAuditLog {
       await fs.appendFile(file, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 })
     } catch {
       // Audit is best effort, but do not print filesystem paths or native ACL details.
-      console.warn('[PluginSDK] audit append failed')
+      desktopRuntimeLog.warn('[PluginSDK] audit append failed')
     }
   }
 
@@ -130,6 +131,7 @@ export class PluginAuditLog {
     this.privacy.forget(rotated)
     await fs.rename(file, rotated)
     await this.privacy.recordRename(file, rotated)
+    await this.privacy.verifyFile(rotated)
   }
 
   /**

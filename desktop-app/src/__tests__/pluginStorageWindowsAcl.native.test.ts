@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawnSync } from 'node:child_process'
+import { appendFileSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -33,6 +34,116 @@ $file.SetAccessControl($security)
 `
 
 let userDataDirectory = ''
+
+type CleanupEvent = {
+  event: 'plugin-acl-cleanup'
+  phase: string
+  ordinal: number
+  elapsedMs: number
+  errorCode?: string
+}
+
+const cleanupEvents: CleanupEvent[] = []
+
+function cleanupPhase(phase: string, ordinal: number, elapsedMs: number, code?: string): void {
+  const allowedCodes = new Set(['EBUSY', 'EACCES', 'EPERM', 'ENOTEMPTY', 'ENOENT', 'UNKNOWN'])
+  const safeCode = code && allowedCodes.has(code) ? code : undefined
+  const record: CleanupEvent = {
+    event: 'plugin-acl-cleanup',
+    phase,
+    ordinal,
+    elapsedMs: Math.max(0, Math.min(60_000, Math.round(elapsedMs))),
+    ...(safeCode ? { errorCode: safeCode } : {}),
+  }
+  cleanupEvents.push(record)
+  process.stderr.write(`${JSON.stringify(record)}\n`)
+  const progressPath = process.env.PR977_PROGRESS_PATH
+  if (progressPath) {
+    appendFileSync(
+      progressPath,
+      `${JSON.stringify({
+        elapsedMs: Date.now() - cleanupProcessStartedAt,
+        event: 'plugin-acl-cleanup-phase',
+        activeFile: 'pluginStorageWindowsAcl.native.test.ts',
+        activeCase: null,
+        activeHook: 'afterEach',
+        lastCompletedOperation: phase,
+        filesStarted: 1,
+        filesCompleted: 0,
+        casesCompleted: 0,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        cleanupPhase: record.phase,
+        cleanupOrdinal: record.ordinal,
+        cleanupElapsedMs: record.elapsedMs,
+        ...(record.errorCode ? { cleanupErrorCode: record.errorCode } : {}),
+      })}\n`,
+      { encoding: 'utf8' }
+    )
+  }
+}
+
+const cleanupProcessStartedAt = Date.now()
+
+type CleanupOperations = {
+  enumerate(directory: string): Promise<import('node:fs').Dirent[]>
+  deleteEntry(entryPath: string, directory: boolean): Promise<void>
+  removeDirectory(directory: string): Promise<void>
+}
+
+async function cleanupTestDirectory(
+  directory: string,
+  operations: CleanupOperations = {
+    enumerate: async target => fs.readdir(target, { withFileTypes: true }),
+    deleteEntry: async (entryPath, isDirectory) =>
+      isDirectory ? fs.rmdir(entryPath) : fs.rm(entryPath),
+    removeDirectory: async target => fs.rmdir(target),
+  }
+): Promise<void> {
+  const started = performance.now()
+  let ordinal = 0
+  const entriesToDelete: { path: string; directory: boolean; ordinal: number }[] = []
+  cleanupPhase('cleanup-start', 0, 0)
+  try {
+    const enumerate = async (target: string, directoryOrdinal = 0): Promise<void> => {
+      const enumerationStarted = performance.now()
+      cleanupPhase('enumeration-start', directoryOrdinal, 0)
+      const entries = await operations.enumerate(target)
+      cleanupPhase('enumeration-complete', directoryOrdinal, performance.now() - enumerationStarted)
+      for (const entry of entries) {
+        const entryOrdinal = ++ordinal
+        const entryPath = path.join(target, entry.name)
+        const isDirectory = entry.isDirectory()
+        if (isDirectory) await enumerate(entryPath, entryOrdinal)
+        entriesToDelete.push({ path: entryPath, directory: isDirectory, ordinal: entryOrdinal })
+      }
+    }
+    await enumerate(directory)
+    for (const entry of entriesToDelete) {
+      const entryStarted = performance.now()
+      cleanupPhase(
+        entry.directory ? 'entry-directory-delete-start' : 'entry-file-delete-start',
+        entry.ordinal,
+        0
+      )
+      await operations.deleteEntry(entry.path, entry.directory)
+      cleanupPhase('entry-delete-complete', entry.ordinal, performance.now() - entryStarted)
+    }
+    const directoryStarted = performance.now()
+    await operations.removeDirectory(directory)
+    cleanupPhase('directory-remove-complete', ordinal, performance.now() - directoryStarted)
+    cleanupPhase('cleanup-complete', ordinal, performance.now() - started)
+  } catch (error) {
+    const rawCode = (error as NodeJS.ErrnoException).code
+    const code =
+      rawCode && ['EBUSY', 'EACCES', 'EPERM', 'ENOTEMPTY', 'ENOENT'].includes(rawCode)
+        ? rawCode
+        : 'UNKNOWN'
+    cleanupPhase('cleanup-failed', ordinal, performance.now() - started, code)
+    throw error
+  }
+}
 
 function grant(overrides: Partial<ConsentGrant> = {}): ConsentGrant {
   return {
@@ -103,11 +214,93 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  if (userDataDirectory) await fs.rm(userDataDirectory, { recursive: true, force: true })
+  if (!userDataDirectory) return
+  await cleanupTestDirectory(userDataDirectory)
   userDataDirectory = ''
 })
 
 describe('Windows plugin storage DACL privacy', () => {
+  it('records bounded cleanup phases and entry ordinals', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-plugin-cleanup-'))
+    const progressPath = `${directory}.progress.jsonl`
+    const previousProgressPath = process.env.PR977_PROGRESS_PATH
+    const nested = path.join(directory, 'nested')
+    await fs.mkdir(nested)
+    await fs.writeFile(path.join(directory, 'fixture.txt'), 'owned fixture')
+    await fs.writeFile(path.join(nested, 'nested-fixture.txt'), 'owned nested fixture')
+    cleanupEvents.length = 0
+
+    try {
+      process.env.PR977_PROGRESS_PATH = progressPath
+      await cleanupTestDirectory(directory)
+
+      expect(cleanupEvents[0]?.phase).toBe('cleanup-start')
+      expect(cleanupEvents.filter(event => event.phase === 'enumeration-start')).toHaveLength(2)
+      expect(cleanupEvents.filter(event => event.phase === 'enumeration-complete')).toHaveLength(2)
+      expect(cleanupEvents.filter(event => event.phase === 'entry-file-delete-start')).toHaveLength(
+        2
+      )
+      expect(
+        cleanupEvents.filter(event => event.phase === 'entry-directory-delete-start')
+      ).toHaveLength(1)
+      expect(cleanupEvents.filter(event => event.phase === 'entry-delete-complete')).toHaveLength(3)
+      expect(
+        cleanupEvents
+          .filter(event => event.phase.endsWith('-delete-start'))
+          .map(event => event.ordinal)
+          .sort((left, right) => left - right)
+      ).toEqual([1, 2, 3])
+      expect(cleanupEvents.at(-2)?.phase).toBe('directory-remove-complete')
+      expect(cleanupEvents.at(-1)?.phase).toBe('cleanup-complete')
+      for (const event of cleanupEvents) {
+        expect(event.elapsedMs).toBeGreaterThanOrEqual(0)
+        expect(event.elapsedMs).toBeLessThanOrEqual(60_000)
+        expect(JSON.stringify(event)).not.toContain(directory)
+      }
+      const progress = (await fs.readFile(progressPath, 'utf8'))
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line))
+      expect(progress.map(event => event.cleanupPhase)).toContain('cleanup-start')
+      expect(progress.map(event => event.cleanupPhase)).toContain('cleanup-complete')
+      expect(
+        progress.every(event => event.cleanupElapsedMs >= 0 && event.cleanupElapsedMs <= 60_000)
+      ).toBe(true)
+      expect(JSON.stringify(progress)).not.toContain(directory)
+    } finally {
+      if (previousProgressPath === undefined) delete process.env.PR977_PROGRESS_PATH
+      else process.env.PR977_PROGRESS_PATH = previousProgressPath
+      await fs.rm(progressPath, { force: true })
+    }
+    expect(await fs.lstat(directory).catch(() => null)).toBeNull()
+  })
+
+  it('reports an allowlisted cleanup error and leaves teardown fatal', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-plugin-cleanup-error-'))
+    cleanupEvents.length = 0
+    const operations: CleanupOperations = {
+      enumerate: async target => fs.readdir(target, { withFileTypes: true }),
+      deleteEntry: async (entryPath, isDirectory) =>
+        isDirectory ? fs.rmdir(entryPath) : fs.rm(entryPath),
+      removeDirectory: async () => {
+        throw Object.assign(new Error('fixture cleanup failed'), { code: 'EACCES' })
+      },
+    }
+
+    try {
+      await expect(cleanupTestDirectory(directory, operations)).rejects.toMatchObject({
+        code: 'EACCES',
+      })
+      expect(cleanupEvents.at(-1)).toMatchObject({
+        phase: 'cleanup-failed',
+        ordinal: 0,
+        errorCode: 'EACCES',
+      })
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true })
+    }
+  })
+
   windowsIt(
     'verifies the real user-data, consent directory, and produced consent file',
     async () => {
@@ -177,6 +370,51 @@ describe('Windows plugin storage DACL privacy', () => {
     await addAuthenticatedUsersAccess(file)
 
     await expect(store.get(grant())).rejects.toThrow('privacy could not be verified')
+  })
+
+  windowsIt('rejects an in-place DACL change without a filesystem identity change', async () => {
+    const directory = path.join(userDataDirectory, 'plugin-consent')
+    const file = path.join(directory, `${ENV_KEY}.json`)
+    const store = new LocalConsentStore(directory)
+    await store.put(grant())
+    expect(await store.get(grant())).not.toBeNull()
+    const before = await fs.lstat(file, { bigint: true })
+    const originalBytes = await fs.readFile(file)
+
+    await addAuthenticatedUsersAccess(file)
+
+    const after = await fs.lstat(file, { bigint: true })
+    expect(after.dev).toBe(before.dev)
+    expect(after.ino).toBe(before.ino)
+    await expect(store.get(grant())).rejects.toThrow('privacy could not be verified')
+    await expect(store.put(grant({ capability: 'org.read' }))).rejects.toThrow(
+      'privacy could not be verified'
+    )
+    expect(await fs.readFile(file)).toEqual(originalBytes)
+  })
+
+  windowsIt('rejects consent when the produced atomic replacement becomes unsafe', async () => {
+    const directory = path.join(userDataDirectory, 'plugin-consent')
+    const file = path.join(directory, `${ENV_KEY}.json`)
+    const originalRename = fs.rename.bind(fs)
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      await originalRename(source, destination)
+      if (String(source).includes('.tmp-')) {
+        await addAuthenticatedUsersAccess(String(destination))
+      }
+    })
+
+    try {
+      await expect(new LocalConsentStore(directory).put(grant())).rejects.toThrow(
+        'privacy could not be verified'
+      )
+    } finally {
+      renameSpy.mockRestore()
+    }
+
+    await expect(new LocalConsentStore(directory).get(grant())).rejects.toThrow(
+      'privacy could not be verified'
+    )
   })
 
   windowsIt('rechecks a replaced consent directory before returning cached grants', async () => {
@@ -261,6 +499,37 @@ describe('Windows plugin storage DACL privacy', () => {
     expect((await fs.stat(rotated)).size).toBeGreaterThan(0)
     expect(await log.read(ENV_KEY, { limit: 1 })).toHaveLength(1)
   })
+
+  windowsIt(
+    'does not append after rotated audit verification rejects the destination',
+    async () => {
+      const directory = path.join(userDataDirectory, 'plugin-audit')
+      const file = path.join(directory, `${ENV_KEY}.jsonl`)
+      const rotated = `${file}.1`
+      const log = new PluginAuditLog(directory, () => Date.now() + 91 * 24 * 60 * 60 * 1000)
+      const originalRename = fs.rename.bind(fs)
+      await log.append(ENV_KEY, auditEntry())
+      const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+        await originalRename(source, destination)
+        if (String(destination) === rotated) await addAuthenticatedUsersAccess(String(destination))
+      })
+      const warningSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+      try {
+        await log.append(ENV_KEY, auditEntry())
+      } finally {
+        renameSpy.mockRestore()
+        warningSpy.mockRestore()
+      }
+
+      expect(await fs.readFile(rotated, 'utf8')).toContain('identity.read')
+      await expect(
+        evidence({ path: rotated, directory: false, requireInherited: true })
+      ).rejects.toThrow('privacy could not be verified')
+      await expect(fs.lstat(file)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await new PluginAuditLog(directory).read(ENV_KEY)).toEqual([])
+    }
+  )
 
   windowsIt('does not append to an audit file with unauthorized effective access', async () => {
     const directory = path.join(userDataDirectory, 'plugin-audit')
