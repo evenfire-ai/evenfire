@@ -368,6 +368,33 @@ assert_invalid_compatibility_flags_leave_all_coordinates_unchanged() {
   fi
 }
 
+assert_same_version_manifest_maintenance_preserves_compatibility_policy() {
+  local d before after compatible
+  d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+  node - "$d/external-rest-api/src/releaseManifest.ts" <<'NODE'
+const fs = require('node:fs')
+const file = process.argv[2]
+const source = fs.readFileSync(file, 'utf8')
+fs.writeFileSync(file, source.replace(
+  "compatibleDesktopVersions: ['0.5.0']",
+  "compatibleDesktopVersions: ['0.4.0', '0.5.0']"
+))
+NODE
+  before="$(manifest_compatible_versions "$d")"
+  ( cd "$d" && node scripts/release/update-desktop-release-manifest.mjs \
+    --release-id maintenance-4444444 >/dev/null 2>&1 )
+  after="$(manifest_compatible_versions "$d")"
+  compatible="$(manifest_field "$d" desktopVersion)"
+  if [ "$before" = "0.4.0,0.5.0" ] && [ "$after" = "$before" ] && [ "$compatible" = "0.5.0" ]; then
+    pass "same-version manifest maintenance preserves the certified compatibility set"
+  else
+    fail "same-version compatibility changed from '$before' to '$after' (desktop=$compatible)"
+  fi
+  rm -rf "$d"
+}
+
 assert_manifest_requires_the_highest_compatible_target() {
   local d; d="$(mktemp -d)"
   make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
@@ -1028,6 +1055,7 @@ assert_ordering_check_fails_against_unpatched_script
 assert_prepare_release_writes_every_coordinate
 assert_prepare_release_can_retain_compatible_builds
 assert_invalid_compatibility_flags_leave_all_coordinates_unchanged
+assert_same_version_manifest_maintenance_preserves_compatibility_policy
 assert_manifest_requires_the_highest_compatible_target
 assert_prepare_release_leaves_a_same_string_dependency_alone
 assert_prepare_release_rejects_a_non_greater_version

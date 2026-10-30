@@ -173,6 +173,11 @@ function main() {
     }
   }
   const prevVersions = previousVersions(previousRef)
+  const previousDesktopVersion =
+    prevVersions.desktopVersion || manifestAtHead?.desktopVersion || previous.desktopVersion
+  const desktopVersionChanged = Boolean(
+    !deferDesktopRelease && previousDesktopVersion !== versions.desktopVersion
+  )
 
   const next = { ...previous, releaseId }
   let changed = false
@@ -190,18 +195,12 @@ function main() {
 
   if (
     !deferDesktopRelease &&
-    (!prevVersions.desktopVersion ||
-      prevVersions.desktopVersion !== versions.desktopVersion ||
-      next.desktopVersion !== versions.desktopVersion)
+    (desktopVersionChanged || next.desktopVersion !== versions.desktopVersion)
   ) {
     next.desktopVersion = versions.desktopVersion
     changed = true
   }
 
-  const desktopVersionChanged = Boolean(
-    !deferDesktopRelease &&
-    (!prevVersions.desktopVersion || prevVersions.desktopVersion !== versions.desktopVersion)
-  )
   const compatibleDesktopVersions = requestedCompatibleVersions.length
     ? requestedCompatibleVersions
     : desktopVersionChanged
