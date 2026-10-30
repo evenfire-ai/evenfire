@@ -25,7 +25,7 @@ try {
     await import('/app/control-api/dist/services/codexSubscriptionConnection.js')
   const { rebuildLiveCodexUnionAllowlist } =
     await import('/app/control-api/dist/services/codexSubscriptionCatalog.js')
-  const { createFixtureIdentities, cleanupFixtureIdentities } =
+  const { createFixtureIdentities, cleanupFixtureIdentities, describeIdentityFailure } =
     await import('/app/approved-tools-setup/identity-lifecycle.mjs')
   const publish = journal => process.stdout.write(JSON.stringify({ e2eIdentity: journal }) + '\n')
   const adapters = {
@@ -56,7 +56,10 @@ try {
   } else {
     await cleanupFixtureIdentities(input, input.initialJournal, adapters)
   }
-} catch {
+} catch (error) {
+  // The coded reason is the only failure detail that leaves this process. It is
+  // validated against the frozen sets by the helper; database text is dropped.
+  process.stdout.write(JSON.stringify({ e2eIdentityError: describeIdentityFailure(error) }) + '\n')
   process.stderr.write('Fixture identity operation failed; retain the host journal for recovery\n')
   process.exitCode = 1
 } finally {

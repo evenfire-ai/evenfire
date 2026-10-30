@@ -23,7 +23,10 @@ const prefix = [`--context=${profile}`, '--request-timeout=30s']
 function proposal() {
   const workflow = makeWorkflowScenario(run, 43105, 43104)
   return [
-    ...makeResources([...makeScenarios(run, [43101, 43102, 43103], 43104), workflow]),
+    ...makeResources([
+      ...makeScenarios(run, [43101, 43102, 43103], 43104, 'codex', undefined, 'approved-tools'),
+      workflow,
+    ]),
     ...makeWorkflowResources(workflow),
   ]
 }

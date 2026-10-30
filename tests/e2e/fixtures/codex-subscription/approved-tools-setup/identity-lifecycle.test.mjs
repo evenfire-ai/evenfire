@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  FixtureIdentityError,
+  IDENTITY_ERROR_CODES,
+  IDENTITY_ERROR_PHASES,
   cleanupFixtureIdentities,
   createFixtureIdentityJournal,
   createFixtureIdentities as createRecordedFixtureIdentities,
+  describeIdentityFailure,
   recordFixtureConnection,
 } from './identity-lifecycle.mjs'
 
@@ -17,6 +21,7 @@ async function createFixtureIdentities(input, deps) {
 const run = 'approved-tools-aabbccddeeff'
 const input = {
   mode: 'deterministic',
+  suite: 'approved-tools',
   run,
   profile: 'owned-e2e',
   context: 'owned-e2e',
@@ -84,11 +89,17 @@ function harness() {
       }
       state.db = db
       state.transactionActive = true
+      if (state.transactionFailure) {
+        state.transactionActive = false
+        state.rollbacks++
+        throw state.transactionFailure
+      }
       try {
         const result = await callback(db)
         state.committed.push(...pending)
         state.commits++
         if (state.commitLost) throw new Error('commit response lost')
+        if (state.commitFailure) throw state.commitFailure
         return result
       } catch (error) {
         state.rollbacks++
@@ -99,6 +110,18 @@ function harness() {
     },
   }
   return { state, adapters }
+}
+
+// Resolves a rejected cleanup into its coded error, failing loudly if the
+// operation unexpectedly succeeded.
+async function refusal(promise) {
+  try {
+    await promise
+  } catch (error) {
+    assert.ok(error instanceof FixtureIdentityError, `expected a coded refusal, got ${error}`)
+    return error
+  }
+  assert.fail('expected an identity refusal')
 }
 
 test('remote creation preserves host-recorded IDs and refuses a reused intent', async () => {
@@ -190,40 +213,155 @@ test('creation is atomic, journals random IDs before mutation, and only grants a
   assert.equal(state.events[0].changes.length, 13)
 })
 
-test('environment, run, scenario, synthetic email and password gates precede mutations', async () => {
-  for (const mutate of [
-    (i, a) => {
-      a.env = { ...env, NODE_ENV: 'production' }
-    },
-    (i, a) => {
-      a.env = { ...env, EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE: '0' }
-    },
-    (i, a) => {
-      a.env = { ...env, APPROVED_TOOLS_RUN_ID: 'other' }
-    },
-    i => {
-      i.context = 'foreign'
-    },
-    i => {
-      i.userEmail = 'existing@example.test'
-    },
-    i => {
-      i.unauthorizedEmail = i.userEmail
-    },
-    i => {
-      i.userPassword = 'x'.repeat(73)
-    },
-    i => {
-      i.scenarios[0].agentName = 'foreign-agent'
-    },
-    i => {
-      i.scenarios.push(i.scenarios[0])
-    },
-  ]) {
+test('every pre-mutation refusal names its own closed code before any DB access', async () => {
+  // One row per refusal site: the mutation applied to the input or the adapters,
+  // the code the site must report, and the phase of the pre-transaction check.
+  const cases = [
+    [
+      'invalid_provider',
+      (i, a) => {
+        i.provider = 'other'
+      },
+    ],
+    [
+      'invalid_run',
+      i => {
+        i.run = 'not-a-run'
+      },
+    ],
+    [
+      'binding_env_mismatch',
+      (i, a) => {
+        a.env = { ...env, NODE_ENV: 'production' }
+      },
+    ],
+    [
+      'binding_env_mismatch',
+      (i, a) => {
+        a.env = { ...env, EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE: '0' }
+      },
+    ],
+    [
+      'binding_env_mismatch',
+      (i, a) => {
+        a.env = { ...env, APPROVED_TOOLS_RUN_ID: 'other' }
+      },
+    ],
+    [
+      'binding_env_mismatch',
+      i => {
+        i.context = 'foreign'
+      },
+    ],
+    [
+      'suite_invalid',
+      i => {
+        i.suite = 'other'
+      },
+    ],
+    [
+      'suite_invalid',
+      i => {
+        delete i.suite
+      },
+    ],
+    [
+      'scenario_set_invalid',
+      i => {
+        i.scenarios = i.scenarios.slice(0, 3)
+      },
+    ],
+    [
+      'scenario_ownership_changed',
+      i => {
+        i.scenarios[0].agentName = 'foreign-agent'
+      },
+    ],
+    [
+      'scenario_set_invalid',
+      i => {
+        i.scenarios.push(i.scenarios[0])
+      },
+    ],
+    [
+      'identity_email_changed',
+      i => {
+        i.userEmail = 'existing@example.test'
+      },
+    ],
+    [
+      'identity_email_changed',
+      i => {
+        i.unauthorizedEmail = i.userEmail
+      },
+    ],
+    [
+      'password_invalid',
+      i => {
+        i.userPassword = 'x'.repeat(73)
+      },
+    ],
+    [
+      'adapter_missing',
+      (i, a) => {
+        delete a.appendPermissionEvents
+      },
+    ],
+    [
+      'journal_fields_invalid',
+      (i, a) => {
+        a.initialJournal.unexpected = true
+      },
+    ],
+    [
+      'journal_binding_mismatch',
+      (i, a) => {
+        a.initialJournal.run = 'approved-tools-000000000000'
+      },
+    ],
+    [
+      'identity_ownership_changed',
+      (i, a) => {
+        a.initialJournal.users[0].email = 'foreign@example.test'
+      },
+    ],
+    [
+      'journal_grant_mismatch',
+      (i, a) => {
+        a.initialJournal.grants.agents = ['foreign-agent']
+      },
+    ],
+    [
+      'connection_evidence_invalid',
+      (i, a) => {
+        a.initialJournal.connections.push({
+          ...connectionEvidence(a.initialJournal),
+          createdBy: 'x',
+        })
+      },
+    ],
+    [
+      'journal_status_invalid',
+      (i, a) => {
+        a.initialJournal.status = 'unexpected'
+      },
+    ],
+    [
+      'cleanup_outcome_invalid',
+      (i, a) => {
+        a.initialJournal.cleanupOutcome = 'unexpected'
+      },
+    ],
+  ]
+  for (const [code, mutate] of cases) {
     const { state, adapters } = harness()
+    adapters.initialJournal = createFixtureIdentityJournal(input, { env })
     const value = structuredClone(input)
     mutate(value, adapters)
-    await assert.rejects(createFixtureIdentities(value, adapters))
+    const error = await refusal(createRecordedFixtureIdentities(value, adapters))
+    assert.equal(error.code, code, `unexpected code for ${mutate}`)
+    assert.equal(error.phase, 'validate-intent')
+    assert.equal(error.sqlstate, 'UNKNOWN')
     assert.equal(state.calls.length, 0)
     assert.equal(state.journal.length, 0)
   }
@@ -278,6 +416,101 @@ test('ordinary cleanup locks ownership and dependencies and preserves audit beha
   assert.ok(state.events.at(-1).changes.every(change => change.action === 'revoke'))
 })
 
+test('every transactional cleanup refusal names its phase and that phase ran last', async () => {
+  // The last recorded statement is the liveness witness for the phase: it proves
+  // the refusal came from that statement group and not from an earlier check.
+  const cases = [
+    [
+      'identity_ownership_changed',
+      'lock-identities',
+      /FROM teams WHERE id = \$1::uuid FOR UPDATE/,
+      j => ({
+        users: j.users.map(user => ({ ...user, name: 'foreign', lifecycle_state: 'active' })),
+      }),
+    ],
+    [
+      'profile_ownership_changed',
+      'check-profiles',
+      /FROM profiles/,
+      j => ({ profiles: j.users.map(user => ({ user_id: user.id, display_name: 'foreign' })) }),
+    ],
+    [
+      'membership_changed',
+      'check-memberships',
+      /FROM team_members/,
+      () => ({
+        team_members: [{ team_id: 'foreign', user_id: 'foreign', role: 'admin', status: 'active' }],
+      }),
+    ],
+    [
+      'user_grants_changed',
+      'check-user-grants',
+      /FROM user_agents/,
+      j => ({ user_agents: [{ user_id: j.users[1].id, resource: j.grants.agents[0] }] }),
+    ],
+    [
+      'workflow_grants_changed',
+      'check-workflow-grants',
+      /FROM user_workflow_triggers/,
+      j => ({
+        user_workflow_triggers: [
+          { user_id: j.users[0].id, recipe_namespace: 'foreign', recipe_name: 'foreign' },
+        ],
+      }),
+    ],
+    [
+      'team_grants_unrelated',
+      'check-team-grants',
+      /FROM team_contexts/,
+      j => ({ team_contexts: [{ team_id: j.team.id }] }),
+    ],
+    [
+      'operator_link_history',
+      'check-operator-links',
+      /FROM gfs_desktop_operator_links/,
+      j => ({ gfs_desktop_operator_links: [{ user_id: j.users[0].id }] }),
+    ],
+    [
+      'invitations_unexpected',
+      'check-invitations',
+      /FROM invitation_teams/,
+      () => ({ invitations: [{ id: 'retained' }] }),
+    ],
+    [
+      'connection_unrecorded',
+      'revoke-connections',
+      /FROM codex_subscription_connections/,
+      () => ({
+        codex_subscription_connections: [
+          {
+            id: '11111111-2222-4333-8444-555555555555',
+            connection_key: 'codex-0123456789abcdef',
+            display_name: `Codex fixture 83 ${run}`,
+            created_by: null,
+            status: 'connected',
+            revoked_at: null,
+          },
+        ],
+      }),
+    ],
+  ]
+  for (const [code, phase, witness, override] of cases) {
+    const { state, adapters } = harness()
+    const journal = await createFixtureIdentities(input, adapters)
+    state.calls = []
+    state.respond = cleanupRows(journal, override(journal))
+    const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+    assert.equal(error.code, code)
+    assert.equal(error.phase, phase)
+    assert.equal(error.sqlstate, 'UNKNOWN')
+    assert.equal(journal.status, 'recovery-required')
+    assert.match(state.calls.at(-1).sql, witness, `last statement must belong to ${phase}`)
+    assert.ok(
+      state.calls.every(call => !/^DELETE|^UPDATE workflow_approval_medium_/.test(call.sql))
+    )
+  }
+})
+
 test('cleanup refuses foreign ownership, memberships, grants, invitations and retained links before mutation', async () => {
   for (const makeOverride of [
     j => ({
@@ -303,7 +536,9 @@ test('cleanup refuses foreign ownership, memberships, grants, invitations and re
     const journal = await createFixtureIdentities(input, adapters)
     state.calls = []
     state.respond = cleanupRows(journal, makeOverride(journal))
-    await assert.rejects(cleanupFixtureIdentities(input, journal, adapters), /retain journal/)
+    const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+    assert.ok(IDENTITY_ERROR_CODES.includes(error.code))
+    assert.ok(IDENTITY_ERROR_PHASES.includes(error.phase))
     assert.ok(state.calls.every(call => !/^(DELETE|UPDATE)/.test(call.sql)))
     assert.equal(journal.status, 'recovery-required')
   }
@@ -315,7 +550,9 @@ test('journal tampering is rejected before DB access; exact absent IDs support r
   state.calls = []
   const foreign = structuredClone(journal)
   foreign.users[0].email = 'foreign@example.test'
-  await assert.rejects(cleanupFixtureIdentities(input, foreign, adapters), /ownership/)
+  const error = await refusal(cleanupFixtureIdentities(input, foreign, adapters))
+  assert.equal(error.code, 'identity_ownership_changed')
+  assert.equal(error.phase, 'validate-intent')
   assert.equal(state.calls.length, 0)
   state.respond = () => ({ rows: [], rowCount: 0 })
   assert.equal(
@@ -325,15 +562,115 @@ test('journal tampering is rejected before DB access; exact absent IDs support r
   assert.ok(state.calls.every(call => !/^(DELETE|UPDATE)/.test(call.sql)))
 })
 
-test('cleanup deletion failure rolls back and leaves recovery journal', async () => {
+test('cleanup deletion failures are coded per table and roll back the journal', async () => {
+  for (const [table, code, phase] of [
+    ['DELETE FROM users', 'user_delete_mismatch', 'delete-users'],
+    ['DELETE FROM teams', 'team_delete_mismatch', 'delete-team'],
+  ]) {
+    const { state, adapters } = harness()
+    const journal = await createFixtureIdentities(input, adapters)
+    const rows = cleanupRows(journal)
+    state.respond = (sql, values) =>
+      sql.startsWith(table) ? { rowCount: 0, rows: [] } : rows(sql, values)
+    state.committed = []
+    const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+    assert.equal(error.code, code)
+    assert.equal(error.phase, phase)
+    assert.equal(state.committed.length, 0)
+    assert.equal(journal.status, 'recovery-required')
+  }
+})
+
+test('a database error is reported as db_error with its SQLSTATE and no message text', async () => {
+  const sentinel = 'duplicate key value violates constraint e2e_never_echo_this'
+  const { state, adapters } = harness()
+  const journal = await createFixtureIdentities(input, adapters)
+  const rows = cleanupRows(journal)
+  state.respond = (sql, values) => {
+    if (sql.startsWith('DELETE FROM users')) throw { code: '23503', message: sentinel }
+    return rows(sql, values)
+  }
+  const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+  assert.deepEqual(
+    { code: error.code, phase: error.phase, sqlstate: error.sqlstate },
+    { code: 'db_error', phase: 'delete-users', sqlstate: '23503' }
+  )
+  assert.equal(String(error.message).includes(sentinel), false)
+  assert.equal(JSON.stringify(describeIdentityFailure(error)).includes(sentinel), false)
+  // Liveness: the failing statement group was entered and its DELETE ran.
+  assert.match(state.calls.at(-1).sql, /^DELETE FROM users/)
+  assert.equal(journal.status, 'recovery-required')
+})
+
+test('a step failure without a PostgreSQL code is step_failed and keeps its phase', async () => {
+  const { state, adapters } = harness()
+  const journal = await createFixtureIdentities(input, adapters)
+  const rows = cleanupRows(journal)
+  state.respond = (sql, values) => {
+    if (sql.startsWith('DELETE FROM teams')) throw new Error('plain javascript fault')
+    return rows(sql, values)
+  }
+  const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+  assert.deepEqual(
+    { code: error.code, phase: error.phase, sqlstate: error.sqlstate },
+    { code: 'step_failed', phase: 'delete-team', sqlstate: 'UNKNOWN' }
+  )
+  assert.ok(IDENTITY_ERROR_CODES.includes('step_failed'))
+})
+
+test('the commit boundary is labelled only after the transaction callback returned', async () => {
+  // Callback returned, then COMMIT failed: the closed commit phase names it and
+  // every inner statement is a witness that the transaction body completed.
   const { state, adapters } = harness()
   const journal = await createFixtureIdentities(input, adapters)
   state.respond = cleanupRows(journal)
-  state.committed = []
-  state.failQuery = sql => sql.startsWith('DELETE FROM teams')
-  await assert.rejects(cleanupFixtureIdentities(input, journal, adapters), /retain journal/)
-  assert.equal(state.committed.length, 0)
+  state.commitFailure = { code: '23514', message: 'deferred constraint e2e_sentinel' }
+  const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+  assert.deepEqual(
+    { code: error.code, phase: error.phase, sqlstate: error.sqlstate },
+    { code: 'db_error', phase: 'commit', sqlstate: '23514' }
+  )
+  assert.ok(state.calls.some(call => call.sql.startsWith('DELETE FROM teams')))
+  assert.ok(state.calls.some(call => call.sql.startsWith('INSERT INTO trigger_grants_audit')))
+  assert.equal(String(error.message).includes('e2e_sentinel'), false)
+
+  // A JavaScript fault before the callback returned is not a COMMIT failure.
+  const early = harness()
+  const earlyJournal = await createFixtureIdentities(input, early.adapters)
+  early.state.transactionFailure = new Error('connection reset before begin')
+  const earlyError = await refusal(cleanupFixtureIdentities(input, earlyJournal, early.adapters))
+  assert.deepEqual(
+    { code: earlyError.code, phase: earlyError.phase, sqlstate: earlyError.sqlstate },
+    { code: 'step_failed', phase: 'validate-intent', sqlstate: 'UNKNOWN' }
+  )
+})
+
+test('publication failure after COMMIT is coded and republishes before cleaned', async () => {
+  const { state, adapters } = harness()
+  const journal = await createFixtureIdentities(input, adapters)
+  state.respond = cleanupRows(journal)
+  state.publicationFailure = true
+  const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+  assert.deepEqual(
+    { code: error.code, phase: error.phase, sqlstate: error.sqlstate },
+    { code: 'step_failed', phase: 'publish-allowlist', sqlstate: 'UNKNOWN' }
+  )
+  assert.equal(state.commits, 2, 'identity cleanup already committed')
+  assert.equal(state.rollbacks, 0, 'publication failure cannot roll back committed DB work')
+  assert.equal(state.publications, 1)
   assert.equal(journal.status, 'recovery-required')
+  assert.ok(state.journal.every(value => value.status !== 'cleaned'))
+  state.respond = () => ({ rows: [], rowCount: 0 })
+  state.publicationFailure = false
+  const save = adapters.saveJournal
+  adapters.saveJournal = async value => {
+    if (value.status === 'cleaned') assert.equal(state.publications, 2)
+    await save(value)
+  }
+  const result = await cleanupFixtureIdentities(input, journal, adapters)
+  assert.equal(result.outcome, 'recorded-identities-absent')
+  assert.equal(state.publications, 2)
+  assert.equal(journal.status, 'cleaned')
 })
 
 function connectionEvidence(journal) {
@@ -432,7 +769,9 @@ test('unrecorded, replaced or foreign same-name connections block cleanup before
     state.calls = []
     adapters.revokeCodexSubscriptionConnection = async () => assert.fail('Unowned revocation')
     adapters.rebuildLiveCodexUnionAllowlist = async () => assert.fail('Unexpected rebuild')
-    await assert.rejects(cleanupFixtureIdentities(input, journal, adapters), /retain journal/)
+    const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+    assert.equal(error.code, 'connection_unrecorded')
+    assert.equal(error.phase, 'revoke-connections')
     assert.ok(state.calls.every(call => !/^(DELETE|UPDATE)/.test(call.sql)))
     assert.equal(journal.status, 'recovery-required')
   }
@@ -465,7 +804,17 @@ test('already-revoked response IDs support retry but adapter failures retain rec
       await cleanupFixtureIdentities(input, journal, adapters)
       assert.equal(journal.status, 'cleaned')
     } else {
-      await assert.rejects(cleanupFixtureIdentities(input, journal, adapters), /retain journal/)
+      const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+      if (mode === 'wrong-result') {
+        assert.equal(error.code, 'revocation_identity_mismatch')
+        assert.equal(error.phase, 'revoke-connections')
+      } else {
+        assert.equal(error.code, 'step_failed')
+        assert.equal(
+          error.phase,
+          mode === 'union-fails' ? 'rebuild-allowlist' : 'revoke-connections'
+        )
+      }
       assert.equal(state.committed.length, 0)
       assert.equal(journal.status, 'recovery-required')
     }
@@ -477,7 +826,9 @@ test('publication is mandatory and cleanup cannot commit without an installed ad
   const journal = await createFixtureIdentities(input, adapters)
   delete adapters.publishRuntimeAllowlist
   state.calls = []
-  await assert.rejects(cleanupFixtureIdentities(input, journal, adapters), /runtime publication/)
+  const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+  assert.equal(error.code, 'adapter_missing')
+  assert.equal(error.phase, 'validate-intent')
   assert.equal(state.calls.length, 0)
 })
 
@@ -512,38 +863,92 @@ test('optional workflow grant cannot belong to the negative user or another reci
         },
       ],
     })
-    await assert.rejects(cleanupFixtureIdentities(input, journal, adapters), /retain journal/)
+    const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+    assert.equal(error.code, 'workflow_grants_changed')
+    assert.equal(error.phase, 'check-workflow-grants')
     assert.ok(state.calls.every(call => !/^(DELETE|UPDATE)/.test(call.sql)))
     assert.equal(state.publications, 0)
   }
 })
 
-test('postcommit publication failure keeps recovery journal and absent-ID retry republishes before cleaned', async () => {
-  const { state, adapters } = harness()
-  const journal = await createFixtureIdentities(input, adapters)
-  state.respond = cleanupRows(journal)
-  state.publicationFailure = true
-  await assert.rejects(cleanupFixtureIdentities(input, journal, adapters), /retain journal/)
-  assert.equal(state.commits, 2, 'identity cleanup already committed')
-  assert.equal(state.rollbacks, 0, 'publication failure cannot roll back committed DB work')
-  assert.equal(state.publications, 1)
-  assert.equal(journal.status, 'recovery-required')
-  assert.ok(state.journal.every(value => value.status !== 'cleaned'))
-  state.respond = () => ({ rows: [], rowCount: 0 })
-  state.publicationFailure = false
-  const save = adapters.saveJournal
-  adapters.saveJournal = async value => {
-    if (value.status === 'cleaned') assert.equal(state.publications, 2)
-    await save(value)
+test('a pre-suite journal restores under approved-tools and is refused for model-step-retry', async () => {
+  // A state written before the suite field existed still carries the four
+  // approved-tools grants; the grants check is what binds a journal to a suite.
+  const journal = await createFixtureIdentities(input, harness().adapters)
+  const evidence = connectionEvidence(journal)
+  recordFixtureConnection(input, journal, { env }, evidence)
+  const legacy = structuredClone(journal)
+  assert.equal('suite' in legacy, false)
+  assert.ok(legacy.grants.workflow)
+
+  const accepted = harness()
+  accepted.state.respond = cleanupRows(legacy, {
+    codex_subscription_connections: [connectionRow(evidence)],
+  })
+  accepted.adapters.revokeCodexSubscriptionConnection = async (db, key) => ({
+    id: evidence.id,
+    connectionKey: key,
+    status: 'revoked',
+    revokedAt: new Date(),
+  })
+  accepted.adapters.rebuildLiveCodexUnionAllowlist = async () => {}
+  const outcome = await cleanupFixtureIdentities(input, structuredClone(legacy), accepted.adapters)
+  assert.equal(outcome.outcome, 'deleted-with-audit-retained')
+  assert.ok(accepted.state.calls.length > 0)
+
+  const refusedJournal = structuredClone(legacy)
+  const refused = harness()
+  const error = await refusal(
+    cleanupFixtureIdentities(
+      { ...input, suite: 'model-step-retry', scenarios: input.scenarios.slice(0, 1) },
+      refusedJournal,
+      refused.adapters
+    )
+  )
+  assert.equal(error.code, 'journal_grant_mismatch')
+  assert.equal(error.phase, 'validate-intent')
+  assert.equal(refusedJournal.status, journal.status)
+  assert.equal(refused.state.calls.length, 0, 'the suite check runs before any DML')
+})
+
+test('the suite is required, closed, and selects the model-step-retry scenario set', async () => {
+  assert.ok(Object.isFrozen(IDENTITY_ERROR_CODES))
+  assert.ok(Object.isFrozen(IDENTITY_ERROR_PHASES))
+  const single = {
+    ...input,
+    suite: 'model-step-retry',
+    scenarios: input.scenarios.slice(0, 1),
   }
-  const result = await cleanupFixtureIdentities(input, journal, adapters)
-  assert.equal(result.outcome, 'recorded-identities-absent')
-  assert.equal(state.publications, 2)
-  assert.equal(journal.status, 'cleaned')
+  const { state, adapters } = harness()
+  const journal = await createFixtureIdentities(single, adapters)
+  assert.deepEqual(journal.grants, {
+    agents: [input.scenarios[0].agentName],
+    contexts: [input.scenarios[0].contextName],
+  })
+  assert.equal(state.calls.filter(call => call.sql.startsWith('INSERT INTO user_agents')).length, 1)
+  assert.ok(!state.calls.some(call => call.sql.startsWith('INSERT INTO user_workflow_triggers')))
+  assert.throws(
+    () => createFixtureIdentityJournal({ ...input, suite: 'unexpected' }, { env }),
+    /Invalid fixture suite/
+  )
+  assert.throws(
+    () => createFixtureIdentityJournal({ ...single, scenarios: input.scenarios }, { env }),
+    /one model-step-retry scenario/
+  )
+  assert.throws(
+    () =>
+      createFixtureIdentityJournal({ ...input, scenarios: input.scenarios.slice(0, 1) }, { env }),
+    /four approved-tools scenarios/
+  )
 })
 
 test('Grok identity setup grants one agent and context, no workflow or connection ownership', async () => {
-  const grok = { ...input, provider: 'grok', scenarios: input.scenarios.slice(0, 1) }
+  const grok = {
+    ...input,
+    provider: 'grok',
+    suite: 'model-step-retry',
+    scenarios: input.scenarios.slice(0, 1),
+  }
   const { state, adapters } = harness()
   const journal = await createFixtureIdentities(grok, adapters)
   assert.equal(journal.status, 'created')
@@ -566,5 +971,42 @@ test('Grok identity setup grants one agent and context, no workflow or connectio
     false
   )
   const broken = { ...grok, scenarios: input.scenarios }
-  assert.throws(() => createFixtureIdentityJournal(broken, { env }), /one Grok scenario/)
+  assert.throws(
+    () => createFixtureIdentityJournal(broken, { env }),
+    /one model-step-retry scenario/
+  )
+})
+
+test('the reported failure payload is the frozen triple or a single unclassified code', async () => {
+  const { adapters } = harness()
+  const journal = await createFixtureIdentities(input, adapters)
+  assert.deepEqual(
+    describeIdentityFailure(
+      new FixtureIdentityError(
+        'journal_grant_mismatch',
+        'validate-intent',
+        'UNKNOWN',
+        'Journal grant mismatch'
+      )
+    ),
+    { code: 'journal_grant_mismatch', phase: 'validate-intent', sqlstate: 'UNKNOWN' }
+  )
+  assert.deepEqual(describeIdentityFailure(new Error('raw runtime text')), { code: 'unclassified' })
+  assert.throws(
+    () => new FixtureIdentityError('not_a_code', 'validate-intent', 'UNKNOWN', 'x'),
+    /Invalid fixture identity error/
+  )
+  assert.throws(
+    () => new FixtureIdentityError('db_error', 'not-a-phase', 'UNKNOWN', 'x'),
+    /Invalid fixture identity error/
+  )
+  assert.throws(
+    () => new FixtureIdentityError('db_error', 'commit', 'not-a-sqlstate', 'x'),
+    /Invalid fixture identity error/
+  )
+  assert.deepEqual(
+    describeIdentityFailure(new FixtureIdentityError('db_error', 'commit', '23514', 'x')),
+    { code: 'db_error', phase: 'commit', sqlstate: '23514' }
+  )
+  assert.equal(journal.status, 'created')
 })

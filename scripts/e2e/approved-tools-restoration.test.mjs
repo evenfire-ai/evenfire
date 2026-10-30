@@ -92,13 +92,16 @@ test('real-hybrid restoration removes the two test-only upstream flags', async (
   f.state.mode = 'real-hybrid'
   f.options.patchProxy = value => {
     f.events.push('patch')
-    assert.deepEqual(value.env.map(entry => entry.name), [
-      'CODEX_APPROVED_TOOLS_TEST_ONLY',
-      'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE',
-      'NODE_ENV',
-      'APPROVED_TOOLS_UPSTREAM_MODE',
-      'CODEX_REAL_UPSTREAM_CONFIRM',
-    ])
+    assert.deepEqual(
+      value.env.map(entry => entry.name),
+      [
+        'CODEX_APPROVED_TOOLS_TEST_ONLY',
+        'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE',
+        'NODE_ENV',
+        'APPROVED_TOOLS_UPSTREAM_MODE',
+        'CODEX_REAL_UPSTREAM_CONFIRM',
+      ]
+    )
     assert(value.env.every(entry => entry.$patch === 'delete'))
   }
   await restoreOwnedFixture(f.options)
@@ -166,6 +169,48 @@ test('foreign profile ownership permits no read, patch or cleanup', async () => 
   assert.deepEqual(f.events, [])
 })
 
+test('a failing identity cleanup surfaces its coded reason instead of the generic line', async () => {
+  const f = fixture()
+  f.state.identitySeedStarted = true
+  f.state.identityJournal = { status: 'cleanup-pending' }
+  f.options.cleanupIdentities = () => {
+    throw new Error('IDENTITY_delete-users_db_error_23503')
+  }
+  await assert.rejects(restoreOwnedFixture(f.options), /IDENTITY_delete-users_db_error_23503/)
+  assert.equal(f.state.restored, false)
+  assert.deepEqual(f.events, ['read', 'patch', 'ready', 'cleanup1', 'cleanup2'])
+})
+
+test('the identity result reader keeps its single 256 KiB bound for journals and failure lines', () => {
+  const expected = {
+    version: 1,
+    mode: 'deterministic',
+    run,
+    profile: 'owned',
+    context: 'owned',
+    users: [],
+    team: {},
+    grants: {},
+    connections: [],
+  }
+  const result = { ...expected, status: 'cleaned' }
+  const line = JSON.stringify({ e2eIdentity: result })
+  assert.doesNotThrow(() => parseIdentityJournal(line, expected, 'cleaned'))
+  assert.throws(
+    () => parseIdentityJournal(line + 'x'.repeat(256 * 1024), expected, 'cleaned'),
+    /Invalid identity result size/
+  )
+  assert.throws(
+    () =>
+      parseIdentityJournal(
+        JSON.stringify({ e2eIdentity: { ...result, padding: 'x'.repeat(256 * 1024) } }),
+        expected,
+        'cleaned'
+      ),
+    /Invalid identity result size/
+  )
+})
+
 test('the outer deadline contains all runner phases and remains finite', () => {
   const b = runnerPhaseBudgetMs()
   assert(
@@ -176,43 +221,68 @@ test('the outer deadline contains all runner phases and remains finite', () => {
   assert(b.runnerOuterSpawnTimeoutMs < b.maxDeadlineMs)
 })
 
-
 test('recorded Host ConfigMap capture is restored after resources and identities without reordering Codex', async () => {
   const f = fixture()
   f.state.hostConfig = { metadata: { uid: 'config', resourceVersion: '1' }, value: null }
   f.state.identitySeedStarted = true
   f.state.identityJournal = { status: 'created' }
-  await restoreOwnedFixture({ ...f.options,
+  await restoreOwnedFixture({
+    ...f.options,
     cleanupResources: () => f.events.push('resources'),
-    cleanupIdentities: () => { f.events.push('identities'); f.state.identityJournal.status = 'cleaned' },
+    cleanupIdentities: () => {
+      f.events.push('identities')
+      f.state.identityJournal.status = 'cleaned'
+    },
     restoreHostConfig: () => f.events.push('config'),
   })
   assert.equal(f.state.restored, true)
-  assert.deepEqual(f.events, ['read', 'patch', 'ready', 'cleanup1', 'cleanup2', 'resources', 'identities', 'config'])
+  assert.deepEqual(f.events, [
+    'read',
+    'patch',
+    'ready',
+    'cleanup1',
+    'cleanup2',
+    'resources',
+    'identities',
+    'config',
+  ])
   const legacy = fixture()
-  await restoreOwnedFixture({ ...legacy.options, restoreHostConfig: () => { throw Error('legacy must not restore config') } })
+  await restoreOwnedFixture({
+    ...legacy.options,
+    restoreHostConfig: () => {
+      throw Error('legacy must not restore config')
+    },
+  })
   assert.equal(legacy.state.restored, true)
 })
 
 test('Host ConfigMap capture restores absence with merge null, refuses drift and survives pre-patch interruption', async () => {
-  const { captureHostConfig, applyHostConfig, restoreHostConfig } = await import('./prepare-codex-approved-tools.mjs')
-  let live = { metadata: { uid: 'config', resourceVersion: '1', annotations: {} }, data: { unrelated: 'keep' } }
+  const { captureHostConfig, applyHostConfig, restoreHostConfig } =
+    await import('./prepare-codex-approved-tools.mjs')
+  let live = {
+    metadata: { uid: 'config', resourceVersion: '1', annotations: {} },
+    data: { unrelated: 'keep' },
+  }
   const state = { run, hostConfig: captureHostConfig(live) }
   const patches = []
-  const adapters = { state, get: () => structuredClone(live), patch: body => {
-    patches.push(body)
-    assert.deepEqual(body.metadata.uid, 'config')
-    assert.equal(body.metadata.resourceVersion, live.metadata.resourceVersion)
-    live.metadata.resourceVersion = String(Number(live.metadata.resourceVersion) + 1)
-    for (const [key, value] of Object.entries(body.data)) {
-      if (value === null) delete live.data[key]
-      else live.data[key] = value
-    }
-    for (const [key, value] of Object.entries(body.metadata.annotations)) {
-      if (value === null) delete live.metadata.annotations[key]
-      else live.metadata.annotations[key] = value
-    }
-  } }
+  const adapters = {
+    state,
+    get: () => structuredClone(live),
+    patch: body => {
+      patches.push(body)
+      assert.deepEqual(body.metadata.uid, 'config')
+      assert.equal(body.metadata.resourceVersion, live.metadata.resourceVersion)
+      live.metadata.resourceVersion = String(Number(live.metadata.resourceVersion) + 1)
+      for (const [key, value] of Object.entries(body.data)) {
+        if (value === null) delete live.data[key]
+        else live.data[key] = value
+      }
+      for (const [key, value] of Object.entries(body.metadata.annotations)) {
+        if (value === null) delete live.metadata.annotations[key]
+        else live.metadata.annotations[key] = value
+      }
+    },
+  }
   await restoreHostConfig(adapters)
   assert.equal(patches.length, 0)
   await applyHostConfig(adapters)
