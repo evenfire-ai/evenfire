@@ -1136,6 +1136,129 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     }
   })
 
+  it('fails a Host closed when its configured Context does not resolve', async () => {
+    const suffix = randomBytes(5).toString('hex')
+    const unresolvedHostName = `i7-unresolved-host-${suffix}`
+    const missingContextRef = `i7-missing-context-${suffix}`
+    const ambiguousContextName = `i7-amb-context-${suffix}`
+    const ambiguousAliasName = `i7-amb-alias-${suffix}`
+    const ambiguousHostName = `i7-amb-host-${suffix}`
+    const unresolvedHostId = `${config.hostsNamespace}/${unresolvedHostName}`
+    const ambiguousHostId = `${config.hostsNamespace}/${ambiguousHostName}`
+    const contextSource = operationalSourceSpecs.find(value => value.family === 'context')!
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+    const unresolvedHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: unresolvedHostName,
+      uid: randomUUID(),
+      spec: { contextRef: missingContextRef },
+    })
+    const ambiguousContext = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: ambiguousContextName,
+      uid: randomUUID(),
+      spec: { mcpServers: [], sharedFileSystems: [] },
+    })
+    const ambiguousAlias = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: ambiguousAliasName,
+      uid: randomUUID(),
+      spec: { contextId: ambiguousContextName, mcpServers: [], sharedFileSystems: [] },
+    })
+    const ambiguousHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: ambiguousHostName,
+      uid: randomUUID(),
+      spec: { contextRef: ambiguousContextName },
+    })
+
+    kubernetesApi.put(ambiguousContext.plural, ambiguousContext.namespace, ambiguousContext.object)
+    kubernetesApi.put(ambiguousAlias.plural, ambiguousAlias.namespace, ambiguousAlias.object)
+    kubernetesApi.put(unresolvedHost.plural, unresolvedHost.namespace, unresolvedHost.object)
+    kubernetesApi.put(ambiguousHost.plural, ambiguousHost.namespace, ambiguousHost.object)
+    await indexer.reconcileSource(contextSource)
+    await indexer.reconcileSource(hostSource)
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, $2), ($1, $3)`,
+      [userId, unresolvedHostName, ambiguousHostName]
+    )
+
+    try {
+      for (const logicalId of [unresolvedHostId, ambiguousHostId]) {
+        await expect(
+          resolveLiveAuthorization(
+            {
+              session,
+              requiredCapability: 'host.read',
+              resource: canonicalResourceIdentity({
+                environmentId,
+                type: 'host',
+                logicalId,
+              }),
+            },
+            { transaction: transaction(databasePool), gateway }
+          )
+        ).resolves.toEqual({
+          status: 'unavailable',
+          dependencyClass: 'operational_resource_store',
+          retryable: true,
+        })
+      }
+
+      const hostCatalog = await buildAccessCatalog(
+        { session, families: ['host'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(hostCatalog.complete).toBe(false)
+      expect(hostCatalog.partialErrors).toEqual([
+        { producer: 'host', code: 'operational_source_unavailable', retryable: true },
+      ])
+      expect(hostCatalog.items.map(item => item.resource.logicalId)).not.toContain(unresolvedHostId)
+      expect(hostCatalog.items.map(item => item.resource.logicalId)).not.toContain(ambiguousHostId)
+      const resolvableHost = hostCatalog.items.find(
+        item => item.resource.logicalId === `${config.hostsNamespace}/catalog-host`
+      )
+      expect(resolvableHost).toBeDefined()
+      for (const path of resolvableHost!.accessPaths) {
+        await expect(
+          resolveLiveAuthorization(
+            {
+              session,
+              requiredCapability: 'host.read',
+              resource: canonicalResourceIdentity(resolvableHost!.resource),
+              requestedAccessPathId: path.accessPathId,
+            },
+            { transaction: transaction(databasePool), gateway }
+          )
+        ).resolves.toEqual(
+          expect.objectContaining({
+            status: 'allowed',
+            selectedPath: expect.objectContaining({ id: path.accessPathId }),
+          })
+        )
+      }
+    } finally {
+      await databasePool.query(
+        `DELETE FROM user_agents WHERE user_id = $1 AND agent_name = ANY($2::text[])`,
+        [userId, [unresolvedHostName, ambiguousHostName]]
+      )
+      kubernetesApi.delete(unresolvedHost.plural, unresolvedHost.namespace, unresolvedHostName)
+      kubernetesApi.delete(ambiguousHost.plural, ambiguousHost.namespace, ambiguousHostName)
+      kubernetesApi.delete(ambiguousAlias.plural, ambiguousAlias.namespace, ambiguousAliasName)
+      kubernetesApi.delete(
+        ambiguousContext.plural,
+        ambiguousContext.namespace,
+        ambiguousContextName
+      )
+      await indexer.reconcileSource(contextSource)
+      await indexer.reconcileSource(hostSource)
+    }
+  })
+
   it('round-trips a catalog write path when capability selection excludes a read-only sibling', async () => {
     const catalog = await buildAccessCatalog(
       { session, families: ['gfs_resource'], limit: 10 },
