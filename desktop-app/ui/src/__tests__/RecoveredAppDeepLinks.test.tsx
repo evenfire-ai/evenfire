@@ -294,6 +294,7 @@ const composerPanelHarness = vi.hoisted(() => ({
   useRealComposerPanel: false,
   renderSendButton: false,
   controller: null as Record<string, unknown> | null,
+  sendTasks: [] as Array<Promise<void>>,
 }))
 const filesPageHarness = vi.hoisted(() => ({
   pendingGfsUri: null as string | null,
@@ -583,7 +584,17 @@ vi.mock('@pages/ChatPage', async () => {
     }
     return (
       <div data-testid="chat-page-surface" data-workspace-chat-tab-id={workspaceChatTabId ?? ''}>
-        <AgentChatActionsProvider value={actions}>
+        <AgentChatActionsProvider
+          value={{
+            ...actions,
+            handleSendAgentMessage: (...args) => {
+              // Observe the real action; durable ChatStore writes precede its RPC.
+              const task = Promise.resolve(actions.handleSendAgentMessage(...args))
+              composerPanelHarness.sendTasks.push(task)
+              return task
+            },
+          }}
+        >
           <ComposerPanel inline />
         </AgentChatActionsProvider>
       </div>
@@ -1088,6 +1099,7 @@ describe('App deep-link orchestration', () => {
     composerPanelHarness.useRealComposerPanel = false
     composerPanelHarness.renderSendButton = false
     composerPanelHarness.controller = null
+    composerPanelHarness.sendTasks = []
     composerHookHarness.refreshConnectors.mockClear()
     composerHookHarness.refreshSharedFiles.mockClear()
     resetComposerDraftStore()
@@ -2753,12 +2765,30 @@ describe('App deep-link orchestration', () => {
   })
 
   afterEach(async () => {
-    cleanup()
-    resetComposerDraftStore()
-    vi.useRealTimers()
-    await main.dispose()
-    vi.unstubAllGlobals()
+    try {
+      if (composerPanelHarness.sendTasks.length > 0) {
+        await act(async () => {
+          await Promise.all(composerPanelHarness.sendTasks)
+        })
+      }
+    } finally {
+      cleanup()
+      resetComposerDraftStore()
+      vi.useRealTimers()
+      await main.dispose()
+      vi.unstubAllGlobals()
+    }
   })
+
+  async function submitActualComposerWithEnter(composer: HTMLElement) {
+    expect(composer.isConnected).toBe(true)
+    const sendsBefore = composerPanelHarness.sendTasks.length
+    await act(async () => {
+      fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+      expect(composerPanelHarness.sendTasks).toHaveLength(sendsBefore + 1)
+      await composerPanelHarness.sendTasks[sendsBefore]
+    })
+  }
 
   // The deep link's launch reached main (`times` opens so far). Main mounts it
   // unless the test told the fake to hold or fail that open.
@@ -4118,7 +4148,7 @@ describe('App deep-link orchestration', () => {
     expect(httpErrorStatus(sendDenial)).toBe(403)
     expect(isAuthorizationError(sendDenial)).toBe(true)
     clerum.rpc.invokeHostMessage.mockRejectedValueOnce(sendDenial)
-    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    await submitActualComposerWithEnter(composer)
     await vi.waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce(), {
       timeout: 2_000,
     })
@@ -4348,7 +4378,7 @@ describe('App deep-link orchestration', () => {
       )
     )
     const inputForFailedSend = screen.getByRole('textbox', { name: 'Agent message composer' })
-    fireEvent.keyDown(inputForFailedSend, { key: 'Enter', code: 'Enter' })
+    await submitActualComposerWithEnter(inputForFailedSend)
     const recoverInput = await screen.findByRole('button', { name: 'Recover input' })
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
