@@ -14,6 +14,7 @@ import {
   sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
+import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
 
@@ -106,7 +107,7 @@ type InheritedAccessProducers = {
   grant?: (...args: Parameters<typeof window.clerum.gfs.grant>) => Promise<void>
   affordances?: (...args: Parameters<typeof window.clerum.gfs.affordances>) => Promise<unknown>
   agents?: () => Promise<unknown[]>
-  pushToast?: (message: string, tone: 'success' | 'error' | 'info' | 'warning') => void
+  pushToast?: (message: string, tone: Tone) => void
 }
 
 async function openShareDialogWithInheritedAccess(producers: InheritedAccessProducers) {
