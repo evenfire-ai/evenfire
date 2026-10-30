@@ -55,7 +55,6 @@ function assignedServer(
     },
     spec: {
       image: 'example/linear:v1',
-      contextRef: 'private-context',
       managed: true,
       enabled: true,
       envSecret: OLD_REFERENCE,

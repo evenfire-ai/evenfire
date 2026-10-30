@@ -31,7 +31,7 @@ import {
   SESSION_PREVIEW_LIMIT,
 } from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
-import type { ChatMessageAttachment } from '../../../../src/types'
+import type { AccessCatalog, ChatMessageAttachment } from '../../../../src/types'
 import { estimateBase64DecodedLength } from '../../lib/base64Size'
 import { chatMessageDomId } from '../../lib/chatLocalSearch'
 import {
@@ -58,6 +58,7 @@ import { NudgeArea } from './NudgeArea'
 type ChatThreadProps = {
   showAgentLabel?: boolean
   onScrollPositionChange?: (isScrolledAwayFromBottom: boolean) => void
+  agentContextByName?: AccessCatalog['agentContextByName']
 }
 type RenderableChatMessage = AgentChatMessage & {
   messageKey: string
@@ -272,7 +273,11 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
   )
 }
 
-export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: ChatThreadProps) {
+export function ChatThread({
+  showAgentLabel = false,
+  onScrollPositionChange,
+  agentContextByName,
+}: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
   const { decideApproval, pushToast } = useNotificationsContext()
   const { composerImageAttachments, composerReferenceAttachments, requestComposerFocus } =
@@ -628,8 +633,14 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                   // failure so it is observable. (Follow-up: a user-facing error
                   // indicator on the button — needs pushToast wiring / an
                   // onConnect→Promise contract in ProgressStepper.)
+                  // The McpServer names no Context, so a context-scoped grant is
+                  // authorized against the Context of the Host being chatted with.
                   window.clerum.rpc
-                    .connectMcpServer(si.mcpServerName!, selectedAgent)
+                    .connectMcpServer(
+                      si.mcpServerName!,
+                      selectedAgent,
+                      agentContextByName?.[selectedAgent] ?? undefined
+                    )
                     .catch(err => {
                       console.error('[connect] connectMcpServer failed', {
                         mcpServerName: si.mcpServerName,
@@ -645,6 +656,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     [
       activityByMessageId,
       activeChatId,
+      agentContextByName,
       decideApproval,
       onCancelTask,
       progressByMessageId,
@@ -976,6 +988,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
           onCancelTask={onCancelTask}
           decideApproval={decideApproval}
           pendingApproval={sessionStateByChatId[activeChatId]?.pendingApproval}
+          agentContextByName={agentContextByName}
         />
       )}
       {activeChatId && selectedAgent && (

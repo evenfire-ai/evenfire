@@ -275,7 +275,6 @@ GET /api/v1/mcpservers
   "servers": [
     {
       "name": "mongodb-server",
-      "contextRef": "context1",
       "transport": {
         "type": "sse",
         "url": "http://mongodb-server.mcp-server.svc.cluster.local:3000/sse"
@@ -293,6 +292,9 @@ This anonymous, metadata-only route is retained temporarily for the existing
 `mcp-proxy` poller. It is not the mcp-host discovery contract and exposes no
 auth selector or Secret metadata. Its removal or authentication belongs to the
 separate PR 2 migration.
+The top-level `contextRef` is a legacy constant (`"*"`) with no consumer;
+servers carry no context of their own, since a server belongs to a context only
+through that Context's `mcpServers` list.
 
 ### Authenticated Host inventory
 
@@ -746,7 +748,8 @@ make dev-example
 
 ```bash
 CLERUM_DEV_MODE=true
-CLERUM_MCP_SERVERS='[{"name":"filesystem","spec":{"contextRef":"dev-context","description":"Filesystem operations","image":"mcp/filesystem:latest","transport":{"type":"sse","url":"http://localhost:3001/sse","port":3001},"enabled":true}}]'
+MCP_HOST=localhost
+CLERUM_MCP_SERVERS='[{"name":"filesystem","spec":{"description":"Filesystem operations","image":"mcp/filesystem:latest","transport":{"type":"sse","url":"http://'"$MCP_HOST"':3001/sse","port":3001},"enabled":true}}]'
 CLERUM_CONTEXTS='[{"name":"dev-context","namespace":"dev","spec":{"contextId":"dev-context","description":"Dev context","mcpServers":["filesystem"]}}]'
 CLERUM_MCP_AUTH='{"github":"ghp_your_token_here"}'
 ```

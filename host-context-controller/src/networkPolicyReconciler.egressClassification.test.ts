@@ -136,7 +136,6 @@ const server: McpServerCRD = {
   name: 'classify-mcp',
   namespace: 'mcp-server',
   spec: {
-    contextRef: 'dev',
     image: 'classify:latest',
     transport: { type: 'streamableHttp', url: 'http://classify:3000', port: 3000 },
     egressBindings: [{ dns: 'api.example.com', port: 443 }],

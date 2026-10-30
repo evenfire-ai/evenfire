@@ -20,7 +20,6 @@ export function buildRegistryMcpServerReference(options: {
   const secretName = registrySecretName(options.name)
   const spec = {
     image: 'ghcr.io/acme/linear-mcp:1.4.0',
-    contextRef: 'default',
     enabled: true,
     managed: registryMcpServerManaged(),
     transport: { type: 'streamableHttp', port: 3000 },

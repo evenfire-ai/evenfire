@@ -65,7 +65,6 @@ export type McpServerCRD = {
     namespace?: string
   }
   spec: {
-    contextRef: string
     enabled?: boolean
     transport: {
       type: 'sse' | 'streamableHttp'

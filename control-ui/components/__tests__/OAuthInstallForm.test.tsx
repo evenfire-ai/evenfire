@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
+import type { InstallFromRegistryResponse } from '../../lib/api'
 import type { CatalogOAuthBlock } from '../../lib/oauthInstall.types'
 import { NOTION_GENERIC_PREFILL } from '../../test/fixtures/genericDiscoveryPrefill'
 import { OAuthInstallForm } from '../OAuthInstallForm'
@@ -49,7 +50,14 @@ vi.mock('../../lib/api', () => ({
   getOAuthCallbackConfig: vi.fn(),
   listMcpSecrets: vi.fn(),
   discoverGenericOAuth: vi.fn(),
-  installFromRegistry: vi.fn().mockResolvedValue({ serverName: 'acme', namespace: 'mcp-server' }),
+  installFromRegistry: vi.fn().mockResolvedValue({
+    serverName: 'acme',
+    namespace: 'mcp-server',
+    registryEntry: 'acme',
+    registryVersion: '1.0.0',
+    correlationId: 'test-corr-id',
+    pendingCredentials: [],
+  } satisfies InstallFromRegistryResponse),
 }))
 
 const CALLBACK_CONFIGURED = {
@@ -127,6 +135,12 @@ describe('OAuthInstallForm — scopes reach the submit (Fam A(3)/E-19.3)', () =>
     expect(req.oauth?.grantScope).toBe('user')
     // oauth.id is never sent — control-api derives it (D-B5).
     expect(req.oauth).not.toHaveProperty('id')
+    expect(req).not.toHaveProperty('contextRef')
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'POST',
+      '/api/v1/admin/contexts',
+      expect.anything()
+    )
   })
 })
 

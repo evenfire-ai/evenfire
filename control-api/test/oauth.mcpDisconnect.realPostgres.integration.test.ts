@@ -40,13 +40,13 @@ const NS = config.mcpServersNamespace
  * A minimal McpServer CR created in the gateway (which assigns its `metadata.uid`,
  * as the apiserver does) and resolved through the REAL resolver the endpoint uses.
  */
-async function resolvedFor(name: string, grantScope: 'user' | 'context', contextRef: string) {
+async function resolvedFor(name: string, grantScope: 'user' | 'context') {
   const gateway = new MockGateway(NS)
   await gateway.createResource(
     'mcpservers',
     {
       metadata: { name },
-      spec: { contextRef, oauth: { id: 'google-drive', provider: 'google', grantScope } },
+      spec: { oauth: { id: 'google-drive', provider: 'google', grantScope } },
     },
     NS
   )
@@ -89,7 +89,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
   })
 
   it('user flavor: deletes ONLY the caller-owned grant (a peer on the same server survives)', async () => {
-    const resolved = await resolvedFor('gdrive', 'user', 'ctx-9')
+    const resolved = await resolvedFor('gdrive', 'user')
     // Two members each connect the SAME user-scope server (real producer), sealed
     // with the installation uid as the consent callback does.
     for (const userId of ['user-a', 'user-b']) {
@@ -128,7 +128,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
   })
 
   it('context flavor: deletes ONLY the target Context grant (a sibling shared grant survives)', async () => {
-    const resolved = await resolvedFor('teamdrive', 'context', 'ctx-A')
+    const resolved = await resolvedFor('teamdrive', 'context')
     // Two DIFFERENT Contexts each bootstrap a shared identity on the SAME server
     // (real producer). ctx-B is the sibling that must survive — the mirror of
     // the user-flavor case's user-b, so a shared DELETE that lost its
@@ -155,6 +155,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
       mcpServersNamespace: NS,
       mcpServerName: 'teamdrive',
       userId: 'user-b',
+      contextId: 'ctx-A',
     })
     expect(key).not.toBeNull()
     await deleteOAuthGrant(db, key!)
@@ -186,7 +187,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
     ).toBe(true)
   })
 
-  it('context flavor without contextRef: key is null (fail-closed, never a blind delete)', () => {
+  it('context flavor without a contextId: key is null (fail-closed, never a blind delete)', () => {
     const resolved = resolveServerOAuth({
       spec: { oauth: { id: 'google-drive', provider: 'google', grantScope: 'context' } },
     })

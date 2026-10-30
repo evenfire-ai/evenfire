@@ -157,7 +157,6 @@ describe('R1-B1 regression: DNS timeout must fail-static (freeze), not prune', (
       name: 'frozen-mcp',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'dev',
         image: 'frozen:latest',
         transport: { type: 'streamableHttp', url: 'http://frozen:3000', port: 3000 },
         egressBindings: [{ dns: 'api.example.com', port: 443 }],
