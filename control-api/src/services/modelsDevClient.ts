@@ -15,11 +15,14 @@
  * public) and the response body is never logged.
  */
 import { isIP } from 'node:net'
-import { type LlmProviderId, PROVIDER_IDS } from '@clerum/llm-providers'
+import { type LlmProviderId, PROVIDER_IDS, isRunnableLlmModelId } from '@clerum/llm-providers'
 import {
   VENDORED_MODELS_DEV_SNAPSHOT,
   VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT,
 } from '../data/modelsDevSnapshot.js'
+import { rootLogger } from '../observability/logger.js'
+
+const log = rootLogger.child({ module: 'models-dev-client' })
 
 /**
  * The catalog URL. Defaults to the fixed, trusted public endpoint. It is NOT
@@ -40,24 +43,35 @@ const MAX_RESPONSE_BYTES = 15 * 1024 * 1024 // ~15MB — api.json is ~3MB today.
 /**
  * One model entry as it appears in the (normalized) catalog. This is a subset
  * of the models.dev per-model object — only the fields discovery consumes. The
- * live api.json carries many more fields; only `id`, `name`, `limit.context`
- * and `modalities.input` are parsed.
+ * live api.json carries many more fields; only `id`, `name`, `limit.context`,
+ * `modalities.{input,output}`, `tool_call`, `status`, `cost` and
+ * `release_date` are parsed. The vendored snapshot carries only the first four,
+ * so a vendored catalog never reads as tool-capable, priced or status-tagged.
+ *
+ * The newer fields are typed `unknown` for the same reason as
+ * `modalities.input`: untrusted data at an API boundary, narrowed only by the
+ * sanitizers below.
  */
 export interface RawModelsDevModel {
   id?: string
   name?: string
   limit?: { context?: number }
   /**
-   * models.dev per-model input modalities (e.g. `["text","image"]`). Only
-   * `input` is read; `attachment` ("accepts file attachments") is a DIFFERENT
-   * capability — today's catalog has 47 models where the two disagree,
-   * including audio-only models with `attachment: true` and vision models with
+   * models.dev per-model modalities (e.g. `input: ["text","image"]`).
+   * `attachment` ("accepts file attachments") is a DIFFERENT capability from
+   * `input` — today's catalog has 47 models where the two disagree, including
+   * audio-only models with `attachment: true` and vision models with
    * `attachment: false` — so it is deliberately not consulted.
-   *
-   * Typed `unknown` on purpose: this is untrusted data at an API boundary and
-   * `imageInputStateFromModalities` is the only place allowed to narrow it.
    */
-  modalities?: { input?: unknown }
+  modalities?: { input?: unknown; output?: unknown }
+  tool_call?: unknown
+  status?: unknown
+  /**
+   * USD per 1M tokens. Only the four flat components are read; tiered pricing
+   * (`context_over_200k`, `tiers`) and audio/reasoning components are ignored.
+   */
+  cost?: unknown
+  release_date?: unknown
 }
 
 /** One provider entry in the (normalized) catalog: a map of model id → entry. */
@@ -133,7 +147,25 @@ export const PROVIDER_KEY_MAP: Readonly<Record<ModelsDevMappedProviderId, string
   azure: 'azure',
 }
 
-/** One discovered model, mapped to our columns (spec 09 §2.2 reconciliation). */
+/** Lifecycle tags models.dev puts on a model; anything else is stored as `null`. */
+export type CatalogStatus = 'deprecated' | 'alpha' | 'beta'
+
+/** Per-1M-token prices shaped for `llm_model_prices` (each fits `NUMERIC(20,8)`). */
+export interface ModelCost {
+  input: number
+  output: number
+  cache_read: number
+  cache_write: number
+}
+
+/**
+ * One discovered model, mapped to our columns (spec 09 §2.2 reconciliation).
+ *
+ * Every catalog-derived value here is already sanitized to what its target
+ * column accepts. The sync writes all providers in one transaction, so a single
+ * out-of-domain upstream value that reached SQL would roll back every
+ * provider's run — and every following run, for as long as models.dev kept it.
+ */
 export interface DiscoveredModel {
   model_id: string
   context_window_tokens?: number
@@ -141,6 +173,19 @@ export interface DiscoveredModel {
   display_name?: string
   /** Tri-state derived from `modalities.input`; see `imageInputStateFromModalities`. */
   image_input_state: ImageInputState
+  /** `modalities.output` is a string array containing `text`; see `textOutputFromModalities`. */
+  text_output: boolean
+  /** True only when the catalog says literally `tool_call: true`. */
+  tool_call: boolean
+  catalog_status: CatalogStatus | null
+  /** `null` = unpriced. Never a fabricated zero; see `sanitizeModelCost`. */
+  cost: ModelCost | null
+  /**
+   * Catalog text bounded to the shape `YYYY-MM-DD` or `YYYY-MM`, NOT a validated
+   * date: `2025-13-45` passes, and `YYYY-MM` is not a valid Postgres DATE. Do
+   * not write it to a DATE column as-is.
+   */
+  release_date?: string
 }
 
 /** Image-input state derived from a models.dev entry — fail-closed. */
@@ -160,6 +205,100 @@ export function imageInputStateFromModalities(model: RawModelsDevModel): ImageIn
   if (!Array.isArray(input) || input.length === 0) return 'unknown'
   if (!input.every(value => typeof value === 'string')) return 'unknown'
   return input.includes('image') ? 'supported' : 'unsupported'
+}
+
+/**
+ * Whether the entry states text output. Same fail-closed reading as the input
+ * side: only an array made entirely of strings, containing the exact token
+ * `text`, counts.
+ */
+export function textOutputFromModalities(model: RawModelsDevModel): boolean {
+  const output = model.modalities?.output
+  if (!Array.isArray(output)) return false
+  if (!output.every(value => typeof value === 'string')) return false
+  return output.includes('text')
+}
+
+const CATALOG_STATUSES: ReadonlySet<string> = new Set<CatalogStatus>([
+  'deprecated',
+  'alpha',
+  'beta',
+])
+
+export function catalogStatusFrom(model: RawModelsDevModel): CatalogStatus | null {
+  const status = model.status
+  return typeof status === 'string' && CATALOG_STATUSES.has(status)
+    ? (status as CatalogStatus)
+    : null
+}
+
+// `llm_model_prices` columns are NUMERIC(20,8) with CHECK (>= 0): 12 integer
+// digits and 8 decimals.
+const PRICE_SCALE = 8
+const PRICE_UPPER_BOUND_EXCLUSIVE = 1e12
+
+/** A price component rounded to the column's scale, or `undefined` if the column would reject it. */
+function sanitizePriceComponent(value: unknown): number | undefined {
+  // The range test also rejects NaN and ±Infinity: every comparison with NaN is false.
+  if (typeof value !== 'number' || !(value >= 0 && value < PRICE_UPPER_BOUND_EXCLUSIVE)) {
+    return undefined
+  }
+  return Number(value.toFixed(PRICE_SCALE))
+}
+
+/**
+ * The entry's flat price, or `null` when it cannot be stored faithfully.
+ *
+ * `input` and `output` are mandatory; missing cache components default to 0,
+ * which is the column default. Any malformed component voids the WHOLE price
+ * rather than being replaced by 0: an invented $0 would make the model look
+ * priced, while `null` keeps it on the admin's unpriced list.
+ */
+export function sanitizeModelCost(model: RawModelsDevModel): ModelCost | null {
+  const cost = model.cost
+  if (!cost || typeof cost !== 'object' || Array.isArray(cost)) return null
+  const raw = cost as Record<string, unknown>
+  const input = sanitizePriceComponent(raw.input)
+  const output = sanitizePriceComponent(raw.output)
+  const cacheRead = raw.cache_read === undefined ? 0 : sanitizePriceComponent(raw.cache_read)
+  const cacheWrite = raw.cache_write === undefined ? 0 : sanitizePriceComponent(raw.cache_write)
+  if (
+    input === undefined ||
+    output === undefined ||
+    cacheRead === undefined ||
+    cacheWrite === undefined
+  ) {
+    return null
+  }
+  return { input, output, cache_read: cacheRead, cache_write: cacheWrite }
+}
+
+const RELEASE_DATE_SHAPE = /^\d{4}-\d{2}(?:-\d{2})?$/
+
+export function releaseDateFrom(model: RawModelsDevModel): string | undefined {
+  const value = model.release_date
+  return typeof value === 'string' && RELEASE_DATE_SHAPE.test(value) ? value : undefined
+}
+
+/** The first auto-enable rule a discovered model fails, in rule order. */
+export type AutoEnableRejection = 'no_text_output' | 'no_tool_call' | 'status' | 'not_runnable'
+
+/**
+ * Which rule keeps a model from being enabled automatically on insert, or
+ * `null` if none does. `tool_call` is a default policy, not a hard runtime
+ * requirement: some paths run without tools, so an operator may still enable a
+ * rejected model by hand.
+ */
+export function autoEnableRejection(m: DiscoveredModel): AutoEnableRejection | null {
+  if (!m.text_output) return 'no_text_output'
+  if (!m.tool_call) return 'no_tool_call'
+  if (m.catalog_status !== null) return 'status'
+  if (!isRunnableLlmModelId(m.model_id)) return 'not_runnable'
+  return null
+}
+
+export function isAutoEnableEligible(m: DiscoveredModel): boolean {
+  return autoEnableRejection(m) === null
 }
 
 /** Result of loading the catalog: which source served it, when, and the data. */
@@ -396,9 +535,9 @@ export async function loadModelsDevCatalog(
     return { source: 'live', fetchedAt, capturedAt: fetchedAt, catalog: parsed }
   } catch (err) {
     // Do NOT log the body. A short reason is enough for operators.
-    console.warn(
-      '[Discovery] models.dev live fetch failed; using vendored snapshot:',
-      err instanceof Error ? err.message : String(err)
+    log.warn(
+      { reason: err instanceof Error ? err.message : String(err) },
+      'models.dev live fetch failed; using vendored snapshot'
     )
     return {
       source: 'vendored',
@@ -470,9 +609,14 @@ export function mapCatalogToProviders(
       if (!modelId || seen.has(modelId)) continue
       if (modelId.length > MAX_MODEL_ID_LEN || CONTROL_CHARS.test(modelId)) continue
       seen.add(modelId)
+      const raw = m ?? {}
       const discovered: DiscoveredModel = {
         model_id: modelId,
-        image_input_state: imageInputStateFromModalities(m ?? {}),
+        image_input_state: imageInputStateFromModalities(raw),
+        text_output: textOutputFromModalities(raw),
+        tool_call: raw.tool_call === true,
+        catalog_status: catalogStatusFrom(raw),
+        cost: sanitizeModelCost(raw),
       }
       const ctx = m?.limit?.context
       if (typeof ctx === 'number' && Number.isInteger(ctx) && ctx > 0) {
@@ -480,11 +624,17 @@ export function mapCatalogToProviders(
       }
       // display_name is non-load-bearing metadata → clamp (truncate) to the
       // operator-API cap rather than skip the whole model over a long label.
+      // A label with a control char is dropped instead: Postgres rejects
+      // `\u0000` in TEXT, which would fail the whole sync transaction.
       const displayName = (typeof m?.name === 'string' ? m.name.trim() : '').slice(
         0,
         MAX_DISPLAY_NAME_LEN
       )
-      if (displayName) discovered.display_name = displayName
+      if (displayName && !CONTROL_CHARS.test(displayName)) {
+        discovered.display_name = displayName
+      }
+      const releaseDate = releaseDateFrom(raw)
+      if (releaseDate) discovered.release_date = releaseDate
       models.push(discovered)
     }
     // Deterministic order keeps sync output/tests stable.

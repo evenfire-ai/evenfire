@@ -43,6 +43,16 @@ const FIXTURE: RawModelsDevCatalog = {
   openai: { name: 'OpenAI', models: {} },
 }
 
+// What the mapper emits for an entry that carries none of the auto-enable
+// fields (as these older-shape entries don't): no tools, no text output, no
+// status, unpriced.
+const NO_AUTO_ENABLE_FIELDS = {
+  text_output: false,
+  tool_call: false,
+  catalog_status: null,
+  cost: null,
+} as const
+
 describe('modelsDevClient — PROVIDER_KEY_MAP', () => {
   it('maps every static provider to a models.dev key and excludes oauth-broker ids', () => {
     const staticIds = PROVIDER_IDS.filter(
@@ -80,12 +90,14 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
         model_id: 'claude-haiku-4-5',
         display_name: 'Claude Haiku 4.5',
         image_input_state: 'unsupported',
+        ...NO_AUTO_ENABLE_FIELDS,
       },
       {
         model_id: 'claude-opus-4-5',
         display_name: 'Claude Opus 4.5',
         context_window_tokens: 200000,
         image_input_state: 'supported',
+        ...NO_AUTO_ENABLE_FIELDS,
       },
     ])
     // vendor is never derived from models.dev (no reliable per-model field).
@@ -101,6 +113,7 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
         context_window_tokens: 1000000,
         // No `modalities` in the fixture — the catalog said nothing, so neither do we.
         image_input_state: 'unknown',
+        ...NO_AUTO_ENABLE_FIELDS,
       },
     ])
   })
@@ -131,7 +144,14 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
     }
     const claude = mapCatalogToProviders(catalog).claude
     // Only the well-formed id survives; the three malformed ones are dropped.
-    expect(claude).toEqual([{ model_id: 'good', display_name: 'ok', image_input_state: 'unknown' }])
+    expect(claude).toEqual([
+      {
+        model_id: 'good',
+        display_name: 'ok',
+        image_input_state: 'unknown',
+        ...NO_AUTO_ENABLE_FIELDS,
+      },
+    ])
   })
 
   it('CLAMPs an over-long display_name to 400 chars (keeps the model)', () => {
@@ -151,7 +171,7 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
       anthropic: { name: 'Anthropic', models: { [id400]: { id: id400 } } },
     }
     expect(mapCatalogToProviders(catalog).claude).toEqual([
-      { model_id: id400, image_input_state: 'unknown' },
+      { model_id: id400, image_input_state: 'unknown', ...NO_AUTO_ENABLE_FIELDS },
     ])
   })
 
