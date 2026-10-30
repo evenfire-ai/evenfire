@@ -57,7 +57,14 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
   }
 
   fileFor(entity) {
-    const file = entity?.filepath ?? entity?.module?.filepath
+    // Vitest 4.1 reporter hooks receive TestModule/TestCase entities directly.
+    const file =
+      entity?.filepath ??
+      entity?.module?.relativeModuleId ??
+      entity?.module?.moduleId ??
+      entity?.relativeModuleId ??
+      entity?.moduleId ??
+      entity?.task?.filepath
     return file ? path.basename(String(file)) : null
   }
 
@@ -82,13 +89,51 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
       stack: error.stack,
       name: error.name,
       code: error.code,
+      reason:
+        typeof error.reason === 'string' && /^[a-z-]{1,80}$/.test(error.reason)
+          ? error.reason
+          : undefined,
+      diagnostic: this.safeNativeDiagnostic(error.diagnostic),
       phase,
       failedHooks,
     }))
   }
 
+  safeNativeDiagnostic(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+    const allowed = new Set([
+      'failure',
+      'elapsedMs',
+      'processErrorCode',
+      'exitStatus',
+      'signal',
+      'nativePhase',
+      'nativeErrorType',
+      'hresult',
+      'nativeOperation',
+      'win32Error',
+      'nativeReason',
+    ])
+    const safe = {}
+    for (const [key, item] of Object.entries(value)) {
+      if (!allowed.has(key)) continue
+      if (typeof item === 'string' && /^[A-Za-z0-9x-]{1,80}$/.test(item)) safe[key] = item
+      else if (
+        typeof item === 'number' &&
+        Number.isSafeInteger(item) &&
+        item >= -1 &&
+        item <= 60_000
+      ) {
+        safe[key] = item
+      } else if (item === null && key === 'exitStatus') {
+        safe[key] = null
+      }
+    }
+    return Object.keys(safe).length ? safe : undefined
+  }
+
   onTestModuleQueued(module) {
-    this.active.file = this.fileFor(module.task)
+    this.active.file = this.fileFor(module)
     this.active.testCase = null
     this.active.hook = null
     this.progress('file-queued')
@@ -96,9 +141,9 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
   }
 
   onTestModuleStart(module) {
-    const file = this.fileFor(module.task)
+    const file = this.fileFor(module)
     this.active.file = file
-    this.startedFiles.add(file)
+    if (file) this.startedFiles.add(file)
     this.active.testCase = null
     this.active.hook = null
     this.progress('file-started')
@@ -106,7 +151,7 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
   }
 
   onTestCaseReady(test) {
-    this.active.file = this.fileFor(test)
+    this.active.file = this.fileFor(test) ?? this.active.file
     this.active.testCase = safeLabel(test.name)
     this.active.hook = null
     this.progress('case-started')
@@ -114,7 +159,7 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
   }
 
   onHookStart(hook) {
-    this.active.file = this.fileFor(hook.entity)
+    this.active.file = this.fileFor(hook.entity) ?? this.active.file
     this.active.testCase = hook.entity?.type === 'test' ? safeLabel(hook.entity.name) : null
     this.active.hook = ['beforeAll', 'beforeEach', 'afterEach', 'afterAll'].includes(hook.name)
       ? hook.name
@@ -124,7 +169,7 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
   }
 
   onHookEnd(hook) {
-    this.active.file = this.fileFor(hook.entity)
+    this.active.file = this.fileFor(hook.entity) ?? this.active.file
     this.active.hook = null
     this.lastCompletedOperation = `${hook.name}-completed`
     this.progress('hook-completed')
@@ -137,7 +182,7 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
     if (result?.state === 'passed') this.passedCases += 1
     else if (result?.state === 'failed') this.failedCases += 1
     else this.skippedCases += 1
-    this.active.file = this.fileFor(test)
+    this.active.file = this.fileFor(test) ?? this.active.file
     this.active.testCase = null
     this.active.hook = null
     this.lastCompletedOperation = 'case-completed'
@@ -146,8 +191,8 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
   }
 
   onTestModuleEnd(module) {
-    const file = this.fileFor(module.task)
-    this.completedFiles.add(file)
+    const file = this.fileFor(module)
+    if (file) this.completedFiles.add(file)
     this.active.file = file
     this.active.testCase = null
     this.active.hook = null
@@ -172,12 +217,25 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
     const report = JSON.parse(json)
     const tests = task => (task.type === 'test' ? [task] : (task.tasks ?? []).flatMap(tests))
     for (const file of report.testResults) {
-      const saved = this.taskFiles.get(file.name)
+      const reportPath = String(file.name).replaceAll('\\', '/')
+      const saved =
+        this.taskFiles.get(file.name) ??
+        [...this.taskFiles.values()].find(({ task }) => {
+          const moduleId = String(task.moduleId ?? '').replaceAll('\\', '/')
+          const relativeModuleId = String(task.relativeModuleId ?? '').replaceAll('\\', '/')
+          return (
+            (moduleId && (reportPath === moduleId || reportPath.endsWith(`/${moduleId}`))) ||
+            (relativeModuleId &&
+              (reportPath === relativeModuleId || reportPath.endsWith(`/${relativeModuleId}`)))
+          )
+        })
       if (!saved) throw new Error('Diagnostic file provenance mismatch')
       const { task, errors } = saved
       const cases = tests(task)
       if (cases.length !== file.assertionResults.length) {
-        throw new Error('Diagnostic assertion inventory mismatch')
+        throw new Error(
+          `Diagnostic assertion inventory mismatch for ${path.basename(file.name)}: ${cases.length} tasks, ${file.assertionResults.length} assertions`
+        )
       }
       file.diagnosticErrors = this.diagnosticErrors(task, 'collection', errors)
       for (const [index, assertion] of file.assertionResults.entries()) {

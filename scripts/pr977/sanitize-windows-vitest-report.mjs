@@ -62,10 +62,14 @@ const errorCodes = [
   'EINVAL',
   'EMFILE',
   'ENFILE',
+  'ENOBUFS',
   'ENOENT',
+  'ENOMEM',
   'ENOSPC',
+  'ENOTDIR',
   'ENOTEMPTY',
   'EPERM',
+  'EPIPE',
   'ETIMEDOUT',
   'ERR_MODULE_NOT_FOUND',
   'ERR_UNKNOWN_FILE_EXTENSION',
@@ -90,6 +94,109 @@ const errorTypes = [
   'ReferenceError',
   'RangeError',
 ]
+const pluginStorageReasons = new Set([
+  'native-inspection-helper-load-failed',
+  'native-inspection-response-rejected',
+  'native-inspection-process-timeout',
+  'native-inspection-process-start-failed',
+  'native-inspection-process-error',
+  'native-inspection-process-terminated',
+  'native-inspection-response-missing',
+  'native-inspection-response-malformed',
+  'native-verifier-rejected',
+  'native-inspection-process-exit-failed',
+  'native-inspection-evidence-invalid',
+])
+const pluginStorageFailureCategories = {
+  'native-inspection-helper-load-failed': 'native-helper-load-failed',
+  'native-inspection-response-rejected': 'native-response-rejected',
+  'native-inspection-process-timeout': 'native-process-timeout',
+  'native-inspection-process-start-failed': 'native-process-start-failed',
+  'native-inspection-process-error': 'native-process-error',
+  'native-inspection-process-terminated': 'native-process-terminated',
+  'native-inspection-response-missing': 'native-response-missing',
+  'native-inspection-response-malformed': 'native-response-malformed',
+  'native-verifier-rejected': 'native-verifier-rejection',
+  'native-inspection-process-exit-failed': 'native-process-exit-failed',
+  'native-inspection-evidence-invalid': 'native-evidence-invalid',
+}
+const pluginStorageFailures = new Set([
+  'helper-load-failed',
+  'response-rejected',
+  'process-timeout',
+  'process-start-failed',
+  'process-error',
+  'process-terminated',
+  'process-exit-failed',
+  'response-missing',
+  'response-malformed',
+  'verifier-rejected',
+  'evidence-invalid',
+])
+const pluginStoragePhases = new Set(['inspect-object', 'load-native-helper', 'verification'])
+const pluginStorageNativeErrors = new Set([
+  'ArgumentException',
+  'FileNotFoundException',
+  'FormatException',
+  'IOException',
+  'InvalidDataException',
+  'InvalidOperationException',
+  'PlatformNotSupportedException',
+  'ReflectionTypeLoadException',
+  'RuntimeException',
+  'SecurityException',
+  'TypeLoadException',
+  'TypeInitializationException',
+  'UnauthorizedAccessException',
+  'Win32Exception',
+])
+const pluginStorageOperations = new Set([
+  'access-check',
+  'duplicate-token',
+  'entry-exists',
+  'file-information',
+  'final-path',
+  'get-security-info',
+  'open-object',
+  'open-object-for-owner',
+  'open-process-token',
+  'security-descriptor-control',
+  'set-owner',
+])
+
+function sanitizePluginStorageError(error) {
+  const value = error?.diagnostic
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const safe = {}
+  if (pluginStorageFailures.has(value.failure)) safe.failure = value.failure
+  if (Number.isSafeInteger(value.elapsedMs) && value.elapsedMs >= 0 && value.elapsedMs <= 60_000)
+    safe.elapsedMs = value.elapsedMs
+  if (typeof value.processErrorCode === 'string' && errorCodes.includes(value.processErrorCode))
+    safe.processErrorCode = value.processErrorCode
+  if (
+    value.exitStatus === null ||
+    (Number.isSafeInteger(value.exitStatus) && value.exitStatus >= -1 && value.exitStatus <= 255)
+  )
+    safe.exitStatus = value.exitStatus
+  if (
+    typeof value.signal === 'string' &&
+    ['SIGABRT', 'SIGBREAK', 'SIGINT', 'SIGKILL', 'SIGTERM'].includes(value.signal)
+  )
+    safe.signal = value.signal
+  if (pluginStoragePhases.has(value.nativePhase)) safe.nativePhase = value.nativePhase
+  if (pluginStorageNativeErrors.has(value.nativeErrorType))
+    safe.nativeErrorType = value.nativeErrorType
+  if (typeof value.hresult === 'string' && /^0x[0-9A-F]{8}$/i.test(value.hresult))
+    safe.hresult = `0x${value.hresult.slice(2).toUpperCase()}`
+  if (pluginStorageOperations.has(value.nativeOperation))
+    safe.nativeOperation = value.nativeOperation
+  if (Number.isSafeInteger(value.win32Error) && value.win32Error >= 0 && value.win32Error <= 0xffff)
+    safe.win32Error = value.win32Error
+  if (typeof value.nativeReason === 'string' && /^[a-z-]{1,60}$/.test(value.nativeReason))
+    safe.nativeReason = value.nativeReason
+  return Object.keys(safe).length ? safe : undefined
+}
+
 const classifyFailure = (message, reportedPhase) => {
   const structured = extractStructuredDiagnostic(message)
   const errorType =
@@ -380,10 +487,14 @@ function failuresFor(entry) {
         )
         const safeCode = typeof error.code === 'string' && errorCodes.includes(error.code)
         const safeName = errorTypes.includes(String(error.name))
+        const safeReason = pluginStorageReasons.has(error.reason) ? error.reason : undefined
+        const pluginDiagnostic = sanitizePluginStorageError(error)
         return {
           ...failure,
+          ...(safeReason ? { category: pluginStorageFailureCategories[safeReason] } : {}),
           ...(safeCode ? { code: error.code } : {}),
           ...(safeName ? { errorType: error.name } : {}),
+          ...(pluginDiagnostic ? { pluginStorageDiagnostic: pluginDiagnostic } : {}),
           failedHooks: Array.isArray(error.failedHooks)
             ? error.failedHooks.filter(name =>
                 ['beforeAll', 'beforeEach', 'afterEach', 'afterAll'].includes(name)

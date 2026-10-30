@@ -3,9 +3,9 @@ name: PR 977 exact-source Windows full Desktop suite (sharded)
 on:
   push:
     branches:
-      - test/pr977-windows-41ed9e64-20261029-r24m6
+      - test/pr977-windows-37b4dfb6-20261030-r24m7
     paths:
-      - .validation/windows/full-sharded.trigger
+      - .validation/windows/pr977-r24m7-run-2.trigger
 
 permissions:
   contents: read
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
+  PR977_SOURCE_SHA: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
 
 jobs:
   desktop-windows-build:
@@ -25,7 +25,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
+          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -95,7 +95,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
+          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -217,7 +217,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
+          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -335,7 +335,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
+          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
           path: source
           persist-credentials: false
           fetch-depth: 1

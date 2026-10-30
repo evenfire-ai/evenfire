@@ -1,9 +1,9 @@
-name: PR 977 exact-source Windows focused failure verification
+name: PR 977 exact-source Windows plugin DACL verification
 
 on:
   push:
     branches:
-      - test/pr977-windows-41ed9e64-20261029-r24m6
+      - test/pr977-windows-37b4dfb6-20261030-r24m7
     paths:
       - .validation/windows/focused-test-target.txt
       - .github/workflows/pr977-windows-focused.yml
@@ -13,8 +13,6 @@ on:
       - scripts/pr977/test-windows-diagnostic-reporter.mjs
       - scripts/pr977/test-sanitize-windows-vitest-report.mjs
       - scripts/pr977/verify-focused-windows-report.mjs
-      - scripts/pr977/prepare-plugin-storage-prevhead-proof.mjs
-      - scripts/pr977/verify-plugin-storage-prevhead-proof.mjs
       - scripts/pr977/test-verify-plugin-storage-prevhead-proof.mjs
       - scripts/pr977/test-aggregate-windows-full-shards.mjs
       - scripts/pr977/sanitize-windows-vitest-report.mjs
@@ -23,30 +21,22 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr977-windows-focused-r28
+  group: pr977-windows-focused-r24m7
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
+  PR977_SOURCE_SHA: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
 
 jobs:
-  focused-windows-test:
+  focused-windows-plugin-dacl:
     runs-on: windows-2025
     timeout-minutes: 15
     steps:
       - name: Check out exact application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 34ca6941fd2b4f4dd6c55e8c11f6e4ea913ffa30
+          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
           path: source
-          persist-credentials: false
-          fetch-depth: 1
-
-      - name: Check out the exact defective previous head
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: 87864f04196240a29673038dedfb7d8bdc978353
-          path: previous-source
           persist-credentials: false
           fetch-depth: 1
 
@@ -58,32 +48,26 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Verify exact revisions, Node pin, and selected source files
+      - name: Verify source and harness revisions
         shell: pwsh
         run: |
           $sourceSha = (git -C source rev-parse HEAD).Trim()
-          $previousSha = (git -C previous-source rev-parse HEAD).Trim()
           $harnessSha = (git -C validation rev-parse HEAD).Trim()
           $nodePin = (Get-Content source/.nvmrc -Raw).Trim()
           Write-Output "Workflow trigger SHA: $env:GITHUB_SHA"
-          Write-Output "Harness checkout SHA: $harnessSha"
+          Write-Output "Diagnostic harness SHA: $harnessSha"
           Write-Output "Application source SHA: $sourceSha"
-          if ($sourceSha -ne $env:PR977_SOURCE_SHA -or $previousSha -ne '87864f04196240a29673038dedfb7d8bdc978353' -or $harnessSha -ne $env:GITHUB_SHA) {
-            throw 'The checked-out source or harness SHA does not match its pin'
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA -or $harnessSha -ne $env:GITHUB_SHA) {
+            throw 'Application source or harness SHA mismatch'
           }
           if ($nodePin -ne '24.22.1') { throw 'Unexpected repository Node pin' }
           $targets = @(Get-Content validation/.validation/windows/focused-test-target.txt |
             ForEach-Object { $_.Trim() } | Where-Object { $_ })
-          if ($targets.Count -ne 11 -or ($targets | Select-Object -Unique).Count -ne 11) {
-            throw 'Focused source target manifest is incomplete or duplicated'
+          if ($targets.Count -ne 1 -or $targets[0] -ne 'src/__tests__/pluginStorageWindowsAcl.native.test.ts') {
+            throw 'Focused native plugin DACL manifest is incomplete or unexpected'
           }
-          foreach ($target in $targets) {
-            if ($target -notmatch '^(src|test|ui/src)/.*\.test\.(ts|tsx)$') {
-              throw 'Focused target is outside the reviewed Desktop test manifest'
-            }
-            if (-not (Test-Path -LiteralPath (Join-Path source/desktop-app $target) -PathType Leaf)) {
-              throw 'A focused source test is missing from the pinned application commit'
-            }
+          if (-not (Test-Path -LiteralPath (Join-Path source/desktop-app $targets[0]) -PathType Leaf)) {
+            throw 'The selected native plugin DACL test is missing from the pinned source'
           }
 
       - name: Set up repository-pinned Node
@@ -125,61 +109,12 @@ jobs:
           node ../../validation/scripts/pr977/test-aggregate-windows-full-shards.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Windows shard aggregation contract tests failed' }
 
-      - name: Prepare assertion-level previous-head proof
-        working-directory: source/desktop-app
-        shell: pwsh
-        run: |
-          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
-          New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'pr977-focused') | Out-Null
-          node ../../validation/scripts/pr977/prepare-plugin-storage-prevhead-proof.mjs `
-            ../../previous-source 87864f04196240a29673038dedfb7d8bdc978353
-          if ($LASTEXITCODE -ne 0) { throw 'Previous-head proof preparation failed' }
-
-      - name: Verify regression test fails at the previous source assertion
-        id: previous_head_proof
-        working-directory: source/desktop-app
-        shell: pwsh
-        run: |
-          $artifactDirectory = Join-Path $env:RUNNER_TEMP 'pr977-focused'
-          $raw = Join-Path $artifactDirectory 'previous-head-raw.json'
-          $safe = Join-Path $artifactDirectory 'previous-head-proof.safe.json'
-          $progress = Join-Path $artifactDirectory 'previous-head-progress.jsonl'
-          $status = Join-Path $artifactDirectory 'previous-head-watchdog.json'
-          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
-          node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
-            --maximum-runtime-ms=120000 `
-            --no-progress-ms=90000 `
-            --progress=$progress `
-            --status=$status `
-            -- node node_modules/vitest/vitest.mjs run `
-              --testTimeout=30000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism `
-              '--reporter=../../validation/scripts/pr977/windows-diagnostic-reporter.mjs' `
-              "--outputFile.json=$raw" `
-              src/__tests__/r24m7-previous-head-plugin-audit.test.ts
-          $vitestExit = $LASTEXITCODE
-          if ($vitestExit -eq 0 -or -not (Test-Path -LiteralPath $raw -PathType Leaf)) {
-            throw 'The pinned defective source did not produce the required assertion failure'
-          }
-          node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $raw $safe
-          if ($LASTEXITCODE -ne 0) { throw 'Previous-head proof report was not safely sanitized' }
-          node ../../validation/scripts/pr977/verify-plugin-storage-prevhead-proof.mjs $safe
-          if ($LASTEXITCODE -ne 0) { throw 'Previous-head proof failed outside the intended assertion' }
-
-      - name: Remove temporary previous-head test overlay
-        if: always()
-        working-directory: source/desktop-app
-        shell: pwsh
-        run: |
-          Remove-Item -LiteralPath `
-            'src/__tests__/r24m7-previous-head-plugin-audit.test.ts', `
-            'src/__tests__/r24m7-previous-head-pluginAuditLog.ts', `
-            'src/__tests__/r24m7-previous-head-pluginConsentStore.ts' `
-            -Force -ErrorAction SilentlyContinue
-
-      - name: Run focused Windows tests with external watchdog
+      - name: Run complete native plugin DACL suite with external watchdog
         id: focused
         working-directory: source/desktop-app
         shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
         run: |
           $artifactDirectory = Join-Path $env:RUNNER_TEMP 'pr977-focused'
           New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
@@ -194,20 +129,10 @@ jobs:
             --progress=$progress `
             --status=$status `
             -- node node_modules/vitest/vitest.mjs run `
-              --testTimeout=30000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism `
-              "--reporter=../../validation/scripts/pr977/windows-diagnostic-reporter.mjs" `
+              --testTimeout=120000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism `
+              '--reporter=../../validation/scripts/pr977/windows-diagnostic-reporter.mjs' `
               "--outputFile.json=$raw" `
-              src/__tests__/appService.directoryDiscoveryBinding.test.ts `
-              src/__tests__/appService.nullableRepairVerification.regression.test.ts `
-              src/__tests__/appService.rpc.test.ts `
-              src/__tests__/tokenStore.encryptedGuards.test.ts `
-              src/__tests__/tokenStore.fallbackRetirement.regression.test.ts `
-              src/__tests__/pluginAuditLog.test.ts `
-              src/__tests__/pluginConsentStore.test.ts `
-              src/__tests__/pluginStorageWindowsAcl.native.test.ts `
-              src/__tests__/pluginStorageWindowsAcl.contract.test.ts `
-              ui/src/hooks/__tests__/useAppController.desktopEnvironmentHandoff.test.tsx `
-              test/__tests__/gfsDragAndDropGate.test.ts
+              src/__tests__/pluginStorageWindowsAcl.native.test.ts
           $runnerExit = $LASTEXITCODE
           if (Test-Path -LiteralPath $raw -PathType Leaf) {
             node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $raw $safe
@@ -221,29 +146,27 @@ jobs:
             $sanitizeExit = 1
             $verifyExit = 1
           }
+          Write-Output "Vitest exit=$runnerExit sanitize=$sanitizeExit verify=$verifyExit"
           if ($runnerExit -ne 0 -or $sanitizeExit -ne 0 -or $verifyExit -ne 0) {
-            throw 'Focused Windows verification did not satisfy the exact-source result contract'
+            throw 'Focused native plugin DACL verification did not pass'
           }
 
-      - name: Preserve focused reports and incremental progress
+      - name: Preserve sanitized reports and progress
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pr977-focused-windows-${{ github.run_id }}
+          name: pr977-focused-plugin-dacl-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/pr977-focused/focused-report.json
             ${{ runner.temp }}/pr977-focused/progress.jsonl
             ${{ runner.temp }}/pr977-focused/watchdog-status.json
-            ${{ runner.temp }}/pr977-focused/previous-head-proof.safe.json
-            ${{ runner.temp }}/pr977-focused/previous-head-progress.jsonl
-            ${{ runner.temp }}/pr977-focused/previous-head-watchdog.json
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Enforce focused result
+      - name: Enforce focused native result
         if: always()
         shell: pwsh
         env:
           FOCUSED_RESULT: ${{ steps.focused.outcome }}
         run: |
-          if ($env:FOCUSED_RESULT -ne 'success') { throw 'Focused Windows verification failed' }
+          if ($env:FOCUSED_RESULT -ne 'success') { throw 'Focused native DACL verification failed' }

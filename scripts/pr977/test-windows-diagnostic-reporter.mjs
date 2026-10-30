@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -41,6 +49,36 @@ describe('producer-backed diagnostics', () => {
     vi.stubEnv('SystemRoot', 'C:\\\\Windows'); vi.stubEnv('TEMP', 'C:\\\\fixture')
     spawn.mockReturnValue({ pid: 123, status: 1, signal: null, stdout: JSON.stringify({ ok: false, phase: 'validate-authority-tree', errorType: 'UnauthorizedAccessException', hresult: '0x80070005', detail: 'unsafe-ace' }), stderr: 'EVENFIRE_ACL_PHASE=validate-authority-tree\\n' })
     verifyWindowsSessionAuthorityDirectory('C:\\\\fixture', 'C:\\\\fixture\\\\sessions')
+  })
+  it('plugin ACL timeout diagnostic', () => {
+    throw Object.assign(new Error('Plugin storage privacy could not be verified'), {
+      name: 'PluginStoragePrivacyError',
+      reason: 'native-inspection-process-timeout',
+      diagnostic: {
+        failure: 'process-timeout',
+        elapsedMs: 15000,
+        processErrorCode: 'ETIMEDOUT',
+        exitStatus: null,
+        nativePhase: 'inspect-object',
+        privatePath: 'C:\\\\Users\\\\private\\\\secret.txt',
+      },
+    })
+  })
+  it('plugin ACL helper-load diagnostic', () => {
+    throw Object.assign(new Error('Plugin storage privacy could not be verified'), {
+      name: 'PluginStoragePrivacyError',
+      reason: 'native-inspection-helper-load-failed',
+      diagnostic: {
+        failure: 'helper-load-failed',
+        elapsedMs: 4200,
+        exitStatus: 2,
+        nativePhase: 'load-native-helper',
+        nativeErrorType: 'FileNotFoundException',
+        hresult: '0x80070002',
+        nativeReason: 'native-helper-path-missing',
+        privatePath: 'C:\\Users\\private\\secret.dll',
+      },
+    })
   })
   it('assertion mismatch', () => { expect('synthetic-private-value').toBe('expected-value') })
   it('test timeout', async () => { await new Promise(() => {}) }, 20)
@@ -97,6 +135,8 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
       }
     )
     assert.equal(processResult.status, 1, 'Controlled failed assertions must keep Vitest red')
+    if (!existsSync(output))
+      throw new Error(`Reporter omitted ${name} JSON: ${processResult.stderr}`)
     outputs[name] = JSON.parse(readFileSync(output, 'utf8'))
   }
   assert.ok(outputs.enriched.numTotalTestSuites > outputs.enriched.testResults.length)
@@ -141,9 +181,33 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
     report.testResults.flatMap(file => file.assertionResults).map(test => [test.title, test])
   )
   assert.equal(cases.get('passes').status, 'passed')
-  assert.equal(report.numFailedTests, 5)
+  assert.equal(report.numFailedTests, 7)
   assert.equal(cases.get('verifier rejection').failure.category, 'native-verifier')
   assert.equal(cases.get('verifier rejection').failure.diagnostic.verifierHresult, '0x80070005')
+  assert.equal(
+    cases.get('plugin ACL timeout diagnostic').failure.category,
+    'native-process-timeout'
+  )
+  assert.deepEqual(cases.get('plugin ACL timeout diagnostic').failure.pluginStorageDiagnostic, {
+    failure: 'process-timeout',
+    elapsedMs: 15000,
+    processErrorCode: 'ETIMEDOUT',
+    exitStatus: null,
+    nativePhase: 'inspect-object',
+  })
+  assert.equal(
+    cases.get('plugin ACL helper-load diagnostic').failure.category,
+    'native-helper-load-failed'
+  )
+  assert.deepEqual(cases.get('plugin ACL helper-load diagnostic').failure.pluginStorageDiagnostic, {
+    failure: 'helper-load-failed',
+    elapsedMs: 4200,
+    exitStatus: 2,
+    nativePhase: 'load-native-helper',
+    nativeErrorType: 'FileNotFoundException',
+    hresult: '0x80070002',
+    nativeReason: 'native-helper-path-missing',
+  })
   assert.equal(cases.get('test timeout').failure.category, 'timeout')
   assert.equal(cases.get('fixture setup').failure.phase, 'setup')
   assert.equal(cases.get('fixture setup').failure.category, 'native-fixture')
@@ -162,6 +226,23 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
     .map(line => JSON.parse(line))
   assert.ok(progress.some(event => event.event === 'file-started'))
   assert.ok(progress.some(event => event.event === 'case-started'))
+  const startedCases = new Map(
+    progress
+      .filter(event => event.event === 'case-started')
+      .map(event => [event.activeCase, event.activeFile])
+  )
+  for (const title of [
+    'verifier rejection',
+    'plugin ACL timeout diagnostic',
+    'plugin ACL helper-load diagnostic',
+    'assertion mismatch',
+    'test timeout',
+    'fixture setup',
+    'fixture teardown',
+  ]) {
+    assert.equal(startedCases.get(title), 'boundary.test.ts', `Incorrect owner for ${title}`)
+  }
+  assert.equal(startedCases.get('passes'), 'passing.test.ts', 'Incorrect owner for passing case')
   assert.ok(
     progress.some(event => event.event === 'hook-started' && event.activeHook === 'beforeEach')
   )
