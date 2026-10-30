@@ -4,7 +4,7 @@ import { appendFileSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { type AuditEntry, PluginAuditLog } from '../pluginAuditLog.js'
+import { AUDIT_MAX_AGE_MS, type AuditEntry, PluginAuditLog } from '../pluginAuditLog.js'
 import { type ConsentGrant, LocalConsentStore } from '../pluginConsentStore.js'
 import { inspectWindowsPluginStoragePaths } from '../pluginStorageWindowsAcl.js'
 import {
@@ -476,12 +476,13 @@ describe('Windows plugin storage DACL privacy', () => {
     const directory = path.join(userDataDirectory, 'plugin-audit')
     const file = path.join(directory, `${ENV_KEY}.jsonl`)
     const rotated = `${file}.1`
-    const log = new PluginAuditLog(directory)
-    const largeShape = { fields: Array.from({ length: 8_000 }, () => 'field') }
+    let currentTime = Date.now()
+    const log = new PluginAuditLog(directory, () => currentTime)
 
-    for (let index = 0; index < 90; index += 1) {
-      await log.append(ENV_KEY, auditEntry({ shape: largeShape }))
-    }
+    // Keep native inspection to two appends while exercising the same rename path as size rotation.
+    await log.append(ENV_KEY, auditEntry())
+    currentTime = (await fs.stat(file)).birthtimeMs + AUDIT_MAX_AGE_MS + 1
+    await log.append(ENV_KEY, auditEntry({ capability: 'org.read' }))
 
     const [parent, child, active, prior] = await evidence(
       { path: userDataDirectory, directory: true, requireInherited: false },
@@ -497,7 +498,13 @@ describe('Windows plugin storage DACL privacy', () => {
     expect(active?.inheritedUserAccess).toBe(true)
     expect(prior?.inheritedUserAccess).toBe(true)
     expect((await fs.stat(rotated)).size).toBeGreaterThan(0)
-    expect(await log.read(ENV_KEY, { limit: 1 })).toHaveLength(1)
+    expect(JSON.parse(await fs.readFile(rotated, 'utf8'))).toMatchObject({
+      capability: 'identity.read',
+    })
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toMatchObject({
+      capability: 'org.read',
+    })
+    expect(await log.read(ENV_KEY, { limit: 1 })).toMatchObject([{ capability: 'org.read' }])
   })
 
   windowsIt(
