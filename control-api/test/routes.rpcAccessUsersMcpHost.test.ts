@@ -176,6 +176,7 @@ describe('POST /rpc/access/users/:userId/mcp-hosts/:hostRef — atomic access an
     expect(bindingService.bind).toHaveBeenCalledWith({
       ...DIRECT_BINDING_BODY,
       hostRef: 'host-a',
+      hostNamespace: expect.any(String),
       identityIssuer: expect.any(String),
       actorHumanSub: userId,
       userId,

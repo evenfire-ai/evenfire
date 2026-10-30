@@ -282,6 +282,40 @@ export async function ancestorsOf(
   return (result.rows as { resource_id: string }[]).map(row => String(row.resource_id))
 }
 
+/**
+ * The ancestor chain of every candidate id in ONE recursive query, keyed by the
+ * candidate it belongs to. A candidate with no live row (or whose chain does not
+ * reach it) is absent from the map — unreadable, exactly as `ancestorsOf`
+ * returns an empty list for a missing resource.
+ */
+async function ancestorChainsOf(
+  db: GrantsDb,
+  drive: string,
+  resourceIds: readonly string[]
+): Promise<Map<string, Set<string>>> {
+  const sql = `
+    WITH RECURSIVE chain AS (
+      SELECT resource_id, parent_resource_id, resource_id AS candidate_id, 0 AS depth
+        FROM gfs_resources
+       WHERE drive = $1 AND resource_id = ANY($2::uuid[]) AND deleted_at IS NULL
+      UNION ALL
+      SELECT r.resource_id, r.parent_resource_id, c.candidate_id, c.depth + 1
+        FROM gfs_resources r
+        JOIN chain c ON r.resource_id = c.parent_resource_id
+       WHERE r.drive = $1 AND r.deleted_at IS NULL
+    )
+    SELECT candidate_id, resource_id FROM chain ORDER BY candidate_id, depth ASC`
+  const result = await db.query(sql, [drive, [...resourceIds]])
+  const chains = new Map<string, Set<string>>()
+  for (const row of result.rows as { candidate_id: string; resource_id: string }[]) {
+    const candidateId = String(row.candidate_id)
+    const chain = chains.get(candidateId)
+    if (chain) chain.add(String(row.resource_id))
+    else chains.set(candidateId, new Set([String(row.resource_id)]))
+  }
+  return chains
+}
+
 async function loadGrants(db: GrantsDb, drive: string, subjects: Set<string>): Promise<GrantRow[]> {
   // Filter by the caller's subjects IN SQL (mirrors gfsc grantsFor) — never fetch
   // the whole drive's grants and filter in JS. Keep subject_type and subject_id
@@ -613,6 +647,34 @@ export async function heldPermissions(
     loadShares(db, drive, caller.subjects),
   ])
   return PERMISSIONS.filter(op => holds(op, resourceId, ancestors, grants, shares))
+}
+
+/**
+ * The subset of `resourceIds` the caller holds `read` on. The caller's grants
+ * and shares are loaded ONCE and one recursive query yields every candidate's
+ * ancestor chain, so a list of N recent files costs 3 queries instead of 3×N.
+ * Operator is intrinsic (as in `heldPermissions`); a candidate with no live
+ * chain is unreadable (as there); everything else is the same `holds('read')`
+ * predicate the rest of the authority engine uses.
+ */
+export async function readableResourceIds(
+  db: GrantsDb,
+  caller: GfsCaller,
+  drive: string,
+  resourceIds: readonly string[]
+): Promise<Set<string>> {
+  if (resourceIds.length === 0) return new Set()
+  if (caller.isOperator) return new Set(resourceIds)
+  const [grants, shares, chains] = await Promise.all([
+    loadGrants(db, drive, caller.subjects),
+    loadShares(db, drive, caller.subjects),
+    ancestorChainsOf(db, drive, resourceIds),
+  ])
+  const readable = new Set<string>()
+  for (const [candidateId, ancestors] of chains) {
+    if (holds('read', candidateId, ancestors, grants, shares)) readable.add(candidateId)
+  }
+  return readable
 }
 
 export function parseSubject(value: unknown): GfsSubject {

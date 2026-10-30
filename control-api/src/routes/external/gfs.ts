@@ -17,6 +17,7 @@ import {
   validateExternalGfsAuthoritySelector,
 } from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId, makeHostSubjectId } from '../../gfs/hostSubject.js'
+import { listRecentFiles } from '../../gfs/recentFiles.js'
 import { DbResolveStore } from '../../gfs/resolve.js'
 import {
   DbChildrenStore,
@@ -26,6 +27,7 @@ import {
   encodeCursor,
   listChildrenPaged,
 } from '../../gfs/tree.js'
+import { recordUserFileActivity } from '../../gfs/userFileActivity.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import {
   type ExternalGfsOperationClass,
@@ -213,6 +215,17 @@ function toIsoTimestamp(value: unknown): string {
     return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString()
   }
   throw new Error('gfs_resources.updated_at is required')
+}
+
+/**
+ * `intent` on the content proxy. Absent → an ordinary read that records
+ * nothing; exactly `open` → the user is opening the content now. A repeated
+ * query key arrives as an array and is as invalid as any other value: silently
+ * picking one would make the record depend on query-string order.
+ */
+function parseOpenIntent(value: unknown): 'none' | 'open' | 'invalid' {
+  if (value === undefined) return 'none'
+  return value === 'open' ? 'open' : 'invalid'
 }
 
 function subjectColumns(subjects: Set<string>): { types: string[]; ids: string[] } {
@@ -736,6 +749,26 @@ export function createExternalGfsRouter(): Router {
     })
   )
 
+  // ── recent files: the caller's own EvenDrive activity, newest first ──
+  // The whole list (at most 100 rows, the per-user cap) in one response: the
+  // Desktop card reveals 10 at a time client-side and there is no cursor (D20).
+  // The caller is always the Desktop actor of the session; no route accepts a
+  // user id.
+  router.get(
+    '/external/gfs/recent',
+    externalGfsResourceRouteRateLimit,
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const items = await listRecentFiles(
+        pool,
+        resolveCaller(req),
+        authorityOf(req as ExternalGfsRequest).desktopUserId,
+        driveOf(req.query.drive)
+      )
+      res.status(200).json({ ok: true, data: { items } })
+    })
+  )
+
   // ── delegation: reuse the EXISTING grant/share handlers (caller-agnostic) ──
   // resolveCaller(req) reads req.externalAuth → user:<id> plus all active team
   // memberships resolved here; assertMayGrant enforces no-escalation (a user may
@@ -1067,11 +1100,24 @@ export function createExternalGfsRouter(): Router {
         res.status(400).json({ error: 'resource_invalid' })
         return
       }
+      // `intent` is the ONLY record path a Desktop client controls (D9, D10,
+      // D13): `open` means "the user is opening this content now". An absent
+      // intent is an ordinary read (ZIP entry walks, plugin SDK reads) and
+      // records nothing; any other value is a caller defect, not a guess.
+      const intent = parseOpenIntent(req.query.intent)
+      if (intent === 'invalid') {
+        res.status(400).json({ error: 'intent_invalid' })
+        return
+      }
+      // Key the record by the Desktop actor, never by `tokenSubject`: for a
+      // linked admin that is the Control admin id, not the user who opened it.
+      const desktopUserId = authorityOf(req as ExternalGfsRequest).desktopUserId
       await proxyReadToGfsc(
         req,
         res,
         driveOf(req.query.drive),
-        `/v1/resources/${encodeURIComponent(rid)}/content`
+        `/v1/resources/${encodeURIComponent(rid)}/content`,
+        intent === 'open' ? () => recordUserFileActivity(pool, desktopUserId, [rid]) : undefined
       )
     })
   )
@@ -1089,7 +1135,8 @@ async function proxyReadToGfsc(
   req: ExternalAuthedRequest,
   res: import('express').Response,
   drive: string,
-  gfscPath: string
+  gfscPath: string,
+  onAuthorizedRead?: () => Promise<void>
 ): Promise<void> {
   const authority = authorityOf(req as ExternalGfsRequest)
   const { token } = signGfsToken({
@@ -1155,6 +1202,26 @@ async function proxyReadToGfsc(
     if (ct) res.setHeader('content-type', ct)
     res.send(errorBody)
     return
+  }
+  // A gfsc 4xx/5xx never records: the caller was not authorized or the read
+  // failed, so the record runs only after this branch and before the status
+  // line of a response that is about to stream the file.
+  if (onAuthorizedRead) {
+    try {
+      await onAuthorizedRead()
+    } catch (error) {
+      // No byte of the file may reach the client when its record failed: drop
+      // the upstream body, then surface the failure (500, empty response).
+      try {
+        await upstream.body?.cancel()
+      } catch (cancelError) {
+        rootLogger.error(
+          { err: cancelError, gfscPath },
+          'gfs external read proxy: upstream body cancel failed after a record failure'
+        )
+      }
+      throw error
+    }
   }
   res.status(upstream.status)
   for (const h of ['content-type', 'content-disposition', 'content-length']) {

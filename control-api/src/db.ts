@@ -3278,6 +3278,105 @@ async function applyGfsUserHomesSchema(db: DbClient): Promise<void> {
   `)
 }
 
+/**
+ * EvenDrive "Recent files" (issue #1168): per-user recency of file content
+ * reads and writes, including the activity of an agent running a Desktop chat
+ * on that user's behalf.
+ *
+ * The table is not durable history: every write trims the user back to the 100
+ * most recent rows, and deleting the user deletes the rows. The two functions
+ * are the only write path, so no role can record for an arbitrary user without
+ * the user-function grant, and no role gets generic DML on the table.
+ */
+async function applyGfsUserFileActivitySchema(db: DbClient): Promise<void> {
+  await db.query(`
+    -- D14: the namespace control-api verified the Host in when it bound the run.
+    -- Nullable without backfill: existing rows were bound before the column
+    -- existed and cannot be updated (the table is append-only), and guessing a
+    -- namespace would fabricate a fact. ADD COLUMN is DDL, so the append-only
+    -- row trigger does not fire.
+    ALTER TABLE governed_run_attribution_bindings
+      ADD COLUMN IF NOT EXISTS host_namespace TEXT NULL
+      CHECK (host_namespace IS NULL
+             OR (char_length(host_namespace) <= 63
+                 AND host_namespace ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'));
+
+    CREATE TABLE gfs_user_file_activity (
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      resource_id UUID NOT NULL,
+      last_activity_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (user_id, resource_id)
+    );
+    CREATE INDEX gfs_user_file_activity_recent_idx
+      ON gfs_user_file_activity (user_id, last_activity_at DESC, resource_id DESC);
+
+    CREATE FUNCTION gfs_record_user_file_activity(p_user_id UUID, p_resource_ids UUID[]) RETURNS void
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    BEGIN
+      IF p_resource_ids IS NULL OR cardinality(p_resource_ids) = 0
+         OR array_position(p_resource_ids, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'resource ids must be a non-empty array without nulls' USING ERRCODE = '22023';
+      END IF;
+      INSERT INTO public.gfs_user_file_activity (user_id, resource_id, last_activity_at)
+      SELECT DISTINCT p_user_id, u.resource_id, now() FROM unnest(p_resource_ids) AS u(resource_id)
+      ON CONFLICT (user_id, resource_id) DO UPDATE SET last_activity_at = EXCLUDED.last_activity_at;
+      -- Trim to the 100 most recent rows of this user.
+      DELETE FROM public.gfs_user_file_activity a
+       WHERE a.user_id = p_user_id
+         AND (a.last_activity_at, a.resource_id) < (
+           SELECT k.last_activity_at, k.resource_id
+             FROM public.gfs_user_file_activity k
+            WHERE k.user_id = p_user_id
+            ORDER BY k.last_activity_at DESC, k.resource_id DESC
+            OFFSET 99 LIMIT 1);
+    END $$;
+
+    -- An agent's content read, write or copy, recorded for the user its Desktop
+    -- chat run is bound to. The user id is never a parameter: it is read from
+    -- the binding row control-api wrote after verifying the user's RPC token.
+    CREATE FUNCTION gfs_record_agent_file_activity(
+      p_host_subject TEXT, p_run_id UUID, p_resource_ids UUID[]
+    ) RETURNS TEXT
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    DECLARE
+      b RECORD;
+    BEGIN
+      IF p_host_subject IS NULL
+         OR p_host_subject !~ '^host:1st:[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$' THEN
+        RAISE EXCEPTION 'agent activity requires a first-party Host subject' USING ERRCODE = '22023';
+      END IF;
+      SELECT g.host_namespace, g.host_ref, g.origin, g.user_id INTO b
+        FROM public.governed_run_attribution_bindings g
+       WHERE g.run_id = p_run_id;
+      IF NOT FOUND THEN
+        RETURN 'no_binding';
+      END IF;
+      IF b.host_ref <> split_part(p_host_subject, '/', 2) THEN
+        RETURN 'host_mismatch';
+      END IF;
+      IF b.origin <> 'direct_chat' THEN
+        RETURN 'excluded_origin';
+      END IF;
+      IF b.host_namespace IS NULL THEN
+        RETURN 'binding_without_namespace';
+      END IF;
+      IF p_host_subject <> 'host:1st:' || b.host_namespace || '/' || b.host_ref THEN
+        RETURN 'host_mismatch';
+      END IF;
+      PERFORM public.gfs_record_user_file_activity(b.user_id, p_resource_ids);
+      RETURN 'recorded';
+    END $$;
+
+    REVOKE ALL ON FUNCTION gfs_record_user_file_activity(UUID, UUID[]) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION gfs_record_user_file_activity(UUID, UUID[])
+      TO control_api_runtime, gfs_controller;
+    REVOKE ALL ON FUNCTION gfs_record_agent_file_activity(TEXT, UUID, UUID[]) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION gfs_record_agent_file_activity(TEXT, UUID, UUID[])
+      TO gfs_controller, gfs_controller_reader;
+    GRANT SELECT ON TABLE gfs_user_file_activity TO control_api_runtime;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6457,6 +6556,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0131_gfs_user_homes',
     legacyVersions: ['0130_gfs_user_homes'],
     apply: applyGfsUserHomesSchema,
+  },
+  {
+    version: '0132_gfs_user_file_activity',
+    apply: applyGfsUserFileActivitySchema,
   },
 ]
 
