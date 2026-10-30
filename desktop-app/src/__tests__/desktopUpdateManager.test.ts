@@ -478,7 +478,7 @@ describe('DesktopUpdateManager', () => {
     })
   })
 
-  it('keeps the app running and preserves a retryable download when OS authorization is refused', async () => {
+  it('keeps the app running and requires a fresh Mac attempt after authorization is refused', async () => {
     const launchInstallHelper = vi
       .fn()
       .mockRejectedValueOnce(new Error('authorization was canceled'))
@@ -491,14 +491,31 @@ describe('DesktopUpdateManager', () => {
       'authorization was canceled'
     )
     expect(mockApp.quit).not.toHaveBeenCalled()
-    await expect(manager.getPendingDesktopUpdate()).resolves.toEqual({
-      version: UPDATE_VERSION,
-      updaterCapable: false,
-    })
+    await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
+    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow('not staged')
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
     await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).resolves.toEqual({
       installed: true,
     })
     expect(launchInstallHelper).toHaveBeenCalledTimes(2)
+  })
+
+  it('never advertises a canceled Mac attempt when interrupted cleanup leaves its journal', async () => {
+    dependencies = createDependencies({
+      launchInstallHelper: vi.fn().mockRejectedValue(new Error('authorization failed')),
+    })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+    vi.spyOn(
+      manager as unknown as { discardOperation: () => Promise<void> },
+      'discardOperation'
+    ).mockRejectedValueOnce(new Error('cleanup interrupted'))
+    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow(
+      'cleanup interrupted'
+    )
+    await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
+    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow('not staged')
+    expect(mockApp.quit).not.toHaveBeenCalled()
   })
 
   it('cancels the helper handoff if the backend recommendation changes during authorization', async () => {

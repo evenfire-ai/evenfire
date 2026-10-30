@@ -25,6 +25,7 @@ import {
   type DesktopInstallPlan,
   detectDesktopInstall,
   launchDesktopInstallHelper,
+  stopMacDesktopInstallJob,
 } from './desktopUpdateInstaller.js'
 import type { DesktopReleaseStatus, DesktopUpdateProgress, PendingDesktopUpdate } from './types.js'
 
@@ -654,6 +655,7 @@ export class DesktopUpdateManager {
         ...operation,
         state: 'downloaded',
       }).catch(() => undefined)
+      if (this.platform === 'darwin') await this.discardOperation(operationPath, operation.id)
       throw error
     }
     app.quit()
@@ -973,6 +975,14 @@ export class DesktopUpdateManager {
       return null
     }
     const operation = await this.readOperation(operationPath, pointer.operationId)
+    if (this.platform === 'darwin') {
+      try {
+        await lstat(path.join(operationPath, 'cancel-install.json'))
+        return null
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
     return operation ? { operationPath, operation } : null
   }
 
@@ -1082,10 +1092,14 @@ export class DesktopUpdateManager {
 
   private async cancelStartedHelper(operationPath: string, operationId: string): Promise<void> {
     await this.writeJsonFile(path.join(operationPath, 'cancel-install.json'), { id: operationId })
+    if (this.platform === 'darwin') await stopMacDesktopInstallJob(operationId)
     for (let attempt = 0; attempt < 400; attempt += 1) {
       const pid = await this.readHelperPid(operationPath)
       if (pid === null || !this.isProcessAlive(pid)) {
-        await this.removeOwnedFile(path.join(operationPath, 'cancel-install.json'))
+        // Keep Mac cancellation durable: a queued authorization must never run later.
+        if (this.platform !== 'darwin') {
+          await this.removeOwnedFile(path.join(operationPath, 'cancel-install.json'))
+        }
         return
       }
       await new Promise(resolve => setTimeout(resolve, 100))

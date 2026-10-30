@@ -333,13 +333,19 @@ describe('macOS updater target trust checks', () => {
       },
     })
 
-    expect(launch.command).toBe('/bin/sh')
-    expect(launch.args[0]).toBe('-s')
-    expect(launch.standardInput).toContain('/usr/bin/codesign --verify --deep --strict')
-    expect(launch.standardInput).toContain("grep '^TeamIdentifier='")
-    expect(launch.standardInput).toContain('[ "$signer" = \'TeamIdentifier=XV6G8QZD5D\' ]')
-    expect(launch.standardInput).toContain('verify_target "$fresh"')
-    expect(launch.standardInput).toContain('verify_target "$app"')
-    expect(launch.standardInput).toContain('/usr/sbin/spctl --assess --type execute')
+    expect(launch.command).toBe('/bin/launchctl')
+    expect(launch.args.slice(0, 3)).toEqual([
+      'submit',
+      '-l',
+      `ai.evenfire.desktop.update.${operationId}`,
+    ])
+    const program = launch.args[launch.args.indexOf('-c') + 1]!
+    expect(launch.standardInput).toBe('')
+    expect(program).toContain('/usr/bin/codesign --verify --deep --strict')
+    expect(program).toContain("grep '^TeamIdentifier='")
+    expect(program).toContain('[ "$signer" = \'TeamIdentifier=XV6G8QZD5D\' ]')
+    expect(program).toContain('verify_target "$fresh"')
+    expect(program).toContain('verify_target "$app"')
+    expect(program).toContain('/usr/sbin/spctl --assess --type execute')
   })
 })
