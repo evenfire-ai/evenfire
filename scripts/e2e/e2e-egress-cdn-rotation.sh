@@ -981,7 +981,13 @@ for line in block:
     rows.append(line)
 if not ttl_written:
     rows.insert(0, '    ttl 5')
-rows.extend('    %s %s' % (ip, host) for ip in ips)
+# CoreDNS's hosts plugin only accepts inline entries before `fallthrough`;
+# an entry after it is an "unknown property" and the reload keeps the old
+# Corefile without failing.
+new_rows = ['    %s %s' % (ip, host) for ip in ips]
+fall = [i for i, line in enumerate(rows) if line.strip().split()[:1] == ['fallthrough']]
+at = fall[0] if fall else len(rows)
+rows[at:at] = new_rows
 
 lines[start + 1:end] = rows
 with open(out, 'w', encoding='utf-8') as handle:
@@ -1012,6 +1018,20 @@ apply_corefile() { # <rendered-file> <ip...>
   return 0
 }
 
+# On a DNS-switch timeout, keep CoreDNS's own reload errors as evidence: an
+# override CoreDNS refused to load is invisible from the ConfigMap.
+capture_coredns_reload_errors() {
+  local out="${EVIDENCE_DIR}/coredns-reload.log" lines
+  kctl logs "deployment/coredns" -n "$DNS_NS" --since=10m >"${out}.raw" 2>&1 || {
+    warn "could not read the CoreDNS log"
+    return 0
+  }
+  grep -E 'Reloading|reload failed|Restart failed|Error during parsing' "${out}.raw" >"$out" || :
+  rm -f "${out}.raw"
+  lines="$(grep -E 'reload failed|Error during parsing' "$out" | tail -n 2)"
+  [ -z "$lines" ] || warn "CoreDNS refused the override Corefile: ${lines}"
+}
+
 switch_dns() { # <A|B> <phase-prefix>
   local label=$1 prefix=$2 file
   local -a ips
@@ -1024,7 +1044,10 @@ switch_dns() { # <A|B> <phase-prefix>
   render_corefile "$ORIGINAL_COREFILE" "$file" "${ips[@]}" || return 1
   apply_corefile "$file" "${ips[@]}" || return 1
   printf '%s %s\n' "$T_PATCH_MS" "$prefix" >>"${EVIDENCE_DIR}/dns-switches.txt"
-  ok "CoreDNS hosts block now answers ${label} with ttl 5 (reload, no restart)"
+  # Writing the ConfigMap is not proof that CoreDNS serves it: the reload
+  # plugin keeps the old Corefile if the new one does not parse. HCC's own
+  # resolver (dns_actual_set) is the witness that the switch took effect.
+  echo "  Corefile with set ${label} written to the ConfigMap (ttl 5); waiting for CoreDNS to reload it"
 }
 
 # ── Phase 2: CoreDNS = B ───────────────────────────────────────────────
@@ -1036,6 +1059,7 @@ phase2() {
   }
   if ! wait_until "$DNS_VISIBLE_TIMEOUT" "HCC's resolver to answer set B" dns_is "$CSV_B"; then
     fail "HCC did not see set B within ${DNS_VISIBLE_TIMEOUT}s"
+    capture_coredns_reload_errors
     dns_actual_set >>"${EVIDENCE_DIR}/dns-witness.txt" 2>&1 || :
     finish 3 phase2-dns-set-b-not-visible
   fi
@@ -1306,6 +1330,7 @@ phase4() {
   local patch_ms=$T_PATCH_MS t_dns="" rc=0
   if ! wait_until "$DNS_VISIBLE_TIMEOUT" "HCC's resolver to answer set A" dns_is "$CSV_A"; then
     fail "HCC did not see set A within ${DNS_VISIBLE_TIMEOUT}s"
+    capture_coredns_reload_errors
     finish 3 phase4-dns-set-a-not-visible
   fi
   ok "HCC resolves ${CDN_HOST} to exactly set A (ttl <= 5)"
@@ -1391,6 +1416,7 @@ phase5() {
 
   if ! wait_until "$DNS_VISIBLE_TIMEOUT" "HCC's resolver to answer set B" dns_is "$CSV_B"; then
     fail "HCC did not see set B within ${DNS_VISIBLE_TIMEOUT}s"
+    capture_coredns_reload_errors
     finish 3 phase5-dns-set-b-not-visible
   fi
   ok "HCC resolves ${CDN_HOST} to exactly set B (ttl <= 5)"
@@ -1463,6 +1489,7 @@ phase6() {
   local patch_ms=$T_PATCH_MS t_dns=""
   if ! wait_until "$DNS_VISIBLE_TIMEOUT" "HCC's resolver to answer set A" dns_is "$CSV_A"; then
     fail "HCC did not see set A within ${DNS_VISIBLE_TIMEOUT}s"
+    capture_coredns_reload_errors
     finish 3 phase6-dns-set-a-not-visible
   fi
   ok "HCC resolves ${CDN_HOST} to exactly set A (ttl <= 5)"
