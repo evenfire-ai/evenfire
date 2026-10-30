@@ -1,24 +1,35 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { buildGfsResourceActions } from '@lib/gfsResourceActions'
 import { GfsResourceMenu } from './index'
 
-describe('GfsResourceMenu', () => {
-  beforeEach(installAntdDomEnvironment)
+function rect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    bottom: top + height,
+    height,
+    left,
+    right: left + width,
+    top,
+    width,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  }
+}
 
+describe('GfsResourceMenu', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
-  it('renders Ant Design actions, retains the Share submenu and invokes its existing callback', async () => {
+  it('uses a vertical kebab and presents an icon-led menu panel', () => {
     const onManage = vi.fn()
-    const onCopyLink = vi.fn()
     render(
       <GfsResourceMenu
-        onCopyLink={onCopyLink}
+        onCopyLink={vi.fn()}
         onDelete={vi.fn()}
         onManage={onManage}
         onPreview={vi.fn()}
@@ -28,88 +39,218 @@ describe('GfsResourceMenu', () => {
     )
 
     const trigger = screen.getByRole('button', { name: 'Options for report.txt' })
-    expect(trigger.getAttribute('aria-haspopup')).toBe('menu')
+    const dotPositions = Array.from(trigger.querySelectorAll('circle')).map(circle => [
+      circle.getAttribute('cx'),
+      circle.getAttribute('cy'),
+    ])
+    expect(dotPositions).toEqual([
+      ['12', '5'],
+      ['12', '12'],
+      ['12', '19'],
+    ])
+
     fireEvent.click(trigger)
 
-    const menu = await screen.findByRole('menu', { name: 'Actions for report.txt' })
+    const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
+    expect(menu.tagName).toBe('DIV')
+    expect(menu.classList.contains('da-gfs-resource-menu__panel')).toBe(true)
+    expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(2)
+    expect(menu.querySelectorAll('.ui-menu-item__icon')).toHaveLength(4)
+    const shareItem = within(menu).getByRole('menuitem', { name: 'Share' })
+    expect(shareItem.getAttribute('aria-haspopup')).toBe('menu')
+    expect(shareItem.getAttribute('aria-expanded')).toBe('false')
+    expect(
+      menu.querySelector('[data-gfs-action="share"] .ui-menu-item__icon path')?.getAttribute('d')
+    ).toBe('M5 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0')
+    expect(within(menu).queryByRole('menuitem', { name: 'Copy link' })).toBeNull()
     expect(within(menu).getByRole('menuitem', { name: 'Preview' })).toBeTruthy()
     expect(within(menu).getByRole('menuitem', { name: 'Replace file' })).toBeTruthy()
-    expect(within(menu).queryByRole('menuitem', { name: 'Copy link' })).toBeNull()
 
-    const shareItem = within(menu).getByRole('menuitem', { name: 'Share' })
-    fireEvent.mouseEnter(shareItem)
-    await screen.findByRole('menuitem', { name: 'Copy link' })
-    const menus = screen.getAllByRole('menu')
-    expect(menus).toHaveLength(2)
-    const shareMenu = menus[1]!
+    fireEvent.click(shareItem)
+    const shareMenu = screen.getByRole('menu', { name: 'Share options for report.txt' })
+    expect(shareItem.getAttribute('aria-expanded')).toBe('true')
     expect(within(shareMenu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     expect(within(shareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
-
+    expect(within(shareMenu).queryByRole('menuitem', { name: 'Manage access' })).toBeNull()
+    expect(
+      shareMenu
+        .querySelector('[data-gfs-action="share-access"] .ui-menu-item__icon path')
+        ?.getAttribute('d')
+    ).toBe('M5 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0')
     fireEvent.mouseEnter(within(menu).getByRole('menuitem', { name: 'Preview' }))
-    expect(screen.getAllByRole('menu')).toHaveLength(2)
+    expect(screen.getByRole('menu', { name: 'Share options for report.txt' })).toBeTruthy()
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
-    await waitFor(() => expect(onManage).toHaveBeenCalledOnce())
-    await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'))
-    expect(onCopyLink).not.toHaveBeenCalled()
+    expect(onManage).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('menu', { name: 'Actions for report.txt' })).toBeNull()
   })
 
-  it('offers Download as zip independently from Download for folders', async () => {
+  it('groups shared action descriptors under the Share submenu', () => {
+    const refresh = vi.fn()
+    const share = vi.fn()
+    const copyLink = vi.fn()
+    const copyRoute = vi.fn()
+    const actions = buildGfsResourceActions({
+      kind: 'directory',
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      handlers: { refresh, share, 'copy-link': copyLink, 'copy-route': copyRoute },
+      canShare: true,
+    })
+    render(<GfsResourceMenu actions={actions} resourceName="Reports" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+
+    const menu = screen.getByRole('menu', { name: 'Actions for Reports' })
+    expect(
+      within(menu)
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Share'])
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+
+    const shareMenu = screen.getByRole('menu', { name: 'Share options for Reports' })
+    expect(
+      within(shareMenu)
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Share', 'Copy link', 'Copy folder ID'])
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+    expect(share).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('menu', { name: 'Share options for Reports' })).toBeNull()
+    expect(refresh).not.toHaveBeenCalled()
+    expect(copyLink).not.toHaveBeenCalled()
+    expect(copyRoute).not.toHaveBeenCalled()
+  })
+
+  it('toggles the Share submenu closed and returns focus after Escape', () => {
+    const actions = buildGfsResourceActions({
+      kind: 'file',
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      handlers: {
+        share: vi.fn(),
+        'copy-link': vi.fn(),
+        'copy-route': vi.fn(),
+      },
+      canShare: true,
+    })
+    render(<GfsResourceMenu actions={actions} resourceName="report.txt" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    const share = screen.getByRole('menuitem', { name: 'Share' })
+    fireEvent.click(share)
+    expect(screen.getByRole('menu', { name: 'Share options for report.txt' })).toBeTruthy()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('menu', { name: 'Share options for report.txt' })).toBeNull()
+    expect(document.activeElement).toBe(share)
+
+    fireEvent.click(share)
+    expect(screen.getByRole('menu', { name: 'Share options for report.txt' })).toBeTruthy()
+    fireEvent.click(share)
+    expect(screen.queryByRole('menu', { name: 'Share options for report.txt' })).toBeNull()
+    expect(share.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('dispatches replacement selection and the selected file through the shared action', () => {
+    const replace = vi.fn((file?: File, context?: { requestFileSelection?: () => void }) => {
+      if (!file) context?.requestFileSelection?.()
+    })
+    const actions = buildGfsResourceActions({
+      kind: 'file',
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      handlers: { replace },
+      canReplace: true,
+    })
+    const inputClick = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
+    render(<GfsResourceMenu actions={actions} resourceName="report.txt" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Replace file' }))
+
+    expect(replace).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({ requestFileSelection: expect.any(Function) })
+    )
+    expect(inputClick).toHaveBeenCalledOnce()
+
+    const selectedFile = new File(['replacement'], 'replacement.txt')
+    fireEvent.change(screen.getByLabelText('Replace report.txt'), {
+      target: { files: [selectedFile] },
+    })
+    expect(replace).toHaveBeenLastCalledWith(selectedFile)
+  })
+
+  it('offers Download as zip for folders when the caller provides the action', () => {
     const onDownloadZip = vi.fn()
     render(
       <GfsResourceMenu resourceName="Assets" onDownload={undefined} onDownloadZip={onDownloadZip} />
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
-    const menu = await screen.findByRole('menu', { name: 'Actions for Assets' })
+    const menu = screen.getByRole('menu', { name: 'Actions for Assets' })
     const zipItem = within(menu).getByRole('menuitem', { name: 'Download as zip' })
-    expect(within(menu).queryByRole('menuitem', { name: /^Download$/ })).toBeNull()
+    expect(zipItem.getAttribute('data-gfs-action')).toBe('download-zip')
+    // The plain single-file Download entry stays independent of the zip entry.
+    expect(within(menu).queryByRole('menuitem', { name: 'Download' })).toBeNull()
 
     fireEvent.click(zipItem)
     expect(onDownloadZip).toHaveBeenCalledOnce()
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Options for Assets' }).getAttribute('aria-expanded')
-      ).toBe('false')
-    )
+    expect(screen.queryByRole('menu', { name: 'Actions for Assets' })).toBeNull()
   })
 
-  it('keeps the popup attached to the Files surface when the sidebar changes width', async () => {
-    const { container } = render(
-      <section data-gfs-browser="true">
-        <GfsResourceMenu resourceName="Shared with me" onOpenGfsLink={vi.fn()} />
-      </section>
-    )
-    const surface = container.querySelector('[data-gfs-browser="true"]')
-    expect(surface).not.toBeNull()
+  it.each(['Shared with me', 'Marketing'])(
+    'keeps the %s breadcrumb menu inside the Files surface as the sidebar resizes',
+    resourceName => {
+      let sidebarExpanded = true
+      const resizeCallbacks: ResizeObserverCallback[] = []
 
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    const menu = await screen.findByRole('menu', { name: 'Actions for Shared with me' })
-    expect(menu.closest('[data-gfs-browser="true"]')).toBe(surface)
+      vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(918)
+      vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(700)
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement
+      ) {
+        if (this.classList.contains('da-gfs-drive')) {
+          const left = sidebarExpanded ? 304 : 74
+          return rect(left, 0, 918 - left, 700)
+        }
+        if (this.classList.contains('da-gfs-resource-menu__panel')) {
+          return rect(0, 0, 360, 260)
+        }
+        if (this.getAttribute('aria-label') === `Options for ${resourceName}`) {
+          const left = sidebarExpanded ? 526 : 296
+          return rect(left, 100, 32, 32)
+        }
+        return rect(0, 0, 0, 0)
+      })
 
-    await act(async () => {
-      window.dispatchEvent(new Event('resize'))
-    })
-    expect(menu.closest('[data-gfs-browser="true"]')).toBe(surface)
-  })
+      class ResizeObserverMock {
+        constructor(callback: ResizeObserverCallback) {
+          resizeCallbacks.push(callback)
+        }
 
-  it('notifies lazy action consumers and returns focus after Escape', async () => {
-    const onOpenChange = vi.fn()
-    render(
-      <GfsResourceMenu
-        onOpenChange={onOpenChange}
-        onOpenGfsLink={vi.fn()}
-        resourceName="Shared with me"
-      />
-    )
+        disconnect() {}
+        observe() {}
+        unobserve() {}
+      }
+      vi.stubGlobal('ResizeObserver', ResizeObserverMock)
 
-    const trigger = screen.getByRole('button', { name: 'Options for Shared with me' })
-    fireEvent.click(trigger)
-    const menu = await screen.findByRole('menu', { name: 'Actions for Shared with me' })
-    await waitFor(() => expect(onOpenChange).toHaveBeenLastCalledWith(true))
+      render(
+        <section className="da-gfs-drive">
+          <GfsResourceMenu resourceName={resourceName} />
+        </section>
+      )
 
-    fireEvent.keyDown(menu, { key: 'Escape' })
-    await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'))
-    await waitFor(() => expect(onOpenChange).toHaveBeenLastCalledWith(false))
-    expect(document.activeElement).toBe(trigger)
-  })
+      fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
+      const menu = screen.getByRole('menu', { name: `Actions for ${resourceName}` })
+
+      // Right alignment would start at 198px and disappear beneath the 304px
+      // sidebar. The Files boundary clamps the whole panel to visible content.
+      expect(menu.style.left).toBe('304px')
+
+      sidebarExpanded = false
+      act(() => {
+        resizeCallbacks.forEach(callback => callback([], {} as ResizeObserver))
+      })
+      expect(menu.style.left).toBe('74px')
+    }
+  )
 })

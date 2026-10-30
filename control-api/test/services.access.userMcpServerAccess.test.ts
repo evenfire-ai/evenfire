@@ -33,7 +33,7 @@ const HOSTS_NS = config.hostsNamespace
 function check(gateway: MockGateway, userId: string, mcpServerName: string): Promise<boolean> {
   return userHasContextEnablingMcpServer({
     gateway: gateway as never,
-    mcpServersNamespace: MCP_NS,
+    contextsNamespace: MCP_NS,
     hostsNamespace: HOSTS_NS,
     userId,
     mcpServerName,
@@ -299,6 +299,7 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
             gateway as never,
             {
               mcpServersNamespace: MCP_NS,
+              contextsNamespace: MCP_NS,
               hostsNamespace: HOSTS_NS,
               agentNames: userAgents,
               userId: 'user-1',
@@ -310,7 +311,8 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
             MCP_NS,
             userContexts,
             'user-1',
-            allGrantsPresent as never
+            allGrantsPresent as never,
+            MCP_NS
           )
           const allowlistedForUser = new Set(userContexts.flatMap(id => allowlists[id] ?? []))
           expect(flat.map(s => s.name).sort()).toEqual([...allowlistedForUser].sort())
@@ -340,7 +342,7 @@ describe('allowedMcpServerNamesForContexts', () => {
   // Padded variants are reachable: the allowlist writer stores the name as given.
   const serverName = fc.constantFrom('notion', 'gdrive', 'slack', ' notion', 'gdrive ', '')
 
-  it('is exactly the trimmed union of the asked Contexts allowlists (oracle)', async () => {
+  it('is exactly the union of the asked Contexts allowlists, compared without trimming (oracle)', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.dictionary(
@@ -358,7 +360,7 @@ describe('allowedMcpServerNamesForContexts', () => {
 
           const expected = new Set<string>()
           for (const id of asked) {
-            for (const n of allowlists[id] ?? []) if (n.trim()) expected.add(n.trim())
+            for (const n of allowlists[id] ?? []) if (n.length > 0) expected.add(n)
           }
           expect([...out].sort()).toEqual([...expected].sort())
         }

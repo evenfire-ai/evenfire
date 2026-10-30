@@ -4,6 +4,7 @@ import { Card } from 'antd'
 import type { ApprovalDecisionTarget } from '@hooks/domain/approvalDecision'
 import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
 import type { ApprovalInputPreview } from '@/uiTypes'
+import type { AccessCatalog } from '../../../../src/types'
 import { ProgressStepper } from '../ProgressStepper'
 
 interface Props {
@@ -32,6 +33,7 @@ interface Props {
     mcpServerName?: string
     inputPreview?: ApprovalInputPreview
   }
+  agentContextByName?: AccessCatalog['agentContextByName']
 }
 
 /**
@@ -48,6 +50,7 @@ export function InFlightAssistantPlaceholder({
   onCancelTask,
   decideApproval,
   pendingApproval,
+  agentContextByName,
 }: Props) {
   const tracker = useAgentTaskTracker()
   const key = makeTaskKey(agentRef, chatId)
@@ -125,12 +128,20 @@ export function InFlightAssistantPlaceholder({
                   // re-enables the Connect button so the user can retry; log the
                   // failure so it is observable. (Follow-up: a user-facing error
                   // indicator on the button.)
-                  window.clerum.rpc.connectMcpServer(si.mcpServerName!, agentRef).catch(err => {
-                    console.error('[connect] connectMcpServer failed', {
-                      mcpServerName: si.mcpServerName,
-                      error: err instanceof Error ? err.message : String(err),
+                  // The McpServer names no Context, so a context-scoped grant is
+                  // authorized against the Context of the Host being chatted with.
+                  window.clerum.rpc
+                    .connectMcpServer(
+                      si.mcpServerName!,
+                      agentRef,
+                      agentContextByName?.[agentRef] ?? undefined
+                    )
+                    .catch(err => {
+                      console.error('[connect] connectMcpServer failed', {
+                        mcpServerName: si.mcpServerName,
+                        error: err instanceof Error ? err.message : String(err),
+                      })
                     })
-                  })
                 }
               : undefined
           }

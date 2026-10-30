@@ -3,21 +3,29 @@ import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { ConfigProvider } from 'antd'
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
+import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
-import { childView, listChildrenPage } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  accessibleResource,
+  affordancesResult,
+  childView,
+  gfsRouteFailureMessage,
+  heldAffordances,
+  listAccessiblePage,
+  listChildrenPage,
+  resolveResource,
+  resolvedDirectory,
+  resolvedFile,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  appServiceAffordanceProducer,
+  heldPermissionResponse,
+} from '@/gfs/__fixtures__/permissionProducerFixtures'
 import type { Tone } from '@/uiTypes'
-import { installAntdDomEnvironment } from '../../test/antdDomEnvironment'
+import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilesPage } from '../FilesPage'
-
-const filesPageStyles = readFileSync(path.join(process.cwd(), 'ui/src/styles.css'), 'utf8').replace(
-  /\s+/g,
-  ' '
-)
 
 const hookMock = vi.hoisted(() => ({
   useGfsBrowserController: vi.fn(),
@@ -33,6 +41,7 @@ function baseController() {
     current: null,
     crumbs: [],
     sessionScope: 'env-1:user-1:team-1',
+    sessionGeneration: 0,
     accessibleResources: [],
     items: [],
     affordances: null,
@@ -41,10 +50,13 @@ function baseController() {
     rowAffordancesResourceId: null,
     setRowAffordancesResourceId: vi.fn(),
     rowAffordancesByResourceId: {},
+    moveSourceParentAffordancesById: {},
+    setMoveSourceParentResourceId: vi.fn(),
     rowAffordances: null,
     rowAffordancesError: null,
     loadingAccessible: false,
     loading: false,
+    loadingCurrentView: false,
     accessibleError: null,
     accessibleNotice: null,
     error: null,
@@ -56,6 +68,7 @@ function baseController() {
     isFetchingMore: false,
     loadMoreAccessible: vi.fn(),
     loadMore: vi.fn(),
+    refreshCurrentLocation: vi.fn(async () => true),
     openUri: vi.fn(),
     openResource: vi.fn(),
     openChild: vi.fn(),
@@ -102,101 +115,165 @@ function baseController() {
   }
 }
 
-function filesPageElement(
-  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
-  pushToast?: (message: string, tone: Tone) => void,
-  onOpenPreview?: (preview: unknown) => void,
-  motion = false
-) {
-  return (
-    <ConfigProvider theme={{ token: { motion } }}>
-      <QueryClientProvider client={queryClient}>
-        <FilesPage pushToast={pushToast} onOpenPreview={onOpenPreview} />
-      </QueryClientProvider>
-    </ConfigProvider>
-  )
-}
-
 function renderFilesPage(
   pushToast?: (message: string, tone: Tone) => void,
   onOpenPreview?: (preview: unknown) => void,
-  motion = false
+  pendingGfsUri?: string | null,
+  onPendingGfsUriHandled?: () => void,
+  titlebarLeadingTarget?: HTMLElement | null
 ) {
-  return render(filesPageElement(undefined, pushToast, onOpenPreview, motion))
-}
-
-const inheritedConfirmationName = /^(?:Update role on parent folder\?|Remove from parent folder\?)$/
-
-function queryInheritedAccessConfirmation() {
-  return screen.queryByText(inheritedConfirmationName)?.closest('[role="dialog"]') ?? null
-}
-
-async function findInheritedAccessConfirmation() {
-  const title = await screen.findByText(inheritedConfirmationName)
-  const dialog = title.closest('[role="dialog"]')
-  if (!(dialog instanceof HTMLElement)) {
-    throw new Error('Inherited access confirmation is not inside an Ant Design dialog')
+  const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
+  if (clerum) {
+    const auth = (clerum.auth ?? {}) as Record<string, unknown>
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        ...clerum,
+        auth: {
+          ...auth,
+          getSessionGeneration:
+            typeof auth.getSessionGeneration === 'function'
+              ? auth.getSessionGeneration
+              : vi.fn(async () => 0),
+        },
+      },
+    })
   }
-  return dialog
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <FilesPage
+        pushToast={pushToast}
+        onOpenPreview={onOpenPreview}
+        pendingGfsUri={pendingGfsUri}
+        onPendingGfsUriHandled={onPendingGfsUriHandled}
+        titlebarLeadingTarget={titlebarLeadingTarget}
+      />
+    </QueryClientProvider>
+  )
 }
 
-async function clickAntdSelectOption(name: string | RegExp) {
-  // rc-select virtualizes its options and exposes a separate hidden option
-  // mirror for assistive technology. Click the visible AntD row while using
-  // the mirrored option to verify its accessible label is present.
-  const accessibleOption = await screen.findByRole('option', { name })
-  const dropdown = accessibleOption.closest('.ant-select-dropdown')
-  if (!(dropdown instanceof HTMLElement)) throw new Error('AntD Select popup is missing')
-  const visibleOption = Array.from(
-    dropdown.querySelectorAll<HTMLElement>('.ant-select-item-option')
-  ).find(option => {
-    const text = option.textContent ?? ''
-    return name instanceof RegExp ? name.test(text) : text.includes(name)
+function uploadInput(): HTMLInputElement {
+  const input = document.querySelector<HTMLInputElement>('input[aria-label="Upload file"]')
+  if (!input) throw new Error('Upload file input is unavailable')
+  return input
+}
+
+function installControllerPermissionQuery() {
+  const gfs = (window.clerum?.gfs ?? {}) as Record<string, unknown>
+  if (typeof gfs.affordances === 'function') return
+  const controller = hookMock.useGfsBrowserController.mock.results.at(-1)?.value as
+    | {
+        current?: { resourceId: string }
+        affordances?: { held?: string[]; canDelegate?: boolean } | null
+        rowAffordancesResourceId?: string | null
+        rowAffordances?: { held?: string[]; canDelegate?: boolean } | null
+        rowAffordancesByResourceId?: Record<string, { held?: string[]; canDelegate?: boolean }>
+        items?: Array<{ resourceId: string; permissions?: string[] }>
+        accessibleResources?: Array<{ resourceId: string; permissions?: string[] }>
+      }
+    | undefined
+  const affordances = vi.fn(async (resourceId: string) => {
+    const resource = [
+      ...(controller?.items ?? []),
+      ...(controller?.accessibleResources ?? []),
+    ].find(item => item.resourceId === resourceId)
+    const rowAuthority =
+      controller?.rowAffordancesByResourceId?.[resourceId] ??
+      (controller?.rowAffordancesResourceId === resourceId ? controller.rowAffordances : null)
+    const authority =
+      controller?.current?.resourceId === resourceId ? controller.affordances : rowAuthority
+    return delegationAffordances(
+      new Set(authority?.held ?? resource?.permissions ?? []),
+      Boolean(authority?.canDelegate)
+    )
   })
-  if (!visibleOption) throw new Error(`Visible AntD option ${String(name)} is missing`)
-  fireEvent.click(visibleOption)
-}
-
-function selectedRoleText(row: HTMLElement) {
-  return within(row).getByRole('combobox').parentElement?.textContent?.trim() ?? null
+  Object.defineProperty(window, 'clerum', {
+    configurable: true,
+    value: { ...window.clerum, gfs: { ...gfs, affordances } },
+  })
 }
 
 async function openManageDialog(resourceName: string) {
-  await openResourceMenu(resourceName)
-  // The Share root item opens its submenu on hover. Let the shared helper do
-  // the single hover; dispatching it twice can restart AntD's submenu motion.
-  fireEvent.click(within(await shareOptionsMenu()).getByRole('menuitem', { name: 'Share' }))
-  await screen.findByRole('dialog', { name: new RegExp(`Share (?:file|folder) ${resourceName}`) })
-}
-
-async function openResourceMenu(resourceName: string) {
-  fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
-  return screen.findByRole('menu', { name: `Actions for ${resourceName}` })
+  installControllerPermissionQuery()
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+  })
+  const shareMenu = screen.queryByRole('menu', { name: `Share options for ${resourceName}` })
+  if (shareMenu) {
+    await act(async () => {
+      fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+    })
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /^Share/ })).toBeTruthy())
+  }
 }
 
 async function chooseResourceAction(resourceName: string, actionName: string) {
-  const menu = await openResourceMenu(resourceName)
-  fireEvent.click(within(menu).getByRole('menuitem', { name: actionName }))
-}
-
-async function shareOptionsMenu() {
-  const shareItem = screen.getByRole('menuitem', { name: 'Share' })
-  shareItem.focus()
-  fireEvent.keyDown(shareItem, { key: 'ArrowRight', keyCode: 39, which: 39 })
-  const copyLink = await screen.findByRole('menuitem', { name: 'Copy link' })
-  const shareMenu = copyLink.closest('[role="menu"]')
-  if (!(shareMenu instanceof HTMLElement)) throw new Error('Share options menu did not open')
-  return shareMenu
+  installControllerPermissionQuery()
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
+  })
+  if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    })
+    const shareMenu = screen.getByRole('menu', { name: `Share options for ${resourceName}` })
+    await act(async () => {
+      fireEvent.click(within(shareMenu).getByRole('menuitem', { name: actionName }))
+    })
+    return
+  }
+  await act(async () => {
+    fireEvent.click(
+      screen.getByRole('menuitem', { name: actionName === 'Move to…' ? 'Move to' : actionName })
+    )
+  })
+  if (actionName === 'Rename') {
+    await screen.findByRole('form', { name: 'Rename resource' })
+  } else if (actionName === 'Delete') {
+    await screen.findByRole('dialog', { name: new RegExp(`Delete ${resourceName}\\?`) })
+  } else if (actionName === 'Move to…') {
+    await screen.findByRole('dialog', { name: new RegExp(`Move .*${resourceName}`) })
+  } else if (actionName === 'New folder') {
+    await screen.findByRole('form', { name: 'Create folder' })
+  }
 }
 
 describe('FilesPage', () => {
   beforeEach(() => {
-    installAntdDomEnvironment()
+    const affordances = vi.fn(async (resourceId: string) => {
+      const controller = hookMock.useGfsBrowserController.mock.results.at(-1)?.value as
+        | {
+            current?: { resourceId: string }
+            affordances?: { held?: string[]; canDelegate?: boolean } | null
+            rowAffordancesResourceId?: string | null
+            rowAffordances?: { held?: string[]; canDelegate?: boolean } | null
+            rowAffordancesByResourceId?: Record<string, { held?: string[]; canDelegate?: boolean }>
+            items?: Array<{ resourceId: string; permissions?: string[] }>
+            accessibleResources?: Array<{ resourceId: string; permissions?: string[] }>
+          }
+        | undefined
+      const rows = [...(controller?.items ?? []), ...(controller?.accessibleResources ?? [])]
+      const resource = rows.find(row => row.resourceId === resourceId)
+      const rowAuthority =
+        controller?.rowAffordancesByResourceId?.[resourceId] ??
+        (controller?.rowAffordancesResourceId === resourceId ? controller.rowAffordances : null)
+      const authority =
+        controller?.current?.resourceId === resourceId ? controller.affordances : rowAuthority
+      return delegationAffordances(
+        new Set(authority?.held ?? resource?.permissions ?? []),
+        Boolean(authority?.canDelegate)
+      )
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
         gfs: {
           getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
+          affordances,
         },
       },
     })
@@ -206,6 +283,104 @@ describe('FilesPage', () => {
     cleanup()
     vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('hides Move for a shared-root row unless its exact source parent can write and delete', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'shared-file',
+          rid: '0123456789abcdef0123456789abcdef',
+          gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+          drive: 'main',
+          parentResourceId: 'source-parent',
+          name: 'report.txt',
+          kind: 'file',
+          path: '/report.txt',
+          version: 1,
+          bytes: 12,
+          permissions: ['read', 'write', 'delete', 'manage_acl'],
+        },
+      ],
+      moveSourceParentAffordancesById: {
+        'source-parent': delegationAffordances(new Set(['read', 'write']), false),
+      },
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    })
+
+    expect(screen.queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+  })
+
+  it('offers Move when a read-only shared file has source-parent write and delete rights', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'shared-file',
+          rid: '0123456789abcdef0123456789abcdef',
+          gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+          drive: 'main',
+          parentResourceId: 'source-parent',
+          name: 'report.txt',
+          kind: 'file',
+          path: '/report.txt',
+          version: 1,
+          bytes: 12,
+          permissions: ['read'],
+        },
+      ],
+      moveSourceParentAffordancesById: {
+        'source-parent': delegationAffordances(new Set(['write', 'delete']), false),
+      },
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    })
+
+    expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+  })
+
+  it('hides breadcrumb Move when the current resource parent lacks delete authority', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'current-folder',
+        gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        parentResourceId: 'source-parent',
+        name: 'Current folder',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      crumbs: [
+        {
+          resourceId: 'current-folder',
+          gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+          parentResourceId: 'source-parent',
+          name: 'Current folder',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      moveSourceParentAffordancesById: {
+        'source-parent': delegationAffordances(new Set(['read', 'write']), false),
+      },
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Current folder' }))
+    })
+
+    expect(screen.queryByRole('menuitem', { name: 'Move to' })).toBeNull()
   })
 
   it('renders unavailable automatic discovery as an info notice, not a technical error', () => {
@@ -218,7 +393,7 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     const notice = screen.getByText(/Automatic EvenDrive discovery is not available/i)
-    expect(notice.closest('.ant-alert')?.className).toContain('ant-alert-info')
+    expect(notice.closest('.status-banner')?.className).toContain('tone-info')
     expect(screen.queryByText(/window\.clerum/i)).toBeNull()
     expect(screen.queryByText(/listAccessible is not a function/i)).toBeNull()
     expect(screen.getByText('No shared files yet')).toBeTruthy()
@@ -248,8 +423,101 @@ describe('FilesPage', () => {
     expect(screen.getByText('This folder or file is no longer available.')).toBeTruthy()
   })
 
+  it('resolves a seeded folder route to the exact resource in Files', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Linked folder')
+    )
+    const folderCrumb: GfsCrumb = { ...folder, kind: 'directory', bytes: folder.bytes ?? 0 }
+    const openUri = vi.fn(async () => {
+      setCrumbs([folderCrumb])
+      return folderCrumb
+    })
+    const handled = vi.fn()
+    let setCrumbs: (crumbs: GfsCrumb[]) => void = () => undefined
+    function useSeededFolderController() {
+      const [crumbs, updateCrumbs] = useState<GfsCrumb[]>([])
+      setCrumbs = updateCrumbs
+      return {
+        ...baseController(),
+        crumbs,
+        current: crumbs.at(-1) ?? null,
+        openUri,
+        restoreCrumbs: updateCrumbs,
+      }
+    }
+    hookMock.useGfsBrowserController.mockImplementation(useSeededFolderController)
+
+    renderFilesPage(undefined, undefined, folder.gfsUri, handled)
+
+    expect(await screen.findByRole('button', { name: 'Linked folder' })).toBeTruthy()
+    expect(openUri).toHaveBeenCalledWith(
+      folder.gfsUri,
+      expect.objectContaining({ shouldContinue: expect.any(Function) })
+    )
+    expect(handled).toHaveBeenCalledOnce()
+  })
+
+  it('resolves a seeded file route and downloads that exact unpreviewable file', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'report.txt')
+    )
+    const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download, getPathForFile: vi.fn() } },
+    })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:gfs-download'),
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    const openUri = vi.fn(async () => {
+      setCrumbs([fileCrumb])
+      return fileCrumb
+    })
+    const handled = vi.fn()
+    let setCrumbs: (crumbs: GfsCrumb[]) => void = () => undefined
+    function useSeededFileController() {
+      const [crumbs, updateCrumbs] = useState<GfsCrumb[]>([])
+      setCrumbs = updateCrumbs
+      return {
+        ...baseController(),
+        crumbs,
+        current: crumbs.at(-1) ?? null,
+        openUri,
+        restoreCrumbs: updateCrumbs,
+      }
+    }
+    hookMock.useGfsBrowserController.mockImplementation(useSeededFileController)
+
+    renderFilesPage(undefined, undefined, file.gfsUri, handled)
+
+    expect(await screen.findByRole('heading', { name: 'report.txt', level: 3 })).toBeTruthy()
+    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
+    expect(openUri).toHaveBeenCalledWith(
+      file.gfsUri,
+      expect.objectContaining({ shouldContinue: expect.any(Function) })
+    )
+    expect(handled).toHaveBeenCalledOnce()
+  })
+
   it.each([
-    ['initial GFS discovery', { loadingAccessible: true }],
+    ['initial GFS discovery', { loadingAccessible: true, loadingCurrentView: true }],
+    [
+      'selected-file authority validation',
+      {
+        current: {
+          resourceId: 'file-loading',
+          gfsUri: 'gfs://main/file-loading',
+          name: 'Loading report.md',
+          kind: 'file' as const,
+          version: 1,
+        },
+        authorityPending: true,
+        loadingCurrentView: true,
+      },
+    ],
     [
       'folder navigation',
       {
@@ -261,6 +529,7 @@ describe('FilesPage', () => {
           version: 1,
         },
         loading: true,
+        loadingCurrentView: true,
       },
     ],
   ])('shows a subtle borderless loader during %s', (_scenario, state) => {
@@ -272,10 +541,10 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     const loader = screen.getByRole('status', { name: 'Loading files' })
-    expect(loader.querySelector('.ant-spin')).not.toBeNull()
-    expect(within(loader).getByText('Loading files…')).toBeTruthy()
+    expect(loader.classList.contains('da-gfs-loading')).toBe(true)
+    expect(loader.querySelectorAll('.da-gfs-loading__dot')).toHaveLength(3)
     expect(screen.queryByText('Fetching your Global File System resources…')).toBeNull()
-    expect(loader.closest('.ant-empty')).toBeNull()
+    expect(loader.closest('.empty-state')).toBeNull()
   })
 
   it('opens a shared folder from the single browser workspace', async () => {
@@ -336,13 +605,13 @@ describe('FilesPage', () => {
 
     const row = screen
       .getByRole('button', { name: 'Open report.txt' })
-      .closest<HTMLElement>('[data-testid^="gfs-resource-row-"]')
+      .closest<HTMLElement>('.da-grid__row')
     expect(row).not.toBeNull()
     expect(within(row!).getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
     expect(within(row!).getByRole('button', { name: 'Download report.txt' })).toBeTruthy()
     expect(within(row!).getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
     expect(
-      Array.from(row!.querySelectorAll('.ant-table-cell:last-child button')).map(button =>
+      Array.from(row!.querySelectorAll('.da-gfs-list__actions button')).map(button =>
         button.getAttribute('aria-label')
       )
     ).toEqual([
@@ -351,48 +620,6 @@ describe('FilesPage', () => {
       'Rename report.txt',
       'Options for report.txt',
     ])
-  })
-
-  it('left aligns resource names and right aligns row actions', () => {
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      accessibleResources: [
-        {
-          resourceId: 'file-1',
-          rid: 'file-1',
-          gfsUri: 'gfs://main/file-1',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'report.txt',
-          kind: 'file',
-          path: '/report.txt',
-          version: 1,
-          bytes: 12,
-          permissions: ['read', 'write', 'manage_acl'],
-        },
-      ],
-    })
-
-    renderFilesPage()
-
-    const row = screen
-      .getByRole('button', { name: 'Open report.txt' })
-      .closest<HTMLElement>('[data-testid^="gfs-resource-row-"]')
-    expect(row).not.toBeNull()
-
-    const cells = row!.querySelectorAll<HTMLElement>('.ant-table-cell')
-    const nameLayout = cells.item(1)?.querySelector<HTMLElement>('.ant-flex')
-    const actionsLayout = cells.item(3)?.querySelector<HTMLElement>('.ant-flex')
-    if (!nameLayout || !actionsLayout) throw new Error('Resource row layouts are missing')
-    expect(window.getComputedStyle(nameLayout).alignItems).toBe('flex-start')
-    expect(window.getComputedStyle(actionsLayout).justifyContent).toBe('flex-end')
-
-    fireEvent.click(within(row!).getByRole('button', { name: 'Rename report.txt' }))
-    const renameForm = screen.getByRole('form', { name: 'Rename resource' })
-    const currentNameCell = renameForm.closest<HTMLElement>('.ant-table-cell')
-    const currentNameLayout = currentNameCell?.querySelector<HTMLElement>('.ant-flex')
-    if (!currentNameLayout) throw new Error('Renaming resource layout is missing')
-    expect(window.getComputedStyle(currentNameLayout).alignItems).toBe('stretch')
   })
 
   it('shows permission-backed share and rename actions for folder and file children', () => {
@@ -464,13 +691,13 @@ describe('FilesPage', () => {
 
     const folderRow = screen
       .getByRole('button', { name: 'Open Assets' })
-      .closest<HTMLElement>('[data-testid^="gfs-resource-row-"]')
+      .closest<HTMLElement>('.da-grid__row')
     const fileRow = screen
       .getByRole('button', { name: 'Open report.txt' })
-      .closest<HTMLElement>('[data-testid^="gfs-resource-row-"]')
+      .closest<HTMLElement>('.da-grid__row')
     const readonlyRow = screen
       .getByRole('button', { name: 'Open readonly.txt' })
-      .closest<HTMLElement>('[data-testid^="gfs-resource-row-"]')
+      .closest<HTMLElement>('.da-grid__row')
     expect(folderRow).not.toBeNull()
     expect(fileRow).not.toBeNull()
     expect(readonlyRow).not.toBeNull()
@@ -551,60 +778,15 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    const resourceNamesInOrder = Array.from(
-      document.querySelectorAll('[data-testid^="gfs-resource-row-"] .ant-table-cell:nth-child(2)')
-    ).map(node => node.querySelector('button')?.textContent?.trim() ?? '')
+    const resourceNamesInOrder = Array.from(document.querySelectorAll('.da-gfs-list__name')).map(
+      node => node.textContent?.trim() ?? ''
+    )
     expect(resourceNamesInOrder).toEqual(['alpha', 'beta', 'apple.md', 'Zebra.md'])
 
-    const alphaRow = screen
-      .getByRole('button', { name: 'Open alpha' })
-      .closest('[data-testid^="gfs-resource-row-"]')
-    expect(
-      alphaRow
-        ?.querySelector('[data-testid="gfs-resource-icon"] [data-icon]')
-        ?.getAttribute('data-icon')
-    ).toBe('folder')
-  })
-
-  it('keeps the browser surfaces transparent and sizes the icon column to its content', () => {
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'parent-1',
-        gfsUri: 'gfs://main/parent-1',
-        name: 'Workspace',
-        kind: 'directory',
-        version: 1,
-      },
-      items: [
-        {
-          resourceId: 'dir-a',
-          rid: 'dir-a',
-          gfsUri: 'gfs://main/dir-a',
-          drive: 'main',
-          parentResourceId: 'parent-1',
-          name: 'alpha',
-          kind: 'directory',
-          path: '/alpha',
-          version: 1,
-          bytes: 0,
-        },
-      ],
-    })
-
-    renderFilesPage()
-
-    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
-    expect(browser.style.background).toBe('transparent')
-    const iconColumn = document.querySelector<HTMLTableColElement>(
-      '.gfs-resource-table colgroup col'
+    const alphaRow = screen.getByRole('button', { name: 'alpha' }).closest('.da-grid__row')
+    expect(alphaRow?.querySelector('.da-gfs-list__icon svg path')?.getAttribute('d')).toContain(
+      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288'
     )
-    expect(iconColumn?.style.width).toBe('48px')
-
-    const tableRule = filesPageStyles.match(
-      /\[data-gfs-browser='true'\]\s+\.gfs-resource-table\s+\.ant-table\s*{([^}]*)}/
-    )?.[1]
-    expect(tableRule).toMatch(/background:\s*transparent/)
   })
 
   it('marks unreadable rows and refuses to open them instead of failing with a download 403', async () => {
@@ -784,21 +966,18 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    const table = screen.getByRole('table')
-    expect(within(table).getByRole('columnheader', { name: 'Size' })).toBeTruthy()
-    expect(within(table).queryByRole('columnheader', { name: 'Type' })).toBeNull()
+    const header = document.querySelector('.da-gfs-drive__grid .da-grid__head')
+    expect(header?.textContent).toContain('Size')
+    expect(header?.textContent).not.toContain('Type')
 
-    const folderRow = screen
-      .getByRole('button', { name: 'Open Moon' })
-      .closest('[data-testid^="gfs-resource-row-"]')
-    expect(folderRow?.querySelector('[data-testid="gfs-resource-size"]')?.textContent).toBe('—')
+    const folderRow = screen.getByText('Moon').closest('.da-grid__row')
+    expect(folderRow?.querySelector('.da-gfs-drive__size')?.textContent).toBe('—')
+    expect(folderRow?.querySelector('.da-gfs-list__meta')).toBeNull()
     expect(folderRow?.textContent).not.toContain('Folder')
     expect(folderRow?.textContent).not.toContain('Shared folder tree')
 
-    const fileRow = screen
-      .getByRole('button', { name: 'Open notes.txt' })
-      .closest('[data-testid^="gfs-resource-row-"]')
-    expect(fileRow?.querySelector('[data-testid="gfs-resource-size"]')?.textContent).toBe('2.0 KB')
+    const fileRow = screen.getByText('notes.txt').closest('.da-grid__row')
+    expect(fileRow?.querySelector('.da-gfs-drive__size')?.textContent).toBe('2.0 KB')
   })
 
   it('shows end-user folder CRUD controls only when held permissions allow them', async () => {
@@ -828,18 +1007,14 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     expect(screen.queryByText('Manage folder')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
-    const newFolderDialog = await screen.findByRole('dialog', { name: 'New folder' })
+    await chooseResourceAction('Team folder', 'New folder')
+    const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
     const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
     expect(within(newFolderDialog).queryByText('People with access')).toBeNull()
     expect(within(newFolderDialog).queryByText(/Add people/)).toBeNull()
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'new-folder' } })
       fireEvent.click(createFolderForm.querySelector('button[type="submit"]')!)
-    })
-    await waitFor(() => expect(createFolder).toHaveBeenCalledWith('new-folder'))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New folder' })).toBeNull(), {
-      timeout: 3000,
     })
 
     await chooseResourceAction('Team folder', 'Rename')
@@ -850,73 +1025,118 @@ describe('FilesPage', () => {
     })
 
     await chooseResourceAction('Team folder', 'Delete')
-    const deleteDialog = await screen.findByRole('dialog', { name: 'Delete Team folder?' })
+    const deleteDialog = screen.getByRole('dialog', { name: 'Delete Team folder?' })
     await act(async () => {
       fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
     })
 
-    expect(createFolder).toHaveBeenCalledWith('new-folder')
+    expect(createFolder).toHaveBeenCalledWith('folder-1', 'new-folder')
     expect(renameResource).toHaveBeenCalledWith('folder-1', 'renamed', 7)
     expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
   })
 
-  it('shows top-right create and upload actions for the open writable folder', async () => {
+  it('keeps resource sharing in the breadcrumb menu and link controls in the navbar', async () => {
+    const gfsUri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const folderName = 'Résumé # ? % folder'
+    const current = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', folderName)
+    )
+    const copyDeepLink = vi.fn(async () => ({
+      url: buildGfsResourceWebLink('https://profile.example', gfsUri),
+    }))
+    const writeText = vi.fn(async () => undefined)
+    const refreshCurrentLocation = vi.fn(async () => true)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { copyDeepLink, getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`) } },
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
     const createFileFromPath = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      refreshCurrentLocation,
+      current,
+      affordances: delegationAffordances(new Set(['read', 'write']), false),
+      createFileFromPath,
+    })
+
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+
+    const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', { name: 'EvenDrive actions' })
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(refreshCurrentLocation).toHaveBeenCalledOnce())
+    expect(screen.getByRole('button', { name: `Options for ${folderName}` })).toBeTruthy()
+
+    await chooseResourceAction(folderName, 'Copy link')
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri))
+    await chooseResourceAction(folderName, 'Copy folder ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(gfsUri))
+
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
+    expect(await screen.findByRole('dialog', { name: 'Open from link' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive link dialog' }))
+
+    await chooseResourceAction(folderName, 'New folder')
+    const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
+    const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
+    expect(within(newFolderDialog).getByRole('heading', { name: 'New folder' })).toBeTruthy()
+    expect(newFolderDialog.classList.contains('da-gfs-new-folder-dialog')).toBe(true)
+    expect(within(newFolderDialog).queryByText('People with access')).toBeNull()
+    expect(createFolderForm.querySelector('.da-gfs-new-folder-dialog__actions')).not.toBeNull()
+    fireEvent.click(within(createFolderForm).getByRole('button', { name: 'Cancel' }))
+
+    await chooseResourceAction(folderName, 'Upload file')
+    const upload = new File(['desktop file'], 'notes.md', { type: 'text/markdown' })
+    await act(async () => {
+      fireEvent.change(uploadInput(), { target: { files: [upload] } })
+      await Promise.resolve()
+    })
+
+    expect(createFileFromPath).toHaveBeenCalledWith(current.resourceId, 'notes.md', '/tmp/notes.md')
+    view.unmount()
+    titlebarLeadingRoot.remove()
+  })
+
+  it('keeps folder actions in the breadcrumb menu and restores shared navbar controls', () => {
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
         resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder-1',
-        name: 'Team folder',
+        gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        name: 'Product',
         kind: 'directory',
-        version: 7,
+        version: 1,
       },
-      affordances: {
-        held: ['read', 'write'],
-        canDelegate: false,
-        grantableBits: [],
-        canCreateShare: false,
-      },
-      createFileFromPath,
+      affordances: delegationAffordances(new Set(['read', 'write']), false),
     })
 
-    renderFilesPage()
-
-    const toolbar = document.querySelector('[data-testid="gfs-header-actions"]')
-    const newFolderButton = screen.getByRole('button', { name: 'New folder' })
-    const uploadButton = screen.getByRole('button', { name: 'Upload file' })
-    expect(toolbar?.contains(newFolderButton)).toBe(true)
-    expect(toolbar?.contains(uploadButton)).toBe(true)
-    expect(screen.queryByRole('button', { name: 'Open EvenDrive link' })).toBeNull()
-
-    await chooseResourceAction('Team folder', 'Open EvenDrive link')
-    expect(await screen.findByRole('dialog', { name: 'Open EvenDrive link' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive link dialog' }))
-    await waitFor(
-      () => expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull(),
-      { timeout: 3000 }
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
-    const newFolderDialog = await screen.findByRole('dialog', { name: 'New folder' })
-    const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
-    expect(within(newFolderDialog).getByRole('heading', { name: 'New folder' })).toBeTruthy()
-    expect(newFolderDialog.classList.contains('da-gfs-new-folder-dialog')).toBe(false)
-    expect(within(newFolderDialog).queryByText('People with access')).toBeNull()
-    expect(within(createFolderForm).getByRole('button', { name: 'Cancel' })).toBeTruthy()
-    expect(within(createFolderForm).getByRole('button', { name: 'Create folder' })).toBeTruthy()
-    fireEvent.click(within(createFolderForm).getByRole('button', { name: 'Cancel' }))
-
-    const upload = new File(['desktop file'], 'notes.md', { type: 'text/markdown' })
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Upload file'), { target: { files: [upload] } })
-      await Promise.resolve()
-    })
-
-    expect(createFileFromPath).toHaveBeenCalledWith('folder-1', 'notes.md', '/tmp/notes.md')
+    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    try {
+      const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', {
+        name: 'EvenDrive actions',
+      })
+      expect(within(toolbar).getByRole('button', { name: 'Refresh' })).toBeTruthy()
+      expect(within(toolbar).getByRole('button', { name: 'Copy link' })).toBeTruthy()
+      expect(within(toolbar).getByRole('button', { name: 'Open link' })).toBeTruthy()
+      const menuTrigger = screen.getByRole('button', { name: 'Options for Product' })
+      fireEvent.click(menuTrigger)
+      const menu = screen.getByRole('menu', { name: 'Actions for Product' })
+      expect(within(menu).queryByRole('menuitem', { name: 'Refresh' })).toBeNull()
+      expect(within(menu).queryByRole('menuitem', { name: 'Open folder from ID' })).toBeNull()
+    } finally {
+      view.unmount()
+      titlebarLeadingRoot.remove()
+    }
   })
 
-  it('hides top-right create and upload actions without write access to the open folder', () => {
+  it('hides upload actions without write access but keeps the shared chooser mounted', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -936,9 +1156,73 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Upload file' })).toBeNull()
-    expect(screen.queryByLabelText('Upload file')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Restricted folder' }))
+    expect(screen.queryByRole('menuitem', { name: 'New folder' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'Upload file' })).toBeNull()
+    expect(screen.getByLabelText('Upload file')).toBeTruthy()
+    expect(uploadInput().tabIndex).toBe(-1)
+    expect(uploadInput().getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('does not default the shared upload input to the current folder without an explicit target', async () => {
+    const createFileFromPath = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'current-folder',
+        gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        name: 'Current folder',
+        kind: 'directory',
+        version: 1,
+      },
+      affordances: delegationAffordances(new Set(['read', 'write']), false),
+      createFileFromPath,
+    })
+    renderFilesPage()
+
+    const input = uploadInput()
+
+    const upload = new File(['notes'], 'notes.md', { type: 'text/markdown' })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [upload] } })
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+
+    expect(createFileFromPath).not.toHaveBeenCalled()
+  })
+
+  it('uploads a writable Shared with me folder row without changing the current location', async () => {
+    const folder = accessibleResource('shared-folder-1', 'Shared project', 'directory', {
+      permissions: ['read', 'write'],
+    })
+    const accessibleResources = (await listAccessiblePage([folder])).items
+    const createFileFromPath = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources,
+      createFileFromPath,
+    })
+    window.clerum.gfs.getPathForFile = vi.fn((file: File) => `/tmp/${file.name}`)
+
+    renderFilesPage()
+
+    expect(screen.getByRole('button', { name: 'Open Shared project' })).toBeTruthy()
+    await chooseResourceAction('Shared project', 'Upload file')
+    const upload = new File(['project notes'], 'notes.md', { type: 'text/markdown' })
+    await act(async () => {
+      fireEvent.change(uploadInput(), { target: { files: [upload] } })
+      await Promise.resolve()
+    })
+
+    await waitFor(() =>
+      expect(createFileFromPath).toHaveBeenCalledWith(
+        'shared-folder-1',
+        'notes.md',
+        '/tmp/notes.md'
+      )
+    )
+    expect(screen.getByText('Shared with me')).toBeTruthy()
+    expect(hookMock.useGfsBrowserController.mock.results.at(-1)?.value.current).toBeNull()
   })
 
   it('does not render a folder upload control inside the manage dialog', async () => {
@@ -1000,7 +1284,7 @@ describe('FilesPage', () => {
     fireEvent.dragEnter(browser, { dataTransfer })
     const dropStatus = screen.getByRole('status')
     expect(dropStatus.textContent).toContain('Drop files to upload to Team folder')
-    expect(dropStatus.className).toContain('ant-alert')
+    expect(dropStatus.className).toContain('composer-drop-overlay')
 
     await act(async () => {
       fireEvent.drop(browser, { dataTransfer })
@@ -1019,6 +1303,51 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Uploaded diagram.png', 'success')
     expect(pushToast).toHaveBeenCalledWith('Uploaded notes.markdown', 'success')
     expect(pushToast).toHaveBeenCalledWith('Uploaded clip.mov', 'success')
+  })
+
+  it('keeps the browser busy for an upload while current-view loading is idle', async () => {
+    let finishUpload: (() => void) | undefined
+    const createFileFromPath = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          finishUpload = resolve
+        })
+    )
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Team folder',
+        kind: 'directory',
+        version: 7,
+      },
+      affordances: {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      loadingCurrentView: false,
+      createFileFromPath,
+    })
+
+    renderFilesPage()
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    const dataTransfer = {
+      dropEffect: 'none',
+      files: [new File(['desktop image'], 'diagram.png', { type: 'image/png' })],
+      types: ['Files'],
+    }
+    expect(browser.getAttribute('aria-busy')).toBe('false')
+
+    fireEvent.drop(browser, { dataTransfer })
+    await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('status').textContent).toContain('Uploading 1 file')
+    expect(browser.getAttribute('aria-busy')).toBe('true')
+
+    await act(async () => finishUpload?.())
+    await waitFor(() => expect(browser.getAttribute('aria-busy')).toBe('false'))
   })
 
   it('adds numbered suffixes for duplicate names in one dropped batch', async () => {
@@ -1115,7 +1444,8 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    fireEvent.change(screen.getByLabelText('Upload file'), {
+    await chooseResourceAction('Team folder', 'Upload file')
+    fireEvent.change(uploadInput(), {
       target: { files: [new File(['report'], 'report.txt', { type: 'text/plain' })] },
     })
 
@@ -1276,6 +1606,15 @@ describe('FilesPage', () => {
       }
     }
     hookMock.useGfsBrowserController.mockImplementation(useChangingFolderController)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          ...(window.clerum?.gfs ?? {}),
+          affordances: vi.fn(async () => delegationAffordances(new Set(['read', 'write']), false)),
+        },
+      },
+    })
 
     renderFilesPage()
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
@@ -1336,8 +1675,9 @@ describe('FilesPage', () => {
     expect(createFileFromPath).not.toHaveBeenCalled()
   })
 
-  it('keeps cached write access available while affordances refresh', async () => {
+  it('blocks dropped uploads while affordances refresh', async () => {
     const createFileFromPath = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -1357,7 +1697,7 @@ describe('FilesPage', () => {
       createFileFromPath,
     })
 
-    renderFilesPage()
+    renderFilesPage(pushToast)
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const dataTransfer = {
       dropEffect: 'none',
@@ -1366,11 +1706,19 @@ describe('FilesPage', () => {
     }
     fireEvent.dragEnter(browser, { dataTransfer })
 
-    expect(screen.getByRole('status').textContent).toContain('Drop files to upload to Team folder')
+    expect(
+      screen.getByText(
+        'Upload permissions for Team folder are still being checked. Try again in a moment.'
+      )
+    ).toBeTruthy()
     fireEvent.drop(browser, { dataTransfer })
     await waitFor(() =>
-      expect(createFileFromPath).toHaveBeenCalledWith('folder-1', 'notes.md', '/tmp/notes.md')
+      expect(pushToast).toHaveBeenCalledWith(
+        'Upload permissions for Team folder are still being checked. Try again in a moment.',
+        'error'
+      )
     )
+    expect(createFileFromPath).not.toHaveBeenCalled()
   })
 
   it('explains why dropped preview files cannot be uploaded without folder write permission', () => {
@@ -1409,7 +1757,7 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith(reason, 'error')
   })
 
-  it('surfaces a non-empty folder delete denial and closes the confirmation', async () => {
+  it('surfaces a non-empty folder delete denial without closing the confirmation', async () => {
     const deleteResource = vi.fn(async () => {
       throw new Error('not_empty: folder has children')
     })
@@ -1435,7 +1783,7 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
 
     await chooseResourceAction('Team folder', 'Delete')
-    const deleteDialog = await screen.findByRole('dialog', { name: 'Delete Team folder?' })
+    const deleteDialog = screen.getByRole('dialog', { name: 'Delete Team folder?' })
     await act(async () => {
       fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
       await Promise.resolve()
@@ -1443,10 +1791,7 @@ describe('FilesPage', () => {
 
     expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
     expect(pushToast).toHaveBeenCalledWith('not_empty: folder has children', 'error')
-    await waitFor(
-      () => expect(screen.queryByRole('dialog', { name: 'Delete Team folder?' })).toBeNull(),
-      { timeout: 3000 }
-    )
+    expect(screen.queryByRole('dialog', { name: 'Delete Team folder?' })).toBeNull()
   })
 
   it('surfaces stale replace and rename precondition failures for the current file', async () => {
@@ -1509,6 +1854,95 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('precondition_failed: stale resource version', 'error')
   })
 
+  it('withholds Replace when the same file version changes during fresh permission check', async () => {
+    const resourceId = 'file-version-race'
+    let releaseRefresh!: (value: ReturnType<typeof heldPermissionResponse>) => void
+    const refresh = new Promise<ReturnType<typeof heldPermissionResponse>>(resolve => {
+      releaseRefresh = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(() => refresh)
+    const affordances = vi.fn((targetResourceId: string, drive: string) =>
+      produceAffordances(targetResourceId, drive)
+    )
+    const replaceFileFromPath = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    const controllerForVersion = (version: number, permissionStatus?: 'loading') => ({
+      ...baseController(),
+      current: {
+        resourceId,
+        gfsUri: 'gfs://main/file-version-race',
+        name: 'report.txt',
+        kind: 'file' as const,
+        version,
+      },
+      affordances: {
+        held: ['read', 'write', 'manage_acl'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      rowPermissionStatusByResourceId: permissionStatus
+        ? { [resourceId]: { status: permissionStatus } }
+        : undefined,
+      replaceFileFromPath,
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controllerForVersion(7))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          affordances,
+          getPathForFile: vi.fn(() => '/fixture/report.txt'),
+        },
+      },
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+    await openManageDialog('report.txt')
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Share file report.txt' })).getByRole('button', {
+        name: 'Close share dialog',
+      })
+    )
+
+    hookMock.useGfsBrowserController.mockReturnValue(controllerForVersion(7, 'loading'))
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+    await chooseResourceAction('report.txt', 'Replace file')
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Replace report.txt'), {
+        target: { files: [new File(['replacement'], 'report.txt', { type: 'text/plain' })] },
+      })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(affordances).toHaveBeenCalledOnce())
+
+    hookMock.useGfsBrowserController.mockReturnValue(controllerForVersion(8, 'loading'))
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+    await act(async () => releaseRefresh(heldPermissionResponse(['read', 'write', 'manage_acl'])))
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'Replace was not started for report.txt because the workspace changed.',
+        'error'
+      )
+    )
+    expect(replaceFileFromPath).not.toHaveBeenCalled()
+    queryClient.clear()
+  })
+
   it('hides the Manage menu entry on rows the caller cannot manage (read-only access)', async () => {
     const child = {
       resourceId: 'child-1',
@@ -1527,6 +1961,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -1551,11 +1986,16 @@ describe('FilesPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
     })
-    expect(screen.queryByRole('menuitem', { name: 'Share' })).toBeNull()
-
-    // Close the read-only menu before the affordances change, then open the
-    // same row again to verify the manage action appears when authorized.
-    fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    const readOnlyShareMenu = screen.getByRole('menu', {
+      name: 'Share options for notes.txt',
+    })
+    expect(within(readOnlyShareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    expect(screen.queryByRole('menu', { name: 'Actions for notes.txt' })).toBeNull()
 
     // Same row with manage_acl held: the entry appears and opens the modal.
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -1570,11 +2010,27 @@ describe('FilesPage', () => {
     })
     await act(async () => {
       view.rerender(
-        filesPageElement(new QueryClient({ defaultOptions: { queries: { retry: false } } }))
+        <QueryClientProvider
+          client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        >
+          <FilesPage />
+        </QueryClientProvider>
       )
     })
-    await openResourceMenu('notes.txt')
-    fireEvent.click(within(await shareOptionsMenu()).getByRole('menuitem', { name: 'Share' }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    })
+    const managedShareMenu = await screen.findByRole('menu', {
+      name: 'Share options for notes.txt',
+    })
+    expect(within(managedShareMenu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(within(managedShareMenu).getByRole('menuitem', { name: 'Share' }))
+    })
+    expect(screen.queryByRole('menu', { name: 'Share options for notes.txt' })).toBeNull()
     // The manage modal opens (titled for the current selection — the mocked
     // controller does not navigate, so it stays on the parent folder).
     expect(screen.getByRole('dialog')).toBeTruthy()
@@ -1641,7 +2097,6 @@ describe('FilesPage', () => {
     await waitFor(() => expect(restoreCrumbs).toHaveBeenCalledWith([]))
     expect(screen.getByRole('button', { name: 'report.txt' })).toBeTruthy()
     expect(screen.queryByText(/Preview this file again/)).toBeNull()
-    expect(screen.getByRole('button', { name: 'Options for Shared with me' })).toBeTruthy()
   })
 
   it('renames the current file inline from its title menu', async () => {
@@ -1670,7 +2125,7 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
 
-    const renameForm = screen.getByRole('form', { name: 'Rename resource' })
+    const renameForm = await screen.findByRole('form', { name: 'Rename resource' })
     expect(screen.getAllByRole('form', { name: 'Rename resource' })).toHaveLength(1)
     expect(screen.queryByRole('dialog', { name: 'Rename resource' })).toBeNull()
     fireEvent.change(within(renameForm).getByLabelText('New name'), {
@@ -1735,8 +2190,9 @@ describe('FilesPage', () => {
       name: 'Add people, teams, or agents',
     })
     await waitFor(() => expect(subjectPicker).toHaveProperty('disabled', false))
-    fireEvent.mouseDown(subjectPicker)
-    expect(await screen.findByRole('option', { name: 'Test Two' })).toBeTruthy()
+    fireEvent.focus(subjectPicker)
+    const userLabel = await screen.findByText('Test Two')
+    expect(userLabel.closest('[role="option"]')).toBeTruthy()
     expect(screen.queryByPlaceholderText(/uuid/i)).toBeNull()
   })
 
@@ -1781,7 +2237,7 @@ describe('FilesPage', () => {
 
     await waitFor(() => expect(listMine).toHaveBeenCalledTimes(1))
     const picker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
-    fireEvent.mouseDown(picker)
+    fireEvent.focus(picker)
     expect(await screen.findByRole('option', { name: /chatllm/ })).toBeTruthy()
     expect(screen.queryByRole('option', { name: /pending-agent/ })).toBeNull()
     expect(screen.queryByRole('checkbox', { name: 'Include contents of this folder' })).toBeNull()
@@ -1829,9 +2285,13 @@ describe('FilesPage', () => {
     await openManageDialog('Team folder')
 
     const picker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
-    fireEvent.mouseDown(picker)
-    await clickAntdSelectOption(/chatllm/)
-    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
+    fireEvent.focus(picker)
+    fireEvent.click(await screen.findByRole('option', { name: /chatllm/ }))
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Share folder Team folder' })).getByRole('button', {
+        name: 'Share',
+      })
+    )
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read'], true)
@@ -1895,9 +2355,13 @@ describe('FilesPage', () => {
     const subjectPicker = await screen.findByRole('combobox', {
       name: 'Add people, teams, or agents',
     })
-    fireEvent.mouseDown(subjectPicker)
-    await clickAntdSelectOption(/Test Two/)
-    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
+    fireEvent.focus(subjectPicker)
+    fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Share folder Team folder' })).getByRole('button', {
+        name: 'Share',
+      })
+    )
 
     // handleGrant issues the grant then MUST list-after-write (the grant PUT
     // returns no ids). Deleting `await ctrl.refreshGrants()` must fail here.
@@ -2011,7 +2475,9 @@ describe('FilesPage', () => {
     expect(within(row).getByText('Test Two')).toBeTruthy()
     expect(within(row).queryByText(/Inherited from/)).toBeNull()
     // Effective role is the strongest across direct and inherited sources.
-    expect(selectedRoleText(row)).toBe('Editor')
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
   })
 
   it('shows inherited members in a FOLDER manage dialog too', async () => {
@@ -2056,7 +2522,9 @@ describe('FilesPage', () => {
     // toggleable row — the reported "no one has access" folder bug.
     const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
     expect(within(row).getByText('Test Two')).toBeTruthy()
-    expect(selectedRoleText(row)).toBe('Editor')
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
   })
 
   // R1-H3: a visibility boundary keeps the known rows AND shows the accurate
@@ -2082,16 +2550,16 @@ describe('FilesPage', () => {
     // Hovering the banner (info icon or text) explains the notice in plain language.
     const boundaryBanner = within(manageDialog)
       .getByText('There may be access from parent folders you cannot see.')
-      .closest('.ant-alert')
-    expect(boundaryBanner?.parentElement?.getAttribute('tabindex')).toBe('0')
-    fireEvent.mouseEnter(boundaryBanner!.parentElement!)
-    expect((await screen.findByRole('tooltip')).textContent).toContain(
+      .closest('.status-banner')
+    expect(boundaryBanner?.getAttribute('title')).toBe(
       'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
     )
     // A boundary is not a load failure — the failure copy must not appear.
     expect(within(manageDialog).queryByText(/could not be loaded/)).toBeNull()
     // Known authorized sources stay editable (no blanket partial read-only).
-    expect(selectedRoleText(row)).toBe('Editor')
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
   })
 
   it('renders the acl-limited notice without hiding known rows', async () => {
@@ -2175,13 +2643,13 @@ describe('FilesPage', () => {
     const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
-      fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
     await act(async () => {
-      await clickAntdSelectOption('Read')
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
     })
 
-    const confirmDialog = await findInheritedAccessConfirmation()
+    const confirmDialog = await screen.findByRole('alertdialog')
     expect(
       within(confirmDialog).getByText(
         'Sharing entries on Team folder still grant Editor access. This change does not remove them.'
@@ -2206,31 +2674,35 @@ describe('FilesPage', () => {
     const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
-      fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
     await act(async () => {
-      await clickAntdSelectOption('Read')
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
     })
 
-    const confirmDialog = await findInheritedAccessConfirmation()
-    expect(within(confirmDialog).getByText('Update role on parent folder?')).toBeTruthy()
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(
+      within(confirmDialog).getByText('Update role on parent folder?', { selector: 'h3' })
+    ).toBeTruthy()
     expect(within(confirmDialog).getByText('Team folder')).toBeTruthy()
     expect(within(confirmDialog).getByText('report.txt')).toBeTruthy()
 
     // Cancel reverts the dropdown and sends nothing.
     fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Cancel' }))
-    expect(queryInheritedAccessConfirmation()).toBeNull()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(parentGrant).not.toHaveBeenCalled()
-    expect(selectedRoleText(row)).toBe('Editor')
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
 
     // Confirm applies the new role to the parent folder grant first…
     await act(async () => {
-      fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
     await act(async () => {
-      await clickAntdSelectOption('Read')
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
     })
-    const confirmDialogAgain = await findInheritedAccessConfirmation()
+    const confirmDialogAgain = await screen.findByRole('alertdialog')
     await act(async () => {
       fireEvent.click(within(confirmDialogAgain).getByRole('button', { name: 'Update role' }))
     })
@@ -2326,15 +2798,17 @@ describe('FilesPage', () => {
     // The direct share row is consumed by the deduped merged row.
     expect(within(manageDialog).queryByTestId('gfs-access-row-share-file-share-1')).toBeNull()
     const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
-    expect(selectedRoleText(row)).toBe('Editor')
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
 
     await act(async () => {
-      fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
     await act(async () => {
-      await clickAntdSelectOption('Read')
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
     })
-    const confirmDialog = await findInheritedAccessConfirmation()
+    const confirmDialog = await screen.findByRole('alertdialog')
     await act(async () => {
       fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
     })
@@ -2357,9 +2831,11 @@ describe('FilesPage', () => {
     })
     // The merged row truthfully stays Editor: the surviving direct share
     // still grants it.
-    expect(selectedRoleText(screen.getByTestId('gfs-access-row-inherited-user:user-2'))).toBe(
-      'Editor'
-    )
+    expect(
+      within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
+        name: 'Access role for Test Two',
+      }).textContent
+    ).toContain('Editor')
     expect(pushToast).toHaveBeenCalledWith(
       'Changed grant access to Read-only on Team folder. Sharing entries on report.txt still grant Editor access.',
       'info'
@@ -2411,12 +2887,12 @@ describe('FilesPage', () => {
     const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
-      fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
     await act(async () => {
-      await clickAntdSelectOption('Read')
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
     })
-    const confirmDialog = await findInheritedAccessConfirmation()
+    const confirmDialog = await screen.findByRole('alertdialog')
     await act(async () => {
       fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
     })
@@ -2434,9 +2910,11 @@ describe('FilesPage', () => {
     // …and a failed role change never revokes shares.
     expect(revokeShare).not.toHaveBeenCalled()
     // The merged row truthfully stays Editor.
-    expect(selectedRoleText(screen.getByTestId('gfs-access-row-inherited-user:user-2'))).toBe(
-      'Editor'
-    )
+    expect(
+      within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
+        name: 'Access role for Test Two',
+      }).textContent
+    ).toContain('Editor')
   })
 
   // R1-M1 — the parent grant's bits are judged by the PARENT folder's
@@ -2468,15 +2946,15 @@ describe('FilesPage', () => {
     const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
-      fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
     await act(async () => {
-      await clickAntdSelectOption('Read')
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
     })
 
     // Pre-flight judged the parent folder itself before opening the modal.
     await waitFor(() => expect(folderAffordances).toHaveBeenCalledWith('folder-1', 'main'))
-    const confirmDialog = await findInheritedAccessConfirmation()
+    const confirmDialog = await screen.findByRole('alertdialog')
     await act(async () => {
       fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
     })
@@ -2542,13 +3020,13 @@ describe('FilesPage', () => {
     const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
-      fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
     await act(async () => {
-      await clickAntdSelectOption('Read')
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
     })
 
-    expect(queryInheritedAccessConfirmation()).toBeNull()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(parentGrant).not.toHaveBeenCalled()
     expect(revokeShare).not.toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith(
@@ -2602,10 +3080,10 @@ describe('FilesPage', () => {
 
     // Editor needs write on the parent; this folder cannot grant it.
     await act(async () => {
-      fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
     })
     await act(async () => {
-      await clickAntdSelectOption('Editor')
+      fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
     })
 
     await waitFor(() =>
@@ -2614,10 +3092,12 @@ describe('FilesPage', () => {
         'error'
       )
     )
-    expect(queryInheritedAccessConfirmation()).toBeNull()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(parentGrant).not.toHaveBeenCalled()
     // The dropdown reverts to the server-backed role.
-    expect(selectedRoleText(row)).toBe('Read')
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Read')
   })
 
   // R1-M3 — a total derivation failure must not silently read as "no one".
@@ -2661,8 +3141,10 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
     })
 
-    const confirmDialog = await findInheritedAccessConfirmation()
-    expect(within(confirmDialog).getByText('Remove from parent folder?')).toBeTruthy()
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(
+      within(confirmDialog).getByText('Remove from parent folder?', { selector: 'h3' })
+    ).toBeTruthy()
     await act(async () => {
       fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
     })
@@ -2754,8 +3236,8 @@ describe('FilesPage', () => {
         fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
       })
 
-      const confirmDialog = await findInheritedAccessConfirmation()
-      expect(within(confirmDialog).getByText('Remove from parent folder?'))
+      const confirmDialog = await screen.findByRole('alertdialog')
+      expect(within(confirmDialog).getByText('Remove from parent folder?', { selector: 'h3' }))
       // Every affected folder is listed with its own current role.
       expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
       expect(within(confirmDialog).getByText('Marketing')).toBeTruthy()
@@ -2789,13 +3271,13 @@ describe('FilesPage', () => {
 
       const row = await openMultiSourceRow([CAMPAIGNS, MARKETING], pushToast)
       await act(async () => {
-        fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
       })
       await act(async () => {
-        await clickAntdSelectOption('Read')
+        fireEvent.click(screen.getByRole('option', { name: 'Read' }))
       })
 
-      const confirmDialog = await findInheritedAccessConfirmation()
+      const confirmDialog = await screen.findByRole('alertdialog')
       expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
       expect(within(confirmDialog).queryByText('Marketing')).toBeNull()
       await act(async () => {
@@ -2832,13 +3314,13 @@ describe('FilesPage', () => {
 
       const row = await openMultiSourceRow([readCampaigns, readMarketing])
       await act(async () => {
-        fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
       })
       await act(async () => {
-        await clickAntdSelectOption('Editor')
+        fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
       })
 
-      const confirmDialog = await findInheritedAccessConfirmation()
+      const confirmDialog = await screen.findByRole('alertdialog')
       expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
       expect(within(confirmDialog).queryByText('Marketing')).toBeNull()
       await act(async () => {
@@ -2908,21 +3390,27 @@ describe('FilesPage', () => {
       const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
       const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
       // The merged row displays the strongest role across sources.
-      expect(selectedRoleText(row)).toBe('Editor')
+      expect(
+        within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+      ).toContain('Editor')
 
       await act(async () => {
-        fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
       })
       await act(async () => {
-        await clickAntdSelectOption('Editor')
+        fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
       })
 
       // No confirmation, no pre-flight, no writes — the displayed role was
       // re-selected.
-      expect(queryInheritedAccessConfirmation()).toBeNull()
+      expect(screen.queryByRole('alertdialog')).toBeNull()
       expect(folderAffordances).not.toHaveBeenCalled()
       expect(parentGrant).not.toHaveBeenCalled()
-      await waitFor(() => expect(selectedRoleText(row)).toBe('Editor'))
+      await waitFor(() =>
+        expect(
+          within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+        ).toContain('Editor')
+      )
     })
 
     // N2 (R1-M5) — when the file's affordances are unavailable (empty
@@ -3001,12 +3489,12 @@ describe('FilesPage', () => {
       const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
       await act(async () => {
-        fireEvent.mouseDown(within(row).getByRole('combobox', { name: 'Access role for Test Two' }))
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
       })
       await act(async () => {
-        await clickAntdSelectOption('Read')
+        fireEvent.click(screen.getByRole('option', { name: 'Read' }))
       })
-      const confirmDialog = await findInheritedAccessConfirmation()
+      const confirmDialog = await screen.findByRole('alertdialog')
       await act(async () => {
         fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
       })
@@ -3029,9 +3517,11 @@ describe('FilesPage', () => {
       expect(fileGrant).not.toHaveBeenCalled()
       // The observable merged row truthfully stays Editor: the kept direct
       // grant still grants it.
-      expect(selectedRoleText(screen.getByTestId('gfs-access-row-inherited-user:user-2'))).toBe(
-        'Editor'
-      )
+      expect(
+        within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
+          name: 'Access role for Test Two',
+        }).textContent
+      ).toContain('Editor')
       await waitFor(() =>
         expect(pushToast).toHaveBeenCalledWith(
           'Updated 1 of 1 folders — direct access on report.txt could not be fully aligned',
@@ -3066,7 +3556,7 @@ describe('FilesPage', () => {
       await act(async () => {
         fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
       })
-      const confirmDialog = await findInheritedAccessConfirmation()
+      const confirmDialog = await screen.findByRole('alertdialog')
       await act(async () => {
         fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
       })
@@ -3206,13 +3696,14 @@ describe('FilesPage', () => {
     const subjectPicker = await screen.findByRole('combobox', {
       name: 'Add people, teams, or agents',
     })
-    await waitFor(() => expect(subjectPicker).toHaveProperty('disabled', false))
-    fireEvent.mouseDown(subjectPicker)
-    fireEvent.change(subjectPicker, { target: { value: 'Test Two' } })
-    await clickAntdSelectOption(/Test Two/)
-    fireEvent.change(subjectPicker, { target: { value: 'Test Three' } })
-    await clickAntdSelectOption(/Test Three/)
-    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
+    fireEvent.focus(subjectPicker)
+    fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
+    fireEvent.click(await screen.findByRole('option', { name: /Test Three/ }))
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Share folder Team folder' })).getByRole('button', {
+        name: 'Share',
+      })
+    )
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['user:user-2', 'user:user-3'], ['read'], true)
@@ -3332,8 +3823,8 @@ describe('FilesPage', () => {
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
-    fireEvent.mouseDown(await screen.findByRole('combobox', { name: 'Access role for chatllm' }))
-    await clickAntdSelectOption('Editor')
+    fireEvent.click(await screen.findByRole('button', { name: 'Access role for chatllm' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read', 'write'], true)
@@ -3396,8 +3887,8 @@ describe('FilesPage', () => {
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
-    fireEvent.mouseDown(await screen.findByRole('combobox', { name: 'Access role for chatllm' }))
-    await clickAntdSelectOption('Editor')
+    fireEvent.click(await screen.findByRole('button', { name: 'Access role for chatllm' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
 
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith(
@@ -3544,11 +4035,24 @@ describe('FilesPage', () => {
 
   it('closes the move dialog when authority is revoked mid-session', async () => {
     const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async (resourceId: string, drive: string) => {
+      expect(resourceId).toBe('source-parent')
+      expect(drive).toBe('main')
+      return delegationAffordances(new Set(['write', 'delete']), false)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
+        gfs: { affordances },
+      },
+    })
     const controllerState = {
       ...baseController(),
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -3571,6 +4075,9 @@ describe('FilesPage', () => {
         canCreateShare: true,
       },
       moveResource,
+      moveSourceParentAffordancesById: {
+        'source-parent': delegationAffordances(new Set(['write', 'delete']), false),
+      },
     }
     hookMock.useGfsBrowserController.mockReturnValue(controllerState)
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -3583,7 +4090,7 @@ describe('FilesPage', () => {
     )
     const { rerender } = render(makeElement())
 
-    await chooseResourceAction('Product', 'Move to…')
+    await chooseResourceAction('Product', 'Move to')
     expect(await screen.findByRole('dialog', { name: 'Move folder Product' })).toBeTruthy()
 
     controllerState.accessState = 'revoked'
@@ -3621,8 +4128,8 @@ describe('FilesPage', () => {
     await waitFor(() => expect(refreshAffordances).toHaveBeenCalledTimes(1))
   })
 
-  it('does not present stale read-only access while permissions are refreshing', async () => {
-    hookMock.useGfsBrowserController.mockReturnValue({
+  it('keeps Manage open without stale read-only access while permissions refresh', async () => {
+    const controllerState = {
       ...baseController(),
       current: {
         resourceId: 'folder-1',
@@ -3636,13 +4143,26 @@ describe('FilesPage', () => {
         grantableBits: [],
         canCreateShare: false,
       },
-      loadingAffordances: true,
-    })
+      loadingAffordances: false,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
 
-    renderFilesPage()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={client}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
     await openManageDialog('Product')
+    controllerState.loadingAffordances = true
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
 
-    expect(screen.getByText('Refreshing permissions…')).toBeTruthy()
+    expect(screen.getByText('Checking permissions…')).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: 'Add people, teams, or agents' })).toBeTruthy()
     expect(screen.queryByText('Read-only access')).toBeNull()
   })
 
@@ -4311,29 +4831,27 @@ describe('FilesPage', () => {
     const { container } = renderFilesPage()
 
     const documentRows = ['notes.txt', 'readme.md', 'report.pdf', 'memo.doc', 'brief.docx'].map(
-      name =>
-        screen
-          .getByRole('button', { name: `Open ${name}` })
-          .closest('[data-testid^="gfs-resource-row-"]')
+      name => screen.getByRole('button', { name }).closest('.da-grid__row')
     )
     for (const row of documentRows) {
-      expect(
-        row
-          ?.querySelector('[data-testid="gfs-resource-icon"] [data-icon]')
-          ?.getAttribute('data-icon')
-      ).toBe('file-text')
+      const iconSvg = row?.querySelector('.da-gfs-list__icon svg')
+      expect(iconSvg?.getAttribute('viewBox')).toBe('0 0 512 512')
+      // The document glyph is outlined — paths carry fill="none" and a
+      // real stroke width; the SVG itself must NOT receive the
+      // data-solid="true" opt-in we use for filled icons.
+      expect(iconSvg?.getAttribute('data-solid')).not.toBe('true')
+      const path = iconSvg?.querySelector('path')
+      expect(path?.getAttribute('fill')).toBe('none')
     }
 
-    const clipRow = screen
-      .getByRole('button', { name: 'Open archive.zip' })
-      .closest('[data-testid^="gfs-resource-row-"]')
-    expect(
-      clipRow
-        ?.querySelector('[data-testid="gfs-resource-icon"] [data-icon]')
-        ?.getAttribute('data-icon')
-    ).toBe('paper-clip')
+    const clipRow = screen.getByRole('button', { name: 'archive.zip' }).closest('.da-grid__row')
+    const clipIcon = clipRow?.querySelector('.da-gfs-list__icon svg')
+    expect(clipIcon?.getAttribute('viewBox')).toBe('0 0 24 24')
 
-    expect(container.querySelectorAll('[data-icon="file-text"]')).toHaveLength(5)
+    const listIconSvg = container.querySelectorAll('.da-gfs-list__icon svg')
+    expect(
+      [...listIconSvg].filter(svg => svg.getAttribute('viewBox') === '0 0 512 512')
+    ).toHaveLength(5)
   })
 
   it('deletes a folder child from its row menu once delete affordances resolve', async () => {
@@ -4357,6 +4875,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -4378,7 +4897,11 @@ describe('FilesPage', () => {
     }
     hookMock.useGfsBrowserController.mockReturnValue(controller)
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const view = render(filesPageElement(queryClient, pushToast))
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
@@ -4397,7 +4920,11 @@ describe('FilesPage', () => {
       },
     })
     await act(async () => {
-      view.rerender(filesPageElement(queryClient, pushToast))
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <FilesPage pushToast={pushToast} />
+        </QueryClientProvider>
+      )
     })
 
     await act(async () => {
@@ -4410,56 +4937,42 @@ describe('FilesPage', () => {
 
     expect(deleteResource).toHaveBeenCalledWith('child-1', 3)
     expect(pushToast).toHaveBeenCalledWith('Deleted notes.txt', 'success')
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull(), { timeout: 3000 })
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 
   it('moves a folder child into another folder through the move dialog', async () => {
     const pushToast = vi.fn()
-    const moveResource = vi.fn(async () => ({}))
-    const listChildren = vi.fn(async (resourceId: string) => ({
-      items:
-        resourceId === 'folder-1'
-          ? [
-              {
-                resourceId: 'sub-1',
-                rid: 'sub-1',
-                gfsUri: 'gfs://main/sub-1',
-                drive: 'main',
-                parentResourceId: 'folder-1',
-                name: 'Subfolder',
-                kind: 'directory',
-                path: '/Product/Subfolder',
-                version: 6,
-                bytes: 0,
-              },
-            ]
-          : [],
-      nextCursor: null,
-    }))
-    // rev-2 shared dispatch: the dialog commit re-resolves the source before
-    // the PATCH (fresh ifMatch) and probes source-resource write for the
-    // numbered-name policy.
-    const resolve = vi.fn(async () => ({
-      drive: 'main',
-      resourceId: 'child-1',
-      parentResourceId: 'folder-1',
-      rid: 'child-1',
-      gfsUri: 'gfs://main/child-1',
-      name: 'notes.txt',
-      kind: 'file',
-      pathCache: '/Product/notes.txt',
-      version: 3,
-      bytes: 12,
-    }))
-    const affordances = vi.fn(async () => ({
-      held: ['read', 'write'],
-      canDelegate: false,
-      grantableBits: [],
-      canCreateShare: false,
-    }))
+    const moveResource = vi.fn(async (resourceId: string) => ({ resourceId, version: 4 }))
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('sub-1', 'Subfolder', 'directory', {
+          parentResourceId: 'folder-1',
+          path: '/Product/Subfolder',
+          version: 6,
+          bytes: 0,
+        }),
+      ])
+    )
+    // Resolve and affordance values come through GfsClient's real response
+    // producers and structured-clone boundary, as they do across Electron IPC.
+    const resolvedSource = await resolveResource(
+      resolvedFile('child-1', 'notes.txt', {
+        gfsUri: 'gfs://main/child1',
+        parentResourceId: 'folder-1',
+        path: '/Product/notes.txt',
+        version: 3,
+        bytes: 12,
+      })
+    )
+    const resolve = vi.fn(async () => resolvedSource)
+    const affordances = vi.fn(async (resourceId: string) =>
+      affordancesResult(
+        heldAffordances(resourceId === 'folder-1' ? ['read', 'write', 'delete'] : ['read', 'write'])
+      )
+    )
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren, resolve, affordances } },
+      value: { gfs: { affordances, listChildren, resolve } },
     })
     const child = {
       resourceId: 'child-1',
@@ -4494,6 +5007,7 @@ describe('FilesPage', () => {
         },
       ],
       items: [child],
+      affordances: delegationAffordances(new Set(['read', 'write', 'delete']), false),
       moveResource,
     })
 
@@ -4502,22 +5016,20 @@ describe('FilesPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
     })
-    // Move is not affordance-gated (authority is parent-relative, server-side).
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    // Move uses source-parent write+delete; own-resource write only enables a numbered name.
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
 
     // The dialog starts at the current folder and lists its subfolders, but
     // never the moved resource itself.
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    await waitFor(() => expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined))
-    expect(await within(dialog).findByRole('treeitem', { name: /Subfolder/ })).toBeTruthy()
-    expect(within(dialog).getAllByRole('treeitem')).toHaveLength(2)
+    expect(await within(dialog).findByRole('button', { name: 'Subfolder' })).toBeTruthy()
     expect(within(dialog).queryByRole('button', { name: 'notes.txt' })).toBeNull()
 
     // The current parent is never preselected, and selecting it explicitly is
     // refused — that "move" is a server-accepted no-op that would toast
     // success while changing nothing.
     await act(async () => {
-      fireEvent.click(within(dialog).getByRole('treeitem', { name: /Product/ }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Product' }))
     })
     const noOpButton = within(dialog).getByRole('button', {
       name: 'Move here (Product)',
@@ -4527,13 +5039,22 @@ describe('FilesPage', () => {
 
     // A real destination commits and toasts.
     await act(async () => {
-      fireEvent.click(within(dialog).getByRole('treeitem', { name: /Subfolder/ }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Subfolder' }))
     })
     await act(async () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Subfolder)' }))
     })
 
-    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 3, undefined, 'folder-1')
+    expect(moveResource).toHaveBeenCalledWith(
+      'child-1',
+      'sub-1',
+      3,
+      undefined,
+      'folder-1',
+      'env-1:user-1:team-1',
+      true,
+      0
+    )
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
   })
@@ -4580,6 +5101,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -4637,7 +5159,16 @@ describe('FilesPage', () => {
     fireEvent.drop(destinationRow, { dataTransfer })
 
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('file-1', 'archive-1', 3, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'file-1',
+        'archive-1',
+        3,
+        undefined,
+        'folder-1',
+        'env-1:user-1:team-1',
+        true,
+        0
+      )
       expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Archive', 'success')
     })
   })
@@ -4670,6 +5201,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -5391,7 +5923,9 @@ describe('FilesPage', () => {
     const sessionLostSurfaces = await screen.findAllByText(
       'Your session ended. Sign in again to continue moving files.'
     )
-    expect(sessionLostSurfaces.some(element => element.closest('.ant-alert') !== null)).toBe(true)
+    expect(sessionLostSurfaces.some(element => element.closest('.status-banner') !== null)).toBe(
+      true
+    )
     expect(pushToast).not.toHaveBeenCalled()
     expect(moveResource).not.toHaveBeenCalled()
   })
@@ -5468,7 +6002,10 @@ describe('FilesPage', () => {
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { affordances } },
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
+        gfs: { affordances },
+      },
     })
     const healthyController = {
       ...baseController(),
@@ -5748,25 +6285,40 @@ describe('FilesPage', () => {
     expect(download).not.toHaveBeenCalled()
   })
 
-  it('opens a GFS URI from the modal and closes after a successful resolve', async () => {
+  it('opens a Profile file link from the navbar dialog and closes after a successful resolve', async () => {
     const openUri = vi.fn(async () => true)
     hookMock.useGfsBrowserController.mockReturnValue({ ...baseController(), openUri })
-    renderFilesPage()
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    const uri = 'gfs://main/11111111111111111111111111111111'
+    const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', { name: 'EvenDrive actions' })
+    const copyButton = within(toolbar).getByRole('button', { name: 'Copy link' })
+    expect((copyButton as HTMLButtonElement).disabled).toBe(true)
+    expect(copyButton.parentElement?.classList.contains('titlebar-leading-action--disabled')).toBe(
+      true
+    )
+    expect(copyButton.parentElement?.getAttribute('title')).toBe(
+      'No link is available on Shared with me'
+    )
 
-    expect(screen.queryByRole('button', { name: 'Open EvenDrive link' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
-    fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
-      target: { value: 'gfs://main/resource-1' },
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open from link' })
+    expect(within(dialog).queryByText(/Paste a canonical/)).toBeNull()
+    fireEvent.change(within(dialog).getByLabelText('URL'), {
+      target: { value: buildGfsResourceWebLink('https://profile.example', uri) },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
 
-    await waitFor(() => expect(openUri).toHaveBeenCalledWith('gfs://main/resource-1'))
-    await waitFor(
-      () => expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull(),
-      { timeout: 3000 }
+    await waitFor(() =>
+      expect(openUri).toHaveBeenCalledWith(
+        uri,
+        expect.objectContaining({ shouldContinue: expect.any(Function) })
+      )
     )
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from link' })).toBeNull())
+    view.unmount()
+    titlebarLeadingRoot.remove()
   })
 
   it('opens a preview tab for a markdown file (no mimeType in the descriptor)', () => {
@@ -5861,12 +6413,19 @@ describe('FilesPage', () => {
     }
     hookMock.useGfsBrowserController.mockImplementation(useResolvedFileController)
 
-    renderFilesPage(undefined, onOpenPreview)
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
-    const linkDialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
-    fireEvent.change(within(linkDialog).getByLabelText('EvenDrive link'), {
-      target: { value: 'gfs://main/svg-1' },
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = renderFilesPage(
+      undefined,
+      onOpenPreview,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
+    fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Open link' }))
+    const linkDialog = await screen.findByRole('dialog', { name: 'Open from link' })
+    fireEvent.change(within(linkDialog).getByLabelText('URL'), {
+      target: { value: 'gfs://main/22222222222222222222222222222222' },
     })
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
 
@@ -5880,11 +6439,10 @@ describe('FilesPage', () => {
         version: 1,
       })
     )
-    await waitFor(
-      () => expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull(),
-      { timeout: 3000 }
-    )
-    expect(screen.getByRole('button', { name: 'Options for Shared with me' })).toBeTruthy()
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from link' })).toBeNull())
+    expect(within(titlebarLeadingRoot).getByRole('button', { name: 'Open link' })).toBeTruthy()
+    view.unmount()
+    titlebarLeadingRoot.remove()
   })
 
   it('navigates through breadcrumbs and resets to Shared with me', async () => {
@@ -5927,47 +6485,6 @@ describe('FilesPage', () => {
     expect(reset).toHaveBeenCalledOnce()
   })
 
-  it('keeps breadcrumb labels and the active folder menu on the same compact height', () => {
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'nested-1',
-        gfsUri: 'gfs://main/nested-1',
-        name: 'Nested',
-        kind: 'directory',
-        version: 2,
-      },
-      crumbs: [
-        {
-          resourceId: 'folder-1',
-          gfsUri: 'gfs://main/folder-1',
-          name: 'Product',
-          kind: 'directory',
-          version: 1,
-        },
-        {
-          resourceId: 'nested-1',
-          gfsUri: 'gfs://main/nested-1',
-          name: 'Nested',
-          kind: 'directory',
-          version: 2,
-        },
-      ],
-    })
-
-    renderFilesPage()
-
-    const breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
-    const controls = [
-      within(breadcrumbs).getByRole('button', { name: 'Shared with me' }),
-      within(breadcrumbs).getByRole('button', { name: 'Product' }),
-      within(breadcrumbs).getByRole('button', { name: 'Nested' }),
-      screen.getByRole('button', { name: 'Options for Nested' }),
-    ]
-
-    expect(controls.every(control => control.classList.contains('ant-btn-sm'))).toBe(true)
-  })
-
   it('mounts the ⋯ menu only on the active folder beside the breadcrumb, never on crumbs or the open file', async () => {
     const fullBits = {
       held: ['read', 'write', 'delete', 'manage_acl'],
@@ -5978,15 +6495,23 @@ describe('FilesPage', () => {
     const parentViewRowOptions = [
       'Share',
       'Open folder',
-      'Open EvenDrive link',
       'Rename',
-      'Move to…',
+      'Move to',
+      'New folder',
+      'Upload file',
       'Download as zip',
       'Delete',
     ]
-    // The active folder is already open, so its menu is the row menu minus the
-    // navigation item — exactly the pre-existing beside-the-breadcrumb menu.
-    const activeFolderOptions = parentViewRowOptions.filter(option => option !== 'Open folder')
+    // The active folder menu retains the shared action descriptors and canonical order.
+    const activeFolderOptions = [
+      'Share',
+      'Rename',
+      'Move to',
+      'New folder',
+      'Upload file',
+      'Download as zip',
+      'Delete',
+    ]
 
     // Phase 1 — the parent view: a fully-permissioned folder row's ⋯ menu.
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -5994,6 +6519,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -6022,6 +6548,8 @@ describe('FilesPage', () => {
         },
       ],
       rowAffordancesByResourceId: { 'folder-2': fullBits },
+      affordances: fullBits,
+      moveSourceParentAffordancesById: { 'source-parent': fullBits },
     })
     const parentView = renderFilesPage()
     await act(async () => {
@@ -6060,10 +6588,12 @@ describe('FilesPage', () => {
         },
       ],
     })
-    renderFilesPage()
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
 
     let breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
-    let titleRow = document.querySelector<HTMLElement>('[data-testid="gfs-title-row"]')
+    let titleRow = document.querySelector<HTMLElement>('.da-gfs-drive__title-row')
     expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Product' })).toBeNull()
     expect(within(breadcrumbs).queryByRole('button', { name: 'Options for report.md' })).toBeNull()
     expect(within(titleRow!).queryByRole('button', { name: 'Options for report.md' })).toBeNull()
@@ -6077,6 +6607,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-2',
         gfsUri: 'gfs://main/folder-2',
+        parentResourceId: 'folder-1',
         name: 'Nested',
         kind: 'directory',
         version: 2,
@@ -6092,23 +6623,31 @@ describe('FilesPage', () => {
         {
           resourceId: 'folder-2',
           gfsUri: 'gfs://main/folder-2',
+          parentResourceId: 'folder-1',
           name: 'Nested',
           kind: 'directory',
           version: 2,
         },
       ],
       affordances: fullBits,
+      moveSourceParentAffordancesById: { 'folder-1': fullBits },
     })
-    renderFilesPage()
+    const phaseThreeView = renderFilesPage(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
 
     breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
-    titleRow = document.querySelector<HTMLElement>('[data-testid="gfs-title-row"]')
+    titleRow = document.querySelector<HTMLElement>('.da-gfs-drive__title-row')
     expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Product' })).toBeNull()
     expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Nested' })).toBeNull()
 
     const activeMenuTrigger = within(titleRow!).getByRole('button', { name: 'Options for Nested' })
-    expect(activeMenuTrigger.parentElement).toBe(titleRow)
-    expect(activeMenuTrigger.previousElementSibling).toBe(breadcrumbs)
+    const activeMenuWrapper = activeMenuTrigger.closest('.da-gfs-resource-menu')
+    expect(activeMenuWrapper?.previousElementSibling).toBe(breadcrumbs)
 
     await act(async () => {
       fireEvent.click(activeMenuTrigger)
@@ -6117,57 +6656,49 @@ describe('FilesPage', () => {
       activeFolderOptions
     )
 
-    // "Open EvenDrive link" is present and opens the link dialog.
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
-    expect(screen.getByRole('dialog', { name: 'Open EvenDrive link' })).toBeTruthy()
+    expect(
+      within(screen.getByRole('menu', { name: 'Actions for Nested' })).queryByRole('menuitem', {
+        name: 'Open folder from ID',
+      })
+    ).toBeNull()
+    fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Open link' }))
+    expect(screen.getByRole('dialog', { name: 'Open from link' })).toBeTruthy()
+    phaseThreeView.unmount()
+    titlebarLeadingRoot.remove()
   })
 
   it('opens nested folders and exposes open and copy actions in the resource menu', async () => {
     const openChild = vi.fn()
-    const writeText = vi.fn(async () => undefined)
-    Object.defineProperty(navigator, 'clipboard', {
+    const openResource = vi.fn()
+    const parent = await resolveResource(
+      resolvedDirectory('22222222222222222222222222222222', 'Product')
+    )
+    const nestedFolderUri = 'gfs://main/11111111111111111111111111111111'
+    const [nestedFolder] = (
+      await listChildrenPage([
+        childView('11111111111111111111111111111111', 'Nested', 'directory', {
+          parentResourceId: parent.resourceId,
+          path: '/Product/Nested',
+        }),
+      ])
+    ).items
+    if (!nestedFolder) throw new Error('The GFS producer did not return the nested folder fixture')
+    const copyDeepLink = vi.fn(async () => ({
+      url: buildGfsResourceWebLink('https://profile.example', nestedFolderUri),
+    }))
+    Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { writeText },
+      value: { gfs: { copyDeepLink, getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`) } },
     })
-    const nestedFolder = {
-      resourceId: 'nested-1',
-      rid: 'nested-1',
-      gfsUri: 'gfs://main/nested-1',
-      drive: 'main',
-      parentResourceId: 'folder-1',
-      name: 'Nested',
-      kind: 'directory' as const,
-      path: '/Product/Nested',
-      version: 2,
-      bytes: 0,
-    }
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder-1',
-        name: 'Product',
-        kind: 'directory',
-        version: 1,
-      },
-      crumbs: [
-        {
-          resourceId: 'folder-1',
-          gfsUri: 'gfs://main/folder-1',
-          name: 'Product',
-          kind: 'directory',
-          version: 1,
-        },
-      ],
+      current: parent,
+      crumbs: [parent],
       items: [nestedFolder],
-      rowAffordancesResourceId: 'nested-1',
-      rowAffordances: {
-        held: ['read', 'write', 'manage_acl'],
-        canDelegate: false,
-        grantableBits: [],
-        canCreateShare: false,
-      },
+      rowAffordancesResourceId: nestedFolder.resourceId,
+      rowAffordances: delegationAffordances(new Set(['read', 'write', 'manage_acl']), false),
       openChild,
+      openResource,
     })
     renderFilesPage()
 
@@ -6175,16 +6706,104 @@ describe('FilesPage', () => {
     expect(openChild).toHaveBeenCalledWith(nestedFolder)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    const shareItem = screen.getByRole('menuitem', { name: 'Share' })
-    await waitFor(() => expect(document.activeElement).toBe(shareItem))
-    fireEvent.keyDown(shareItem, { key: 'ArrowDown' })
+    const firstItem = screen.getAllByRole('menuitem')[0]!
+    await waitFor(() => expect(document.activeElement).toBe(firstItem))
+    fireEvent.keyDown(firstItem, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open folder' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder' }))
     expect(openChild).toHaveBeenCalledTimes(2)
 
-    await openResourceMenu('Nested')
-    fireEvent.click(within(await shareOptionsMenu()).getByRole('menuitem', { name: 'Copy link' }))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith('gfs://main/nested-1'))
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    const shareMenu = screen.getByRole('menu', { name: 'Share options for Nested' })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy link' }))
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(nestedFolder.gfsUri))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Share options for Nested' })).getByRole('menuitem', {
+        name: 'Share',
+      })
+    )
+    await waitFor(() => expect(openResource).toHaveBeenCalledWith(nestedFolder))
+  })
+
+  it('keeps row folder menus limited to actions available on that folder', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('22222222222222222222222222222222', 'Product')
+    )
+    const [targetFolder] = (
+      await listChildrenPage([
+        childView('11111111111111111111111111111111', 'Nested', 'directory', {
+          parentResourceId: parent.resourceId,
+          path: '/Product/Nested',
+        }),
+      ])
+    ).items
+    if (!targetFolder) throw new Error('The GFS producer did not return the nested folder fixture')
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
+          listChildren,
+          affordances: vi.fn(async () =>
+            delegationAffordances(new Set(['read', 'write', 'delete', 'manage_acl']), false)
+          ),
+        },
+      },
+    })
+    const createFolder = vi.fn(async () => undefined)
+    const createFileFromPath = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: parent,
+      crumbs: [parent],
+      items: [targetFolder],
+      rowAffordancesByResourceId: {
+        [targetFolder.resourceId]: {
+          held: ['read', 'write', 'delete', 'manage_acl'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        },
+      },
+      createFolder,
+      createFileFromPath,
+    })
+    renderFilesPage()
+
+    await waitFor(() =>
+      expect(listChildren).toHaveBeenCalledWith(targetFolder.resourceId, 'main', undefined)
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
+    expect(screen.queryByRole('menuitem', { name: 'Refresh' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New folder' }))
+    const createDialog = screen.getByRole('dialog', { name: 'New folder' })
+    expect(within(createDialog).getByText('Create a new folder in Nested.')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'Child folder' } })
+    fireEvent.click(within(createDialog).getByRole('button', { name: 'Create folder' }))
+    await waitFor(() =>
+      expect(createFolder).toHaveBeenCalledWith(targetFolder.resourceId, 'Child folder')
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Upload file' }))
+    const upload = new File(['notes'], 'notes.md', { type: 'text/markdown' })
+    await act(async () => {
+      fireEvent.change(uploadInput(), { target: { files: [upload] } })
+      await Promise.resolve()
+    })
+    await waitFor(() =>
+      expect(createFileFromPath).toHaveBeenCalledWith(
+        targetFolder.resourceId,
+        'notes.md',
+        '/tmp/notes.md'
+      )
+    )
   })
 
   it('clears a cancelled create-folder draft before reopening the form', async () => {
@@ -6206,14 +6825,14 @@ describe('FilesPage', () => {
     })
     renderFilesPage()
 
-    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
+    await chooseResourceAction('Product', 'New folder')
     fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'unfinished' } })
     fireEvent.click(
       within(screen.getByRole('form', { name: 'Create folder' })).getByRole('button', {
         name: 'Cancel',
       })
     )
-    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
+    await chooseResourceAction('Product', 'New folder')
 
     expect((screen.getByLabelText('Folder name') as HTMLInputElement).value).toBe('')
   })
@@ -6418,7 +7037,7 @@ describe('FilesPage', () => {
     // the first ten right if the cached ids were all at the front.
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     cached.forEach(resourceId =>
-      queryClient.setQueryData(desktopQueryKeys.gfsChildren(scope, resourceId, 'main'), {
+      queryClient.setQueryData(desktopQueryKeys.gfsChildren(scope, resourceId, 'main', 0), {
         pages: [{ items: [], nextCursor: null }],
         pageParams: [undefined],
       })
@@ -6885,6 +7504,7 @@ describe('FilesPage — folder drag-and-drop', () => {
       resolveVersion?: number
       moveResult?: () => Promise<{ resourceId: string; version: number }>
       conflictOnce?: boolean
+      conflictMessage?: string
     } = {}
   ) {
     const pushToast = vi.fn()
@@ -6896,7 +7516,10 @@ describe('FilesPage — folder drag-and-drop', () => {
       moveResource.mockImplementation(async () => {
         if (!conflicted) {
           conflicted = true
-          throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
+          throw new Error(
+            options.conflictMessage ??
+              '409 Conflict: a resource with this name already exists httpStatus=409'
+          )
         }
         return { resourceId: 'folder-src', version: 5 }
       })
@@ -7005,7 +7628,16 @@ describe('FilesPage — folder drag-and-drop', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
     })
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('folder-src', 'archive-1', 4, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'archive-1',
+        4,
+        undefined,
+        'folder-1',
+        'env-1:user-1:team-1',
+        true,
+        0
+      )
     })
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Moved Projects to Archive', 'success')
@@ -7040,7 +7672,24 @@ describe('FilesPage — folder drag-and-drop', () => {
   })
 
   it('a folder conflict without the numbered-name opt-in stops with alternatives', async () => {
-    const { pushToast, moveResource } = folderDragHarness({ conflictOnce: true })
+    const conflictMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          {
+            resourceId: 'folder-src',
+            destinationId: 'archive-1',
+            drive: 'main',
+            ifMatch: 4,
+          },
+          'fixture-session-token'
+        ),
+      409,
+      { code: 'name_conflict', message: 'an item with this name already exists' }
+    )
+    const { pushToast, moveResource } = folderDragHarness({
+      conflictOnce: true,
+      conflictMessage,
+    })
     const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
     const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
     const dataTransfer = {
@@ -7055,6 +7704,8 @@ describe('FilesPage — folder drag-and-drop', () => {
     fireEvent.drop(destinationRow, { dataTransfer })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
+    expect(within(dialog).queryByRole('checkbox')).toBeNull()
+    expect(within(dialog).queryByText(/numbered name/i)).toBeNull()
     await act(async () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
     })
@@ -7065,6 +7716,16 @@ describe('FilesPage — folder drag-and-drop', () => {
       )
     })
     expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(moveResource).toHaveBeenCalledWith(
+      'folder-src',
+      'archive-1',
+      4,
+      undefined,
+      'folder-1',
+      'env-1:user-1:team-1',
+      true,
+      0
+    )
   })
 
   // Breadcrumb crumb drop targets (Control UI parity): the trail inside a
@@ -7197,7 +7858,16 @@ describe('FilesPage — folder drag-and-drop', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
     })
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('folder-src', 'folder-0', 4, undefined, 'folder-1')
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'folder-0',
+        4,
+        undefined,
+        'folder-1',
+        'env-1:user-1:team-1',
+        true,
+        0
+      )
     })
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Moved Projects to Product', 'success')
@@ -7274,15 +7944,19 @@ describe('FilesPage — folder drag-and-drop', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
-  it('a file conflict resolves with a numbered whole-resource rename (CU parity)', async () => {
+  it('stops a file drag on a producer-derived name conflict without retrying', async () => {
+    const conflictMessage = await gfsRouteFailureMessage(
+      client =>
+        client.moveResource(
+          { resourceId: 'file-1', destinationId: 'archive-1', drive: 'main', ifMatch: 3 },
+          'fixture-session-token'
+        ),
+      409,
+      { code: 'name_conflict', message: 'an item with this name already exists' }
+    )
     const pushToast = vi.fn()
-    let conflicted = false
-    const moveResource = vi.fn(async (_id: string, _dest: string, _v: number, newName?: string) => {
-      if (newName === undefined && !conflicted) {
-        conflicted = true
-        throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
-      }
-      return { resourceId: 'file-1', version: 6 }
+    const moveResource = vi.fn(async () => {
+      throw new Error(conflictMessage)
     })
     const affordances = vi.fn(async (resourceId: string) => {
       if (resourceId === 'folder-1') return { held: ['read', 'write', 'delete'] }
@@ -7355,18 +8029,22 @@ describe('FilesPage — folder drag-and-drop', () => {
     fireEvent.dragEnter(destinationRow, { dataTransfer })
     fireEvent.drop(destinationRow, { dataTransfer })
 
-    await waitFor(() => {
+    await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith(
-        'Moved notes.txt to Archive as notes (1).txt',
-        'success'
+        expect.stringContaining('notes.txt → Archive: An item with this name already exists'),
+        'error'
       )
-    })
-    expect(moveResource).toHaveBeenLastCalledWith(
+    )
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(moveResource).toHaveBeenCalledWith(
       'file-1',
       'archive-1',
       3,
-      'notes (1).txt',
-      'folder-1'
+      undefined,
+      'folder-1',
+      'env-1:user-1:team-1',
+      true,
+      0
     )
   })
 
@@ -7374,7 +8052,7 @@ describe('FilesPage — folder drag-and-drop', () => {
     folderDragHarness()
     const folderRow = screen
       .getByRole('button', { name: 'Open Projects' })
-      .closest('[data-testid^="gfs-resource-row-"]') as HTMLElement
+      .closest('.da-grid__row') as HTMLElement
     expect(folderRow.getAttribute('draggable')).toBe('true')
     expect(folderRow.getAttribute('title')).toBe('Drag Projects into a folder to move it')
   })

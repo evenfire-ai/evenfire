@@ -249,8 +249,8 @@ describe('createBrokerTokenProvider — fail-closed contract', () => {
   it('oauth-context subject POSTs no identity — control-api resolves the context server-side', async () => {
     // The production factory (main.ts createMcpTokenProviderFactory) builds the
     // oauth-context provider with an EMPTY subject `{}` — control-api keys the
-    // shared grant by server.spec.contextRef (authoritative) and mcp-host
-    // transports no context identity (invariant I1). Assert the shape the factory
+    // shared grant by the authenticated Host's context (authoritative) and
+    // mcp-host transports no context identity (invariant I1). Assert the shape the factory
     // actually emits, not a contextId the host never sends (R2-M3).
     const f = stubFetch(() => jsonResponse(200, { token: 'ctx-tok', expiresAt: null }))
     const p = createBrokerTokenProvider({ name: 'gh' }, {}, deps(f))

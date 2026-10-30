@@ -29,7 +29,11 @@ describe('AppService setup and saved-session ownership', () => {
       getMe: vi.fn().mockRejectedValue(new Error('synthetic network failure')),
     }
 
-    await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.getSessionState()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 0,
+    })
     expect(app.getSessionGeneration()).toBe(0)
   })
 
@@ -77,7 +81,11 @@ describe('AppService setup and saved-session ownership', () => {
         provider === 'Google'
           ? service.googleLogin('synthetic-google-login-b')
           : service.passwordLogin('user-b@example.test', 'synthetic-password-b')
-      await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+      await expect(service.getSessionState()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+        sessionGeneration: 1,
+      })
       expect(app.authClient.getMe).not.toHaveBeenCalled()
 
       loginResponse.resolve({ token: 'synthetic-login-session-b', me: loginUser })
@@ -200,7 +208,11 @@ describe('AppService setup and saved-session ownership', () => {
     await setup
     restoredUser.resolve(user)
 
-    await expect(restore).resolves.toEqual({ authenticated: false, me: null })
+    await expect(restore).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 2,
+    })
     expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restB)
     expect(app.sessionToken).toBeNull()
     expect(app.me).toBeNull()

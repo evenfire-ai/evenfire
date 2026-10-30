@@ -1,22 +1,20 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import { useAuthContext } from '@contexts/AuthContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { Alert, Button as AntButton, Collapse, Dropdown, Flex, Input, Tag, Typography } from 'antd'
-import type { MenuProps } from 'antd'
+import { Button, IconButton, MenuItem } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
-  IconConnectors as ApiOutlined,
-  IconWorkflows as AppstoreOutlined,
-  IconClose as CloseOutlined,
-  IconAttachFile as FileTextOutlined,
-  IconContexts as FolderOutlined,
-  IconAttachFile as PaperClipOutlined,
-  IconAttachFile as PictureOutlined,
-  IconPlus as PlusOutlined,
-  IconChevronRight as RightOutlined,
-  IconUpload as UploadOutlined,
+  IconAttachFile,
+  IconClose,
+  IconConnectors,
+  IconContexts,
+  IconPlus,
+  IconUpload,
+  IconWorkflows,
 } from '@components/SidebarNav/icons'
 import {
   SHOW_AGENT_FILES_UI,
@@ -30,10 +28,14 @@ import {
   composerImageBudget,
   composerImageCountedBytes,
 } from '@constants/attachments'
+import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
+import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
+import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
+import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { formatFileSize } from '@lib/composerFileAdmission'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
@@ -121,12 +123,10 @@ function composerPerImageLimitMessage(
 }
 
 function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
-  if (attachment.type === 'plugin') return <AppstoreOutlined width={14} height={14} />
-  if (attachment.type === 'connector') return <ApiOutlined width={14} height={14} />
-  if (attachment.type === 'global_file') {
-    return <GfsFileIcon name={attachment.label} width={14} height={14} />
-  }
-  return <FolderOutlined width={14} height={14} />
+  if (attachment.type === 'plugin') return <IconWorkflows />
+  if (attachment.type === 'connector') return <IconConnectors />
+  if (attachment.type === 'global_file') return <GfsFileIcon name={attachment.label} />
+  return <IconContexts />
 }
 
 /** Status line of a document chip: what the user needs to know before sending. */
@@ -151,6 +151,7 @@ function getComposerFileNotice(file: ComposerFileAttachment): string | null {
 
 export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelProps) {
   const { selectedAgent } = useNavigationContext()
+  const { me } = useAuthContext()
   const {
     composerImageAttachments,
     composerFileAttachments,
@@ -160,6 +161,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     agentError,
     failedAgentSend,
     activeChatId,
+    workspaceChatTabId,
     activeMessageCount,
     composerFocusRequestId,
   } = useChatComposerStateContext()
@@ -187,9 +189,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     selectedAgent,
   })
   const { sharedFilesByContext, refreshSharedFiles } = useContextsDataController()
+  const agentCatalog = useAgentsDataController()
 
   const [composerAttachmentError, setComposerAttachmentError] = useState<string | null>(null)
   const [composerMenuOpen, setComposerMenuOpen] = useState(false)
+  const [composerSubmenu, setComposerSubmenu] = useState<
+    'plugins' | 'connectors' | 'agent-files' | null
+  >(null)
   const [pluginOptions, setPluginOptions] = useState<
     Array<{ id: string; label: string; namespace: string; name: string }>
   >([])
@@ -203,10 +209,34 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Per-chat draft from the module-scoped store. Typing only re-renders this
   // component (it's the sole subscriber); the value is restored automatically when
   // activeChatId changes and survives the inline→docked composer swap.
-  const [draft, setDraft] = useComposerDraft(activeChatId, selectedAgent ?? undefined)
+  const [draft, setDraft] = useComposerDraft(
+    activeChatId,
+    selectedAgent ?? undefined,
+    workspaceChatTabId
+  )
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
+  const composerMenuRef = useRef<HTMLSpanElement | null>(null)
+  // The reference submenu is portaled out of the composer (the drawer's
+  // overflow-clipping ancestors would otherwise crop it), so it needs an anchor
+  // ref per primary item and its own ref for click-outside + positioning.
+  const composerSubmenuRef = useRef<HTMLSpanElement | null>(null)
+  const pluginsItemRef = useRef<HTMLButtonElement | null>(null)
+  const connectorsItemRef = useRef<HTMLButtonElement | null>(null)
+  const agentFilesItemRef = useRef<HTMLButtonElement | null>(null)
+  const composerSubmenuAnchorRef =
+    composerSubmenu === 'connectors'
+      ? connectorsItemRef
+      : composerSubmenu === 'agent-files'
+        ? agentFilesItemRef
+        : pluginsItemRef
+  const submenuFlyoutPosition = useFlyoutPosition({
+    anchorRef: composerSubmenuAnchorRef,
+    flyoutRef: composerSubmenuRef,
+    open: composerMenuOpen && composerSubmenu !== null,
+    placement: 'right-of',
+  })
 
   // Issue #654: image capability comes from the host-projected per-model
   // decision shared with the selector and the send path — never from the
@@ -232,6 +262,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   )
   const agentFilesAvailable = Boolean(agentFilesState?.items?.length)
   const agentFilesDisabled = agentFilesLoading || !agentFilesAvailable
+
+  // Both refs: the submenu is portaled to document.body, so a mousedown on a
+  // submenu item is outside `composerMenuRef` and would close the menu before
+  // the item's click fires.
+  useClickOutside([composerMenuRef, composerSubmenuRef], composerMenuOpen, () => {
+    setComposerMenuOpen(false)
+    setComposerSubmenu(null)
+  })
 
   const resizeComposerInput = useCallback(() => {
     const textarea = composerInputRef.current
@@ -269,6 +307,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   useEffect(() => {
     setComposerAttachmentError(null)
     setComposerMenuOpen(false)
+    setComposerSubmenu(null)
     setPluginsLoaded(false)
     setPluginsLoading(false)
     setPluginOptions([])
@@ -366,10 +405,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const handleDraftChange = useCallback(
     (value: string) => {
-      setDraft(value)
+      const result = setDraft(value)
       // Clear any pending send error as the user resumes typing. No re-render up-tree
       // unless an error is actually present.
-      clearComposerSendError()
+      if (result.accepted) clearComposerSendError()
     },
     [clearComposerSendError, setDraft]
   )
@@ -388,10 +427,42 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Sending now would leave it out without saying so, so send stays disabled
   // until each chip is ready or removed.
   const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
+  const accessCatalog = agentCatalog.accessCatalog
+  const agentCatalogMatchesSession = Boolean(
+    me && accessCatalog && accessCatalog.userId === me.id && accessCatalog.teamId === me.teamId
+  )
+  const selectedAgentCatalogState = resolveAgentCatalogAvailability({
+    selectedAgent,
+    loading: agentCatalog.loading,
+    error: agentCatalog.error,
+    catalogMatchesSession: agentCatalogMatchesSession,
+    agentNames: agentCatalog.agentNames,
+  })
+  const selectedAgentCatalogMessage =
+    selectedAgentCatalogState === 'checking'
+      ? 'Checking agent access for this team…'
+      : selectedAgentCatalogState === 'error'
+        ? 'Could not verify agent access for this team. Retry the check before sending.'
+        : selectedAgentCatalogState === 'unavailable'
+          ? `${selectedAgent} is unavailable in this team. Select an available agent to send.`
+          : null
+  const selectedAgentSendBlocked =
+    selectedAgentCatalogState !== 'ready' && selectedAgentCatalogState !== 'available'
+  const agentCatalogNoticeId = useId()
   const handleSend = useCallback(() => {
-    if (imagesBlockedForSend || filesBlockedForSend) return
-    void onSend(draft)
-  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend])
+    if (imagesBlockedForSend || filesBlockedForSend || selectedAgentSendBlocked) {
+      return
+    }
+    if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
+    else void onSend(draft)
+  }, [
+    onSend,
+    draft,
+    imagesBlockedForSend,
+    filesBlockedForSend,
+    selectedAgentSendBlocked,
+    workspaceChatTabId,
+  ])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -424,6 +495,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     (attachment: ComposerReferenceAttachment) => {
       onAddComposerReferenceAttachments([attachment])
       setComposerMenuOpen(false)
+      setComposerSubmenu(null)
       setComposerAttachmentError(null)
     },
     [onAddComposerReferenceAttachments]
@@ -431,6 +503,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const openUploadPicker = useCallback(() => {
     setComposerMenuOpen(false)
+    setComposerSubmenu(null)
     composerFileInputRef.current?.click()
   }, [])
 
@@ -442,122 +515,20 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     if (!selectedAgentContext || !agentFilesAvailable) {
       setComposerAttachmentError('No Agent Files Available')
       setComposerMenuOpen(false)
+      setComposerSubmenu(null)
       return
     }
     setComposerMenuOpen(false)
+    setComposerSubmenu(null)
     setAgentFilesModalOpen(true)
   }, [agentFilesAvailable, agentFilesLoading, selectedAgentContext])
 
   const openGlobalFilesModal = useCallback(() => {
     setComposerMenuOpen(false)
+    setComposerSubmenu(null)
     setComposerAttachmentError(null)
     setGlobalFilesModalOpen(true)
   }, [])
-
-  const composerReferenceMenuItems = useMemo<NonNullable<MenuProps['items']>>(
-    () => [
-      {
-        key: 'plugins',
-        icon: <AppstoreOutlined aria-hidden="true" width={18} height={18} />,
-        label: 'Plugins',
-        title: 'Plugins',
-        popupClassName: 'composer-reference-submenu',
-        children: pluginsLoading
-          ? [{ key: 'plugins-loading', disabled: true, label: 'Loading plugins...' }]
-          : pluginsError
-            ? [{ key: 'plugins-error', disabled: true, label: pluginsError }]
-            : pluginOptions.length
-              ? pluginOptions.map(plugin => ({
-                  key: `plugin:${plugin.id}`,
-                  label: plugin.label,
-                  onClick: () =>
-                    addComposerReference({
-                      id: plugin.id,
-                      type: 'plugin',
-                      namespace: plugin.namespace,
-                      name: plugin.name,
-                      label: plugin.label,
-                    }),
-                }))
-              : [{ key: 'plugins-empty', disabled: true, label: 'No plugins available' }],
-      },
-      {
-        key: 'connectors',
-        icon: <ApiOutlined aria-hidden="true" width={18} height={18} />,
-        label: 'Connectors',
-        title: 'Connectors',
-        popupClassName: 'composer-reference-submenu',
-        children: connectorOptions.length
-          ? connectorOptions.map(connector => ({
-              key: connector.id,
-              label: connector.label,
-              onClick: () =>
-                addComposerReference({
-                  id: connector.id,
-                  type: 'connector',
-                  name: connector.name,
-                  label: connector.label,
-                }),
-            }))
-          : [{ key: 'connectors-empty', disabled: true, label: 'No connectors available' }],
-      },
-      ...(SHOW_AGENT_FILES_UI
-        ? [
-            agentFilesDisabled
-              ? {
-                  key: 'agent-files',
-                  icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
-                  label: 'Agent Files',
-                  title: 'Agent Files',
-                  popupClassName: 'composer-reference-submenu',
-                  children: [
-                    {
-                      key: agentFilesLoading ? 'agent-files-loading' : 'agent-files-empty',
-                      disabled: true,
-                      label: agentFilesLoading
-                        ? 'Loading Agent Files...'
-                        : 'No Agent Files Available',
-                    },
-                  ],
-                }
-              : {
-                  key: 'agent-files',
-                  icon: <FolderOutlined aria-hidden="true" width={18} height={18} />,
-                  label: 'Agent Files',
-                  onClick: openAgentFilesModal,
-                },
-          ]
-        : []),
-      ...(SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM
-        ? [
-            {
-              key: 'even-drive',
-              icon: <PaperClipOutlined aria-hidden="true" width={18} height={18} />,
-              label: 'EvenDrive',
-              onClick: openGlobalFilesModal,
-            },
-          ]
-        : []),
-      {
-        key: 'upload',
-        icon: <UploadOutlined aria-hidden="true" width={18} height={18} />,
-        label: 'Upload Files',
-        onClick: openUploadPicker,
-      },
-    ],
-    [
-      addComposerReference,
-      agentFilesDisabled,
-      agentFilesLoading,
-      connectorOptions,
-      openAgentFilesModal,
-      openGlobalFilesModal,
-      openUploadPicker,
-      pluginOptions,
-      pluginsError,
-      pluginsLoading,
-    ]
-  )
 
   const readFileAsDataUrl = useCallback(
     (file: File) =>
@@ -966,14 +937,11 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         onDrop={handleComposerDrop}
       >
         <div className="composer-textarea-viewport">
-          <Input.TextArea
+          <textarea
             key={activeChatId ?? 'no-chat'}
-            ref={input => {
-              composerInputRef.current = input?.resizableTextArea?.textArea ?? null
-            }}
+            ref={composerInputRef}
             data-testid="chat-input"
             aria-label="Agent message composer"
-            variant="borderless"
             value={draft}
             onChange={event => {
               handleDraftChange(event.target.value)
@@ -994,151 +962,290 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         <div className="composer-input-actions">
           {agentSelector && <span className="composer-agent-selector-slot">{agentSelector}</span>}
           <span className="composer-reference-toolbar">
-            <span className="composer-reference-menu">
-              <Dropdown
-                autoAdjustOverflow
-                autoFocus
-                destroyOnHidden
-                menu={{
-                  items: composerReferenceMenuItems,
-                  className: 'composer-reference-menu-antd',
-                  getPopupContainer: () => document.body,
-                  subMenuOpenDelay: 0,
-                  subMenuCloseDelay: 0.4,
-                  expandIcon: (
-                    <span aria-hidden="true">
-                      <RightOutlined width={18} height={18} />
-                    </span>
-                  ),
-                  'aria-label': 'Add context',
+            <span className="composer-reference-menu" ref={composerMenuRef}>
+              <IconButton
+                className="composer-reference-trigger"
+                color="neutral"
+                disabled={agentSending}
+                label="Add context"
+                size="sm"
+                variant="ghost"
+                aria-haspopup="menu"
+                aria-expanded={composerMenuOpen}
+                onClick={() => {
+                  setComposerMenuOpen(open => !open)
+                  setComposerSubmenu(null)
                 }}
-                classNames={{ root: 'composer-reference-menu-panel' }}
-                getPopupContainer={trigger =>
-                  trigger.closest<HTMLElement>('.composer-reference-menu') ?? document.body
-                }
-                onOpenChange={open => setComposerMenuOpen(open)}
-                open={composerMenuOpen}
-                placement={inline ? 'bottomLeft' : 'topLeft'}
-                trigger={['click']}
               >
-                <AntButton
-                  htmlType="button"
-                  type="text"
-                  size="small"
-                  icon={<PlusOutlined aria-hidden="true" width={16} height={16} />}
-                  disabled={agentSending}
-                  aria-label="Add context"
-                  aria-haspopup="menu"
-                  aria-expanded={composerMenuOpen}
-                />
-              </Dropdown>
+                <IconPlus />
+              </IconButton>
+              {composerMenuOpen ? (
+                <span className="composer-reference-menu-panel" role="menu">
+                  <span className="composer-reference-menu-primary">
+                    <MenuItem
+                      ref={pluginsItemRef}
+                      aria-haspopup="menu"
+                      aria-expanded={composerSubmenu === 'plugins'}
+                      leadingIcon={<IconWorkflows />}
+                      onMouseEnter={() => setComposerSubmenu('plugins')}
+                      onFocus={() => setComposerSubmenu('plugins')}
+                      role="menuitem"
+                      trailingIcon={<span aria-hidden="true">&gt;</span>}
+                    >
+                      Plugins
+                    </MenuItem>
+                    <MenuItem
+                      ref={connectorsItemRef}
+                      aria-haspopup="menu"
+                      aria-expanded={composerSubmenu === 'connectors'}
+                      leadingIcon={<IconConnectors />}
+                      onMouseEnter={() => setComposerSubmenu('connectors')}
+                      onFocus={() => setComposerSubmenu('connectors')}
+                      role="menuitem"
+                      trailingIcon={<span aria-hidden="true">&gt;</span>}
+                    >
+                      Connectors
+                    </MenuItem>
+                    {SHOW_AGENT_FILES_UI ? (
+                      <MenuItem
+                        ref={agentFilesItemRef}
+                        aria-disabled={agentFilesDisabled}
+                        aria-haspopup={agentFilesDisabled ? 'menu' : undefined}
+                        aria-expanded={
+                          agentFilesDisabled ? composerSubmenu === 'agent-files' : undefined
+                        }
+                        className={
+                          agentFilesDisabled ? 'composer-reference-menu-item-disabled' : undefined
+                        }
+                        leadingIcon={<IconContexts />}
+                        onClick={agentFilesDisabled ? undefined : openAgentFilesModal}
+                        onFocus={() =>
+                          setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                        }
+                        onMouseEnter={() =>
+                          setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                        }
+                        role="menuitem"
+                        trailingIcon={
+                          agentFilesDisabled ? <span aria-hidden="true">&gt;</span> : undefined
+                        }
+                      >
+                        Agent Files
+                      </MenuItem>
+                    ) : null}
+                    {SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM ? (
+                      <MenuItem
+                        leadingIcon={<IconAttachFile />}
+                        onClick={openGlobalFilesModal}
+                        role="menuitem"
+                      >
+                        EvenDrive
+                      </MenuItem>
+                    ) : null}
+                    <MenuItem
+                      leadingIcon={<IconUpload />}
+                      onClick={openUploadPicker}
+                      role="menuitem"
+                    >
+                      Upload Files
+                    </MenuItem>
+                  </span>
+                </span>
+              ) : null}
+              {/* The submenu is portaled to document.body and positioned with a
+                  fixed rect confined to the chat drawer. In-flow it was cropped
+                  by the drawer's overflow-clipping ancestors and the native
+                  embed painting over it; see useFlyoutPosition. */}
+              {composerMenuOpen && composerSubmenu !== null
+                ? createPortal(
+                    <span
+                      className="composer-reference-submenu"
+                      ref={composerSubmenuRef}
+                      role="menu"
+                      style={{
+                        left: submenuFlyoutPosition?.left ?? 0,
+                        top: submenuFlyoutPosition?.top ?? 0,
+                        // Hidden at the origin until the first layout pass sets a
+                        // real rect, so it never flashes in the top-left corner.
+                        visibility: submenuFlyoutPosition ? undefined : 'hidden',
+                      }}
+                    >
+                      {composerSubmenu === 'plugins' ? (
+                        pluginsLoading ? (
+                          <span className="composer-reference-menu-empty">Loading plugins...</span>
+                        ) : pluginsError ? (
+                          <span className="composer-reference-menu-empty">{pluginsError}</span>
+                        ) : pluginOptions.length ? (
+                          pluginOptions.map(plugin => (
+                            <MenuItem
+                              key={plugin.id}
+                              onClick={() =>
+                                addComposerReference({
+                                  id: plugin.id,
+                                  type: 'plugin',
+                                  namespace: plugin.namespace,
+                                  name: plugin.name,
+                                  label: plugin.label,
+                                })
+                              }
+                              role="menuitem"
+                            >
+                              {plugin.label}
+                            </MenuItem>
+                          ))
+                        ) : (
+                          <span className="composer-reference-menu-empty">
+                            No plugins available
+                          </span>
+                        )
+                      ) : composerSubmenu === 'connectors' ? (
+                        connectorOptions.length ? (
+                          connectorOptions.map(connector => (
+                            <MenuItem
+                              key={connector.id}
+                              onClick={() =>
+                                addComposerReference({
+                                  id: connector.id,
+                                  type: 'connector',
+                                  name: connector.name,
+                                  label: connector.label,
+                                })
+                              }
+                              role="menuitem"
+                            >
+                              {connector.label}
+                            </MenuItem>
+                          ))
+                        ) : (
+                          <span className="composer-reference-menu-empty">
+                            No connectors available
+                          </span>
+                        )
+                      ) : SHOW_AGENT_FILES_UI && composerSubmenu === 'agent-files' ? (
+                        <span className="composer-reference-menu-empty">
+                          {agentFilesLoading
+                            ? 'Loading Agent Files...'
+                            : 'No Agent Files Available'}
+                        </span>
+                      ) : null}
+                    </span>,
+                    document.body
+                  )
+                : null}
             </span>
             {hasComposerAttachments ? (
-              <Flex align="center" data-testid="composer-attachments-list" gap="small" wrap>
-                <Typography.Text type="secondary" data-testid="composer-attachments-count">
+              <span className="composer-attachments-list composer-attachments-list--inline">
+                <span
+                  className="composer-attachments-count"
+                  data-testid="composer-attachments-count"
+                >
                   {composerAttachmentItems.length}{' '}
                   {composerAttachmentItems.length === 1 ? 'attachment' : 'attachments'}
-                </Typography.Text>
+                </span>
                 {composerAttachmentItems.map(item => {
                   if (item.kind === 'reference') {
                     const attachment = item.attachment
                     const typeLabel = getComposerReferenceTypeLabel(attachment.type)
                     return (
-                      <Flex align="center" key={item.id}>
-                        <Tag title={typeLabel}>
-                          <Flex align="center" gap={4}>
-                            <span aria-hidden="true">{getComposerReferenceIcon(attachment)}</span>
-                            <Typography.Text>{attachment.label}</Typography.Text>
-                            <AntButton
-                              htmlType="button"
-                              type="text"
-                              size="small"
-                              shape="circle"
-                              icon={<CloseOutlined aria-hidden="true" width={12} height={12} />}
-                              onClick={() => onRemoveComposerReferenceAttachment(attachment.id)}
-                              aria-label={`Remove ${attachment.label}`}
-                            />
-                          </Flex>
-                        </Tag>
-                      </Flex>
+                      <span key={item.id} className="composer-attachment-chip" title={typeLabel}>
+                        <span
+                          className={`composer-reference-icon composer-reference-icon--${attachment.type}`}
+                          aria-hidden="true"
+                        >
+                          {getComposerReferenceIcon(attachment)}
+                        </span>
+                        <span className="composer-attachment-chip-body">
+                          <strong>{attachment.label}</strong>
+                        </span>
+                        <IconButton
+                          className="composer-attachment-remove"
+                          onClick={() => onRemoveComposerReferenceAttachment(attachment.id)}
+                          aria-label={`Remove ${attachment.label}`}
+                          label={`Remove ${attachment.label}`}
+                          size="xs"
+                          variant="ghost"
+                        >
+                          <IconClose />
+                        </IconButton>
+                      </span>
                     )
                   }
                   if (item.kind === 'file') {
                     const attachment = item.attachment
                     const meta = getComposerFileMeta(attachment)
                     return (
-                      <Flex
-                        align="center"
+                      <span
                         key={item.id}
+                        className="composer-attachment-chip"
+                        title={`${attachment.filename} - ${meta}`}
                         data-testid="composer-file-chip"
                         data-file-status={attachment.status}
-                        title={`${attachment.filename} - ${meta}`}
                       >
-                        <Tag>
-                          <Flex align="center" gap={4}>
-                            <span aria-hidden="true">
-                              <FileTextOutlined width={14} height={14} />
-                            </span>
-                            <Flex vertical>
-                              <Typography.Text>{attachment.filename}</Typography.Text>
-                              <Typography.Text type="secondary">{meta}</Typography.Text>
-                            </Flex>
-                            <AntButton
-                              htmlType="button"
-                              type="text"
-                              size="small"
-                              shape="circle"
-                              icon={<CloseOutlined aria-hidden="true" width={12} height={12} />}
-                              onClick={() => onRemoveComposerFileAttachment(attachment.id)}
-                              aria-label={`Remove ${attachment.filename}`}
-                            />
-                          </Flex>
-                        </Tag>
-                      </Flex>
+                        <span
+                          className="composer-reference-icon composer-reference-icon--uploaded-file"
+                          aria-hidden="true"
+                        >
+                          <IconAttachFile />
+                        </span>
+                        <span className="composer-attachment-chip-body">
+                          <strong>{attachment.filename}</strong>
+                          <span className="composer-attachment-chip-meta">{meta}</span>
+                        </span>
+                        <IconButton
+                          className="composer-attachment-remove"
+                          onClick={() => onRemoveComposerFileAttachment(attachment.id)}
+                          aria-label={`Remove ${attachment.filename}`}
+                          label={`Remove ${attachment.filename}`}
+                          size="xs"
+                          variant="ghost"
+                        >
+                          <IconClose />
+                        </IconButton>
+                      </span>
                     )
                   }
                   const attachment = item.attachment
                   const tooltip = getComposerImageTooltip(attachment)
                   return (
-                    <Flex align="center" key={item.id} title={tooltip}>
-                      <Tag>
-                        <Flex align="center" gap={4}>
-                          <span aria-hidden="true">
-                            <PictureOutlined width={14} height={14} />
-                          </span>
-                          <AntButton
-                            htmlType="button"
-                            type="link"
-                            size="small"
-                            onClick={() => setPreviewAttachmentId(attachment.id)}
-                            title={tooltip}
-                          >
-                            {attachment.name}
-                          </AntButton>
-                          <AntButton
-                            htmlType="button"
-                            type="text"
-                            size="small"
-                            shape="circle"
-                            icon={<CloseOutlined aria-hidden="true" width={12} height={12} />}
-                            onClick={() => onRemoveComposerImageAttachment(attachment.id)}
-                            aria-label={`Remove ${attachment.name}`}
-                          />
-                        </Flex>
-                      </Tag>
-                    </Flex>
+                    <span key={item.id} className="composer-attachment-chip" title={tooltip}>
+                      <button
+                        type="button"
+                        className="composer-attachment-preview-trigger"
+                        onClick={() => setPreviewAttachmentId(attachment.id)}
+                        title={tooltip}
+                      >
+                        <span
+                          className="composer-reference-icon composer-reference-icon--uploaded-image"
+                          aria-hidden="true"
+                        >
+                          <IconAttachFile />
+                        </span>
+                        <span className="composer-attachment-chip-body">
+                          <strong>{attachment.name}</strong>
+                        </span>
+                      </button>
+                      <IconButton
+                        className="composer-attachment-remove"
+                        onClick={() => onRemoveComposerImageAttachment(attachment.id)}
+                        aria-label={`Remove ${attachment.name}`}
+                        label={`Remove ${attachment.name}`}
+                        size="xs"
+                        variant="ghost"
+                      >
+                        <IconClose />
+                      </IconButton>
+                    </span>
                   )
                 })}
-                <AntButton
-                  htmlType="button"
-                  type="link"
-                  size="small"
+                <button
+                  type="button"
+                  className="composer-attachments-clear"
                   onClick={onClearComposerAttachments}
                   aria-label="Clear all attachments"
                 >
                   Clear all
-                </AntButton>
-              </Flex>
+                </button>
+              </span>
             ) : null}
           </span>
           <span className="composer-actions-right">
@@ -1148,157 +1255,166 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               // locally, and the first send piggybacks it onto message 1 (R2).
               <ModelSelector agentRef={selectedAgent} chatId={activeChatId ?? ''} placement="up" />
             )}
-            <AntButton
-              htmlType="button"
+            <IconButton
               data-testid="send-button"
-              shape="circle"
-              size="small"
+              className="composer-send-button composer-send-button-compact composer-send-icon-btn"
               onClick={handleSend}
               disabled={
                 isDegraded ||
                 agentSending ||
                 imagesBlockedForSend ||
                 filesBlockedForSend ||
+                selectedAgentSendBlocked ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
                   composerFileAttachments.length === 0 &&
                   composerReferenceAttachments.length === 0)
               }
               aria-label={agentSending ? 'Sending message' : 'Send message'}
-              aria-describedby={imagesBlockedForSend ? imageNoticeId : undefined}
-              loading={agentSending}
+              aria-describedby={
+                [
+                  imagesBlockedForSend ? imageNoticeId : null,
+                  selectedAgentCatalogMessage ? agentCatalogNoticeId : null,
+                ]
+                  .filter(Boolean)
+                  .join(' ') || undefined
+              }
+              label={agentSending ? 'Sending message' : 'Send message'}
+              size="sm"
               title={agentSending ? 'Sending...' : 'Send message'}
-              type="primary"
-              icon={
-                <svg
-                  viewBox="0 0 20 20"
-                  width={22}
-                  height={22}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.9}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
+              variant="solid"
+            >
+              {agentSending ? (
+                <span className="composer-send-spinner" aria-hidden="true" />
+              ) : (
+                <svg viewBox="0 0 20 20" aria-hidden="true">
                   <path d="M10 5v9.1" />
                   <path d="M6.7 8.3 10 5l3.3 3.3" />
                 </svg>
-              }
-            ></AntButton>
+              )}
+            </IconButton>
           </span>
         </div>
       </div>
       {imagesBlockedForSend || composerAttachmentError ? (
-        <Alert
-          showIcon
-          type="error"
-          role="alert"
-          title={
-            imagesBlockedForSend
+        <div className="composer-attachments">
+          <p
+            className="composer-attachment-error"
+            role="alert"
+            id={imagesBlockedForSend ? imageNoticeId : undefined}
+            data-testid={imagesBlockedForSend ? 'composer-image-capability-notice' : undefined}
+          >
+            {imagesBlockedForSend
               ? (imageAttachmentBlockMessage ??
                 'Image attachments are not available for this model yet.')
-              : composerAttachmentError
-          }
-          id={imagesBlockedForSend ? imageNoticeId : undefined}
-          data-testid={imagesBlockedForSend ? 'composer-image-capability-notice' : undefined}
-        />
+              : composerAttachmentError}
+          </p>
+        </div>
+      ) : null}
+      {selectedAgentCatalogMessage ? (
+        <div className="composer-attachments">
+          <p
+            className={
+              selectedAgentCatalogState === 'checking'
+                ? 'composer-attachment-notice'
+                : 'composer-attachment-error'
+            }
+            role={selectedAgentCatalogState === 'checking' ? 'status' : 'alert'}
+            id={agentCatalogNoticeId}
+            data-testid="composer-agent-catalog-notice"
+          >
+            {selectedAgentCatalogMessage}
+          </p>
+          {selectedAgentCatalogState === 'error' ? (
+            <Button
+              disabled={agentCatalog.loading}
+              onClick={() => void agentCatalog.refresh()}
+              size="sm"
+              variant="ghost"
+            >
+              Retry access check
+            </Button>
+          ) : null}
+        </div>
       ) : null}
       {composerFileNotices.length > 0 ? (
-        <Flex vertical gap="small" data-testid="composer-file-notices">
+        <div className="composer-attachments" data-testid="composer-file-notices">
           {composerFileNotices.map(notice => (
-            <Alert
+            <p
               key={notice.id}
-              showIcon
-              type={notice.refused ? 'error' : 'warning'}
+              className={
+                notice.refused ? 'composer-attachment-error' : 'composer-attachment-notice'
+              }
               role={notice.refused ? 'alert' : 'status'}
-              title={notice.text}
-            />
+            >
+              {notice.text}
+            </p>
           ))}
-        </Flex>
+        </div>
       ) : null}
       {agentError ? (
-        <Flex vertical gap="small">
+        <div className="composer-footer">
           {failedAgentSend?.kind === 'waking' ? (
-            <Alert
-              type="info"
-              showIcon
-              role="status"
-              data-testid="waking-state"
-              title="Agent is waking up — this usually takes under a minute. Your message was not delivered yet."
-              action={
-                <AntButton
-                  htmlType="button"
+            <div className="composer-error" role="status" data-testid="waking-state">
+              <p className="error-text">
+                Agent is waking up — this usually takes under a minute. Your message was not
+                delivered yet.
+              </p>
+              <div className="action-row">
+                <Button
+                  color="neutral"
                   onClick={onRetryFailedSend}
                   disabled={agentSending}
-                  size="small"
-                  type="text"
+                  size="xs"
+                  variant="ghost"
                 >
                   Retry last send
-                </AntButton>
-              }
-            />
+                </Button>
+              </div>
+            </div>
           ) : (
-            <Alert
-              type="error"
-              showIcon
-              role="alert"
-              title={agentError}
-              description={
-                failedAgentSend?.message ? (
-                  <Collapse
-                    size="small"
-                    items={[
-                      {
-                        key: 'technical-details',
-                        label: 'Technical details',
-                        forceRender: true,
-                        children: <Typography.Text code>{failedAgentSend.message}</Typography.Text>,
-                      },
-                    ]}
-                  />
-                ) : undefined
-              }
-            />
+            <div className="composer-error" role="alert">
+              <p className="error-text">{agentError}</p>
+              {failedAgentSend?.message ? (
+                <details className="error-details">
+                  <summary>Technical details</summary>
+                  <pre>{failedAgentSend.message}</pre>
+                </details>
+              ) : null}
+              <div className="action-row">
+                {/* A message answered without its documents is never resent. */}
+                {failedAgentSend && !failedAgentSend.answeredWithoutFiles && (
+                  <Button
+                    color="neutral"
+                    onClick={onRetryFailedSend}
+                    disabled={agentSending}
+                    size="xs"
+                    variant="ghost"
+                  >
+                    Retry last send
+                  </Button>
+                )}
+              </div>
+            </div>
           )}
-          {failedAgentSend?.kind !== 'waking' &&
-          failedAgentSend &&
-          !failedAgentSend.answeredWithoutFiles ? (
-            <Flex justify="flex-end">
-              <AntButton
-                htmlType="button"
-                onClick={onRetryFailedSend}
-                disabled={agentSending}
-                size="small"
-                type="text"
-              >
-                Retry last send
-              </AntButton>
-            </Flex>
-          ) : null}
-        </Flex>
+        </div>
       ) : null}
       {failedAgentSend ? (
-        <Flex gap="small" justify="flex-end">
-          <AntButton
-            htmlType="button"
-            onClick={onRecoverFailedSend}
-            disabled={agentSending}
-            size="small"
-            type="text"
-          >
-            {failedAgentSend.answeredWithoutFiles ? 'Recover files' : 'Recover input'}
-          </AntButton>
-          <AntButton
-            htmlType="button"
-            onClick={onDiscardFailedSend}
-            disabled={agentSending}
-            size="small"
-            type="text"
-          >
-            Discard failed input
-          </AntButton>
-        </Flex>
+        <div className="composer-footer">
+          <div className="action-row">
+            <Button
+              onClick={() => onRecoverFailedSend(workspaceChatTabId)}
+              disabled={agentSending}
+              size="xs"
+              variant="ghost"
+            >
+              {failedAgentSend.answeredWithoutFiles ? 'Recover files' : 'Recover input'}
+            </Button>
+            <Button onClick={onDiscardFailedSend} disabled={agentSending} size="xs" variant="ghost">
+              Discard failed input
+            </Button>
+          </div>
+        </div>
       ) : null}
 
       {previewAttachment && (

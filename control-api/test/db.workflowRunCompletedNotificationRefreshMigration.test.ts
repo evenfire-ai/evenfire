@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -78,6 +79,8 @@ describe('workflow completion download detection refresh migration', () => {
       release: clientRelease,
     })
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         return {
           rows: APPLIED_MIGRATIONS.map(version => ({ version })),

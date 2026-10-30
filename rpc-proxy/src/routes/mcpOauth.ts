@@ -18,21 +18,22 @@ import { jsonBody } from '../middleware/jsonBody.js'
  *      of invoking, so no new scope is issued (would be a token-issuance change
  *      in control-api).
  *
- * rpc-proxy forwards IDENTITY only. control-api owns the server→context
- * resolution and the Context-membership rule (D4, one source of truth); this
- * route never resolves a server's Context on its own. The `userId` is taken
- * from `req.auth.sub`, never the body. An optional body `{ contextId? }` is
- * forwarded for control-api to cross-check against the server's authoritative
- * `spec.contextRef`.
+ * rpc-proxy forwards IDENTITY only. control-api owns the Context-membership
+ * rule (one source of truth); this route never decides which Context a
+ * server belongs to. The `userId` is taken from `req.auth.sub`, never the body.
+ * An MCP server has no owning Context: for a context-scoped server the body
+ * `contextId` names the Context the user consents for, and control-api
+ * authorizes the user's membership in it and that it enables the server. For a
+ * user-scoped server control-api ignores it.
  *
  * Error propagation from control-api's internal mint endpoint:
  *   - 401 → rpc-proxy↔control-api service-token misconfig (control-api answers
  *     401 on a bad/absent service token) → coerce to 502 so the user does not
  *     read it as their own credential failure;
  *   - 403 → legitimate `context_membership_denied` → propagate verbatim;
- *   - 404 (`server_not_found`) / 400 (`not_oauth_server`, `context_mismatch`,
- *     `server_missing_context`) / 503 (`integration_not_configured`) →
- *     propagate verbatim;
+ *   - 404 (`server_not_found`) / 400 (`not_oauth_server`, `context_required`,
+ *     `invalid_request`) / 503 (`integration_not_configured`) → propagate
+ *     verbatim;
  *   - 200 → `{ authorizeUrl }`.
  */
 
@@ -127,19 +128,19 @@ export function createMcpOauthRouter(): Router {
   //      already holds to connect/invoke; revoking is the inverse of connecting,
   //      so no new scope is issued.
   //
-  // rpc-proxy forwards IDENTITY only. control-api owns server→context
-  // resolution and the per-flavor authorization (user: own grant; context:
-  // Context membership) — this route never resolves a server's Context. The
-  // `userId` is `req.auth.sub`, never the body. An optional `{ contextId? }` is
-  // forwarded for control-api to cross-check against the server's authoritative
-  // `spec.contextRef`.
+  // rpc-proxy forwards IDENTITY only. control-api owns the per-flavor
+  // authorization (user: own grant; context: Context membership) — this route
+  // never decides which Context a server belongs to. The `userId` is
+  // `req.auth.sub`, never the body. For a context-scoped server the body
+  // `contextId` names the Context whose shared grant is revoked; control-api
+  // ignores it for a user-scoped server.
   //
   // Error propagation mirrors the authorize-URL route exactly:
   //   - 401 → rpc-proxy↔control-api service-token misconfig → coerce to 502 so
   //     the user does not read it as their own credential failure;
   //   - 403 → legitimate `context_membership_denied` → propagate verbatim;
-  //   - 404 (`server_not_found`) / 400 (`not_oauth_server`, `context_mismatch`,
-  //     `server_missing_context`, `invalid_request`) → propagate verbatim;
+  //   - 404 (`server_not_found`) / 400 (`not_oauth_server`, `context_required`,
+  //     `invalid_request`) → propagate verbatim;
   //   - 204 → success (idempotent; empty body).
   router.delete(
     '/mcp-oauth/:mcpServerName/grant',

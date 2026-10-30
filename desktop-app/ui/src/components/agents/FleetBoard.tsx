@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAgentActivityContext } from '@contexts/AgentActivityContext'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import { useAuthContext } from '@contexts/AuthContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { Button as AntButton, Dropdown, Empty, Flex, Select, Table, Tag, Typography } from 'antd'
 import type { MenuProps, TableColumnsType } from 'antd'
@@ -46,12 +47,9 @@ const AGENT_SCOPE_FILTER_OPTIONS: Array<{ label: string; value: AgentScopeFilter
 export function FleetBoard() {
   const { agentNames, agentDisplayByName, userAgentNames, teamAgentNames } =
     useAgentsDataController()
-  const {
-    teams,
-    currentTeamId,
-    teamDirectory,
-    ensureHydrated: ensureTeamsHydrated,
-  } = useTeamsDataController()
+  const { teams, teamDirectory, ensureHydrated: ensureTeamsHydrated } = useTeamsDataController()
+  const { me } = useAuthContext()
+  const currentTeamId = String(me?.teamId ?? '').trim()
   const { agentMcpServerCountByAgent, agentMcpServersByAgent, mcpServerMappingUnavailableMessage } =
     useMcpServersDataController()
   const {

@@ -100,7 +100,6 @@ function mcpServer(options: {
     metadata: { name: SERVER_NAME, namespace: NAMESPACE },
     spec: {
       image: CONNECTOR_IMAGE,
-      contextRef: 'default',
       ...(options.managed === undefined ? {} : { managed: options.managed }),
       envSecret: {
         name: options.secretName ?? SECRET_NAME,
@@ -424,7 +423,6 @@ describe('EditMcpServerPage — credential surface wiring', () => {
       metadata: { name: SERVER_NAME, namespace: NAMESPACE },
       spec: {
         image: CONNECTOR_IMAGE,
-        contextRef: 'default',
         auth: { type: 'oauth' },
         oauth: {
           id: SERVER_NAME,
@@ -534,7 +532,6 @@ describe('EditMcpServerPage — Change assigned Secret', () => {
       },
       spec: {
         image: CONNECTOR_IMAGE,
-        contextRef: 'default',
         managed: true,
         envSecret: {
           name: SECRET_NAME,

@@ -1,13 +1,12 @@
 import { useState } from 'react'
-import { Alert, Button, Form, Input, Space } from 'antd'
+import { parseGfsResourceLink } from '@clerum/desktop-app-links'
+import { Button, Field, StatusBanner, TextInput } from '@components/Common'
 import type { GfsFilePickerProps } from './filePicker.types'
 
 /**
- * P2-S06 / P4-S07 — Desktop gfs:// open bar (renderer). Drives the GFS browser:
- * the user pastes a gfs:// link and the page resolves it THROUGH the API (no
- * local mirror), starting navigation at that resource. A revoked grant surfaces
- * as the API error on open. The component state and submit contract stay here;
- * Ant Design owns the visible controls.
+ * Desktop GFS link entry. Accepts a canonical gfs:// URI, an evenfire://files
+ * handoff, or a Profile /open/files URL, then resolves only its canonical URI
+ * through the authenticated GFS API.
  */
 
 export function GfsFilePicker({
@@ -16,12 +15,19 @@ export function GfsFilePicker({
   busy = false,
   error = null,
 }: GfsFilePickerProps) {
-  const [uri, setUri] = useState('')
-  const valid = uri.trim().length > 0
+  const [link, setLink] = useState('')
+  const [inputError, setInputError] = useState<string | null>(null)
+  const valid = link.trim().length > 0
 
   const submit = async () => {
     if (!valid) return
-    const opened = await onOpen(uri.trim())
+    const target = parseGfsResourceLink(link)
+    if (!target) {
+      setInputError('Enter a valid EvenDrive link or canonical GFS URI.')
+      return
+    }
+    setInputError(null)
+    const opened = await onOpen(target.uri)
     if (opened !== false) onOpened?.()
   }
 
@@ -33,23 +39,30 @@ export function GfsFilePicker({
         void submit()
       }}
     >
-      <Form.Item label="EvenDrive link" htmlFor="gfs-uri-input">
-        <Space.Compact block>
-          <Input
-            autoFocus
-            id="gfs-uri-input"
-            aria-label="EvenDrive link"
-            placeholder="gfs://main/<rid>"
-            prefix="URI"
-            value={uri}
-            onChange={event => setUri(event.target.value)}
-          />
-          <Button type="primary" htmlType="submit" disabled={busy || !valid} loading={busy}>
+      <Field label="URL" htmlFor="gfs-url-input">
+        <div className="da-gfs-file-picker__row">
+          <div className="da-gfs-file-picker__input">
+            <span className="da-gfs-file-picker__scheme" aria-hidden="true">
+              URL
+            </span>
+            <TextInput
+              autoFocus
+              id="gfs-url-input"
+              aria-label="URL"
+              placeholder="gfs://… or https://…/open/files?uri=…"
+              value={link}
+              onChange={e => {
+                setLink(e.target.value)
+                setInputError(null)
+              }}
+            />
+          </div>
+          <Button type="submit" disabled={busy || !valid} loading={busy}>
             Open
           </Button>
-        </Space.Compact>
-      </Form.Item>
-      {error ? <Alert role="alert" showIcon type="error" title={error} /> : null}
+        </div>
+      </Field>
+      {error || inputError ? <StatusBanner tone="error" text={error || inputError || ''} /> : null}
     </form>
   )
 }

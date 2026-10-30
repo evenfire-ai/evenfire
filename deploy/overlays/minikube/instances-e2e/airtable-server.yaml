@@ -4,7 +4,6 @@ metadata:
   name: airtable-server
   namespace: mcp-server
 spec:
-  contextRef: context1
   description: >-
     Airtable MCP Server - provides tools for interacting with Airtable bases
     including listing bases, querying and searching records, creating/updating/deleting

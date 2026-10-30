@@ -24,7 +24,8 @@ bcrypt.compare=async (...args)=>{
   return work;
 };
 const {verifyMemberPassword}=require('./src/services/auth/passwordCredentialVerification.ts');
-verifyMemberPassword(process.env.TEST_EMAIL,process.env.TEST_PASSWORD,{publicLogin:false})
+verifyMemberPassword(process.env.TEST_EMAIL,process.env.TEST_PASSWORD,
+ {publicLogin:false,userId:process.env.TEST_USER_ID})
  .then(user=>process.send({kind:'result',success:!!user},()=>process.exit(0)),
  error=>process.send({kind:'result',status:error.status},()=>process.exit(0)));
 `
@@ -33,6 +34,7 @@ realPg('RP-1010-04 durable expensive-work ownership', () => {
   const database = `rp004_${randomBytes(6).toString('hex')}`
   let admin: Pool
   let db: typeof import('../src/db.js')
+  let userId: string
   let url: URL
   const children = new Set<ChildProcess>()
   beforeAll(async () => {
@@ -44,10 +46,11 @@ realPg('RP-1010-04 durable expensive-work ownership', () => {
     vi.resetModules()
     db = await import('../src/db.js')
     await db.initDb()
-    await db.pool.query('INSERT INTO users(email,password_hash) VALUES ($1,$2)', [
-      email,
-      await bcrypt.hash(password, 12),
-    ])
+    const user = await db.pool.query(
+      'INSERT INTO users(email,password_hash) VALUES ($1,$2) RETURNING id',
+      [email, await bcrypt.hash(password, 12)]
+    )
+    userId = String(user.rows[0].id)
   }, 60_000)
   beforeEach(async () => {
     await db.pool.query('TRUNCATE password_identifier_state, password_verification_pace')
@@ -87,6 +90,7 @@ realPg('RP-1010-04 durable expensive-work ownership', () => {
         CONTROL_API_PG_CONNECTION_STRING: childUrl.toString(),
         TEST_EMAIL: email,
         TEST_PASSWORD: password,
+        TEST_USER_ID: userId,
         PAUSE_COMPARISON: paused ? '1' : '0',
       },
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -195,7 +199,7 @@ realPg('RP-1010-04 durable expensive-work ownership', () => {
     const compare = vi.spyOn(bcrypt, 'compare')
     try {
       await expect(
-        engine.verifyMemberPassword(email, password, { publicLogin: false })
+        engine.verifyMemberPassword(email, password, { publicLogin: false, userId })
       ).rejects.toMatchObject({ status: 429 })
       expect(compare).not.toHaveBeenCalled()
       expect(

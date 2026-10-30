@@ -44,7 +44,12 @@ import { setTeamContexts } from '../src/services/directory/contextAccess.js'
 import { createTeamForUser } from '../src/services/directory/teams.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
 import { seedActiveMember, seedAgentHost, seedControlAdmin } from './fixtures/contextAllowlist.js'
-import { discoverPilot, installRemoteServer, seedContext } from './fixtures/perServerInstall.js'
+import {
+  discoverPilot,
+  enableServerInContext,
+  installRemoteServer,
+  seedContext,
+} from './fixtures/perServerInstall.js'
 import {
   ATLASSIAN_V2_PILOT,
   DCR_PUBLIC_REGISTRATION_RESPONSE,
@@ -184,7 +189,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     savedBaseUrl = config.oauthCallbackBaseUrl
     config.oauthCallbackBaseUrl = ORIGIN
     gateway = new MockGateway(NS)
-    await seedContext(gateway, NS, CONTEXT)
+    await seedContext(gateway, config.contextsNamespace, CONTEXT)
     memberId = await seedActiveMember(db, { contexts: [CONTEXT] })
     app = createApp(gateway as never)
     tokenEndpoint.posts.length = 0
@@ -201,12 +206,12 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       discovery: atlassian,
       body: {
         serverName: name,
-        contextRef: CONTEXT,
         baseUrl: ATLASSIAN_V2_PILOT.mcpUrl,
         mode: 'dcr',
       },
     })
     expect(res.status).toBe(201)
+    await enableServerInContext(gateway, CONTEXT, name, db)
     const post = res.dcrCalls.find(c => c.method === 'POST')
     const registered = (JSON.parse(post?.body ?? '{}') as { redirect_uris?: string[] })
       .redirect_uris
@@ -269,7 +274,6 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       discovery: notion,
       body: {
         serverName: 'notion',
-        contextRef: CONTEXT,
         baseUrl: PILOTS.notion.mcpUrl,
         mode: 'pre-registered',
         clientId: 'client-notion',
@@ -277,6 +281,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       },
     })
     expect(install.status).toBe(201)
+    await enableServerInContext(gateway, CONTEXT, 'notion', db)
     const registered = String(install.body.redirectUri)
 
     const minted = await mint('notion')

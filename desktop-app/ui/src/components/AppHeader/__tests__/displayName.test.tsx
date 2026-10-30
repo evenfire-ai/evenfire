@@ -1,11 +1,27 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import type { PropsWithChildren, ReactElement } from 'react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AuthContext } from '@contexts/AuthContext'
+import type { AuthContextValue } from '@contexts/AuthContext.types'
+import {
+  type RenderOptions,
+  cleanup,
+  fireEvent,
+  screen,
+  render as testingLibraryRender,
+} from '@testing-library/react'
 import type { AccessCatalog } from '../../../../../src/types'
-import { installAntdDomEnvironment } from '../../../test/antdDomEnvironment'
 import { AppHeader } from '../index'
 
-beforeEach(installAntdDomEnvironment)
+function AuthContextTestWrapper({ children }: PropsWithChildren) {
+  return (
+    <AuthContext.Provider value={{ me: null } as AuthContextValue}>{children}</AuthContext.Provider>
+  )
+}
+
+function render(ui: ReactElement, options?: RenderOptions) {
+  return testingLibraryRender(ui, { ...options, wrapper: AuthContextTestWrapper })
+}
 
 // UT-11 (spec §5, F3 desktop-app) — Agent WITHOUT fallback.
 // The agents menu must render the visible name (spec.host, surfaced as the

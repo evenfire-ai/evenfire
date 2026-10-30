@@ -1,7 +1,26 @@
 // @vitest-environment jsdom
+import type { PropsWithChildren, ReactElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { AuthContext } from '@contexts/AuthContext'
+import type { AuthContextValue } from '@contexts/AuthContext.types'
+import {
+  type RenderOptions,
+  cleanup,
+  fireEvent,
+  screen,
+  render as testingLibraryRender,
+} from '@testing-library/react'
 import { AppHeader } from '../index'
+
+function AuthContextTestWrapper({ children }: PropsWithChildren) {
+  return (
+    <AuthContext.Provider value={{ me: null } as AuthContextValue}>{children}</AuthContext.Provider>
+  )
+}
+
+function render(ui: ReactElement, options?: RenderOptions) {
+  return testingLibraryRender(ui, { ...options, wrapper: AuthContextTestWrapper })
+}
 
 // Mini-spec 04a §C/R3: the chat-drawer toggle lives in the app header, between
 // the search and the notification bell. The interactive button renders only when

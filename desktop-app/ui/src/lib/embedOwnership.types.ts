@@ -31,6 +31,8 @@ export type ViewPhase =
   | 'mounted'
   /** CAS close emitted; ends with `released`, a failed `openSettled` or `closeFailed`. */
   | 'closeRequested'
+  /** A close was rejected without a matching release; main may still own this view. */
+  | 'closeFailed'
   /**
    * Main released the view of an open that failed after mounting it; the launch
    * still waits for that open's rejection, which carries the failure. Nothing
@@ -49,7 +51,11 @@ export type EmbedFailure = {
   message?: string
 }
 
-export type EmbedHandoff = { requestId: number; waitFor: ReadonlySet<LaunchId> }
+export type EmbedHandoff = {
+  requestId: number
+  waitFor: ReadonlySet<LaunchId>
+  ownerLaunchId: LaunchId | null
+}
 
 export type EmbedOwnershipState = {
   /** Projection of the committed tab store; only `projected` writes it. */
@@ -97,6 +103,7 @@ export type EmbedEffect =
   | { type: 'persistRoute'; tabId: TabId; route: PersistedRoute }
   | { type: 'setTitle'; tabId: TabId; title: string }
   | { type: 'handoffReady'; requestId: number }
+  | { type: 'handoffFailed'; requestId: number }
   | { type: 'launchSettled'; launchId: LaunchId; outcome: LaunchOutcome }
 
 export type EmbedTransition = {

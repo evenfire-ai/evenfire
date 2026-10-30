@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react'
+
 /**
  * De-modalized markdown/text preview body (spec 18 §3.B.2): the rendered
  * `<article>` + its fetch, copy, and size-guard, without modal chrome. Shared by
@@ -8,6 +10,9 @@ export type GfsMarkdownPreviewBodyProps = {
   fileName: string
   gfsUri: string
   onDownloadError?: (error: unknown) => void
+  onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
   titleId?: string
+  titleActions?: ReactNode
+  headerActions?: ReactNode
   headingLevel?: 2 | 3
 }
