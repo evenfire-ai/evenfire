@@ -211,10 +211,23 @@ describe('R5 OIDC transient DNS classification', () => {
     network.addresses.set(new URL(privateTarget.jwksUri).hostname, ['10.30.0.5'])
     await expect(privateTarget.engine.validateProvider()).resolves.toMatchObject({
       status: 'incompatible',
+      reason: 'untrusted-endpoint',
     })
     expect(network.transport).not.toHaveBeenCalledWith(
       expect.objectContaining({ url: privateTarget.jwksUri })
     )
+  })
+
+  it('keeps insecure metadata endpoints in the trusted-endpoint result category', async () => {
+    const fixture = createOidcR5ProtocolFixture({ hostPrefix: 'insecure-metadata' })
+    registerFixture(fixture)
+    fixture.metadata.authorization_endpoint = 'http://authorization.example.test/authorize'
+
+    await expect(fixture.engine.validateProvider()).resolves.toMatchObject({
+      status: 'incompatible',
+      reason: 'untrusted-endpoint',
+    })
+    expect(network.transport).toHaveBeenCalledTimes(1)
   })
 
   it('keeps permanent DNS errors incompatible when a hostname resembles a transient code', async () => {

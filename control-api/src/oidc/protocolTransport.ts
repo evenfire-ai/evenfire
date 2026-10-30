@@ -4,6 +4,7 @@ import { resolveValidatedOAuthEndpoint } from '../http/validateMcpServerSpec.js'
 import { checkAsEndpointsSameSite, registrableSite } from '../oauth/discovery.js'
 import type { OidcProviderConfiguration } from './configuration.js'
 import {
+  OidcCallerCancelledError,
   type OidcOperationContext,
   OidcProviderIncompatibleError,
   type OidcProviderOperationFailure,
@@ -92,7 +93,10 @@ export class TrustedOidcTransport {
         if (resolved.classification === 'transient_dns') {
           throw new OidcProviderUnavailableError()
         }
-        throw new OidcProviderIncompatibleError('OIDC endpoint failed public-network validation')
+        throw new OidcProviderIncompatibleError(
+          'OIDC endpoint failed public-network validation',
+          'untrusted-endpoint'
+        )
       }
     }
     const trustedEndpoints: TrustedOidcProviderEndpoints = Object.freeze({
@@ -151,18 +155,29 @@ export class TrustedOidcTransport {
     const headers = Object.fromEntries(
       Object.entries(options.headers).map(([key, value]) => [key, value])
     )
-    const result = await pinnedFetch(normalized, 'OIDC provider endpoint', {
-      method,
-      headers,
-      ...(body !== undefined ? { body } : {}),
-      timeoutMs: OIDC_REQUEST_TIMEOUT_MS,
-      maxBodyBytes: 1024 * 1024,
-      signal: combineSignals(options.signal, this.dependencies.getOperationContext()?.signal),
-    })
+    const operationSignal = this.dependencies.getOperationContext()?.signal
+    let result: Awaited<ReturnType<typeof pinnedFetch>>
+    try {
+      result = await pinnedFetch(normalized, 'OIDC provider endpoint', {
+        method,
+        headers,
+        ...(body !== undefined ? { body } : {}),
+        timeoutMs: OIDC_REQUEST_TIMEOUT_MS,
+        maxBodyBytes: 1024 * 1024,
+        signal: combineSignals(options.signal, operationSignal),
+      })
+    } catch (error) {
+      if (operationSignal?.aborted) throw new OidcCallerCancelledError()
+      throw error
+    }
     if (!result.ok) {
+      if (operationSignal?.aborted) throw new OidcCallerCancelledError()
       let error: OidcProviderIncompatibleError | OidcProviderUnavailableError
       if (result.error.kind === 'kernel_rejected') {
-        error = new OidcProviderIncompatibleError('OIDC endpoint failed public-network validation')
+        error = new OidcProviderIncompatibleError(
+          'OIDC endpoint failed public-network validation',
+          'untrusted-endpoint'
+        )
       } else if (result.error.kind === 'transport_failed') {
         error = new OidcProviderUnavailableError()
       } else {
@@ -233,6 +248,7 @@ async function resolveEndpointWithDeadline(
     })
     return await Promise.race([resolveValidatedOAuthEndpoint(url, field), aborted])
   } catch {
+    if (operationSignal?.aborted) throw new OidcCallerCancelledError()
     throw new OidcProviderUnavailableError()
   } finally {
     if (signal && abortListener) signal.removeEventListener('abort', abortListener)

@@ -29,9 +29,14 @@ import {
   insertOidcProtocolAttempt,
 } from './protocolAttemptStore.js'
 import {
+  OidcAttemptRejectedError,
+  OidcCallerCancelledError,
+  OidcCredentialConfigurationError,
   type OidcOperationContext,
+  OidcPersistenceFailure,
   OidcProviderIncompatibleError,
   OidcProviderUnavailableError,
+  type OidcProviderValidationReason,
 } from './protocolResult.js'
 import { OIDC_REQUEST_TIMEOUT_MS, TrustedOidcTransport } from './protocolTransport.js'
 import {
@@ -69,7 +74,7 @@ export type OidcProviderValidation = Readonly<{
   issuer: string
   configurationGeneration: string
   memberAuthenticationActivated: false
-  reason?: 'provider-unavailable' | 'unsupported-provider-profile' | 'untrusted-endpoint'
+  reason?: OidcProviderValidationReason
 }>
 
 export type OidcVerifiedAttributes = Readonly<{
@@ -112,7 +117,7 @@ export function parseOidcCallbackUrl(
     callback = new URL(rawCallbackUrl)
     expected = new URL(expectedRedirectUri)
   } catch {
-    throw new OidcProviderIncompatibleError('OIDC callback URL is malformed')
+    throw new OidcAttemptRejectedError('malformed-callback', 'OIDC callback URL is malformed')
   }
   if (
     callback.origin !== expected.origin ||
@@ -121,19 +126,22 @@ export function parseOidcCallbackUrl(
     callback.username !== '' ||
     callback.password !== ''
   ) {
-    throw new OidcProviderIncompatibleError(
+    throw new OidcAttemptRejectedError(
+      'malformed-callback',
       'OIDC callback URL does not match the registered redirect URI'
     )
   }
   for (const name of ['state', 'code', 'iss', 'error', 'error_description']) {
     if (callback.searchParams.getAll(name).length > 1) {
-      throw new OidcProviderIncompatibleError(
+      throw new OidcAttemptRejectedError(
+        'malformed-callback',
         'OIDC callback contains duplicate protocol parameters'
       )
     }
   }
   if (callback.searchParams.has('error') || callback.searchParams.has('error_description')) {
-    throw new OidcProviderIncompatibleError(
+    throw new OidcAttemptRejectedError(
+      'provider-response',
       'OIDC authorization was denied or could not be completed'
     )
   }
@@ -141,7 +149,8 @@ export function parseOidcCallbackUrl(
   const code = callback.searchParams.get('code')
   const issuer = callback.searchParams.get('iss') ?? undefined
   if (!state || !code) {
-    throw new OidcProviderIncompatibleError(
+    throw new OidcAttemptRejectedError(
+      'malformed-callback',
       'OIDC callback is missing its state or authorization code'
     )
   }
@@ -164,14 +173,11 @@ export class OidcProtocolEngine {
         await trusted.transport.fetchJwks(trusted.profile)
         return this.safeStatus('metadata-and-jwks-valid')
       } catch (error) {
+        if (options.signal?.aborted) throw new OidcCallerCancelledError()
         if (error instanceof OidcProviderIncompatibleError) {
-          return this.safeStatus(
-            'incompatible',
-            error.message === 'OIDC endpoint failed public-network validation'
-              ? 'untrusted-endpoint'
-              : 'unsupported-provider-profile'
-          )
+          return this.safeStatus('incompatible', error.reason)
         }
+        if (error instanceof OidcCallerCancelledError) throw error
         return this.safeStatus('unavailable', 'provider-unavailable')
       }
     })
@@ -188,17 +194,22 @@ export class OidcProtocolEngine {
       const pkceVerifier = randomPKCECodeVerifier()
       const codeChallenge = await calculatePKCECodeChallenge(pkceVerifier)
       const expiresAt = new Date(now + OIDC_PROTOCOL_ATTEMPT_TTL_MS)
-      const attempt = await insertOidcProtocolAttempt(
-        this.dependencies.db,
-        this.dependencies.encryptionKeyHex,
-        {
-          ...this.binding(trusted.profile),
-          state,
-          pkceVerifier,
-          nonce,
-          expiresAt,
-        }
-      )
+      let attempt: Awaited<ReturnType<typeof insertOidcProtocolAttempt>>
+      try {
+        attempt = await insertOidcProtocolAttempt(
+          this.dependencies.db,
+          this.dependencies.encryptionKeyHex,
+          {
+            ...this.binding(trusted.profile),
+            state,
+            pkceVerifier,
+            nonce,
+            expiresAt,
+          }
+        )
+      } catch {
+        throw new OidcPersistenceFailure('insert')
+      }
 
       const authorizationUrl = buildAuthorizationUrl(trusted.client, {
         client_id: this.provider.clientId,
@@ -223,9 +234,16 @@ export class OidcProtocolEngine {
     },
     options: { signal?: AbortSignal } = {}
   ): Promise<VerifiedOidcIdentityProof> {
-    return this.operationContext.run({ signal: options.signal }, () =>
-      this.completeIdentityProofAttemptInternal(input)
-    )
+    return this.operationContext.run({ signal: options.signal }, async () => {
+      try {
+        return await this.completeIdentityProofAttemptInternal(input)
+      } catch (error) {
+        if (options.signal?.aborted && !(error instanceof OidcPersistenceFailure)) {
+          throw new OidcCallerCancelledError()
+        }
+        throw error
+      }
+    })
   }
 
   private async completeIdentityProofAttemptInternal(input: {
@@ -243,30 +261,41 @@ export class OidcProtocolEngine {
       (input.issuer !== undefined &&
         (typeof input.issuer !== 'string' || input.issuer.length > 2048))
     ) {
-      throw new OidcProviderIncompatibleError('OIDC authorization response is malformed')
+      throw new OidcAttemptRejectedError(
+        'malformed-callback',
+        'OIDC authorization response is malformed'
+      )
     }
     this.assertCurrentGeneration()
     const trusted = await this.getTrustedConfiguration()
     const hasIssuerBinding = trusted.profile.authorizationResponseIssuerParameterSupported
     if (hasIssuerBinding && input.issuer !== this.provider.issuer) {
-      throw new OidcProviderIncompatibleError(
+      throw new OidcAttemptRejectedError(
+        'issuer-binding',
         'OIDC authorization response issuer binding is invalid'
       )
     }
     if (!hasIssuerBinding && input.issuer !== undefined && input.issuer !== this.provider.issuer) {
-      throw new OidcProviderIncompatibleError(
+      throw new OidcAttemptRejectedError(
+        'issuer-binding',
         'OIDC authorization response issuer binding is invalid'
       )
     }
 
-    const claimed = await claimOidcProtocolAttempt(
-      this.dependencies.db,
-      this.dependencies.encryptionKeyHex,
-      input.state,
-      this.binding(trusted.profile)
-    )
+    let claimed: Awaited<ReturnType<typeof claimOidcProtocolAttempt>>
+    try {
+      claimed = await claimOidcProtocolAttempt(
+        this.dependencies.db,
+        this.dependencies.encryptionKeyHex,
+        input.state,
+        this.binding(trusted.profile)
+      )
+    } catch {
+      throw new OidcPersistenceFailure('claim')
+    }
     if (!claimed)
-      throw new OidcProviderIncompatibleError(
+      throw new OidcAttemptRejectedError(
+        'expired-or-replayed',
         'OIDC authorization attempt is expired or already used'
       )
 
@@ -284,7 +313,8 @@ export class OidcProtocolEngine {
       })
       const claims = tokenResponse.claims() as Record<string, unknown> | undefined
       if (!claims)
-        throw new OidcProviderIncompatibleError(
+        throw new OidcAttemptRejectedError(
+          'verified-token',
           'OIDC response did not contain a validated ID token'
         )
       const proof = this.createVerifiedProof(claims, claimed)
@@ -298,6 +328,7 @@ export class OidcProtocolEngine {
     } catch (error) {
       await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'failed')
       const transportFailure = this.operationContext.getStore()?.transportFailure
+      if (error instanceof OidcCallerCancelledError) throw error
       if (
         error instanceof OidcProviderUnavailableError ||
         transportFailure?.kind === 'unavailable'
@@ -308,7 +339,10 @@ export class OidcProtocolEngine {
       if (transportFailure?.kind === 'incompatible') {
         throw transportFailure.error
       }
-      throw new OidcProviderIncompatibleError('OIDC authorization response could not be verified')
+      throw new OidcAttemptRejectedError(
+        'provider-response',
+        'OIDC authorization response could not be verified'
+      )
     }
   }
 
@@ -347,12 +381,16 @@ export class OidcProtocolEngine {
           claims.auth_time < 0 ||
           claims.auth_time > nowSeconds + 60))
     ) {
-      throw new OidcProviderIncompatibleError(
+      throw new OidcAttemptRejectedError(
+        'verified-token',
         'OIDC ID token claims do not match the client registration'
       )
     }
     if (attempt.issuer !== this.provider.issuer || attempt.clientId !== this.provider.clientId) {
-      throw new OidcProviderIncompatibleError('OIDC attempt registration binding is invalid')
+      throw new OidcAttemptRejectedError(
+        'issuer-binding',
+        'OIDC attempt registration binding is invalid'
+      )
     }
 
     const attributes = this.readValidatedAttributes(claims)
@@ -437,7 +475,8 @@ export class OidcProtocolEngine {
     } catch (error) {
       if (
         error instanceof OidcProviderIncompatibleError ||
-        error instanceof OidcProviderUnavailableError
+        error instanceof OidcProviderUnavailableError ||
+        error instanceof OidcCallerCancelledError
       ) {
         throw error
       }
@@ -475,7 +514,7 @@ export class OidcProtocolEngine {
         this.dependencies.encryptionKeyHex
       )
     } catch {
-      throw new OidcProviderIncompatibleError('OIDC provider credential is unavailable')
+      throw new OidcCredentialConfigurationError()
     }
     if (current !== this.provider.configurationGeneration) {
       this.cachedConfiguration = undefined

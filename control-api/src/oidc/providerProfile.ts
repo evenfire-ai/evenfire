@@ -61,7 +61,10 @@ export function validateMetadataEndpoint(value: string, field: string): void {
     hostname.endsWith('.cluster.local') ||
     !hostname.split('.').every(label => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label))
   ) {
-    throw new OidcProviderIncompatibleError(`OIDC ${field} is not a public HTTPS endpoint`)
+    throw new OidcProviderIncompatibleError(
+      `OIDC ${field} is not a public HTTPS endpoint`,
+      'untrusted-endpoint'
+    )
   }
 }
 
