@@ -391,6 +391,32 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(conf).toContain('listen 3000')
     })
 
+    it.each([
+      ['a static remote', () => REMOTE_SERVER],
+      [
+        'an oauth remote',
+        () =>
+          cloneServer(REMOTE_SERVER, {
+            auth: { type: 'oauth' },
+            remote: { baseUrl: 'https://mcp.sentry.io/sse' },
+          }),
+      ],
+    ])(
+      'ignores upstream X-Accel-Redirect and X-Accel-Charset once inside the proxied location for %s (#1240)',
+      (_label, server) => {
+        const conf = remoteConfig(reconciler, server())
+        const directive = 'proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;'
+
+        expect(conf.split(directive)).toHaveLength(2)
+        const location = conf.indexOf('location /')
+        const health = conf.indexOf('location /health')
+        const at = conf.indexOf(directive)
+        expect(location).toBeGreaterThanOrEqual(0)
+        expect(at).toBeGreaterThan(location)
+        expect(at).toBeLessThan(health)
+      }
+    )
+
     it('should disable proxy_buffering for SSE streaming support', () => {
       const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
       const conf = cm.data['default.conf.template']
@@ -1675,6 +1701,35 @@ describe('McpServerReconciler remote egress proxy', () => {
       expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
     })
 
+    it.each([
+      ['a dollar sign', '/a$b/mcp'],
+      ['a semicolon', '/mcp;return'],
+    ])('rejects %s in the remote URL path without echoing the path (A1.2)', (_label, path) => {
+      let error: unknown
+      try {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://api.example.com${path}`)
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('remote.baseUrl path contains a forbidden character')
+      expect(message).not.toContain(path)
+      expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
+    })
+
+    it.each([
+      ['a versioned path', '/v1/mcp'],
+      ['a percent-encoded dollar', '/a%24b/mcp'],
+      ['braces the URL parser encodes', '/a{b}/mcp'],
+    ])('accepts %s in the remote URL path (A1.2)', (_label, path) => {
+      expect(() => {
+        ;(reconciler as any).sanitizeRemoteUrl(`https://api.example.com${path}`)
+      }).not.toThrow()
+      expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
+    })
+
     it('should accept a valid HTTPS URL and return safe components', () => {
       const result = (reconciler as any).sanitizeRemoteUrl('https://mcp.sentry.io/sse')
       expect(result.safeUrl).toBe('https://mcp.sentry.io/sse')
@@ -1815,6 +1870,25 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
       expect(status.message).toContain('Resource sync failed')
       expect(status.message).toMatch(/invalid placeholder|forbidden character/)
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(status.message).not.toContain(marker)
+      expectRemoteLivenessWitness(reconciler, REMOTE_SERVER)
+    })
+
+    it('fails the reconcile without writing when the baseUrl path has a dollar sign (A1.2)', async () => {
+      const marker = 'zz-p-marker-path'
+      const server = cloneServer(REMOTE_SERVER, {
+        remote: { baseUrl: `https://api.example.com/${marker}$scheme/mcp` },
+      })
+
+      await reconciler.reconcile(server)
+
+      const status = reconciler.getStatus(server.name)
+      // Witness: the reconcile reached the resource sync (it read the Secret).
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledTimes(1)
+      expect(status.message).toContain('Resource sync failed')
+      expect(status.message).toContain('remote.baseUrl path contains a forbidden character')
       expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
       expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
       expect(status.message).not.toContain(marker)

@@ -1026,6 +1026,17 @@ export class McpServerReconciler {
         )
       }
     }
+    // The path is rendered unquoted in `location`, `proxy_pass` and
+    // `proxy_redirect`, where NGINX expands `$name` as a variable and a `;`
+    // ends the directive. The URL parser percent-encodes spaces and braces in
+    // the path and turns `\` into `/`, so in practice this rejects `$` and `;`;
+    // the rest of the class matches the query check. The error does not echo
+    // the path.
+    if (/[\\;{}$\u0000-\u0020]/.test(parsed.pathname)) {
+      throw new Error(
+        'remote.baseUrl path contains a forbidden character ($, ;, \\, braces or whitespace)'
+      )
+    }
     // Reconstruct safe URL from parsed components (strips injected chars like newlines)
     const path = parsed.pathname
     const safeUrl = parsed.origin + path + parsed.search
@@ -1186,6 +1197,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolved) ──\n' + authHeaderLines + '\n' : ''}${authorizationBlock}
+        # An upstream must not drive internal redirects or charset overrides:
+        # NGINX logs the X-Accel-Redirect target and the X-Accel-Charset value
+        # it received, outside the messages egress-proxy-log-filter redacts (#1240).
+        proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;
+
         # SSE/streaming support
         proxy_buffering off;
         proxy_cache off;
