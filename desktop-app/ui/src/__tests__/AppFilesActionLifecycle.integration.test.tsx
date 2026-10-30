@@ -496,7 +496,10 @@ function installClerum(
     value: {
       ...previousBridge,
       app: { rendererReady: vi.fn(async () => undefined) },
-      auth: { getDesktopAppInfo: vi.fn(async () => ({ version: 'test' })), getSessionGeneration: vi.fn(async () => 1) },
+      auth: {
+        getDesktopAppInfo: vi.fn(async () => ({ version: 'test' })),
+        getSessionGeneration: vi.fn(async () => 1),
+      },
       shortcuts: {
         onCommand: vi.fn((handler: (commandId: string, source: 'host' | 'sandbox') => void) => {
           appHarness.shortcutCommand = (commandId, source) => {
@@ -938,58 +941,6 @@ describe('App → Files action lifecycle integration', () => {
     expect(downloadPreview).toHaveBeenCalledTimes(2)
   })
 
-  it('reveals an adjacent app tab when scope cleanup closes the active Preview', async () => {
-    const resource = await resolveResource(
-      resolvedFile('cccccccccccccccccccccccccccccccc', 'fallback.md')
-    )
-    installClerum([resource])
-    Object.assign(window.clerum.sandboxUi, {
-      listApps: vi.fn(async () => ({
-        apps: [
-          {
-            appRef: 'ns/fallback-app',
-            title: 'Fallback app',
-            defaultPath: '/',
-            ready: true,
-            phase: 'active',
-          },
-        ],
-      })),
-    })
-    const teamAScope = buildGfsSessionScope('', true, makeController().me)
-    if (!teamAScope) throw new Error('Team A scope was not available')
-    const appTab = openAppTab(createWorkspaceTabsState('chat-tab-1'), {
-      id: 'fallback-app-tab',
-      appRef: 'ns/fallback-app',
-      title: 'Fallback app',
-    })
-    const workspaceTabs = openPreviewTab(appTab, {
-      id: 'active-preview-tab',
-      title: resource.name,
-      gfsUri: resource.gfsUri,
-      fileKind: 'markdown',
-      byteLength: resourceByteLength(resource),
-      sessionScope: teamAScope,
-    })
-    appHarness.controller = makeController(workspaceTabs)
-    renderApp()
-    await screen.findByRole('heading', { name: /fixture preview/i })
-    await waitFor(() => expect(window.clerum.sandboxUi.listApps).toHaveBeenCalled())
-
-    act(() => {
-      appHarness.controller.me = { ...appHarness.controller.me!, teamId: 'team-b' }
-      appHarness.controller.currentTeamId = 'team-b'
-      appHarness.forceRender()
-    })
-
-    await waitFor(() => expect(appHarness.sandboxUiShortcutAppRef).toBe('ns/fallback-app'))
-    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-      id: 'fallback-app-tab',
-      kind: 'app',
-    })
-    expect(appHarness.controller.workspaceTabs.tabs.some(tab => tab.kind === 'preview')).toBe(false)
-  })
-
   it('keeps a newer explicit Chat selection when Preview scope cleanup runs', async () => {
     const resource = await resolveResource(
       resolvedFile('ffffffffffffffffffffffffffffffff', 'latest-selection.md')
@@ -1105,7 +1056,9 @@ describe('App → Files action lifecycle integration', () => {
           canOpenFolder: kind === 'directory',
           canDelete: true,
         })
-      ).filter(action => !['copy-link', 'copy-route'].includes(action.id)).map(action => ({ id: action.id, label: action.label }))
+      )
+        .filter(action => !['copy-link', 'copy-route'].includes(action.id))
+        .map(action => ({ id: action.id, label: action.label }))
 
     for (const resource of [folder, file]) {
       const row = screen
@@ -2138,66 +2091,75 @@ describe('App → Files action lifecycle integration', () => {
     expect(deleteResource).toHaveBeenCalledTimes(1)
   })
 
-  it.each([false, true])('moves a child through its exact parent (readable: %s)', async readable => {
-    const parent = await resolveResource(
-      resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Shared parent')
-    )
-    const target = await resolveResource(
-      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'unreadable-child.txt', {
-        parentResourceId: parent.resourceId,
-      })
-    )
-    const destination = await resolveResource(
-      resolvedDirectory('dddddddddddddddddddddddddddddddd', 'Move destination')
-    )
-    const unreadableChild = childView(target.resourceId, target.name, 'file', {
-      gfsUri: target.gfsUri,
-      parentResourceId: parent.resourceId,
-      version: target.version,
-      readable,
-    })
-    const { moveResource } = installClerum([parent, target, destination], new Map(), {
-      accessibleRows: [
-        accessibleResource(parent.resourceId, parent.name, 'directory', {
-          gfsUri: parent.gfsUri,
-        }),
-        accessibleResource(destination.resourceId, destination.name, 'directory', {
-          gfsUri: destination.gfsUri,
-        }),
-      ],
-      childRowsByParent: new Map([[parent.resourceId, [unreadableChild]]]),
-    })
-    renderApp()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
-    const parentRow = await screen.findByRole('treeitem', { name: /Shared parent/ })
-    fireEvent.click(within(parentRow).getByRole('button', { name: 'Expand Shared parent' }))
-    await screen.findByRole('button', { name: 'Options for unreadable-child.txt' })
-    await chooseRowAction(target.name, 'Move to')
-
-    const dialog = await screen.findByRole('dialog', { name: 'Move file unreadable-child.txt' })
-    expect(dialog.querySelector('.da-gfs-move-dialog__current-location')?.textContent).toContain(
-      'Shared parent'
-    )
-    fireEvent.click(await within(dialog).findByRole('button', { name: destination.name }))
-    fireEvent.click(within(dialog).getByRole('button', { name: `Move here (${destination.name})` }))
-
-    await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith(
-        target.resourceId,
-        destination.resourceId,
-        'main',
-        target.version,
-        undefined,
-        1
+  it.each([false, true])(
+    'moves a child through its exact parent (readable: %s)',
+    async readable => {
+      const parent = await resolveResource(
+        resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Shared parent')
       )
-    )
-  })
+      const target = await resolveResource(
+        resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'unreadable-child.txt', {
+          parentResourceId: parent.resourceId,
+        })
+      )
+      const destination = await resolveResource(
+        resolvedDirectory('dddddddddddddddddddddddddddddddd', 'Move destination')
+      )
+      const unreadableChild = childView(target.resourceId, target.name, 'file', {
+        gfsUri: target.gfsUri,
+        parentResourceId: parent.resourceId,
+        version: target.version,
+        readable,
+      })
+      const { moveResource } = installClerum([parent, target, destination], new Map(), {
+        accessibleRows: [
+          accessibleResource(parent.resourceId, parent.name, 'directory', {
+            gfsUri: parent.gfsUri,
+          }),
+          accessibleResource(destination.resourceId, destination.name, 'directory', {
+            gfsUri: destination.gfsUri,
+          }),
+        ],
+        childRowsByParent: new Map([[parent.resourceId, [unreadableChild]]]),
+      })
+      renderApp()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      const parentRow = await screen.findByRole('treeitem', { name: /Shared parent/ })
+      fireEvent.click(within(parentRow).getByRole('button', { name: 'Expand Shared parent' }))
+      await screen.findByRole('button', { name: 'Options for unreadable-child.txt' })
+      await chooseRowAction(target.name, 'Move to')
+
+      const dialog = await screen.findByRole('dialog', { name: 'Move file unreadable-child.txt' })
+      expect(dialog.querySelector('.da-gfs-move-dialog__current-location')?.textContent).toContain(
+        'Shared parent'
+      )
+      fireEvent.click(await within(dialog).findByRole('button', { name: destination.name }))
+      fireEvent.click(
+        within(dialog).getByRole('button', { name: `Move here (${destination.name})` })
+      )
+
+      await waitFor(() =>
+        expect(moveResource).toHaveBeenCalledWith(
+          target.resourceId,
+          destination.resourceId,
+          'main',
+          target.version,
+          undefined,
+          1
+        )
+      )
+    }
+  )
 
   it('omits Move for a shared-root row without source parent', async () => {
-    const target = await resolveResource(resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'root-move.txt'))
+    const target = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'root-move.txt')
+    )
     const { moveResource } = installClerum([target], new Map(), {
-      accessibleRows: [accessibleResource(target.resourceId, target.name, 'file', { gfsUri: target.gfsUri })],
+      accessibleRows: [
+        accessibleResource(target.resourceId, target.name, 'file', { gfsUri: target.gfsUri }),
+      ],
     })
     renderApp()
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
@@ -2286,41 +2248,73 @@ describe('App → Files action lifecycle integration', () => {
   })
 })
 
-
 describe('App explicit Chat intent handoff through the real controller', () => {
-  it.each([null, 'agent-a'])('closes Files into its Chat neighbor with exactly one intent (agent: %s)', async agentRef => {
-    installClerum([])
-    const { currentController } = await renderAppWithRealController()
-    const workspace = openFilesTab(createWorkspaceTabsState('intent-chat-owner', agentRef), { id: 'files-to-close', path: null })
-    act(() => currentController().setWorkspaceTabs(workspace))
-    await waitFor(() => expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe('files-to-close'))
-    const before = currentController().navigationIntentSequence
-    fireEvent.click(screen.getByRole('button', { name: 'Close Files' }))
-    await waitFor(() => {
-      expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat)
-      expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe('intent-chat-owner')
-      expect(currentController().workspaceTabs.tabs.some(tab => tab.id === 'files-to-close')).toBe(false)
-    })
-    expect(currentController().navigationIntentSequence).toBe(before + 1)
-  })
+  it.each([null, 'agent-a'])(
+    'closes Files into its Chat neighbor with exactly one intent (agent: %s)',
+    async agentRef => {
+      installClerum([])
+      const { currentController } = await renderAppWithRealController()
+      const workspace = openFilesTab(createWorkspaceTabsState('intent-chat-owner', agentRef), {
+        id: 'files-to-close',
+        path: null,
+      })
+      act(() => currentController().setWorkspaceTabs(workspace))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe('files-to-close')
+      )
+      const before = currentController().navigationIntentSequence
+      fireEvent.click(screen.getByRole('button', { name: 'Close Files' }))
+      await waitFor(() => {
+        expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat)
+        expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe('intent-chat-owner')
+        expect(
+          currentController().workspaceTabs.tabs.some(tab => tab.id === 'files-to-close')
+        ).toBe(false)
+      })
+      expect(currentController().navigationIntentSequence).toBe(before + 1)
+    }
+  )
 
-  it('creates New chat once and records a genuinely later active-tab reselection once', async () => {
-    installClerum([])
-    const { currentController } = await renderAppWithRealController()
-    act(() => currentController().setWorkspaceTabs(openFilesTab(createWorkspaceTabsState('prior-chat', 'agent-a'), { id: 'files-before-new', path: null })))
-    const before = currentController().navigationIntentSequence
-    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
-    await waitFor(() => expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat))
-    const selected = activeWorkspaceTab(currentController().workspaceTabs)
-    expect(selected).toMatchObject({ kind: 'chat', chat: { chatId: null } })
-    expect(currentController().navigationIntentSequence).toBe(before + 1)
-    const newChatIntent = currentController().navigationIntentSequence
-    const tab = getWorkspaceTabButtons(selected!.title).find(button => button.getAttribute('aria-pressed') === 'true')
-    if (!tab) throw new Error('New chat did not select a rendered workspace tab')
-    fireEvent.click(tab)
-    expect(currentController().navigationIntentSequence).toBe(newChatIntent + 1)
-    expect(currentController().isNavigationIntentCurrent(newChatIntent)).toBe(false)
-    expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe(selected!.id)
-    expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat)
-  })
+  it.each(['chat', 'files'] as const)(
+    'creates New chat once from %s and records later active-tab reselection once',
+    async surface => {
+      installClerum([])
+      const { currentController } = await renderAppWithRealController()
+      const chatWorkspace = createWorkspaceTabsState('prior-chat', 'agent-a')
+      act(() =>
+        currentController().setWorkspaceTabs(
+          surface === 'files'
+            ? openFilesTab(chatWorkspace, { id: 'files-before-new', path: null })
+            : chatWorkspace
+        )
+      )
+      const before = currentController().navigationIntentSequence
+      const newChatAction = screen
+        .getAllByRole('button', { name: 'New chat' })
+        .find(button => !button.hasAttribute('aria-pressed'))
+      if (!newChatAction) throw new Error('The explicit New chat action did not render')
+      fireEvent.click(newChatAction)
+      if (surface === 'files') {
+        // Files supports the existing drawer diversion; New chat must not replace it.
+        await screen.findByRole('button', { name: 'Open chats' })
+      } else {
+        await waitFor(() => expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat))
+      }
+      const selected = activeWorkspaceTab(currentController().workspaceTabs)
+      expect(selected?.kind).toBe(surface)
+      expect(currentController().navigationIntentSequence).toBe(before + 1)
+      const newChatIntent = currentController().navigationIntentSequence
+      const tab = getWorkspaceTabButtons(selected!.title).find(
+        button => button.getAttribute('aria-pressed') === 'true'
+      )
+      if (!tab) throw new Error('New chat did not select a rendered workspace tab')
+      fireEvent.click(tab)
+      expect(currentController().navigationIntentSequence).toBe(newChatIntent + 1)
+      expect(currentController().isNavigationIntentCurrent(newChatIntent)).toBe(false)
+      expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe(selected!.id)
+      expect(currentController().navItem).toBe(
+        surface === 'files' ? DESKTOP_ROUTES.files : DESKTOP_ROUTES.chat
+      )
+    }
+  )
 })

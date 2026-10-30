@@ -234,10 +234,11 @@ export function useNavigationController() {
   // drift from the focused one (D4).
   const focusChatSection = useCallback(
     (
-      source: 'explicit' | 'programmatic' = 'explicit'
+      source: 'explicit' | 'programmatic' = 'explicit',
+      navigationIntentAlreadyStarted = false
     ): { agentRef: string; chatId: string } | null => {
       if (source === 'explicit') {
-        beginUserNavigationIntent()
+        if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
       } else if (navigationIntentSequenceRef.current > 0) {
         // Bootstrap must not replace a tab selected while authentication loads.
         return null
@@ -498,7 +499,7 @@ export function useNavigationController() {
       if (item === DESKTOP_ROUTES.chat) {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
-        return focusChatSection(source)
+        return focusChatSection(source, options.navigationIntentAlreadyStarted)
       }
       if (item === DESKTOP_ROUTES.apps) {
         showAppsPicker()

@@ -472,3 +472,46 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     expect(controller.selectedTeam).toBeUndefined()
   })
 })
+
+describe('Chat intent receipt ownership', () => {
+  it('honors a caller-owned receipt while revealing the real blank Chat tab', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const ownerTabId = result.current.workspaceTabs.activeTabId
+    act(() => result.current.beginUserNavigationIntent())
+    const started = result.current.navigationIntentSequence
+    act(() =>
+      result.current.handleNavSelect(DESKTOP_ROUTES.chat, { navigationIntentAlreadyStarted: true })
+    )
+    expect(result.current.navigationIntentSequence).toBe(started)
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(result.current.workspaceTabs.activeTabId).toBe(ownerTabId)
+    expect(result.current.workspaceTabs.tabs.find(tab => tab.id === ownerTabId)?.kind).toBe('chat')
+  })
+
+  it('advances once for each explicit blank Chat reselection and supersedes the earlier receipt', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const ownerTabId = result.current.workspaceTabs.activeTabId
+    const before = result.current.navigationIntentSequence
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
+    expect(result.current.navigationIntentSequence).toBe(before + 1)
+    const earlier = result.current.navigationIntentSequence
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
+    expect(result.current.navigationIntentSequence).toBe(before + 2)
+    expect(result.current.isNavigationIntentCurrent(earlier)).toBe(false)
+    expect(result.current.workspaceTabs.activeTabId).toBe(ownerTabId)
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+  })
+  it('does not mint user intent for bootstrap or let stale programmatic focus replace Files', () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' }))
+    expect(result.current.navigationIntentSequence).toBe(0)
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+    act(() => result.current.openFilesSection())
+    const selectedFiles = result.current.workspaceTabs.activeTabId
+    const explicitIntent = result.current.navigationIntentSequence
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' }))
+    expect(result.current.navigationIntentSequence).toBe(explicitIntent)
+    expect(result.current.workspaceTabs.activeTabId).toBe(selectedFiles)
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.files)
+  })
+})

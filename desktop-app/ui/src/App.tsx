@@ -837,7 +837,7 @@ export function App() {
             : { selectLatest: false, ...navigationIntentOption }
         )
       } else {
-        vm.handleNavSelect(DESKTOP_ROUTES.chat)
+        vm.handleNavSelect(DESKTOP_ROUTES.chat, navigationIntentOption)
       }
     },
     [leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
@@ -920,7 +920,7 @@ export function App() {
       // update may have made the closed tab the active one.
       activateAndLaunch(
         state => closeWorkspaceTab(state, id),
-        wasActive ? () => revealWorkspaceTab(activeWorkspaceTab(projected), false) : undefined,
+        wasActive ? () => revealWorkspaceTab(activeWorkspaceTab(projected), false, true) : undefined,
         ACTIVATED_TAB_LAUNCH
       )
     },

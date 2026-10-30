@@ -1344,12 +1344,16 @@ export function useAppController(options: UseAppControllerOptions = {}) {
           handleSelectChatAgent(focusedChat.agentRef, {
             chatId: focusedChat.chatId,
             selectLatest: false,
+            navigationIntentAlreadyStarted: true,
           })
           return
         }
         const latestAgent = pickLatestAgent(agentsData.agentNames, activity.agentLastActiveByAgent)
         if (latestAgent) {
-          handleSelectChatAgent(latestAgent, { selectLatest: false })
+          handleSelectChatAgent(latestAgent, {
+            selectLatest: false,
+            navigationIntentAlreadyStarted: true,
+          })
         }
       }
     },
