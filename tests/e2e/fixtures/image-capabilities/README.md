@@ -55,6 +55,40 @@ file chip, sends, and requires the digest of the attached bytes in the answer,
 one `document-read-requested` row, one `document-answer` row carrying that
 digest, no image row and no `documentFailures`.
 
+## Attachment save (EvenDrive)
+
+The fixture also answers the EvenDrive save journey. A fixed
+`EVENDRIVE_SAVE folder="<name>" drive=<drive>` directive in the last user
+message selects it; the directive names the folder the user sees in Files,
+never a resource id. The directive is read from a string message or from the
+text parts of an image turn, and is classified before the image scanner, so an
+attached image that asks to save makes tool calls instead of entering the color
+oracle. Without the directive the fixture behaves exactly as before.
+
+The journey is stateless and classified by the tool results after the last user
+message:
+
+1. `discover` (no tool result and the save tool offered) asks for
+   `clerum__gfs_accessible` and records `attachment-save-discovery-requested`.
+2. `save` (the accessible result) selects the only accessible directory with
+   the requested name and the first `attached_file`/`attached_image` context
+   line, calls `clerum__gfs_save_attachment`, and records
+   `attachment-save-requested`.
+3. `answer` (the save result) replies `SAVE-ANSWER success` or
+   `SAVE-ANSWER failure` and records `attachment-save-answer` with
+   `saveOutcome`: `success`, or the exact gfsc mutation-failure message. The
+   markers are shared constants exported by `provider.mjs`.
+4. `absent` (directive present, `clerum__gfs_create_file` offered and the save
+   tool missing) replies `SAVE-TOOL-ABSENT` and records
+   `attachment-save-tool-absent`.
+
+A missing or duplicated destination folder, a folder beyond the first
+accessible page, a turn context without an attached line, an unreadable save
+tool result, or a directive without the gfs write tools is refused with the
+fixed reasons `save-folder-not-unique`, `save-folder-beyond-first-page`,
+`save-attachment-line-missing`, `save-tool-output-malformed` and
+`save-write-tools-missing`.
+
 ## Local execution
 
 Use Node 24 and Bash 5, a clean development branch based on current `origin/dev`,
