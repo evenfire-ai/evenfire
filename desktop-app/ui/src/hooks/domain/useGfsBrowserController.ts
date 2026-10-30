@@ -1276,13 +1276,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (!ownsPublishedAuthority()) return
     await childrenQuery.refetch()
   }, [childrenQuery, ownsPublishedAuthority])
-  const isMoveSessionGenerationCurrent = useCallback(async (expected: number): Promise<boolean> => {
-    try {
-      return (await window.clerum.auth.getSessionGeneration()) === expected
-    } catch {
-      return false
-    }
-  }, [])
+  const isMoveSessionGenerationCurrent = useCallback(
+    async (expected: number): Promise<boolean> => {
+      try {
+        const authoritativeGeneration = await window.clerum.auth.getSessionGeneration()
+        return authoritativeGeneration === expected && liveSessionGenerationRef.current === expected
+      } catch {
+        return false
+      }
+    },
+    [liveSessionGenerationRef]
+  )
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
       ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
@@ -1558,8 +1562,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         ? crumbs.find(crumb => crumb.resourceId === input.resourceId)
         : undefined
       if (ownsLiveSession) {
-        setCrumbs(prev =>
-          prev.map(crumb =>
+        setCrumbs(prev => {
+          if (
+            input.expectedSessionGeneration !== undefined &&
+            liveSessionGenerationRef.current !== input.expectedSessionGeneration
+          ) {
+            return prev
+          }
+          return prev.map(crumb =>
             crumb.resourceId === input.resourceId
               ? {
                   ...crumb,
@@ -1568,7 +1578,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
                 }
               : crumb
           )
-        )
+        })
       }
       if (capturedScope) {
         applyMoveConvergence(

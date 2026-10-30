@@ -27,6 +27,7 @@ import {
   setComposerDraft,
 } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
+import { readGfsOpenLocations } from '@lib/gfsOpenLocations'
 import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
@@ -383,9 +384,23 @@ vi.mock('@pages/SettingsPage', () => ({
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
 vi.mock('@pages/WorkflowsPage', () => ({ WorkflowsPage: () => null }))
 
+let proofGfsController: ReturnType<typeof useGfsBrowserController> | null = null
 function GfsAuthorityProbe() {
   const controller = useGfsBrowserController()
-  return <output data-testid="gfs-session-access">{controller.accessState}</output>
+  proofGfsController = controller
+  return (
+    <>
+      <output data-testid="gfs-session-access">{controller.accessState}</output>
+      <output data-testid="r7-actual-current-version">{controller.current?.version}</output>
+      <output data-testid="r7-actual-current-resource">{controller.current?.resourceId}</output>
+      <output data-testid="r7-actual-crumb-version">
+        {
+          controller.crumbs.find(crumb => crumb.resourceId === controller.current?.resourceId)
+            ?.version
+        }
+      </output>
+    </>
+  )
 }
 
 type AppController = ReturnType<typeof useAppController>
@@ -7754,5 +7769,126 @@ describe('App deep-link orchestration', () => {
       resetComposerDraftStore()
       if (dispose.mock.calls.length === 0) await main.dispose()
     }
+  })
+
+  it('R7 actual main snapshot reply cannot settle an old Move into replacement GFS state', async () => {
+    const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
+    const rootId = 'a'.repeat(32),
+      destinationId = 'b'.repeat(32)
+    const root = resolvedDirectory(rootId, 'Held root', { version: 3 })
+    const tokens: string[] = []
+    const moves: Array<{ resourceId: string; destinationId: string; generation: number }> = []
+    let serverVersion = 3
+    transportBoundaries.gfsClient = new GfsClient({
+      baseUrl: 'https://gfs.fixture.test',
+      fetchBytes: async () => new ArrayBuffer(0),
+      requestJson: (async (method: string, input: string, options?: { token?: string }) => {
+        const url = new URL(input)
+        if (method === 'PATCH') {
+          tokens.push(options?.token ?? '')
+          return { ok: true, data: { resourceId: rootId, version: 9 } }
+        }
+        if (url.pathname.endsWith('/affordances'))
+          return heldAffordances(['read', 'write', 'delete'])
+        if (url.pathname.endsWith('/resolve'))
+          return { ok: true, data: { ...root, version: serverVersion } }
+        if (url.pathname.endsWith('/children'))
+          return { ok: true, data: { items: [], nextCursor: null } }
+        return {
+          ok: true,
+          data: { items: [accessibleResource(rootId, 'Held root', 'directory')], nextCursor: null },
+        }
+      }) as GfsTransport['requestJson'],
+    })
+    await service.googleLogin('fixture-google-A')
+    const issuedN = service.getSessionGeneration()
+    const { getController, queryClient, view } = await mountSessionBackedApp(
+      userA,
+      desktopQueryClient
+    )
+    filesPageHarness.renderActual = true
+    filesPageHarness.showAuthorityProbe = true
+    window.clerum.gfs.resolve = uri =>
+      service.resolveGfsUri(uri) as ReturnType<Window['clerum']['gfs']['resolve']>
+    window.clerum.gfs.affordances = (id, drive) => service.gfsAffordances(id, drive)
+    window.clerum.gfs.listAccessible = (drive, cursor) =>
+      service.listAccessibleGfsResources(drive, cursor)
+    window.clerum.gfs.listChildren = (id, drive, cursor) =>
+      service.listGfsChildren(id, drive, cursor)
+    window.clerum.gfs.moveResource = (id, target, drive, ifMatch, newName, generation) => {
+      moves.push({ resourceId: id, destinationId: target, generation })
+      return service.moveGfsResource(id, target, generation, drive, ifMatch, newName)
+    }
+    act(() => getController().openFilesSection(root.gfsUri))
+    await waitFor(() => expect(proofGfsController).toBeTruthy())
+    await act(async () => {
+      await proofGfsController!.openUri(root.gfsUri)
+    })
+    expect(proofGfsController!.current?.version).toBe(3)
+    let hold = true,
+      reply!: (value: number) => void,
+      held = false,
+      capturedSnapshot: number | null = null
+    const pending = new Promise<number>(resolve => {
+      reply = resolve
+    })
+    window.clerum.auth.getSessionGeneration = async () => {
+      const actualMainSnapshot = service.getSessionGeneration()
+      if (hold) {
+        hold = false
+        held = true
+        capturedSnapshot = actualMainSnapshot
+        return pending
+      }
+      return actualMainSnapshot
+    }
+    let move!: Promise<unknown>
+    await act(async () => {
+      move = proofGfsController!.moveResource(
+        rootId,
+        destinationId,
+        3,
+        undefined,
+        null,
+        proofGfsController!.sessionScope,
+        true,
+        issuedN
+      )
+      void move.catch(() => {})
+      await new Promise<void>(r => setImmediate(r))
+    })
+    await waitFor(() => expect(held).toBe(true))
+    expect(tokens).toEqual(['session-permission-A'])
+    expect(moves).toEqual([{ resourceId: rootId, destinationId, generation: issuedN }])
+    expect(capturedSnapshot).toBe(issuedN)
+    // A later server edit advances the resource after the old Move committed.
+    serverVersion = 30
+    await service.googleLogin('fixture-google-B')
+    const issuedNext = service.getSessionGeneration()
+    expect(issuedNext).toBeGreaterThan(issuedN)
+    await act(async () => {
+      await getController().loadSession({ preserveNav: true })
+    })
+    expect(getController().sessionGeneration).toBe(issuedNext)
+    await act(async () => {
+      await proofGfsController!.openUri(root.gfsUri)
+    })
+    expect(proofGfsController!.current?.version).toBe(30)
+    const replacementOpenLocations = readGfsOpenLocations(
+      queryClient,
+      proofGfsController!.sessionScope!
+    )
+    await act(async () => {
+      reply(capturedSnapshot!)
+      await move
+    })
+    expect(view.getByTestId('r7-actual-current-version').textContent).toBe('30')
+    expect(view.getByTestId('r7-actual-current-resource').textContent).toBe(rootId)
+    expect(view.getByTestId('r7-actual-crumb-version').textContent).toBe('30')
+    expect(readGfsOpenLocations(queryClient, proofGfsController!.sessionScope!)).toEqual(
+      replacementOpenLocations
+    )
+    expect(tokens).toHaveLength(1)
+    queryClient.clear()
   })
 })
