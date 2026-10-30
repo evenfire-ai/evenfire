@@ -148,6 +148,10 @@ NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror, unprivileged image" 0 1 "$
   "docker.io/nginxinc/nginx-unprivileged:$TAG@$DIGEST"
 expect_call "mirror, unprivileged image" "buildx imagetools inspect mirror.gcr.io/nginxinc/nginx-unprivileged@$DIGEST --format {{json .Image}}"
 
+NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror, current official unprivileged image" 0 1 "$(image_index "$V" "$V")" \
+  "docker.io/nginx/nginx-unprivileged:$TAG@$DIGEST"
+expect_call "mirror, current official unprivileged image" "buildx imagetools inspect mirror.gcr.io/nginx/nginx-unprivileged@$DIGEST --format {{json .Image}}"
+
 NGINX_REGISTRY_MIRROR=mirror.gcr.io FAKE_DOCKER_FAIL=1 run_case "mirror inspect failure" 1 1 "" "$REF"
 expect_call "mirror inspect failure" "buildx imagetools inspect mirror.gcr.io/library/nginx@$DIGEST --format {{json .Image}}"
 expect_out "mirror inspect failure" "could not inspect mirror.gcr.io/library/nginx@$DIGEST"

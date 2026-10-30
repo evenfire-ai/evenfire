@@ -12,10 +12,11 @@
 #
 # Each reference is inspected once, under the name it is written with. When
 # NGINX_REGISTRY_MIRROR is set (CI uses mirror.gcr.io), Docker Hub names
-# (nginx, docker.io/library/nginx, nginxinc/nginx-unprivileged,
-# docker.io/nginxinc/nginx-unprivileged) are inspected on that mirror instead:
-# same digest, same bytes. A failed inspect is an error; there is no retry and
-# no second registry. A variable registry prefix is not resolved.
+# (nginx, docker.io/library/nginx, nginx/nginx-unprivileged,
+# docker.io/nginx/nginx-unprivileged, and the legacy nginxinc/nginx-unprivileged
+# names) are inspected on that mirror instead: same digest, same bytes. A
+# failed inspect is an error; there is no retry and no second registry. A
+# variable registry prefix is not resolved.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +55,7 @@ while IFS= read -r ref; do
   name="${name%:*}"
   case "$name" in
     nginx | docker.io/library/nginx) hub_repo="library/nginx" ;;
+    nginx/nginx-unprivileged | docker.io/nginx/nginx-unprivileged) hub_repo="nginx/nginx-unprivileged" ;;
     nginxinc/nginx-unprivileged | docker.io/nginxinc/nginx-unprivileged) hub_repo="nginxinc/nginx-unprivileged" ;;
     *) hub_repo="" ;;
   esac
