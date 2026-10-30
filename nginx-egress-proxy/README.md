@@ -31,13 +31,14 @@ For each remote McpServer, host-context-controller:
    private/link-local/loopback patterns rejected; the URL is reconstructed from
    parsed components so injected characters (e.g. newlines) are stripped.
    Query placeholders must be complete `${NAME}` values where `NAME` matches
-   `[A-Z_][A-Z0-9_]*` and is declared by `spec.env` or `spec.envSecret`; bare
-   dollars, malformed braces, backslashes, semicolons and undeclared names are
-   rejected. The URL parser strips TAB/CR/LF and percent-encodes other control
-   characters and spaces before that check. The path takes no placeholders and
-   must not contain `$` (or the other characters the query check rejects: `\`,
-   `;`, `{`, `}`, control characters and space), because it is rendered into
-   the NGINX template unquoted.
+   `[A-Z_][A-Z0-9_]*` and is declared by `spec.env` or `spec.envSecret`. The
+   URL parser runs first: it strips TAB/CR/LF and percent-encodes spaces and
+   other control characters, which are then accepted in encoded form. The query
+   check then rejects any `$`, brace, backslash or semicolon outside a complete
+   placeholder, and undeclared names. The path takes no placeholders; the
+   parser also percent-encodes braces in the path and turns `\` into `/`, so the
+   path check rejects `$` and `;`. Both are rendered into the NGINX template
+   unquoted.
 2. **Renders a per-server `default.conf.template` ConfigMap** that resolves and
    re-resolves the external base URL with NGINX. The resolver comes from the
    pod's `/etc/resolv.conf`, and the upstream `server ... resolve` directive
@@ -66,13 +67,16 @@ the generated `resolver` directive uses.
 
 Residuals:
 
-- A declared placeholder whose value contains an NGINX variable reference (for
-  example `$http_authorization` in `spec.env` or a Secret) is substituted by
-  `envsubst` and then expanded by NGINX, so a client header can reach the
-  upstream URL and the error log. Only an admin who can write the Secret or the
-  CRD env can do this, and the same actor can already do it on `dev` through
-  `authHeaders`. A container-start template check closes it; that layer is
-  tracked with #1240.
+- Declared values are substituted literally by `envsubst`; HCC validates
+  placeholder names, not values. In the unquoted `baseUrl` query a value
+  containing `;` or a newline adds whole NGINX directives; in a double-quoted
+  `authHeaders` value a `"` or a `\` breaks out of the string with the same
+  effect. In both, a value containing `$name` is expanded by NGINX, so a client
+  header can reach the upstream URL, an added header or the error log. Only an
+  admin who can write the Secret or the CRD env can set such a value, and the
+  same actor can already do it on `dev` through `authHeaders`. A
+  container-start template value check closes it; that layer is tracked with
+  #1240.
 - A literal credential written into `baseUrl` instead of a placeholder is still
   stored in the ConfigMap. Use placeholders.
 

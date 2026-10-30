@@ -987,10 +987,12 @@ export class McpServerReconciler {
     if (PRIVATE_IP.test(host)) {
       throw new Error(`remote.baseUrl must not point to private/reserved IP ranges: ${host}`)
     }
-    // Defense in depth for the generated NGINX directive: only complete,
-    // uppercase placeholders may remain dynamic. The URL parser strips TAB/CR/LF,
-    // but every other control character, whitespace, directive separator, escape,
-    // brace, or bare dollar must be rejected here.
+    // Defense in depth for the generated NGINX directive: the query is rendered
+    // unquoted in `proxy_pass`/`proxy_redirect`, so only complete, uppercase
+    // placeholders may remain dynamic. The URL parser strips TAB/CR/LF and
+    // percent-encodes spaces and other control characters, so in practice this
+    // rejects `$`, braces, `\` and `;` outside a complete placeholder; undeclared
+    // names are rejected below. The error does not echo the query.
     const queryWithoutPlaceholders = parsed.search.replace(QUERY_PLACEHOLDER_RE, '')
     if (/[\\;{}$\u0000-\u0020]/.test(queryWithoutPlaceholders)) {
       throw new Error(
