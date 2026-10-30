@@ -96,6 +96,7 @@ const errorTypes = [
 ]
 const pluginStorageReasons = new Set([
   'native-inspection-helper-load-failed',
+  'native-inspection-request-setup-failed',
   'native-inspection-response-rejected',
   'native-inspection-process-timeout',
   'native-inspection-process-start-failed',
@@ -109,6 +110,7 @@ const pluginStorageReasons = new Set([
 ])
 const pluginStorageFailureCategories = {
   'native-inspection-helper-load-failed': 'native-helper-load-failed',
+  'native-inspection-request-setup-failed': 'native-request-setup-failed',
   'native-inspection-response-rejected': 'native-response-rejected',
   'native-inspection-process-timeout': 'native-process-timeout',
   'native-inspection-process-start-failed': 'native-process-start-failed',
@@ -122,6 +124,7 @@ const pluginStorageFailureCategories = {
 }
 const pluginStorageFailures = new Set([
   'helper-load-failed',
+  'request-setup-failed',
   'response-rejected',
   'process-timeout',
   'process-start-failed',
@@ -133,7 +136,22 @@ const pluginStorageFailures = new Set([
   'verifier-rejected',
   'evidence-invalid',
 ])
-const pluginStoragePhases = new Set(['inspect-object', 'load-native-helper', 'verification'])
+const pluginStoragePhases = new Set([
+  'inspect-object',
+  'load-native-helper',
+  'prepare-request',
+  'verification',
+])
+const pluginStorageNativeReasons = new Set([
+  'current-user-access-insufficient',
+  'inspection-failed',
+  'native-helper-path-missing',
+  'object-identity-or-owner-invalid',
+  'request-missing',
+  'unauthorized-principal-access',
+  'unsupported-ace',
+  'user-access-not-inherited',
+])
 const pluginStorageNativeErrors = new Set([
   'ArgumentException',
   'FileNotFoundException',
@@ -192,7 +210,7 @@ function sanitizePluginStorageError(error) {
     safe.nativeOperation = value.nativeOperation
   if (Number.isSafeInteger(value.win32Error) && value.win32Error >= 0 && value.win32Error <= 0xffff)
     safe.win32Error = value.win32Error
-  if (typeof value.nativeReason === 'string' && /^[a-z-]{1,60}$/.test(value.nativeReason))
+  if (typeof value.nativeReason === 'string' && pluginStorageNativeReasons.has(value.nativeReason))
     safe.nativeReason = value.nativeReason
   return Object.keys(safe).length ? safe : undefined
 }

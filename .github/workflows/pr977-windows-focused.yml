@@ -3,7 +3,7 @@ name: PR 977 exact-source Windows plugin DACL verification
 on:
   push:
     branches:
-      - test/pr977-windows-37b4dfb6-20261030-r24m7
+      - test/pr977-windows-68b8ea74-20261030-r24l11
     paths:
       - .validation/windows/focused-test-target.txt
       - .github/workflows/pr977-windows-focused.yml
@@ -21,11 +21,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr977-windows-focused-r24m7
+  group: pr977-windows-focused-r24l11
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
+  PR977_SOURCE_SHA: 68b8ea7430ade92e1107381f0d08d76a2c72ec71
 
 jobs:
   focused-windows-plugin-dacl:
@@ -35,7 +35,7 @@ jobs:
       - name: Check out exact application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
+          ref: 68b8ea7430ade92e1107381f0d08d76a2c72ec71
           path: source
           persist-credentials: false
           fetch-depth: 1

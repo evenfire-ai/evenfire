@@ -3,7 +3,7 @@ name: PR 977 exact-source Windows full Desktop suite (sharded)
 on:
   push:
     branches:
-      - test/pr977-windows-37b4dfb6-20261030-r24m7
+      - test/pr977-windows-68b8ea74-20261030-r24l11
     paths:
       - .validation/windows/pr977-r24m7-run-2.trigger
 
@@ -11,11 +11,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr977-windows-full-sharded-r24m7-${{ github.ref }}
+  group: pr977-windows-full-sharded-r24l11-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
+  PR977_SOURCE_SHA: 68b8ea7430ade92e1107381f0d08d76a2c72ec71
 
 jobs:
   desktop-windows-build:
@@ -25,7 +25,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
+          ref: 68b8ea7430ade92e1107381f0d08d76a2c72ec71
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -95,7 +95,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
+          ref: 68b8ea7430ade92e1107381f0d08d76a2c72ec71
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -217,7 +217,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
+          ref: 68b8ea7430ade92e1107381f0d08d76a2c72ec71
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -335,7 +335,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 37b4dfb6a35f6b51372676bdcf66b0936b07dd60
+          ref: 68b8ea7430ade92e1107381f0d08d76a2c72ec71
           path: source
           persist-credentials: false
           fetch-depth: 1

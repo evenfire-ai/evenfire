@@ -80,6 +80,22 @@ describe('producer-backed diagnostics', () => {
       },
     })
   })
+  it('plugin ACL request-setup diagnostic', () => {
+    throw Object.assign(new Error('Plugin storage privacy could not be verified'), {
+      name: 'PluginStoragePrivacyError',
+      reason: 'native-inspection-request-setup-failed',
+      diagnostic: {
+        failure: 'request-setup-failed',
+        elapsedMs: 1200,
+        exitStatus: 2,
+        nativePhase: 'prepare-request',
+        nativeErrorType: 'FormatException',
+        hresult: '0x80131537',
+        nativeReason: 'private-token-value',
+        privatePath: 'C:\\Users\\private\\request.json',
+      },
+    })
+  })
   it('assertion mismatch', () => { expect('synthetic-private-value').toBe('expected-value') })
   it('test timeout', async () => { await new Promise(() => {}) }, 20)
   describe('setup', () => {
@@ -181,7 +197,7 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
     report.testResults.flatMap(file => file.assertionResults).map(test => [test.title, test])
   )
   assert.equal(cases.get('passes').status, 'passed')
-  assert.equal(report.numFailedTests, 7)
+  assert.equal(report.numFailedTests, 8)
   assert.equal(cases.get('verifier rejection').failure.category, 'native-verifier')
   assert.equal(cases.get('verifier rejection').failure.diagnostic.verifierHresult, '0x80070005')
   assert.equal(
@@ -208,6 +224,21 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
     hresult: '0x80070002',
     nativeReason: 'native-helper-path-missing',
   })
+  assert.equal(
+    cases.get('plugin ACL request-setup diagnostic').failure.category,
+    'native-request-setup-failed'
+  )
+  assert.deepEqual(
+    cases.get('plugin ACL request-setup diagnostic').failure.pluginStorageDiagnostic,
+    {
+      failure: 'request-setup-failed',
+      elapsedMs: 1200,
+      exitStatus: 2,
+      nativePhase: 'prepare-request',
+      nativeErrorType: 'FormatException',
+      hresult: '0x80131537',
+    }
+  )
   assert.equal(cases.get('test timeout').failure.category, 'timeout')
   assert.equal(cases.get('fixture setup').failure.phase, 'setup')
   assert.equal(cases.get('fixture setup').failure.category, 'native-fixture')
@@ -219,7 +250,10 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
   assert.equal(collection.failure.phase, 'collection')
   assert.equal(collection.failure.category, 'module-resolution')
   assert.equal(collection.failure.code, 'ERR_MODULE_NOT_FOUND')
-  assert.doesNotMatch(JSON.stringify(report), /private-value|teardown details|Users|C:\\\\/)
+  assert.doesNotMatch(
+    JSON.stringify(report),
+    /private-value|private-token-value|teardown details|Users|C:\\\\/
+  )
   const progress = readFileSync(path.join(directory, 'enriched-progress.jsonl'), 'utf8')
     .trim()
     .split(/\r?\n/)
@@ -235,6 +269,7 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
     'verifier rejection',
     'plugin ACL timeout diagnostic',
     'plugin ACL helper-load diagnostic',
+    'plugin ACL request-setup diagnostic',
     'assertion mismatch',
     'test timeout',
     'fixture setup',
