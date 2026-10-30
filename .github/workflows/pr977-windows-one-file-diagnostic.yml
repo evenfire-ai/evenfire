@@ -1,0 +1,106 @@
+name: PR 977 Windows one-file authentication diagnostic
+
+on:
+  push:
+    branches:
+      - test/pr977-windows-075794e5-20261028-r24m3
+    paths:
+      - .validation/windows/auth-password-rollback.trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr977-windows-auth-password-rollback-075794e5
+  cancel-in-progress: false
+
+env:
+  PR977_SOURCE_SHA: 075794e5606a65c30f4626a15f17718447393ec5
+
+jobs:
+  password-rollback-diagnostic:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact PR application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 075794e5606a65c30f4626a15f17718447393ec5
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out validation harness commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify and report source and harness revisions
+        shell: pwsh
+        run: |
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nvmrc = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $env:GITHUB_SHA"
+          Write-Output "Validation harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          Write-Output "Repository-pinned Node version: $nvmrc"
+          if ($env:GITHUB_SHA -ne $harnessSha) { throw 'Harness checkout does not match trigger SHA' }
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source SHA mismatch' }
+          if ($nvmrc -ne '24.22.1') { throw 'Repository Node pin is not 24.22.1' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            source/desktop-app/package-lock.json
+            source/mcp-host/package-lock.json
+
+      - name: Install Host fixture dependencies
+        working-directory: source/mcp-host
+        run: npm ci
+
+      - name: Install Desktop dependencies
+        working-directory: source/desktop-app
+        run: npm ci
+
+      - name: Run the selected password rollback test case
+        id: focused_test
+        continue-on-error: true
+        working-directory: source/desktop-app
+        shell: pwsh
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP 'pr977-password-rollback-windows.json'
+          $logPath = Join-Path $env:RUNNER_TEMP 'pr977-password-rollback-windows.log'
+          $filter = 'src/__tests__/appService.passwordLoginRollback.regression.test.ts'
+          $testName = 'restores the accepted prior source when candidate preparation fails after publication'
+          npm test -- --testTimeout=60000 --hookTimeout=60000 --maxWorkers=1 --no-file-parallelism --reporter=verbose --reporter=json "--outputFile.json=$reportPath" $filter --testNamePattern $testName *> $logPath
+          $testExit = $LASTEXITCODE
+          Write-Output "Single-file command exit code: $testExit"
+          if (-not (Test-Path $reportPath)) { throw 'Single-file JSON report is missing' }
+          $sanitizer = Join-Path $env:GITHUB_WORKSPACE 'validation/scripts/pr977/sanitize-windows-test-report.mjs'
+          node $sanitizer $reportPath $env:GITHUB_STEP_SUMMARY $logPath
+          if ($testExit -ne 0) { exit $testExit }
+
+      - name: Preserve sanitized failure report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr977-password-rollback-safe-diagnostics
+          path: ${{ runner.temp }}/pr977-password-rollback-windows.safe.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce focused Windows result
+        if: always()
+        shell: pwsh
+        env:
+          FOCUSED_STEP: ${{ steps.focused_test.outcome }}
+        run: |
+          Write-Output "Password rollback test-file result: $env:FOCUSED_STEP"
+          if ($env:FOCUSED_STEP -ne 'success') { throw 'The focused Windows test file did not pass.' }

@@ -1,0 +1,11 @@
+src/__tests__/appService.directoryDiscoveryBinding.test.ts
+src/__tests__/appService.nullableRepairVerification.regression.test.ts
+src/__tests__/appService.rpc.test.ts
+src/__tests__/tokenStore.encryptedGuards.test.ts
+src/__tests__/tokenStore.fallbackRetirement.regression.test.ts
+src/__tests__/pluginAuditLog.test.ts
+src/__tests__/pluginConsentStore.test.ts
+src/__tests__/pluginStorageWindowsAcl.native.test.ts
+src/__tests__/pluginStorageWindowsAcl.contract.test.ts
+ui/src/hooks/__tests__/useAppController.desktopEnvironmentHandoff.test.tsx
+test/__tests__/gfsDragAndDropGate.test.ts

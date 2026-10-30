@@ -1,0 +1,118 @@
+name: PR 977 exact-source Windows native verification
+
+on:
+  push:
+    branches:
+      - test/pr977-windows-41ed9e64-20261029-r24m6
+    paths:
+      - .validation/windows/native-verification.trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr977-windows-native-41ed9e64
+  cancel-in-progress: false
+
+env:
+  PR977_SOURCE_SHA: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+
+jobs:
+  native-windows-authority:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact PR application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out validation harness commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: validation
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify source, harness, and Node pin
+        shell: pwsh
+        run: |
+          $triggerSha = $env:GITHUB_SHA
+          $sourceSha = (git -C source rev-parse HEAD).Trim()
+          $harnessSha = (git -C validation rev-parse HEAD).Trim()
+          $nvmrc = (Get-Content source/.nvmrc -Raw).Trim()
+          Write-Output "Workflow trigger SHA: $triggerSha"
+          Write-Output "Validation harness SHA: $harnessSha"
+          Write-Output "Windows-tested application source SHA: $sourceSha"
+          if ($triggerSha -ne $harnessSha) { throw 'Harness checkout does not match trigger SHA' }
+          if ($sourceSha -ne $env:PR977_SOURCE_SHA) { throw 'Application source SHA mismatch' }
+          if ($nvmrc -ne '24.22.1') { throw 'Repository Node pin is not 24.22.1' }
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: source/desktop-app/package-lock.json
+
+      - name: Install Desktop dependencies
+        working-directory: source/desktop-app
+        run: npm ci
+
+      - name: Prepare exact-source native helper
+        working-directory: source/desktop-app
+        run: npm run prepare:windows-native
+
+      - name: Verify Electron runtime
+        working-directory: source/desktop-app
+        run: npm run verify:electron
+
+      - name: Run native Windows ACL and durability suites
+        working-directory: source/desktop-app
+        shell: pwsh
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+        run: |
+          $env:PR977_DESKTOP_ROOT = (Get-Location).Path
+          $reporter = Join-Path $env:GITHUB_WORKSPACE 'validation/scripts/pr977/windows-diagnostic-reporter.mjs'
+          $rawReportPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority-raw.json'
+          $reportPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority.json'
+          $logPath = Join-Path $env:RUNNER_TEMP 'native-windows-authority.log'
+          npm test -- 'src/__tests__/windowsSessionAuthorityAcl.native.test.ts' 'src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts' --testTimeout=150000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism "--reporter=$reporter" "--outputFile.json=$rawReportPath" *> $logPath
+          $testExit = $LASTEXITCODE
+          Write-Output "Native Windows ACL/durability command exit code: $testExit"
+          if (-not (Test-Path $rawReportPath)) { throw 'Native Windows suites did not produce a JSON report.' }
+          node ../../validation/scripts/pr977/sanitize-windows-vitest-report.mjs $rawReportPath $reportPath
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows suite report could not be sanitized.' }
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          $nativeNames = @($report.testResults | ForEach-Object { [System.IO.Path]::GetFileName($_.name) })
+          Write-Output "Native Windows suites: files=$($report.numTestFiles) tests=$($report.numTotalTests) passed=$($report.numPassedTests) failed=$($report.numFailedTests) skipped=$($report.numPendingTests) success=$($report.success)"
+          $requiredNativeNames = @('windowsSessionAuthorityAcl.native.test.ts', 'windowsSessionAuthorityDurableFileOps.native.test.ts')
+          $missingNativeNames = @($requiredNativeNames | Where-Object { $nativeNames -notcontains $_ })
+          $nativeNamesMatch = $nativeNames.Count -eq 2 -and $missingNativeNames.Count -eq 0
+          $requiredCases = @{ 'windowsSessionAuthorityAcl.native.test.ts' = 13; 'windowsSessionAuthorityDurableFileOps.native.test.ts' = 4 }
+          foreach ($file in @($report.testResults)) {
+            $name = [System.IO.Path]::GetFileName($file.name)
+            $cases = @($file.assertionResults)
+            if (-not $requiredCases.ContainsKey($name) -or $cases.Count -ne $requiredCases[$name] -or @($cases | Where-Object { $_.status -ne 'passed' }).Count -ne 0) {
+              throw 'Required native cases did not all execute and pass.'
+            }
+          }
+          if ($testExit -ne 0 -or -not $report.success -or $report.numTestFiles -ne 2 -or $report.testResults.Count -ne 2 -or -not $nativeNamesMatch -or $report.numTotalTests -le 0 -or $report.numFailedTests -ne 0 -or $report.numPendingTests -ne 0) {
+            throw 'Native Windows ACL or durability validation failed.'
+          }
+          Remove-Item -LiteralPath $rawReportPath, $logPath -ErrorAction SilentlyContinue
+
+      - name: Preserve native Windows report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr977-windows-native-authority
+          path: ${{ runner.temp }}/native-windows-authority.json
+          if-no-files-found: error
+          retention-days: 1
