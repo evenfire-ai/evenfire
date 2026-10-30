@@ -1803,11 +1803,12 @@ h3 {
   line-height: var(--line-height-tight);
 }
 
-/* Sidebar file explorer (spec 18 §3.A) — the accordion panel under "Files". */
+/* Sidebar file explorer (spec 18 §3.A) — the accordion panel under "Files".
+   No indent: its "My home" and "Shared with me" labels start at the left edge
+   of the EvenDrive entry above them. */
 .nav-file-explorer {
   min-width: 0;
   margin: 0 0 var(--space-1) 0;
-  padding-left: var(--sidebar-nav-label-indent);
   /* Claim the sidebar's leftover height so the tree gets real room; the scroll
      is contained to .da-file-explorer below instead of the whole nav column.
      The min-height floor stops expanded siblings (Chat sessions, apps) from
