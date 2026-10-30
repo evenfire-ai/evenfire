@@ -230,7 +230,12 @@ for (const surface of ['sidebar', 'files'] as const) {
         <QueryClientProvider client={queryClient}>
           <GfsDragSessionProvider>
             {!mounted ? null : surface === 'sidebar' ? (
-              <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={toast} />
+              <FileExplorerTree
+                onOpenFolder={vi.fn()}
+                onOpenPreview={vi.fn()}
+                onResourceAction={vi.fn()}
+                pushToast={toast}
+              />
             ) : (
               <FilesPage pushToast={toast} />
             )}

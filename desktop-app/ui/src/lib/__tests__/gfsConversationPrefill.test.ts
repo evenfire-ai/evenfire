@@ -89,7 +89,7 @@ describe('prefillNewConversationWithGfsResource', () => {
       })
     )
 
-    expect(prefillNewConversationWithGfsResource(staleTab, 'agent-1')).toBe(false)
+    expect(prefillNewConversationWithGfsResource(staleTab, 'agent-1', destinationTabId)).toBe(false)
     expect(getComposerDraft(null, 'agent-1')).toBe('')
   })
 
@@ -112,9 +112,9 @@ describe('prefillNewConversationWithGfsResource', () => {
       chat: { agentRef: 'agent-1', chatId: null },
     }
 
-    expect(prefillNewConversationWithGfsResource(filesTab, 'agent-1')).toBe(true)
-    clearComposerDraft(null, 'agent-1')
-    expect(prefillNewConversationWithGfsResource(chatTab, 'agent-1')).toBe(false)
+    expect(prefillNewConversationWithGfsResource(filesTab, 'agent-1', destinationTabId)).toBe(true)
+    clearComposerDraft(null, 'agent-1', destinationTabId)
+    expect(prefillNewConversationWithGfsResource(chatTab, 'agent-1', destinationTabId)).toBe(false)
     expect(getComposerDraft(null, 'agent-1')).toBe('')
   })
 
@@ -135,7 +135,7 @@ describe('prefillNewConversationWithGfsResource', () => {
     expect(getComposerDraft(null, undefined, destinationTabId)).toBe(folder.gfsUri)
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
 
-    expect(prefillNewConversationWithGfsResource(tab, null, destinationTabId)).toBe(true)
+    expect(prefillNewConversationWithGfsResource(tab, null, destinationTabId)).toBe(false)
     expect(getComposerDraft(null, undefined, destinationTabId)).toBe(folder.gfsUri)
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
     expect(getComposerDraft(null, 'agent-1', 'different-chat')).toBe('')
@@ -178,14 +178,15 @@ describe('prefillNewConversationWithGfsResource', () => {
 
   it('keeps a legacy draft beside a valid Files prefill and ignores root or chat tabs', () => {
     setComposerDraft(null, 'keep this draft', 'agent-1')
-
-    expect(
-      prefillNewConversationWithGfsResource(
-        { id: 'files', kind: 'files', title: 'Files', files: { path: uri } },
-        'agent-1',
-        destinationTabId
+    const visibleTab = captureVisibleGfsContext(
+      activeWorkspaceTab(
+        openFilesTab(createWorkspaceTabsState('chat-tab'), { id: 'files', path: uri })
       )
-    ).toBe(true)
+    )
+
+    expect(prefillNewConversationWithGfsResource(visibleTab, 'agent-1', destinationTabId)).toBe(
+      true
+    )
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(uri)
     expect(getComposerDraft(null, 'agent-1')).toBe('keep this draft')
     expect(

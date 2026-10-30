@@ -14,13 +14,13 @@ import {
   GROK_COMPOSER_MAX_IMAGE_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
+import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
 import {
   clearComposerDraft,
   getComposerDraft,
   resetComposerDraftStore,
   setComposerDraft,
 } from '@lib/composerDraftStore'
-import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
 import { readComposerFile } from '@lib/composerFileAdmission'
 import {
   clearLatestGfsConversationContext,
@@ -469,6 +469,7 @@ describe('ComposerPanel EvenDrive picker', () => {
     draftState.set.mockImplementation(value => {
       draftState.value = value
       setComposerDraft('chat-1', value, 'agent-1')
+      return { accepted: true }
     })
     setComposerDraft('chat-1', initialDraft, 'agent-1')
 
@@ -504,6 +505,7 @@ describe('ComposerPanel EvenDrive picker', () => {
     draftState.set.mockImplementation(value => {
       draftState.value = value
       setComposerDraft('chat-1', value, 'agent-1')
+      return { accepted: true }
     })
     setComposerDraft('chat-1', initialDraft, 'agent-1')
 
@@ -538,6 +540,7 @@ describe('ComposerPanel EvenDrive picker', () => {
     draftState.set.mockImplementation(value => {
       draftState.value = value
       setComposerDraft('chat-1', value, 'agent-1')
+      return { accepted: true }
     })
     setComposerDraft('chat-1', initialDraft, 'agent-1')
 
