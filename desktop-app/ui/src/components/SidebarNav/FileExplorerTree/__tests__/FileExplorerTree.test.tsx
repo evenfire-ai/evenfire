@@ -78,11 +78,18 @@ function installClerum(producers: Producers) {
   })
 }
 
-function renderTree(props: Partial<Parameters<typeof FileExplorerTree>[0]> = {}) {
+function renderTree(
+  props: Partial<Parameters<typeof FileExplorerTree>[0]> = {},
+  productionQueryDefaults = false
+) {
   const onOpenFolder = props.onOpenFolder ?? vi.fn()
   const onOpenPreview = props.onOpenPreview ?? vi.fn()
   const pushToast = props.pushToast ?? vi.fn()
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const queryClient = new QueryClient(
+    productionQueryDefaults
+      ? { defaultOptions: desktopQueryDefaults }
+      : { defaultOptions: { queries: { retry: false } } }
+  )
   render(
     <QueryClientProvider client={queryClient}>
       <FileExplorerTree
@@ -92,7 +99,7 @@ function renderTree(props: Partial<Parameters<typeof FileExplorerTree>[0]> = {})
       />
     </QueryClientProvider>
   )
-  return { onOpenFolder, onOpenPreview, pushToast }
+  return { onOpenFolder, onOpenPreview, pushToast, queryClient }
 }
 
 beforeEach(() => {
@@ -112,6 +119,38 @@ afterEach(() => {
 })
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
+  it('keeps the sidebar empty node during a cached-empty root refetch', async () => {
+    const emptyPage = await listAccessiblePage([])
+    let resolveRefetch!: (page: Awaited<ReturnType<typeof listAccessiblePage>>) => void
+    const refetchPage = new Promise<Awaited<ReturnType<typeof listAccessiblePage>>>(resolve => {
+      resolveRefetch = resolve
+    })
+    const listAccessible = vi
+      .fn()
+      .mockResolvedValueOnce(emptyPage)
+      .mockImplementationOnce(() => refetchPage)
+    installClerum({ listAccessible })
+
+    const { queryClient } = renderTree({}, true)
+    const emptyState = await screen.findByText('No shared files yet.')
+    const accessibleKey = desktopQueryKeys.gfsAccessible('test:user-1:team-1', 'main')
+
+    act(() => {
+      void queryClient.invalidateQueries({ exact: true, queryKey: accessibleKey })
+    })
+    await waitFor(() => {
+      expect(listAccessible).toHaveBeenCalledTimes(2)
+      expect(queryClient.getQueryState(accessibleKey)?.fetchStatus).toBe('fetching')
+    })
+
+    expect(emptyState.isConnected).toBe(true)
+    expect(screen.getByText('No shared files yet.')).toBe(emptyState)
+    expect(screen.queryByRole('status', { name: 'Loading files…' })).toBeNull()
+
+    await act(async () => resolveRefetch(emptyPage))
+    expect(emptyState.isConnected).toBe(true)
+  })
+
   it('does not fetch a folder before it is expanded, then loads and hides its children', async () => {
     const listChildren = vi.fn(async () =>
       listChildrenPage([childView('sub-1', 'Sub', 'directory'), childView('r-1', 'r.md', 'file')])
