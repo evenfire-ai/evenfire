@@ -12,6 +12,13 @@ import diagnostics from './windows-native-spawn-observer.cjs'
 
 const { validateEnvironmentFingerprint, validateNativeHelperAttempt } = diagnostics
 
+export function validateFocusedFingerprintPreflight(fingerprint, helperAttemptsPath) {
+  if (!fingerprint?.nativeHelper?.preparationSucceeded || !existsSync(helperAttemptsPath)) {
+    throw new Error('Focused orchestration refused incomplete native environment diagnostics')
+  }
+  return true
+}
+
 function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', ...options })
   if (result.error)
@@ -68,13 +75,7 @@ async function main() {
       'Focused orchestration refused a missing or invalid Windows environment fingerprint'
     )
   }
-  if (
-    !fingerprint.runtimeProbeSucceeded ||
-    !fingerprint.nativeHelper.preparationSucceeded ||
-    !existsSync(helperAttemptsPath)
-  ) {
-    throw new Error('Focused orchestration refused incomplete native environment diagnostics')
-  }
+  validateFocusedFingerprintPreflight(fingerprint, helperAttemptsPath)
   writeFileSync(
     identityPath,
     `${JSON.stringify({

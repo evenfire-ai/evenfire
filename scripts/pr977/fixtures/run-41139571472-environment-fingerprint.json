@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "sourceSha": "585ab1466433c3bbb5120152baca17daafe7ef6f",
+  "harnessSha": "6fe9ccdc5c18129c2497f422ec06b99d432e1003",
+  "runner": {
+    "label": "windows-2025",
+    "imageOS": "win25-vs2026",
+    "imageVersion": "20261021.278.1"
+  },
+  "node": {
+    "pinnedVersion": "24.22.1",
+    "actualVersion": "v24.22.1"
+  },
+  "windowsPowerShellVersion": null,
+  "clrVersion": null,
+  "runtimeProbeSucceeded": false,
+  "nativeHelper": {
+    "preparationSucceeded": true,
+    "preparationElapsedMs": 33838,
+    "sha256": "24b21755682e7e1a4edd30e756af5ac59004cd336f2bb7a5347fe60e20f0e96b",
+    "byteLength": 13312,
+    "inspectorTimeoutMs": 15000,
+    "loadAttemptsFile": "native-helper-load-attempts.jsonl"
+  }
+}

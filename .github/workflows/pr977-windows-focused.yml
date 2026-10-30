@@ -120,7 +120,7 @@ jobs:
           $env:PR977_RUNNER_IMAGE_LABEL = 'windows-2025'
           node ../../validation/scripts/pr977/capture-windows-native-fingerprint.mjs
           $fingerprintExit = $LASTEXITCODE
-          if ($fingerprintExit -ne 0) { throw 'Windows native environment fingerprint failed' }
+          if ($fingerprintExit -ne 0) { throw 'Required native source/helper fingerprint checks failed' }
           if (-not $prepared) { throw 'Native helper preparation failed' }
 
       - name: Verify Windows diagnostic harness contracts

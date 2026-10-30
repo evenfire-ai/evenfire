@@ -33,6 +33,16 @@ const ALLOWED_PROCESS_ERRORS = new Set([
   'ETIMEDOUT',
 ])
 const ALLOWED_SIGNALS = new Set(['SIGABRT', 'SIGBREAK', 'SIGINT', 'SIGKILL', 'SIGTERM'])
+const RUNTIME_PROBE_CLASSIFICATIONS = new Set([
+  'ok',
+  'query-start-failed',
+  'query-nonzero',
+  'query-timeout',
+  'value-missing',
+  'value-invalid',
+  'environment-unavailable',
+  'unknown',
+])
 const VERSION = /^\d{1,5}(?:\.\d{1,5}){1,3}$/
 const SHA256 = /^[a-f0-9]{64}$/
 const SHA1 = /^[a-f0-9]{40}$/
@@ -261,8 +271,10 @@ function buildEnvironmentFingerprint(input) {
   const prepared = input.nativeHelperPreparationSucceeded
   const sha = input.nativeHelperSha256
   const byteLength = input.nativeHelperByteLength
+  const runtimeClassification = input.runtimeProbeClassification
+  const runtimeElapsedMs = input.runtimeProbeElapsedMs
   if (
-    input.schemaVersion !== 1 ||
+    input.schemaVersion !== 2 ||
     !SHA1.test(input.sourceSha ?? '') ||
     !SHA1.test(input.harnessSha ?? '') ||
     !validText(input.runnerImageLabel) ||
@@ -272,10 +284,21 @@ function buildEnvironmentFingerprint(input) {
     !validNodeVersion(input.nodeVersion) ||
     input.nodeVersion !== `v${input.pinnedNodeVersion}` ||
     typeof input.runtimeProbeSucceeded !== 'boolean' ||
-    (input.runtimeProbeSucceeded &&
+    !RUNTIME_PROBE_CLASSIFICATIONS.has(runtimeClassification) ||
+    input.runtimeProbeSucceeded !== (runtimeClassification === 'ok') ||
+    (runtimeElapsedMs !== null &&
+      (!Number.isSafeInteger(runtimeElapsedMs) ||
+        runtimeElapsedMs < 0 ||
+        runtimeElapsedMs > 6_000)) ||
+    (runtimeElapsedMs === null && runtimeClassification !== 'unknown') ||
+    (runtimeClassification === 'ok' &&
       (!validVersion(input.windowsPowerShellVersion) || !validVersion(input.clrVersion))) ||
-    (!input.runtimeProbeSucceeded &&
-      (input.windowsPowerShellVersion !== null || input.clrVersion !== null)) ||
+    (runtimeClassification !== 'ok' &&
+      input.windowsPowerShellVersion !== null &&
+      !validVersion(input.windowsPowerShellVersion)) ||
+    (runtimeClassification !== 'ok' &&
+      input.clrVersion !== null &&
+      !validVersion(input.clrVersion)) ||
     typeof prepared !== 'boolean' ||
     !Number.isSafeInteger(input.preparationElapsedMs) ||
     input.preparationElapsedMs < 0 ||
@@ -292,7 +315,7 @@ function buildEnvironmentFingerprint(input) {
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceSha: input.sourceSha,
     harnessSha: input.harnessSha,
     runner: {
@@ -307,6 +330,8 @@ function buildEnvironmentFingerprint(input) {
     windowsPowerShellVersion: input.windowsPowerShellVersion,
     clrVersion: input.clrVersion,
     runtimeProbeSucceeded: input.runtimeProbeSucceeded,
+    runtimeProbeClassification: runtimeClassification,
+    runtimeProbeElapsedMs: runtimeElapsedMs,
     nativeHelper: {
       preparationSucceeded: prepared,
       preparationElapsedMs: input.preparationElapsedMs,
@@ -336,6 +361,8 @@ function validateEnvironmentFingerprint(value, expectedSourceSha, expectedHarnes
     windowsPowerShellVersion: value.windowsPowerShellVersion,
     clrVersion: value.clrVersion,
     runtimeProbeSucceeded: value.runtimeProbeSucceeded,
+    runtimeProbeClassification: value.runtimeProbeClassification,
+    runtimeProbeElapsedMs: value.runtimeProbeElapsedMs,
     nativeHelperPreparationSucceeded: nativeHelper?.preparationSucceeded,
     preparationElapsedMs: nativeHelper?.preparationElapsedMs,
     nativeHelperSha256: nativeHelper?.sha256,

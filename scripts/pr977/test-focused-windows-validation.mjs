@@ -9,12 +9,15 @@ import {
   focusedTestNamePattern,
   validateFocusedManifest,
 } from './focused-windows-plan.mjs'
+import { validateFocusedFingerprintPreflight } from './run-focused-windows-processes.mjs'
 import { verifyFocusedProcess } from './verify-focused-windows-report.mjs'
+import diagnostics from './windows-native-spawn-observer.cjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const manifest = JSON.parse(
   readFileSync(path.join(here, '../../.validation/windows/focused-test-cases.json'), 'utf8')
 )
+const { buildEnvironmentFingerprint } = diagnostics
 const scratchRoot = process.env.CODEX_SCRATCH_ROOT
 if (!scratchRoot || !path.isAbsolute(scratchRoot))
   throw new Error('CODEX_SCRATCH_ROOT must name the configured absolute scratch directory')
@@ -205,6 +208,49 @@ try {
   assert.equal(consent.skippedInProcess, 10)
   assert.equal(audit.passed, 1)
   assert.equal(audit.skippedInProcess, 13)
+
+  const unavailableMetadataFingerprint = buildEnvironmentFingerprint({
+    schemaVersion: 2,
+    sourceSha,
+    harnessSha,
+    runnerImageLabel: 'windows-2025',
+    runnerImageOS: 'win25-vs2026',
+    runnerImageVersion: '20261021.278.1',
+    pinnedNodeVersion: '24.22.1',
+    nodeVersion: 'v24.22.1',
+    windowsPowerShellVersion: null,
+    clrVersion: null,
+    runtimeProbeSucceeded: false,
+    runtimeProbeClassification: 'query-nonzero',
+    runtimeProbeElapsedMs: 13,
+    nativeHelperPreparationSucceeded: true,
+    preparationElapsedMs: 33_838,
+    nativeHelperSha256: 'c'.repeat(64),
+    nativeHelperByteLength: 13_312,
+    inspectorTimeoutMs: 15_000,
+  })
+  const attemptsPath = path.join(fixtureRoot, 'native-helper-load-attempts.jsonl')
+  writeFileSync(attemptsPath, '', { encoding: 'utf8' })
+  const optionalMetadataStarted = []
+  const optionalMetadataSequence = await executeFocusedSequence(manifest, async spec => {
+    assert.equal(
+      validateFocusedFingerprintPreflight(unavailableMetadataFingerprint, attemptsPath),
+      true
+    )
+    optionalMetadataStarted.push(spec.id)
+    return spec.id === 'consent' ? consent : audit
+  })
+  assert.deepEqual(optionalMetadataStarted, ['consent', 'audit-rotation'])
+  assert.equal(optionalMetadataSequence.passedRequiredCases, 5)
+  assert.throws(
+    () =>
+      validateFocusedFingerprintPreflight(
+        unavailableMetadataFingerprint,
+        attemptsPath + '.missing'
+      ),
+    /incomplete native environment diagnostics/
+  )
+
   const aggregate = aggregateFocusedResults([consent, audit], manifest)
   assert.equal(aggregate.requiredCases, 5)
   assert.equal(aggregate.passedRequiredCases, 5)
