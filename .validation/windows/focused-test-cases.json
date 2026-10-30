@@ -7,6 +7,8 @@
     "verifies actual audit files and the rotated generation"
   ],
   "deselected": [
+    "records bounded cleanup phases and entry ordinals",
+    "reports an allowlisted cleanup error and leaves teardown fatal",
     "does not append after rotated audit verification rejects the destination",
     "rechecks a replaced consent file instead of returning cached grants",
     "rechecks a replaced consent directory before returning cached grants",

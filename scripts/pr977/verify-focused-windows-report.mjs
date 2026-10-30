@@ -1,7 +1,10 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { validateFocusedManifest as validateFocusedPlan } from './focused-windows-plan.mjs'
+import {
+  focusedCaseCount,
+  validateFocusedManifest as validateFocusedPlan,
+} from './focused-windows-plan.mjs'
 
 const EXPECTED_TARGET = 'src/__tests__/pluginStorageWindowsAcl.native.test.ts'
 const CLEANUP_PHASES = new Set([
@@ -162,6 +165,7 @@ export function validateCleanupProgress(cleanup, selectedCount, maximumRuntimeMs
 }
 
 function validateReporterProgress(progress, manifest, maximumRuntimeMs, selectedCount) {
+  const totalCases = focusedCaseCount(manifest)
   const caseTitles = new Set([...manifest.selected, ...manifest.deselected])
   const reporterProgress = progress.filter(value => value?.event !== 'plugin-acl-cleanup-phase')
   for (const value of reporterProgress) {
@@ -216,10 +220,10 @@ function validateReporterProgress(progress, manifest, maximumRuntimeMs, selected
     terminal.runReason !== 'passed' ||
     terminal.filesStarted !== 1 ||
     terminal.filesCompleted !== 1 ||
-    terminal.casesCompleted !== 12 ||
+    terminal.casesCompleted !== totalCases ||
     terminal.passed !== selectedCount ||
     terminal.failed !== 0 ||
-    terminal.skipped !== 12 - selectedCount
+    terminal.skipped !== totalCases - selectedCount
   ) {
     fail('Reporter progress has no complete final run record')
   }
@@ -323,11 +327,12 @@ export function verifyFocusedProcess({
     }
   }
   const selectedCount = process.selected.length
+  const totalCases = focusedCaseCount(manifest)
   if (
     report.numTestFiles !== 1 ||
-    report.numTotalTests !== 12 ||
+    report.numTotalTests !== totalCases ||
     report.numPassedTests !== selectedCount ||
-    report.numPendingTests !== 12 - selectedCount ||
+    report.numPendingTests !== totalCases - selectedCount ||
     report.numFailedTests !== 0
   ) {
     fail('Focused report counters do not match this process selection')
@@ -347,10 +352,10 @@ export function verifyFocusedProcess({
     !terminalProgress ||
     terminalProgress.filesStarted !== 1 ||
     terminalProgress.filesCompleted !== 1 ||
-    terminalProgress.casesCompleted !== 12 ||
+    terminalProgress.casesCompleted !== totalCases ||
     terminalProgress.passed !== selectedCount ||
     terminalProgress.failed !== 0 ||
-    terminalProgress.skipped !== 12 - selectedCount
+    terminalProgress.skipped !== totalCases - selectedCount
   ) {
     fail('Focused progress counters or completion marker are incomplete')
   }
@@ -364,10 +369,10 @@ export function verifyFocusedProcess({
     status.elapsedMs < 1 ||
     status.elapsedMs > process.maximumRuntimeMs ||
     status.lastProgress?.event !== 'run-completed' ||
-    status.lastProgress?.casesCompleted !== 12 ||
+    status.lastProgress?.casesCompleted !== totalCases ||
     status.lastProgress?.passed !== selectedCount ||
     status.lastProgress?.failed !== 0 ||
-    status.lastProgress?.skipped !== 12 - selectedCount
+    status.lastProgress?.skipped !== totalCases - selectedCount
   ) {
     fail('Focused process failed, timed out, or lacks complete watchdog evidence')
   }
@@ -382,7 +387,7 @@ export function verifyFocusedProcess({
     elapsedMs: status.elapsedMs,
     selected: process.selected,
     passed: selectedCount,
-    skippedInProcess: 12 - selectedCount,
+    skippedInProcess: totalCases - selectedCount,
     intentionallyDeselectedSkipped: manifest.deselected.length,
     deferredRequiredCasesSkipped: manifest.selected.length - selectedCount,
     cleanupPhases: cleanupSummary.phases,

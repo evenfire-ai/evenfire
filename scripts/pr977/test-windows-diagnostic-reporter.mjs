@@ -133,13 +133,29 @@ describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => {
   const nativeCaseTitles = [...nativeTestSource.matchAll(/\bwindowsIt\s*\(\s*'([^']+)'/g)].map(
     match => match[1]
   )
+  const ordinaryCaseTitles = [...nativeTestSource.matchAll(/\bit\s*\(\s*'([^']+)'/g)].map(
+    match => match[1]
+  )
   const manifestCaseTitles = [...caseManifest.selected, ...caseManifest.deselected]
   assert.equal(nativeCaseTitles.length, 12, 'Unexpected native plugin privacy case inventory')
   assert.equal(new Set(nativeCaseTitles).size, nativeCaseTitles.length, 'Duplicate source cases')
+  assert.deepEqual(ordinaryCaseTitles, [
+    'records bounded cleanup phases and entry ordinals',
+    'reports an allowlisted cleanup error and leaves teardown fatal',
+  ])
+  const sourceCaseTitles = [...nativeCaseTitles, ...ordinaryCaseTitles]
+  assert.equal(sourceCaseTitles.length, 14, 'Unexpected complete plugin storage case inventory')
+  assert.equal(new Set(sourceCaseTitles).size, sourceCaseTitles.length, 'Duplicate source cases')
   assert.deepEqual(
     [...manifestCaseTitles].sort(),
-    [...nativeCaseTitles].sort(),
-    'Focused manifest must account for every real native privacy case exactly once'
+    [...sourceCaseTitles].sort(),
+    'Focused manifest must account for every native and ordinary source case exactly once'
+  )
+  assert.throws(() =>
+    assert.deepEqual(
+      [...manifestCaseTitles].sort(),
+      [...sourceCaseTitles, 'unrecorded case'].sort()
+    )
   )
   const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const alternatives = caseManifest.selected.map(escapeRegExp).join('|')
@@ -195,7 +211,10 @@ describe('Windows plugin storage DACL privacy', () => {
     const processPattern = focusedTestNamePattern(processSpec)
     const processSelection = runSelection(processPattern, `${processSpec.id}-selection.json`)
     assert.equal(processSelection.numPassedTests, processSpec.selected.length)
-    assert.equal(processSelection.numPendingTests, 12 - processSpec.selected.length + 1)
+    assert.equal(
+      processSelection.numPendingTests,
+      manifestCaseTitles.length - processSpec.selected.length + 1
+    )
     assert.equal(processSelection.numFailedTests, 0)
     const selectedStatuses = new Map(
       processSelection.testResults.flatMap(file =>
@@ -212,6 +231,14 @@ describe('Windows plugin storage DACL privacy', () => {
       assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(title)))
     assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(decoyTitle)))
   }
+  const completePattern = `^Windows plugin storage DACL privacy (?:${manifestCaseTitles
+    .map(escapeRegExp)
+    .join('|')})$`
+  const completeInventory = runSelection(completePattern, 'complete-inventory.json')
+  assert.equal(completeInventory.numTotalTests, manifestCaseTitles.length + 1)
+  assert.equal(completeInventory.numPassedTests, manifestCaseTitles.length)
+  assert.equal(completeInventory.numPendingTests, 1)
+  assert.equal(completeInventory.numFailedTests, 0)
   rmSync(selectionFile)
 
   const outputs = {}

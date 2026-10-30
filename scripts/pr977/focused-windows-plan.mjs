@@ -18,18 +18,35 @@ export const EXPECTED_FOCUSED_PROCESSES = [
   },
 ]
 
+export const EXPECTED_DESELECTED_CASES = [
+  'records bounded cleanup phases and entry ordinals',
+  'reports an allowlisted cleanup error and leaves teardown fatal',
+  'does not append after rotated audit verification rejects the destination',
+  'rechecks a replaced consent file instead of returning cached grants',
+  'rechecks a replaced consent directory before returning cached grants',
+  'retains inherited effective access after an atomic consent replacement',
+  'preserves consent corruption recovery as a verified inherited-DACL file',
+  'rejects an unsafe user-data parent before creating consent files',
+  'does not append to an audit file with unauthorized effective access',
+]
+
+export function focusedCaseCount(manifest) {
+  return manifest.selected.length + manifest.deselected.length
+}
+
 export function validateFocusedManifest(manifest) {
   const selected = manifest?.selected
   const deselected = manifest?.deselected
   if (
     !Array.isArray(selected) ||
     !Array.isArray(deselected) ||
-    selected.length !== 5 ||
-    deselected.length !== 7 ||
+    selected.length !== EXPECTED_FOCUSED_PROCESSES.flatMap(value => value.selected).length ||
+    JSON.stringify(deselected) !== JSON.stringify(EXPECTED_DESELECTED_CASES) ||
+    deselected.length !== EXPECTED_DESELECTED_CASES.length ||
     [...selected, ...deselected].some(title => typeof title !== 'string' || title.length === 0) ||
-    new Set([...selected, ...deselected]).size !== 12
+    new Set([...selected, ...deselected]).size !== selected.length + deselected.length
   ) {
-    throw new Error('Focused case manifest must contain five selected and seven deselected cases')
+    throw new Error('Focused case manifest must contain five selected and nine deselected cases')
   }
   const normalizedProcesses = Array.isArray(manifest.processes)
     ? manifest.processes.map(process => ({
@@ -46,7 +63,7 @@ export function validateFocusedManifest(manifest) {
   }
   const processCases = manifest.processes.flatMap(process => process.selected)
   if (
-    new Set(processCases).size !== 5 ||
+    new Set(processCases).size !== selected.length ||
     selected.some(title => !processCases.includes(title)) ||
     processCases.some(title => !selected.includes(title))
   ) {
@@ -71,7 +88,7 @@ function assertProcessResult(result, processSpec, manifest) {
     !Array.isArray(result.selected) ||
     JSON.stringify(result.selected) !== JSON.stringify(processSpec.selected) ||
     result.passed !== processSpec.selected.length ||
-    result.skippedInProcess !== 12 - processSpec.selected.length ||
+    result.skippedInProcess !== focusedCaseCount(manifest) - processSpec.selected.length ||
     result.intentionallyDeselectedSkipped !== manifest.deselected.length ||
     result.deferredRequiredCasesSkipped !==
       manifest.selected.length - processSpec.selected.length ||
@@ -112,8 +129,8 @@ export function aggregateFocusedResults(results, manifest) {
   if (
     sourceShas.size !== 1 ||
     harnessShas.size !== 1 ||
-    completedCases.length !== 5 ||
-    new Set(completedCases).size !== 5 ||
+    completedCases.length !== manifest.selected.length ||
+    new Set(completedCases).size !== manifest.selected.length ||
     manifest.selected.some(title => !completedCases.includes(title)) ||
     completedCases.some(title => !manifest.selected.includes(title)) ||
     elapsedMs > 525_000
@@ -124,8 +141,8 @@ export function aggregateFocusedResults(results, manifest) {
     sourceSha: [...sourceShas][0],
     harnessSha: [...harnessShas][0],
     totalProcessElapsedMs: elapsedMs,
-    requiredCases: 5,
-    passedRequiredCases: 5,
+    requiredCases: manifest.selected.length,
+    passedRequiredCases: completedCases.length,
     intentionallyDeselectedCases: manifest.deselected.length,
     intentionallyDeselectedSkippedInEachProcess: manifest.deselected.length,
     deferredRequiredCaseSkipsAcrossProcesses: manifest.selected.length,

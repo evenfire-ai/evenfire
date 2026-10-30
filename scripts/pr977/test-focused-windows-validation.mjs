@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import {
   aggregateFocusedResults,
   executeFocusedSequence,
+  focusedCaseCount,
   focusedTestNamePattern,
   validateFocusedManifest,
 } from './focused-windows-plan.mjs'
@@ -37,10 +38,18 @@ writeFileSync(
   })}\n`
 )
 validateFocusedManifest(manifest)
+const totalCases = focusedCaseCount(manifest)
+assert.equal(totalCases, 14)
 
 const duplicateManifest = structuredClone(manifest)
 duplicateManifest.processes[1].selected.push(duplicateManifest.processes[0].selected[0])
 assert.throws(() => validateFocusedManifest(duplicateManifest), /hard runtime limits/)
+const unrecordedDeselection = structuredClone(manifest)
+unrecordedDeselection.deselected[0] = 'unrecorded test case'
+assert.throws(
+  () => validateFocusedManifest(unrecordedDeselection),
+  /five selected and nine deselected/
+)
 const zeroSelection = structuredClone(manifest)
 zeroSelection.selected = []
 assert.throws(() => validateFocusedManifest(zeroSelection), /five selected/)
@@ -79,7 +88,7 @@ function createFixture(processId) {
     status: processCases.has(title) ? 'passed' : 'pending',
   }))
   const passed = processSpec.selected.length
-  const skipped = 12 - passed
+  const skipped = totalCases - passed
   const reportPath = path.join(fixtureRoot, `${processId}-report.json`)
   const progressPath = path.join(fixtureRoot, `${processId}-progress.jsonl`)
   const statusPath = path.join(fixtureRoot, `${processId}-status.json`)
@@ -91,7 +100,7 @@ function createFixture(processId) {
     numPassedTestSuites: 1,
     numFailedTestSuites: 0,
     numPendingTestSuites: 0,
-    numTotalTests: 12,
+    numTotalTests: totalCases,
     numPassedTests: passed,
     numFailedTests: 0,
     numPendingTests: skipped,
@@ -154,7 +163,7 @@ function createFixture(processId) {
     lastCompletedOperation: 'run-completed',
     filesStarted: 1,
     filesCompleted: 1,
-    casesCompleted: 12,
+    casesCompleted: totalCases,
     passed,
     failed: 0,
     skipped,
@@ -193,16 +202,33 @@ try {
   const consent = verify('consent')
   const audit = verify('audit-rotation')
   assert.equal(consent.passed, 4)
-  assert.equal(consent.skippedInProcess, 8)
+  assert.equal(consent.skippedInProcess, 10)
   assert.equal(audit.passed, 1)
-  assert.equal(audit.skippedInProcess, 11)
+  assert.equal(audit.skippedInProcess, 13)
   const aggregate = aggregateFocusedResults([consent, audit], manifest)
   assert.equal(aggregate.requiredCases, 5)
   assert.equal(aggregate.passedRequiredCases, 5)
-  assert.equal(aggregate.intentionallyDeselectedCases, 7)
-  assert.equal(aggregate.intentionallyDeselectedSkippedInEachProcess, 7)
+  assert.equal(aggregate.intentionallyDeselectedCases, 9)
+  assert.equal(aggregate.intentionallyDeselectedSkippedInEachProcess, 9)
   assert.equal(aggregate.deferredRequiredCaseSkipsAcrossProcesses, 5)
   assert.equal(aggregate.totalProcessElapsedMs, 20_000)
+
+  const historicalArtifact = path.join(here, 'fixtures/focused-run-41128010590/process-consent')
+  const historicalResult = verifyFocusedProcess({
+    reportPath: path.join(historicalArtifact, 'focused-report.fixture'),
+    targetPath,
+    caseManifestPath: path.join(here, '../../.validation/windows/focused-test-cases.json'),
+    progressPath: path.join(historicalArtifact, 'progress.fixture'),
+    statusPath: path.join(historicalArtifact, 'watchdog-status.fixture'),
+    identityPath: path.join(historicalArtifact, 'source-identity.fixture'),
+    processId: 'consent',
+    expectedSourceSha: '0725bd5b872682c49c231225eda98aaea21fc16a',
+    expectedHarnessSha: '788b943f172dfcb2b3c5998a15c61035ab8973ee',
+  })
+  assert.deepEqual(historicalResult.selected, manifest.processes[0].selected)
+  assert.equal(historicalResult.passed, 4)
+  assert.equal(historicalResult.skippedInProcess, 10)
+  assert.equal(historicalResult.elapsedMs, 292_920)
 
   for (const [name, mutate] of [
     [
@@ -266,6 +292,12 @@ try {
             elapsedMs: 345_001,
           })
         )
+      },
+    ],
+    [
+      'malformed watchdog report',
+      fixture => {
+        writeFileSync(fixture.statusPath, '{')
       },
     ],
     [
@@ -383,6 +415,14 @@ try {
   assert.deepEqual(invalidConsentStarted, ['consent'])
 
   const bothStarted = []
+  const successfulSequence = await executeFocusedSequence(manifest, async spec => {
+    bothStarted.push(spec.id)
+    return spec.id === 'consent' ? consent : audit
+  })
+  assert.deepEqual(bothStarted, ['consent', 'audit-rotation'])
+  assert.equal(successfulSequence.passedRequiredCases, 5)
+
+  bothStarted.length = 0
   await assert.rejects(
     executeFocusedSequence(manifest, async spec => {
       bothStarted.push(spec.id)

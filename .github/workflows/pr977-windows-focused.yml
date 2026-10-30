@@ -75,7 +75,8 @@ jobs:
           $selectedCases = @($caseManifest.selected)
           $deselectedCases = @($caseManifest.deselected)
           $processes = @($caseManifest.processes)
-          if ($selectedCases.Count -ne 5 -or $deselectedCases.Count -ne 7 -or $processes.Count -ne 2) {
+          if ($selectedCases.Count -ne 5 -or $deselectedCases.Count -ne 9 -or
+              ($selectedCases.Count + $deselectedCases.Count) -ne 14 -or $processes.Count -ne 2) {
             throw 'Focused native plugin DACL case manifest has an unexpected selection size'
           }
           if ($processes[0].id -ne 'consent' -or @($processes[0].selected).Count -ne 4 -or
