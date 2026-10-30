@@ -38,7 +38,10 @@ For each remote McpServer, host-context-controller:
    other control characters and spaces before that check. A placeholder name
    that is a forbidden container variable (`PATH`, `LD_PRELOAD`, …) or starts
    with `NGINX_` is rejected, because the placeholder is backfilled into the
-   container env.
+   container env. The path takes no placeholders and must not contain `$` (or
+   the other characters the query check rejects: `\`, `;`, `{`, `}`, control
+   characters and space), because it is rendered into the NGINX template
+   unquoted.
 2. **Renders a per-server `default.conf.template` ConfigMap** that resolves and
    re-resolves the external base URL with NGINX. The resolver comes from the
    pod's `/etc/resolv.conf`, and the upstream `server ... resolve` directive
@@ -83,11 +86,58 @@ image exports the pod's local nameservers into `NGINX_LOCAL_RESOLVERS`, which
 the generated `resolver` directive uses.
 
 NGINX's stderr (the error log) goes through `egress-proxy-log-filter`, which
-replaces the query of every `upstream: "..."` field with `?REDACTED` and keeps
-the scheme, peer, path and message text. It redacts only that field: if an
-upstream echoes a credential back in other message text (for example a response
-header NGINX quotes), that text is not redacted. stdout (the access log) is not
-filtered.
+applies two rules to every line:
+
+1. **Upstream-quoted text.** NGINX quotes bytes the upstream sent in four
+   messages: `upstream sent duplicate header line`,
+   `upstream sent invalid "Content-Length" header`,
+   `upstream sent unknown "Transfer-Encoding"` and
+   `upstream sent invalid header`. Everything from the message's opening quote
+   to the line's last `, client: ` becomes `REDACTED`; on a line cut at NGINX's
+   2047-byte error cap, everything to the end of the line becomes `REDACTED`.
+   A credential the proxy forwarded — a query value, an `authHeaders` value or
+   the per-user OAuth Bearer — that the upstream echoes in a response header
+   therefore never reaches the log.
+2. **The upstream field.** The query of every `upstream: "..."` field becomes
+   `?REDACTED`, as before; the scheme, peer and path stay.
+
+Those upstream-quoted lines lose the header name, its value and the
+`while …` action; a cut quoting line also loses its context fields. stdout (the
+access log) is not filtered. An ordinary line costs about 0.4 ms of filter time
+at the container's 100m CPU limit. A crafted line with about 200 forged
+`, client: ` occurrences costs about 5 ms, and one upstream response can produce
+up to about 190 cut lines, because every short duplicate of a long header
+re-quotes the previous value. That fills the 64 KiB FIFO, so that upstream's own
+proxy can block on error-log writes for about a second per response; no byte
+leaks.
+
+The generated template ignores the upstream's `X-Accel-Redirect` and
+`X-Accel-Charset` (`proxy_ignore_headers`), whose values NGINX would otherwise
+log in messages the filter does not cover. Clients see no header change: both
+are already hidden from the response by NGINX's default proxy header list, so
+only the internal redirect and the charset override stop.
+
+The message list is audited against the NGINX release in the Dockerfile `FROM`.
+The harness reads the release of the built image and fails on any other one,
+with a message naming the list to re-audit, so an unaudited base bump turns the
+`Egress proxy TLS` check red. That check is not a required status check, so the
+red check is visible but does not block the merge (see "Updating NGINX").
+
+Residuals:
+
+- stdout (the access log) is not filtered. `log_format main` records
+  client-side fields only, and the proxy never adds the remote query or
+  forwarded headers to the client request line.
+- `upstream sent invalid trailer` is not covered: it needs
+  `proxy_pass_trailers on`, which the template does not set. Neither are the
+  upstream messages of modules the template does not use (FastCGI, uwsgi,
+  SCGI, gRPC, HTTP/2 proxying, memcached, mail).
+- A literal credential written into `baseUrl` instead of a placeholder is still
+  stored in the ConfigMap. Use placeholders.
+
+There is deliberately no short-value, percent-encoding or whitespace-trimming
+residual: the redaction is positional, so whatever bytes NGINX quotes, trimmed
+or encoded, lie inside the redacted span.
 
 The remote container's readiness probe remains the local `/health` HTTP probe.
 Its liveness probe runs `/usr/local/bin/egress-proxy-liveness <port>`. That
@@ -146,9 +196,11 @@ against a local TLS upstream: a trusted chain (direct and with two
 intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
 mismatch, and the test CA without the mounted trust store are rejected.
 The harness also covers the DNS switch (`H7 dns-switch`), query placeholder
-resolution (`H8 query-accept`), stderr query redaction (`H9 redact`), signal
-delivery (`H10 signals`), filter-death detection (`H11 filter-death`), and the
-template value check (`H12 value-reject`).
+resolution (`H8 query-accept`), stderr query redaction (`H9 redact`), credential
+echoes from an upstream (`H13 echo`), the filter program on fixed NGINX lines
+behind the audited-release gate (`H14 filter-lines`), signal delivery
+(`H10 signals`), filter-death detection (`H11 filter-death`), and the template
+value check (`H12 value-reject`).
 
 The CDN answer-set rotation is proven end to end on a branch-owned minikube
 profile by [scripts/e2e/e2e-egress-cdn-rotation.sh](../scripts/e2e/e2e-egress-cdn-rotation.sh);
@@ -170,14 +222,23 @@ A newer fixed release on an accepted line (for example 1.30.6 → 1.30.7):
    `nginxinc/nginx-unprivileged` recipe samples, the recipe guides, E2E scripts
    and specs, and unit tests. They stay valid at or above the floor, so moving
    them to the new release is optional; the validator does not require it.
-4. Run `bash scripts/validate-nginx-images.sh`,
+4. Audit the upstream-quoting messages of the new release again. In
+   `src/http/ngx_http_upstream.c`, in
+   `src/http/modules/ngx_http_proxy_module.c`, and in any module the template
+   starts using, find every `ngx_log_error` call whose arguments carry upstream
+   response bytes. Update the `QUOTED[]` list and its comment in
+   `egress-proxy-log-filter`, then set `AUDITED_NGINX_VERSION` in
+   `scripts/tests/test-nginx-egress-proxy-tls.sh` to the new release. The
+   harness fails on any other release, so a missed audit shows up as a red
+   `Egress proxy TLS` check on the bump PR.
+5. Run `bash scripts/validate-nginx-images.sh`,
    `bash scripts/tests/test-validate-nginx-images.sh`,
    `bash scripts/tests/test-verify-nginx-image-digests.sh` and
    `bash scripts/verify-nginx-image-digests.sh`.
 
-The guard tests and CI need no edits for such a bump: both tests read the
-release from the validator and the Dockerfile. When a new CVE raises the
-minimum, also edit `NGINX_RELEASE_FLOORS` and its CVE comment in
+Apart from that audit the guard tests and CI need no edits for such a bump: both
+tests read the release from the validator and the Dockerfile. When a new CVE
+raises the minimum, also edit `NGINX_RELEASE_FLOORS` and its CVE comment in
 `scripts/nginx-image-policy.sh`, the floor cases in
 `scripts/tests/test-validate-nginx-images.sh`, and every reference the
 validator then reports as below the new floor, including the
@@ -191,5 +252,14 @@ CI builds and publishes the image via
 into the deploy-time GCP Artifact Registry. There are no static manifests for
 this service: Deployments, ConfigMaps, and Services are created dynamically by
 host-context-controller — see its [README](../host-context-controller/README.md).
+
+Image tag scope: the filter and the template change described above do not move
+the image tag. `deploy/base` and `scripts/validate-nginx-images.sh` keep
+`clerum/nginx-egress-proxy:0.1.0`. Deployed environments pin per-commit
+`sha-<short>` tags, so the new filter and the new template line reach a cluster
+together, with the commit that carries them. HCC puts no ConfigMap hash on the
+pod template, so a ConfigMap update alone would not roll a pod; the per-commit
+tag is what rolls it. The T2 lane builds
+`clerum/nginx-egress-proxy:test`.
 
 <!-- auto-deploy proof: OSS dev → build → mirror → infra apply (2026-07-22) -->

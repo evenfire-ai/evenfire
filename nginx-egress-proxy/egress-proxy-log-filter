@@ -1,26 +1,52 @@
-# Redact the query string of the `upstream: "..."` field in NGINX error lines.
+# Keep credentials the egress proxy forwards out of NGINX's error log (#1240).
 #
-# NGINX writes the upstream URL of a failed request as:
+# Two rules run on every record, message rule first.
 #
-#   ... upstream: "https://<peer>/<path>?<query>", host: "..."
+# 1. Message rule. NGINX quotes bytes the upstream sent in the four messages
+#    listed in BEGIN (audited against the release in the Dockerfile FROM). An
+#    upstream can echo any credential the proxy forwarded there: a query value,
+#    an `authHeaders` value, or the per-user OAuth Bearer, which is per request
+#    and never in this container's environment. Everything from the message's
+#    opening quote to the last `, client: ` on the line becomes REDACTED.
 #
-# The remote baseUrl query can carry a credential (#1240), and envsubst resolves
-# it inside this container, so the line must never leave the container with it.
-# Everything before the first "?" of that field (scheme, peer IP:port or the
-# upstream block name, path) and the rest of the line stay untouched: the peer
-# classifies a 502 race in the field evidence, and the message text is what the
-# error alerts match.
+#    NGINX appends `, client: ` and the context fields after the message on
+#    every HTTP connection log, so a forged `, client: ` inside the echo lies
+#    before the real one and the last occurrence is the real one. The message
+#    start is anchored, so a quoting prefix that only appears in client text
+#    (the request line cannot hold a space) never starts the rule.
 #
-# The field ends at the closing quote NGINX writes before the next context
-# field it appends, `, host: "` or `, referrer: "`, not at the first quote: a
-# quote inside the substituted value must not end the redaction early. A line
-# with neither field (no Host header, or cut at NGX_MAX_ERROR_STR, 2047 bytes)
-# is redacted to the end of the line, keeping a final closing quote.
+#    On a line cut at NGX_MAX_ERROR_STR (2047 bytes) the real `, client: ` can
+#    be missing, so a line at or past that length is redacted to its end. A
+#    quoting line with no `, client: ` at all shares that branch: NGINX does
+#    not produce one, but the alternative is printing the rest of the line next
+#    to REDACTED.
 #
-# Every `upstream: "` on the line is processed, not only the first. The message
-# text before the real field can quote bytes the upstream sent (for example
-# `upstream sent duplicate header line: "<name>: <value>"`), so an upstream can
-# put a fake field, or a fake `", host: "`, ahead of the real one.
+#    This rule runs before the field rule on purpose. An upstream echo can hold
+#    a fake `upstream: "..."` field; collapsing the echo first leaves only
+#    NGINX's own fields for rule 2. In the other order the field rule could
+#    consume the real `, client: ` and leave the echo in place.
+#
+# 2. Field rule. In every `upstream: "..."` field the query becomes
+#    `?REDACTED`. Scheme, peer and path stay: the peer classifies a 502 race,
+#    and the message text is what the error alerts match. The field ends at the
+#    closing quote NGINX writes before the next context field it appends,
+#    `, host: "` or `, referrer: "`, not at the first quote: a quote inside the
+#    substituted value must not end the redaction early. A line with neither
+#    field (no Host header, or cut at NGX_MAX_ERROR_STR) is redacted to the end
+#    of the line, keeping a final closing quote. Every `upstream: "` on the line
+#    is still processed: rule 1 has already removed any fake one an upstream
+#    echo could carry, so the field loop stays as written.
+#
+# Cost. An ordinary line costs about 0.4 ms at the container's 100m CPU limit.
+# The message rule's index() loop copies the rest of the line per `, client: `
+# found, so the cost grows with that count times the line length: a crafted line
+# with about 200 of them costs about 5 ms (about 170 such lines per second at
+# 100m). One response can produce up to about 190 cut lines, because every short
+# duplicate of a long header re-quotes the previous value; that fills the 64 KiB
+# FIFO and NGINX's error-log writes then block for about a second, against at
+# most 0.08 s for the same lines without the message rule. Only the malicious
+# upstream's own proxy stalls, and no byte leaks. A byte-exact search cheaper
+# than index() would need a per-byte loop, measured at about 10 ms per line.
 #
 # One line per record plus an explicit flush: a block-buffered filter would
 # delay every error line and, once the 64 KiB FIFO filled, block NGINX's
@@ -29,6 +55,56 @@ BEGIN {
     FIELD = "upstream: \""
     NEXT_HOST = "\", host: \""
     NEXT_REFERRER = "\", referrer: \""
+    # Messages whose text quotes bytes the upstream sent, NGINX 1.30.6:
+    # ngx_http_upstream.c:4940, 4990, 5011, 5030, 5223, 5276, 5352, 5471, 5496
+    # and ngx_http_proxy_module.c:2023. Each entry ends with the quote that
+    # opens the upstream bytes. The harness reads the release of the built image
+    # and fails on any other one, so a new or reworded message cannot pass
+    # unnoticed.
+    QUOTED[1] = "upstream sent duplicate header line: \""
+    QUOTED[2] = "upstream sent invalid \"Content-Length\" header: \""
+    QUOTED[3] = "upstream sent unknown \"Transfer-Encoding\": \""
+    QUOTED[4] = "upstream sent invalid header: \""
+    QUOTED_COUNT = 4
+    CONTEXT = ", client: "
+    MAX_ERROR_LINE = 2047
+}
+
+# Position of the message text: after "<time> [<level>] <pid>#<tid>: " and the
+# optional "*<connection> " prefix. 0 when the line has no such prefix.
+function message_start(s,    i, j) {
+    i = index(s, ": ")
+    if (i == 0) return 0
+    i = i + 2
+    if (substr(s, i, 1) == "*") {
+        j = index(substr(s, i), " ")
+        if (j == 0) return 0
+        i = i + j
+    }
+    return i
+}
+
+# Replaces the upstream-quoted part of a quoting message with REDACTED: from the
+# opening quote to the last ", client: " NGINX appended, or to the end of a line
+# that may be cut at NGX_MAX_ERROR_STR. Locals are the parameter list.
+function redact_quoted(s,    m, k, start, rest, off, i, last) {
+    m = message_start(s)
+    if (m == 0) return s
+    for (k = 1; k <= QUOTED_COUNT; k++) {
+        if (substr(s, m, length(QUOTED[k])) == QUOTED[k]) break
+    }
+    if (k > QUOTED_COUNT) return s
+    start = m + length(QUOTED[k])
+    last = 0
+    rest = substr(s, start)
+    off = start - 1
+    while ((i = index(rest, CONTEXT)) > 0) {
+        last = off + i
+        off = last + length(CONTEXT) - 1
+        rest = substr(rest, i + length(CONTEXT))
+    }
+    if (length(s) >= MAX_ERROR_LINE || last == 0) return substr(s, 1, start - 1) "REDACTED"
+    return substr(s, 1, start - 1) "REDACTED" substr(s, last)
 }
 
 # Length of the field value at the start of s, which begins right after the
@@ -45,7 +121,7 @@ function field_length(s,    n, i) {
 
 {
     out = ""
-    rest = $0
+    rest = redact_quoted($0)
     while ((start = index(rest, FIELD)) > 0) {
         out = out substr(rest, 1, start + length(FIELD) - 1)
         rest = substr(rest, start + length(FIELD))

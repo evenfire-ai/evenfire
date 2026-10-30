@@ -27,7 +27,7 @@
 # The upstream sends only the leaf, so OpenSSL reports a missing issuer of the
 # leaf as error 21, not 20 (which needs an intermediate with a missing issuer).
 #
-# Cases (12, the run fails unless exactly this many ran):
+# Cases (14, the run fails unless exactly this many ran):
 #
 #   valid, chain2, untrusted, expired, wrongsan, nobundle   TLS contract
 #   dns-switch     the upstream's A record moves to another container while the
@@ -38,7 +38,18 @@
 #                  IP form, the upstream-group form, a line truncated at
 #                  NGINX's 2047-byte error cap, and a line where upstream bytes
 #                  quoted in the message put a fake field ahead of the real one
-#                  while the value itself holds a quote (#1240)
+#                  while the value itself holds a quote; the message rule
+#                  removes the whole quoted echo there (#1240)
+#   echo           an upstream echoes a credential the proxy forwarded (the
+#                  per-user OAuth Bearer, a static authHeaders value and the
+#                  query value) in the response headers NGINX quotes, plus the
+#                  two X-Accel headers the generated template ignores: the
+#                  filtered log never holds a marker and each echo has its own
+#                  upstream access-log witness (#1240)
+#   filter-lines   the shipped filter program on fixed NGINX 1.30.6 lines a live
+#                  upstream fixture cannot produce (P2-P4, the no-context
+#                  branch, a non-quoting control), behind the audited-release
+#                  gate (#1240)
 #   signals        QUIT and TERM reach the NGINX master, which is PID 1
 #   filter-death   the exec liveness script fails once the stderr filter dies,
 #                  and no unfiltered error line reaches the logs
@@ -58,11 +69,22 @@
 #   depth-1               proxy_ssl_verify_depth 1           -> chain2 red
 #   no-resolve            drops ` resolve` (dns-switch only) -> dns-switch red
 #   no-ssl-name           drops proxy_ssl_name               -> valid, chain2, wrongsan red
-#   no-redact             runs the proxy without its filter  -> redact, filter-death red
+#   no-redact             runs the proxy without its filter  -> redact, echo, filter-death red
 #   liveness-health-only  liveness script checks /health only -> filter-death red
-#   redact-first-only     filter redacts only the first field -> redact (req4) red
 #   redact-first-quote    filter ends the field at the first quote -> redact (req4) red
 #   no-value-check        wrapper skips the template value check -> value-reject red
+#   no-message-redact     filter drops the message rule      -> redact (req4), echo (E1-E5),
+#                                                             filter-lines (S1-S3, S5) red
+#   message-first-client  message rule stops at the first client field -> echo (E4),
+#                                                             filter-lines (S1-S3) red
+#   message-no-cut        message rule ignores the 2047-byte cap -> echo (E5) red
+#   message-no-default    message rule has no no-context branch -> filter-lines (S5) red
+#   no-ignore-accel       template stops ignoring X-Accel-*  -> echo (E6a, E6b, and the
+#                                                             marker scan) red
+#
+# audit-version is a run-time switch, not a file mutation: it compares the built
+# image's release against nginx/0.0.0, so the release gate in filter-lines (and
+# nothing else) goes red. A gate that never read the image would stay green.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -79,7 +101,11 @@ UPSTREAM_X="$NAME-upstream-x"
 UPSTREAM_Y="$NAME-upstream-y"
 DNS="$NAME-dns"
 WORK="$(mktemp -d)"
-EXPECTED_CASES=12
+EXPECTED_CASES=14
+# The release the message list in egress-proxy-log-filter was audited against.
+# filter-lines reads the release of the built image and fails on any other one,
+# so a base bump cannot ship an unaudited upstream-quoting message.
+AUDITED_NGINX_VERSION=nginx/1.30.6
 # Pinned by multi-arch index digest: the CI matrix runs this harness on amd64
 # and arm64, and a tag alone would let the two runs use different CoreDNS
 # builds. registry.k8s.io is used instead of Docker Hub so this image does not
@@ -100,7 +126,8 @@ if [ ! -f "$HCC_DIR/node_modules/ts-node/dist/bin.js" ]; then
 fi
 case "$MUTATION" in
   "" | verify-off | depth-1 | no-resolve | no-ssl-name | no-redact | liveness-health-only | \
-    redact-first-only | redact-first-quote | no-value-check) ;;
+    redact-first-quote | no-value-check | no-message-redact | message-first-client | \
+    message-no-cut | message-no-default | no-ignore-accel | audit-version) ;;
   *) echo "FAIL: unknown NGINX_TLS_TEST_MUTATION '$MUTATION'" >&2; exit 1 ;;
 esac
 
@@ -175,15 +202,38 @@ case "$MUTATION" in
     mutate "$build_context/egress-proxy-entrypoint" \
       'exec awk -f "$TEMPLATE_CHECK" $templates' 'exec true'
     ;;
-  redact-first-only | redact-first-quote)
+  redact-first-quote)
     build_context="$WORK/image-mutation"
     cp -R "$DOCKERFILE_DIR" "$build_context"
-    if [ "$MUTATION" = "redact-first-only" ]; then
-      mutate "$build_context/egress-proxy-log-filter" \
-        'while ((start = index(rest, FIELD)) > 0) {' 'if ((start = index(rest, FIELD)) > 0) {'
-    else
-      mutate "$build_context/egress-proxy-log-filter" 'NEXT_HOST = "\", host: \""' 'NEXT_HOST = "\""'
-    fi
+    mutate "$build_context/egress-proxy-log-filter" 'NEXT_HOST = "\", host: \""' 'NEXT_HOST = "\""'
+    ;;
+  no-message-redact | message-first-client | message-no-cut | message-no-default)
+    build_context="$WORK/image-mutation"
+    cp -R "$DOCKERFILE_DIR" "$build_context"
+    filter_copy="$build_context/egress-proxy-log-filter"
+    case "$MUTATION" in
+      no-message-redact)
+        # The field rule sees the raw line again, so the quoted echo survives.
+        # shellcheck disable=SC2016  # literal awk text, not a shell expansion.
+        mutate "$filter_copy" 'rest = redact_quoted($0)' 'rest = $0'
+        ;;
+      message-first-client)
+        # The terminator stops at the first forged ", client: " inside the echo.
+        # shellcheck disable=SC2016  # literal awk text, not a shell expansion.
+        mutate "$filter_copy" \
+          'while ((i = index(rest, CONTEXT)) > 0) {' 'if ((i = index(rest, CONTEXT)) > 0) {'
+        ;;
+      message-no-cut)
+        # A cut line keeps its forged terminator and the tail after it.
+        # shellcheck disable=SC2016  # literal awk text, not a shell expansion.
+        mutate "$filter_copy" 'length(s) >= MAX_ERROR_LINE || last == 0' 'last == 0'
+        ;;
+      message-no-default)
+        # A quoting line with no context at all reprints its tail.
+        # shellcheck disable=SC2016  # literal awk text, not a shell expansion.
+        mutate "$filter_copy" 'length(s) >= MAX_ERROR_LINE || last == 0' 'length(s) >= MAX_ERROR_LINE'
+        ;;
+    esac
     ;;
 esac
 
@@ -336,7 +386,19 @@ port_of() {
 }
 
 {
-  echo "log_format tlstest 'TLSTEST port=\$server_port uri=\$request_uri token=\$http_x_test_token sni=\$ssl_server_name auth=\"\$http_authorization\"';"
+  # H13 fixture design: one exact-match /echo location per server. X-Echo-Mode
+  # selects what the upstream sends back in a response header, so one proxy can
+  # carry every credential kind at once. An empty add_header value adds no
+  # header (NGINX skips it), which is why mode "none" produces a plain 200.
+  cat <<'MAPS'
+map $http_x_echo_mode $echo_cl          { auth $http_authorization; query $arg_apikey; x $http_x_echo; default ""; }
+map $http_x_echo_mode $echo_server      { key $http_x_api_key; default ""; }
+map $http_x_echo_mode $echo_xa_redirect { xa-redirect "/nowhere/$http_x_echo"; default ""; }
+map $http_x_echo_mode $echo_xa_charset  { xa-charset $http_x_echo; default ""; }
+MAPS
+  # key, echo and the two sent_http fields are H13's per-request witnesses: they
+  # record what this upstream received and which response headers it sent.
+  echo "log_format tlstest 'TLSTEST port=\$server_port uri=\$request_uri token=\$http_x_test_token sni=\$ssl_server_name auth=\"\$http_authorization\" key=\"\$http_x_api_key\" echo=\"\$http_x_echo\" xa=\"\$sent_http_x_accel_redirect\" xc=\"\$sent_http_x_accel_charset\"';"
   for cert in valid chain2 untrusted expired wrongsan; do
     cat <<EOF
 server {
@@ -349,6 +411,18 @@ server {
     # header line" with the raw header value, ahead of the real upstream field.
     location = /shadow {
         add_header Content-Length 'upstream: "a", host: "b' always;
+        return 200 'ok';
+    }
+    # H13: echo a credential the proxy forwarded (mode auth, query, x) or a
+    # header the generated template must ignore (mode xa-redirect, xa-charset)
+    # in a response header, which is where NGINX quotes upstream bytes in the
+    # error log.
+    location = /echo {
+        default_type text/plain;
+        add_header Content-Length \$echo_cl always;
+        add_header Server \$echo_server always;
+        add_header X-Accel-Redirect \$echo_xa_redirect always;
+        add_header X-Accel-Charset \$echo_xa_charset always;
         return 200 'ok';
     }
     location / {
@@ -580,7 +654,7 @@ const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
   coreApi: {} as never,
   customApi: {} as never,
 })
-const server = (baseUrl: string) => ({
+const server = (baseUrl: string): any => ({
   name: "tls-test",
   namespace: "mcp-server",
   spec: {
@@ -596,11 +670,21 @@ const server = (baseUrl: string) => ({
   },
 })
 const templateDir = process.env.TEMPLATE_DIR as string
-const render = (dir: string, baseUrl: string) => {
-  const cm = (reconciler as any).buildNginxConfigMap(server(baseUrl))
+const renderServer = (dir: string, crd: any) => {
+  const cm = (reconciler as any).buildNginxConfigMap(crd)
   const out = path.join(templateDir, dir)
   fs.mkdirSync(out, { recursive: true })
   fs.writeFileSync(path.join(out, "default.conf.template"), cm.data["default.conf.template"])
+}
+const render = (dir: string, baseUrl: string) => renderServer(dir, server(baseUrl))
+// H13: the real oauth shape. One proxy carries the per-user Bearer passthrough
+// (auth.type oauth), a static authHeaders placeholder and a query placeholder,
+// so one echoed response header per credential kind reaches the error log.
+const oauthServer = (baseUrl: string) => {
+  const crd = server(baseUrl)
+  crd.spec.auth = { type: "oauth" }
+  crd.spec.remote.authHeaders = [{ header: "X-Api-Key", valueTemplate: "${UPSTREAM_TOKEN}" }]
+  return crd
 }
 for (const port of [8441, 8442, 8443, 8444, 8445]) {
   render(String(port), "https://upstream.test:" + port + "/mcp")
@@ -610,6 +694,7 @@ render("query-accept", "https://upstream.test:8441/mcp?apikey=${UPSTREAM_QUERY_K
 render("redact", "https://upstream.test:8443/mcp?apikey=${UPSTREAM_QUERY_KEY}")
 render("redact-group", "https://unresolvable.test:8443/mcp?apikey=${UPSTREAM_QUERY_KEY}")
 render("redact-shadow", "https://upstream.test:8441/shadow?apikey=${UPSTREAM_QUERY_KEY}")
+renderServer("echo", oauthServer("https://upstream.test:8441/echo?apikey=${UPSTREAM_QUERY_KEY}"))
 
 const deployment = (reconciler as any).buildDeployment(server("https://upstream.test:8441/mcp"))
 const proxies = deployment.spec.template.spec.containers.filter((c: any) => c.name === "egress-proxy")
@@ -739,11 +824,23 @@ for port in 8441 8442 8443 8444 8445; do
   assert_count "$t" "server upstream.test:$port resolve;" 1
   assert_count "$t" "proxy_pass https://remote_upstream/mcp;" 1
 done
-for template in dns-switch query-accept redact redact-group redact-shadow; do
+for template in dns-switch query-accept redact redact-group redact-shadow echo; do
   t="$WORK/templates/$template/default.conf.template"
   # shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
   assert_count "$t" 'resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off;' 1
 done
+
+# H13's template must carry all three credential kinds the oauth shape emits: the
+# passthrough Bearer, the static header placeholder and the query placeholder.
+# If the template stopped being oauth, echo could pass for the wrong reason.
+t="$WORK/templates/echo/default.conf.template"
+# shellcheck disable=SC2016  # literal directive expected in the template.
+assert_count "$t" 'proxy_set_header Authorization $http_authorization;' 1
+# shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
+assert_count "$t" 'proxy_set_header X-Api-Key "${UPSTREAM_TOKEN}";' 1
+# shellcheck disable=SC2016  # literal envsubst placeholder expected in the template.
+assert_count "$t" 'proxy_pass https://remote_upstream/echo?apikey=${UPSTREAM_QUERY_KEY};' 1
+assert_count "$t" 'proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;' 1
 
 case "$MUTATION" in
   verify-off)
@@ -765,6 +862,13 @@ case "$MUTATION" in
   no-resolve)
     mutate "$WORK/templates/dns-switch/default.conf.template" " resolve;" ";"
     ;;
+  no-ignore-accel)
+    # The template stops ignoring the two headers NGINX logs in messages the
+    # filter does not cover, so E6a and E6b really reach those messages.
+    mutate "$WORK/templates/echo/default.conf.template" \
+      "proxy_ignore_headers X-Accel-Redirect X-Accel-Charset;" \
+      "# proxy_ignore_headers removed by NGINX_TLS_TEST_MUTATION=no-ignore-accel"
+    ;;
 esac
 
 # `no-redact` removes the filter from the containers that prove it: they start
@@ -772,6 +876,11 @@ esac
 # wrapper. The mutation is a run-time entrypoint switch, never an image knob.
 REDACT_FILTER=on
 [ "$MUTATION" = "no-redact" ] && REDACT_FILTER=off
+
+# `audit-version` is a run-time switch too: the harness constant is not a file
+# under $WORK. It is the release gate's own liveness proof, because a comparison
+# that never read the image would stay green.
+[ "$MUTATION" = "audit-version" ] && AUDITED_NGINX_VERSION=nginx/0.0.0
 for dir in "$WORK"/templates/*; do
   chmod 755 "$dir"
   chmod 644 "$dir/default.conf.template"
@@ -887,6 +996,89 @@ proxy_request() {
   local container="$1" token="$2" path="${3:-/mcp}"
   curl -s -o "$WORK/body" -w '%{http_code}' --max-time 15 -H "X-Test-Token: $token" \
     "http://127.0.0.1:$(host_port "$container" 3000)$path"
+}
+
+# proxy_request against the fixture's /echo location, with the mode that selects
+# what the upstream echoes back in a response header. Extra arguments are curl
+# options, used for the request headers that carry the markers.
+echo_request() {
+  local container="$1" token="$2" mode="$3"
+  shift 3
+  curl -s -o "$WORK/body" -w '%{http_code}' --max-time 15 -H "X-Test-Token: $token" \
+    -H "X-Echo-Mode: $mode" "$@" "http://127.0.0.1:$(host_port "$container" 3000)/echo"
+}
+
+# Number of filtered "upstream sent duplicate header line" lines. Every echo
+# line keeps that message text after redaction, including one cut before the
+# context fields, so it is the growth witness E5 can use. Returns 2 when the log
+# cannot be read, so an unreadable log never reads as zero lines.
+quoted_line_count() {
+  local log
+  if ! log="$(container_stderr "$1")"; then
+    return 2
+  fi
+  printf '%s\n' "$log" | grep -cF 'upstream sent duplicate header line: "' || true
+}
+
+# True when the container logged more quoting lines than the given count.
+quoted_lines_grew() {
+  local count
+  count="$(quoted_line_count "$1")" || return 1
+  [ "${count:-0}" -gt "${2:-0}" ]
+}
+
+# Newest quoting line of the filtered stderr log. Returns 2 when the log cannot
+# be read, so a failed read never looks like an empty line.
+newest_quoted_line() {
+  local log
+  if ! log="$(container_stderr "$1")"; then
+    return 2
+  fi
+  printf '%s\n' "$log" | grep -F 'upstream sent duplicate header line: "' | tail -n 1
+}
+
+# True when the upstream access-log line of a request carries the X-Echo value
+# the proxy forwarded. The value can hold quotes, commas and spaces, so only the
+# field name and the marker are anchored.
+echo_witness() {
+  printf '%s' "$1" | grep -qF 'echo="' && printf '%s' "$1" | grep -qF -- "$2"
+}
+
+# Number of occurrences of a fixed string in one line.
+count_fixed() {
+  printf '%s' "$1" | grep -oF -- "$2" | grep -c . || true
+}
+
+# One echo step: sends the request, fails unless the status is the expected one,
+# waits for a new quoting error line, and stores that line in the caller's
+# echo_line. Returns 1 after fail() on any missing witness, so the caller only
+# has to check the line's shape.
+echo_step() {
+  local case_name="$1" container="$2" label="$3" mode="$4" want="$5" token="$6"
+  shift 6
+  local before code
+  if ! before="$(quoted_line_count "$container")"; then
+    fail "$case_name: could not read the stderr log before $label"
+    return 1
+  fi
+  code="$(echo_request "$container" "$token" "$mode" "$@")"
+  if [ "$code" != "$want" ]; then
+    fail "$case_name: $label expected $want, got $code $(cat "$WORK/body")"
+    return 1
+  fi
+  if ! wait_until "$label's quoting error line" "$LOG_SECONDS" quoted_lines_grew "$container" "$before"; then
+    fail "$case_name: $label produced no new quoting error line within ${LOG_SECONDS}s: $(container_log "$container" | tail -n 3)"
+    return 1
+  fi
+  if ! echo_line="$(newest_quoted_line "$container")"; then
+    fail "$case_name: could not read the stderr log after $label"
+    return 1
+  fi
+  if [ -z "$echo_line" ]; then
+    fail "$case_name: $label produced no quoting line"
+    return 1
+  fi
+  return 0
 }
 
 # Prints the upstream log lines for a token (empty when none). Returns 2 when
@@ -1241,10 +1433,11 @@ expect_redact() {
 
   # req4: the upstream answers with a second Content-Length whose value is
   # `upstream: "a", host: "b`. NGINX quotes that raw value in the message text
-  # ahead of the real field, so the line holds a fake field and a fake host
-  # delimiter before the real one. The substituted value also holds a raw
-  # quote, which must not end the redaction early. Two markers, one on each
-  # side of that quote.
+  # ahead of the real field. The message rule replaces the whole quoted echo, so
+  # the fake field and the fake host delimiter are gone from the line; the field
+  # rule then reduces the real field's query. The substituted value also holds a
+  # raw quote, which must not end the field redaction early: that is what the
+  # first-quote mutation still breaks. Two markers, one on each side of it.
   local shadow_head shadow_tail
   shadow_head="sq1-$RUN_ID-$(openssl rand -hex 16)"
   shadow_tail="sq2-$(openssl rand -hex 16)"
@@ -1252,17 +1445,19 @@ expect_redact() {
   code="$(proxy_request "$shadow" "tok-$case_name-shadow-$RUN_ID" /shadow)"
   if [ "$code" != "502" ]; then
     fail "$case_name: req4 expected 502, got $code"
-  elif ! wait_log "$shadow" 'upstream sent duplicate header line: "Content-Length: upstream: "a", host: "b"'; then
-    fail "$case_name: req4 produced no duplicate-header line quoting the fake field within ${LOG_SECONDS}s: $(container_log "$shadow" | tail -n 3)"
+  elif ! wait_log "$shadow" 'upstream sent duplicate header line: "REDACTED, client: '; then
+    fail "$case_name: req4 produced no redacted duplicate-header line within ${LOG_SECONDS}s: $(container_log "$shadow" | tail -n 3)"
   elif ! log="$(container_log "$shadow")"; then
     fail "$case_name: could not read the req4 log"
+  elif printf '%s\n' "$log" | grep -qF 'upstream: "a", host: "b'; then
+    fail "$case_name: req4 kept the upstream-quoted fake field"
   elif printf '%s\n' "$log" | grep -qF -e "$shadow_head" -e "$shadow_tail"; then
     fail "$case_name: req4 leaked the value on one side of its quote"
   elif ! printf '%s\n' "$log" | grep -F 'duplicate header line' |
     grep -qE 'upstream: "https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:8441/shadow\?REDACTED", host: "'; then
     fail "$case_name: req4's real field is not 'https://<ipv4>:8441/shadow?REDACTED': $(printf '%s\n' "$log" | grep -F 'duplicate header line' | tail -n 1)"
   else
-    echo "PASS: $case_name req4 -> the real field is redacted behind a fake field and a quote in the value"
+    echo "PASS: $case_name req4 -> the quoted echo is REDACTED and a quote in the real value does not end its field"
   fi
 
   # Global negatives, after the positives, on every filtered container. Each
@@ -1305,6 +1500,299 @@ expect_redact() {
     echo "PASS: $case_name -> marker absent from every filtered stream, ${redacted_total} ?REDACTED lines, stdout untouched"
   fi
   docker rm -f "$container" "$group" "$raw" "$shadow" >/dev/null 2>&1 || true
+}
+
+# ─── H13: credentials the proxy forwards and an upstream echoes ──────────────
+#
+# One oauth proxy (Bearer passthrough, a static authHeaders value and a query
+# value, rendered from the real reconciler) against an upstream that echoes a
+# request value into a response header. NGINX quotes those bytes in four
+# upstream messages, so this is the case the message rule exists for. Each
+# negative has a positive in the same step: the upstream access log records the
+# value it received and the header it sent.
+expect_echo() {
+  local case_name="echo" container="$NAME-proxy-echo"
+  local token code line log before after failures_before scanned=0 m
+  local echo_line="" cut_pad cut_echo hostile
+  # Every uncut E line keeps the level, the client, the request and the real
+  # upstream field; only the upstream-quoted span and the query are REDACTED.
+  local shape='upstream sent duplicate header line: "REDACTED, client: [0-9.]+, server: , request: "GET /echo HTTP/1.1", upstream: "https://[0-9.]+:8441/echo\?REDACTED", host: "'
+  cases=$((cases + 1))
+  failures_before=$failures
+
+  # PROXY_UPSTREAM_TOKEN is set explicitly, so the static authHeaders witness
+  # can never pass on the shared AUTH_SECRET fallback.
+  PROXY_UPSTREAM_TOKEN="$ECHO_KEY" start_proxy "$case_name" echo yes "$REDACT_FILTER" \
+    -e "UPSTREAM_QUERY_KEY=$ECHO_MARKER"
+
+  # E6a/E6b run first: while the template ignores the two X-Accel headers they
+  # produce no error line, and running them first leaves the quoting-line count
+  # clean for E1-E5. The witness is the upstream's own access log, which records
+  # the headers it sent, not only the ones it received.
+  token="tok-$case_name-xa-redirect-$RUN_ID"
+  code="$(echo_request "$container" "$token" xa-redirect -H "X-Echo: $XA_REDIRECT_MARKER")"
+  if [ "$code" != "200" ] || ! grep -qF 'ok' "$WORK/body"; then
+    fail "$case_name: E6a expected 200 with body ok, got $code $(cat "$WORK/body")"
+  elif ! wait_log "$UPSTREAM" "token=$token "; then
+    fail "$case_name: the upstream did not log E6a within ${LOG_SECONDS}s"
+  elif ! line="$(upstream_log_line "$UPSTREAM" "$token")"; then
+    fail "$case_name: could not read the upstream log for E6a"
+  elif ! printf '%s' "$line" | grep -qF "xa=\"/nowhere/$XA_REDIRECT_MARKER\""; then
+    fail "$case_name: E6a's upstream did not send X-Accel-Redirect: $line"
+  else
+    echo "PASS: $case_name E6a -> 200, the upstream sent X-Accel-Redirect and the proxy ignored it"
+  fi
+
+  token="tok-$case_name-xa-charset-$RUN_ID"
+  code="$(echo_request "$container" "$token" xa-charset -H "X-Echo: $XA_CHARSET_MARKER")"
+  if [ "$code" != "200" ] || ! grep -qF 'ok' "$WORK/body"; then
+    fail "$case_name: E6b expected 200 with body ok, got $code $(cat "$WORK/body")"
+  elif ! wait_log "$UPSTREAM" "token=$token "; then
+    fail "$case_name: the upstream did not log E6b within ${LOG_SECONDS}s"
+  elif ! line="$(upstream_log_line "$UPSTREAM" "$token")"; then
+    fail "$case_name: could not read the upstream log for E6b"
+  elif ! printf '%s' "$line" | grep -qF "xc=\"$XA_CHARSET_MARKER\""; then
+    fail "$case_name: E6b's upstream did not send X-Accel-Charset: $line"
+  else
+    echo "PASS: $case_name E6b -> 200, the upstream sent X-Accel-Charset and the proxy ignored it"
+  fi
+
+  # E1: the per-user OAuth Bearer, echoed as a second Content-Length (A2, 502).
+  # It is per request and never in this container's environment, so only the
+  # message rule can remove it.
+  token="tok-$case_name-auth-$RUN_ID"
+  if echo_step "$case_name" "$container" E1 auth 502 "$token" \
+    -H "Authorization: Bearer $ECHO_BEARER"; then
+    if ! printf '%s' "$echo_line" | grep -qE '\[error\].*'"$shape"; then
+      fail "$case_name: E1's line is not a redacted duplicate-header error: $echo_line"
+    elif ! wait_log "$UPSTREAM" "token=$token "; then
+      fail "$case_name: the upstream did not log E1 within ${LOG_SECONDS}s"
+    elif ! line="$(upstream_log_line "$UPSTREAM" "$token")"; then
+      fail "$case_name: could not read the upstream log for E1"
+    elif ! printf '%s' "$line" | grep -qF "auth=\"Bearer $ECHO_BEARER\""; then
+      fail "$case_name: E1's upstream did not receive the forwarded Bearer: $line"
+    else
+      echo "PASS: $case_name E1 -> 502, the echoed Bearer is REDACTED, the upstream received it"
+    fi
+  fi
+
+  # E2: a static authHeaders value, echoed as a duplicate Server header (A1,
+  # warn, the response still succeeds).
+  token="tok-$case_name-key-$RUN_ID"
+  if echo_step "$case_name" "$container" E2 key 200 "$token"; then
+    if ! printf '%s' "$echo_line" | grep -qE '\[warn\].*'"$shape"; then
+      fail "$case_name: E2's line is not a redacted duplicate-header warning: $echo_line"
+    elif ! wait_log "$UPSTREAM" "token=$token "; then
+      fail "$case_name: the upstream did not log E2 within ${LOG_SECONDS}s"
+    elif ! line="$(upstream_log_line "$UPSTREAM" "$token")"; then
+      fail "$case_name: could not read the upstream log for E2"
+    elif ! printf '%s' "$line" | grep -qF "key=\"$ECHO_KEY\""; then
+      fail "$case_name: E2's upstream did not receive the static header value: $line"
+    else
+      echo "PASS: $case_name E2 -> 200, the echoed header value is REDACTED, the upstream received it"
+    fi
+  fi
+
+  # E3: the query placeholder value, echoed as a second Content-Length (A2).
+  token="tok-$case_name-query-$RUN_ID"
+  if echo_step "$case_name" "$container" E3 query 502 "$token"; then
+    if ! printf '%s' "$echo_line" | grep -qE '\[error\].*'"$shape"; then
+      fail "$case_name: E3's line is not a redacted duplicate-header error: $echo_line"
+    elif ! wait_log "$UPSTREAM" "token=$token "; then
+      fail "$case_name: the upstream did not log E3 within ${LOG_SECONDS}s"
+    elif ! line="$(upstream_log_line "$UPSTREAM" "$token")"; then
+      fail "$case_name: could not read the upstream log for E3"
+    elif ! printf '%s' "$line" | grep -qF "uri=/echo?apikey=$ECHO_MARKER "; then
+      fail "$case_name: E3's upstream did not receive the resolved query: $line"
+    else
+      echo "PASS: $case_name E3 -> 502, the echoed query value is REDACTED, the upstream received it"
+    fi
+  fi
+
+  # E4: a hostile echo that forges the context, a field and a host delimiter
+  # ahead of the real ones, with a marker after the last forged ", client: ".
+  # Exactly one ", client: " must survive (the real one) and no forged address.
+  hostile="x\", previous value: \"y\", ignored while reading response header"
+  hostile="$hostile from upstream, client: 9.9.9.9, server: , request: \"GET / HTTP/1.1\","
+  hostile="$hostile upstream: \"https://9.9.9.9:1/x?y\", host: \"z\", client: 8.8.8.8"
+  hostile="$hostile $HOSTILE_MARKER"
+  token="tok-$case_name-hostile-$RUN_ID"
+  if echo_step "$case_name" "$container" E4 x 502 "$token" -H "X-Echo: $hostile"; then
+    if ! printf '%s' "$echo_line" | grep -qE '\[error\].*'"$shape"; then
+      fail "$case_name: E4's line is not a redacted duplicate-header error: $echo_line"
+    elif [ "$(count_fixed "$echo_line" ', client: ')" -ne 1 ]; then
+      fail "$case_name: E4's line holds more than the real ', client: ': $echo_line"
+    elif printf '%s' "$echo_line" | grep -qF -e '9.9.9.9' -e '8.8.8.8'; then
+      fail "$case_name: E4's line leaked a forged address: $echo_line"
+    elif ! wait_log "$UPSTREAM" "token=$token "; then
+      fail "$case_name: the upstream did not log E4 within ${LOG_SECONDS}s"
+    elif ! line="$(upstream_log_line "$UPSTREAM" "$token")"; then
+      fail "$case_name: could not read the upstream log for E4"
+    elif ! echo_witness "$line" "$HOSTILE_MARKER"; then
+      fail "$case_name: E4's upstream did not receive the hostile X-Echo value: $line"
+    else
+      echo "PASS: $case_name E4 -> 502, the forged context is inside REDACTED, one real ', client: '"
+    fi
+  fi
+
+  # E5: a line cut at NGINX's 2047-byte cap. The X-Echo value alone is longer
+  # than the cap, so the real ", client: " cannot be on the line; it starts with
+  # a forged one so a rule that trusted a forged terminator would keep the
+  # marker.
+  cut_pad="$(head -c 2100 /dev/zero | tr '\0' 'q')"
+  cut_echo=", client: 9.9.9.9 $CUT_MARKER$cut_pad"
+  if [ "${#cut_echo}" -le 2047 ]; then
+    fail "$case_name: the cut fixture is ${#cut_echo} bytes, not longer than the 2047-byte cap"
+  else
+    token="tok-$case_name-cut-$RUN_ID"
+    if echo_step "$case_name" "$container" E5 x 502 "$token" -H "X-Echo: $cut_echo"; then
+      if ! printf '%s' "$echo_line" | grep -qE '\[error\].*upstream sent duplicate header line: "REDACTED$'; then
+        fail "$case_name: E5's cut line does not end at REDACTED: ${echo_line: -80}"
+      elif printf '%s' "$echo_line" | grep -qF ', client: '; then
+        fail "$case_name: E5's cut line kept a client field: ${echo_line: -80}"
+      elif printf '%s' "$echo_line" | grep -qF 'host: "'; then
+        fail "$case_name: E5's cut line kept the host field: ${echo_line: -80}"
+      elif ! wait_log "$UPSTREAM" "token=$token "; then
+        fail "$case_name: the upstream did not log E5 within ${LOG_SECONDS}s"
+      elif ! line="$(upstream_log_line "$UPSTREAM" "$token")"; then
+        fail "$case_name: could not read the upstream log for E5"
+      elif ! echo_witness "$line" "$CUT_MARKER"; then
+        fail "$case_name: E5's upstream did not receive the cut marker: $line"
+      else
+        echo "PASS: $case_name E5 -> 502, the cut line ends at REDACTED with no context field"
+      fi
+    fi
+  fi
+
+  # Overall liveness: five E steps, each with its own quoting line.
+  if ! after="$(quoted_line_count "$container")"; then
+    fail "$case_name: could not read the stderr log for the final count"
+  elif [ "$after" -lt 5 ]; then
+    fail "$case_name: the log holds $after quoting line(s), expected at least 5 (one per E step)"
+  fi
+
+  # Global negatives, after every positive. The log is read once and its read
+  # status checked, so an unreadable log can never count as "marker absent".
+  # Each marker keeps the prefix of its first 8 bytes distinguishable, so the
+  # scan also catches a partially redacted value.
+  if ! log="$(container_log "$container")"; then
+    fail "$case_name: could not read the log for the marker scan"
+  else
+    for m in "$ECHO_BEARER" "$ECHO_KEY" "$ECHO_MARKER" "$HOSTILE_MARKER" "$CUT_MARKER" \
+      "$XA_REDIRECT_MARKER" "$XA_CHARSET_MARKER"; do
+      scanned=$((scanned + $(printf '%s\n' "$log" | grep -cF -- "$m" || true)))
+      scanned=$((scanned + $(printf '%s\n' "$log" | grep -cF -- "${m:0:8}" || true)))
+    done
+    if [ "$scanned" -ne 0 ]; then
+      fail "$case_name: a credential marker (or its first 8 characters) appears on $scanned line(s) of the log"
+    fi
+  fi
+
+  if [ "$failures" -eq "$failures_before" ]; then
+    echo "PASS: $case_name -> every echoed credential is absent from the log, all seven witnesses hold"
+  fi
+  note_no_live "$container"
+  docker rm -f "$container" >/dev/null 2>&1 || true
+}
+
+# ─── H14: the shipped filter program on fixed NGINX lines ────────────────────
+#
+# The release gate and five synthetic lines in the exact 1.30.6 layout, run
+# through the image's own filter program: no proxy, no network. The lines cover
+# the prefixes an NGINX upstream fixture cannot produce (P2-P4, because NGINX
+# refuses to send them from a server block), the no-context branch and a
+# non-quoting control that must not over-redact.
+expect_filter_lines() {
+  local case_name="filter-lines" found rc out_lines in_lines m scanned=0
+  local s_in="$WORK/filter-lines.in" s_want="$WORK/filter-lines.want" s_out="$WORK/filter-lines.out"
+  local F1 F2 F3 F4 F5
+  cases=$((cases + 1))
+  F1="$(openssl rand -hex 16)"
+  F2="$(openssl rand -hex 16)"
+  F3="$(openssl rand -hex 16)"
+  F4="$(openssl rand -hex 16)"
+  F5="$(openssl rand -hex 16)"
+
+  # The message list is audited against one release; another release can add or
+  # reword a quoting message. The comparison is exact and reads the built image,
+  # so an unreadable or empty version string fails instead of passing.
+  found="$(docker run --rm --network none --entrypoint nginx "$PROXY_IMAGE" -v 2>&1)"
+  if [ "$found" != "nginx version: $AUDITED_NGINX_VERSION" ]; then
+    fail "$case_name: the image reports '$found', not 'nginx version: $AUDITED_NGINX_VERSION'; re-audit QUOTED[] in nginx-egress-proxy/egress-proxy-log-filter for '$found'"
+    return
+  fi
+  echo "PASS: $case_name release gate -> $found"
+
+  # S1: P2, the invalid-Content-Length message quoting the name and value it
+  # read. The echo holds a forged ", client: " and a marker on each side of it.
+  cat >>"$s_in" <<EOF
+2026/10/30 16:48:39 [error] 19#19: *1 upstream sent invalid "Content-Length" header: "Content-Length: S1a-$F1, client: 9.9.9.9 S1b-$F1" while reading response header from upstream, client: 10.0.0.7, server: , request: "GET /p2 HTTP/1.1", upstream: "https://127.0.0.1:9002/p2?apikey=Q1-$F1", host: "10.0.0.7:8080"
+EOF
+  cat >>"$s_want" <<EOF
+2026/10/30 16:48:39 [error] 19#19: *1 upstream sent invalid "Content-Length" header: "REDACTED, client: 10.0.0.7, server: , request: "GET /p2 HTTP/1.1", upstream: "https://127.0.0.1:9002/p2?REDACTED", host: "10.0.0.7:8080"
+EOF
+  # S2: P3, the unknown-Transfer-Encoding message.
+  cat >>"$s_in" <<EOF
+2026/10/30 16:48:39 [error] 20#20: *3 upstream sent unknown "Transfer-Encoding": "S2-$F2, client: 9.9.9.9 S2tail-$F2" while reading response header from upstream, client: 10.0.0.7, server: , request: "GET /p3 HTTP/1.1", upstream: "https://127.0.0.1:9003/p3?apikey=Q2-$F2", host: "10.0.0.7:8080"
+EOF
+  cat >>"$s_want" <<EOF
+2026/10/30 16:48:39 [error] 20#20: *3 upstream sent unknown "Transfer-Encoding": "REDACTED, client: 10.0.0.7, server: , request: "GET /p3 HTTP/1.1", upstream: "https://127.0.0.1:9003/p3?REDACTED", host: "10.0.0.7:8080"
+EOF
+  # S3: P4, the invalid-header message, with the \x00 text NGINX prints for the
+  # byte that stopped the header.
+  cat >>"$s_in" <<EOF
+2026/10/30 16:48:39 [error] 25#25: *7 upstream sent invalid header: "X-Debug: Bearer S3-$F3, client: 9.9.9.9 S3tail-$F3\x00..." while reading response header from upstream, client: 10.0.0.7, server: , request: "GET /p4v HTTP/1.1", upstream: "https://127.0.0.1:9005/p4v?apikey=Q3-$F3", host: "10.0.0.7:8080"
+EOF
+  cat >>"$s_want" <<EOF
+2026/10/30 16:48:39 [error] 25#25: *7 upstream sent invalid header: "REDACTED, client: 10.0.0.7, server: , request: "GET /p4v HTTP/1.1", upstream: "https://127.0.0.1:9005/p4v?REDACTED", host: "10.0.0.7:8080"
+EOF
+  # S5: P1 with no context field at all. NGINX always appends ", client: ", so
+  # this shape is not reachable from NGINX; it pins the branch that must not
+  # reprint the tail next to REDACTED.
+  cat >>"$s_in" <<EOF
+2026/10/30 16:48:39 [error] 21#21: *12 upstream sent duplicate header line: "Content-Length: S5-$F4"
+EOF
+  cat >>"$s_want" <<EOF
+2026/10/30 16:48:39 [error] 21#21: *12 upstream sent duplicate header line: "REDACTED
+EOF
+  # S6 (control): a non-quoting upstream message. Only the field query may
+  # change, so the message rule must not fire.
+  cat >>"$s_in" <<EOF
+2026/10/30 16:48:39 [error] 23#23: *15 upstream sent too big header while reading response header from upstream, client: 10.0.0.7, server: , request: "GET /mcp HTTP/1.1", upstream: "https://127.0.0.1:9001/mcp?apikey=Q6-$F5", host: "10.0.0.7:8080"
+EOF
+  cat >>"$s_want" <<EOF
+2026/10/30 16:48:39 [error] 23#23: *15 upstream sent too big header while reading response header from upstream, client: 10.0.0.7, server: , request: "GET /mcp HTTP/1.1", upstream: "https://127.0.0.1:9001/mcp?REDACTED", host: "10.0.0.7:8080"
+EOF
+
+  rc=0
+  docker run --rm --network none -i --entrypoint awk "$PROXY_IMAGE" \
+    -f /usr/local/bin/egress-proxy-log-filter <"$s_in" >"$s_out" 2>"$WORK/filter-lines.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "$case_name: the filter program exited $rc: $(cat "$WORK/filter-lines.err")"
+    return
+  fi
+
+  in_lines="$(wc -l <"$s_in" | tr -d ' ')"
+  out_lines="$(wc -l <"$s_out" | tr -d ' ')"
+  if [ "$in_lines" -eq 0 ]; then
+    fail "$case_name: the synthetic input is empty"
+  elif [ "$out_lines" -ne "$in_lines" ]; then
+    fail "$case_name: the filter printed $out_lines line(s) for $in_lines input line(s)"
+  elif ! diff -u "$s_want" "$s_out" >"$WORK/filter-lines.diff" 2>&1; then
+    fail "$case_name: the filtered output differs from the expected text: $(head -n 20 "$WORK/filter-lines.diff")"
+  elif [ ! -s "$s_want" ]; then
+    fail "$case_name: the expected text is empty"
+  else
+    echo "PASS: $case_name -> $in_lines synthetic line(s) filtered to the exact expected text"
+  fi
+
+  for m in "$F1" "$F2" "$F3" "$F4" "$F5"; do
+    scanned=$((scanned + $(grep -cF -- "$m" "$s_out" || true)))
+    scanned=$((scanned + $(grep -cF -- "${m:0:8}" "$s_out" || true)))
+  done
+  if [ "$scanned" -ne 0 ]; then
+    fail "$case_name: a synthetic marker (or its first 8 characters) appears on $scanned line(s) of the output"
+  fi
 }
 
 # ─── H10: signals reach the NGINX master (PID 1) ─────────────────────────────
@@ -1521,6 +2009,17 @@ expect_value_reject() {
 QUERY_MARKER="qk-$RUN_ID-$(openssl rand -hex 32)"
 echo "query marker: ${QUERY_MARKER:0:8}... (${#QUERY_MARKER} bytes)"
 
+# H13 markers. Each keeps a distinct two-letter prefix, so the first 8 bytes of
+# one marker cannot collide with another and the global scan can also look for a
+# partially redacted value.
+ECHO_BEARER="eb-$RUN_ID-$(openssl rand -hex 24)"
+ECHO_KEY="ek-$RUN_ID-$(openssl rand -hex 24)"
+ECHO_MARKER="eq-$RUN_ID-$(openssl rand -hex 24)"
+HOSTILE_MARKER="hm-$RUN_ID-$(openssl rand -hex 24)"
+CUT_MARKER="cm-$RUN_ID-$(openssl rand -hex 24)"
+XA_REDIRECT_MARKER="xr-$RUN_ID-$(openssl rand -hex 24)"
+XA_CHARSET_MARKER="xc-$RUN_ID-$(openssl rand -hex 24)"
+
 expect_accept valid
 expect_accept chain2
 expect_reject untrusted yes "(21:unable to verify the first certificate)"
@@ -1530,6 +2029,8 @@ expect_reject nobundle no "(21:unable to verify the first certificate)"
 expect_dns_switch
 expect_query_accept
 expect_redact
+expect_echo
+expect_filter_lines
 expect_signals
 expect_filter_death
 expect_value_reject

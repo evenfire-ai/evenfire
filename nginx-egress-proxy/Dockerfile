@@ -6,7 +6,9 @@ FROM nginx:1.30.6-alpine@sha256:c59d1f8b1e0e42da75be973424cd72e23f7f8adfb54e982f
 #
 # This layer also carries the stderr log filter (#1240). The remote baseUrl
 # query can hold a credential, and NGINX prints the full upstream URL in every
-# upstream error line. egress-proxy-entrypoint keeps NGINX as PID 1 and routes
+# upstream error line; it also quotes the upstream's response-header bytes in
+# four upstream messages, where an upstream can echo any credential the proxy
+# forwarded. egress-proxy-entrypoint keeps NGINX as PID 1 and routes
 # only stderr through egress-proxy-log-filter; egress-proxy-liveness is the exec
 # liveness probe that makes a dead filter a visible container restart.
 # egress-proxy-template-check refuses to start when a value that envsubst will

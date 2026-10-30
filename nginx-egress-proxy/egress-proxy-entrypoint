@@ -17,9 +17,11 @@
 #      process does not need it and does not have it.
 #   2. It routes only NGINX's stderr through the log filter (#1240). The remote
 #      baseUrl query may carry a credential and NGINX prints the full upstream
-#      URL in every upstream error line. stdout keeps the access log unfiltered:
-#      it records the client's request line, to which the proxy never adds the
-#      remote query.
+#      URL in every upstream error line; NGINX also quotes the upstream's
+#      response-header bytes in four upstream messages, where an upstream can
+#      echo any credential the proxy forwarded, the per-user OAuth Bearer
+#      included. stdout keeps the access log unfiltered: it records the
+#      client's request line, to which the proxy never adds the remote query.
 #
 # The filter is a child of NGINX after the exec, so the master reaps it. If it
 # dies after NGINX has opened its error log, NGINX keeps serving (it ignores
