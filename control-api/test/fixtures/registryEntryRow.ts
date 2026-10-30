@@ -9,8 +9,9 @@
  *   the entry/version GETs return that row unchanged, and `registryClient` passes
  *   it through untouched.
  * - The publish validation that matters for this block (`validationService.ts`):
- *   the name grammar, `mcpServer.oauth` only with `serverMode: remote`, and
- *   `validateRemoteOAuthMeta` (closed keys, enums, bounds, the console URL rule).
+ *   the name grammar, `mcpServer.oauth` only on `entryType: mcp-server` and only
+ *   with `serverMode: remote`, and `validateRemoteOAuthMeta` (closed keys, enums,
+ *   bounds, the console URL rules).
  *
  * What it does not mirror: org rows come from a fixed list instead of
  * `registry_orgs`, ids are random UUIDs, and the columns the publish body sets
@@ -131,6 +132,8 @@ const HINT_RE = /^[a-z0-9][a-z0-9-]{0,31}$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const CONSOLE_ASCII_RE = /^[\x21-\x7E]+$/
 const CONSOLE_PREFIX_RE = /^https:\/\/[^/\\]/
+const CONSOLE_AUTHORITY_RE = /^https:\/\/([^/?#]*)/
+const CONSOLE_UNSAFE_RE = /["'<>`{}|^]/
 
 const isObj = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -173,6 +176,9 @@ function remoteOAuthMetaError(oauth: unknown): string | null {
     if (!bounded(u, 512) || !CONSOLE_ASCII_RE.test(u) || !CONSOLE_PREFIX_RE.test(u)) {
       return 'oauth.providerConsoleUrl'
     }
+    if (u.includes('\\') || CONSOLE_UNSAFE_RE.test(u)) return 'oauth.providerConsoleUrl'
+    const authority = CONSOLE_AUTHORITY_RE.exec(u)![1]
+    if (authority.includes('@') || authority.includes('%')) return 'oauth.providerConsoleUrl'
     let parsed: URL
     try {
       parsed = new URL(u)
@@ -218,6 +224,9 @@ function buildRow(
   const version = body.version ?? '1.0.0'
   const entryType = body.entryType ?? 'mcp-server'
   const mcp = body.mcpServer
+  if (validateOAuth && entryType !== 'mcp-server' && mcp?.oauth !== undefined) {
+    fail("mcpServer.oauth only valid for entryType 'mcp-server'")
+  }
   if (validateOAuth && entryType === 'mcp-server' && mcp?.oauth !== undefined) {
     if (mcp.serverMode !== 'remote') fail('mcpServer.oauth only valid for serverMode=remote')
     const err = remoteOAuthMetaError(mcp.oauth)

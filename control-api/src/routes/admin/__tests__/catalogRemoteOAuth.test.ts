@@ -122,7 +122,7 @@ describe('parseRemoteOAuthCatalogBlock (T-C3)', () => {
   })
 
   it.each([
-    ['not an mcp-server', entry(oauthBlock(), { entryType: 'recipe' }), 'not_mcp_server'],
+    ['not an mcp-server', bad(oauthBlock(), { entryType: 'recipe' }), 'not_mcp_server'],
     ['local server', bad(oauthBlock(), { serverMode: 'local' }), 'not_remote_server'],
     ['no oauth block', entry(undefined), 'oauth_block_missing'],
     ['source other than remote', bad(oauthBlock({ source: 'generic' })), 'oauth_source_not_remote'],
@@ -214,6 +214,26 @@ describe('parseRemoteOAuthCatalogBlock (T-C3)', () => {
       'provider_console_url_not_https',
     ],
     [
+      'console url with a backslash before the userinfo',
+      bad(oauthBlock({ providerConsoleUrl: 'https://a.com\\@evil.com/' })),
+      'provider_console_url_invalid',
+    ],
+    [
+      'console url with an empty userinfo',
+      bad(oauthBlock({ providerConsoleUrl: 'https://@host.com/' })),
+      'provider_console_url_not_https',
+    ],
+    [
+      'console url with a percent-encoded host',
+      bad(oauthBlock({ providerConsoleUrl: 'https://%65vil.com/' })),
+      'provider_console_url_invalid',
+    ],
+    [
+      'console url that breaks out of an HTML attribute',
+      bad(oauthBlock({ providerConsoleUrl: 'https://x.com/"><svg>' })),
+      'provider_console_url_invalid',
+    ],
+    [
       'console url with interior space',
       bad(oauthBlock({ providerConsoleUrl: 'https://console.x.com/a b' })),
       'provider_console_url_invalid',
@@ -267,6 +287,14 @@ describe('parseRemoteOAuthCatalogBlock (T-C3)', () => {
       })
     )
     expect(parseRemoteOAuthCatalogBlock(e, { trusted: true }).valid).toBe(true)
+  })
+
+  it('a console url with "@" and "%" outside the authority is accepted verbatim', () => {
+    const url = 'https://console.example.com/u/@me?q=%7B#x'
+    const r = parseRemoteOAuthCatalogBlock(entry(oauthBlock({ providerConsoleUrl: url })), {
+      trusted: true,
+    })
+    expect(r.valid && r.block.providerConsoleUrl).toBe(url)
   })
 
   it('a guide of exactly 4000 chars is accepted', () => {
@@ -404,6 +432,19 @@ describe('isCuratorEntry (T-C5, pure part)', () => {
     const outsider: RegistryPublisher = { kind: 'user', username: 'acme' }
     expect(() => entry(oauthBlock(), { name: '@acme/notion', publisher: outsider })).toThrow(
       /not_an_org_member/
+    )
+    for (const url of [
+      'https://a.com\\@evil.com/',
+      'https://@host.com/',
+      'https://%65vil.com/',
+      'https://x.com/"><svg>',
+    ]) {
+      expect(() => entry(oauthBlock({ providerConsoleUrl: url })), url).toThrow(
+        /oauth\.providerConsoleUrl/
+      )
+    }
+    expect(() => entry(oauthBlock(), { entryType: 'recipe' })).toThrow(
+      /only valid for entryType 'mcp-server'/
     )
     expect(() => entry(oauthBlock({ provider: 'notion' }))).toThrow(/Unsupported field/)
     expect(() => entry(oauthBlock(), { serverMode: 'local' })).toThrow(/serverMode=remote/)

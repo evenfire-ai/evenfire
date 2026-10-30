@@ -134,12 +134,28 @@ function oauthBlockOf(entry: CatalogEntryInput): Record<string, unknown> | null 
  * before it can be inspected: it reads `https:host` and `https:\\host` as
  * `https://host`, drops tabs and newlines, and punycodes Unicode hosts. So the raw
  * form is pinned first, with the same rules the registry applies at publish:
- * printable ASCII only (an internationalized host must arrive as punycode, which
- * rules out homoglyph, bidi and zero-width tricks) and a literal `https://`
- * followed directly by the host.
+ * - printable ASCII only (an internationalized host must arrive as punycode, which
+ *   rules out homoglyph, bidi and zero-width tricks);
+ * - a literal `https://` followed directly by the host;
+ * - no `\` anywhere: WHATWG reads it as `/` and RFC 3986 parsers do not, so
+ *   `https://a.com\@evil.com/` names a different host depending on the parser;
+ * - none of `" ' < > \` { } | ^`: the string is rendered raw, and these would let
+ *   it break out of an HTML attribute or open a tag;
+ * - no `@` in the raw authority: an empty userinfo (`https://@host`) parses to an
+ *   empty username, so the parsed credentials check alone misses it;
+ * - no `%` in the raw authority: `new URL()` percent-decodes the host, so
+ *   `https://%65vil.com` opens evil.com while the raw string reads otherwise.
+ *
+ * Reason codes: a malformed string (non-ASCII, a `\` or a forbidden character
+ * anywhere, a `%` in the host) is `_invalid`; a missing `https://` prefix, any
+ * userinfo, or a string `new URL()` will not parse as https is `_not_https`. A
+ * credentialed URL keeps `_not_https`, the code it returned before the raw `@`
+ * check existed.
  */
 const CONSOLE_URL_ASCII_RE = /^[\x21-\x7E]+$/
 const CONSOLE_URL_PREFIX_RE = /^https:\/\/[^/\\]/
+const CONSOLE_URL_AUTHORITY_RE = /^https:\/\/([^/?#]*)/
+const CONSOLE_URL_UNSAFE_RE = /["'<>`{}|^]/
 
 function providerConsoleUrlReason(value: unknown): RemoteOAuthInvalidReason | null {
   if (
@@ -150,9 +166,14 @@ function providerConsoleUrlReason(value: unknown): RemoteOAuthInvalidReason | nu
   ) {
     return 'provider_console_url_invalid'
   }
-  if (!CONSOLE_URL_PREFIX_RE.test(value) || !isHttpsUrl(value)) {
-    return 'provider_console_url_not_https'
+  if (!CONSOLE_URL_PREFIX_RE.test(value)) return 'provider_console_url_not_https'
+  if (value.includes('\\') || CONSOLE_URL_UNSAFE_RE.test(value)) {
+    return 'provider_console_url_invalid'
   }
+  const authority = CONSOLE_URL_AUTHORITY_RE.exec(value)![1]
+  if (authority.includes('@')) return 'provider_console_url_not_https'
+  if (authority.includes('%')) return 'provider_console_url_invalid'
+  if (!isHttpsUrl(value)) return 'provider_console_url_not_https'
   return null
 }
 
