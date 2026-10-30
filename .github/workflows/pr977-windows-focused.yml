@@ -36,7 +36,7 @@ jobs:
       - name: Check out exact application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 68b8ea7430ade92e1107381f0d08d76a2c72ec71
+          ref: 7b9770947126def942fdca2a12eab2a12c24e653
           path: source
           persist-credentials: false
           fetch-depth: 1

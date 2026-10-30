@@ -433,6 +433,17 @@ describe('Windows plugin storage DACL privacy', () => {
     path.join(here, '../../.github/workflows/pr977-exact-source-windows-full-sharded.yml'),
     'utf8'
   )
+  const expectedSourceSha = focusedWorkflow.match(/^\s*PR977_SOURCE_SHA:\s*([0-9a-f]{40})$/m)?.[1]
+  const sourceCheckout = focusedWorkflow.match(
+    /- name: Check out exact application source([\s\S]*?)(?=\n      - name:)/
+  )?.[1]
+  assert.ok(expectedSourceSha, 'Focused workflow must pin an exact application source SHA')
+  assert.ok(sourceCheckout, 'Focused workflow must check out the pinned application source')
+  assert.match(
+    sourceCheckout,
+    new RegExp(`ref:\\s*${expectedSourceSha}`),
+    'Focused workflow checkout must use the exact source SHA enforced by its guard'
+  )
   assert.match(focusedWorkflow, /timeout-minutes:\s*12/)
   assert.match(focusedWorkflow, /--maximum-runtime-ms=360000/)
   assert.match(focusedWorkflow, /--no-progress-ms=120000/)
