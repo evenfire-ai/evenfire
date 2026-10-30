@@ -211,6 +211,65 @@ describe('FileExplorerTree — sort ordering', () => {
 })
 
 describe('FileExplorerTree — resource action menus', () => {
+  it('hides Move on parentless roots and preserves exact-parent child Move', async () => {
+    const folder = accessibleResource('root-folder', 'Shared folder', 'directory')
+    const file = accessibleResource('root-file', 'Shared file.txt', 'file')
+    const child = childView('readable-child', 'Readable child.txt', 'file', {
+      parentResourceId: folder.resourceId,
+      readable: true,
+    })
+    const unreadable = childView('unreadable-child', 'Unreadable child.txt', 'file', {
+      parentResourceId: folder.resourceId,
+      readable: false,
+    })
+    const onResourceAction = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([folder, file])),
+      listChildren: vi.fn(async () => listChildrenPage([child, unreadable])),
+      affordances: vi.fn(async () =>
+        resourceAffordances(['read', 'write', 'delete', 'manage_acl'])
+      ),
+    })
+    renderTree({ onResourceAction })
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Shared folder' }))
+
+    for (const root of [folder, file]) {
+      fireEvent.click(await screen.findByRole('button', { name: `Options for ${root.name}` }))
+      const menu = await screen.findByRole('menu', { name: `Actions for ${root.name}` })
+      expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+      const shareMenu = await screen.findByRole('menu', { name: `Share options for ${root.name}` })
+      fireEvent.click(
+        within(shareMenu).getByRole('menuitem', {
+          name: root.kind === 'directory' ? 'Copy folder ID' : 'Copy file ID',
+        })
+      )
+      expect(onResourceAction).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          resourceId: root.resourceId,
+          gfsUri: root.gfsUri,
+          parentResourceId: null,
+        }),
+        'copy-route'
+      )
+    }
+
+    for (const target of [child, unreadable]) {
+      fireEvent.click(await screen.findByRole('button', { name: `Options for ${target.name}` }))
+      const menu = await screen.findByRole('menu', { name: `Actions for ${target.name}` })
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+      expect(onResourceAction).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          resourceId: target.resourceId,
+          gfsUri: target.gfsUri,
+          parentResourceId: folder.resourceId,
+          readable: target.readable !== false,
+        }),
+        'move'
+      )
+    }
+  })
+
   it.each([
     ['folder', 'directory', 'Reports'],
     ['file', 'file', 'report.md'],
@@ -255,7 +314,7 @@ describe('FileExplorerTree — resource action menus', () => {
             delete: handler,
           },
           canRename: true,
-          canMove: true,
+          canMove: resource.parentResourceId != null,
           canCreateFolder: true,
           canUpload: true,
           canShare: true,
@@ -269,10 +328,14 @@ describe('FileExplorerTree — resource action menus', () => {
       )
 
       expect(renderedActions.map(action => action.dataset.gfsAction)).toEqual(
-        expectedActions.map(action => action.id)
+        expectedActions
+          .filter(action => !['copy-link', 'copy-route'].includes(action.id))
+          .map(action => action.id)
       )
       expect(renderedActions.map(action => action.textContent?.trim())).toEqual(
-        expectedActions.map(action => action.label)
+        expectedActions
+          .filter(action => !['copy-link', 'copy-route'].includes(action.id))
+          .map(action => action.label)
       )
     }
   )
@@ -337,7 +400,9 @@ describe('FileExplorerTree — resource action menus', () => {
 
     fireEvent.click(within(secondRow).getByRole('button', { name: `Options for ${second.name}` }))
     const menu = await screen.findByRole('menu', { name: `Actions for ${second.name}` })
-    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy file ID' }))
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${second.name}` })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'second', gfsUri: second.gfsUri }),
@@ -372,8 +437,12 @@ describe('FileExplorerTree — resource action menus', () => {
       expect(document.activeElement).toBe(trigger)
 
       await user.keyboard('{Enter}')
-      const menu = await screen.findByRole('menu', { name: 'Actions for focus-target.md' })
-      const menuItems = within(menu).getAllByRole('menuitem')
+      await screen.findByRole('menu', { name: 'Actions for focus-target.md' })
+      await user.keyboard('{ArrowRight}')
+      const shareMenu = await screen.findByRole('menu', {
+        name: 'Share options for focus-target.md',
+      })
+      const menuItems = within(shareMenu).getAllByRole('menuitem')
       const selectedIndex = menuItems.findIndex(item => item.textContent?.trim() === actionName)
       expect(selectedIndex).toBeGreaterThanOrEqual(0)
       await user.keyboard('{Home}')
@@ -436,9 +505,13 @@ describe('FileExplorerTree — resource action menus', () => {
     }
     expect(document.activeElement).toBe(triggerButton)
     await user.keyboard('{Enter}')
-    const menu = await screen.findByRole('menu', { name: 'Actions for removed-target.md' })
+    await screen.findByRole('menu', { name: 'Actions for removed-target.md' })
+    await user.keyboard('{ArrowRight}')
+    const shareMenu = await screen.findByRole('menu', {
+      name: 'Share options for removed-target.md',
+    })
     focusTrigger.mockClear()
-    const menuItems = within(menu).getAllByRole('menuitem')
+    const menuItems = within(shareMenu).getAllByRole('menuitem')
     const copyRouteIndex = menuItems.findIndex(item => item.textContent?.trim() === 'Copy file ID')
     await user.keyboard('{Home}')
     for (let index = 0; index < copyRouteIndex; index += 1) {
@@ -473,7 +546,11 @@ describe('FileExplorerTree — resource action menus', () => {
     const trigger = within(row).getByRole('button', { name: 'Options for pointer-target.md' })
     await user.click(trigger)
     const menu = await screen.findByRole('menu', { name: 'Actions for pointer-target.md' })
-    await user.click(within(menu).getByRole('menuitem', { name: 'Copy file ID' }))
+    await user.hover(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', {
+      name: 'Share options for pointer-target.md',
+    })
+    await user.click(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
@@ -687,7 +764,9 @@ describe('FileExplorerTree — resource action menus', () => {
     ) as HTMLElement
     fireEvent.click(within(nestedRow).getByRole('button', { name: 'Options for Nested folder' }))
     const menu = await screen.findByRole('menu', { name: 'Actions for Nested folder' })
-    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy folder ID' }))
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: 'Share options for Nested folder' })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy folder ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'nested', gfsUri: nested.gfsUri }),
@@ -726,10 +805,12 @@ describe('FileExplorerTree — resource action menus', () => {
     ) as HTMLElement
     fireEvent.click(within(fileRow).getByRole('button', { name: 'Options for report.pdf' }))
     const fileMenu = await screen.findByRole('menu', { name: 'Actions for report.pdf' })
-    expect(await within(fileMenu).findByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
+    fireEvent.click(within(fileMenu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: 'Share options for report.pdf' })
+    expect(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
     expect(within(fileMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
-    expect(within(fileMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    expect(within(shareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'New folder' })).toBeNull()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Replace file' })).toBeNull()
@@ -755,7 +836,12 @@ describe('FileExplorerTree — resource action menus', () => {
     held = ['read']
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: desktopQueryKeys.gfsAffordances('test:user-1:team-1', 'folder', 'main'),
+        queryKey: desktopQueryKeys.gfsAffordances(
+          'test:user-1:team-1',
+          'folder',
+          'main',
+          mockAuthContext.sessionGeneration
+        ),
         exact: true,
       })
     })
@@ -785,7 +871,12 @@ describe('FileExplorerTree — resource action menus', () => {
 
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: desktopQueryKeys.gfsAffordances('test:user-1:team-1', 'folder', 'main'),
+        queryKey: desktopQueryKeys.gfsAffordances(
+          'test:user-1:team-1',
+          'folder',
+          'main',
+          mockAuthContext.sessionGeneration
+        ),
         exact: true,
       })
     })
@@ -831,7 +922,12 @@ describe('FileExplorerTree — resource action menus', () => {
 
     await act(async () => {
       await queryClient.invalidateQueries({
-        queryKey: desktopQueryKeys.gfsAffordances('test:user-1:team-1', 'folder', 'main'),
+        queryKey: desktopQueryKeys.gfsAffordances(
+          'test:user-1:team-1',
+          'folder',
+          'main',
+          mockAuthContext.sessionGeneration
+        ),
         exact: true,
       })
     })
@@ -1289,8 +1385,8 @@ describe('FileExplorerTree — unreadable rows refuse activation (R1-H1)', () =>
   async function renderExpandedVault(props: Partial<Parameters<typeof FileExplorerTree>[0]> = {}) {
     const listChildren = vi.fn(async () =>
       listChildrenPage([
-        childView('locked', 'Locked', 'directory', { readable: false }),
-        childView('secret', 'secret.pdf', 'file', { readable: false }),
+        childView('locked', 'Locked', 'directory', { readable: false, parentResourceId: 'vault' }),
+        childView('secret', 'secret.pdf', 'file', { readable: false, parentResourceId: 'vault' }),
       ])
     )
     const download = vi.fn(async () => downloadResult(resolvedFile('secret', 'secret.pdf')))
@@ -1518,6 +1614,7 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
         <FileExplorerTree
           onOpenFolder={onOpenFolder}
           onOpenPreview={onOpenPreview}
+          onResourceAction={vi.fn()}
           pushToast={pushToast}
         />
       </GfsDragSessionProvider>
@@ -2864,6 +2961,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
           <FileExplorerTree
             onOpenFolder={onOpenFolder}
             onOpenPreview={onOpenPreview}
+            onResourceAction={vi.fn()}
             pushToast={pushToast}
           />
           <SessionProbe onApi={api => (sessionApi = api)} />

@@ -193,7 +193,7 @@ function FileExplorerNode({
             delete: () => onResourceAction(node, 'delete'),
           },
           canRename: hasBit(affordances, 'write'),
-          canMove: accessActive,
+          canMove: accessActive && node.parentResourceId != null,
           canCreateFolder: isDirectory && hasBit(affordances, 'write'),
           canUpload: isDirectory && hasBit(affordances, 'write'),
           canShare: hasBit(affordances, 'manage_acl'),
