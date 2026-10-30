@@ -806,6 +806,10 @@ export interface GfscWriteClient extends GfscReadClient {
     },
     call?: GfscCallOptions
   ): Promise<unknown>
+  createFileFromBytes(
+    args: { drive: string; parentResourceId: string; name: string; contentBase64: string },
+    call?: GfscCallOptions
+  ): Promise<unknown>
   createFolder(
     args: { drive: string; parentResourceId: string; name: string },
     call?: GfscCallOptions

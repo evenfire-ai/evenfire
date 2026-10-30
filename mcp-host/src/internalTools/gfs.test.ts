@@ -267,6 +267,7 @@ describe('buildGfsWriteTools (P4)', () => {
       resolve: vi.fn(),
       write: vi.fn(async () => ({ gfsUri: 'gfs://main/abc', version: 4 })),
       createFile: vi.fn(async () => ({ resourceId: 'file' })),
+      createFileFromBytes: vi.fn(async () => ({ resourceId: 'file' })),
       createFolder: vi.fn(async () => ({ resourceId: 'folder' })),
       rename: vi.fn(async () => ({ resourceId: 'abc', version: 5 })),
       copy: vi.fn(async () => ({
