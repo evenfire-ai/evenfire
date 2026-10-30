@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { buildGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
 
 type SentMessage = {
@@ -38,25 +39,33 @@ function createHarness() {
   const requestMainWindow = vi.fn()
   const logout = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
   const handleSandboxUiDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
+  const handleGfsResourceDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
   const shouldAcceptSandboxUiProtocolLink = vi
+    .fn<(rawUrl: string) => boolean>()
+    .mockReturnValue(true)
+  const shouldAcceptGfsResourceProtocolLink = vi
     .fn<(rawUrl: string) => boolean>()
     .mockReturnValue(true)
   const router = createEvenfireDeepLinkRouter<TestWindow>({
     appProtocol: 'evenfire',
     sandboxUiDeepLinkHost: 'app',
+    gfsResourceDeepLinkHost: 'files',
     focusMainWindow: focusWindow,
     getWindow: () => currentWindow,
     handleSandboxUiDeepLink,
+    handleGfsResourceDeepLink,
     isRendererReady: () => rendererReady,
     logout,
     requestMainWindow,
     shouldAcceptSandboxUiProtocolLink,
+    shouldAcceptGfsResourceProtocolLink,
   })
 
   return {
     currentWindow: () => currentWindow,
     focusWindow,
     handleSandboxUiDeepLink,
+    handleGfsResourceDeepLink,
     logout,
     requestMainWindow,
     router,
@@ -71,6 +80,7 @@ function createHarness() {
       currentWindow = window
     },
     shouldAcceptSandboxUiProtocolLink,
+    shouldAcceptGfsResourceProtocolLink,
   }
 }
 
@@ -86,6 +96,11 @@ describe('evenfire deep-link router', () => {
     expect(harness.handleSandboxUiDeepLink).toHaveBeenCalledWith(
       'evenfire://app/evenfire/example?path=%2Finbox&team=team-1'
     )
+
+    const resourceLink = buildGfsResourceDeepLink('gfs://main/0123456789abcdef0123456789abcdef')
+    harness.router.handle(resourceLink)
+    expect(harness.shouldAcceptGfsResourceProtocolLink).toHaveBeenCalledWith(resourceLink)
+    expect(harness.handleGfsResourceDeepLink).toHaveBeenCalledWith(resourceLink)
 
     harness.router.handle(
       'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.test&rpcProxyBaseUrl=https%3A%2F%2Frpc.example.test&tenantName=Acme'

@@ -24,6 +24,8 @@ export interface FileExplorerNodeProps {
   level: number
   /** Cache-scope key shared with the Files page's TanStack queries. */
   scope: string
+  /** Published main-process generation that owns this authority query. */
+  sessionGeneration: number | null
   /** Session access is live: gates the per-node children fetch the same way the
    *  controller gates its own children query — a revoked session fetches nothing. */
   accessActive: boolean
@@ -49,7 +51,7 @@ export interface FileExplorerNodeProps {
   onActivateFolder: (node: GfsBrowserChild) => void
   onActivateFile: (node: GfsBrowserChild) => void
   /** Fail-closed hook: a listing authority error revokes the session. */
-  onAuthorityFailure: (message: string) => void
+  onAuthorityFailure: (message: string, scope: string, sessionGeneration: number) => void
   onNodeDragStart: (
     node: GfsBrowserChild,
     event: ReactDragEvent<HTMLElement>,

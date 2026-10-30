@@ -60,7 +60,7 @@ beforeAll(async () => {
   binding.__setChatStoreBaseDirForTests(base)
   await binding.bindChatStoreForUser('user-a', 'env-a', { teamId: 'team-a' })
   const { registerIpcHandlers } = await import('../ipc.js')
-  registerIpcHandlers(service as unknown as AppService)
+  registerIpcHandlers(service as unknown as AppService, async () => 0)
   await call('chat:create', { agentRef: 'agent-1', chatId: 'deleted-chat' })
   const fence = await call('chat:captureDeleteFence', { expectedAuthorityScope: TEAM_A })
   await call('chat:delete', { version: 3, fence, agentRef: 'agent-1', chatId: 'deleted-chat' })
