@@ -1,34 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
+import {
+  disposeTokenStorePersistenceFixture,
+  tokenStorePersistenceFixture as fixture,
+  resetTokenStorePersistenceFixture,
+} from '../../testSupport/tokenStorePersistenceFixture.js'
 import { type SessionTokenFallbackSnapshot, TokenStore } from '../tokenStore.js'
 
-const fixture = vi.hoisted(() => ({
-  directory: '',
-  keychain: new Map<string, string>(),
-}))
-
-vi.mock('electron', () => ({
-  app: { isReady: () => true, getPath: () => fixture.directory },
-  safeStorage: {
-    isEncryptionAvailable: () => true,
-    getSelectedStorageBackend: () => 'gnome_libsecret',
-    encryptString: (token: string) => Buffer.from(`encrypted:${token}`),
-    decryptString: (value: Buffer) => value.toString().slice('encrypted:'.length),
-  },
-}))
-vi.mock('keytar', () => ({
-  getPassword: vi.fn(
-    async (_service: string, account: string) => fixture.keychain.get(account) ?? null
-  ),
-  setPassword: vi.fn(async (_service: string, account: string, token: string) => {
-    fixture.keychain.set(account, token)
-  }),
-  deletePassword: vi.fn(async (_service: string, account: string) =>
-    fixture.keychain.delete(account)
-  ),
-}))
+vi.mock('electron', async () => {
+  const { createTokenStoreElectronFixture } =
+    await import('../../testSupport/tokenStorePersistenceFixture.js')
+  return createTokenStoreElectronFixture()
+})
+vi.mock('keytar', async () => {
+  const { tokenStoreKeytarFixture } =
+    await import('../../testSupport/tokenStorePersistenceFixture.js')
+  return tokenStoreKeytarFixture
+})
 vi.mock('../windowsSessionAuthorityFileOps.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../windowsSessionAuthorityFileOps.js')>()
   const { createWindowsSessionAuthorityFileOpsUnitFixture } =
@@ -200,8 +189,7 @@ const operations: Operation[] = [
 ]
 
 beforeEach(async () => {
-  fixture.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-marker-drain-'))
-  fixture.keychain.clear()
+  await resetTokenStorePersistenceFixture('evenfire-marker-drain-')
   vi.clearAllMocks()
   const producer = new TokenStore()
   await producer.setSessionToken(TOKEN, ENV)
@@ -211,7 +199,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks()
-  await fs.rm(fixture.directory, { recursive: true, force: true })
+  await disposeTokenStorePersistenceFixture()
 })
 
 async function pauseBoundary(boundary: Operation['boundary'], store: TokenStore) {
