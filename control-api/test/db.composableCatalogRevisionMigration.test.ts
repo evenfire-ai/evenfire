@@ -39,6 +39,11 @@ describe('0134 composable catalog revisions migration', () => {
     expect(sql).toMatch(
       /GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions\(UUID\[\]\)\s+TO control_api_runtime/
     )
+    // The stuck-run sweep runs on the Workflow Recipes pool and holds its
+    // batch's approval subjects there before the first run phase change.
+    expect(sql).toMatch(
+      /GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions\(UUID\[\]\)\s+TO workflow_recipes_runtime/
+    )
     // The approval-trigger prelock covers the run INSERT that a decision or a
     // consume performs, so its body reads the run intent and the decision team.
     expect(sql).toContain(

@@ -970,6 +970,10 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     REVOKE ALL ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[]) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[])
       TO control_api_runtime;
+    -- The stuck-run sweep runs on the Workflow Recipes pool, so that runtime
+    -- role may hold the batch's approval subjects before failing the runs.
+    GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_revisions(UUID[])
+      TO workflow_recipes_runtime;
     REVOKE ALL ON FUNCTION authorization_prelock_workflow_approval_trigger_revisions(UUID)
       FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION authorization_prelock_workflow_approval_trigger_revisions(UUID)

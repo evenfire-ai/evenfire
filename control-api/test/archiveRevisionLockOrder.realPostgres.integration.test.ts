@@ -67,7 +67,8 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
           OR current_setting('application_name') LIKE 'approval-expiry-%'
           OR current_setting('application_name') LIKE 'approval-decision-%'
           OR current_setting('application_name') LIKE 'approval-approved-run-%'
-          OR current_setting('application_name') LIKE 'recipe-delete-%' THEN
+          OR current_setting('application_name') LIKE 'recipe-delete-%'
+          OR current_setting('application_name') LIKE 'stuck-run-%' THEN
           INSERT INTO archive_delete_revision_observations
             (application_name, revision_table, subject_id, revision)
           VALUES (current_setting('application_name'), TG_TABLE_NAME,
@@ -1937,4 +1938,269 @@ describeRealPostgres('archive batches and phase updates share revision lock orde
       expect(await revisions(ids)).toEqual(before)
     }
   )
+
+  // The stuck-run sweep's statements, copied from
+  // workflow-recipes/src/reconciler/dbRunProcessor.ts:153-162 (FIND_STUCK_RUNS,
+  // now also returning approval_request_id) and :164-172 (FAIL_STUCK_RUN). The
+  // runner below executes them in the same order as :566-597.
+  const stuckRunStatements = {
+    find: `SELECT run_id, started_at, max_duration_seconds, approval_request_id
+    FROM workflow_runs
+   WHERE phase = 'Running'
+     AND owner_instance_id = $1
+     AND max_duration_seconds IS NOT NULL
+     AND started_at IS NOT NULL
+     AND started_at < now() - (max_duration_seconds || ' seconds')::interval
+   FOR UPDATE SKIP LOCKED
+   LIMIT 50`,
+    prelock: 'SELECT authorization_prelock_workflow_approval_revisions($1::uuid[])',
+    fail: `UPDATE workflow_runs
+     SET phase = 'Failed',
+         completed_at = now(),
+         last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $1
+     AND phase = 'Running'
+     AND owner_instance_id = $2`,
+  } as const
+
+  // T3 executes a copy of the sweep, so bind that copy to the processor source:
+  // removing the prelock call from checkStuckRuns must redden this test as well
+  // as the unit test (mutation M-B1a), not only the real-PostgreSQL case.
+  it('runs the stuck-run sweep statements the processor executes, in the same order', () => {
+    const source = readFileSync(
+      new URL('../../workflow-recipes/src/reconciler/dbRunProcessor.ts', import.meta.url),
+      'utf8'
+    )
+    const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+    const normalizedSource = normalize(source)
+    for (const statement of [stuckRunStatements.find, stuckRunStatements.fail]) {
+      expect(normalizedSource, `missing statement: ${statement}`).toContain(normalize(statement))
+    }
+    expect(normalizedSource).toContain(stuckRunStatements.prelock)
+    // FIND must return the column the prelock feeds on.
+    expect(normalize(stuckRunStatements.find)).toContain('approval_request_id')
+    const sweepStart = normalizedSource.indexOf('async function checkStuckRuns()')
+    expect(sweepStart).toBeGreaterThan(-1)
+    const sweepBody = normalizedSource.slice(
+      sweepStart,
+      normalizedSource.indexOf('return {', sweepStart)
+    )
+    let position = -1
+    for (const call of [
+      'FIND_STUCK_RUNS',
+      'authorization_prelock_workflow_approval_revisions($1::uuid[])',
+      'FAIL_STUCK_RUN',
+    ]) {
+      const index = sweepBody.indexOf(call, position + 1)
+      expect(index, `missing after the previous statement: ${call}`).toBeGreaterThan(position)
+      position = index
+    }
+    // The prelock is conditional: a batch with no approval ids makes no call.
+    expect(sweepBody).toContain('if (approvalRequestIds.length > 0)')
+  })
+
+  it('fails stuck provider-bound runs beside a run INSERT without reversing subject locks', async () => {
+    const instanceId = `stuck-sweep-${randomBytes(4).toString('hex')}`
+    const competitorRecipe = `stuck-run-competitor-${randomBytes(4).toString('hex')}`
+    const recipeName = `stuck-run-${randomBytes(4).toString('hex')}`
+    const user = randomUUID()
+    const team = randomUUID()
+    // N3: the user-targeted run carries the smaller explicit run_id and is
+    // inserted first, so the heap scan FIND_STUCK_RUNS (no ORDER BY) uses
+    // reaches it first.
+    const userRunId = '00000000-0000-4000-8000-000000000001'
+    const teamRunId = '00000000-0000-4000-8000-000000000002'
+    await databasePool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+      user,
+      `stuck-run-${user}@example.test`,
+    ])
+    await databasePool.query("INSERT INTO teams(id, name) VALUES ($1, 'Stuck run sweep')", [team])
+    const approvalIds: string[] = []
+    for (const [runId, column, target] of [
+      [userRunId, 'target_user_id', user],
+      [teamRunId, 'target_team_id', team],
+    ] as const) {
+      const approvalId = randomUUID()
+      approvalIds.push(approvalId)
+      await databasePool.query(
+        `INSERT INTO workflow_approval_requests(
+           id, recipe_namespace, recipe_name, expires_at, status, ${column},
+           payload, idempotency_key, requested_at, decided_at
+         ) VALUES ($1, 'sandbox-recipes', $2, NOW() + INTERVAL '1 hour', 'consumed', $3,
+           $4::jsonb, $5, NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours')`,
+        [
+          approvalId,
+          recipeName,
+          target,
+          JSON.stringify({
+            metadata: {
+              workflowTrigger: {
+                providerBinding: {
+                  medium: 'telegram',
+                  providerChannelId: `channel-${randomUUID()}`,
+                },
+              },
+            },
+          }),
+          `stuck-run-${approvalId}`,
+        ]
+      )
+      await databasePool.query(
+        `INSERT INTO workflow_approval_trigger_intents(
+           approval_request_id, trigger_namespace, trigger_name, trigger_caller_key
+         ) VALUES ($1, 'sandbox-recipes', $2, 'sandbox-recipes/' || $2)`,
+        [approvalId, recipeName]
+      )
+      await databasePool.query(
+        `INSERT INTO workflow_runs(
+           run_id, recipe_namespace, recipe_name, phase, actor_type, actor_id, team_id,
+           trigger_source, approval_request_id, owner_instance_id, max_duration_seconds, started_at
+         ) VALUES ($1, 'sandbox-recipes', $2, 'Running', 'user', $3, $4, 'onDemand', $5, $6, 1,
+           NOW() - INTERVAL '1 hour')`,
+        [runId, recipeName, user, team, approvalId, instanceId]
+      )
+    }
+    const before = await revisions({ users: [user], teams: [team] })
+
+    const sweep = await databasePool.connect()
+    const competitor = await databasePool.connect()
+    const sweepPid = await pid(sweep)
+    const competitorPid = await pid(competitor)
+    let sweepFailure: unknown
+    let competitorWork: Promise<Outcome> | undefined
+    let competitorOutcome: Outcome | undefined
+    let phases: {
+      foundFirst?: string
+      firstFailed?: boolean
+      competitorBlocker?: number
+      committed?: boolean
+    } = {}
+    let witness:
+      | {
+          runs: Array<{ run_id: string; phase: string }>
+          deliveries: Array<Record<string, string>>
+          observed: Array<{ revision_table: string; subject_id: string }>
+          after: Awaited<ReturnType<typeof revisions>>
+        }
+      | undefined
+    try {
+      await configure(sweep, 'stuck-run-sweep')
+      await configure(competitor, 'stuck-run-insert')
+      await sweep.query('BEGIN')
+      // The sweep runs on the Workflow Recipes pool (dbRunProcessor.ts:566).
+      await sweep.query('SET LOCAL ROLE workflow_recipes_runtime')
+      const found = await sweep.query<{ run_id: string; approval_request_id: string | null }>(
+        stuckRunStatements.find,
+        [instanceId]
+      )
+      phases.foundFirst = found.rows[0]?.run_id
+      const foundApprovalIds = [
+        ...new Set(
+          found.rows
+            .map(row => row.approval_request_id)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0)
+        ),
+      ]
+      await sweep.query(stuckRunStatements.prelock, [foundApprovalIds])
+      const firstFailure = await sweep.query(stuckRunStatements.fail, [
+        found.rows[0]!.run_id,
+        instanceId,
+      ])
+      phases.firstFailed = firstFailure.rowCount === 1
+
+      // B: the competing run INSERT of (team, user), started while A holds the
+      // prelocked subjects; it must block on A.
+      await competitor.query('BEGIN')
+      competitorWork = observe(
+        createRun(competingRunInsert({ user, team }, competitorRecipe), competitor)
+      )
+      phases.competitorBlocker = await waitForBlock(competitorPid, [sweepPid])
+
+      // A: the remaining stuck run, then COMMIT.
+      for (const row of found.rows.slice(1)) {
+        const update = await sweep.query(stuckRunStatements.fail, [row.run_id, instanceId])
+        expect(update.rowCount).toBe(1)
+      }
+      await sweep.query('COMMIT')
+      phases.committed = true
+      competitorOutcome = await competitorWork
+      await competitor.query(competitorOutcome.status === 'fulfilled' ? 'COMMIT' : 'ROLLBACK')
+
+      witness = {
+        runs: (
+          await databasePool.query<{ run_id: string; phase: string }>(
+            `SELECT run_id, phase FROM workflow_runs WHERE run_id = ANY($1::uuid[]) ORDER BY run_id`,
+            [[userRunId, teamRunId]]
+          )
+        ).rows,
+        deliveries: (
+          await databasePool.query<{ audience: Record<string, string> }>(
+            `SELECT audience FROM notification_deliveries
+              WHERE dedupe_key = ANY($1::text[]) ORDER BY audience::text`,
+            [
+              [
+                `workflow.run.completed:${userRunId}:Failed`,
+                `workflow.run.completed:${teamRunId}:Failed`,
+              ],
+            ]
+          )
+        ).rows.map(row => row.audience),
+        observed: (await observedRevisions('stuck-run-sweep')).slice(0, 2),
+        after: await revisions({ users: [user], teams: [team] }),
+      }
+    } catch (error) {
+      sweepFailure = error
+    } finally {
+      if (!phases.committed) await sweep.query('ROLLBACK').catch(() => undefined)
+      await competitor.query('ROLLBACK').catch(() => undefined)
+      if (competitorWork) await competitorWork
+      sweep.release()
+      competitor.release()
+      await databasePool.query(
+        `DELETE FROM notification_deliveries
+          WHERE dedupe_key = ANY($1::text[])`,
+        [
+          [
+            `workflow.run.completed:${userRunId}:Failed`,
+            `workflow.run.completed:${teamRunId}:Failed`,
+          ],
+        ]
+      )
+      await databasePool.query('DELETE FROM workflow_runs WHERE recipe_name = ANY($1::text[])', [
+        [recipeName, competitorRecipe],
+      ])
+      await databasePool.query(
+        'DELETE FROM workflow_approval_requests WHERE id = ANY($1::uuid[])',
+        [approvalIds]
+      )
+      await databasePool.query('DELETE FROM users WHERE id = $1', [user])
+      await databasePool.query('DELETE FROM teams WHERE id = $1', [team])
+    }
+    expect(sweepFailure).toBeUndefined()
+    expect(phases).toMatchObject({
+      foundFirst: userRunId,
+      firstFailed: true,
+      competitorBlocker: sweepPid,
+      committed: true,
+    })
+    expect(competitorOutcome?.status).toBe('fulfilled')
+    expect(witness!.runs).toEqual([
+      { run_id: userRunId, phase: 'Failed' },
+      { run_id: teamRunId, phase: 'Failed' },
+    ])
+    // Liveness of the nested INSERT: one delivery per failed provider-bound run,
+    // with the audience the trigger's approval target names.
+    expect(witness!.deliveries).toEqual([{ teamId: team }, { userId: user }])
+    // The prelock takes the batch's subjects in the global order: the team
+    // revision first, then the user revision.
+    expect(witness!.observed).toEqual([
+      { revision_table: 'authorization_team_revisions', subject_id: team },
+      { revision_table: 'authorization_user_revisions', subject_id: user },
+    ])
+    // Both subjects advanced. B's own INSERT also bumps them, so this is a
+    // liveness check, not the ordering witness (N3).
+    expect(byId(witness!.after.user)[user]!).toBeGreaterThan(byId(before.user)[user]!)
+    expect(byId(witness!.after.team)[team]!).toBeGreaterThan(byId(before.team)[team]!)
+  })
 })

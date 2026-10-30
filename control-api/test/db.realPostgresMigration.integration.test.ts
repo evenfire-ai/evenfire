@@ -936,6 +936,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           grantee: 'control_api_runtime',
         },
         {
+          function_name: 'authorization_prelock_workflow_approval_revisions',
+          grantee: 'workflow_recipes_runtime',
+        },
+        {
           function_name: 'authorization_prelock_workflow_recipe_policy_revisions',
           grantee: 'workflow_recipes_runtime',
         },
@@ -3091,8 +3095,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     `)
     expect(functionAccess.rows[0]?.violations).toBe('')
 
-    // The recipe-delete prelock is the only authorization function the Workflow
-    // Recipes runtime may execute; every other one stays owner-only.
+    // The Workflow Recipes runtime may execute exactly two authorization
+    // functions: the stuck-run sweep's approval prelock and the recipe-delete
+    // prelock. Every other one stays owner-only.
     const recipePolicyFunctionAccess = await dbPool.query<{ function_name: string }>(`
       SELECT routine.proname AS function_name
         FROM pg_proc routine
@@ -3103,6 +3108,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
        ORDER BY routine.proname
     `)
     expect(recipePolicyFunctionAccess.rows).toEqual([
+      { function_name: 'authorization_prelock_workflow_approval_revisions' },
       { function_name: 'authorization_prelock_workflow_recipe_policy_revisions' },
     ])
 

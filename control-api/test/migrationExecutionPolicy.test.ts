@@ -112,11 +112,13 @@ describe('D34 migration execution policy', () => {
     // resource trigger does the same for content saves that keep its identity,
     // name, parent and tombstone, and the notification trigger does the same
     // for delivery-state writes that keep its id, event type, audience and
-    // expiry.
+    // expiry. B4.1 (PR #334 review r2) then granted the approval prelock to the
+    // Workflow Recipes runtime, which holds the stuck-run sweep's approval
+    // subjects before its first run phase change.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'f86f9d57136a6925196bca2312a33fad4dfceef77517823fe445a24a028b4316',
+        '406f41f6f056970ca1faa65e425e673aaea4dfea378b06b4512dc99321ee299d',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',
