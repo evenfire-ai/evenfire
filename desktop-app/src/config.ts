@@ -184,12 +184,10 @@ function requiredOrDefault(name: string, fallback: string): string {
   return value || fallback
 }
 
-function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
-  const explicit = process.env.PROFILE_UI_BASE_URL?.trim()
-  if (explicit) return explicit
-
+function profileUiBaseUrlFromExternalRestApi(externalRestApiBaseUrl: string): string | null {
   try {
     const url = new URL(externalRestApiBaseUrl)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
     url.username = ''
     url.password = ''
     url.pathname = ''
@@ -197,12 +195,6 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
     url.hash = ''
 
     if (url.hostname === 'example.com') {
-      url.hostname = 'example.com'
-      return url.toString().replace(/\/$/, '')
-    }
-
-    if (url.hostname === 'example.com') {
-      url.hostname = 'example.com'
       return url.toString().replace(/\/$/, '')
     }
 
@@ -216,10 +208,24 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
       return url.toString().replace(/\/$/, '')
     }
   } catch {
-    // Keep the local developer fallback when runtime config is invalid or unavailable.
+    // An unrecognized deployment must not be used as a shareable-link origin.
   }
+  return null
+}
 
-  return 'http://127.0.0.1:3001'
+function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
+  const explicit = process.env.PROFILE_UI_BASE_URL?.trim()
+  if (explicit) return explicit
+  return profileUiBaseUrlFromExternalRestApi(externalRestApiBaseUrl) || 'http://127.0.0.1:3001'
+}
+
+/** Resolve the Profile origin paired with the currently active Desktop deployment. */
+export function getActiveDeploymentProfileUiBaseUrl(): string {
+  const profileUiBaseUrl = profileUiBaseUrlFromExternalRestApi(config.externalRestApiBaseUrl)
+  if (!profileUiBaseUrl) {
+    throw new Error('Cannot resolve a shareable Profile UI link for the active desktop deployment')
+  }
+  return profileUiBaseUrl
 }
 
 function hasExplicitProfileUiBaseUrl(): boolean {

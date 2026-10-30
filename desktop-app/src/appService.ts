@@ -7,6 +7,7 @@ import {
   clearDesktopRuntimeConfigSelection,
   config,
   deleteDesktopRuntimeConfigOption,
+  getActiveDeploymentProfileUiBaseUrl,
   getActiveEnvKey,
   getActiveLegacyEnvKeys,
   getActiveRuntimeConfigOptionId,
@@ -6184,29 +6185,37 @@ export class AppService {
   }
 
   async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
-    const driver = await import('./sandboxUiDriver.js')
-    const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
-    const location = driver.getActiveSandboxUiLocation()
-    if (!location) throw new Error('No app is currently open')
-    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
-      fallbackOnLookupError: false,
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.requireSessionToken()
+      if (!this.me) throw new Error('Not authenticated')
+      const environmentBinding = this.captureAuthEnvironmentBinding()
+      const driver = await import('./sandboxUiDriver.js')
+      const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
+      const location = driver.getActiveSandboxUiLocation()
+      if (!location) throw new Error('No app is currently open')
+      const profileUiBaseUrl = getActiveDeploymentProfileUiBaseUrl()
+      this.assertAuthEnvironmentBinding(environmentBinding)
+      return {
+        url: buildSandboxUiWebLink(profileUiBaseUrl, {
+          ...location,
+          teamId: String(teamId || '').trim() || undefined,
+        }),
+      }
     })
-    return {
-      url: buildSandboxUiWebLink(profileUiBaseUrl, {
-        ...location,
-        teamId: String(teamId || '').trim() || undefined,
-      }),
-    }
   }
 
   async createGfsResourceDeepLink(uri: string): Promise<{ url: string }> {
-    const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
-    const canonicalUri = normalizeGfsResourceUri(uri)
-    if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
-    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
-      fallbackOnLookupError: false,
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.requireSessionToken()
+      if (!this.me) throw new Error('Not authenticated')
+      const environmentBinding = this.captureAuthEnvironmentBinding()
+      const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+      const canonicalUri = normalizeGfsResourceUri(uri)
+      if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+      const profileUiBaseUrl = getActiveDeploymentProfileUiBaseUrl()
+      this.assertAuthEnvironmentBinding(environmentBinding)
+      return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
     })
-    return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
   }
 
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {
