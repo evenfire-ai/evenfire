@@ -142,6 +142,74 @@ describe('Windows plugin storage native evidence contract', () => {
     expect(spawnSyncMock).toHaveBeenCalledTimes(1)
   })
 
+  it('classifies native helper load failure separately from DACL rejection', () => {
+    prepareWindowsInspection()
+    spawnSyncMock.mockReturnValue({
+      error: undefined,
+      signal: null,
+      status: 2,
+      stdout: JSON.stringify({
+        ok: false,
+        phase: 'load-native-helper',
+        errorType: 'FileNotFoundException',
+        hresult: '0x80070002',
+        reason: 'native-helper-path-missing',
+      }),
+      stderr: 'private loader output',
+    })
+
+    let inspectionError: unknown
+    try {
+      inspectWindowsPluginStoragePaths([
+        { path: 'C:\\fixture\\file', directory: false, requireInherited: true },
+      ])
+    } catch (error) {
+      inspectionError = error
+    }
+    expect(inspectionError).toBeInstanceOf(PluginStoragePrivacyError)
+    expect(inspectionError).toMatchObject({
+      reason: 'native-inspection-helper-load-failed',
+      diagnostic: {
+        failure: 'helper-load-failed',
+        exitStatus: 2,
+        nativePhase: 'load-native-helper',
+        nativeErrorType: 'FileNotFoundException',
+        hresult: '0x80070002',
+        nativeReason: 'native-helper-path-missing',
+      },
+    })
+    expect(JSON.stringify(inspectionError)).not.toMatch(/private loader output|fixture/)
+  })
+
+  it('does not label an unrecognized native failure phase as a DACL rejection', () => {
+    prepareWindowsInspection()
+    spawnSyncMock.mockReturnValue({
+      error: undefined,
+      signal: null,
+      status: 2,
+      stdout: JSON.stringify({
+        ok: false,
+        phase: 'unrecognized-phase',
+        errorType: 'RuntimeException',
+      }),
+      stderr: '',
+    })
+
+    let inspectionError: unknown
+    try {
+      inspectWindowsPluginStoragePaths([
+        { path: 'C:\\fixture\\file', directory: false, requireInherited: true },
+      ])
+    } catch (error) {
+      inspectionError = error
+    }
+    expect(inspectionError).toBeInstanceOf(PluginStoragePrivacyError)
+    expect(inspectionError).toMatchObject({
+      reason: 'native-inspection-response-rejected',
+      diagnostic: { failure: 'response-rejected', exitStatus: 2 },
+    })
+  })
+
   it.each([
     [
       'missing',

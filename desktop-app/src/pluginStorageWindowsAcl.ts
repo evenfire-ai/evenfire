@@ -108,6 +108,8 @@ export type PluginStorageNativeDiagnostic = {
     | 'process-exit-failed'
     | 'response-missing'
     | 'response-malformed'
+    | 'helper-load-failed'
+    | 'response-rejected'
     | 'verifier-rejected'
     | 'evidence-invalid'
   elapsedMs: number
@@ -333,9 +335,26 @@ function sanitizedResult(result: SpawnSyncReturns<string>, elapsedMs: number): N
     !Array.isArray(parsed) &&
     (parsed as Record<string, unknown>).ok === false
   ) {
+    const response = parsed as Record<string, unknown>
+    const nativePhase = typeof response.phase === 'string' ? response.phase : undefined
+    const helperLoadFailed = nativePhase === 'load-native-helper'
+    const verifierRejected = nativePhase === 'inspect-object' || nativePhase === 'verification'
     throw new PluginStoragePrivacyError(
-      'native-verifier-rejected',
-      nativeDiagnostic('verifier-rejected', result, elapsedMs, parsed)
+      helperLoadFailed
+        ? 'native-inspection-helper-load-failed'
+        : verifierRejected
+          ? 'native-verifier-rejected'
+          : 'native-inspection-response-rejected',
+      nativeDiagnostic(
+        helperLoadFailed
+          ? 'helper-load-failed'
+          : verifierRejected
+            ? 'verifier-rejected'
+            : 'response-rejected',
+        result,
+        elapsedMs,
+        parsed
+      )
     )
   }
   if (result.status !== 0) {
