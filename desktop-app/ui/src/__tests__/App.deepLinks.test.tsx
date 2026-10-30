@@ -217,6 +217,7 @@ const desktopUpdateCheckHarness = vi.hoisted(() => ({
   onRequested: null as null | (() => void),
   getStatus: vi.fn<() => Promise<unknown>>(),
   getPresentation: vi.fn<() => Promise<{ manualInstall: boolean }>>(),
+  getPending: vi.fn<() => Promise<unknown>>(),
   onDownloaded: null as
     | null
     | ((update: { version: string; updaterCapable: boolean; manualInstall?: boolean }) => void),
@@ -579,6 +580,27 @@ describe('App deep-link orchestration', () => {
     view.unmount()
   })
 
+  it('restores a backend-bound pending DMG for an incompatible startup', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.getPending.mockResolvedValue({
+      version: status.latestVersion,
+      updaterCapable: false,
+      manualInstall: true,
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: 'Open installer & Quit Evenfire' })).not.toBeNull()
+    )
+    expect(view.getByText('Ready to install')).not.toBeNull()
+    expect(desktopUpdateCheckHarness.download).not.toHaveBeenCalled()
+  })
+
   it('continues startup consent through a pre-updater download without another confirmation', async () => {
     const status = await createOutdatedDesktopReleaseStatus('0.11.9')
     const downloaded = await createPreUpdaterDownload(status.latestVersion)
@@ -849,6 +871,7 @@ describe('App deep-link orchestration', () => {
     desktopUpdateCheckHarness.onRequested = null
     desktopUpdateCheckHarness.getStatus = vi.fn().mockResolvedValue(null)
     desktopUpdateCheckHarness.getPresentation = vi.fn().mockResolvedValue({ manualInstall: false })
+    desktopUpdateCheckHarness.getPending = vi.fn().mockResolvedValue(null)
     desktopUpdateCheckHarness.onDownloaded = null
     desktopUpdateCheckHarness.onExtracting = null
     desktopUpdateCheckHarness.onSaving = null
@@ -874,7 +897,7 @@ describe('App deep-link orchestration', () => {
         auth: {
           getDesktopReleaseStatus: () => desktopUpdateCheckHarness.getStatus(),
           getDesktopUpdatePresentation: () => desktopUpdateCheckHarness.getPresentation(),
-          getPendingDesktopUpdate: vi.fn().mockResolvedValue(null),
+          getPendingDesktopUpdate: () => desktopUpdateCheckHarness.getPending(),
           downloadDesktopUpdate: (...args: unknown[]) =>
             desktopUpdateCheckHarness.download(...args),
           installDesktopUpdate: (...args: unknown[]) => desktopUpdateCheckHarness.install(...args),

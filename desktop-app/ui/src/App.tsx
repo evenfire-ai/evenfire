@@ -667,33 +667,35 @@ export function App() {
       setDesktopUpdateFlow(null)
       return
     }
-    if (status.updateRequired) {
-      const requestId = ++desktopUpdateRequestRef.current
-      void getDesktopUpdatePresentation().then(presentation => {
-        if (requestId !== desktopUpdateRequestRef.current) return
-        setDesktopUpdateFlow({
-          mode: 'startup',
-          phase: 'available',
-          status,
-          progress: { percent: 0, transferred: 0, total: 0 },
-          manualInstall: presentation.manualInstall,
-        })
-      })
-      return
-    }
-    if (!status.compatible) return
+    const requestId = ++desktopUpdateRequestRef.current
     void window.clerum.auth
       .getPendingDesktopUpdate()
-      .then(pending => {
-        if (!pending || pending.version !== status.latestVersion) return
-        setDesktopUpdateFlow({
-          mode: 'manual',
-          phase: pending.manualInstall ? 'ready' : 'downloaded',
-          status,
-          updaterCapable: pending.updaterCapable,
-          manualInstall: pending.manualInstall,
-          progress: { percent: 100, transferred: 0, total: 0 },
-        })
+      .then(async pending => {
+        if (requestId !== desktopUpdateRequestRef.current) return
+        if (pending && pending.version === status.latestVersion) {
+          setDesktopUpdateFlow({
+            mode: 'manual',
+            phase: pending.manualInstall ? 'ready' : 'downloaded',
+            status,
+            updaterCapable: pending.updaterCapable,
+            manualInstall: pending.manualInstall,
+            progress: { percent: 100, transferred: 0, total: 0 },
+          })
+          return
+        }
+        if (status.updateRequired) {
+          const presentation = await getDesktopUpdatePresentation()
+          if (requestId !== desktopUpdateRequestRef.current) return
+          setDesktopUpdateFlow({
+            mode: 'startup',
+            phase: 'available',
+            status,
+            progress: { percent: 0, transferred: 0, total: 0 },
+            manualInstall: presentation.manualInstall,
+          })
+          return
+        }
+        if (!status.compatible) return
       })
       .catch(() => undefined)
   }, [vm.desktopReleaseStatus])
