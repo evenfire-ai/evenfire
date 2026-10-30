@@ -1,5 +1,7 @@
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
+import { decodedBase64Length } from '../core/attachments/attachmentSave'
+import type { Attachment } from '../core/types'
 import { logger } from '../logger'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
@@ -21,7 +23,7 @@ import {
   recordGfsDownloadTransfer,
 } from './gfsDownloadMetrics'
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
-import { GFS_FILE_LIMITS } from './gfsFilePolicy'
+import { GFS_FILE_LIMITS, GFS_LEGACY_WRITE_MAX_BYTES } from './gfsFilePolicy'
 import {
   GFS_LOCAL_PROCESSING_GUIDANCE,
   type GfsFileContent,
@@ -1016,6 +1018,86 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
               callOptions(context)
             )
           )
+        } catch (err) {
+          return mutationFail(err)
+        }
+      },
+    },
+  ]
+}
+
+/**
+ * Saves an attachment of the turn's own message into a gfs folder. The Host
+ * resolves the id against that message only and forwards the admitted base64
+ * unchanged, so the model never carries the bytes and cannot write bytes it
+ * was not given. The file keeps its attached name; rename afterwards with
+ * clerum__gfs_rename.
+ */
+export function buildGfsAttachmentSaveTools(
+  client: GfscWriteClient,
+  attachments: readonly Attachment[]
+): InternalToolDefinition[] {
+  return [
+    {
+      name: 'clerum__gfs_save_attachment',
+      description:
+        'Save a file or image attached to the current message into an existing gfs folder, byte for byte. ' +
+        'Pass the id of its attached_file or attached_image line. The new file keeps the attached name. ' +
+        'If a file with that name already ' +
+        'exists in the folder the save fails with conflict: tell the user and do not rename or replace ' +
+        'their files unless they ask.',
+      parameters: {
+        type: 'object',
+        required: ['drive', 'parentResourceId', 'attachmentId'],
+        properties: {
+          drive: { type: 'string', description: 'gfs drive name.' },
+          parentResourceId: { type: 'string', description: 'Destination folder resource id.' },
+          attachmentId: {
+            type: 'string',
+            description: 'The id of an attached_file or attached_image line in the turn context.',
+          },
+        },
+      },
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
+        const { drive, parentResourceId, attachmentId } = args
+        if (typeof drive !== 'string' || typeof parentResourceId !== 'string') {
+          return invalidArgs(
+            'clerum__gfs_save_attachment requires string drive and parentResourceId'
+          )
+        }
+        const attachment = attachments.find(candidate => candidate.id === attachmentId)
+        if (!attachment) {
+          return invalidArgs(
+            'attachment_not_found: no attachment with this id is part of the current message'
+          )
+        }
+        if (typeof attachment.dataBase64 !== 'string') {
+          return invalidArgs(
+            'bytes_unavailable_after_restart: ask the user to attach the file again in a new message'
+          )
+        }
+        const name = attachment.filename?.trim()
+        if (!name) {
+          return invalidArgs(
+            'attachment_name_missing: this attachment has no name to save it under'
+          )
+        }
+        const bytes = decodedBase64Length(attachment.dataBase64)
+        if (bytes > GFS_LEGACY_WRITE_MAX_BYTES) {
+          return invalidArgs(
+            `limit_exceeded: attachments larger than ${GFS_LEGACY_WRITE_MAX_BYTES} bytes cannot be saved`
+          )
+        }
+        try {
+          const resource = await client.createFileFromBytes(
+            { drive, parentResourceId, name, contentBase64: attachment.dataBase64 },
+            callOptions(context)
+          )
+          return ok({ attachmentId: attachment.id, name, bytes, resource })
         } catch (err) {
           return mutationFail(err)
         }
