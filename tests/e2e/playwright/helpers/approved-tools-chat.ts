@@ -53,8 +53,11 @@ export async function openAgentChat(desktop: Page, scenario: Scenario) {
   const modelOption = desktop.getByTestId(`model-option-${scenario.modelName}`)
   await expect(modelOption).toHaveCount(1)
   await modelOption.click()
-  await expect(
-    desktop.getByRole('button', { name: `Model — ${scenario.modelName}`, exact: true })
-  ).toBeVisible()
+  // The chip label follows the same displayName fallback, so assert the
+  // selected model id instead of that label (ModelSelector.tsx:212-213).
+  await expect(desktop.getByTestId('selected-chat-model')).toHaveAttribute(
+    'data-model-id',
+    scenario.modelName
+  )
   await expect(desktop.getByTestId('agent-response')).toHaveCount(0)
 }
