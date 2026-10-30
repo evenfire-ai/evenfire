@@ -150,6 +150,8 @@ test('all three isolated catalogs start without connector grants or subscription
   }
   for (const mcp of resources.filter(r => r.kind === 'McpServer')) {
     const scenario = scenarios.find(s => s.connectorName === mcp.metadata.name)
+    // The McpServer CRD has no owner Context; the Context allowlist is the only link.
+    assert.equal(Object.hasOwn(mcp.spec, 'contextRef'), false)
     assert.equal(mcp.spec.image, 'clerum/codex-approved-tools-mcp-e2e:test')
     assert.equal(mcp.spec.imagePullPolicy, 'Never')
     assert.equal(mcp.spec.transport.port, 8080)

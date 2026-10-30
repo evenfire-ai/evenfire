@@ -426,7 +426,7 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
 
 /**
  * Parse CLERUM_MCP_SERVERS JSON for dev mode.
- * Format: [{"name": "...", "spec": {"contextRef": "...", "transport": {...}}}]
+ * Format: [{"name": "...", "spec": {"image": "...", "transport": {...}}}]
  */
 function parseDevMcpServers(): McpServerCRD[] {
   const serversJson = process.env.CLERUM_MCP_SERVERS

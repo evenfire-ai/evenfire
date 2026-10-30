@@ -129,7 +129,6 @@ const wikipedia = {
   kind: 'McpServer',
   metadata: { name: 'issue-627-wikipedia', namespace: 'mcp-server', labels },
   spec: {
-    contextRef: host.spec.contextRef,
     image: 'registry.evenfire.ai/evenfire/mcp-wikipedia:1.0.0',
     imagePullPolicy: 'IfNotPresent',
     enabled: true,

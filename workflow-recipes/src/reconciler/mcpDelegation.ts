@@ -432,7 +432,7 @@ export function buildMcpServerManifest(
   if (!workload.transport) return null
 
   const name = mcpServerName(recipe.metadata.name, workload.id, recipe)
-  const contextRef = effectiveWorkflowContextRef(recipe)
+  const contextLabel = effectiveWorkflowContextRef(recipe)
   const port = workload.port ?? 3000
   const isStdio = workload.transport.type === 'stdio'
   const path = workload.transport.path ?? '/mcp'
@@ -486,14 +486,13 @@ export function buildMcpServerManifest(
       name,
       namespace,
       ...(mcpServerOwnerRefs && { ownerReferences: mcpServerOwnerRefs }),
-      labels: workloadLabels(recipe.metadata.name, workload.id, contextRef),
+      labels: workloadLabels(recipe.metadata.name, workload.id, contextLabel),
       ...(Object.keys(annotations).length > 0 && { annotations }),
     },
     spec: {
       // stdio servers use managed: true — HCC injects the stdio-bridge sidecar
       // and manages the Deployment. HTTP servers use managed: false — WRC manages.
       managed: isStdio,
-      contextRef,
       description: `MCP server for ${workload.id} (recipe: ${recipe.metadata.name})`,
       image: workload.image,
       ...(workload.imagePullPolicy && { imagePullPolicy: workload.imagePullPolicy }),

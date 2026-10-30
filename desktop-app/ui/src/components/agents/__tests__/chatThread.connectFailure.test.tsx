@@ -6,6 +6,7 @@ import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
 import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
 import type { AgentChatMessage, TaskProgress } from '../../../uiTypes'
 import { ChatThread } from '../ChatThread'
+import { accessCatalogFromWire } from './__fixtures__/accessCatalog'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -64,7 +65,13 @@ vi.mock('@contexts/ChatThreadStateContext', () => ({
     ),
   }),
 }))
-vi.mock('../InFlightAssistantPlaceholder', () => ({ InFlightAssistantPlaceholder: () => null }))
+const placeholderProps = vi.hoisted(() => ({ last: null as Record<string, unknown> | null }))
+vi.mock('../InFlightAssistantPlaceholder', () => ({
+  InFlightAssistantPlaceholder: (props: Record<string, unknown>) => {
+    placeholderProps.last = props
+    return null
+  },
+}))
 vi.mock('../NudgeArea', () => ({ NudgeArea: () => null }))
 vi.mock('../ChatStateBadge', () => ({ ChatStateBadge: () => null }))
 vi.mock('@components/MessageArtifactActions', () => ({ MessageArtifactActions: () => null }))
@@ -123,6 +130,7 @@ beforeEach(() => {
   connectMcpServer = vi.fn(() => Promise.reject(new Error('403 not a member')))
   userMessage = { id: 'msg-1', role: 'user', content: 'hi', timestamp: 1 }
   progressByMessageId = {}
+  placeholderProps.last = null
 })
 
 afterEach(() => {
@@ -146,7 +154,10 @@ describe('ChatThread — connect failure (R4-L1)', () => {
       await Promise.resolve()
     })
 
-    expect(connectMcpServer).toHaveBeenCalledWith('monday', 'agent-x')
+    expect(connectMcpServer).toHaveBeenCalledTimes(1)
+    const [serverName, agentName, contextId] = connectMcpServer.mock.calls[0] as unknown[]
+    expect([serverName, agentName]).toEqual(['monday', 'agent-x'])
+    expect(contextId).toBeUndefined()
     // The rejection is handled by the ChatThread call-site `.catch` — it does NOT
     // float as an unhandled rejection. Its observable is the error log; revert the
     // `.catch` to `void connectMcpServer(...)` and this assertion goes red.
@@ -155,5 +166,55 @@ describe('ChatThread — connect failure (R4-L1)', () => {
       expect.objectContaining({ mcpServerName: 'monday' })
     )
     errSpy.mockRestore()
+  })
+})
+
+// A `grantScope: context` connector is authorized against a Context, and the
+// McpServer no longer names one, so the chat must send the Context of the Host it
+// is chatting with or control-api rejects the authorize-url request.
+describe('ChatThread — Connect sends the agent Host Context', () => {
+  it('passes the selected agent context (from the access catalog) as contextId', async () => {
+    const catalog = await accessCatalogFromWire([
+      { name: 'agent-x', contextRef: 'ctx-sales' },
+      { name: 'agent-y', contextRef: 'ctx-ops' },
+    ])
+    progressByMessageId = { 'msg-1': await deriveConnectRequiredProgress() }
+    connectMcpServer.mockImplementation(() => Promise.resolve())
+
+    const { getByTestId } = render(<ChatThread agentContextByName={catalog.agentContextByName} />)
+    await act(async () => {
+      fireEvent.click(getByTestId('connect-mcp-btn'))
+      await Promise.resolve()
+    })
+
+    expect(connectMcpServer).toHaveBeenCalledTimes(1)
+    expect(connectMcpServer).toHaveBeenCalledWith('monday', 'agent-x', 'ctx-sales')
+  })
+
+  it('sends no contextId when the agent Host has no Context', async () => {
+    const catalog = await accessCatalogFromWire([{ name: 'agent-x', contextRef: null }])
+    progressByMessageId = { 'msg-1': await deriveConnectRequiredProgress() }
+    connectMcpServer.mockImplementation(() => Promise.resolve())
+
+    const { getByTestId } = render(<ChatThread agentContextByName={catalog.agentContextByName} />)
+    await act(async () => {
+      fireEvent.click(getByTestId('connect-mcp-btn'))
+      await Promise.resolve()
+    })
+
+    // Positional check on purpose: omitting the third argument is the same wire
+    // request as passing `undefined`, so only a defined contextId must fail here.
+    expect(connectMcpServer).toHaveBeenCalledTimes(1)
+    const [serverName, agentName, contextId] = connectMcpServer.mock.calls[0] as unknown[]
+    expect([serverName, agentName]).toEqual(['monday', 'agent-x'])
+    expect(contextId).toBeUndefined()
+  })
+
+  it('hands the access catalog context map to the in-flight placeholder', async () => {
+    const catalog = await accessCatalogFromWire([{ name: 'agent-x', contextRef: 'ctx-sales' }])
+
+    render(<ChatThread agentContextByName={catalog.agentContextByName} />)
+
+    expect(placeholderProps.last?.agentContextByName).toEqual({ 'agent-x': 'ctx-sales' })
   })
 })

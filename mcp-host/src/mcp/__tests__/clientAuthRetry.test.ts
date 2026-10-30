@@ -45,7 +45,6 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 function server(): McpServerInfo {
   return {
     name: 'gh',
-    contextRef: 'ctx',
     transport: { type: 'streamableHttp', url: 'http://gh/mcp' },
     auth: { type: 'oauth' },
     oauth: { grantScope: 'user' },

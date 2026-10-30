@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
+import { rootLogger } from '../src/observability/logger.js'
 import { createExternalRouter } from '../src/routes/external/index.js'
 import { createRpcAccessRouter } from '../src/routes/rpc-access/index.js'
 import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
@@ -221,7 +222,9 @@ describe('routes/profile', () => {
     const gateway = {
       listResource: vi.fn(async (plural: string) => {
         if (plural === 'contexts') {
-          return [{ spec: { contextId: 'ctx-a', mcpServers: ['mcp-a'] } }]
+          return [
+            { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a', mcpServers: ['mcp-a'] } },
+          ]
         }
         if (plural === 'hosts') {
           return [{ metadata: { name: 'agent-a' }, spec: { enabled: true } }]
@@ -780,8 +783,8 @@ describe('routes/profile', () => {
     })
     const gateway = accessCatalogGateway()
     gateway.getResource.mockRejectedValue(transientError)
-    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const structuredWarn = vi.fn()
+    const rootWarn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
 
     const app = express()
     app.use(express.json())
@@ -809,7 +812,7 @@ describe('routes/profile', () => {
       'agent-stale',
       'agent-b',
     ])
-    expect(structuredWarn).toHaveBeenCalledOnce()
+    expect(structuredWarn).toHaveBeenCalledTimes(2)
     expect(structuredWarn).toHaveBeenCalledWith(
       expect.objectContaining({
         err: transientError,
@@ -818,8 +821,17 @@ describe('routes/profile', () => {
       }),
       'external user MCP server enrichment failed'
     )
-    expect(consoleWarn).toHaveBeenCalledOnce()
-    consoleWarn.mockRestore()
+    expect(structuredWarn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: transientError,
+        module: 'external-teams',
+        teamId: 't1',
+      }),
+      'MCP server enrichment failed'
+    )
+    // Both routes log through the request logger; nothing falls back to the root logger.
+    expect(rootWarn).not.toHaveBeenCalled()
+    rootWarn.mockRestore()
   })
 
   it('verifies session token server-side for rpc token issuance', async () => {

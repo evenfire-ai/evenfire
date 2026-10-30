@@ -20,8 +20,8 @@ import type { LiveOAuthPartition } from './manager'
 /**
  * One entry of the batch request. Mirrors control-api's `GrantExistsQuery`.
  * `userId` addresses an `oauth-user` grant; `oauth-context` sends neither
- * coordinate (control-api keys the shared grant by the server's authoritative
- * `contextRef`, server-side — mcp-host transports no context identity).
+ * coordinate (control-api keys the shared grant by the authenticated Host's
+ * context, server-side — mcp-host transports no context identity).
  */
 export interface GrantExistsQuery {
   mcpServerName: string
@@ -32,7 +32,7 @@ export interface GrantExistsQuery {
 /**
  * One entry of the response. control-api ECHOES the query coordinates so the
  * consumer correlates by tuple, not by array position; `exists` is the only
- * new field. Never a token, never the authoritative contextRef, never a key.
+ * new field. Never a token, never the authoritative context, never a key.
  */
 export interface GrantExistsResult {
   mcpServerName: string

@@ -8,7 +8,6 @@ metadata:
   name: mongodb-server
   namespace: mcp-server
 spec:
-  contextRef: context1
   description: >-
     MongoDB MCP Server - provides tools for interacting with MongoDB databases
     including querying, aggregation, schema inspection, index management,
@@ -23,8 +22,8 @@ spec:
     port: 3001
   serverConfig:
     readOnly: false
-    loggers: "stderr"
-    telemetry: "disabled"
+    loggers: 'stderr'
+    telemetry: 'disabled'
   envMapping:
     transport: MDB_MCP_TRANSPORT
     httpHost: MDB_MCP_HTTP_HOST
@@ -41,11 +40,11 @@ spec:
         envVar: MDB_MCP_CONNECTION_STRING
   resources:
     requests:
-      memory: "128Mi"
-      cpu: "100m"
+      memory: '128Mi'
+      cpu: '100m'
     limits:
-      memory: "256Mi"
-      cpu: "500m"
+      memory: '256Mi'
+      cpu: '500m'
   auth:
     type: none
   enabled: true

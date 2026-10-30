@@ -258,7 +258,6 @@ describe('NetworkPolicyReconciler', () => {
       name: 'alpha',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'clerum/alpha:test',
         transport: { type: 'streamableHttp', port: 3000 },
         egressBindings: [{ cidr: '1.2.3.4/32', port: 443, protocol: 'TCP' }],
@@ -986,7 +985,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mongo',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'mongo:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -1026,7 +1024,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'b-c',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'a',
           image: 'mongo:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -1069,7 +1066,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mongo',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'mongo:latest',
           transport: { type: 'streamableHttp', url: 'http://mongo:3000', port: 3000 },
         },
@@ -1131,7 +1127,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mongo',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'mongo:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -1209,7 +1204,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mongo',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'mongo:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -1259,7 +1253,6 @@ describe('NetworkPolicyReconciler', () => {
         uid: 'mongo-uid',
         generation: 1,
         spec: {
-          contextRef: 'dev',
           image: 'mongo:old',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -1286,7 +1279,6 @@ describe('NetworkPolicyReconciler', () => {
         uid: 'mongo-uid',
         generation: 2,
         spec: {
-          contextRef: 'dev',
           image: 'mongo:new',
           transport: { type: 'streamableHttp', port: 4000 },
         },
@@ -1309,7 +1301,6 @@ describe('NetworkPolicyReconciler', () => {
         uid: 'mongo-uid',
         generation: 1,
         spec: {
-          contextRef: 'dev',
           image: 'mongo:stable',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -1365,7 +1356,6 @@ describe('NetworkPolicyReconciler', () => {
         uid: 'late-server-uid',
         generation: 1,
         spec: {
-          contextRef: 'dev',
           image: 'late-server:new',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -1386,7 +1376,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mongo',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'mongo:latest',
           transport: { type: 'streamableHttp', url: 'http://mongo:3000', port: 3000 },
         },
@@ -1445,7 +1434,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mongo',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'ctx-name',
           image: 'mongo:latest',
           transport: { type: 'streamableHttp', url: 'http://mongo:3000', port: 3000 },
         },
@@ -1481,7 +1469,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mongo',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'mongo:latest',
           transport: { type: 'streamableHttp', url: 'http://mongo:3000', port: 3000 },
         },
@@ -1539,7 +1526,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'race-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'race:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ cidr: '104.18.0.0/16', port: 443 }],
@@ -1587,7 +1573,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ cidr: '104.18.0.0/16', port: 443 }],
@@ -1621,7 +1606,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ cidr: '104.18.0.0/16', port: 443 }],
@@ -1655,7 +1639,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ cidr: '104.18.0.0/16', port: 443 }],
@@ -1678,7 +1661,6 @@ describe('NetworkPolicyReconciler', () => {
         namespace: 'mcp-server',
         generation: 7,
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -1738,7 +1720,6 @@ describe('NetworkPolicyReconciler', () => {
         uid: 'authority-race-uid',
         generation: 3,
         spec: {
-          contextRef: 'dev',
           image: 'authority-race:test',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -1788,7 +1769,6 @@ describe('NetworkPolicyReconciler', () => {
         uid: 'openai-mcp-uid',
         generation: 7,
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -1836,7 +1816,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -1883,7 +1862,6 @@ describe('NetworkPolicyReconciler', () => {
           uid: 'openai-mcp-uid',
           generation: 7,
           spec: {
-            contextRef: 'dev',
             image: 'openai:latest',
             transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
             egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -1924,7 +1902,6 @@ describe('NetworkPolicyReconciler', () => {
         uid: 'openai-mcp-uid',
         generation: 7,
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -1956,7 +1933,6 @@ describe('NetworkPolicyReconciler', () => {
         namespace: 'mcp-server',
         generation: 7,
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -1979,7 +1955,6 @@ describe('NetworkPolicyReconciler', () => {
         namespace: 'mcp-server',
         generation: 7,
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -1999,7 +1974,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'search-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'search:latest',
           transport: { type: 'streamableHttp', url: 'http://search:3000', port: 3000 },
           egressBindings: [{ egressClass: 'public-web' }],
@@ -2041,7 +2015,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'search-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'search:latest',
           transport: { type: 'streamableHttp', url: 'http://search:3000', port: 3000 },
           egressBindings: [{ egressClass: 'public-web', dns: 'api.example.com', port: 443 }],
@@ -2059,7 +2032,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'search-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'search:latest',
           transport: { type: 'streamableHttp', url: 'http://search:3000', port: 3000 },
           egressBindings: [{ egressClass: 'public-web', protocol: 'TCP' }],
@@ -2097,7 +2069,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -2143,7 +2114,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -2165,7 +2135,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'ordered-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'ordered:latest',
           transport: { type: 'streamableHttp', url: 'http://ordered:3000', port: 3000 },
           egressBindings: [
@@ -2192,7 +2161,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'noop-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'noop:latest',
           transport: { type: 'streamableHttp', url: 'http://noop:3000', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2239,7 +2207,6 @@ describe('NetworkPolicyReconciler', () => {
           name: `fresh-${mode}-mcp`,
           namespace: 'mcp-server',
           spec: {
-            contextRef: 'dev',
             image: 'fresh:test',
             transport: { type: 'streamableHttp', url: 'http://fresh:3000', port: 3000 },
             egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2303,7 +2270,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'renew-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'renew:latest',
           transport: { type: 'streamableHttp', url: 'http://renew:3000', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2353,7 +2319,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'renew-409-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'renew:latest',
           transport: { type: 'streamableHttp', url: 'http://renew:3000', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2411,7 +2376,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'tamper-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'tamper:latest',
           transport: { type: 'streamableHttp', url: 'http://tamper:3000', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2489,7 +2453,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'ttl-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'ttl:latest',
           transport: { type: 'streamableHttp', url: 'http://ttl:3000', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2507,7 +2470,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'rot-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'rot:latest',
           transport: { type: 'streamableHttp', url: 'http://rot:3000', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2544,7 +2506,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'cidr-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'cidr:latest',
           transport: { type: 'streamableHttp', url: 'http://cidr:3000', port: 3000 },
           egressBindings: [{ cidr: '93.184.216.0/24', port: 443 }],
@@ -2575,7 +2536,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'keyorder-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'keyorder:latest',
           transport: { type: 'streamableHttp', url: 'http://keyorder:3000', port: 3000 },
           egressBindings: [{ cidr: '93.184.216.0/24', port: 443 }],
@@ -2608,7 +2568,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'drift-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'drift:latest',
           transport: { type: 'streamableHttp', url: 'http://drift:3000', port: 3000 },
           egressBindings: [{ cidr: '93.184.216.0/24', port: 443 }],
@@ -2647,7 +2606,6 @@ describe('NetworkPolicyReconciler', () => {
           name: 'private-mcp',
           namespace: 'mcp-server',
           spec: {
-            contextRef: 'dev',
             image: 'private:latest',
             transport: { type: 'streamableHttp', url: 'http://private:3000', port: 3000 },
             egressBindings: [{ cidr, port: 443 }],
@@ -2668,7 +2626,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mixed-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'mixed:latest',
           transport: { type: 'streamableHttp', url: 'http://mixed:3000', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2703,7 +2660,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'internal-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'internal:latest',
           transport: { type: 'streamableHttp', url: 'http://internal:3000', port: 3000 },
           egressBindings: [{ dns: 'kubernetes.default.svc', port: 443 }],
@@ -2724,7 +2680,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'private-dns-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'private-dns:latest',
           transport: { type: 'streamableHttp', url: 'http://private-dns:3000', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -2759,7 +2714,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -2799,7 +2753,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -2841,7 +2794,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -2888,7 +2840,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'broken-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'broken:latest',
           transport: { type: 'streamableHttp', url: 'http://broken:3000', port: 3000 },
           egressBindings: [{ port: 443 }],
@@ -2909,7 +2860,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'stuck-dns-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'stuck-dns:test',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -2930,7 +2880,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'basic-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'basic:latest',
           transport: { type: 'streamableHttp', url: 'http://basic:3000', port: 3000 },
         },
@@ -3053,7 +3002,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'openai-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'openai:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'api.openai.com', port: 443 }],
@@ -3269,7 +3217,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'live-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'live-context',
           image: 'live:test',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ cidr: '8.8.8.8/32', port: 443 }],
@@ -3998,7 +3945,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'live-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'live:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [],
@@ -4096,7 +4042,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'live-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'live:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -4176,7 +4121,6 @@ describe('NetworkPolicyReconciler', () => {
           name: 'live-server',
           namespace: 'mcp-server',
           spec: {
-            contextRef: 'default',
             image: 'live:latest',
             transport: { type: 'streamableHttp', port: 3000 },
           },
@@ -4247,7 +4191,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'live-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'live:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -4314,7 +4257,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'live-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'live:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -4366,7 +4308,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'live-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'live:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'TCP' }],
@@ -4426,7 +4367,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'live-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'live:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'TCP' }],
@@ -4492,7 +4432,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'renamed-dns-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'dns:test',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'old.example.com', port: 443 }],
@@ -4558,7 +4497,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'mixed-drift-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'mixed:test',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [
@@ -4624,7 +4562,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'recreated-dns-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'dns:test',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443 }],
@@ -4695,7 +4632,6 @@ describe('NetworkPolicyReconciler', () => {
           name: 'fresh-read-server',
           namespace: 'mcp-server',
           spec: {
-            contextRef: 'default',
             image: 'fresh:test',
             transport: { type: 'streamableHttp', port: 3000 },
             egressBindings: [{ cidr: '8.8.8.8/32', port: 443, protocol: 'TCP' }],
@@ -4749,7 +4685,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'fresh-success-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'fresh:test',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ cidr: '8.8.8.8/32', port: 443, protocol: 'TCP' }],
@@ -4817,7 +4752,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'stable-dns-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'stable:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'TCP' }],
@@ -4870,7 +4804,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'undeletable-dns-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'stable:latest',
           transport: { type: 'streamableHttp', port: 3000 },
           egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'TCP' }],
@@ -5006,7 +4939,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'anchor-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'anchor:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -5040,7 +4972,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'late-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: 'late:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -5062,7 +4993,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'default-window-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default-window',
           image: 'default-window:latest',
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -5184,7 +5114,6 @@ describe('NetworkPolicyReconciler', () => {
         name,
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'default',
           image: `${name}:latest`,
           transport: { type: 'streamableHttp', port: 3000 },
         },
@@ -5245,7 +5174,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'airtable-mcp',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'dev',
           image: 'airtable:latest',
           transport: { type: 'streamableHttp', url: 'http://airtable:3000', port: 3000 },
           egressBindings: [{ dns: 'api.airtable.com', port: 443 }],
@@ -5467,7 +5395,6 @@ describe('NetworkPolicyReconciler', () => {
         name: 'current-server',
         namespace: 'mcp-server',
         spec: {
-          contextRef: 'current',
           image: 'current:latest',
           transport: { type: 'streamableHttp', url: 'http://current:3000', port: 3000 },
         },
@@ -6009,7 +5936,6 @@ describe('NetworkPolicyReconciler', () => {
       name: 'renamed-server',
       namespace: 'mcp-server',
       spec: {
-        contextRef: 'default',
         image: 'renamed:latest',
         transport: { type: 'streamableHttp', port: 3000 },
         egressBindings: [{ cidr: '104.18.0.0/16', port: 443 }],
@@ -6356,7 +6282,6 @@ describe('NetworkPolicyReconciler', () => {
         uid: 'server-lifecycle',
         generation: 1,
         spec: {
-          contextRef: 'ctx',
           image: 'fixture:v1',
           envSecret: { name: 'fixture-env', keys: [{ secretKey: 'required', envVar: 'VALUE' }] },
           transport: { type: 'streamableHttp', port: 3000 },

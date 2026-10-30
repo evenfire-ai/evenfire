@@ -88,10 +88,6 @@ function makeApp(gateway: MockGateway) {
 
 function makeInstallApp() {
   const gw = new MockGateway(NS)
-  gw.createResource('contexts', {
-    metadata: { name: 'default-context' },
-    spec: { contextId: 'default-context', mcpServers: [] },
-  })
   return { app: makeApp(gw), gw }
 }
 
@@ -114,7 +110,6 @@ function evenfireEntry(overrides: Record<string, unknown> = {}) {
 function installBody() {
   return {
     serverName: 'forecast',
-    contextRef: 'default-context',
     registryEntryName: 'forecast',
     registryEntryVersion: '1.0.0',
   }

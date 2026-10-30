@@ -3,6 +3,7 @@ import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { checkAndIncrement } from '../src/services/rateLimiterService.js'
+import { seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -17,8 +18,9 @@ import { MockGateway } from './mockGateway.js'
  *   - `user`    → the key is built on the forwarded userId, so a cross-user
  *     delete is structurally impossible. No Context membership is required: a
  *     user who has left every Context can still revoke their own token.
- *   - `context` → membership in the server's Context is required (getUserContexts),
- *     and a non-member is rejected 403 with NO delete.
+ *   - `context` → the body names the Context; the caller must reach it (directly
+ *     or through an assigned agent's Host), and a caller who does not is
+ *     rejected 403 with NO delete.
  *
  * These tests mock `pool.query` (SQL-shape assertions). The end-to-end delete
  * against real grant rows built by the real producers is the sibling
@@ -56,6 +58,8 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
 
 const MCP_NS = config.mcpServersNamespace
 const URL = '/api/v1/internal/mcp-oauth/grant'
+// The context branch reads user_contexts (a UUID column) only for a canonical id.
+const MEMBER = '55555555-5555-4555-8555-555555555555'
 
 function seedOauthServer(
   gateway: MockGateway,
@@ -248,43 +252,41 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
 
   // ── context flavor ───────────────────────────────────────────────────────
 
-  it('context flavor: a MEMBER revokes → 204 and deletes the single (shared, contextRef) grant', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    mockDb({ memberContexts: ['ctx-A'] })
-    const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-2' })
+  it('context flavor: a MEMBER revokes → 204 and deletes the single (shared, named Context) grant', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context' })
+    await seedAllowlistedContext(gateway, 'ctx-a', ['gdrive'], config.contextsNamespace)
+    mockDb({ memberContexts: ['ctx-a'] })
+    const res = await del(app).send({ mcpServerName: 'gdrive', userId: MEMBER, contextId: 'ctx-a' })
     expect(res.status).toBe(204)
 
     const calls = deleteCalls()
     expect(calls).toHaveLength(1)
     const [sql, params] = calls[0]
-    // context-flavor delete: shared grant keyed by the server's AUTHORITATIVE
-    // contextRef (ctx-A), user_id NULL — decoupled from the caller's userId.
+    // context-flavor delete: shared grant keyed by the named Context (ctx-a),
+    // user_id NULL — decoupled from the caller's userId.
     expect(sql).toContain("grant_kind = 'shared'")
     // params order: [ownerKind, ns, serverName, contextId, oauthClientId]
-    expect(params).toEqual(['mcpserver', MCP_NS, 'gdrive', 'ctx-A', 'google-drive'])
+    expect(params).toEqual(['mcpserver', MCP_NS, 'gdrive', 'ctx-a', 'google-drive'])
     // The caller's userId is NEVER part of the shared delete key.
-    expect(params).not.toContain('user-2')
+    expect(params).not.toContain(MEMBER)
   })
 
   it('context flavor: a NON-member is rejected 403 and NOTHING is deleted', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context' })
+    await seedAllowlistedContext(gateway, 'ctx-a', ['gdrive'], config.contextsNamespace)
     mockDb({ memberContexts: ['ctx-other', 'ctx-else'] })
-    const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-nomember' })
+    const res = await del(app).send({ mcpServerName: 'gdrive', userId: MEMBER, contextId: 'ctx-a' })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('context_membership_denied')
     expect(deleteCalls()).toHaveLength(0)
   })
 
-  it('context flavor: a cross-context body contextId is rejected 400 context_mismatch, before any delete', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    mockDb({ memberContexts: ['ctx-A'] })
-    const res = await del(app).send({
-      mcpServerName: 'gdrive',
-      userId: 'user-2',
-      contextId: 'ctx-B',
-    })
+  it('context flavor: without a contextId → 400 context_required, before any delete', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context' })
+    mockDb({ memberContexts: ['ctx-a'] })
+    const res = await del(app).send({ mcpServerName: 'gdrive', userId: MEMBER })
     expect(res.status).toBe(400)
-    expect(res.body.error).toBe('context_mismatch')
+    expect(res.body.error).toBe('context_required')
     expect(deleteCalls()).toHaveLength(0)
   })
 

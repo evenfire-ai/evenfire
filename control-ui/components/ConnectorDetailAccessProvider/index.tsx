@@ -122,8 +122,7 @@ export function ConnectorDetailAccessProvider({ children }: { children: ReactNod
         await addConnectorToAgentContexts(
           { name: serverName, namespace: serverNamespace },
           agents,
-          currentSnapshot.contexts,
-          server.spec
+          currentSnapshot.contexts
         )
         const refreshed = await load()
         setNotice(
