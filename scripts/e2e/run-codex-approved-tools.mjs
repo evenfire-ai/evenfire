@@ -26,6 +26,14 @@ export const toolCallLimitTitle =
   'tool call limit: Desktop shows Too Many Tool Calls without retry or connector call'
 export const toolCallLimitBoundaryTitle =
   'tool call limit boundary: Desktop completes a turn of exactly 256 tool calls'
+// #1044: the visible preparation both model-step suites need. It runs once in
+// its own project, which the suite's cases depend on: a `beforeAll` would run
+// again in every worker Playwright starts after a failure, and the second Codex
+// grant capture refuses to open (`approved-tools-connection-journal.mjs`).
+// It is not a dependency on the approved-tools project: that suite is a
+// different lane run (Addendum 21, decoupling).
+export const modelStepRetrySetupTitle =
+  'model step retry setup: the subscription grant and the model binding are visible'
 // #1044: the model-step retry cases, run by their own Playwright project after
 // the approved-tools spec, against the deterministic upstream only.
 export const modelStepRetryTitles = [
@@ -94,18 +102,44 @@ function validateProvider(provider) {
   return provider
 }
 
+// The lane splits into two suite runs that never share a fixture run
+// directory: `approved-tools` (the base journeys, the native workflow and the
+// limit probes) and `model-step-retry` (the visible setup plus the retry
+// cases). Each run selects exactly one, so a base-spec defect cannot decide the
+// retry cases' verdict.
+export const approvedToolsSuites = ['approved-tools', 'model-step-retry']
+
+export function validateSuite(suite) {
+  if (!approvedToolsSuites.includes(suite))
+    throw new Error('Select the approved-tools or model-step-retry suite explicitly')
+  return suite
+}
+
+function validateMode(mode) {
+  if (!['deterministic', 'real', 'real-hybrid'].includes(mode))
+    throw new Error('Select deterministic, real or real-hybrid upstream mode explicitly')
+  return mode
+}
+
 // The tool-call limit cases exist only in deterministic mode: only the
 // deterministic upstream can emit more function calls than the contract allows,
 // or exactly that many. validateReport compares this registry against the report
 // by count as well as by title, so a case the spec declares and this list omits
 // fails the entire lane without ever naming it.
-export function expectedTitles(mode, provider = 'codex') {
+export function expectedTitles(mode, provider = 'codex', suite) {
   validateProvider(provider)
-  if (!['deterministic', 'real', 'real-hybrid'].includes(mode))
-    throw new Error('Select deterministic, real or real-hybrid upstream mode explicitly')
+  validateSuite(suite)
+  validateMode(mode)
   if (provider === 'grok') {
+    if (suite !== 'model-step-retry')
+      throw new Error('The Grok lane runs only the model-step-retry suite')
     if (mode !== 'deterministic') throw new Error('The Grok lane runs only in deterministic mode')
-    return grokModelStepRetryTitles
+    return [modelStepRetrySetupTitle, ...grokModelStepRetryTitles]
+  }
+  if (suite === 'model-step-retry') {
+    if (mode !== 'deterministic')
+      throw new Error('The Codex model-step-retry suite runs only in deterministic mode')
+    return [modelStepRetrySetupTitle, ...modelStepRetryTitles]
   }
   if (mode === 'real-hybrid') return hybridRetryTitles
   return [
@@ -116,13 +150,54 @@ export function expectedTitles(mode, provider = 'codex') {
       size => `approved tools ${size}: ordinary discovery, reuse, approval decisions and revocation`
     ),
     ...(mode === 'deterministic' ? [toolCallLimitTitle, toolCallLimitBoundaryTitle] : []),
-    ...(mode === 'deterministic' ? modelStepRetryTitles : []),
   ]
+}
+
+/**
+ * The preconditions each suite run reads. The model-step suites run neither the
+ * native workflow nor the unauthorized-user journey, and both of those keys are
+ * still prepared (the identity keeps two users), so requiring them there would
+ * describe a case that cannot run.
+ */
+export function requiredRunnerKeys(mode, provider = 'codex', suite) {
+  validateProvider(provider)
+  validateSuite(suite)
+  validateMode(mode)
+  const keys = [
+    'MINIKUBE_PROFILE',
+    'CONTROL_API_REAL_PG_CONTEXT',
+    'CONTROL_UI_URL',
+    'EXTERNAL_REST_API_BASE_URL',
+    'RPC_PROXY_BASE_URL',
+    'APPROVED_TOOLS_SCENARIOS',
+  ]
+  // The Grok lane has no workflow or unauthorized-user journey; it needs the
+  // name of the connection the user created in the Control UI.
+  if (provider === 'grok') return [...keys, 'APPROVED_TOOLS_GROK_CONNECTION_NAME']
+  if (suite === 'model-step-retry' || mode === 'real-hybrid') return keys
+  return [
+    ...keys,
+    'APPROVED_TOOLS_WORKFLOW_SCENARIO',
+    'APPROVED_TOOLS_UNAUTHORIZED_EMAIL',
+    'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD',
+  ]
+}
+
+/**
+ * Whether this run compares the upstream model-step block before and after
+ * Playwright. Only the model-step suite moves those counters now; real-hybrid
+ * keeps reading the same block for its injection counters.
+ */
+export function readsModelStepEvidence(mode, suite) {
+  validateSuite(suite)
+  validateMode(mode)
+  return suite === 'model-step-retry' || mode === 'real-hybrid'
 }
 
 // The spec file that owns each registered title: a title found in another file
 // is not the registered case.
 export function specFileFor(title) {
+  if (title === modelStepRetrySetupTitle) return modelStepSpecFile
   if (hybridRetryTitles.includes(title)) return hybridSpecFile
   return modelStepRetryTitles.includes(title) ? modelStepSpecFile : specFile
 }
@@ -213,8 +288,8 @@ export function runPhaseTimeouts() {
   }
 }
 
-export function validateReport(report, mode, provider = 'codex') {
-  const titles = expectedTitles(mode, provider)
+export function validateReport(report, mode, provider = 'codex', suite) {
+  const titles = expectedTitles(mode, provider, suite)
   const specs = []
   function collect(suites) {
     if (!Array.isArray(suites)) throw new Error('Incomplete Playwright suites')
@@ -304,28 +379,10 @@ async function main() {
   if (!['deterministic', 'real', 'real-hybrid'].includes(mode))
     throw new Error('Select deterministic, real or real-hybrid upstream mode explicitly')
   const provider = validateProvider(required('APPROVED_TOOLS_PROVIDER'))
-  // Fails before any browser work when the provider and mode do not combine.
-  expectedTitles(mode, provider)
-  for (const key of [
-    'MINIKUBE_PROFILE',
-    'CONTROL_API_REAL_PG_CONTEXT',
-    'CONTROL_UI_URL',
-    'EXTERNAL_REST_API_BASE_URL',
-    'RPC_PROXY_BASE_URL',
-    'APPROVED_TOOLS_SCENARIOS',
-    // The Grok lane has no workflow or unauthorized-user journey; it needs the
-    // name of the connection the user created in the Control UI.
-    ...(provider === 'grok'
-      ? ['APPROVED_TOOLS_GROK_CONNECTION_NAME']
-      : mode === 'real-hybrid'
-      ? []
-      : [
-          'APPROVED_TOOLS_WORKFLOW_SCENARIO',
-          'APPROVED_TOOLS_UNAUTHORIZED_EMAIL',
-          'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD',
-        ]),
-  ])
-    required(key)
+  const suite = validateSuite(required('APPROVED_TOOLS_SUITE'))
+  // Fails before any browser work when the provider, mode and suite do not combine.
+  expectedTitles(mode, provider, suite)
+  for (const key of requiredRunnerKeys(mode, provider, suite)) required(key)
   if (mode !== 'deterministic' && process.env.CODEX_REAL_UPSTREAM_CONFIRM !== '1')
     throw new Error('Real subscription use requires explicit confirmation')
   const evidence = validateRunDirectory(
@@ -377,9 +434,7 @@ async function main() {
     )
     if (audit.error || audit.signal || audit.status !== 0)
       throw new Error('E2E Guardian audit failed')
-    const evidenceUrl = mode === 'deterministic' || mode === 'real-hybrid'
-      ? modelStepEvidenceUrl()
-      : undefined
+    const evidenceUrl = readsModelStepEvidence(mode, suite) ? modelStepEvidenceUrl() : undefined
     const evidenceBefore = evidenceUrl ? await readModelStepEvidence(evidenceUrl) : undefined
     runNode(
       [
@@ -391,15 +446,21 @@ async function main() {
       env,
       APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS
     )
-    const verified = validateReport(JSON.parse(readOwnedDescriptor(reportFile)), mode, provider)
+    const verified = validateReport(
+      JSON.parse(readOwnedDescriptor(reportFile)),
+      mode,
+      provider,
+      suite
+    )
     const evidenceAfter = evidenceUrl ? await readModelStepEvidence(evidenceUrl) : undefined
-    const modelStepRetry = mode === 'deterministic'
-      ? validateModelStepEvidence(evidenceBefore, evidenceAfter, provider)
-      : mode === 'real-hybrid'
-        ? validateHybridEvidence(evidenceBefore, evidenceAfter)
-        : undefined
+    const modelStepRetry =
+      suite === 'model-step-retry'
+        ? validateModelStepEvidence(evidenceBefore, evidenceAfter, provider)
+        : mode === 'real-hybrid'
+          ? validateHybridEvidence(evidenceBefore, evidenceAfter)
+          : undefined
     process.stdout.write(
-      `${JSON.stringify({ lane: 'Playwright', provider, upstream: mode, ...verified, modelStepRetry, report })}\n`
+      `${JSON.stringify({ lane: 'Playwright', provider, suite, upstream: mode, ...verified, modelStepRetry, report })}\n`
     )
   } finally {
     fs.closeSync(reportFile.fd)

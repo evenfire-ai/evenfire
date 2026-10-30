@@ -117,14 +117,47 @@ export function approvedToolsProvider(): 'codex' | 'grok' {
     throw new Error('APPROVED_TOOLS_PROVIDER must be codex or grok')
   return value
 }
+/**
+ * The suite this lane run owns; required, with no default. `approved-tools` is
+ * the base journey suite (and the real-hybrid pair); `model-step-retry` is the
+ * visible setup plus the retry cases. Each run reads exactly one, and the
+ * combinations the lane does not run are refused here as well as by prepare.
+ */
+export function approvedToolsSuite(): 'approved-tools' | 'model-step-retry' {
+  const value = required('APPROVED_TOOLS_SUITE')
+  if (value !== 'approved-tools' && value !== 'model-step-retry')
+    throw new Error('APPROVED_TOOLS_SUITE must be approved-tools or model-step-retry')
+  return value
+}
+/**
+ * The Desktop approval label of a fixture connector tool. The Host projects the
+ * MCP server name as the display name (`getDisplayName`,
+ * `mcp-host/src/progress/intentExtraction.ts:12-19`) and
+ * `formatToolApprovalLabel` keeps it instead of the tool function, so the
+ * pending approval names the connector only. Which tool was pending is proven
+ * by the physical execution the case asserts after the decision, never by this
+ * label.
+ */
+export function connectorApprovalLabel(scenario: Scenario): string {
+  const name = scenario.connectorName
+  return name.charAt(0).toUpperCase() + name.slice(1)
+}
 export function scenarios(): Scenario[] {
   const parsed: unknown = JSON.parse(required('APPROVED_TOOLS_SCENARIOS'))
-  const grok = approvedToolsProvider() === 'grok'
+  const provider = approvedToolsProvider()
+  const suite = approvedToolsSuite()
+  const grok = provider === 'grok'
   // The Grok lane prepares exactly one 83-tool agent bound to the connection the
   // user created by hand in the Control UI (C1, C2, C11 share it).
+  if (grok && suite !== 'model-step-retry')
+    throw new Error('The Grok lane runs only the model-step-retry suite')
   if (grok && (!Array.isArray(parsed) || parsed.length !== 1))
     throw new Error('Exactly one Grok approved-tools scenario required')
-  if (!grok && (!Array.isArray(parsed) || parsed.length !== 3))
+  // The Codex model-step suite needs the single 83-tool agent too: its own
+  // prepare output carries no workflow scenario and no other catalogue.
+  if (!grok && suite === 'model-step-retry' && (!Array.isArray(parsed) || parsed.length !== 1))
+    throw new Error('Exactly one Codex model-step-retry scenario required')
+  if (!grok && suite === 'approved-tools' && (!Array.isArray(parsed) || parsed.length !== 3))
     throw new Error('Exactly three approved-tools scenarios required')
   const fields = [
     'runId',
@@ -159,6 +192,11 @@ export function scenarios(): Scenario[] {
   }
   if (rows.some(row => row.provider !== undefined))
     throw new Error('Codex scenarios must not carry a provider')
+  if (suite === 'model-step-retry') {
+    const [row] = rows
+    if (row.catalogSize !== 83) throw new Error('The model-step-retry scenario must be 83 tools')
+    return rows
+  }
   if (catalogSizes.some(size => rows.filter(row => row.catalogSize === size).length !== 1))
     throw new Error('Scenarios must cover 83, 150, 250 exactly once')
   for (const key of ['runId', 'agentName', 'contextName', 'connectorName', 'fixtureUrl'] as const) {

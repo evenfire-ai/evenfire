@@ -16,6 +16,7 @@ import {
   type Scenario,
   type UpstreamEvidence,
   browserApiPath,
+  connectorApprovalLabel,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
@@ -90,7 +91,11 @@ async function receiptApproval(page: Page, scenario: Scenario, previousCalls: nu
     .getByTestId('progress-stepper')
     .filter({ has: page.getByTestId('approval-approve-btn') })
   await expect(pending).toHaveCount(1)
-  await expect(pending).toContainText('workitem_read_receipt')
+  // The pending approval names the connector, not the tool: the Host projects
+  // the MCP server name as the display name and the Desktop keeps it
+  // (`formatToolApprovalLabel`). The receipt tool this decision approves is
+  // proven by the physical execution each caller asserts after the decision.
+  await expect(pending).toContainText(connectorApprovalLabel(scenario))
   await expect(pending).toContainText('requires approval')
   await expect(pending).not.toContainText('clerum__tool_call requires approval')
   expect((await readEvidence(scenario)).calls).toHaveLength(previousCalls)

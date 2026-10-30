@@ -1,24 +1,64 @@
 import { defineConfig, devices } from '@playwright/test'
-import { approvedToolsProvider, localUrl, required } from './helpers/approved-tools-scenarios'
+import {
+  approvedToolsProvider,
+  approvedToolsSuite,
+  localUrl,
+  required,
+} from './helpers/approved-tools-scenarios'
 
 const mode = required('APPROVED_TOOLS_UPSTREAM_MODE')
 if (!['deterministic', 'real', 'real-hybrid'].includes(mode))
   throw new Error('APPROVED_TOOLS_UPSTREAM_MODE must be deterministic, real or real-hybrid')
 const provider = approvedToolsProvider()
+const suite = approvedToolsSuite()
 if (provider === 'grok' && mode !== 'deterministic')
   throw new Error('The Grok approved-tools lane runs only in deterministic mode')
+if (provider === 'grok' && suite !== 'model-step-retry')
+  throw new Error('The Grok approved-tools lane runs only the model-step-retry suite')
+if (suite === 'model-step-retry' && mode !== 'deterministic')
+  throw new Error('The model-step-retry suite runs only in deterministic mode')
 
-// #1044: the Grok lane runs C1, C2 and C11 only, with its own visible setup in the
-// spec, so it has no dependency on the Codex approved-tools journey. Playwright
-// matches `grep` against the joined project/file/title path, so the pattern is
-// not anchored; the trailing colon keeps C10 and C11 apart from C1.
+// #1044: one suite per lane run, with no dependency between them.
+// `approved-tools` runs the base journeys (or, in real-hybrid mode, the two
+// hybrid cases); `model-step-retry` runs the visible setup once plus the retry
+// cases it owns. Playwright matches `grep` against the joined project/file/title
+// path, so the patterns are not anchored; the trailing colon keeps C10 and C11
+// apart from C1. The setup title is the one constant both suites exclude from
+// their own project, so a setup failure skips them and the runner refuses the
+// skip instead of repeating the grant capture in a fresh worker.
+const setupGrep = /model step retry setup: /
+const modelStepSetupProject = {
+  name: 'model-step-retry-setup',
+  testMatch: 'model-step-retry-codex.spec.ts',
+  grep: setupGrep,
+}
 const grokProjects = [
+  modelStepSetupProject,
   {
     name: 'model-step-retry-grok',
     testMatch: 'model-step-retry-codex.spec.ts',
     grep: /model step retry C(?:1|2|11): /,
+    dependencies: ['model-step-retry-setup'],
   },
 ]
+const modelStepProjects = [
+  modelStepSetupProject,
+  {
+    name: 'model-step-retry',
+    testMatch: 'model-step-retry-codex.spec.ts',
+    grepInvert: setupGrep,
+    dependencies: ['model-step-retry-setup'],
+  },
+]
+const approvedToolsProjects =
+  mode === 'real-hybrid'
+    ? [
+        {
+          name: 'model-step-retry-hybrid',
+          testMatch: 'model-step-retry-codex-hybrid.spec.ts',
+        },
+      ]
+    : [{ name: 'approved-tools', testMatch: 'codex-subscription-approved-tools.spec.ts' }]
 
 export default defineConfig({
   testDir: './desktop',
@@ -41,28 +81,7 @@ export default defineConfig({
   projects:
     provider === 'grok'
       ? grokProjects
-      : [
-          ...(mode === 'real-hybrid'
-            ? [
-                {
-                  name: 'model-step-retry-hybrid',
-                  testMatch: 'model-step-retry-codex-hybrid.spec.ts',
-                },
-              ]
-            : [{ name: 'approved-tools', testMatch: 'codex-subscription-approved-tools.spec.ts' }]),
-          // #1044: the model-step retry cases reuse the agent the approved-tools
-          // journey binds to the subscription model, so they run only after it and
-          // never if it failed (a dependency failure skips them, which the runner
-          // rejects). The hybrid project uses an already prepared real grant and
-          // its own test-only proxy image to inject one 503 after a tool result.
-          ...(mode === 'deterministic'
-            ? [
-                {
-                  name: 'model-step-retry',
-                  testMatch: 'model-step-retry-codex.spec.ts',
-                  dependencies: ['approved-tools'],
-                },
-              ]
-            : []),
-        ],
+      : suite === 'model-step-retry'
+        ? modelStepProjects
+        : approvedToolsProjects,
 })

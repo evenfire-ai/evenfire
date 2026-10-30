@@ -271,7 +271,9 @@ NODE
 # The #627 real-tool and approved-tools targets must forward the same explicit
 # profile/context/lease passthrough as every sibling target; without it a
 # makefile-variable profile (`MINIKUBE_PROFILE ?=`, never exported) never
-# reaches the wrapper and the transition fails before it can run.
+# reaches the wrapper and the transition fails before it can run. The Codex
+# model-step retry suite is its own lane run (#1044), so its run and restore
+# targets are enclosed the same way.
 assert_627_targets_forward_the_profile_and_lease() {
   local target plan before_build problem=""
   for target in \
@@ -281,7 +283,9 @@ assert_627_targets_forward_the_profile_and_lease() {
     minikube-build-codex-approved-tools-fixtures \
     minikube-prepare-codex-approved-tools \
     minikube-run-codex-approved-tools \
-    minikube-restore-codex-approved-tools; do
+    minikube-restore-codex-approved-tools \
+    minikube-run-codex-model-step-retry \
+    minikube-restore-codex-model-step-retry; do
     # Inspect the rendered boundary with a known Make value. Explicit recipe
     # assignments also support values defined by included Makefiles, which are
     # not automatically exported like command-line assignments are.
@@ -310,7 +314,7 @@ assert_627_targets_forward_the_profile_and_lease() {
     printf 'FAIL: #627 mutation targets: %s\n' "${problem}" >&2
     exit 1
   fi
-  printf 'PASS: the #627 real-tool and four approved-tools targets forward profile/context/lease; fixture body guards its builds\n'
+  printf 'PASS: the #627 real-tool and approved-tools targets, including the Codex model-step retry suite, forward profile/context/lease; fixture body guards its builds\n'
 }
 
 

@@ -7,11 +7,13 @@
  * counter) and what the user sees and can do next (the message, which recovery
  * button is offered, and that the chat never ends in a dead end).
  *
- * Codex (`APPROVED_TOOLS_PROVIDER=codex`): runs after
- * `codex-subscription-approved-tools.spec.ts` (a Playwright project dependency),
- * which binds the 83-tool scenario's agent to the subscription model. Grok
- * (`APPROVED_TOOLS_PROVIDER=grok`): runs C1, C2 and C11 only, and binds its single
- * agent visibly in `beforeAll` to the connection the user created by hand.
+ * Both providers run this file as its own `model-step-retry` lane suite
+ * (`APPROVED_TOOLS_SUITE=model-step-retry`), with no dependency on
+ * `codex-subscription-approved-tools.spec.ts`. The first test is the visible
+ * setup: Codex creates the fixture grant (`prepareSubscriptionVisible`) and both
+ * providers bind the 83-tool agent to its subscription model in the Control UI;
+ * the suite's cases depend on that one project, so the grant capture runs once.
+ * Codex runs C1–C11, Grok runs C1, C2 and C11.
  * Deterministic upstream only: a real provider cannot be made to fail on a chosen
  * model step.
  *
@@ -37,13 +39,14 @@ import {
   type Scenario,
   approvedToolsProvider,
   browserApiPath,
-  localUrl,
+  connectorApprovalLabel,
   modelStepRetryFields,
   readEvidence,
   readUpstreamEvidence,
   required,
   scenarios,
 } from '../helpers/approved-tools-scenarios'
+import { prepareSubscriptionVisible } from '../helpers/approved-tools-subscription'
 import { signOutDesktop } from '../helpers/desktop-session'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
@@ -238,54 +241,61 @@ async function withDesktopChat(run: (desktop: Page) => Promise<void>) {
   }
 }
 
-// #1044 Grok lane: preparation creates the agent unbound (`connectionRef:
-// 'unassigned'`) and without connectors, and the Grok project has no dependency on
-// the Codex approved-tools journey. Bind the agent visibly to the subscription
-// connection the user created by hand in the Control UI; C1 then attaches the
-// receipt connector through restoreReceiptConnector, as it does for Codex. The
-// Host save and the connector save each start their own rollout, so each is
+// #1044: preparation creates the agent unbound (`connectionRef: 'unassigned'`)
+// and without connectors. This setup test is the one source of the visible
+// grant (Codex) and of the model binding (both providers), and it is its own
+// project, which the suite's cases depend on: a `beforeAll` would run again in
+// every worker Playwright restarts after a case failure, and the second Codex
+// grant capture refuses to open its journal entry. C1 then attaches the receipt
+// connector through restoreReceiptConnector, for both providers.
+// The Host save and the connector save each start their own rollout, so each is
 // awaited against its own generation baseline.
-test.beforeAll(async ({ browser }, testInfo) => {
-  if (approvedToolsProvider() !== 'grok') return
-  testInfo.setTimeout(300_000)
+test('model step retry setup: the subscription grant and the model binding are visible', async ({
+  page,
+}) => {
+  test.setTimeout(300_000)
   const active = scenario()
-  const context = await browser.newContext({ baseURL: localUrl(required('CONTROL_UI_URL')) })
-  try {
-    const page = await context.newPage()
-    // E2E_GUARDIAN_ENTRY_POINT: Control UI root starts the visible admin journey.
-    await page.goto('/')
-    await loginControlUiVisible(page)
-    await new ControlUiShell(page).openAgents()
-    await new AgentListPage(page).openNamed(active.agentName)
-    await expect(
-      page.getByRole('heading', { name: `Agent: ${active.agentDisplayName}`, exact: true })
-    ).toBeVisible()
-    const generation = readAgentDeploymentGeneration(active.agentName)
-    const model = new AgentModelPage(page)
-    await model.openEditor()
-    await model.chooseSubscription(active.subscriptionName)
-    await page.getByLabel('Current model', { exact: true }).click()
-    await page.getByRole('option', { name: active.modelName, exact: true }).click()
-    const host = await model.saveHost(active.agentName)
-    const savedPolicy = (host.spec as { llmPolicy?: { fallbacks: unknown[] } } | undefined)
-      ?.llmPolicy
-    expect(savedPolicy?.fallbacks ?? [], 'the Grok agent must not fall back').toEqual([])
-    expect(host.spec?.model).toMatchObject({
-      provider: 'grok-subscription',
-      name: active.modelName,
-    })
+  const provider = approvedToolsProvider()
+  // E2E_GUARDIAN_ENTRY_POINT: Control UI root starts the visible admin journey.
+  await page.goto('/')
+  await loginControlUiVisible(page)
+  if (provider === 'codex') {
+    // The grant belongs to this run: no earlier journey created it.
+    active.connectionKey = await prepareSubscriptionVisible(page, active)
+    expect(active.connectionKey).not.toBe('unassigned')
+  }
+  await new ControlUiShell(page).openAgents()
+  await new AgentListPage(page).openNamed(active.agentName)
+  await expect(
+    page.getByRole('heading', { name: `Agent: ${active.agentDisplayName}`, exact: true })
+  ).toBeVisible()
+  const generation = readAgentDeploymentGeneration(active.agentName)
+  const model = new AgentModelPage(page)
+  await model.openEditor()
+  await model.chooseSubscription(active.subscriptionName)
+  await page.getByLabel('Current model', { exact: true }).click()
+  await page.getByRole('option', { name: active.modelName, exact: true }).click()
+  const host = await model.saveHost(active.agentName)
+  const savedPolicy = (host.spec as { llmPolicy?: { fallbacks: unknown[] } } | undefined)?.llmPolicy
+  expect(savedPolicy?.fallbacks ?? [], 'the retry agent must not fall back').toEqual([])
+  expect(host.spec?.model).toMatchObject({
+    provider: provider === 'grok' ? 'grok-subscription' : 'codex-subscription',
+    name: active.modelName,
+  })
+  if (provider === 'codex') {
+    expect(host.spec?.model?.connectionRef).toBe(active.connectionKey)
+  } else {
     // The connection key belongs to the user's connection, so only its binding is checked.
     expect(host.spec?.model?.connectionRef).toBeTruthy()
     expect(host.spec?.model?.connectionRef).not.toBe('unassigned')
-    await waitForAgentRollout(active.agentName, generation)
-  } finally {
-    await context.close()
   }
+  await waitForAgentRollout(active.agentName, generation)
 })
 
 /**
- * Attaches the receipt connector visibly. For Codex the prerequisite journey ends
- * by revoking it; for Grok the prepared agent starts without connectors.
+ * Attaches the receipt connector visibly. Both suites prepare their agent with
+ * an empty connector list (`mcpServers: []`), so the empty state below is the
+ * fixture's own, not a leftover from another journey.
  */
 async function restoreReceiptConnector(page: Page) {
   const active = scenario()
@@ -337,7 +347,11 @@ test('model step retry C1: a 503 after a confirmed tool continues once without r
       const pending = desktop.getByTestId('progress-stepper').filter({
         has: desktop.getByTestId('approval-approve-btn'),
       })
-      await expect(pending).toContainText('workitem_read_receipt', { timeout: TURN_TIMEOUT })
+      // Both providers label the pending approval with the connector, not the
+      // tool; the receipt this case approves is proven by the execution below.
+      await expect(pending).toContainText(connectorApprovalLabel(scenario()), {
+        timeout: TURN_TIMEOUT,
+      })
       await expect(pending).toContainText('requires approval')
       expect(toolExecutions(await readEvidence(scenario()), 'workitem_read_receipt')).toBe(
         toolExecutions(physicalBefore, 'workitem_read_receipt')
@@ -606,7 +620,11 @@ test('model step retry C7: approval inside a continuation executes the receipt o
       const pending = desktop.getByTestId('progress-stepper').filter({
         has: desktop.getByTestId('approval-approve-btn'),
       })
-      await expect(pending).toContainText('workitem_read_receipt', { timeout: TURN_TIMEOUT })
+      // The connector label is the approval's own name; the receipt is proven
+      // by the execution this case asserts after the decision.
+      await expect(pending).toContainText(connectorApprovalLabel(scenario()), {
+        timeout: TURN_TIMEOUT,
+      })
       await expect(pending).toContainText('requires approval')
       const waiting = await expectSessionState(desktop, prompt, 'awaiting_approval')
       expect(waiting.chatId).toBe(failedRead.chatId)
@@ -680,7 +698,11 @@ async function decisionJourney(decision: 'deny' | 'cancel') {
     const pending = desktop.getByTestId('progress-stepper').filter({
       has: desktop.getByTestId(decision === 'deny' ? 'approval-deny-btn' : 'progress-cancel-btn'),
     })
-    await expect(pending).toContainText('workitem_read_receipt', { timeout: TURN_TIMEOUT })
+    // Connector label, as for C1 and C7; the decision itself and the unchanged
+    // execution count below are the witnesses, and no upstream request follows.
+    await expect(pending).toContainText(connectorApprovalLabel(scenario()), {
+      timeout: TURN_TIMEOUT,
+    })
     await expect(pending).toContainText('requires approval')
     const waiting = await expectSessionState(desktop, prompt, 'awaiting_approval')
     expect(waiting.modelStepCheckpoint?.checkpointId).toBe(

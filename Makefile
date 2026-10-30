@@ -345,21 +345,36 @@ minikube-build-codex-approved-tools-fixtures-body:
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-workflow-e2e
 
-.PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools
+.PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools minikube-run-codex-model-step-retry minikube-restore-codex-model-step-retry
 minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools fixtures; requires prior image acquisition and fresh run directory
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
-		APPROVED_TOOLS_PROVIDER=codex bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_SUITE=approved-tools bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
 
 minikube-run-codex-approved-tools: ## Run approved-tools Desktop E2E (deterministic or prepared real-hybrid) and restore the owned proxy
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
-		APPROVED_TOOLS_PROVIDER=codex bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_SUITE=approved-tools bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
 
 minikube-restore-codex-approved-tools: ## Restore recorded proxy image/env and close only this fixture run's owned forwards
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
-		APPROVED_TOOLS_PROVIDER=codex bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_SUITE=approved-tools bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
+
+# #1044: the retry cases run as their own suite run, with no dependency on the
+# base approved-tools journeys. The suite is deterministic only, so the target
+# pins the upstream mode the runner requires.
+minikube-run-codex-model-step-retry: ## Run the Codex model-step retry suite (C1-C11) and restore the owned fixtures
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=model-step-retry \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
+
+minikube-restore-codex-model-step-retry: ## Restore only the recorded Codex model-step fixture resources
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		APPROVED_TOOLS_PROVIDER=codex APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=model-step-retry \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
 
 .PHONY: minikube-build-grok-model-step-fixtures minikube-build-grok-model-step-fixtures-body minikube-run-grok-model-step minikube-restore-grok-model-step
 minikube-build-grok-model-step-fixtures: ## Acquire optional Grok recovery fixtures before T2 reconcile
@@ -379,13 +394,13 @@ minikube-build-grok-model-step-fixtures-body:
 minikube-run-grok-model-step: ## Run C1/C2/C11 with a user-created Grok connection and restore fixtures
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
-		APPROVED_TOOLS_PROVIDER=grok APPROVED_TOOLS_UPSTREAM_MODE=deterministic \
+		APPROVED_TOOLS_PROVIDER=grok APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=model-step-retry \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
 
 minikube-restore-grok-model-step: ## Restore only the recorded Grok fixture resources; preserve the user's connection
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
-		APPROVED_TOOLS_PROVIDER=grok APPROVED_TOOLS_UPSTREAM_MODE=deterministic \
+		APPROVED_TOOLS_PROVIDER=grok APPROVED_TOOLS_UPSTREAM_MODE=deterministic APPROVED_TOOLS_SUITE=model-step-retry \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
 
 minikube-build-e2e-fixtures: ## Build the two unpublished coordinator E2E fixtures under one mutation lease

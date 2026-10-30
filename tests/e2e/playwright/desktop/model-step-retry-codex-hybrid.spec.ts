@@ -16,6 +16,7 @@ import {
 } from '../helpers/approved-tools-execution'
 import {
   type Scenario,
+  connectorApprovalLabel,
   localUrl,
   readEvidence,
   required,
@@ -134,7 +135,9 @@ async function unavailable(desktop: Page, prompt: string) {
   const pending = desktop.getByTestId('progress-stepper').filter({
     has: desktop.getByTestId('approval-approve-btn'),
   })
-  await expect(pending).toContainText('workitem_read_000', { timeout: TIMEOUT })
+  // The approval names the connector; R1 proves the tool by the fixture read
+  // whose execution counter it asserts after this decision.
+  await expect(pending).toContainText(connectorApprovalLabel(scenario()), { timeout: TIMEOUT })
   await expect(pending).toContainText('requires approval')
   await pending.getByTestId('approval-approve-btn').click()
   await expect(responses.filter({ hasText: /Provider Unavailable/ })).toHaveCount(1, {
@@ -245,7 +248,9 @@ test('real hybrid R2: approval inside the continuation executes the receipt once
       const pending = desktop.getByTestId('progress-stepper').filter({
         has: desktop.getByTestId('approval-approve-btn'),
       })
-      await expect(pending).toContainText('workitem_read_receipt', { timeout: TIMEOUT })
+      // Same connector-only label; R2 proves the receipt by the one execution
+      // it asserts below.
+      await expect(pending).toContainText(connectorApprovalLabel(scenario()), { timeout: TIMEOUT })
       await expect(pending).toContainText('requires approval')
       await expect
         .poll(async () => (await session(desktop, prompt)).state, { timeout: TIMEOUT })
