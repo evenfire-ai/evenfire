@@ -321,7 +321,6 @@ describe('WATCH and recovered LIST policy effects', () => {
         },
         spec: {
           image: 'fixture:v1',
-          contextRef: 'ctx',
           transport: { type: 'streamableHttp', port: 3000 },
           envSecret: { name: 'fixture-env', keys: [] },
           egressBindings: [{ cidr: '1.2.3.4/32', port: 443 }],
@@ -378,7 +377,6 @@ describe('WATCH and recovered LIST policy effects', () => {
       },
       spec: {
         image: 'fixture:v1',
-        contextRef: 'ctx',
         transport: { type: 'streamableHttp', port: 3000 },
         envSecret: { name: 'fixture-env', keys: [] },
         egressBindings: [{ cidr: '1.2.3.4/32', port: 443 }],

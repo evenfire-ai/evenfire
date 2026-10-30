@@ -1,303 +1,282 @@
-import { describe, expect, it, vi } from 'vitest'
-import {
-  type CallbackDeps,
-  type CallbackInput,
-  type McpServerOAuthSubject,
-  handleOAuthCallback,
-} from '../callback.js'
-// State is derived from the REAL producer (T1): never hand-write the signed
-// wire format. `signOAuthState` is the same signer the authorize-URL path uses.
-import { signOAuthState } from '../state.js'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const mockPoolQuery = vi.fn()
+vi.mock('../../db.js', () => ({
+  pool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
+}))
+
+const { config } = await import('../../config.js')
+const { handleOAuthCallback } = await import('../callback.js')
+const { signOAuthState } = await import('../state.js')
+const { buildOAuthCallbackDeps } = await import('../../routes/external/oauthCallback.js')
+const { MockGateway } = await import('../../../test/mockGateway.js')
+const { membership, seedAgentHost, seedAllowlistedContext } =
+  await import('../../../test/fixtures/contextAllowlist.js')
+
+type CallbackInput = import('../callback.js').CallbackInput
 
 /**
- * Guards-before-exchange ordering for the mcp callback (R3-L1).
+ * Guards-before-exchange ordering for the mcp callback, through the
+ * production dependency wiring (`buildOAuthCallbackDeps`): the subject is
+ * resolved from the McpServer CR by the real reader, access by the same rules
+ * the mint applies, and only the provider fetch is replaced.
  *
- * The fix moves the `server_missing_context` + `context_membership_denied`
- * guards ahead of `exchangeAuthCode`, so a user removed from the Context during
- * the mint→callback window is rejected WITHOUT burning the single-use auth-code
- * (no token exchange, no secret read). These tests pin that: the `fetchFn` /
- * `secretReader` spies must stay untouched on the denied path, while the
- * happy paths (context member + per-user) still exchange and persist.
- *
- * The per-user flavor has its own pre-exchange guard: some Context the user
- * reaches must still enable the server (`userServerAccessReader`), so a user
- * who lost that access between mint and callback cannot finish creating a grant.
+ * A user who lost access during the mint→callback window is rejected WITHOUT
+ * burning the single-use auth-code (no token exchange, no write). The `context`
+ * flavor checks the Context signed into the state (live, allowlisting the
+ * server, reached by the user directly or through an assigned agent's Host);
+ * the `user` flavor checks that some Context the user reaches still enables
+ * the server.
  */
 
-const STATE_SECRET = 'test-state-secret-0123456789abcdef' // ≥ 32 chars
-const ENCRYPTION_KEY = Buffer.alloc(32, 7) // AES-256-GCM key
-
+const NS = config.mcpServersNamespace
 const OAUTH_CLIENT_ID = 'google-client'
-const MCP_SERVER_NAME = 'gdrive'
-const USER_ID = 'user-42'
-const CONTEXT_REF = 'ctx-1'
+const SERVER = 'gdrive'
+const USER_ID = '44444444-4444-4444-8444-444444444444'
+const CONTEXT = 'ctx-1'
 
-function mcpSubject(overrides: Partial<McpServerOAuthSubject> = {}): McpServerOAuthSubject {
-  return {
-    namespace: 'mcp-servers',
-    grantScope: 'context',
-    contextRef: CONTEXT_REF,
-    decl: {
-      id: OAUTH_CLIENT_ID,
-      provider: 'google',
-      clientIdRef: { name: 'oauth-secret', key: 'client_id' },
-      clientSecretRef: { name: 'oauth-secret', key: 'client_secret' },
-    },
-    ...overrides,
-  }
-}
-
-function signedMcpState(): string {
-  return signOAuthState(STATE_SECRET, {
-    subjectKind: 'mcp',
-    mcpServerName: MCP_SERVER_NAME,
-    userId: USER_ID,
-    oauthClientId: OAUTH_CLIENT_ID,
-    grantKind: 'user',
-    background: false,
-  })
-}
-
-function input(): CallbackInput {
-  return {
-    target: {
-      kind: 'client',
-      id: OAUTH_CLIENT_ID,
-      redirectUri: 'https://example.test/oauth/callback',
-    },
-    code: 'auth-code-single-use',
-    state: signedMcpState(),
-  }
-}
-
-/** A provider token-exchange response that would succeed if reached. */
 function okTokenFetch() {
-  return vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({
+  return vi.fn(async () =>
+    Response.json({
       access_token: 'access-token',
       refresh_token: 'refresh-token',
       expires_in: 3600,
       token_type: 'Bearer',
-    }),
-  })) as unknown as typeof fetch
+    })
+  ) as unknown as typeof fetch
 }
 
-function buildDeps(
-  opts: {
-    subject?: McpServerOAuthSubject
-    contextIds?: string[]
-    fetchFn?: typeof fetch
-    secretReader?: CallbackDeps['secretReader']
-    db?: CallbackDeps['db']
-    userContextsReader?: CallbackDeps['userContextsReader']
-    userServerAccessReader?: CallbackDeps['userServerAccessReader']
-  } = {}
-): CallbackDeps {
-  const secretReader =
-    opts.secretReader ??
-    ({
-      read: vi.fn(async () => ({ client_id: 'cid', client_secret: 'csec' })),
-    } as unknown as CallbackDeps['secretReader'])
-  const db =
-    opts.db ??
-    ({
-      query: vi.fn(async () => ({ rowCount: 1, rows: [{ id: 'grant-1' }] })),
-    } as unknown as CallbackDeps['db'])
-  const userContextsReader =
-    opts.userContextsReader ?? vi.fn(async () => ({ contextIds: opts.contextIds ?? [] }))
+async function installServer(
+  gateway: InstanceType<typeof MockGateway>,
+  grantScope: 'user' | 'context'
+): Promise<string> {
+  const created = (await gateway.createResource(
+    'mcpservers',
+    {
+      metadata: { name: SERVER },
+      spec: {
+        transport: { type: 'streamableHttp', url: 'https://gdrive.example.com/mcp' },
+        auth: { type: 'oauth' },
+        oauth: {
+          id: OAUTH_CLIENT_ID,
+          provider: 'google',
+          clientIdRef: { name: 'oauth-secret', key: 'client_id' },
+          clientSecretRef: { name: 'oauth-secret', key: 'client_secret' },
+          grantScope,
+        },
+      },
+    },
+    NS
+  )) as { metadata: { uid: string } }
+  gateway.seedSecret('oauth-secret', NS, {
+    data: {
+      client_id: Buffer.from('cid').toString('base64'),
+      client_secret: Buffer.from('csec').toString('base64'),
+    },
+  })
+  return created.metadata.uid
+}
+
+function input(contextId?: string): CallbackInput {
   return {
-    db,
-    recipeReader: { read: vi.fn(async () => null) },
-    secretReader,
-    mcpServerReader: { read: vi.fn(async () => opts.subject ?? mcpSubject()) },
-    userContextsReader,
-    // Absent unless a test wires it, so the unwired (fail-closed) case is real.
-    ...('userServerAccessReader' in opts
-      ? { userServerAccessReader: opts.userServerAccessReader }
-      : {}),
-    fetchFn: opts.fetchFn ?? okTokenFetch(),
-    stateSecret: STATE_SECRET,
-    encryptionKey: ENCRYPTION_KEY,
+    target: { kind: 'client', id: OAUTH_CLIENT_ID, redirectUri: 'https://example.test/cb' },
+    code: 'auth-code-single-use',
+    state: signOAuthState(config.oauthStateHmacSecret, {
+      subjectKind: 'mcp',
+      mcpServerName: SERVER,
+      userId: USER_ID,
+      oauthClientId: OAUTH_CLIENT_ID,
+      grantKind: 'user',
+      background: false,
+      ...(contextId !== undefined ? { contextId } : {}),
+    }),
   }
 }
 
-describe('handleOAuthCallback — mcp context membership guard (R3-L1)', () => {
-  it('denies a non-member WITHOUT exchanging the auth-code or reading secrets', async () => {
-    const fetchFn = okTokenFetch()
-    const secretReader = {
-      read: vi.fn(async () => ({ client_id: 'cid', client_secret: 'csec' })),
-    } as unknown as CallbackDeps['secretReader']
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'context', contextRef: CONTEXT_REF }),
-      contextIds: [], // user is NOT a member of ctx-1
-      fetchFn,
-      secretReader,
-    })
+function grantWrites(): Array<[string, unknown[]]> {
+  return mockPoolQuery.mock.calls.filter(
+    ([sql]) => typeof sql === 'string' && sql.includes('oauth_grants')
+  ) as Array<[string, unknown[]]>
+}
 
-    const result = await handleOAuthCallback(input(), deps)
+describe('handleOAuthCallback — mcp access guards before the exchange', () => {
+  let gateway: InstanceType<typeof MockGateway>
+  let fetchFn: typeof fetch
 
-    // Observable outcome (T4).
-    expect(result.kind).toBe('context_membership_denied')
-    // The heart of the fix (R3-L1): the single-use auth-code is NOT burned.
-    expect(fetchFn).not.toHaveBeenCalled()
-    expect(secretReader.read).not.toHaveBeenCalled()
-    // And nothing was persisted.
-    expect(deps.db.query as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+  beforeEach(() => {
+    gateway = new MockGateway(NS)
+    mockPoolQuery.mockReset()
+    fetchFn = okTokenFetch()
   })
 
-  it('rejects a context grant with no contextRef WITHOUT exchanging the auth-code', async () => {
-    // The sibling guard the same reorder moved ahead of the exchange (F2): a
-    // context-scoped server with no authoritative contextRef must also short
-    // out before `exchangeAuthCode`, never burning the single-use code.
-    const fetchFn = okTokenFetch()
-    const secretReader = {
-      read: vi.fn(async () => ({ client_id: 'cid', client_secret: 'csec' })),
-    } as unknown as CallbackDeps['secretReader']
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'context', contextRef: undefined }),
-      fetchFn,
-      secretReader,
+  function deps() {
+    return { ...buildOAuthCallbackDeps(gateway as never), fetchFn }
+  }
+
+  describe('context flavor', () => {
+    beforeEach(async () => {
+      await installServer(gateway, 'context')
+      await seedAllowlistedContext(gateway, CONTEXT, [SERVER], config.contextsNamespace)
     })
 
-    const result = await handleOAuthCallback(input(), deps)
+    it('denies a user who does not reach the signed Context WITHOUT exchanging', async () => {
+      membership(mockPoolQuery, { contexts: {} })
 
-    expect(result.kind).toBe('server_missing_context')
-    expect(fetchFn).not.toHaveBeenCalled()
-    expect(secretReader.read).not.toHaveBeenCalled()
-    expect(deps.db.query as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+      const result = await handleOAuthCallback(input(CONTEXT), deps())
+
+      expect(result.kind).toBe('context_membership_denied')
+      expect(fetchFn).not.toHaveBeenCalled()
+      expect(grantWrites()).toHaveLength(0)
+    })
+
+    it('denies when the signed Context no longer allowlists the server WITHOUT exchanging', async () => {
+      membership(mockPoolQuery, { contexts: { [USER_ID]: ['ctx-2'] } })
+      await seedAllowlistedContext(gateway, 'ctx-2', [], config.contextsNamespace)
+
+      const result = await handleOAuthCallback(input('ctx-2'), deps())
+
+      expect(result.kind).toBe('context_membership_denied')
+      expect(fetchFn).not.toHaveBeenCalled()
+      expect(grantWrites()).toHaveLength(0)
+    })
+
+    it('refuses a state that names no Context as outdated WITHOUT exchanging or reading', async () => {
+      membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } })
+
+      const result = await handleOAuthCallback(input(), deps())
+
+      expect(result.kind).toBe('oauth_state_outdated')
+      expect(fetchFn).not.toHaveBeenCalled()
+      expect(mockPoolQuery).not.toHaveBeenCalled()
+    })
+
+    it('bootstraps the shared grant of the signed Context for a direct member', async () => {
+      membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } }, () =>
+        Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
+      )
+
+      const result = await handleOAuthCallback(input(CONTEXT), deps())
+
+      expect(result.kind).toBe('ok')
+      if (result.kind === 'ok') {
+        expect(result.source).toBe('mcp')
+        expect(result.mcpServerName).toBe(SERVER)
+        expect(result.userId).toBe(USER_ID)
+      }
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      const writes = grantWrites()
+      expect(writes).toHaveLength(1)
+      expect(writes[0][0]).toContain('INSERT INTO oauth_grants')
+      expect(writes[0][0]).toContain("'shared'")
+      // Same-uid conflict no-ops (first consent wins); a different uid is replaced.
+      expect(writes[0][0]).toContain('DO UPDATE SET')
+      expect(writes[0][0]).toContain('oauth_grants.cr_uid IS DISTINCT FROM EXCLUDED.cr_uid')
+      // owner_kind, recipe_namespace, recipe_name, context_id, oauth_client_id, bootstrapper
+      expect(writes[0][1].slice(0, 6)).toEqual([
+        'mcpserver',
+        NS,
+        SERVER,
+        CONTEXT,
+        OAUTH_CLIENT_ID,
+        USER_ID,
+      ])
+    })
+
+    it('bootstraps for a user who reaches the signed Context only through an agent', async () => {
+      await seedAgentHost(gateway, 'host-1', CONTEXT)
+      membership(mockPoolQuery, { agents: { [USER_ID]: ['host-1'] } }, () =>
+        Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
+      )
+
+      const result = await handleOAuthCallback(input(CONTEXT), deps())
+
+      expect(result.kind).toBe('ok')
+      expect(grantWrites()[0][1][3]).toBe(CONTEXT)
+    })
+
+    it('seals the shared grant with the uid of the CR it read', async () => {
+      const uid = (
+        (await gateway.getResource('mcpservers', SERVER, NS)) as {
+          metadata: { uid: string }
+        }
+      ).metadata.uid
+      membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } }, () =>
+        Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
+      )
+
+      const result = await handleOAuthCallback(input(CONTEXT), deps())
+
+      expect(result.kind).toBe('ok')
+      // cr_uid is the last positional param of the shared INSERT.
+      expect(grantWrites()[0][1].at(-1)).toBe(uid)
+    })
+
+    it('fails closed WITHOUT exchanging when no context access reader is wired', async () => {
+      membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } })
+      const { contextAccessReader: _unwired, ...rest } = deps()
+
+      const result = await handleOAuthCallback(input(CONTEXT), rest)
+
+      expect(result.kind).toBe('context_membership_denied')
+      expect(fetchFn).not.toHaveBeenCalled()
+    })
   })
 
-  it('bootstraps a shared grant for a Context member (happy path, no regression)', async () => {
-    const fetchFn = okTokenFetch()
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'context', contextRef: CONTEXT_REF }),
-      contextIds: [CONTEXT_REF], // member
-      fetchFn,
+  describe('user flavor', () => {
+    let uid: string
+    beforeEach(async () => {
+      uid = await installServer(gateway, 'user')
     })
 
-    const result = await handleOAuthCallback(input(), deps)
+    it('an enabled user exchanges and upserts, sealed with the CR uid', async () => {
+      await seedAllowlistedContext(gateway, CONTEXT, [SERVER], config.contextsNamespace)
+      membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } }, () =>
+        Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
+      )
 
-    expect(result.kind).toBe('ok')
-    if (result.kind === 'ok') {
-      expect(result.source).toBe('mcp')
-      expect(result.mcpServerName).toBe(MCP_SERVER_NAME)
-      expect(result.userId).toBe(USER_ID)
-    }
-    // Exchange ran and the shared grant was persisted (bootstrap INSERT).
-    expect(fetchFn).toHaveBeenCalledTimes(1)
-    const query = deps.db.query as ReturnType<typeof vi.fn>
-    expect(query).toHaveBeenCalledTimes(1)
-    expect(String(query.mock.calls[0][0])).toContain('INSERT INTO oauth_grants')
-    expect(String(query.mock.calls[0][0])).toContain("'shared'")
-  })
+      const result = await handleOAuthCallback(input(), deps())
 
-  // The per-user happy path now requires a Context of the user that enables the
-  // server (previously the per-user path ran no access check at all).
-  it('per-user grant path: an enabled user exchanges and upserts', async () => {
-    const fetchFn = okTokenFetch()
-    const userContextsReader = vi.fn(async () => ({ contextIds: [] }))
-    const userServerAccessReader = vi.fn(async () => true)
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'user', contextRef: undefined }),
-      fetchFn,
-      userContextsReader,
-      userServerAccessReader,
+      expect(result.kind).toBe('ok')
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      const writes = grantWrites()
+      expect(writes).toHaveLength(1)
+      expect(writes[0][0]).toContain('INSERT INTO oauth_grants')
+      expect(writes[0][0]).toContain("'user'")
+      expect(writes[0][1].at(-1)).toBe(uid)
     })
 
-    const result = await handleOAuthCallback(input(), deps)
+    it('a Context signed into the state plays no part in the per-user flavor', async () => {
+      await seedAllowlistedContext(gateway, CONTEXT, [SERVER], config.contextsNamespace)
+      membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } }, () =>
+        Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
+      )
 
-    expect(result.kind).toBe('ok')
-    if (result.kind === 'ok') {
-      expect(result.source).toBe('mcp')
-    }
-    expect(fetchFn).toHaveBeenCalledTimes(1)
-    // Access is checked for the SIGNED initiator and the SIGNED server name.
-    expect(userServerAccessReader).toHaveBeenCalledWith(USER_ID, MCP_SERVER_NAME)
-    // The per-user path never consults the contextRef membership reader.
-    expect(userContextsReader).not.toHaveBeenCalled()
-    const query = deps.db.query as ReturnType<typeof vi.fn>
-    expect(query).toHaveBeenCalledTimes(1)
-    expect(String(query.mock.calls[0][0])).toContain('INSERT INTO oauth_grants')
-    expect(String(query.mock.calls[0][0])).toContain("'user'")
-  })
+      const result = await handleOAuthCallback(input('nowhere'), deps())
 
-  it('per-user: no Context of the user enables the server → denied WITHOUT exchanging', async () => {
-    const fetchFn = okTokenFetch()
-    const secretReader = {
-      read: vi.fn(async () => ({ client_id: 'cid', client_secret: 'csec' })),
-    } as unknown as CallbackDeps['secretReader']
-    const userServerAccessReader = vi.fn(async () => false)
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'user', contextRef: CONTEXT_REF }),
-      // Membership in the server's contextRef is irrelevant for this flavor.
-      contextIds: [CONTEXT_REF],
-      fetchFn,
-      secretReader,
-      userServerAccessReader,
+      expect(result.kind).toBe('ok')
     })
 
-    const result = await handleOAuthCallback(input(), deps)
+    it('no Context of the user enables the server → denied WITHOUT exchanging', async () => {
+      await seedAllowlistedContext(gateway, CONTEXT, ['another-server'], config.contextsNamespace)
+      membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } })
 
-    expect(result.kind).toBe('context_membership_denied')
-    expect(userServerAccessReader).toHaveBeenCalledWith(USER_ID, MCP_SERVER_NAME)
-    expect(fetchFn).not.toHaveBeenCalled()
-    expect(secretReader.read).not.toHaveBeenCalled()
-    expect(deps.db.query as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
-  })
+      const result = await handleOAuthCallback(input(), deps())
 
-  it('per-user: fails closed WITHOUT exchanging when no access reader is wired', async () => {
-    const fetchFn = okTokenFetch()
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'user', contextRef: CONTEXT_REF }),
-      contextIds: [CONTEXT_REF],
-      fetchFn,
-      userServerAccessReader: undefined,
+      expect(result.kind).toBe('context_membership_denied')
+      expect(fetchFn).not.toHaveBeenCalled()
+      expect(grantWrites()).toHaveLength(0)
     })
 
-    const result = await handleOAuthCallback(input(), deps)
+    it('fails closed WITHOUT exchanging when no access reader is wired', async () => {
+      await seedAllowlistedContext(gateway, CONTEXT, [SERVER], config.contextsNamespace)
+      membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } })
+      const { userServerAccessReader: _unwired, ...rest } = deps()
 
-    expect(result.kind).toBe('context_membership_denied')
-    expect(fetchFn).not.toHaveBeenCalled()
-    expect(deps.db.query as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
-  })
+      const result = await handleOAuthCallback(input(), rest)
 
-  // R3-H5 (D-T3): the subject's CR uid seals the grant so a same-name reinstall's
-  // teardown never purges this installation's consent.
-  it('seals a shared bootstrap grant with the subject cr_uid', async () => {
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'context', contextRef: CONTEXT_REF, crUid: 'uid-live-cr' }),
-      contextIds: [CONTEXT_REF],
+      expect(result.kind).toBe('context_membership_denied')
+      expect(fetchFn).not.toHaveBeenCalled()
     })
-
-    const result = await handleOAuthCallback(input(), deps)
-    expect(result.kind).toBe('ok')
-
-    const query = deps.db.query as ReturnType<typeof vi.fn>
-    const [sql, values] = query.mock.calls[0]
-    expect(String(sql)).toContain('INSERT INTO oauth_grants')
-    expect(String(sql)).toContain("'shared'")
-    // cr_uid is the last positional param of the shared INSERT.
-    expect((values as unknown[]).at(-1)).toBe('uid-live-cr')
-  })
-
-  it('seals a per-user grant with the subject cr_uid', async () => {
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'user', contextRef: undefined, crUid: 'uid-live-cr' }),
-      userContextsReader: vi.fn(async () => ({ contextIds: [] })),
-      userServerAccessReader: vi.fn(async () => true),
-    })
-
-    const result = await handleOAuthCallback(input(), deps)
-    expect(result.kind).toBe('ok')
-
-    const query = deps.db.query as ReturnType<typeof vi.fn>
-    const [sql, values] = query.mock.calls[0]
-    expect(String(sql)).toContain('INSERT INTO oauth_grants')
-    expect(String(sql)).toContain("'user'")
-    // cr_uid is the last positional param of the user INSERT.
-    expect((values as unknown[]).at(-1)).toBe('uid-live-cr')
   })
 
   // Pins current behaviour for a subject read from a CR without `metadata.uid`,
@@ -305,17 +284,19 @@ describe('handleOAuthCallback — mcp context membership guard (R3-L1)', () => {
   // instead of failing closed. Such a row is still purgeable by any teardown, but
   // the readers only serve it to a baked key of the same provider.
   it('persists cr_uid NULL for a subject read from a CR without a uid (current behaviour)', async () => {
-    const deps = buildDeps({
-      subject: mcpSubject({ grantScope: 'user', contextRef: undefined, crUid: undefined }),
-      userContextsReader: vi.fn(async () => ({ contextIds: [] })),
-      userServerAccessReader: vi.fn(async () => true),
-    })
+    await installServer(gateway, 'user')
+    const cr = (await gateway.getResource('mcpservers', SERVER, NS)) as {
+      metadata: Record<string, unknown>
+    }
+    delete cr.metadata.uid
+    await seedAllowlistedContext(gateway, CONTEXT, [SERVER], config.contextsNamespace)
+    membership(mockPoolQuery, { contexts: { [USER_ID]: [CONTEXT] } }, () =>
+      Promise.resolve({ rows: [{ id: 'grant-1' }], rowCount: 1 })
+    )
 
-    const result = await handleOAuthCallback(input(), deps)
+    const result = await handleOAuthCallback(input(), deps())
+
     expect(result.kind).toBe('ok')
-
-    const query = deps.db.query as ReturnType<typeof vi.fn>
-    const [, values] = query.mock.calls[0]
-    expect((values as unknown[]).at(-1)).toBeNull()
+    expect(grantWrites()[0][1].at(-1)).toBeNull()
   })
 })

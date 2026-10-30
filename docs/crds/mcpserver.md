@@ -12,13 +12,17 @@ McpServer defines an MCP (Model Context Protocol) server that provides tools to
 the LLM. The context-mapper watches these CRDs, manages runtime resources for
 HCC-owned servers, and exposes discovery/status for WRC-owned servers.
 
+An McpServer does not belong to a Context. A Context exposes a server by listing
+its name in [`Context.spec.mcpServers`](context.md), and several Contexts can list
+the same server. Installing a server writes no Context allowlist; enabling it for
+an agent is a separate edit of that agent's Context.
+
 ## Spec Fields
 
 ### Core
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `spec.contextRef` | string | yes | -- | Reference to the Context this server belongs to. |
 | `spec.description` | string | no | -- | Human-readable description of what this MCP server does. |
 | `spec.image` | string | yes | -- | Docker image for the MCP server container (e.g. `mongodb/mongodb-mcp-server:latest`). |
 | `spec.imagePullPolicy` | string | no | _(none)_ | Image pull policy. One of: `Always`, `IfNotPresent`, `Never`. The schema sets no default; if omitted, HCC applies `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` (default `IfNotPresent`). |
@@ -75,7 +79,7 @@ after creation:
 | `oauth.clientIdRef` / `oauth.clientSecretRef` | all | `{name, key}` of Secrets in the `mcp-server` namespace (control-api's `CONTROL_API_MCP_SERVERS_NAMESPACE`) holding the client id / secret. |
 | `oauth.scopes[]` | all | Scopes to request. Include the provider's offline/refresh scope when `backgroundAccess` is true. |
 | `oauth.backgroundAccess` | all | Allow use by a workload with no live human session. |
-| `oauth.grantScope` | all | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context, which one member bootstraps and others inherit. Immutable. |
+| `oauth.grantScope` | all | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context that enables the server in its `spec.mcpServers`, which one member bootstraps and others inherit. Immutable. |
 | `oauth.source` | — | absent (built-in), `remote`, or `generic`. Immutable. |
 | `oauth.clientMode` | remote | `public` (PKCE, no secret) or `confidential`. |
 | `oauth.authorizationEndpoint`, `tokenEndpoint`, `resource` | remote, generic | Pinned endpoints; `resource` is the RFC 8707 resource indicator. |
@@ -238,11 +242,11 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 
 ## Additional Printer Columns
 
-`kubectl get mcpservers` displays: Context, Image, Transport, URL, Enabled, Managed, Ready.
+`kubectl get mcpservers` displays: Image, Transport, URL, Enabled, Managed, Ready. To see which Contexts expose a server, read `spec.mcpServers` with `kubectl get contexts`.
 
 ## CRD Validation Rules
 
-- WRC-owned servers (`managed: false`) still require `transport` and `contextRef`.
+- WRC-owned servers (`managed: false`) still require `transport`.
 - For `managed: false`, WRC owns runtime isolation, including runtime NetworkPolicies; HCC exposes discovery/status and does not create or delete WRC-owned runtime policies.
 - `spec.managed` is immutable after creation; omit is treated as the default `true`.
 - Each egress binding must have exactly one of `dns` or `cidr` (not both, not neither).
@@ -269,7 +273,6 @@ kind: McpServer
 metadata:
   name: github-server
 spec:
-  contextRef: context1
   description: Provides GitHub repository management tools
   image: mcp/github:latest
   transport:
@@ -306,7 +309,7 @@ spec:
 
 ## Related
 
-- [Context CRD](context.md) -- referenced via `spec.contextRef`
+- [Context CRD](context.md) -- lists this server's name in `spec.mcpServers` to expose it
 - [Host CRD](host.md) -- indirectly connected through Context
 - [CRD Index](README.md)
 - Examples: [github](../../charts/clerum-crds/examples/mcpserver-github.yaml), [postgres](../../charts/clerum-crds/examples/mcpserver-postgres.yaml), [filesystem](../../charts/clerum-crds/examples/mcpserver-filesystem.yaml)

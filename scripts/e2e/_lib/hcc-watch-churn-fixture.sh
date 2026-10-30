@@ -182,14 +182,12 @@ EOF
   # Lifecycle suites supply their own real MCP fixtures and need no filler.
   if (( n_mcp > 0 )); then
   { for ((i = 1; i <= n_mcp; i++)); do
-    ctx="$(printf '%s-ctx-%03d' "$FLEET_PREFIX" $(((i % n_ctx) + 1)))"
     cat <<EOF
 ---
 apiVersion: clerum.io/v1alpha1
 kind: McpServer
 metadata: {name: $(printf '%s-mcp-%03d' "$FLEET_PREFIX" "$i"), namespace: ${MCP_NS}, labels: {e2e.clerum.io/suite: hcc-watch-churn, e2e.clerum.io/run: "${RUN_ID}"}}
 spec:
-  contextRef: ${ctx}
   description: "churn fleet mcp server"
   image: ${HCC_IMAGE}
   imagePullPolicy: Never

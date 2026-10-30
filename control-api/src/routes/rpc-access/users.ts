@@ -142,7 +142,8 @@ export function createRpcAccessUsersRouter(
           config.mcpServersNamespace,
           userContexts.contextIds,
           req.params.userId,
-          { query: (text, values) => pool.query(text, values) }
+          { query: (text, values) => pool.query(text, values) },
+          config.contextsNamespace
         )
         res.status(200).json({
           userId: req.params.userId,
@@ -171,6 +172,7 @@ export function createRpcAccessUsersRouter(
           gateway,
           {
             mcpServersNamespace: config.mcpServersNamespace,
+            contextsNamespace: config.contextsNamespace,
             hostsNamespace: config.hostsNamespace,
             agentNames,
             userId: req.params.userId,

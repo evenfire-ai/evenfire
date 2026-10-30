@@ -6,7 +6,6 @@ import { type DbClient, type DbTransactionClient, pool, withTransaction } from '
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { extractK8sError } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
-import { RFC1123_RE } from '../../http/rfc1123.js'
 import { type ValidationError, validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { type UiAuthedRequest } from '../../middleware/controlUIAuth.js'
@@ -59,7 +58,6 @@ import {
   remoteCallbackVariant,
 } from '../../oauth/remoteCallback.js'
 import { rootLogger } from '../../observability/logger.js'
-import { attachServerToContext } from '../../services/contextAllowlist.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import type { SecretSnapshot } from '../../services/secretRepository.js'
 import type { ResourcePreconditions } from '../../types.js'
@@ -78,8 +76,9 @@ import { normalizeConfiguredOrigin } from '../external/oauthCallback.js'
  *     discovery server-side (D-4: discover only at install, then pin), probe the MCP
  *     transport as a hard gate (a provably-dead 404/405 path is a 400
  *     `transport_unreachable` BEFORE any AS mint or K8s write), then create the Secret
- *     (confidential only) + McpServer CR + attach to the Context, with compensating
- *     rollback that preserves the original error.
+ *     (confidential only) + McpServer CR, with compensating rollback that preserves
+ *     the original error. The install owns no Context: enabling the server for an
+ *     agent is a later Context allowlist edit.
  *
  * The written `spec.oauth` remote shape is the C3 CRD contract (see
  * {@link buildRemoteOAuthSpec}). It is NOT admissible by the current CRD — C3
@@ -126,11 +125,11 @@ const discoverBodySchema = z.object({
   authorizationServer: authorizationServerSchema.optional(),
 })
 
-// Install body: serverName + contextRef + baseUrl + registration mode. A
-// pre-registered confidential client also carries clientId/clientSecret.
+// Install body: serverName + baseUrl + registration mode. A pre-registered confidential
+// client also carries clientId/clientSecret. Unknown keys are dropped, so an older client
+// still sending `contextRef` installs the same server.
 const installBodySchema = z.object({
   serverName: z.string().min(1),
-  contextRef: z.string().min(1),
   baseUrl: z.string().min(1),
   mode: z.enum(['cimd', 'pre-registered', 'dcr']),
   clientId: z.string().min(1).max(MAX_CLIENT_ID_LENGTH).optional(),
@@ -666,10 +665,6 @@ export function createAdminRemoteMcpRouter(
         })
         return
       }
-      if (!RFC1123_RE.test(body.contextRef)) {
-        res.status(400).json({ error: 'invalid contextRef' })
-        return
-      }
 
       // A pre-registered install must carry the operator-supplied credentials up
       // front (they become the K8s Secret). CIMD/DCR carry none here.
@@ -1004,7 +999,6 @@ export function createAdminRemoteMcpRouter(
 
       const targetNs = config.mcpServersNamespace
       const serverName = body.serverName
-      const contextRef = body.contextRef
       const grantScope = body.grantScope ?? 'user'
 
       const managedLabels: Record<string, string> = {
@@ -1045,20 +1039,6 @@ export function createAdminRemoteMcpRouter(
       }
 
       if (body.mode === 'dcr') {
-        // Cheap read-only precheck so a bad contextRef does not mint a throwaway
-        // client at the AS. The attach step re-reads and remains authoritative.
-        try {
-          await gateway.getResource('contexts', contextRef)
-        } catch (err) {
-          const k8sErr = extractK8sError(err)
-          const notFound = err instanceof K8sNotFoundError
-          if (notFound || k8sErr?.status === 404) {
-            res.status(404).json({ error: `context "${contextRef}" not found` })
-            return
-          }
-          throw err
-        }
-
         const registrationEndpoint = discovery.endpoints.registration
         if (!registrationEndpoint) {
           res.status(400).json({
@@ -1387,7 +1367,6 @@ export function createAdminRemoteMcpRouter(
 
       const mcpServerSpec: Record<string, unknown> = {
         image: REMOTE_MCP_EGRESS_PROXY_IMAGE,
-        contextRef,
         enabled: true,
         managed: true,
         transport: {
@@ -1597,7 +1576,7 @@ export function createAdminRemoteMcpRouter(
           ))
         } catch (err) {
           // A thrown bind (DB error) would otherwise strand the created CR, the pending
-          // row and the minted AS client at once. Compensate all three, like steps 2/3.
+          // row and the minted AS client at once. Compensate all three.
           await rollbackCreatedServer()
           await rollbackDynamicClient()
           throw err
@@ -1618,61 +1597,11 @@ export function createAdminRemoteMcpRouter(
         }
       }
 
-      // ── Saga step 3: attach to the Context allowlist (rollback CR+Secret) ──
-      try {
-        await attachServerToContext(gateway, { name: contextRef }, serverName)
-      } catch (err) {
-        try {
-          await gateway.deleteResource(
-            'mcpservers',
-            serverName,
-            targetNs,
-            createdServerPreconditions
-          )
-          await waitForDeletion(
-            () => gateway.getResource('mcpservers', serverName, targetNs),
-            `McpServer/${serverName}`
-          )
-        } catch {
-          // Best-effort rollback; preserve the original attach error.
-        }
-        if (createdClientSecretSnapshot && clientSecretName) {
-          try {
-            await gateway.deleteSecret(clientSecretName, targetNs, {
-              uid: createdClientSecretSnapshot.uid,
-              resourceVersion: createdClientSecretSnapshot.resourceVersion,
-            })
-            await waitForDeletion(
-              () => gateway.getSecret(clientSecretName, targetNs),
-              `Secret/${clientSecretName}`
-            )
-          } catch {
-            // Best-effort rollback; preserve the original attach error.
-          }
-        }
-        // Compensate a DCR registration made in step 0 (local delete + best-effort 7592).
-        await rollbackDynamicClient()
-        const k8sErr = extractK8sError(err)
-        const notFound = err instanceof K8sNotFoundError
-        const message =
-          k8sErr?.message ||
-          (notFound
-            ? `context "${contextRef}" not found`
-            : err instanceof Error
-              ? err.message
-              : 'Failed to update Context allowlist')
-        res
-          .status(k8sErr?.status ?? (notFound ? 404 : 500))
-          .json({ error: `Context allowlist update failed: ${message}` })
-        return
-      }
-
       log.info(
         {
           event: 'remote_oauth_server_installed',
           serverName,
           namespace: targetNs,
-          contextRef,
           clientMode: effectiveClientMode,
           registrationMode: discovery.registrationMode,
         },
@@ -1683,8 +1612,6 @@ export function createAdminRemoteMcpRouter(
       res.status(201).json({
         serverName,
         namespace: targetNs,
-        contextRef,
-        contextUpdated: true,
         clientMode: effectiveClientMode,
         registrationMode: discovery.registrationMode,
         callbackVariant,

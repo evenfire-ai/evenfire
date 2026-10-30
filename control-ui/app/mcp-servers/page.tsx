@@ -25,7 +25,6 @@ import {
   connectorAccessMutationError,
   connectorAgentBindingsFromContexts,
   connectorAgentTargetsFromHosts,
-  connectorResourceKey,
 } from '../../lib/connectorAccessManagement'
 
 export default function McpServersPage() {
@@ -114,11 +113,10 @@ export default function McpServersPage() {
     agents: Array<{ name: string; contextRef: string }>
   ): Promise<boolean> {
     const key = `${server.namespace}/${server.name}`
-    const connector = mcpServers.find(item => connectorResourceKey(item) === key)
     setUpdatingAgentAccessKey(key)
     setError('')
     try {
-      await addConnectorToAgentContexts(server, agents, contexts, connector?.spec)
+      await addConnectorToAgentContexts(server, agents, contexts)
       await loadAll()
       showToast(
         agents.length === 1

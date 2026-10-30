@@ -535,10 +535,13 @@ export class RpcProxyClient {
   /**
    * Disconnect (revoke) an mcp-server's OAuth grant (spec 11 U4). Mirrors the
    * authorize-URL mint route but as a `DELETE`; the `userId` is derived by
-   * rpc-proxy from `auth.sub` and is NEVER sent in the body (invariant 3). The
-   * optional `contextId` is only a hint for the `oauth-context` flavor — control
-   * -api resolves the authoritative Context server-side. Idempotent: a missing
-   * grant answers 204. Throws `ApiError` (401/403-missing-scope → refresh retry).
+   * rpc-proxy from `auth.sub` and is NEVER sent in the body (invariant 3).
+   * `contextId` is required for a `grantScope: 'context'` server — it selects
+   * which Context's shared grant is revoked, and control-api answers 400
+   * `context_required` without it and 403 `context_membership_denied` unless the
+   * user reaches that Context. It is ignored for a per-user server. Idempotent: a
+   * missing grant answers 204. Throws `ApiError` (401/403-missing-scope → refresh
+   * retry).
    */
   async deleteMcpOauthGrant(
     rpcAccessToken: string,
