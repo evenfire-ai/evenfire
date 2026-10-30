@@ -5570,14 +5570,23 @@ export class AppService {
           HOST_WAKEABLE_OPERATION_SCOPES,
           effectiveHostRefs
         )
-        return this.rpcClient.continueModelStep(
-          retried.token,
-          targetHostRef,
-          targetAgent,
-          targetChatId,
-          targetCheckpointId,
-          version
-        )
+        try {
+          return await this.rpcClient.continueModelStep(
+            retried.token,
+            targetHostRef,
+            targetAgent,
+            targetChatId,
+            targetCheckpointId,
+            version
+          )
+        } catch (retryError) {
+          const retryAvailabilityError = AppService.toHostAvailabilityError(
+            targetHostRef,
+            retryError
+          )
+          if (retryAvailabilityError) throw retryAvailabilityError
+          throw retryError
+        }
       }
       throw error
     }
