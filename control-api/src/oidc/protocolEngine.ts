@@ -24,11 +24,9 @@ import {
   type ClaimedOidcProtocolAttempt,
   OIDC_PROTOCOL_ATTEMPT_TTL_MS,
   type OidcProtocolAttemptBinding,
-  cancelOidcProtocolAttempt,
   claimOidcProtocolAttempt,
   finishOidcProtocolAttempt,
   insertOidcProtocolAttempt,
-  preflightOidcProtocolAttempt,
 } from './protocolAttemptStore.js'
 import {
   OidcAttemptRejectedError,
@@ -36,7 +34,6 @@ import {
   OidcCredentialConfigurationError,
   type OidcOperationContext,
   OidcPersistenceFailure,
-  type OidcProtocolOutcome,
   OidcProviderIncompatibleError,
   OidcProviderUnavailableError,
   type OidcProviderValidationReason,
@@ -52,8 +49,6 @@ export type OidcProtocolDependencies = Readonly<{
   db: Pick<DbClient, 'query'>
   getClientSecret: () => string
   encryptionKeyHex: string
-  /** Server-owned claim names needed by the later eligibility-policy owner. */
-  policyEvidenceClaimNames?: readonly string[]
   now?: () => number
 }>
 
@@ -63,20 +58,6 @@ type TrustedConfiguration = Readonly<{
   profile: ValidatedOidcProviderProfile
   validatedAt: number
 }>
-
-function safePrimaryOutcome(
-  error: unknown,
-  transportFailure: OidcOperationContext['transportFailure']
-): OidcProtocolOutcome {
-  if (error instanceof OidcCallerCancelledError) return error.category
-  if (error instanceof OidcProviderUnavailableError || transportFailure?.kind === 'unavailable') {
-    return 'provider-unavailable'
-  }
-  if (error instanceof OidcProviderIncompatibleError) return error.category
-  if (error instanceof OidcPersistenceFailure) return error.category
-  if (transportFailure?.kind === 'incompatible') return 'provider-incompatible'
-  return 'attempt-rejected'
-}
 
 /**
  * The OIDC protocol engine stops at a validated external identity proof. It has
@@ -105,24 +86,11 @@ export type OidcVerifiedAttributes = Readonly<{
   locale?: string
 }>
 
-export interface OidcVerifiedClaimObject {
-  readonly [key: string]: OidcVerifiedClaimValue
-}
-
-export type OidcVerifiedClaimValue =
-  | string
-  | number
-  | boolean
-  | null
-  | readonly OidcVerifiedClaimValue[]
-  | OidcVerifiedClaimObject
-export type OidcVerifiedClaimObservation =
-  | Readonly<{ status: 'missing' }>
-  | Readonly<{ status: 'unsupported' }>
-  | Readonly<{ status: 'present'; value: OidcVerifiedClaimValue }>
+export type OidcVerifiedClaimScalar = string | number | boolean
+export type OidcVerifiedClaimValue = OidcVerifiedClaimScalar | readonly OidcVerifiedClaimScalar[]
 export type OidcVerifiedClaimEvidence = Readonly<{
   source: 'validated_id_token'
-  claims: Readonly<Record<string, OidcVerifiedClaimObservation>>
+  claims: Readonly<Record<string, OidcVerifiedClaimValue>>
 }>
 
 export type VerifiedOidcIdentityProof = Readonly<{
@@ -145,11 +113,6 @@ const MAX_VERIFIED_CLAIMS_BYTES = 16_384
 const MAX_VERIFIED_CLAIM_NAME_LENGTH = 128
 const MAX_VERIFIED_CLAIM_STRING_LENGTH = 512
 const MAX_VERIFIED_CLAIM_ARRAY_LENGTH = 32
-const MAX_VERIFIED_CLAIM_OBJECT_KEYS = 32
-const MAX_VERIFIED_CLAIM_DEPTH = 8
-const MAX_VERIFIED_CLAIM_NODES = 256
-const MAX_VERIFIED_CLAIM_VALUE_BYTES = 4096
-const BASE_VERIFIED_CLAIM_NAMES = ['email', 'email_verified'] as const
 const OIDC_PROTOCOL_CLAIMS = new Set([
   'iss',
   'sub',
@@ -226,16 +189,11 @@ export function parseOidcCallbackUrl(
 export class OidcProtocolEngine {
   private cachedConfiguration?: TrustedConfiguration
   private readonly operationContext = new AsyncLocalStorage<OidcOperationContext>()
-  private readonly policyEvidenceClaimNames: readonly string[]
 
   constructor(
     private readonly provider: OidcProviderConfiguration,
     private readonly dependencies: OidcProtocolDependencies
-  ) {
-    this.policyEvidenceClaimNames = this.validatePolicyEvidenceClaimNames(
-      dependencies.policyEvidenceClaimNames ?? []
-    )
-  }
+  ) {}
 
   async validateProvider(options: { signal?: AbortSignal } = {}): Promise<OidcProviderValidation> {
     return this.operationContext.run({ signal: options.signal }, async () => {
@@ -254,10 +212,9 @@ export class OidcProtocolEngine {
     })
   }
 
-  async beginIdentityProofAttempt(options: {
-    browserBinding: string
-    signal?: AbortSignal
-  }): Promise<{ authorizationUrl: string; expiresAt: Date }> {
+  async beginIdentityProofAttempt(
+    options: { signal?: AbortSignal } = {}
+  ): Promise<{ authorizationUrl: string; expiresAt: Date }> {
     return this.operationContext.run({ signal: options.signal }, async () => {
       const trusted = await this.getTrustedConfiguration()
       const now = this.now()
@@ -274,7 +231,6 @@ export class OidcProtocolEngine {
           {
             ...this.binding(trusted.profile),
             state,
-            browserBinding: options.browserBinding,
             pkceVerifier,
             nonce,
             expiresAt,
@@ -302,7 +258,6 @@ export class OidcProtocolEngine {
   async completeIdentityProofAttempt(
     input: {
       state: string
-      browserBinding?: string
       code: string
       issuer?: string
     },
@@ -322,7 +277,6 @@ export class OidcProtocolEngine {
 
   private async completeIdentityProofAttemptInternal(input: {
     state: string
-    browserBinding?: string
     code: string
     issuer?: string
   }): Promise<VerifiedOidcIdentityProof> {
@@ -342,25 +296,6 @@ export class OidcProtocolEngine {
       )
     }
     this.assertCurrentGeneration()
-
-    let preflightPassed: boolean
-    try {
-      preflightPassed = await preflightOidcProtocolAttempt(
-        this.dependencies.db,
-        input.state,
-        input.browserBinding ?? '',
-        this.configuredBinding()
-      )
-    } catch {
-      throw new OidcPersistenceFailure('preflight')
-    }
-    if (!preflightPassed) {
-      throw new OidcAttemptRejectedError(
-        'expired-or-replayed',
-        'OIDC authorization attempt is expired or already used'
-      )
-    }
-
     const trusted = await this.getTrustedConfiguration()
     const hasIssuerBinding = trusted.profile.authorizationResponseIssuerParameterSupported
     if (hasIssuerBinding && input.issuer !== this.provider.issuer) {
@@ -382,7 +317,6 @@ export class OidcProtocolEngine {
         this.dependencies.db,
         this.dependencies.encryptionKeyHex,
         input.state,
-        input.browserBinding ?? '',
         this.binding(trusted.profile)
       )
     } catch {
@@ -413,27 +347,16 @@ export class OidcProtocolEngine {
           'OIDC response did not contain a validated ID token'
         )
       const proof = this.createVerifiedProof(claims, claimed)
-      let finalized: boolean
-      try {
-        finalized = await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'completed')
-      } catch {
-        throw new OidcPersistenceFailure('finalize')
-      }
-      if (!finalized) throw new OidcPersistenceFailure('finalize')
+      const finalized = await finishOidcProtocolAttempt(
+        this.dependencies.db,
+        claimed.id,
+        'completed'
+      )
+      if (!finalized) throw new Error('OIDC attempt completion was not persisted')
       return proof
     } catch (error) {
+      await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'failed')
       const transportFailure = this.operationContext.getStore()?.transportFailure
-      try {
-        const failed = await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'failed')
-        if (!failed) throw new Error('OIDC attempt failure was not persisted')
-      } catch {
-        throw new OidcPersistenceFailure(
-          'finalize',
-          safePrimaryOutcome(error, transportFailure),
-          error instanceof OidcPersistenceFailure ? error.operation : undefined
-        )
-      }
-      if (error instanceof OidcPersistenceFailure) throw error
       if (error instanceof OidcCallerCancelledError) throw error
       if (
         error instanceof OidcProviderUnavailableError ||
@@ -449,32 +372,6 @@ export class OidcProtocolEngine {
         'provider-response',
         'OIDC authorization response could not be verified'
       )
-    }
-  }
-
-  async cancelIdentityProofAttempt(input: {
-    state: string
-    browserBinding: string
-  }): Promise<boolean> {
-    if (
-      typeof input.state !== 'string' ||
-      input.state.length < 32 ||
-      input.state.length > 512 ||
-      typeof input.browserBinding !== 'string' ||
-      !/^[A-Za-z0-9_-]{43}$/.test(input.browserBinding)
-    ) {
-      return false
-    }
-    this.assertCurrentGeneration()
-    try {
-      return await cancelOidcProtocolAttempt(
-        this.dependencies.db,
-        input.state,
-        input.browserBinding,
-        this.configuredBinding()
-      )
-    } catch {
-      throw new OidcPersistenceFailure('finalize')
     }
   }
 
@@ -567,32 +464,37 @@ export class OidcProtocolEngine {
   }
 
   private readVerifiedClaims(claims: Record<string, unknown>): OidcVerifiedClaimEvidence {
-    const projected: Record<string, OidcVerifiedClaimObservation> = Object.create(null)
+    const projected: Record<string, OidcVerifiedClaimValue> = Object.create(null)
+    const names = Object.keys(claims)
+      .filter(name => !OIDC_PROTOCOL_CLAIMS.has(name))
+      .sort()
+    if (names.length > MAX_VERIFIED_CLAIMS) {
+      throw new OidcAttemptRejectedError(
+        'verified-token',
+        'OIDC ID token contains too many policy-evidence claims'
+      )
+    }
     let projectedBytes = 0
 
-    for (const name of this.policyEvidenceClaimNames) {
-      let observation: OidcVerifiedClaimObservation
-      if (!Object.hasOwn(claims, name)) {
-        observation = Object.freeze({ status: 'missing' })
-      } else {
-        const projectedValue = this.projectVerifiedClaimValue(claims[name])
-        observation =
-          projectedValue === undefined
-            ? Object.freeze({ status: 'unsupported' })
-            : Object.freeze({ status: 'present', value: projectedValue })
-      }
-
-      const encoded = JSON.stringify(observation)
-      const entryBytes = Buffer.byteLength(name) + Buffer.byteLength(encoded) + 4
+    for (const name of names) {
       if (
-        projectedBytes + entryBytes > MAX_VERIFIED_CLAIMS_BYTES ||
-        entryBytes > MAX_VERIFIED_CLAIM_VALUE_BYTES
+        name.length === 0 ||
+        name.length > MAX_VERIFIED_CLAIM_NAME_LENGTH ||
+        /[\u0000-\u001f\u007f]/.test(name)
       ) {
-        observation = Object.freeze({ status: 'unsupported' })
-      } else {
-        projectedBytes += entryBytes
+        continue
       }
-      projected[name] = observation
+      const value = this.projectVerifiedClaimValue(claims[name])
+      if (value !== undefined) {
+        projectedBytes += Buffer.byteLength(name) + Buffer.byteLength(JSON.stringify(value)) + 4
+        if (projectedBytes > MAX_VERIFIED_CLAIMS_BYTES) {
+          throw new OidcAttemptRejectedError(
+            'verified-token',
+            'OIDC ID token policy-evidence claims exceed the supported size'
+          )
+        }
+        projected[name] = value
+      }
     }
 
     return Object.freeze({
@@ -601,79 +503,27 @@ export class OidcProtocolEngine {
     })
   }
 
-  private validatePolicyEvidenceClaimNames(names: readonly string[]): readonly string[] {
-    if (!Array.isArray(names)) {
-      throw new TypeError('OIDC policy-evidence claim selection is invalid')
-    }
-    const selectedNames = [...BASE_VERIFIED_CLAIM_NAMES, ...names]
-    if (
-      selectedNames.length > MAX_VERIFIED_CLAIMS ||
-      names.some(
-        name =>
-          typeof name !== 'string' ||
-          name.length === 0 ||
-          name.length > MAX_VERIFIED_CLAIM_NAME_LENGTH ||
-          /[\u0000-\u001f\u007f]/.test(name) ||
-          OIDC_PROTOCOL_CLAIMS.has(name)
-      ) ||
-      new Set(names).size !== names.length
-    ) {
-      throw new TypeError('OIDC policy-evidence claim selection is invalid')
-    }
-    return Object.freeze([...new Set(selectedNames)].sort())
-  }
-
   private projectVerifiedClaimValue(value: unknown): OidcVerifiedClaimValue | undefined {
-    let nodes = 0
-    const project = (candidate: unknown, depth: number): OidcVerifiedClaimValue | undefined => {
-      nodes += 1
-      if (nodes > MAX_VERIFIED_CLAIM_NODES || depth > MAX_VERIFIED_CLAIM_DEPTH) return undefined
-      if (candidate === null) return null
-      if (typeof candidate === 'string') {
-        return candidate.length <= MAX_VERIFIED_CLAIM_STRING_LENGTH ? candidate : undefined
-      }
-      if (typeof candidate === 'boolean') return candidate
-      if (typeof candidate === 'number') return Number.isFinite(candidate) ? candidate : undefined
-      if (Array.isArray(candidate)) {
-        if (candidate.length > MAX_VERIFIED_CLAIM_ARRAY_LENGTH) return undefined
-        const projected: OidcVerifiedClaimValue[] = []
-        for (const entry of candidate) {
-          const item = project(entry, depth + 1)
-          if (item === undefined) return undefined
-          projected.push(item)
-        }
-        return Object.freeze(projected)
-      }
-      if (typeof candidate !== 'object') return undefined
-
-      const prototype = Object.getPrototypeOf(candidate)
-      if (prototype !== Object.prototype && prototype !== null) return undefined
-      const entries = Object.entries(candidate)
-      if (entries.length > MAX_VERIFIED_CLAIM_OBJECT_KEYS) return undefined
-      const projected: Record<string, OidcVerifiedClaimValue> = Object.create(null)
-      for (const [key, entry] of entries.sort(([left], [right]) => left.localeCompare(right))) {
-        if (
-          key.length === 0 ||
-          key.length > MAX_VERIFIED_CLAIM_NAME_LENGTH ||
-          /[\u0000-\u001f\u007f]/.test(key)
-        ) {
-          return undefined
-        }
-        const item = project(entry, depth + 1)
-        if (item === undefined) return undefined
-        projected[key] = item
-      }
-      return Object.freeze(projected)
+    if (typeof value === 'string') {
+      return value.length <= MAX_VERIFIED_CLAIM_STRING_LENGTH ? value : undefined
     }
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+    if (!Array.isArray(value) || value.length > MAX_VERIFIED_CLAIM_ARRAY_LENGTH) return undefined
 
-    const projected = project(value, 0)
-    if (
-      projected === undefined ||
-      Buffer.byteLength(JSON.stringify(projected)) > MAX_VERIFIED_CLAIM_VALUE_BYTES
-    ) {
-      return undefined
+    const projected: OidcVerifiedClaimScalar[] = []
+    for (const entry of value) {
+      if (typeof entry === 'string' && entry.length <= MAX_VERIFIED_CLAIM_STRING_LENGTH) {
+        projected.push(entry)
+      } else if (typeof entry === 'boolean') {
+        projected.push(entry)
+      } else if (typeof entry === 'number' && Number.isFinite(entry)) {
+        projected.push(entry)
+      } else {
+        return undefined
+      }
     }
-    return projected
+    return Object.freeze(projected)
   }
 
   private async getTrustedConfiguration(): Promise<TrustedConfiguration> {
@@ -746,17 +596,6 @@ export class OidcProtocolEngine {
       clientId: this.provider.clientId,
       redirectUri: this.provider.redirectUri,
       responseMode: profile.responseMode,
-    }
-  }
-
-  private configuredBinding(): OidcProtocolAttemptBinding {
-    return {
-      registrationId: this.provider.registrationId,
-      configurationGeneration: this.provider.configurationGeneration,
-      issuer: this.provider.issuer,
-      clientId: this.provider.clientId,
-      redirectUri: this.provider.redirectUri,
-      responseMode: this.provider.responseMode,
     }
   }
 

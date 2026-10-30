@@ -1,12 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import {
-  type KeyObject,
-  constants,
-  createHash,
-  createSign,
-  generateKeyPairSync,
-  randomBytes,
-} from 'node:crypto'
+import { type KeyObject, constants, createHash, createSign, generateKeyPairSync } from 'node:crypto'
 import type { DbClient } from '../src/db.js'
 import type { PinnedFetchOptions, PinnedTransport } from '../src/http/pinnedFetch.js'
 import { loadOidcProviderConfiguration } from '../src/oidc/configuration.js'
@@ -17,7 +10,6 @@ import {
   isVerifiedOidcIdentityProof,
   parseOidcCallbackUrl,
 } from '../src/oidc/protocol.js'
-import { OidcAttemptRejectedError } from '../src/oidc/protocolResult.js'
 
 const oidcTestNetwork = vi.hoisted(() => ({
   pinnedFetch: vi.fn(),
@@ -50,7 +42,6 @@ type StoredAttempt = {
   clientId: string
   redirectUri: string
   responseMode: string
-  browserBindingHash: string
   verifierEncrypted: string | null
   nonceEncrypted: string | null
   status: string
@@ -81,43 +72,25 @@ class MemoryAttemptDb {
           clientId: String(values[5]),
           redirectUri: String(values[6]),
           responseMode: String(values[7]),
-          browserBindingHash: String(values[9]),
-          verifierEncrypted: String(values[10]),
-          nonceEncrypted: String(values[11]),
+          verifierEncrypted: String(values[9]),
+          nonceEncrypted: String(values[10]),
           status: 'pending',
-          expiresAt: new Date(values[12] as Date),
+          expiresAt: new Date(values[11] as Date),
           createdAt: new Date(),
         }
         this.rows.set(row.id, row)
         return { rows: [{ id: row.id, expires_at: row.expiresAt }], rowCount: 1 }
       }
-      if (sql.includes('SELECT 1') && sql.includes('browser_binding_hash = $2')) {
-        const row = [...this.rows.values()].find(
-          candidate =>
-            candidate.stateHash === values[0] &&
-            candidate.browserBindingHash === values[1] &&
-            candidate.registrationId === values[2] &&
-            candidate.configurationGeneration === values[3] &&
-            candidate.issuer === values[4] &&
-            candidate.clientId === values[5] &&
-            candidate.redirectUri === values[6] &&
-            candidate.responseMode === values[7] &&
-            candidate.status === 'pending' &&
-            candidate.expiresAt.getTime() > Date.now()
-        )
-        return { rows: row ? [{ '?column?': 1 }] : [], rowCount: row ? 1 : 0 }
-      }
       if (sql.includes('WITH candidate AS')) {
         const row = [...this.rows.values()].find(
           candidate =>
             candidate.stateHash === values[0] &&
-            candidate.browserBindingHash === values[1] &&
-            candidate.registrationId === values[2] &&
-            candidate.configurationGeneration === values[3] &&
-            candidate.issuer === values[4] &&
-            candidate.clientId === values[5] &&
-            candidate.redirectUri === values[6] &&
-            candidate.responseMode === values[7] &&
+            candidate.registrationId === values[1] &&
+            candidate.configurationGeneration === values[2] &&
+            candidate.issuer === values[3] &&
+            candidate.clientId === values[4] &&
+            candidate.redirectUri === values[5] &&
+            candidate.responseMode === values[6] &&
             candidate.status === 'pending' &&
             candidate.expiresAt.getTime() > Date.now()
         )
@@ -147,10 +120,7 @@ class MemoryAttemptDb {
         }
       }
       if (sql.includes("SET status = 'cancelled'")) {
-        const row = [...this.rows.values()].find(
-          candidate =>
-            candidate.stateHash === values[0] && candidate.browserBindingHash === values[1]
-        )
+        const row = [...this.rows.values()].find(candidate => candidate.stateHash === values[0])
         if (!row || row.status !== 'pending') return { rows: [], rowCount: 0 }
         row.status = 'cancelled'
         row.verifierEncrypted = null
@@ -247,7 +217,6 @@ function fixture(
     tokenStatus?: number
     tokenTimeout?: boolean
     temporaryTokenEndpointDnsFailure?: boolean
-    policyEvidenceClaimNames?: readonly string[]
     claims?: (nonce: string) => Record<string, unknown>
     beforeTokenResponse?: (code: string) => Promise<void>
   } = {}
@@ -423,44 +392,15 @@ function fixture(
       }
     })
   const db = new MemoryAttemptDb()
-  const provider = providerConfiguration(issuer)
-  const createEngine = () =>
-    new OidcProtocolEngine(provider, {
-      db: db.client,
-      getClientSecret: () => currentClientSecret,
-      encryptionKeyHex: ENCRYPTION_KEY,
-      policyEvidenceClaimNames: options.policyEvidenceClaimNames,
-      now: () => Date.now(),
-    })
-  const engine = createEngine()
-  const browserBindings = new Map<string, string>()
-  const testEngine = new Proxy(engine, {
-    get(target, property, receiver) {
-      if (property === 'completeIdentityProofAttempt') {
-        return (
-          input: Parameters<OidcProtocolEngine['completeIdentityProofAttempt']>[0],
-          options?: Parameters<OidcProtocolEngine['completeIdentityProofAttempt']>[1]
-        ) =>
-          target.completeIdentityProofAttempt(
-            {
-              ...input,
-              browserBinding: input.browserBinding ?? browserBindings.get(input.state) ?? '',
-            },
-            options
-          )
-      }
-      const value = Reflect.get(target, property, receiver)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
+  const engine = new OidcProtocolEngine(providerConfiguration(issuer), {
+    db: db.client,
+    getClientSecret: () => currentClientSecret,
+    encryptionKeyHex: ENCRYPTION_KEY,
+    now: () => Date.now(),
   })
   return {
     db,
-    engine: testEngine,
-    createUncachedEngine: createEngine,
-    requestedUrls,
-    rememberBrowserBinding(state: string, binding: string) {
-      browserBindings.set(state, binding)
-    },
+    engine,
     tokenRequests: () => tokenRequests,
     jwksRequests: () => jwksRequests,
     requestedUrls,
@@ -485,13 +425,11 @@ function fixture(
 }
 
 async function begin(f: ReturnType<typeof fixture>) {
-  const browserBinding = randomBytes(32).toString('base64url')
-  const attempt = await f.engine.beginIdentityProofAttempt({ browserBinding })
+  const attempt = await f.engine.beginIdentityProofAttempt()
   const params = new URL(attempt.authorizationUrl).searchParams
-  f.rememberBrowserBinding(params.get('state')!, browserBinding)
   f.setNonce(params.get('nonce') ?? '')
   f.setChallenge(params.get('code_challenge') ?? '')
-  return { attempt, params, browserBinding }
+  return { attempt, params }
 }
 
 function deferred<T = void>() {
@@ -503,34 +441,6 @@ function deferred<T = void>() {
 }
 
 describe('generic OIDC protocol foundation', () => {
-  it('rejects a missing or cross-browser binding before provider I/O or attempt consumption', async () => {
-    const f = fixture()
-    const first = await begin(f)
-    const second = await begin(f)
-    f.requestedUrls.length = 0
-    const engine = f.createUncachedEngine()
-    const state = first.params.get('state')!
-
-    for (const browserBinding of [second.browserBinding, undefined]) {
-      await expect(
-        engine.completeIdentityProofAttempt({
-          state,
-          ...(browserBinding ? { browserBinding } : {}),
-          code: 'fixture-code',
-          issuer: GENERIC_ISSUER,
-        })
-      ).rejects.toMatchObject({ category: 'attempt-rejected' })
-      expect(
-        [...f.db.rows.values()].find(
-          row => row.stateHash === createHash('sha256').update(state).digest('hex')
-        )?.status
-      ).toBe('pending')
-    }
-
-    expect(f.requestedUrls).toEqual([])
-    expect(f.tokenRequests()).toBe(0)
-  })
-
   it('uses code + PKCE S256, verifies an issuer-bound ID token, and returns only a proof', async () => {
     const f = fixture()
     const { params } = await begin(f)
@@ -569,18 +479,6 @@ describe('generic OIDC protocol foundation', () => {
   it('projects bounded immutable typed evidence from the validated ID token', async () => {
     const now = Math.floor(Date.now() / 1000)
     const f = fixture({
-      policyEvidenceClaimNames: [
-        'accountEnabled',
-        'empty',
-        'idp',
-        'missingClaim',
-        'nestedPolicy',
-        'nilPolicy',
-        'oversized',
-        'quotaLevel',
-        'roles',
-        'tid',
-      ],
       claims: nonce => ({
         iss: GENERIC_ISSUER,
         sub: 'opaque-subject-claims',
@@ -594,14 +492,11 @@ describe('generic OIDC protocol foundation', () => {
         idp: 'external-idp',
         roles: ['Evenfire.User', 'Billing.Read'],
         accountEnabled: false,
-        empty: '',
         quotaLevel: 0,
-        nilPolicy: null,
         email: 'member@example.test',
         email_verified: true,
-        nestedPolicy: { access: { permitted: false, seats: 0 }, flags: ['A', null] },
+        unsupportedNested: { privilege: 'must-not-be-forwarded' },
         oversized: 'x'.repeat(513),
-        unselectedPrivilege: 'must-not-be-forwarded',
       }),
     })
     const { params } = await begin(f)
@@ -616,50 +511,50 @@ describe('generic OIDC protocol foundation', () => {
     expect(proof.verifiedClaims).toEqual({
       source: 'validated_id_token',
       claims: {
-        accountEnabled: { status: 'present', value: false },
-        email: { status: 'present', value: 'member@example.test' },
-        email_verified: { status: 'present', value: true },
-        empty: { status: 'present', value: '' },
-        idp: { status: 'present', value: 'external-idp' },
-        missingClaim: { status: 'missing' },
-        nestedPolicy: {
-          status: 'present',
-          value: { access: { permitted: false, seats: 0 }, flags: ['A', null] },
-        },
-        nilPolicy: { status: 'present', value: null },
-        oversized: { status: 'unsupported' },
-        quotaLevel: { status: 'present', value: 0 },
-        roles: { status: 'present', value: ['Evenfire.User', 'Billing.Read'] },
-        tid: { status: 'present', value: 'tenant-42' },
+        accountEnabled: false,
+        email: 'member@example.test',
+        email_verified: true,
+        idp: 'external-idp',
+        quotaLevel: 0,
+        roles: ['Evenfire.User', 'Billing.Read'],
+        tid: 'tenant-42',
       },
     })
     expect(Object.isFrozen(proof.verifiedClaims)).toBe(true)
     expect(Object.isFrozen(proof.verifiedClaims.claims)).toBe(true)
     expect(Object.isFrozen(proof.verifiedClaims.claims.roles)).toBe(true)
-    expect(proof.verifiedClaims.claims).not.toHaveProperty('unselectedPrivilege')
-    const nested = proof.verifiedClaims.claims.nestedPolicy
-    if (nested.status !== 'present' || typeof nested.value !== 'object' || nested.value === null) {
-      throw new Error('nested policy evidence was not preserved')
-    }
-    expect(Object.isFrozen(nested.value)).toBe(true)
-    const nestedValue = nested.value as Record<string, unknown>
-    const access = nestedValue.access as Record<string, unknown>
-    expect(Object.isFrozen(access)).toBe(true)
-    expect(Object.isFrozen(nestedValue.flags)).toBe(true)
+    expect(proof.verifiedClaims.claims).not.toHaveProperty('unsupportedNested')
+    expect(proof.verifiedClaims.claims).not.toHaveProperty('oversized')
     expect(isVerifiedOidcIdentityProof({ ...proof })).toBe(false)
     expect(JSON.stringify(proof)).not.toContain(CLIENT_SECRET)
   })
 
-  it('rejects invalid server-owned policy evidence selections', () => {
-    expect(() => fixture({ policyEvidenceClaimNames: ['tid', 'tid'] })).toThrow(
-      'OIDC policy-evidence claim selection is invalid'
-    )
-    expect(() => fixture({ policyEvidenceClaimNames: ['nonce'] })).toThrow(
-      'OIDC policy-evidence claim selection is invalid'
-    )
-    expect(() =>
-      fixture({ policyEvidenceClaimNames: Array.from({ length: 65 }, (_, i) => `c${i}`) })
-    ).toThrow('OIDC policy-evidence claim selection is invalid')
+  it('rejects proof construction when validated policy claims exceed the evidence bound', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const f = fixture({
+      claims: nonce => ({
+        iss: GENERIC_ISSUER,
+        sub: 'opaque-subject-too-many-claims',
+        aud: CLIENT_ID,
+        azp: CLIENT_ID,
+        exp: now + 300,
+        iat: now,
+        nonce,
+        ...Object.fromEntries(
+          Array.from({ length: 65 }, (_, index) => [`policyClaim${index}`, `value-${index}`])
+        ),
+      }),
+    })
+    const { params } = await begin(f)
+
+    await expect(
+      f.engine.completeIdentityProofAttempt({
+        state: params.get('state')!,
+        code: 'fixture-code',
+        issuer: GENERIC_ISSUER,
+      })
+    ).rejects.toMatchObject({ attemptReason: 'verified-token' })
+    expect([...f.db.rows.values()][0]?.status).toBe('failed')
   })
 
   it('fails closed for wrong state, callback issuer, and replay without a second exchange', async () => {
@@ -1154,35 +1049,5 @@ describe('generic OIDC protocol foundation', () => {
         GENERIC_REDIRECT
       )
     ).toMatchObject({ code: 'auth-code' })
-  })
-
-  it('classifies malformed callback issuer, denial, fragment, userinfo, and missing-field cases', () => {
-    const state = 's'.repeat(48)
-    const valid = `${GENERIC_REDIRECT}?state=${state}&code=auth-code`
-    const cases = [
-      [
-        `${valid}&iss=${encodeURIComponent(GENERIC_ISSUER)}&iss=${encodeURIComponent(GENERIC_ISSUER)}`,
-        'malformed-callback',
-      ],
-      [`${GENERIC_REDIRECT}?state=${state}&error=access_denied`, 'provider-response'],
-      [`${valid}#unexpected`, 'malformed-callback'],
-      [
-        `https://user@api.example.test/api/v1/oidc/callback?state=${state}&code=auth-code`,
-        'malformed-callback',
-      ],
-      [`${GENERIC_REDIRECT}?code=auth-code`, 'malformed-callback'],
-      [`${GENERIC_REDIRECT}?state=${state}`, 'malformed-callback'],
-    ] as const
-
-    for (const [callback, reason] of cases) {
-      let failure: unknown
-      try {
-        parseOidcCallbackUrl(callback, GENERIC_REDIRECT)
-      } catch (error) {
-        failure = error
-      }
-      expect(failure).toBeInstanceOf(OidcAttemptRejectedError)
-      expect(failure).toMatchObject({ category: 'attempt-rejected', attemptReason: reason })
-    }
   })
 })

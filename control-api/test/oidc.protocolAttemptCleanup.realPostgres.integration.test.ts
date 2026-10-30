@@ -49,17 +49,6 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
   })
 
   it('upgrades an existing attempt table and receipt without recreating its rows', async () => {
-    // Recreate the pre-0133 table shape in this disposable database to prove the real
-    // upgrade path for a pending attempt that never had browser-possession binding.
-    await pool!.query(`
-      ALTER TABLE oidc_protocol_attempts
-        DROP CONSTRAINT oidc_protocol_attempts_pending_requires_browser_binding,
-        DROP CONSTRAINT oidc_protocol_attempts_browser_binding_hash_format,
-        DROP COLUMN browser_binding_hash
-    `)
-    await pool!.query(
-      `DELETE FROM schema_migrations WHERE version = '0133_oidc_protocol_attempt_browser_binding'`
-    )
     const attemptId = randomUUID()
     await pool!.query(
       `INSERT INTO oidc_protocol_attempts (
@@ -85,40 +74,16 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
 
     await initDb({ connect: () => pool!.connect() })
 
-    const row = await pool!.query<{
-      id: string
-      status: string
-      pkce_verifier_encrypted: string | null
-      nonce_encrypted: string | null
-      browser_binding_hash: string | null
-      finished_at: Date | null
-    }>(
-      `SELECT id, status, pkce_verifier_encrypted, nonce_encrypted,
-              browser_binding_hash, finished_at
-         FROM oidc_protocol_attempts WHERE id = $1`,
+    const row = await pool!.query<{ id: string }>(
+      'SELECT id FROM oidc_protocol_attempts WHERE id = $1',
       [attemptId]
     )
-    expect(row.rows).toHaveLength(1)
-    expect(row.rows[0]).toMatchObject({
-      id: attemptId,
-      status: 'cancelled',
-      pkce_verifier_encrypted: null,
-      nonce_encrypted: null,
-      browser_binding_hash: null,
-    })
-    expect(row.rows[0]?.finished_at).toBeInstanceOf(Date)
+    expect(row.rows).toEqual([{ id: attemptId }])
     const receipt = await pool!.query<{ version: string }>(
       `SELECT version FROM schema_migrations
         WHERE version = '0132_oidc_protocol_attempt_expiry_index'`
     )
     expect(receipt.rows).toEqual([{ version: '0132_oidc_protocol_attempt_expiry_index' }])
-    const browserBindingReceipt = await pool!.query<{ version: string }>(
-      `SELECT version FROM schema_migrations
-        WHERE version = '0133_oidc_protocol_attempt_browser_binding'`
-    )
-    expect(browserBindingReceipt.rows).toEqual([
-      { version: '0133_oidc_protocol_attempt_browser_binding' },
-    ])
   }, 60_000)
 
   it('uses a non-partial ordered expiry index for all lifecycle states', async () => {
@@ -156,18 +121,16 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
       await pool!.query(
         `INSERT INTO oidc_protocol_attempts (
            id, state_hash, registration_id, configuration_generation, issuer, client_id,
-           redirect_uri, response_mode, purpose, browser_binding_hash,
-           pkce_verifier_encrypted, nonce_encrypted,
+           redirect_uri, response_mode, purpose, pkce_verifier_encrypted, nonce_encrypted,
            status, expires_at, claimed_at, finished_at
          ) VALUES (
            $1, $2, 'company-login', 'g1', 'https://issuer.example.test', 'test-client',
            'https://api.example.test/oidc/callback', 'query', 'identity-proof-v1',
-           $3, $4, $5, $6, $7, $8, $9
+           $3, $4, $5, $6, $7, $8
          )`,
         [
           id,
           stateHash,
-          status === 'pending' ? createHash('sha256').update('x'.repeat(43)).digest('hex') : null,
           pending ? 'encrypted-pkce' : null,
           pending ? 'encrypted-nonce' : null,
           status,
@@ -209,7 +172,6 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
       insertOidcProtocolAttempt(pool!, ENCRYPTION_KEY, {
         ...liveBinding,
         state,
-        browserBinding: randomBytes(32).toString('base64url'),
         pkceVerifier: 'test-pkce-verifier',
         nonce: 'test-nonce',
         expiresAt: new Date(Date.now() + 60_000),
