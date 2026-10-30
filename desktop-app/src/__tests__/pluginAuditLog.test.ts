@@ -53,7 +53,7 @@ describe('PluginAuditLog', () => {
     expect(entries.map(item => item.capability)).toEqual(['org.read', 'identity.read'])
   })
 
-  // Node only exposes the owner write flag on Windows; group/other mode bits are not meaningful.
+  // Node mode bits do not prove Windows ACL privacy; native Windows coverage lives separately.
   it.skipIf(process.platform === 'win32')('writes the file with POSIX mode 0600', async () => {
     await log.append(ENV_KEY, entry())
     const stat = await fs.stat(path.join(tmpDir, `${ENV_KEY}.jsonl`))

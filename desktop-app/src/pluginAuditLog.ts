@@ -12,6 +12,7 @@
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { PluginStoragePrivacyGuard } from './pluginStorageWindowsAcl.js'
 
 /** Same shape guard tokenStore.ts applies before interpolating into a path. */
 const ENV_KEY_SHAPE = /^[a-z0-9_]+-[0-9a-f]{12}$/
@@ -56,10 +57,14 @@ export type AuditEntry = {
 }
 
 export class PluginAuditLog {
+  private readonly privacy: PluginStoragePrivacyGuard
+
   constructor(
     private readonly baseDir: string,
     private readonly now: () => number = () => Date.now()
-  ) {}
+  ) {
+    this.privacy = new PluginStoragePrivacyGuard(baseDir)
+  }
 
   private fileFor(envKey: string): string {
     if (!ENV_KEY_SHAPE.test(envKey)) throw new Error('Invalid envKey: unexpected shape')
@@ -75,26 +80,56 @@ export class PluginAuditLog {
   async append(envKey: string, entry: AuditEntry): Promise<void> {
     try {
       const file = this.fileFor(envKey)
+      await this.privacy.ensureDirectory()
       await fs.mkdir(this.baseDir, { recursive: true, mode: 0o700 })
       await this.rotateIfNeeded(file)
+      await this.ensureFile(file)
       await fs.appendFile(file, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 })
-    } catch (err) {
-      console.warn('[PluginSDK] audit append failed:', err)
+    } catch {
+      // Audit is best effort, but do not print filesystem paths or native ACL details.
+      console.warn('[PluginSDK] audit append failed')
     }
+  }
+
+  private async ensureFile(file: string): Promise<void> {
+    try {
+      await fs.lstat(file)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      try {
+        const handle = await fs.open(file, 'wx', 0o600)
+        await handle.close()
+      } catch (createError) {
+        if ((createError as NodeJS.ErrnoException).code !== 'EEXIST') throw createError
+      }
+    }
+    await this.privacy.verifyFile(file)
   }
 
   private async rotateIfNeeded(file: string): Promise<void> {
     let stat
     try {
-      stat = await fs.stat(file)
-    } catch {
-      return
+      await fs.lstat(file)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
     }
+    await this.privacy.verifyFile(file)
+    stat = await fs.stat(file)
     const tooBig = stat.size >= AUDIT_MAX_BYTES
     const tooOld = this.now() - stat.birthtimeMs >= AUDIT_MAX_AGE_MS
     if (!tooBig && !tooOld) return
-    await fs.rm(`${file}.1`, { force: true })
-    await fs.rename(file, `${file}.1`)
+    const rotated = `${file}.1`
+    try {
+      await fs.lstat(rotated)
+      await this.privacy.verifyFile(rotated)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    await fs.rm(rotated, { force: true })
+    this.privacy.forget(rotated)
+    await fs.rename(file, rotated)
+    await this.privacy.recordRename(file, rotated)
   }
 
   /**
@@ -106,7 +141,10 @@ export class PluginAuditLog {
     const limit = options?.limit ?? 200
     let raw: string
     try {
-      raw = await fs.readFile(this.fileFor(envKey), 'utf8')
+      const file = this.fileFor(envKey)
+      await fs.lstat(file)
+      await this.privacy.verifyFile(file)
+      raw = await fs.readFile(file, 'utf8')
     } catch {
       return []
     }
@@ -126,8 +164,19 @@ export class PluginAuditLog {
 
   async clear(envKey: string): Promise<void> {
     const file = this.fileFor(envKey)
+    for (const target of [file, `${file}.1`]) {
+      try {
+        await fs.lstat(target)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      await this.privacy.verifyFile(target)
+    }
     await fs.rm(file, { force: true })
     await fs.rm(`${file}.1`, { force: true })
+    this.privacy.forget(file)
+    this.privacy.forget(`${file}.1`)
   }
 }
 

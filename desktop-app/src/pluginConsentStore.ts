@@ -7,7 +7,8 @@
  * should touch this file and nothing the plugin can observe.
  *
  * Storage: one JSON file per environment under `<userData>/plugin-consent/`,
- * mode 0600, written atomically. Scoped by `envKey` exactly like `tokenStore`
+ * private through POSIX mode 0600 or verified Windows DACL inheritance, written atomically.
+ * Scoped by `envKey` exactly like `tokenStore`
  * and the sandbox-ui partitions, so cluster A's grants never leak into
  * cluster B's. Keyed by `userId` inside the file, so a shared machine keeps two
  * humans' decisions apart.
@@ -15,10 +16,12 @@
  * NOT encrypted, deliberately: grants are not secrets ("plugin X may read Y"),
  * and an attacker who can read this file can already read the audit log or
  * patch the app bundle. safeStorage would add a platform-dependent failure mode
- * for no real gain. 0600 is the protection.
+ * for no real gain. Platform-specific filesystem privacy is the protection.
  */
+import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { PluginStoragePrivacyGuard } from './pluginStorageWindowsAcl.js'
 
 const ENV_KEY_SHAPE = /^[a-z0-9_]+-[0-9a-f]{12}$/
 const SCHEMA_VERSION = 1
@@ -71,13 +74,18 @@ function sameGrant(grant: ConsentGrant, key: GrantKey): boolean {
 export class LocalConsentStore implements ConsentStore {
   /** envKey → parsed file. Invalidated on every write. */
   private cache = new Map<string, ConsentFile>()
+  /** Windows file identity paired with each cached grant snapshot. */
+  private readonly cachedIdentity = new Map<string, string | null>()
   /** Serializes read-modify-write so two concurrent puts cannot drop one. */
   private chain: Promise<unknown> = Promise.resolve()
+  private readonly privacy: PluginStoragePrivacyGuard
 
   constructor(
     private readonly baseDir: string,
     private readonly now: () => number = () => Date.now()
-  ) {}
+  ) {
+    this.privacy = new PluginStoragePrivacyGuard(baseDir)
+  }
 
   private fileFor(envKey: string): string {
     if (!ENV_KEY_SHAPE.test(envKey)) throw new Error('Invalid envKey: unexpected shape')
@@ -85,12 +93,32 @@ export class LocalConsentStore implements ConsentStore {
   }
 
   private async load(envKey: string): Promise<ConsentFile> {
-    const cached = this.cache.get(envKey)
-    if (cached) return cached
     const file = this.fileFor(envKey)
+    const identity = await this.privacy.verifyFile(file)
+    const cached = this.cache.get(envKey)
+    if (
+      cached &&
+      (process.platform !== 'win32' || this.cachedIdentity.get(envKey) === (identity ?? null))
+    ) {
+      return cached
+    }
+    this.cache.delete(envKey)
+    let raw: string
+    try {
+      raw = await fs.readFile(file, 'utf8')
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code
+      if (code !== 'ENOENT') {
+        throw err
+      }
+      const absent = emptyFile()
+      this.cache.set(envKey, absent)
+      if (process.platform === 'win32') this.cachedIdentity.set(envKey, null)
+      return absent
+    }
+
     let parsed: ConsentFile
     try {
-      const raw = await fs.readFile(file, 'utf8')
       const candidate = JSON.parse(raw) as ConsentFile
       if (
         !candidate ||
@@ -98,36 +126,41 @@ export class LocalConsentStore implements ConsentStore {
         candidate.version !== SCHEMA_VERSION ||
         typeof candidate.users !== 'object'
       ) {
-        throw new Error(`unsupported consent file version: ${candidate?.version}`)
+        throw new Error('unsupported-consent-file')
       }
       parsed = candidate
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code
-      if (code && code !== 'ENOENT') {
-        // Fail CLOSED: an unreadable or future-version file means every
-        // capability re-prompts. Never partially parse a consent file — a
-        // half-understood grant list is worse than no grant list.
-        console.warn('[PluginSDK] consent file unreadable, starting empty:', err)
-        await fs.rename(file, `${file}.corrupt-${this.now()}`).catch(() => undefined)
-      } else if (!code) {
-        console.warn('[PluginSDK] consent file invalid, starting empty:', err)
-        await fs.rename(file, `${file}.corrupt-${this.now()}`).catch(() => undefined)
-      }
+    } catch {
+      // The source was verified before read. Preserve its exact bytes in a
+      // same-directory recovery artifact; never move an untrusted Windows file.
+      const quarantine = `${file}.corrupt-${randomUUID()}`
+      await fs.rename(file, quarantine)
+      await this.privacy.recordRename(file, quarantine)
       parsed = emptyFile()
     }
     this.cache.set(envKey, parsed)
+    if (process.platform === 'win32') this.cachedIdentity.set(envKey, identity ?? null)
     return parsed
   }
 
   private async save(envKey: string, data: ConsentFile): Promise<void> {
     const file = this.fileFor(envKey)
+    await this.privacy.ensureDirectory()
+    await this.privacy.verifyFile(file)
     await fs.mkdir(this.baseDir, { recursive: true, mode: 0o700 })
     // Atomic: a crash mid-write leaves the previous file intact rather than a
     // truncated one that would fail closed and silently drop every grant.
-    const tmp = `${file}.tmp-${this.now()}`
-    await fs.writeFile(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 })
+    const tmp = `${file}.tmp-${randomUUID()}`
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+      flag: 'wx',
+    })
+    await this.privacy.verifyFile(tmp)
     await fs.rename(tmp, file)
+    await this.privacy.recordRename(tmp, file)
     this.cache.set(envKey, data)
+    const identity = await this.privacy.verifyFile(file)
+    if (process.platform === 'win32') this.cachedIdentity.set(envKey, identity ?? null)
   }
 
   private mutate<T>(fn: () => Promise<T>): Promise<T> {
@@ -208,5 +241,6 @@ export class LocalConsentStore implements ConsentStore {
   /** ONLY for tests. */
   _invalidateCacheForTests(): void {
     this.cache.clear()
+    this.cachedIdentity.clear()
   }
 }
