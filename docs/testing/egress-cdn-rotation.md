@@ -209,6 +209,15 @@ Only two objects are modified, both with the annotation
    Corefile is saved and restored byte for byte; CoreDNS reloads itself, it is
    never restarted, so cluster DNS is not interrupted.
 
+The script verifies the restored ConfigMap, not what CoreDNS serves. CoreDNS
+serves the restored Corefile only after the kubelet refreshes the mounted
+ConfigMap and the `reload` plugin detects the change. On the 2026-10-30 runs an
+override became visible to HCC's resolver 23-99 s after the patch (including
+HCC's 5 s sampling), and phases 2, 4, 5 and 6 wait up to 150 s
+(`DNS_VISIBLE_TIMEOUT`) before they fail. The script does not wait for that
+propagation after the restore, so until then cluster DNS can still answer
+`CDN_HOST` from the test rows.
+
 Cleanup order: delete the McpServer and the control, wait until the Deployment,
 ConfigMap and `ext-egress` NetworkPolicy are gone, restore HCC, restore the
 Corefile, then verify the env JSON, the Corefile bytes, the removal of the

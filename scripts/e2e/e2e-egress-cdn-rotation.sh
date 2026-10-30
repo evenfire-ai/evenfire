@@ -137,7 +137,6 @@ WINDOW_MAX_DELTA_MS=65000
 HCC_ROLLOUT_TIMEOUT=600
 WORKLOAD_READY_TIMEOUT=180
 RESOURCE_DELETE_TIMEOUT=180
-DNS_RESTORE_TIMEOUT=90
 
 # ── Run state (read by the EXIT trap; keep every name defined) ─────────
 EXIT_CODE=0
@@ -555,19 +554,27 @@ resources_gone() {
 }
 
 restore_hcc() {
+  local restored="${EVIDENCE_DIR}/hcc-deployment-restored.json"
   kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=json \
     -p "$(cat "${EVIDENCE_DIR}/hcc-env-restore.json")" >/dev/null || return 1
   kctl annotate deployment "$HCC_DEPLOY" -n "$HCC_NS" "${OVERRIDE_ANNOTATION}-" >/dev/null || return 1
   kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout="${HCC_ROLLOUT_TIMEOUT}s" >/dev/null ||
     return 1
-  [ "$(hcc_env_json)" = "$HCC_ENV_ORIGINAL" ] || return 1
-  [ -z "$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o json |
-    jq -r --arg key "$OVERRIDE_ANNOTATION" '.metadata.annotations[$key] // ""')" ] || return 1
+  # Read the Deployment once and derive both checks from that read, so a failed
+  # read cannot pass as "env restored and annotation absent".
+  kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" --request-timeout=20s -o json >"$restored" || {
+    warn "the restored HCC Deployment could not be read back"
+    return 1
+  }
+  jq -e --argjson i "$HCC_ENV_INDEX" --argjson original "$HCC_ENV_ORIGINAL" \
+    '.spec.template.spec.containers[$i].env == $original' "$restored" >/dev/null || return 1
+  jq -e --arg key "$OVERRIDE_ANNOTATION" '(.metadata.annotations[$key] // "") == ""' "$restored" >/dev/null ||
+    return 1
   return 0
 }
 
 restore_corefile() {
-  local patch
+  local patch restored="${EVIDENCE_DIR}/coredns-restored.json"
   patch="$(jq -cn --rawfile cf "${EVIDENCE_DIR}/corefile-original.txt" \
     --arg key "$OVERRIDE_ANNOTATION" \
     '{data:{Corefile:$cf},metadata:{annotations:{($key):null}}}')"
@@ -575,33 +582,27 @@ restore_corefile() {
     warn "the CoreDNS ConfigMap patch was rejected"
     return 1
   }
-  kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --request-timeout=20s -o json |
-    jq -j '.data.Corefile' >"${EVIDENCE_DIR}/corefile-restored.txt" || {
-    warn "the restored Corefile could not be read back"
+  # Read the ConfigMap once and derive both checks from that read. The restore is
+  # proven by what the script wrote and can read back deterministically; an
+  # external DNS lookup would also fail when a complete restore meets a network
+  # outage, and would pass while CoreDNS still serves the override.
+  kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --request-timeout=20s -o json >"$restored" || {
+    warn "the restored ConfigMap could not be read back"
+    return 1
+  }
+  jq -j '.data.Corefile' "$restored" >"${EVIDENCE_DIR}/corefile-restored.txt" || {
+    warn "the restored Corefile could not be read out of the ConfigMap"
     return 1
   }
   cmp -s "${EVIDENCE_DIR}/corefile-original.txt" "${EVIDENCE_DIR}/corefile-restored.txt" || {
     warn "the Corefile differs from the saved original"
     return 1
   }
-  [ -z "$(kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" -o json |
-    jq -r --arg key "$OVERRIDE_ANNOTATION" '.metadata.annotations[$key] // ""')" ] || {
+  jq -e --arg key "$OVERRIDE_ANNOTATION" '(.metadata.annotations[$key] // "") == ""' "$restored" >/dev/null || {
     warn "the CoreDNS override annotation is still present"
     return 1
   }
-  wait_until "$DNS_RESTORE_TIMEOUT" "CoreDNS answering after the Corefile restore" dns_liveness || {
-    warn "the Corefile is restored but CoreDNS did not answer ${CDN_HOST} afterwards"
-    return 1
-  }
   return 0
-}
-
-dns_liveness() {
-  local raw
-  raw="$(kctl exec "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -c "$HCC_CONTAINER" --request-timeout=40s -- \
-    node -e 'require("dns").promises.resolve4(process.argv[1]).then(r=>{if(r.length===0)process.exit(3);console.log("ok")}).catch(()=>process.exit(3))' \
-    "$CDN_HOST")" || return 1
-  [ "$raw" = ok ]
 }
 
 cleanup() {
