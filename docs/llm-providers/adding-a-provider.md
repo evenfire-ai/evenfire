@@ -267,6 +267,7 @@ Surfaces to update:
 - [ ] `mcp-host/src/llm/registryCore.ts` — `RUNTIME_FIELDS` row (baseURL/defaultModel/tokenizer)
 - [ ] `mcp-host/src/llm/registry.ts` — `makeProvider` arm (driver path only)
 - [ ] `control-api/src/services/modelsDevClient.ts` — `PROVIDER_KEY_MAP` entry (our id → models.dev key; verify against live `api.json`)
+- [ ] `packages/llm-providers/index.cjs` — `PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT` entry: `true` only for a direct provider whose models.dev ids are the ids its API accepts; `false` for aggregators, multi-vendor hosts and clouds with deployment/region-specific ids (omit for oauth-broker providers). The package test fails until this entry exists
 - [ ] `control-ui/lib/llm.ts` — `LLM_DEFAULT_MODEL_BY_PROVIDER` entry
 
 **Data / assets** (not type-checked, but required for the provider to work end-to-end):

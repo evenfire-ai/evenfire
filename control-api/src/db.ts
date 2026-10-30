@@ -6386,6 +6386,27 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0130_password_login_success_admission',
     apply: applyPasswordSuccessAdmissionSchema,
   },
+  {
+    version: '0131_llm_provider_catalog_settings',
+    apply: async db => {
+      // Operator overrides of the per-provider catalog auto-enable policy. No
+      // CHECK on `provider`: a row for a provider later removed from the code
+      // must not block the migration, and the service only writes known ids.
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS llm_provider_catalog_settings (
+          provider TEXT PRIMARY KEY,
+          auto_enable BOOLEAN NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_by TEXT
+        );
+
+        REVOKE ALL ON TABLE llm_provider_catalog_settings
+          FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+        GRANT SELECT, INSERT, UPDATE ON TABLE llm_provider_catalog_settings
+          TO control_api_runtime;
+      `)
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {

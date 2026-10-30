@@ -59,6 +59,7 @@ import { rootLogger } from '../observability/logger.js'
 import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
 import { MAX_CONTEXT_WINDOW_TOKENS } from './llmAllowedModels.js'
 import type { AllowedModelsConfigMapMaterializer } from './llmAllowedModelsConfigMap.js'
+import { acquireCatalogSyncLock } from './llmCatalogSyncLock.js'
 import {
   type DiscoveredModel,
   type FetchLike,
@@ -154,11 +155,6 @@ export interface CatalogSyncRun {
   updated: number
   staled: number
 }
-
-// Constant advisory-lock key so only one sync runs at a time (an on-demand admin
-// action; concurrent runs would race on INSERT). xact-scoped: auto-released on
-// COMMIT/ROLLBACK.
-const SYNC_ADVISORY_LOCK_KEY = 'llm-catalog-sync-v1'
 
 const log = rootLogger.child({ service: 'llm_catalog_sync' })
 
@@ -454,8 +450,8 @@ export async function syncDiscoveredModels(
   try {
     await client.query('BEGIN')
     inTransaction = true
-    // Serialize concurrent syncs (xact-scoped advisory lock).
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [SYNC_ADVISORY_LOCK_KEY])
+    // Serialize concurrent syncs and policy toggles (xact-scoped advisory lock).
+    await acquireCatalogSyncLock(client)
 
     // Layer 1 (source==='live') AND layer 3 (global plausibility) both gate the
     // vanished→stale inference for the whole run; layer 2 (per-provider floor)
