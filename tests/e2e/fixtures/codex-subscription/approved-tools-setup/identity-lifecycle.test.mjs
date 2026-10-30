@@ -25,6 +25,7 @@ const input = {
   run,
   profile: 'owned-e2e',
   context: 'owned-e2e',
+  adminUsername: 'admin',
   userEmail: `${run}@example.test`,
   unauthorizedEmail: `${run}-unauthorized@example.test`,
   userPassword: 'fixture-only-member-password',
@@ -53,6 +54,11 @@ function harness() {
     commits: 0,
     publications: 0,
     transactionActive: false,
+    // The lane's Control Admin row the governed retirement resolves. `null`
+    // removes it to prove the fixture refuses an actorless retirement.
+    controlAdmin: '99999999-9999-4999-8999-999999999999',
+    retirements: [],
+    retirementOutcome: 'deleted',
   }
   const adapters = {
     env,
@@ -76,6 +82,20 @@ function harness() {
       if (state.auditFailure) throw new Error('audit failure')
       state.events.push(value)
     },
+    // The governed retirement is a product adapter in the seed; this harness
+    // records its exact request and never mutates users itself.
+    retireDesktopUserInTransaction: async (db, request) => {
+      assert.equal(db, state.db, 'retirement must use the cleanup transaction handle')
+      state.retirements.push(request)
+      if (state.retirementError) throw state.retirementError
+      return {
+        id: request.userId,
+        outcome: state.retirementOutcome,
+        operationId: '77777777-7777-4777-8777-777777777777',
+        lifecycleVersion: null,
+        replayed: false,
+      }
+    },
     withTransaction: async callback => {
       const pending = []
       const db = {
@@ -83,6 +103,10 @@ function harness() {
           state.calls.push({ sql, values })
           if (state.failQuery?.(sql)) throw new Error('synthetic query failure')
           pending.push({ sql, values })
+          if (sql.includes('FROM control_admin_users')) {
+            const rows = state.controlAdmin === null ? [] : [{ id: state.controlAdmin }]
+            return { rows, rowCount: rows.length }
+          }
           if (state.respond) return state.respond(sql, values)
           return { rows: [], rowCount: 1 }
         },
@@ -398,16 +422,21 @@ test('ordinary cleanup locks ownership and dependencies and preserves audit beha
   assert.deepEqual(outcome, { outcome: 'deleted-with-audit-retained', auditRetention: 'preserved' })
   assert.equal(journal.status, 'cleaned')
   const deletes = state.calls.filter(call => call.sql.startsWith('DELETE'))
-  assert.equal(deletes.length, 3)
-  assert.deepEqual(deletes[0].values, [
-    journal.users[0].id,
-    journal.users[0].email,
-    journal.users[0].name,
-  ])
+  assert.equal(deletes.length, 1, 'only the journaled team is deleted directly')
+  assert.match(deletes[0].sql, /^DELETE FROM teams/)
+  assert.ok(
+    state.calls.every(call => !/^DELETE FROM users/.test(call.sql)),
+    'users are removed only by the governed retirement adapter'
+  )
+  assert.equal(state.retirements.length, 2)
+  assert.deepEqual(
+    state.retirements.map(request => request.userId),
+    journal.users.map(user => user.id)
+  )
   assert.ok(
     state.calls
       .filter(call => call.sql.startsWith('SELECT'))
-      .every(call => call.sql.includes('FOR UPDATE'))
+      .every(call => call.sql.includes('FOR UPDATE') || call.sql.includes('control_admin_users'))
   )
   assert.equal(
     state.calls.filter(call => call.sql.startsWith('UPDATE workflow_approval_medium_')).length,
@@ -506,9 +535,30 @@ test('every transactional cleanup refusal names its phase and that phase ran las
     assert.equal(journal.status, 'recovery-required')
     assert.match(state.calls.at(-1).sql, witness, `last statement must belong to ${phase}`)
     assert.ok(
-      state.calls.every(call => !/^DELETE|^UPDATE workflow_approval_medium_/.test(call.sql))
+      state.calls.every(call => !/^DELETE|^UPDATE workflow_approval_medium_/.test(call.sql)),
+      `${code} must refuse before any deletion or approval-medium update`
     )
   }
+})
+
+test('a missing control admin refuses the governed retirement before any deletion', async () => {
+  const { state, adapters } = harness()
+  const journal = await createFixtureIdentities(input, adapters)
+  state.calls = []
+  state.retirements = []
+  state.controlAdmin = null
+  state.respond = cleanupRows(journal)
+  const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+  assert.equal(error.code, 'control_admin_missing')
+  assert.equal(error.phase, 'delete-users')
+  assert.equal(error.sqlstate, 'UNKNOWN')
+  assert.equal(journal.status, 'recovery-required')
+  assert.equal(state.commits, 1, 'only the fixture creation transaction committed')
+  assert.equal(state.retirements.length, 0, 'no actorless retirement may be attempted')
+  assert.ok(state.calls.every(call => !/DELETE FROM users/.test(call.sql)))
+  // Liveness: the lookup ran inside the cleanup transaction and named the input.
+  assert.match(state.calls.at(-1).sql, /FROM control_admin_users/)
+  assert.deepEqual(state.calls.at(-1).values, [input.adminUsername])
 })
 
 test('cleanup refuses foreign ownership, memberships, grants, invitations and retained links before mutation', async () => {
@@ -562,34 +612,45 @@ test('journal tampering is rejected before DB access; exact absent IDs support r
   assert.ok(state.calls.every(call => !/^(DELETE|UPDATE)/.test(call.sql)))
 })
 
-test('cleanup deletion failures are coded per table and roll back the journal', async () => {
-  for (const [table, code, phase] of [
-    ['DELETE FROM users', 'user_delete_mismatch', 'delete-users'],
-    ['DELETE FROM teams', 'team_delete_mismatch', 'delete-team'],
-  ]) {
-    const { state, adapters } = harness()
-    const journal = await createFixtureIdentities(input, adapters)
-    const rows = cleanupRows(journal)
-    state.respond = (sql, values) =>
-      sql.startsWith(table) ? { rowCount: 0, rows: [] } : rows(sql, values)
-    state.committed = []
-    const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
-    assert.equal(error.code, code)
-    assert.equal(error.phase, phase)
-    assert.equal(state.committed.length, 0)
-    assert.equal(journal.status, 'recovery-required')
-  }
+test('cleanup deletion failures are coded per site and roll back the journal', async () => {
+  // A tombstone outcome retains an identity this fixture must remove; the
+  // refusal is the user-delete site, not the team delete.
+  const tombstone = harness()
+  const tombstoneJournal = await createFixtureIdentities(input, tombstone.adapters)
+  tombstone.state.respond = cleanupRows(tombstoneJournal)
+  tombstone.state.retirementOutcome = 'retired'
+  tombstone.state.committed = []
+  tombstone.state.commits = 0
+  const retiredError = await refusal(
+    cleanupFixtureIdentities(input, tombstoneJournal, tombstone.adapters)
+  )
+  assert.equal(retiredError.code, 'user_delete_mismatch')
+  assert.equal(retiredError.phase, 'delete-users')
+  assert.equal(tombstone.state.committed.length, 0)
+  assert.equal(tombstoneJournal.status, 'recovery-required')
+  assert.equal(tombstone.state.retirements.length, 1, 'the refusal came from the retirement')
+
+  const team = harness()
+  const teamJournal = await createFixtureIdentities(input, team.adapters)
+  const rows = cleanupRows(teamJournal)
+  team.state.respond = (sql, values) =>
+    sql.startsWith('DELETE FROM teams') ? { rowCount: 0, rows: [] } : rows(sql, values)
+  team.state.committed = []
+  team.state.commits = 0
+  const teamError = await refusal(cleanupFixtureIdentities(input, teamJournal, team.adapters))
+  assert.equal(teamError.code, 'team_delete_mismatch')
+  assert.equal(teamError.phase, 'delete-team')
+  assert.equal(team.state.committed.length, 0)
+  assert.equal(teamJournal.status, 'recovery-required')
+  assert.equal(team.state.retirements.length, 2, 'both users retired before the team refusal')
 })
 
 test('a database error is reported as db_error with its SQLSTATE and no message text', async () => {
   const sentinel = 'duplicate key value violates constraint e2e_never_echo_this'
   const { state, adapters } = harness()
   const journal = await createFixtureIdentities(input, adapters)
-  const rows = cleanupRows(journal)
-  state.respond = (sql, values) => {
-    if (sql.startsWith('DELETE FROM users')) throw { code: '23503', message: sentinel }
-    return rows(sql, values)
-  }
+  state.respond = cleanupRows(journal)
+  state.retirementError = { code: '23503', message: sentinel }
   const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
   assert.deepEqual(
     { code: error.code, phase: error.phase, sqlstate: error.sqlstate },
@@ -597,8 +658,10 @@ test('a database error is reported as db_error with its SQLSTATE and no message 
   )
   assert.equal(String(error.message).includes(sentinel), false)
   assert.equal(JSON.stringify(describeIdentityFailure(error)).includes(sentinel), false)
-  // Liveness: the failing statement group was entered and its DELETE ran.
-  assert.match(state.calls.at(-1).sql, /^DELETE FROM users/)
+  // Liveness: the governed retirement was entered and the actor was resolved
+  // in the cleanup transaction before it failed.
+  assert.equal(state.retirements.length, 1)
+  assert.match(state.calls.at(-1).sql, /FROM control_admin_users/)
   assert.equal(journal.status, 'recovery-required')
 })
 
@@ -822,14 +885,73 @@ test('already-revoked response IDs support retry but adapter failures retain rec
 })
 
 test('publication is mandatory and cleanup cannot commit without an installed adapter', async () => {
+  for (const adapter of ['publishRuntimeAllowlist', 'retireDesktopUserInTransaction']) {
+    const { state, adapters } = harness()
+    const journal = await createFixtureIdentities(input, adapters)
+    delete adapters[adapter]
+    state.calls = []
+    const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
+    assert.equal(error.code, 'adapter_missing')
+    assert.equal(error.phase, 'validate-intent')
+    assert.equal(state.calls.length, 0)
+  }
+})
+
+test('cleanup retires every journal user through the governed adapter inside the transaction', async () => {
   const { state, adapters } = harness()
   const journal = await createFixtureIdentities(input, adapters)
-  delete adapters.publishRuntimeAllowlist
   state.calls = []
+  state.retirements = []
+  state.respond = cleanupRows(journal)
+  const result = await cleanupFixtureIdentities(input, journal, adapters)
+  assert.deepEqual(result, {
+    outcome: 'deleted-with-audit-retained',
+    auditRetention: 'preserved',
+  })
+  // One governed retirement per journal user, with the transaction handle, the
+  // resolved Control Admin, a fixed reason and a deterministic idempotency key.
+  assert.equal(state.retirements.length, 2)
+  assert.deepEqual(
+    state.retirements.map(request => request.userId),
+    journal.users.map(user => user.id)
+  )
+  for (const request of state.retirements) {
+    assert.deepEqual(request.actor, {
+      kind: 'control_admin',
+      controlAdminId: state.controlAdmin,
+    })
+    assert.equal(request.reason, 'Approved tools E2E fixture identity cleanup')
+    assert.equal(request.idempotencyKey, `approved-tools-cleanup:${run}:${request.userId}`)
+    assert.equal(request.requestId, null)
+  }
+  // The actor lookup names the injected username and admits only an active row.
+  const lookup = state.calls.find(call => call.sql.includes('FROM control_admin_users'))
+  assert.deepEqual(lookup.values, [input.adminUsername])
+  assert.match(lookup.sql, /status = 'active'/)
+  // No raw user delete is issued by the fixture itself.
+  assert.ok(state.calls.every(call => !/DELETE FROM users/.test(call.sql)))
+  assert.ok(state.calls.some(call => /^DELETE FROM teams/.test(call.sql)))
+})
+
+test('a database refusal from the governed retirement keeps its SQLSTATE and phase', async () => {
+  // The password-admission fence rejects a raw delete with 55000; the cleanup
+  // must surface that exact classification instead of a generic failure.
+  const { state, adapters } = harness()
+  const journal = await createFixtureIdentities(input, adapters)
+  state.respond = cleanupRows(journal)
+  state.retirementError = { code: '55000' }
+  state.committed = []
+  state.commits = 0
+  state.rollbacks = 0
   const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
-  assert.equal(error.code, 'adapter_missing')
-  assert.equal(error.phase, 'validate-intent')
-  assert.equal(state.calls.length, 0)
+  assert.deepEqual(
+    { code: error.code, phase: error.phase, sqlstate: error.sqlstate },
+    { code: 'db_error', phase: 'delete-users', sqlstate: '55000' }
+  )
+  assert.equal(journal.status, 'recovery-required')
+  assert.equal(state.commits, 0)
+  assert.equal(state.rollbacks, 1)
+  assert.ok(state.calls.some(call => call.sql.includes('FROM control_admin_users')))
 })
 
 test('controller-removed workflow grant permits cleanup without claiming a second revocation', async () => {
@@ -977,7 +1099,7 @@ test('Grok identity setup grants one agent and context, no workflow or connectio
   )
 })
 
-test('the reported failure payload is the frozen triple or a single unclassified code', async () => {
+test('the reported failure payload is always the frozen triple', async () => {
   const { adapters } = harness()
   const journal = await createFixtureIdentities(input, adapters)
   assert.deepEqual(
@@ -991,7 +1113,17 @@ test('the reported failure payload is the frozen triple or a single unclassified
     ),
     { code: 'journal_grant_mismatch', phase: 'validate-intent', sqlstate: 'UNKNOWN' }
   )
-  assert.deepEqual(describeIdentityFailure(new Error('raw runtime text')), { code: 'unclassified' })
+  // A non-fixture error is classified instead of escaping the closed sets.
+  assert.deepEqual(describeIdentityFailure(new Error('raw runtime text')), {
+    code: 'step_failed',
+    phase: 'unknown',
+    sqlstate: 'UNKNOWN',
+  })
+  assert.deepEqual(describeIdentityFailure({ code: '55000' }), {
+    code: 'db_error',
+    phase: 'unknown',
+    sqlstate: '55000',
+  })
   assert.throws(
     () => new FixtureIdentityError('not_a_code', 'validate-intent', 'UNKNOWN', 'x'),
     /Invalid fixture identity error/

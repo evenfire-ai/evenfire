@@ -1115,6 +1115,27 @@ export function parseIdentityJournal(output, expected, status) {
   return result
 }
 
+// The cleanup request the host sends to the isolated seed. It names the lane's
+// Control Admin (`adminUsername`) so the governed retirement records a real
+// operator, and it never carries a credential: preparation keeps those in the
+// process environment.
+export function identityCleanupRequest(input) {
+  return {
+    action: 'cleanup',
+    mode: 'deterministic',
+    suite: input.suite,
+    run: input.run,
+    profile: input.profile,
+    context: input.profile,
+    provider: input.provider,
+    adminUsername: input.adminUsername,
+    scenarios: input.workflowScenario
+      ? [...input.scenarios, input.workflowScenario]
+      : input.scenarios,
+    initialJournal: input.initialJournal,
+  }
+}
+
 function lastIdentityLine(output, key) {
   if (typeof output !== 'string' || Buffer.byteLength(output) > IDENTITY_RESULT_LIMIT_BYTES)
     return null
@@ -1584,19 +1605,19 @@ async function main() {
             verify: verifyApiMarker,
           })
           if (!pending) return
-          runIdentityOperation({
-            action: 'cleanup',
-            mode: 'deterministic',
-            suite,
-            run: state.run,
-            profile,
-            context: profile,
-            provider,
-            scenarios: state.workflowScenario
-              ? [...state.scenarios, state.workflowScenario]
-              : state.scenarios,
-            initialJournal: state.identityJournal,
-          })
+          runIdentityOperation(
+            identityCleanupRequest({
+              suite,
+              run: state.run,
+              profile,
+              provider,
+              // The lane's own Control Admin records the governed retirement.
+              adminUsername: required('TEST_ADMIN_USERNAME'),
+              scenarios: state.scenarios,
+              workflowScenario: state.workflowScenario,
+              initialJournal: state.identityJournal,
+            })
+          )
         },
         cleanupResources: () =>
           cleanupJournaledFixtureResources({

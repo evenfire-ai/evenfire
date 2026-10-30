@@ -17,6 +17,10 @@ for await (const chunk of process.stdin) {
 const input = JSON.parse(Buffer.concat(inputChunks, inputBytes).toString('utf8'))
 if (!['create', 'cleanup'].includes(input.action)) throw new Error('Invalid identity action')
 const { pool, withTransaction } = await import('/app/control-api/dist/db.js')
+// The failure reporter is bound here, outside the try: the catch below must be
+// able to describe every failure, including one raised by an adapter import.
+const { createFixtureIdentities, cleanupFixtureIdentities, describeIdentityFailure } =
+  await import('/app/approved-tools-setup/identity-lifecycle.mjs')
 try {
   const { default: bcrypt } = await import('/app/control-api/node_modules/bcryptjs/index.js')
   const { appendControlApiPermissionEventsInTransaction } =
@@ -25,8 +29,8 @@ try {
     await import('/app/control-api/dist/services/codexSubscriptionConnection.js')
   const { rebuildLiveCodexUnionAllowlist } =
     await import('/app/control-api/dist/services/codexSubscriptionCatalog.js')
-  const { createFixtureIdentities, cleanupFixtureIdentities, describeIdentityFailure } =
-    await import('/app/approved-tools-setup/identity-lifecycle.mjs')
+  const { retireDesktopUserInTransaction } =
+    await import('/app/control-api/dist/services/directory/users.js')
   const publish = journal => process.stdout.write(JSON.stringify({ e2eIdentity: journal }) + '\n')
   const adapters = {
     env: process.env,
@@ -35,6 +39,7 @@ try {
     appendPermissionEvents: appendControlApiPermissionEventsInTransaction,
     revokeCodexSubscriptionConnection,
     rebuildLiveCodexUnionAllowlist,
+    retireDesktopUserInTransaction,
     publishRuntimeAllowlist: async () => {
       const { KubeConfig, CoreV1Api } =
         await import('/app/control-api/node_modules/@kubernetes/client-node/dist/index.js')

@@ -12,8 +12,10 @@ function suiteIsSingle(suite) {
 
 // Closed set of reasons a fixture identity operation can fail for. One code per
 // refusal site; `db_error` and `step_failed` are the two generic classifications
-// for an unexpected error raised inside a step, and `unparseable` is the host's
-// label for a failure line it cannot classify. Nothing else may leave this file.
+// for an unexpected error raised inside a step, `control_admin_missing` refuses
+// a governed retirement without the lane's recorded operator, and `unparseable`
+// is the host's label for a failure line it cannot classify. Nothing else may
+// leave this file.
 export const IDENTITY_ERROR_CODES = Object.freeze([
   'adapter_missing',
   'binding_env_mismatch',
@@ -22,6 +24,7 @@ export const IDENTITY_ERROR_CODES = Object.freeze([
   'connection_evidence_invalid',
   'connection_prerequisite_missing',
   'connection_unrecorded',
+  'control_admin_missing',
   'db_error',
   'identity_email_changed',
   'identity_ownership_changed',
@@ -54,8 +57,8 @@ export const IDENTITY_ERROR_CODES = Object.freeze([
 // Closed set of phases. `validate-intent` covers the pre-transaction input,
 // journal and adapter checks; `commit` wraps the transaction boundary and is
 // entered only once its callback has returned; `publish-allowlist` wraps the
-// post-commit publication; `unknown` is the closed label for a failure line the
-// host could not classify.
+// post-commit publication; `unknown` labels an error the operation could not
+// classify, so every reported failure still carries one of these phases.
 export const IDENTITY_ERROR_PHASES = Object.freeze([
   'validate-intent',
   'lock-identities',
@@ -161,11 +164,17 @@ function createSteps() {
   return { guard, step, commit, phase: () => current.phase }
 }
 
-/** The only payload the seed may print for a failed identity operation. */
+/**
+ * The only payload the seed may print for a failed identity operation. Every
+ * error yields the triple the host parser accepts: a FixtureIdentityError keeps
+ * its own code, phase and SQLSTATE, and anything else is classified as an
+ * unexpected step or database failure in the `unknown` phase. `unparseable`
+ * therefore stays the host's label for a run that printed no valid line at all
+ * (a crash, a lost process or a reporter that never ran).
+ */
 export function describeIdentityFailure(error) {
-  if (error instanceof FixtureIdentityError)
-    return { code: error.code, phase: error.phase, sqlstate: error.sqlstate }
-  return { code: 'unclassified' }
+  const failure = asIdentityError('unknown', error)
+  return { code: failure.code, phase: failure.phase, sqlstate: failure.sqlstate }
 }
 
 function binding(input, env) {
@@ -663,7 +672,30 @@ async function appendFixturePermissions(db, journal, action, append, includeWork
 
 // Statement groups of the cleanup transaction. Each group is one closed phase;
 // a refusal or database error inside it carries only that phase and its code.
-async function performCleanupTransaction(db, journal, grants, adapters, steps) {
+// The retirement reason and key prefix are fixed so a retried cleanup replays
+// the recorded operation instead of creating a second one.
+const retirementReason = 'Approved tools E2E fixture identity cleanup'
+const retirementKeyPrefix = 'approved-tools-cleanup:'
+
+// Resolve the retirement actor the lane names, inside the cleanup transaction.
+// The recorded operation then names a real Control Admin instead of a
+// fabricated UUID; an absent row is a named refusal, never an actorless write.
+async function resolveRetirementActor(db, input) {
+  const admins = (
+    await db.query(
+      `SELECT id::text FROM control_admin_users WHERE username = $1 AND status = 'active'`,
+      [String(input.adminUsername ?? '')]
+    )
+  ).rows
+  requireValue(
+    admins.length === 1,
+    'The recorded control admin actor is missing',
+    'control_admin_missing'
+  )
+  return { kind: 'control_admin', controlAdminId: admins[0].id }
+}
+
+async function performCleanupTransaction(db, journal, grants, input, adapters, steps) {
   const ids = journal.users.map(user => user.id)
   const ownership = await steps.step('lock-identities', async () => {
     await db.query("SET LOCAL statement_timeout = '15s'")
@@ -871,15 +903,24 @@ async function performCleanupTransaction(db, journal, grants, adapters, steps) {
     )
   )
   await steps.step('delete-users', async () => {
+    // A raw `DELETE FROM users` meets the password-admission fence (SQLSTATE
+    // 55000) as soon as the user has identifier state, and it records no actor.
+    // The product's governed retirement records a durable pending operation in
+    // this same transaction, which is the only nested detach that fence admits.
+    // Operator-link history was refused above, so the outcome must be `deleted`;
+    // a tombstone would retain an identity this fixture must remove.
+    const actor = await resolveRetirementActor(db, input)
     for (const user of journal.users) {
-      const result = await db.query(
-        `DELETE FROM users WHERE id = $1::uuid AND email = $2 AND name = $3
-        AND lifecycle_state = 'active' RETURNING id`,
-        [user.id, user.email, user.name]
-      )
+      const retired = await adapters.retireDesktopUserInTransaction(db, {
+        actor,
+        userId: user.id,
+        reason: retirementReason,
+        idempotencyKey: `${retirementKeyPrefix}${journal.run}:${user.id}`,
+        requestId: null,
+      })
       requireValue(
-        result.rowCount === 1,
-        'User deletion ownership mismatch',
+        retired?.outcome === 'deleted',
+        'User deletion outcome mismatch',
         'user_delete_mismatch'
       )
     }
@@ -895,9 +936,11 @@ async function performCleanupTransaction(db, journal, grants, adapters, steps) {
 }
 
 /**
- * Legacy deletion is permitted only for fresh active users with no operator-link
- * history, matching adminDeleteUser's retention boundary. Retained-history cases
- * fail closed for governed retirement; no lifecycle history is erased here.
+ * Identities are removed only through the product's governed retirement path:
+ * fresh active users with no operator-link history are physically deleted while
+ * the durable retirement operation and any password-admission identifier state
+ * are retained as audit. Retained-history cases fail closed, so no lifecycle
+ * history is erased or fabricated here.
  * Parent FOR UPDATE locks also block new FK-dependent grants/memberships while
  * existing dependent rows are locked and checked within this same transaction.
  */
@@ -912,6 +955,7 @@ export async function cleanupFixtureIdentities(
     revokeCodexSubscriptionConnection,
     rebuildLiveCodexUnionAllowlist,
     publishRuntimeAllowlist,
+    retireDesktopUserInTransaction,
   }
 ) {
   const steps = createSteps()
@@ -920,8 +964,9 @@ export async function cleanupFixtureIdentities(
     requireValue(
       typeof appendPermissionEvents === 'function' &&
         typeof saveJournal === 'function' &&
-        typeof publishRuntimeAllowlist === 'function',
-      'Audit, durable journal and runtime publication adapters are required',
+        typeof publishRuntimeAllowlist === 'function' &&
+        typeof retireDesktopUserInTransaction === 'function',
+      'Audit, durable journal, runtime publication and governed retirement adapters are required',
       'adapter_missing'
     )
     return value
@@ -935,10 +980,12 @@ export async function cleanupFixtureIdentities(
           db,
           journal,
           grants,
+          input,
           {
             appendPermissionEvents,
             revokeCodexSubscriptionConnection,
             rebuildLiveCodexUnionAllowlist,
+            retireDesktopUserInTransaction,
           },
           steps
         )

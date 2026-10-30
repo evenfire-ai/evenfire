@@ -5,6 +5,10 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
+  FixtureIdentityError,
+  describeIdentityFailure,
+} from '../../tests/e2e/fixtures/codex-subscription/approved-tools-setup/identity-lifecycle.mjs'
+import {
   IMAGES,
   localRef,
   minikubeVerifyRefs,
@@ -14,6 +18,7 @@ import {
 import {
   APPROVED_TOOLS_SUITES,
   assertResourceRoundTrip,
+  identityCleanupRequest,
   identityFailureMessage,
   isIdentityFailureMessage,
   makeResources,
@@ -935,6 +940,74 @@ test('a failed identity operation reports only a closed coded line', () => {
   ])
     assert.equal(isIdentityFailureMessage(message), false)
   assert.equal(isIdentityFailureMessage('IDENTITY_unknown_unparseable'), true)
+})
+
+test('the fixture failure producer always yields a triple the host parser accepts', () => {
+  // Producer and parser are joined here: every payload the seed can print is
+  // parsed back to itself, so `unparseable` stays the host's label for a run
+  // that produced no valid line at all.
+  const cases = [
+    new FixtureIdentityError('db_error', 'delete-users', '55000', 'fenced'),
+    new Error('raw runtime text'),
+    Object.assign(new Error('pg failure'), { code: '23503' }),
+    { code: '55000' },
+    'thrown string',
+  ]
+  for (const error of cases) {
+    const described = describeIdentityFailure(error)
+    const parsed = parseIdentityFailure(
+      `startup noise\n${JSON.stringify({ e2eIdentityError: described })}\n`
+    )
+    assert.deepEqual(parsed, described)
+    assert.notEqual(parsed.code, 'unparseable')
+    assert.equal(isIdentityFailureMessage(identityFailureMessage(parsed)), true)
+  }
+})
+
+test('the cleanup request names the lane control admin and no credential', () => {
+  const run = 'approved-tools-0123456789ab'
+  const scenarios = ['83', '150', '250'].map(label => ({ runId: `${run}-${label}` }))
+  const workflowScenario = { runId: `${run}-workflow` }
+  const initialJournal = { version: 1, users: [], team: {}, grants: {} }
+  const request = identityCleanupRequest({
+    suite: 'approved-tools',
+    run,
+    profile: 'owned-e2e',
+    provider: 'codex',
+    adminUsername: 'fixture-admin',
+    scenarios,
+    workflowScenario,
+    initialJournal,
+  })
+  assert.deepEqual(request, {
+    action: 'cleanup',
+    mode: 'deterministic',
+    suite: 'approved-tools',
+    run,
+    profile: 'owned-e2e',
+    context: 'owned-e2e',
+    provider: 'codex',
+    adminUsername: 'fixture-admin',
+    scenarios: [...scenarios, workflowScenario],
+    initialJournal,
+  })
+  // The model-step suite records no workflow scenario.
+  assert.deepEqual(
+    identityCleanupRequest({
+      suite: 'model-step-retry',
+      run,
+      profile: 'owned-e2e',
+      provider: undefined,
+      adminUsername: 'fixture-admin',
+      scenarios: scenarios.slice(0, 1),
+      workflowScenario: undefined,
+      initialJournal,
+    }).scenarios,
+    scenarios.slice(0, 1)
+  )
+  // The request crosses a process boundary: it carries no credential field.
+  for (const key of ['password', 'adminPassword', 'userPassword', 'unauthorizedPassword'])
+    assert.equal(JSON.stringify(request).includes(`"${key}"`), false, `${key} must be absent`)
 })
 
 test('Grok running-image witness requires ready owned pods, resourceVersion and the acquired image ID', async () => {
