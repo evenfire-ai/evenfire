@@ -13,6 +13,7 @@ import { ComposerGfsLinkPicker } from '../ComposerGfsLinkPicker'
 
 const auth = {
   isAuthenticated: true,
+  sessionGeneration: 1,
   me: { id: 'user-1', teamId: 'team-1' },
   runtimeConfigState: { envKey: 'test' },
 } as unknown as AuthContextValue

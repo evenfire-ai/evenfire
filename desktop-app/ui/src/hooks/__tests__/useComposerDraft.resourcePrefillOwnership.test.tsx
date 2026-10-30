@@ -8,7 +8,11 @@ import {
   setComposerDraft,
   setResourceComposerPrefill,
 } from '@lib/composerDraftStore'
-import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
+import {
+  clearLatestGfsConversationContext,
+  prefillNewConversationWithGfsResource,
+  recordLatestGfsConversationContext,
+} from '@lib/gfsConversationPrefill'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -26,6 +30,7 @@ const draftSurfaceHarness: {
 afterEach(() => {
   cleanup()
   resetComposerDraftStore()
+  clearLatestGfsConversationContext()
   draftSurfaceHarness.setDraft = null
   vi.restoreAllMocks()
 })
@@ -228,6 +233,7 @@ describe('tab-owned GFS composer prefill', () => {
       path: resource.gfsUri,
     }).tabs.find(tab => tab.id === 'files-source') as WorkspaceTab
 
+    recordLatestGfsConversationContext(sourceTab)
     expect(prefillNewConversationWithGfsResource(sourceTab, null, 'chat-a')).toBe(true)
     render(<SelectedChatHarness />)
 
@@ -266,6 +272,7 @@ describe('tab-owned GFS composer prefill', () => {
     }).tabs.find(tab => tab.id === 'files-source') as WorkspaceTab
     const { rerender } = render(<DraftSurface tabId="chat-a" agentRef="agent-a" />)
 
+    recordLatestGfsConversationContext(sourceTab)
     expect(prefillNewConversationWithGfsResource(sourceTab, 'agent-a', 'chat-a')).toBe(true)
     rerender(<DraftSurface tabId="chat-a" agentRef="agent-a" />)
     await waitFor(() =>
@@ -283,6 +290,7 @@ describe('tab-owned GFS composer prefill', () => {
       id: 'files-source',
       path: resource.gfsUri,
     }).tabs.find(tab => tab.id === 'files-source') as WorkspaceTab
+    recordLatestGfsConversationContext(sourceTab)
     expect(prefillNewConversationWithGfsResource(sourceTab, null, 'chat-a')).toBe(true)
 
     const { rerender } = render(<DraftSurface tabId="chat-a" agentRef="" />)

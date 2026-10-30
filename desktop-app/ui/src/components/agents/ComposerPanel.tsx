@@ -64,6 +64,7 @@ const COMPOSER_INLINE_MIN_TEXT_HEIGHT = 48
 
 type GfsInsertionSession = {
   id: number
+  workspaceTabId: string | null
   chatId: string | null
   agent: string | null
   expectedDraft: string
@@ -175,7 +176,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     agentError,
     failedAgentSend,
     activeChatId,
-    workspaceChatTabId,
+    workspaceChatTabId = null,
     activeMessageCount,
     composerFocusRequestId,
   } = useChatComposerStateContext()
@@ -240,8 +241,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const gfsInsertionSessionRef = useRef<GfsInsertionSession | null>(null)
   const gfsInsertionSessionCounterRef = useRef(0)
   const gfsInsertionBusyRef = useRef(false)
-  const composerIdentityRef = useRef({ chatId: activeChatId, agent: selectedAgent })
-  composerIdentityRef.current = { chatId: activeChatId, agent: selectedAgent }
+  const composerIdentityRef = useRef({
+    chatId: activeChatId,
+    agent: selectedAgent,
+    workspaceTabId: workspaceChatTabId,
+  })
+  composerIdentityRef.current = {
+    chatId: activeChatId,
+    agent: selectedAgent,
+    workspaceTabId: workspaceChatTabId,
+  }
   const pluginsItemRef = useRef<HTMLButtonElement | null>(null)
   const connectorsItemRef = useRef<HTMLButtonElement | null>(null)
   const agentFilesItemRef = useRef<HTMLButtonElement | null>(null)
@@ -298,11 +307,15 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   useEffect(() => {
     const session = gfsInsertionSessionRef.current
     if (!session) return
-    if (session.chatId !== activeChatId || session.agent !== selectedAgent) {
+    if (
+      session.chatId !== activeChatId ||
+      session.agent !== selectedAgent ||
+      session.workspaceTabId !== workspaceChatTabId
+    ) {
       gfsInsertionSessionRef.current = null
       setComposerSubmenu(current => (current === 'gfs' ? null : current))
     }
-  }, [activeChatId, selectedAgent])
+  }, [activeChatId, selectedAgent, workspaceChatTabId])
 
   const resizeComposerInput = useCallback(() => {
     const textarea = composerInputRef.current
@@ -449,12 +462,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         result.accepted &&
         session &&
         session.chatId === activeChatId &&
-        session.agent === selectedAgent
+        session.agent === selectedAgent &&
+        session.workspaceTabId === workspaceChatTabId
       ) {
         session.expectedDraft = value
         session.expectedRevision = getComposerDraftRevision(
           activeChatId,
-          selectedAgent ?? undefined
+          selectedAgent ?? undefined,
+          workspaceChatTabId
         )
         session.anchor = selectionStart ?? value.length
       }
@@ -462,7 +477,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       // unless an error is actually present.
       if (result.accepted) clearComposerSendError()
     },
-    [activeChatId, clearComposerSendError, selectedAgent, setDraft]
+    [activeChatId, clearComposerSendError, selectedAgent, setDraft, workspaceChatTabId]
   )
 
   const rememberGfsInsertionAnchor = useCallback(() => {
@@ -472,15 +487,24 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       !session ||
       !textarea ||
       session.chatId !== activeChatId ||
-      session.agent !== selectedAgent
+      session.agent !== selectedAgent ||
+      session.workspaceTabId !== workspaceChatTabId
     ) {
       return
     }
-    const currentDraft = getComposerDraft(activeChatId, selectedAgent ?? undefined)
+    const currentDraft = getComposerDraft(
+      activeChatId,
+      selectedAgent ?? undefined,
+      workspaceChatTabId
+    )
     session.expectedDraft = currentDraft
-    session.expectedRevision = getComposerDraftRevision(activeChatId, selectedAgent ?? undefined)
+    session.expectedRevision = getComposerDraftRevision(
+      activeChatId,
+      selectedAgent ?? undefined,
+      workspaceChatTabId
+    )
     session.anchor = textarea.selectionEnd
-  }, [activeChatId, selectedAgent])
+  }, [activeChatId, selectedAgent, workspaceChatTabId])
 
   // The controller clears the draft store only when the send is actually accepted
   // (it bails out early if the chat already has an in-flight task), so a no-op send
@@ -605,20 +629,29 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const openGfsLinkPicker = useCallback(() => {
     const textarea = composerInputRef.current
-    const currentDraft = getComposerDraft(activeChatId, selectedAgent ?? undefined)
+    const currentDraft = getComposerDraft(
+      activeChatId,
+      selectedAgent ?? undefined,
+      workspaceChatTabId
+    )
     gfsInsertionSessionRef.current = {
       id: ++gfsInsertionSessionCounterRef.current,
       chatId: activeChatId,
       agent: selectedAgent,
+      workspaceTabId: workspaceChatTabId,
       expectedDraft: currentDraft,
-      expectedRevision: getComposerDraftRevision(activeChatId, selectedAgent ?? undefined),
+      expectedRevision: getComposerDraftRevision(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceChatTabId
+      ),
       anchor: textarea?.selectionEnd ?? currentDraft.length,
       controllerScope: null,
     }
     setComposerMenuOpen(true)
     setComposerSubmenu('gfs')
     setComposerAttachmentError(null)
-  }, [activeChatId, selectedAgent])
+  }, [activeChatId, selectedAgent, workspaceChatTabId])
 
   const captureGfsControllerScope = useCallback((sessionId: number, scope: string) => {
     const session = gfsInsertionSessionRef.current
@@ -650,16 +683,26 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       if (
         session.chatId !== composerIdentityRef.current.chatId ||
         session.agent !== composerIdentityRef.current.agent ||
+        session.workspaceTabId !== composerIdentityRef.current.workspaceTabId ||
         session.chatId !== activeChatId ||
         session.agent !== selectedAgent ||
+        session.workspaceTabId !== workspaceChatTabId ||
         session.controllerScope !== controllerScope
       ) {
         gfsInsertionSessionRef.current = null
         setComposerSubmenu(null)
         return
       }
-      const currentDraft = getComposerDraft(activeChatId, selectedAgent ?? undefined)
-      const currentRevision = getComposerDraftRevision(activeChatId, selectedAgent ?? undefined)
+      const currentDraft = getComposerDraft(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceChatTabId
+      )
+      const currentRevision = getComposerDraftRevision(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceChatTabId
+      )
       if (currentDraft !== session.expectedDraft || currentRevision !== session.expectedRevision) {
         gfsInsertionSessionRef.current = null
         setComposerSubmenu(null)
@@ -673,16 +716,25 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       const insertion = `${canonicalUri} `
       const nextDraft = `${currentDraft.slice(0, anchor)}${insertion}${currentDraft.slice(anchor)}`
       const nextAnchor = anchor + insertion.length
-      setDraft(nextDraft)
+      const result = setDraft(nextDraft)
+      if (!result.accepted) {
+        gfsInsertionBusyRef.current = false
+        return
+      }
       session.expectedDraft = nextDraft
-      session.expectedRevision = getComposerDraftRevision(activeChatId, selectedAgent ?? undefined)
+      session.expectedRevision = getComposerDraftRevision(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceChatTabId
+      )
       session.anchor = nextAnchor
       window.requestAnimationFrame(() => {
         const textarea = composerInputRef.current
         if (
           !textarea ||
-          activeChatId !== session.chatId ||
-          selectedAgent !== session.agent ||
+          composerIdentityRef.current.chatId !== session.chatId ||
+          composerIdentityRef.current.agent !== session.agent ||
+          composerIdentityRef.current.workspaceTabId !== session.workspaceTabId ||
           gfsInsertionSessionRef.current?.id !== session.id
         ) {
           gfsInsertionBusyRef.current = false
@@ -694,7 +746,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         gfsInsertionBusyRef.current = false
       })
     },
-    [activeChatId, resizeComposerInput, selectedAgent, setDraft]
+    [activeChatId, resizeComposerInput, selectedAgent, setDraft, workspaceChatTabId]
   )
 
   const readFileAsDataUrl = useCallback(
