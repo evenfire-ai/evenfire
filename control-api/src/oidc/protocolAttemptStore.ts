@@ -128,10 +128,11 @@ export async function applyOidcProtocolAttemptSchema(db: Pick<DbClient, 'query'>
 export async function applyOidcProtocolAttemptExpiryIndexMigration(
   db: Pick<DbClient, 'query'>
 ): Promise<void> {
-  const table = await db.query<{ relation: string | null }>(
+  const table = await db.query(
     `SELECT to_regclass('public.oidc_protocol_attempts')::text AS relation`
   )
-  if (!table.rows[0]?.relation) return
+  const relation = table.rows[0] as { relation?: string | null } | undefined
+  if (!relation?.relation) return
 
   await db.query(`
     CREATE INDEX IF NOT EXISTS oidc_protocol_attempts_expiry_idx
