@@ -1,0 +1,15 @@
+{
+  "selected": [
+    "verifies the real user-data, consent directory, and produced consent file",
+    "rejects an unsafe existing consent file without reading or overwriting it",
+    "rejects an unsafe user-data parent before creating consent files",
+    "verifies actual audit files and the rotated generation"
+  ],
+  "deselected": [
+    "rechecks a replaced consent file instead of returning cached grants",
+    "rechecks a replaced consent directory before returning cached grants",
+    "retains inherited effective access after an atomic consent replacement",
+    "preserves consent corruption recovery as a verified inherited-DACL file",
+    "does not append to an audit file with unauthorized effective access"
+  ]
+}

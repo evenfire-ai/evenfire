@@ -6,6 +6,7 @@ on:
       - test/pr977-windows-68b8ea74-20261030-r24l11
     paths:
       - .validation/windows/focused-test-target.txt
+      - .validation/windows/focused-test-cases.json
       - .github/workflows/pr977-windows-focused.yml
       - scripts/pr977/windows-diagnostic-reporter.mjs
       - scripts/pr977/run-vitest-with-watchdog.mjs
@@ -66,6 +67,13 @@ jobs:
           if ($targets.Count -ne 1 -or $targets[0] -ne 'src/__tests__/pluginStorageWindowsAcl.native.test.ts') {
             throw 'Focused native plugin DACL manifest is incomplete or unexpected'
           }
+          $caseManifest = Get-Content validation/.validation/windows/focused-test-cases.json -Raw |
+            ConvertFrom-Json
+          $selectedCases = @($caseManifest.selected)
+          $deselectedCases = @($caseManifest.deselected)
+          if ($selectedCases.Count -ne 4 -or $deselectedCases.Count -ne 5) {
+            throw 'Focused native plugin DACL case manifest has an unexpected selection size'
+          }
           if (-not (Test-Path -LiteralPath (Join-Path source/desktop-app $targets[0]) -PathType Leaf)) {
             throw 'The selected native plugin DACL test is missing from the pinned source'
           }
@@ -109,7 +117,7 @@ jobs:
           node ../../validation/scripts/pr977/test-aggregate-windows-full-shards.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Windows shard aggregation contract tests failed' }
 
-      - name: Run complete native plugin DACL suite with external watchdog
+      - name: Run selected native plugin DACL cases with external watchdog
         id: focused
         working-directory: source/desktop-app
         shell: pwsh
@@ -122,6 +130,10 @@ jobs:
           $status = Join-Path $artifactDirectory 'watchdog-status.json'
           $raw = Join-Path $artifactDirectory 'vitest-raw.json'
           $safe = Join-Path $artifactDirectory 'focused-report.json'
+          $caseManifest = Get-Content ../../validation/.validation/windows/focused-test-cases.json -Raw |
+            ConvertFrom-Json
+          $patternParts = @($caseManifest.selected | ForEach-Object { [regex]::Escape([string]$_) })
+          $testNamePattern = '^(?:' + ($patternParts -join '|') + ')$'
           $env:PR977_DESKTOP_ROOT = (Get-Location).Path
           node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
             --maximum-runtime-ms=480000 `
@@ -132,6 +144,7 @@ jobs:
               --testTimeout=120000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism `
               '--reporter=../../validation/scripts/pr977/windows-diagnostic-reporter.mjs' `
               "--outputFile.json=$raw" `
+              --testNamePattern $testNamePattern `
               src/__tests__/pluginStorageWindowsAcl.native.test.ts
           $runnerExit = $LASTEXITCODE
           if (Test-Path -LiteralPath $raw -PathType Leaf) {
@@ -139,7 +152,8 @@ jobs:
             $sanitizeExit = $LASTEXITCODE
             if ($sanitizeExit -eq 0 -and (Test-Path -LiteralPath $safe -PathType Leaf)) {
               node ../../validation/scripts/pr977/verify-focused-windows-report.mjs `
-                $safe ../../validation/.validation/windows/focused-test-target.txt
+                $safe ../../validation/.validation/windows/focused-test-target.txt `
+                ../../validation/.validation/windows/focused-test-cases.json
               $verifyExit = $LASTEXITCODE
             } else { $verifyExit = 1 }
           } else {

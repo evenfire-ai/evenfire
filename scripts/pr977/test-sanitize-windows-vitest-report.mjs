@@ -243,22 +243,117 @@ assert.doesNotMatch(
 
 const selectedReport = path.join(tempRoot, 'passing-output.json')
 const selectedManifest = path.join(tempRoot, 'selected-targets.txt')
-writeFileSync(selectedManifest, 'src/__tests__/case-1.test.ts\n')
+const selectedCaseManifest = path.join(tempRoot, 'selected-cases.json')
+const selectedCases = [
+  'verifies the real user-data, consent directory, and produced consent file',
+  'rejects an unsafe existing consent file without reading or overwriting it',
+  'rejects an unsafe user-data parent before creating consent files',
+  'verifies actual audit files and the rotated generation',
+]
+const deselectedCases = [
+  'rechecks a replaced consent file instead of returning cached grants',
+  'rechecks a replaced consent directory before returning cached grants',
+  'retains inherited effective access after an atomic consent replacement',
+  'preserves consent corruption recovery as a verified inherited-DACL file',
+  'does not append to an audit file with unauthorized effective access',
+]
+const focusedSummary = {
+  ...passing.sanitized,
+  numTotalTests: selectedCases.length + deselectedCases.length,
+  numPassedTests: selectedCases.length,
+  numPendingTests: deselectedCases.length,
+  numFailedTests: 0,
+  numTodoTests: 0,
+  counterConsistency: { valid: true, discrepancies: [] },
+  success: true,
+  numTestFiles: 1,
+  testResults: [
+    {
+      name: 'src/__tests__/pluginStorageWindowsAcl.native.test.ts',
+      status: 'passed',
+      assertionResults: [
+        ...selectedCases.map(title => ({ title, status: 'passed' })),
+        ...deselectedCases.map(title => ({ title, status: 'pending' })),
+      ],
+    },
+  ],
+}
+writeFileSync(selectedReport, `${JSON.stringify(focusedSummary)}\n`)
+writeFileSync(selectedManifest, 'src/__tests__/pluginStorageWindowsAcl.native.test.ts\n')
+writeFileSync(
+  selectedCaseManifest,
+  `${JSON.stringify({ selected: selectedCases, deselected: deselectedCases })}\n`
+)
 const selectedPass = spawnSync(
   process.execPath,
-  [path.join(here, 'verify-focused-windows-report.mjs'), selectedReport, selectedManifest],
+  [
+    path.join(here, 'verify-focused-windows-report.mjs'),
+    selectedReport,
+    selectedManifest,
+    selectedCaseManifest,
+  ],
   { encoding: 'utf8' }
 )
 assert.equal(selectedPass.status, 0)
+const selectedFailure = structuredClone(focusedSummary)
+selectedFailure.testResults[0].assertionResults[0].status = 'failed'
+writeFileSync(selectedReport, `${JSON.stringify(selectedFailure)}\n`)
+const selectedRejected = spawnSync(
+  process.execPath,
+  [
+    path.join(here, 'verify-focused-windows-report.mjs'),
+    selectedReport,
+    selectedManifest,
+    selectedCaseManifest,
+  ],
+  { encoding: 'utf8' }
+)
+assert.equal(selectedRejected.status, 1, 'A failed selected case must fail verification')
+const unexpectedSkip = structuredClone(focusedSummary)
+unexpectedSkip.testResults[0].assertionResults[0].status = 'pending'
+writeFileSync(selectedReport, `${JSON.stringify(unexpectedSkip)}\n`)
+const skippedRequired = spawnSync(
+  process.execPath,
+  [
+    path.join(here, 'verify-focused-windows-report.mjs'),
+    selectedReport,
+    selectedManifest,
+    selectedCaseManifest,
+  ],
+  { encoding: 'utf8' }
+)
+assert.equal(skippedRequired.status, 1, 'A skipped selected case must fail verification')
+const unexpectedCase = structuredClone(focusedSummary)
+unexpectedCase.testResults[0].assertionResults.push({
+  title: 'an unexpected case executed',
+  status: 'passed',
+})
+writeFileSync(selectedReport, `${JSON.stringify(unexpectedCase)}\n`)
+const unexpectedCaseResult = spawnSync(
+  process.execPath,
+  [
+    path.join(here, 'verify-focused-windows-report.mjs'),
+    selectedReport,
+    selectedManifest,
+    selectedCaseManifest,
+  ],
+  { encoding: 'utf8' }
+)
+assert.equal(unexpectedCaseResult.status, 1, 'An unexpected executed case must fail verification')
 writeFileSync(selectedManifest, 'src/__tests__/case-1.test.ts\nsrc/__tests__/missing.test.ts\n')
 const selectedMissing = spawnSync(
   process.execPath,
-  [path.join(here, 'verify-focused-windows-report.mjs'), selectedReport, selectedManifest],
+  [
+    path.join(here, 'verify-focused-windows-report.mjs'),
+    selectedReport,
+    selectedManifest,
+    selectedCaseManifest,
+  ],
   { encoding: 'utf8' }
 )
 assert.equal(selectedMissing.status, 1, 'Missing required selected files must fail verification')
 
 rmSync(tempRoot, { recursive: true, force: true })
 process.stdout.write(
-  'Sanitized Windows Vitest report fixtures passed (pass, verifier, assertion, mismatch, fixture).\n'
+  'Sanitized Windows report fixtures passed (including selected-case and intentional-deselection enforcement).\n'
 )
