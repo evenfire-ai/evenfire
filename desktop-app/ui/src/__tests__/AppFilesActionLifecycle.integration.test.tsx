@@ -270,6 +270,7 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
     authenticatedPrincipalIdentity: 'integration-user:integration@example.test',
     availableTeamIds: ['team-a'],
     teamDirectoryHydrated: true,
@@ -495,7 +496,7 @@ function installClerum(
     value: {
       ...previousBridge,
       app: { rendererReady: vi.fn(async () => undefined) },
-      auth: { getDesktopAppInfo: vi.fn(async () => ({ version: 'test' })) },
+      auth: { getDesktopAppInfo: vi.fn(async () => ({ version: 'test' })), getSessionGeneration: vi.fn(async () => 1) },
       shortcuts: {
         onCommand: vi.fn((handler: (commandId: string, source: 'host' | 'sandbox') => void) => {
           appHarness.shortcutCommand = (commandId, source) => {
@@ -507,6 +508,7 @@ function installClerum(
         }),
       },
       sandboxUi: {
+        onSessionInvalidated: vi.fn(() => vi.fn()),
         listApps: vi.fn(async () => ({ apps: [] })),
         listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
         clearPendingDeepLinks: vi.fn(async () => undefined),
@@ -629,6 +631,9 @@ async function chooseRowAction(resourceName: string, actionName: string) {
     )
   if (!row) throw new Error(`Could not find the exact sidebar row for ${resourceName}`)
   fireEvent.click(within(row).getByRole('button', { name: `Options for ${resourceName}` }))
+  if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Share' }))
+  }
   fireEvent.click(await screen.findByRole('menuitem', { name: actionName }))
 }
 
@@ -1089,7 +1094,7 @@ describe('App → Files action lifecycle integration', () => {
           uri,
           handlers,
           canRename: true,
-          canMove: true,
+          canMove: false,
           canCreateFolder: kind === 'directory',
           canUpload: kind === 'directory',
           canShare: true,
@@ -1100,7 +1105,7 @@ describe('App → Files action lifecycle integration', () => {
           canOpenFolder: kind === 'directory',
           canDelete: true,
         })
-      ).map(action => ({ id: action.id, label: action.label }))
+      ).filter(action => !['copy-link', 'copy-route'].includes(action.id)).map(action => ({ id: action.id, label: action.label }))
 
     for (const resource of [folder, file]) {
       const row = screen
@@ -2133,7 +2138,7 @@ describe('App → Files action lifecycle integration', () => {
     expect(deleteResource).toHaveBeenCalledTimes(1)
   })
 
-  it('moves an unreadable child from its accessible parent without changing target identity', async () => {
+  it.each([false, true])('moves a child through its exact parent (readable: %s)', async readable => {
     const parent = await resolveResource(
       resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Shared parent')
     )
@@ -2149,7 +2154,7 @@ describe('App → Files action lifecycle integration', () => {
       gfsUri: target.gfsUri,
       parentResourceId: parent.resourceId,
       version: target.version,
-      readable: false,
+      readable,
     })
     const { moveResource } = installClerum([parent, target, destination], new Map(), {
       accessibleRows: [
@@ -2182,49 +2187,26 @@ describe('App → Files action lifecycle integration', () => {
         target.resourceId,
         destination.resourceId,
         'main',
-        target.version
+        target.version,
+        undefined,
+        1
       )
     )
   })
 
-  it('moves a root row through virtual-root readiness and preserves its target', async () => {
-    const target = await resolveResource(
-      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'root-move.txt')
-    )
-    const destination = await resolveResource(
-      resolvedDirectory('dddddddddddddddddddddddddddddddd', 'Root move destination')
-    )
-    const { moveResource } = installClerum([target, destination], new Map(), {
-      accessibleRows: [
-        accessibleResource(target.resourceId, target.name, 'file', {
-          gfsUri: target.gfsUri,
-        }),
-        accessibleResource(destination.resourceId, destination.name, 'directory', {
-          gfsUri: destination.gfsUri,
-        }),
-      ],
+  it('omits Move for a shared-root row without source parent', async () => {
+    const target = await resolveResource(resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'root-move.txt'))
+    const { moveResource } = installClerum([target], new Map(), {
+      accessibleRows: [accessibleResource(target.resourceId, target.name, 'file', { gfsUri: target.gfsUri })],
     })
     renderApp()
-
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
-    await screen.findByRole('treeitem', { name: /root-move\.txt/ })
-    await chooseRowAction(target.name, 'Move to')
-
-    const dialog = await screen.findByRole('dialog', { name: 'Move file root-move.txt' })
-    expect(dialog.querySelector('.da-gfs-move-dialog__current-location')?.textContent).toContain(
-      'Shared with me'
-    )
-    fireEvent.click(await within(dialog).findByRole('button', { name: destination.name }))
-    fireEvent.click(within(dialog).getByRole('button', { name: `Move here (${destination.name})` }))
-
-    await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith(
-        target.resourceId,
-        destination.resourceId,
-        'main',
-        target.version
-      )
-    )
+    const row = await screen.findByRole('treeitem', { name: /root-move\.txt/ })
+    fireEvent.click(within(row).getByRole('button', { name: 'Options for root-move.txt' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for root-move.txt' })
+    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+    expect(within(menu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
   })
 
   it('keeps copy-content owned by the matching Preview page', async () => {
@@ -2301,5 +2283,44 @@ describe('App → Files action lifecycle integration', () => {
     })
     await screen.findByRole('heading', { name: 'Preview body' })
     expect(writeText).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('App explicit Chat intent handoff through the real controller', () => {
+  it.each([null, 'agent-a'])('closes Files into its Chat neighbor with exactly one intent (agent: %s)', async agentRef => {
+    installClerum([])
+    const { currentController } = await renderAppWithRealController()
+    const workspace = openFilesTab(createWorkspaceTabsState('intent-chat-owner', agentRef), { id: 'files-to-close', path: null })
+    act(() => currentController().setWorkspaceTabs(workspace))
+    await waitFor(() => expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe('files-to-close'))
+    const before = currentController().navigationIntentSequence
+    fireEvent.click(screen.getByRole('button', { name: 'Close Files' }))
+    await waitFor(() => {
+      expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat)
+      expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe('intent-chat-owner')
+      expect(currentController().workspaceTabs.tabs.some(tab => tab.id === 'files-to-close')).toBe(false)
+    })
+    expect(currentController().navigationIntentSequence).toBe(before + 1)
+  })
+
+  it('creates New chat once and records a genuinely later active-tab reselection once', async () => {
+    installClerum([])
+    const { currentController } = await renderAppWithRealController()
+    act(() => currentController().setWorkspaceTabs(openFilesTab(createWorkspaceTabsState('prior-chat', 'agent-a'), { id: 'files-before-new', path: null })))
+    const before = currentController().navigationIntentSequence
+    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+    await waitFor(() => expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat))
+    const selected = activeWorkspaceTab(currentController().workspaceTabs)
+    expect(selected).toMatchObject({ kind: 'chat', chat: { chatId: null } })
+    expect(currentController().navigationIntentSequence).toBe(before + 1)
+    const newChatIntent = currentController().navigationIntentSequence
+    const tab = getWorkspaceTabButtons(selected!.title).find(button => button.getAttribute('aria-pressed') === 'true')
+    if (!tab) throw new Error('New chat did not select a rendered workspace tab')
+    fireEvent.click(tab)
+    expect(currentController().navigationIntentSequence).toBe(newChatIntent + 1)
+    expect(currentController().isNavigationIntentCurrent(newChatIntent)).toBe(false)
+    expect(activeWorkspaceTab(currentController().workspaceTabs)?.id).toBe(selected!.id)
+    expect(currentController().navItem).toBe(DESKTOP_ROUTES.chat)
   })
 })

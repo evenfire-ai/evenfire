@@ -1104,7 +1104,7 @@ export function App() {
         if (preview) openScopedPreviewSection(preview)
         return
       }
-      if (actionId === 'move' && resource.readable === false) {
+      if (actionId === 'move') {
         const navigationUri =
           resource.parentResourceId === null
             ? null
