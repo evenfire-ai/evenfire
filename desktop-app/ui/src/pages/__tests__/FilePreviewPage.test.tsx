@@ -13,6 +13,7 @@ import {
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
@@ -736,6 +737,18 @@ describe('FilePreviewPage', () => {
 
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
+      const queryClient = queryClients.at(-1)!
+      await waitFor(() => {
+        for (const resourceId of ['0123456789abcdef0123456789abcdef', 'preview-parent']) {
+          const query = queryClient.getQueryState(
+            desktopQueryKeys.gfsAffordances('preview-test-user:main', resourceId, 'main', 2)
+          )
+          expect(query?.status).toBe('success')
+          expect(query?.fetchStatus).toBe('idle')
+        }
+      })
+      const permissionReadsAfterReplacement = affordances.mock.calls.length
+      expect(permissionReadsAfterReplacement).toBeGreaterThan(permissionReadsBeforeReplacement)
       await act(async () => releaseDigest(new ArrayBuffer(0)))
       await act(async () => {
         await Promise.resolve()
@@ -743,7 +756,7 @@ describe('FilePreviewPage', () => {
       })
 
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
+      expect(affordances.mock.calls.length).toBe(permissionReadsAfterReplacement)
     } finally {
       releaseDigest(new ArrayBuffer(0))
       digestSpy.mockRestore()
