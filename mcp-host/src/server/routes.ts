@@ -392,6 +392,8 @@ export async function handleMessageRoute(
       const caller = getRuntimeCallerContext(req)
       if (caller?.caller === 'rpc-proxy' && caller.userId) {
         message.sender = caller.userId
+        // rpc-proxy omits the timestamp; checkpoint continuation needs the Host receive time.
+        message.timestamp ??= new Date().toISOString()
         if (caller.teamId) {
           message.metadata = { ...(message.metadata ?? {}), teamId: caller.teamId }
         }
