@@ -1,8 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { AUDIT_MAX_BYTES, type AuditEntry, PluginAuditLog, shapeOf } from '../pluginAuditLog.js'
+
+vi.mock('../pluginStorageWindowsAcl.js', async () => {
+  const { PluginStoragePrivacyUnitFixture } =
+    await import('../../testSupport/pluginStoragePrivacyUnitFixture.js')
+  return { PluginStoragePrivacyGuard: PluginStoragePrivacyUnitFixture }
+})
 
 const ENV_KEY = 'testenv-0123456789ab'
 

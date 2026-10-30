@@ -4,6 +4,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { type ConsentGrant, LocalConsentStore } from '../pluginConsentStore.js'
 
+vi.mock('../pluginStorageWindowsAcl.js', async () => {
+  const { PluginStoragePrivacyUnitFixture } =
+    await import('../../testSupport/pluginStoragePrivacyUnitFixture.js')
+  return { PluginStoragePrivacyGuard: PluginStoragePrivacyUnitFixture }
+})
+
 const ENV_A = 'enva-0123456789ab'
 const ENV_B = 'envb-0123456789ab'
 

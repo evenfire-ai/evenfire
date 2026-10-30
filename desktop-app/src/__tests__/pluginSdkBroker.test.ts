@@ -11,6 +11,12 @@ import type { PluginSdkDataSource } from '../pluginSdkCapabilities.js'
 import type { PluginConsentRequest } from '../pluginSdkProtocol.js'
 import { _resetPluginSurfacesForTests, pinPluginSurface } from '../pluginSurfaceRegistry.js'
 
+vi.mock('../pluginStorageWindowsAcl.js', async () => {
+  const { PluginStoragePrivacyUnitFixture } =
+    await import('../../testSupport/pluginStoragePrivacyUnitFixture.js')
+  return { PluginStoragePrivacyGuard: PluginStoragePrivacyUnitFixture }
+})
+
 const ENV_KEY = 'testenv-0123456789ab'
 const USER_ID = 'user-1'
 const PLUGIN_ID = 'sandbox-recipes/leadforge'

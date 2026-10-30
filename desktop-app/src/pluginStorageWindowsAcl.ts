@@ -99,8 +99,55 @@ export type WindowsPluginStorageEvidence = {
   allowedPrincipalsOnly: true
 }
 
+export type PluginStorageNativeDiagnostic = {
+  failure:
+    | 'process-timeout'
+    | 'process-start-failed'
+    | 'process-error'
+    | 'process-terminated'
+    | 'process-exit-failed'
+    | 'response-missing'
+    | 'response-malformed'
+    | 'verifier-rejected'
+    | 'evidence-invalid'
+  elapsedMs: number
+  processErrorCode?:
+    | 'EACCES'
+    | 'EINVAL'
+    | 'EIO'
+    | 'EMFILE'
+    | 'ENFILE'
+    | 'ENOBUFS'
+    | 'ENOENT'
+    | 'ENOMEM'
+    | 'ENOTDIR'
+    | 'EPERM'
+    | 'EPIPE'
+    | 'ETIMEDOUT'
+  exitStatus?: number | null
+  signal?: 'SIGABRT' | 'SIGBREAK' | 'SIGINT' | 'SIGKILL' | 'SIGTERM'
+  nativePhase?: 'inspect-object' | 'load-native-helper' | 'verification'
+  nativeErrorType?:
+    | 'ArgumentException'
+    | 'FileNotFoundException'
+    | 'InvalidOperationException'
+    | 'PlatformNotSupportedException'
+    | 'ReflectionTypeLoadException'
+    | 'RuntimeException'
+    | 'UnauthorizedAccessException'
+    | 'TypeInitializationException'
+    | 'Win32Exception'
+  hresult?: string
+  nativeOperation?: string
+  win32Error?: number
+  nativeReason?: string
+}
+
 export class PluginStoragePrivacyError extends Error {
-  constructor(readonly reason: string) {
+  constructor(
+    readonly reason: string,
+    readonly diagnostic?: PluginStorageNativeDiagnostic
+  ) {
     super('Plugin storage privacy could not be verified')
     this.name = 'PluginStoragePrivacyError'
   }
@@ -149,17 +196,165 @@ export function validateWindowsPluginStorageEvidence(value: unknown): NativeResu
   return record as NativeResult
 }
 
-function sanitizedResult(result: SpawnSyncReturns<string>): NativeResult {
-  if (result.error || result.signal || result.status !== 0 || !result.stdout) {
-    throw new PluginStoragePrivacyError('native-inspection-unavailable')
+const PROCESS_ERROR_CODES = new Set([
+  'EACCES',
+  'EINVAL',
+  'EIO',
+  'EMFILE',
+  'ENFILE',
+  'ENOBUFS',
+  'ENOENT',
+  'ENOMEM',
+  'ENOTDIR',
+  'EPERM',
+  'EPIPE',
+  'ETIMEDOUT',
+])
+const PROCESS_SIGNALS = new Set(['SIGABRT', 'SIGBREAK', 'SIGINT', 'SIGKILL', 'SIGTERM'])
+const NATIVE_PHASES = new Set(['inspect-object', 'load-native-helper', 'verification'])
+const NATIVE_ERROR_TYPES = new Set([
+  'ArgumentException',
+  'FileNotFoundException',
+  'FormatException',
+  'IOException',
+  'InvalidDataException',
+  'InvalidOperationException',
+  'PlatformNotSupportedException',
+  'ReflectionTypeLoadException',
+  'RuntimeException',
+  'SecurityException',
+  'TypeLoadException',
+  'TypeInitializationException',
+  'UnauthorizedAccessException',
+  'Win32Exception',
+])
+
+function boundedElapsedMs(elapsedMs: number): number {
+  return Math.max(0, Math.min(60_000, Math.round(elapsedMs)))
+}
+
+function nativeDiagnostic(
+  failure: PluginStorageNativeDiagnostic['failure'],
+  result: SpawnSyncReturns<string>,
+  elapsedMs: number,
+  response?: unknown
+): PluginStorageNativeDiagnostic {
+  const diagnostic: PluginStorageNativeDiagnostic = {
+    failure,
+    elapsedMs: boundedElapsedMs(elapsedMs),
+  }
+  const processErrorCode = (result.error as NodeJS.ErrnoException | undefined)?.code
+  if (typeof processErrorCode === 'string' && PROCESS_ERROR_CODES.has(processErrorCode)) {
+    diagnostic.processErrorCode =
+      processErrorCode as PluginStorageNativeDiagnostic['processErrorCode']
+  }
+  diagnostic.exitStatus =
+    Number.isSafeInteger(result.status) && result.status !== null
+      ? Math.max(-1, Math.min(255, result.status))
+      : null
+  if (typeof result.signal === 'string' && PROCESS_SIGNALS.has(result.signal)) {
+    diagnostic.signal = result.signal as PluginStorageNativeDiagnostic['signal']
+  }
+  if (response && typeof response === 'object' && !Array.isArray(response)) {
+    const fields = response as Record<string, unknown>
+    if (typeof fields.phase === 'string' && NATIVE_PHASES.has(fields.phase)) {
+      diagnostic.nativePhase = fields.phase as PluginStorageNativeDiagnostic['nativePhase']
+    }
+    if (typeof fields.errorType === 'string' && NATIVE_ERROR_TYPES.has(fields.errorType)) {
+      diagnostic.nativeErrorType =
+        fields.errorType as PluginStorageNativeDiagnostic['nativeErrorType']
+    }
+    if (typeof fields.hresult === 'string' && /^0x[0-9A-F]{8}$/i.test(fields.hresult)) {
+      diagnostic.hresult = `0x${fields.hresult.slice(2).toUpperCase()}`
+    }
+    if (
+      typeof fields.nativeOperation === 'string' &&
+      /^[a-z-]{1,40}$/.test(fields.nativeOperation)
+    ) {
+      diagnostic.nativeOperation = fields.nativeOperation
+    }
+    if (
+      typeof fields.win32Error === 'number' &&
+      Number.isSafeInteger(fields.win32Error) &&
+      fields.win32Error >= 0 &&
+      fields.win32Error <= 0xffff
+    ) {
+      diagnostic.win32Error = fields.win32Error
+    }
+    if (typeof fields.reason === 'string' && /^[a-z-]{1,60}$/.test(fields.reason)) {
+      diagnostic.nativeReason = fields.reason
+    }
+  }
+  return diagnostic
+}
+
+function sanitizedResult(result: SpawnSyncReturns<string>, elapsedMs: number): NativeResult {
+  if (result.error) {
+    const processErrorCode = (result.error as NodeJS.ErrnoException).code
+    const timedOut = processErrorCode === 'ETIMEDOUT'
+    const launchFailed = ['EACCES', 'ENOENT', 'EPERM'].includes(String(processErrorCode))
+    throw new PluginStoragePrivacyError(
+      timedOut
+        ? 'native-inspection-process-timeout'
+        : launchFailed
+          ? 'native-inspection-process-start-failed'
+          : 'native-inspection-process-error',
+      nativeDiagnostic(
+        timedOut ? 'process-timeout' : launchFailed ? 'process-start-failed' : 'process-error',
+        result,
+        elapsedMs
+      )
+    )
+  }
+  if (result.signal) {
+    throw new PluginStoragePrivacyError(
+      'native-inspection-process-terminated',
+      nativeDiagnostic('process-terminated', result, elapsedMs)
+    )
+  }
+  if (!result.stdout) {
+    throw new PluginStoragePrivacyError(
+      'native-inspection-response-missing',
+      nativeDiagnostic('response-missing', result, elapsedMs)
+    )
   }
   let parsed: unknown
   try {
     parsed = JSON.parse(result.stdout.trim())
   } catch {
-    throw new PluginStoragePrivacyError('native-inspection-malformed')
+    throw new PluginStoragePrivacyError(
+      'native-inspection-response-malformed',
+      nativeDiagnostic('response-malformed', result, elapsedMs)
+    )
   }
-  return validateWindowsPluginStorageEvidence(parsed)
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    (parsed as Record<string, unknown>).ok === false
+  ) {
+    throw new PluginStoragePrivacyError(
+      'native-verifier-rejected',
+      nativeDiagnostic('verifier-rejected', result, elapsedMs, parsed)
+    )
+  }
+  if (result.status !== 0) {
+    throw new PluginStoragePrivacyError(
+      'native-inspection-process-exit-failed',
+      nativeDiagnostic('process-exit-failed', result, elapsedMs, parsed)
+    )
+  }
+  try {
+    return validateWindowsPluginStorageEvidence(parsed)
+  } catch (error) {
+    if (error instanceof PluginStoragePrivacyError) {
+      throw new PluginStoragePrivacyError(
+        'native-inspection-evidence-invalid',
+        nativeDiagnostic('evidence-invalid', result, elapsedMs, parsed)
+      )
+    }
+    throw error
+  }
 }
 
 /** Inspect actual Windows handles using the existing compiled native helper. */
@@ -183,6 +378,7 @@ export function inspectWindowsPluginStoragePaths(
     'v1.0',
     'powershell.exe'
   )
+  const startedAt = performance.now()
   const result = spawnSync(
     executable,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', LAUNCHER],
@@ -200,7 +396,7 @@ export function inspectWindowsPluginStoragePaths(
       windowsHide: true,
     }
   )
-  const items = sanitizedResult(result).items
+  const items = sanitizedResult(result, performance.now() - startedAt).items
   if (items.length !== checks.length) {
     throw new PluginStoragePrivacyError('native-inspection-incomplete')
   }
