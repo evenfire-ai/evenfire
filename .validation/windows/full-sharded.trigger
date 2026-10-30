@@ -1,2 +1,2 @@
-source=41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
-harness=verified-native-and-complete-producer-dependencies-v3
+source=cee0e58a586761459ab259cfb575901ef4bb77db
+harness=r24m7-final-full-cee0e58a
