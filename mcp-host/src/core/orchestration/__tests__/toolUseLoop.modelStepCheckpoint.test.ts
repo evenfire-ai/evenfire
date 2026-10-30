@@ -24,6 +24,7 @@ import { GrokSubscriptionProvider } from '../../../llm/grokSubscription'
 import { CodexAuthorizeError } from '../../../llm/providerAttemptAuthorizer'
 import type { ClassifiedError } from '../../../llm/types'
 import { logger } from '../../../logger'
+import type { LlmInProgressEvent, ProgressReporter } from '../../../progress/types'
 import {
   type InProcessWorkerHandle,
   createInProcessWorker,
@@ -256,6 +257,7 @@ function withRecorder(
     events?: AgentEventEmitter
     abortSignal?: AbortSignal
     modelStepAutoRetries?: number
+    progressReporter?: ProgressReporter
   } = {}
 ) {
   return {
@@ -1768,6 +1770,101 @@ describe('automatic model-step retry (#1043 §2.1)', () => {
     await expect(settle.mock.results[0]!.value).resolves.toBeUndefined()
     expect(resumableTransitions(transition)).toHaveLength(0)
     expect(abandonedTransitions(transition)).toHaveLength(1)
+  })
+
+  // #1043 §2.1 (B7) — the heartbeat interval is opened once per model step,
+  // before both retry paths, so it keeps ticking while the automatic retry is
+  // in flight and stops with the step.
+  it('H10 (B7): llm_in_progress heartbeats keep running inside the model-step retry', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+    })
+    // NOT setImmediate, NOT queueMicrotask: the in-process worker replies with
+    // queueMicrotask, so those must stay real.
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const { store, recorder } = harness()
+      const settle = vi.spyOn(recorder, 'settle')
+      const transition = vi.spyOn(store, 'transition')
+      const tool = createMockTool('read_file')
+
+      let retryWindowOpen = false
+      let retryAnswered = false
+      let continueCalls = 0
+      let heartbeatsDuringRetry = 0
+      const heartbeat = vi.fn((_event: LlmInProgressEvent) => {
+        if (retryWindowOpen) heartbeatsDuringRetry += 1
+      })
+      const reporter: ProgressReporter = {
+        reportToolStart: vi.fn(),
+        reportToolComplete: vi.fn(),
+        reportToolProgress: vi.fn(),
+        reportThinking: vi.fn(),
+        reportLlmInProgress: heartbeat,
+      }
+
+      const reasoning: ReasoningPort = {
+        respondWithTools: vi.fn(async () => ({
+          type: 'tool_calls' as const,
+          calls: [{ id: 'tc_h10', name: 'read_file', arguments: {} }],
+        })),
+        continueWithToolResults: vi.fn(async () => {
+          continueCalls += 1
+          if (continueCalls === 1) return { type: 'error' as const, error: codexUnavailable() }
+          // The automatic retry: 25 s of fake time inside the retried call.
+          retryWindowOpen = true
+          await new Promise<void>(resolve => setTimeout(resolve, 25_000))
+          retryWindowOpen = false
+          retryAnswered = true
+          return { type: 'text' as const, content: 'answer after the retried step' }
+        }),
+      }
+
+      const loopPromise = runToolUseLoop(
+        withRecorder(reasoning, [tool], recorder, 4, {
+          modelStepAutoRetries: 1,
+          progressReporter: reporter,
+        }),
+        [user]
+      )
+      // Drive fake time in 1 s slices; each slice drains the microtask chain, so
+      // the loop reaches its next timer even though the first tool batch is an
+      // awaited store write. Stop as soon as the retried call answered: the
+      // settle write that follows must not race its 5 s queue timeout.
+      for (let slice = 0; slice < 40 && !retryAnswered; slice++) {
+        await vi.advanceTimersByTimeAsync(1_000)
+      }
+      expect(retryAnswered).toBe(true)
+      const result = await loopPromise
+
+      expect(result).toMatchObject({ type: 'response', content: 'answer after the retried step' })
+      // One failed step and its retry; the tool ran once.
+      expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+      expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+      expect(tool.execute).toHaveBeenCalledTimes(1)
+      // Liveness: the 10 s and 20 s ticks of the interval opened for that step,
+      // both strictly inside the 25 s retried call.
+      expect(heartbeatsDuringRetry).toBeGreaterThanOrEqual(2)
+      expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2)
+      // The heartbeats belong to the retried model step: no extra loop
+      // iteration was consumed.
+      expect(heartbeat.mock.calls.every(([event]) => event.iteration === 1)).toBe(true)
+      // Stopped after completion.
+      const afterCompletion = heartbeat.mock.calls.length
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(heartbeat).toHaveBeenCalledTimes(afterCompletion)
+      expect(vi.getTimerCount()).toBe(0)
+      // H1/H2 parity: the answered turn settled as abandoned, never resumable.
+      expect(settle).toHaveBeenCalledTimes(1)
+      await expect(settle.mock.results[0]!.value).resolves.toBeUndefined()
+      expect(resumableTransitions(transition)).toHaveLength(0)
+      expect(abandonedTransitions(transition)).toHaveLength(1)
+      // A silent "no retry at all" also fails: the retry announced itself once.
+      expect(retryWarnings(warn)).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
   it.each([
