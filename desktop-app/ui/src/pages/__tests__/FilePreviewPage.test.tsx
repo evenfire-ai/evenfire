@@ -146,8 +146,16 @@ describe('FilePreviewPage', () => {
   })
 
   it('keeps the current preview when a delayed resource error belongs to a replaced session', async () => {
-    const authority = await vi.importActual<typeof import('@hooks/domain/useGfsBrowserController')>('@hooks/domain/useGfsBrowserController')
-    const staleError = new Error(await resolveDeniedMessage('gfs://main/current-preview', { code: 'unauthorized', message: 'not authenticated' }, 401))
+    const authority = await vi.importActual<typeof import('@hooks/domain/useGfsBrowserController')>(
+      '@hooks/domain/useGfsBrowserController'
+    )
+    const staleError = new Error(
+      await resolveDeniedMessage(
+        'gfs://main/current-preview',
+        { code: 'unauthorized', message: 'not authenticated' },
+        401
+      )
+    )
     staleError.name = 'GfsStaleSessionAuthorityError'
     let setAccessState: (state: 'active' | 'revoked') => void = () => undefined
     const handleAuthorityFailure = vi.fn((error: unknown) => {
@@ -161,7 +169,9 @@ describe('FilePreviewPage', () => {
       return { ...controller(accessState), handleAuthorityFailure }
     })
     let rejectRefresh: (error: Error) => void = () => undefined
-    const delayedRefresh = new Promise<never>((_resolve, reject) => { rejectRefresh = reject })
+    const delayedRefresh = new Promise<never>((_resolve, reject) => {
+      rejectRefresh = reject
+    })
     let resolveCalls = 0
     stubGfs({
       downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
@@ -171,7 +181,15 @@ describe('FilePreviewPage', () => {
         return delayedRefresh
       },
     })
-    render(<FilePreviewPage gfsUri="gfs://main/current-preview" fileName="current.png" fileKind="image" mimeType="image/png" byteLength={3} />)
+    render(
+      <FilePreviewPage
+        gfsUri="gfs://main/current-preview"
+        fileName="current.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={3}
+      />
+    )
     expect(await screen.findByAltText('Preview of current.png')).toBeTruthy()
     fireEvent.focus(window)
     await waitFor(() => expect(resolveCalls).toBeGreaterThan(1))
@@ -179,7 +197,12 @@ describe('FilePreviewPage', () => {
     await waitFor(() => expect(handleAuthorityFailure).toHaveBeenCalled())
     expect(screen.queryByAltText('Preview of current.png')).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'File unavailable' })).toBeNull()
-    expect(handleAuthorityFailure).toHaveBeenCalledWith(staleError, 'operation', 'preview-test-user:main', 1)
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(
+      staleError,
+      'operation',
+      'preview-test-user:main',
+      1
+    )
   })
 
   it('mounts the image body for an image preview tab', async () => {
@@ -1093,7 +1116,9 @@ describe('FilePreviewPage', () => {
     await user.keyboard('{Enter}')
     const menu = screen.getByRole('menu', { name: 'Actions for keyboard.md' })
     const copyItem = within(menu).getByRole('menuitem', { name: 'Copy content' })
-    const enabledItems = within(menu).getAllByRole('menuitem').filter(item => !(item as HTMLButtonElement).disabled)
+    const enabledItems = within(menu)
+      .getAllByRole('menuitem')
+      .filter(item => !(item as HTMLButtonElement).disabled)
     const copyIndex = enabledItems.indexOf(copyItem)
     expect(copyIndex).toBeGreaterThanOrEqual(0)
     await user.keyboard('{Home}')

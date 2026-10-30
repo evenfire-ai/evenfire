@@ -882,12 +882,7 @@ export function FilesPage({
       capturedScope = sessionScope,
       capturedGeneration = ctrl.sessionGeneration
     ): boolean =>
-      ctrl.handleAuthorityFailure(
-        error,
-        'operation',
-        capturedScope,
-        capturedGeneration
-      ),
+      ctrl.handleAuthorityFailure(error, 'operation', capturedScope, capturedGeneration),
     [ctrl.handleAuthorityFailure, ctrl.sessionGeneration, sessionScope]
   )
   const fetchRowAuthority = async (resourceId: string, resourceName: string, drive: string) => {

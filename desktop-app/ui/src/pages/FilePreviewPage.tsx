@@ -374,7 +374,13 @@ export function FilePreviewPage({
   ])
 
   const revalidateAccess = useCallback(async () => {
-    if (denied || accessRevoked || !isCurrentGfsPreviewScope() || !isGfsSessionGeneration(ctrl.sessionGeneration)) return
+    if (
+      denied ||
+      accessRevoked ||
+      !isCurrentGfsPreviewScope() ||
+      !isGfsSessionGeneration(ctrl.sessionGeneration)
+    )
+      return
     const capturedScope = ctrl.sessionScope
     const capturedGeneration = ctrl.sessionGeneration
     const resourceQueryKey = [
@@ -414,8 +420,7 @@ export function FilePreviewPage({
       // A session-authority failure revokes the shared session (H2 path); the
       // body then remounts and fails closed. A per-resource 403 is local to this
       // preview — drop its bytes here without touching the session.
-      if (ctrl.handleAuthorityFailure(error, 'operation', capturedScope, capturedGeneration))
-        return
+      if (ctrl.handleAuthorityFailure(error, 'operation', capturedScope, capturedGeneration)) return
       if (isPerResourceAccessDenial(message)) setDenied(message)
     }
   }, [

@@ -153,8 +153,9 @@ function cancellableGfsInvoke<T>(
   const requestId = crypto.randomUUID()
   const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
   signal.addEventListener('abort', onAbort, { once: true })
-  return invokeGfs<T>(channel, { ...payload, requestId })
-    .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
+  return invokeGfs<T>(channel, { ...payload, requestId }).finally(() =>
+    signal.removeEventListener('abort', onAbort)
+  ) as Promise<T>
 }
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {

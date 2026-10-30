@@ -920,7 +920,9 @@ export function App() {
       // update may have made the closed tab the active one.
       activateAndLaunch(
         state => closeWorkspaceTab(state, id),
-        wasActive ? () => revealWorkspaceTab(activeWorkspaceTab(projected), false, true) : undefined,
+        wasActive
+          ? () => revealWorkspaceTab(activeWorkspaceTab(projected), false, true)
+          : undefined,
         ACTIVATED_TAB_LAUNCH
       )
     },
@@ -1551,7 +1553,8 @@ export function App() {
             gfsSessionScopeRef.current,
             gfsSessionGenerationRef.current
           )
-        ) return
+        )
+          return
         activateAndLaunch(
           state => state,
           () => revealWorkspaceTab(activeWorkspaceTab(workspaceTabsRef.current), false, true),

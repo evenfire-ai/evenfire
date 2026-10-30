@@ -788,36 +788,30 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  handleGfs(
-    'gfs:downloadPreview',
-    async (event, payload: { uri: string; maxBytes: number }) => {
-      assertTrustedSender(event)
-      // The preview path is bounded: a required ceiling caps the download so an
-      // oversized payload is rejected before it materializes (the save-to-disk
-      // 'gfs:download' path above stays intentionally uncapped).
-      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
-      if (maxBytes === undefined) {
-        throw new Error('maxBytes is required for a preview download')
-      }
-      // The renderer is untrusted: it may ask for a smaller per-type limit, but
-      // the ceiling is enforced here in main. Reject (not clamp) an over-cap
-      // request — a value above the app maximum is a bug or a tampered payload,
-      // consistent with the fail-loud missing-maxBytes guard above.
-      if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
-        throw new Error('preview download limit exceeds the allowed maximum')
-      }
-      return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+  handleGfs('gfs:downloadPreview', async (event, payload: { uri: string; maxBytes: number }) => {
+    assertTrustedSender(event)
+    // The preview path is bounded: a required ceiling caps the download so an
+    // oversized payload is rejected before it materializes (the save-to-disk
+    // 'gfs:download' path above stays intentionally uncapped).
+    const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+    if (maxBytes === undefined) {
+      throw new Error('maxBytes is required for a preview download')
     }
-  )
-  handleGfs(
-    'gfs:listAccessible',
-    async (event, payload: { drive?: string; cursor?: string }) => {
-      assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-      const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
-      return service.listAccessibleGfsResources(drive, cursor)
+    // The renderer is untrusted: it may ask for a smaller per-type limit, but
+    // the ceiling is enforced here in main. Reject (not clamp) an over-cap
+    // request — a value above the app maximum is a bug or a tampered payload,
+    // consistent with the fail-loud missing-maxBytes guard above.
+    if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
+      throw new Error('preview download limit exceeds the allowed maximum')
     }
-  )
+    return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+  })
+  handleGfs('gfs:listAccessible', async (event, payload: { drive?: string; cursor?: string }) => {
+    assertTrustedSender(event)
+    const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+    const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
+    return service.listAccessibleGfsResources(drive, cursor)
+  })
   handleGfs(
     'gfs:listChildren',
     async (
@@ -833,14 +827,11 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
-  handleGfs(
-    'gfs:affordances',
-    async (event, payload: { resourceId: string; drive?: string }) => {
-      assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-      return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
-    }
-  )
+  handleGfs('gfs:affordances', async (event, payload: { resourceId: string; drive?: string }) => {
+    assertTrustedSender(event)
+    const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+    return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
+  })
   // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
   // main-process temp file, finish saves through a native dialog. All five
   // channels trust-check.

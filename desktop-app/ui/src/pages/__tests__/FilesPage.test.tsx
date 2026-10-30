@@ -695,19 +695,26 @@ describe('FilesPage', () => {
       return { ...baseController(), accessibleResources: [resource], loadingCurrentView }
     })
     const handled = vi.fn()
-    renderFilesPage(undefined, undefined, null, undefined, {
-      id: 16,
-      targetUri: resource.gfsUri,
-      navigationUri: null,
-      actionId: 'move',
-      targetResource: {
-        resourceId: resource.resourceId,
-        name: resource.name,
-        kind: resource.kind,
-        version: resource.version,
-        parentResourceId: resource.parentResourceId,
+    renderFilesPage(
+      undefined,
+      undefined,
+      null,
+      undefined,
+      {
+        id: 16,
+        targetUri: resource.gfsUri,
+        navigationUri: null,
+        actionId: 'move',
+        targetResource: {
+          resourceId: resource.resourceId,
+          name: resource.name,
+          kind: resource.kind,
+          version: resource.version,
+          parentResourceId: resource.parentResourceId,
+        },
       },
-    }, handled)
+      handled
+    )
     expect(screen.queryByRole('dialog', { name: 'Move file shared-note.txt' })).toBeNull()
     expect(handled).not.toHaveBeenCalled()
     act(() => finishLoading(false))

@@ -1213,37 +1213,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // normal way the loss is discovered under Infinity staleTime). Discovery is
   // the session/authority boundary; per-resource verdicts stay local.
   const queryAuthorizationError = [
-    accessibleQuery.error
-      ? { error: (accessibleQuery.error), surface: 'discovery' as const }
-      : null,
-    childrenQuery.error
-      ? { error: (childrenQuery.error), surface: 'operation' as const }
-      : null,
+    accessibleQuery.error ? { error: accessibleQuery.error, surface: 'discovery' as const } : null,
+    childrenQuery.error ? { error: childrenQuery.error, surface: 'operation' as const } : null,
     affordancesQuery.error
-      ? { error: (affordancesQuery.error), surface: 'operation' as const }
+      ? { error: affordancesQuery.error, surface: 'operation' as const }
       : null,
     rowAffordancesQuery.error
-      ? { error: (rowAffordancesQuery.error), surface: 'operation' as const }
+      ? { error: rowAffordancesQuery.error, surface: 'operation' as const }
       : null,
     ...rowAffordancesQueries.map(query =>
-      query.error ? { error: (query.error), surface: 'operation' as const } : null
+      query.error ? { error: query.error, surface: 'operation' as const } : null
     ),
     ...moveSourceParentQueries.map(query =>
-      query.error ? { error: (query.error), surface: 'operation' as const } : null
+      query.error ? { error: query.error, surface: 'operation' as const } : null
     ),
-    grantsQuery.error
-      ? { error: (grantsQuery.error), surface: 'operation' as const }
-      : null,
-    sharesQuery.error
-      ? { error: (sharesQuery.error), surface: 'operation' as const }
-      : null,
+    grantsQuery.error ? { error: grantsQuery.error, surface: 'operation' as const } : null,
+    sharesQuery.error ? { error: sharesQuery.error, surface: 'operation' as const } : null,
     inheritedAccessQuery.error
-      ? { error: (inheritedAccessQuery.error), surface: 'operation' as const }
+      ? { error: inheritedAccessQuery.error, surface: 'operation' as const }
       : null,
   ]
-    .filter(
-      (entry): entry is NonNullable<typeof entry> => entry !== null
-    )
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
     .find(entry => isGfsSessionAuthorityFailure(entry.error, entry.surface))
   useEffect(() => {
     if (!ownsPublishedAuthority() || !queryAuthorizationError || accessState === 'revoked') return
@@ -1592,7 +1582,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           backgroundLocationRetryAttemptRef.current = 0
         }
         setCrumbsState([...ancestors.reverse(), crumb])
-        return { ...crumb, originatingSessionScope, originatingSessionGeneration: sessionGeneration }
+        return {
+          ...crumb,
+          originatingSessionScope,
+          originatingSessionGeneration: sessionGeneration,
+        }
       } catch (error) {
         if (!(await isSessionGenerationCurrent()) || !isCurrent()) {
           await reportSuperseded()
