@@ -83,7 +83,7 @@
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
     "cross-env": "^10.0.0",
-    "electron": "^41.10.7",
+    "electron": "^44.10.0",
     "fast-check": "^4.9.0",
     "jsdom": "^29.0.2",
     "typescript": "^5.9.2",
