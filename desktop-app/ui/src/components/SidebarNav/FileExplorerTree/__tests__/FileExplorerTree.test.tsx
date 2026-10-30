@@ -3,7 +3,7 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { FOLDER_HOVER_EXPAND_DELAY_MS } from '@constants/gfsBrowser'
+import { FOLDER_HOVER_EXPAND_DELAY_MS, GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -51,7 +51,21 @@ type Producers = {
   getHome?: () => Promise<Awaited<ReturnType<typeof homeView>>>
   listAccessible?: (drive?: string, cursor?: string) => Promise<unknown>
   listChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
+  /** Children of the caller's home. The home section always lists them, so
+   *  they are served apart from `listChildren`, which serves shared folders. */
+  listHomeChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
   download?: (uri: string) => Promise<unknown>
+}
+
+const FIXTURE_HOME_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
+function listChildrenProducer(producers: Producers) {
+  const shared = producers.listChildren ?? vi.fn(async () => listChildrenPage([]))
+  const home = producers.listHomeChildren ?? vi.fn(async () => listChildrenPage([]))
+  return (resourceId: string, drive?: string, cursor?: string) =>
+    resourceId === FIXTURE_HOME_ID
+      ? home(resourceId, drive, cursor)
+      : shared(resourceId, drive, cursor)
 }
 
 function installClerum(producers: Producers) {
@@ -61,7 +75,7 @@ function installClerum(producers: Producers) {
       gfs: {
         getHome: producers.getHome ?? vi.fn(async () => homeView()),
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
-        listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
+        listChildren: listChildrenProducer(producers),
         download:
           producers.download ??
           vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),
@@ -110,31 +124,38 @@ afterEach(() => {
 })
 
 describe('My home', () => {
-  it('shows the server-provided non-main home as an expandable My home that opens on double-click', async () => {
-    const listChildren = vi.fn(async () =>
+  it('shows the server-provided non-main home as a My home section that lists its folders and opens on click', async () => {
+    const listHomeChildren = vi.fn(async () =>
       listChildrenPage([childView('child-1', 'Projects', 'directory', { drive: 'private' })])
     )
-    installClerum({ getHome: async () => homeView({ drive: 'private' }), listChildren })
+    installClerum({ getHome: async () => homeView({ drive: 'private' }), listHomeChildren })
     const { onOpenFolder } = renderTree()
-    // Until the home loads, My home is the disabled flat entry; once ready it
-    // is a collapsed folder row.
+    // Like "Shared with me", My home is a label with its folders listed below
+    // it: no toggle, nothing to expand first.
+    // Until the home loads, My home is the disabled flat entry.
     await waitFor(() =>
       expect(screen.getByRole('treeitem', { name: 'My home' }).getAttribute('aria-expanded')).toBe(
-        'false'
+        'true'
       )
     )
     const home = screen.getByRole('treeitem', { name: 'My home' })
-    fireEvent.click(within(home).getByRole('button', { name: 'Expand My home' }))
     expect(await within(home).findByRole('treeitem', { name: 'Projects' })).toBeTruthy()
-    expect(listChildren).toHaveBeenCalledWith(
+    expect(listHomeChildren).toHaveBeenCalledWith(
       'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       'private',
       undefined
     )
-    fireEvent.doubleClick(within(home).getAllByRole('button', { name: 'My home' })[0]!)
-    expect(onOpenFolder).toHaveBeenCalledWith('gfs://private/aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa')
+    expect(within(home).queryByRole('button', { name: /^(Expand|Collapse) My home$/ })).toBeNull()
+    // The folders under it keep their own toggle.
+    expect(within(home).getByRole('button', { name: 'Expand Projects' })).toBeTruthy()
+    fireEvent.click(within(home).getByRole('button', { name: 'My home' }))
+    await waitFor(() =>
+      expect(onOpenFolder).toHaveBeenCalledWith('gfs://private/aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa')
+    )
+    // "Shared with me" opens its own view, not the EvenDrive overview (null).
     fireEvent.click(screen.getByRole('treeitem', { name: 'Shared with me' }))
-    expect(onOpenFolder).toHaveBeenCalledWith(null)
+    expect(onOpenFolder).toHaveBeenLastCalledWith(GFS_SHARED_WITH_ME_LOCATION)
+    expect(onOpenFolder).not.toHaveBeenCalledWith(null)
   })
 
   it('lists the caller home only as My home, never under Shared with me', async () => {
@@ -908,7 +929,7 @@ function installDndClerum(producers: DndProducers) {
       gfs: {
         getHome: producers.getHome ?? vi.fn(async () => homeView()),
         listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
-        listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
+        listChildren: listChildrenProducer(producers),
         download:
           producers.download ??
           vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),

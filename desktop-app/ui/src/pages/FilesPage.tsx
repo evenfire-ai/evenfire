@@ -33,7 +33,12 @@ import {
   IconShare,
   IconUpload,
 } from '@components/SidebarNav/icons'
-import { GFS_MY_HOME_LABEL, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
+import {
+  GFS_MY_HOME_LABEL,
+  GFS_RESOURCE_DRAG_TYPE,
+  GFS_SHARED_WITH_ME_LABEL,
+  GFS_SHARED_WITH_ME_LOCATION,
+} from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   GFS_UNAVAILABLE_LOCATION_MESSAGE,
@@ -352,6 +357,11 @@ export function FilesPage({
   const [renameTarget, setRenameTarget] = useState<GfsActionTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
+  // What the root shows: the EvenDrive overview (the caller's home and what
+  // others share) or only what others share. Seeded from the tab location.
+  const [rootView, setRootView] = useState<'overview' | 'shared'>(() =>
+    pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION ? 'shared' : 'overview'
+  )
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
@@ -1285,6 +1295,12 @@ export function FilesPage({
    */
   useEffect(() => {
     if (!pendingGfsUri) return
+    // A view id, not a resource: nothing to resolve. The page is keyed by its
+    // tab, so this seed only arrives on mount, where `rootView` already took it.
+    if (pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION) {
+      onPendingGfsUriHandled?.()
+      return
+    }
     // Re-arm on every non-null seed so a deep-link onto an already-mounted page
     // suppresses the pre-open location the same way the initial mount does.
     seedPendingRef.current = true
@@ -1309,8 +1325,12 @@ export function FilesPage({
       if (currentGfsUri === null) return
       seedPendingRef.current = false
     }
+    if (currentGfsUri === null && rootView === 'shared') {
+      onLocationChange?.(GFS_SHARED_WITH_ME_LOCATION, GFS_SHARED_WITH_ME_LABEL)
+      return
+    }
     onLocationChange?.(currentGfsUri, currentName)
-  }, [currentGfsUri, currentName, onLocationChange])
+  }, [currentGfsUri, currentName, onLocationChange, rootView])
 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
@@ -2078,8 +2098,9 @@ export function FilesPage({
     )
   }, [accessibleResources, ctrl.home, current, currentIsFolder, items])
   const myHome = useMemo(
-    () => (current ? null : callerHomeRootNode(ctrl.home, accessibleResources)),
-    [accessibleResources, ctrl.home, current]
+    () =>
+      current || rootView === 'shared' ? null : callerHomeRootNode(ctrl.home, accessibleResources),
+    [accessibleResources, ctrl.home, current, rootView]
   )
   // The controller owns current-view loading semantics, including the
   // page-wide authority gate and the distinction between initial and
@@ -2225,17 +2246,26 @@ export function FilesPage({
               <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
                 {homeTrail ? null : (
                   <Button
-                    className="da-gfs-drive__breadcrumb"
+                    className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
                     color="neutral"
-                    disabled={!current}
-                    onClick={() => {
-                      manageReturnCrumbsRef.current = null
-                      setManageOpen(false)
-                      ctrl.reset()
-                    }}
+                    // In the Shared with me view this is the active crumb: inert,
+                    // and styled as a view root like "My home" at the home root.
+                    // A revoked session offers nothing but retry.
+                    aria-current={!current && rootView === 'shared' ? 'page' : undefined}
+                    disabled={!current && accessRevoked}
+                    onClick={
+                      !current && rootView === 'shared'
+                        ? undefined
+                        : () => {
+                            manageReturnCrumbsRef.current = null
+                            setManageOpen(false)
+                            setRootView('shared')
+                            ctrl.reset()
+                          }
+                    }
                     variant="text"
                   >
-                    Shared with me
+                    {GFS_SHARED_WITH_ME_LABEL}
                   </Button>
                 )}
                 {crumbs.map((crumb, index) => (
@@ -2253,6 +2283,8 @@ export function FilesPage({
                     ) : (
                       <Button
                         className={`da-gfs-drive__breadcrumb${
+                          homeTrail && index === 0 ? ' da-gfs-drive__breadcrumb--view-root' : ''
+                        }${
                           dragOverFolderId === crumb.resourceId
                             ? ' da-gfs-drive__breadcrumb--allowed'
                             : ''

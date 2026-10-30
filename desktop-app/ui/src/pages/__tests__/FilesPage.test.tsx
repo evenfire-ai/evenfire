@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { randomUUID } from 'node:crypto'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
@@ -7343,10 +7344,18 @@ describe('FilesPage', () => {
     })
     renderFilesPage()
     const trail = screen.getByRole('navigation', { name: 'File location' })
-    expect(within(trail).getByRole('button', { name: 'My home' })).toBeTruthy()
+    const homeRootCrumb = within(trail).getByRole('button', { name: 'My home' })
+    // The home is the view root; the open folder below it is the highlighted crumb.
+    expect(homeRootCrumb.classList.contains('da-gfs-drive__breadcrumb--view-root')).toBe(true)
+    expect(homeRootCrumb.getAttribute('aria-current')).toBeNull()
     expect(
       within(trail).getByRole('button', { name: 'Projects' }).getAttribute('aria-current')
     ).toBe('page')
+    expect(
+      within(trail)
+        .getByRole('button', { name: 'Projects' })
+        .classList.contains('da-gfs-drive__breadcrumb--view-root')
+    ).toBe(false)
     expect(within(trail).queryByRole('button', { name: 'Shared with me' })).toBeNull()
     expect(within(trail).queryByRole('button', { name: 'fixture' })).toBeNull()
     cleanup()
@@ -7399,6 +7408,77 @@ describe('FilesPage', () => {
     expect(openResource).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'home-1', name: 'My home' })
     )
+  })
+
+  describe('EvenDrive overview and the Shared with me view', () => {
+    const sharedRow = (resourceId: string, name: string) => ({
+      resourceId,
+      rid: resourceId,
+      gfsUri: `gfs://main/${resourceId}`,
+      drive: 'main',
+      parentResourceId: null,
+      name,
+      kind: 'directory' as const,
+      path: `/${name}`,
+      version: 1,
+      bytes: 0,
+      permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+    })
+    const renderAt = (pendingGfsUri: string | null) => {
+      const controller = {
+        ...baseController(),
+        home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+        accessibleResources: [sharedRow('alpha-1', 'Alpha shared'), sharedRow('home-1', 'fixture')],
+      }
+      hookMock.useGfsBrowserController.mockReturnValue(controller)
+      const onLocationChange = vi.fn()
+      const onPendingGfsUriHandled = vi.fn()
+      render(
+        <QueryClientProvider client={new QueryClient()}>
+          <FilesPage
+            pendingGfsUri={pendingGfsUri}
+            onLocationChange={onLocationChange}
+            onPendingGfsUriHandled={onPendingGfsUriHandled}
+          />
+        </QueryClientProvider>
+      )
+      return { controller, onLocationChange, onPendingGfsUriHandled }
+    }
+
+    it('shows only what others share in the Shared with me view, without resolving it', () => {
+      const { controller, onLocationChange, onPendingGfsUriHandled } = renderAt(
+        GFS_SHARED_WITH_ME_LOCATION
+      )
+      const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
+      // Witness: the shared listing rendered and the seed was consumed.
+      expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
+      expect(onPendingGfsUriHandled).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
+      expect(within(shared).queryByText('fixture')).toBeNull()
+      expect(controller.openUri).not.toHaveBeenCalled()
+      const sharedRootCrumb = within(shared).getByRole('button', { name: 'Shared with me' })
+      expect(sharedRootCrumb.getAttribute('aria-current')).toBe('page')
+      expect(sharedRootCrumb.classList.contains('da-gfs-drive__breadcrumb--view-root')).toBe(true)
+      expect(onLocationChange).toHaveBeenLastCalledWith(
+        GFS_SHARED_WITH_ME_LOCATION,
+        'Shared with me'
+      )
+    })
+
+    it('shows the home and what others share in the overview, and narrows to Shared with me from the trail', () => {
+      const { controller, onLocationChange } = renderAt(null)
+      expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
+      expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
+      const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
+      fireEvent.click(within(shared).getByRole('button', { name: 'Shared with me' }))
+      expect(controller.reset).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
+      expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
+      expect(onLocationChange).toHaveBeenLastCalledWith(
+        GFS_SHARED_WITH_ME_LOCATION,
+        'Shared with me'
+      )
+    })
   })
 })
 

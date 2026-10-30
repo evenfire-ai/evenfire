@@ -2,7 +2,12 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
-import { FOLDER_HOVER_EXPAND_DELAY_MS, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
+import {
+  FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_RESOURCE_DRAG_TYPE,
+  GFS_SHARED_WITH_ME_LABEL,
+  GFS_SHARED_WITH_ME_LOCATION,
+} from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   type GfsBrowserChild,
@@ -80,6 +85,7 @@ function FileExplorerNode({
   accessActive,
   homeResourceId,
   expandedIds,
+  section = false,
   selectedId,
   movingResourceId,
   ancestorIds,
@@ -100,7 +106,9 @@ function FileExplorerNode({
 }: FileExplorerNodeProps) {
   const queryClient = useQueryClient()
   const isDirectory = node.kind === 'directory'
-  const isExpanded = isDirectory && expandedIds.has(node.resourceId)
+  // A section (the caller's home) always lists its children, like the
+  // "Shared with me" roots below its label.
+  const isExpanded = isDirectory && (section || expandedIds.has(node.resourceId))
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
   // The treeitem is named by its label alone, not by its toggle and children.
@@ -173,7 +181,8 @@ function FileExplorerNode({
     // (open preview, or download when not previewable) immediately — no delay.
     // A double-click on a file just re-activates it idempotently. onActivateFile
     // also selects the node, so selection still follows a file's single-click.
-    if (!isDirectory) {
+    // A section label has no toggle: a click opens it, like "Shared with me".
+    if (!isDirectory || section) {
       runActivate()
       return
     }
@@ -183,7 +192,7 @@ function FileExplorerNode({
       clickTimerRef.current = null
       onToggle(node.resourceId)
     }, DOUBLE_CLICK_DELAY_MS)
-  }, [clearClickTimer, isDirectory, node.resourceId, onToggle, runActivate])
+  }, [clearClickTimer, isDirectory, node.resourceId, onToggle, runActivate, section])
 
   const handleRowDoubleClick = useCallback(() => {
     clearClickTimer()
@@ -273,6 +282,7 @@ function FileExplorerNode({
       const hoverState = dropState?.state
       if (
         isDirectoryRow &&
+        !section &&
         !isExpanded &&
         (hoverState === undefined || hoverState === 'allowed' || hoverState === 'checking')
       ) {
@@ -284,7 +294,7 @@ function FileExplorerNode({
         }
       }
     },
-    [dropState, handleRowDragOver, isDirectoryRow, isExpanded, node.resourceId, onToggle]
+    [dropState, handleRowDragOver, isDirectoryRow, isExpanded, node.resourceId, onToggle, section]
   )
 
   const handleRowDragLeave = useCallback(
@@ -336,7 +346,9 @@ function FileExplorerNode({
       role="treeitem"
     >
       <div
-        className={`da-file-explorer__row${dropStateName ? ` is-drop-${dropStateName}` : ''}`}
+        className={`da-file-explorer__row${section ? ' da-file-explorer__row--section' : ''}${
+          dropStateName ? ` is-drop-${dropStateName}` : ''
+        }`}
         data-drop-state={dropStateName}
         data-drop-reason={dropReason}
         title={dropReasonTooltip}
@@ -345,7 +357,7 @@ function FileExplorerNode({
         onDragLeave={isDirectory ? handleRowDragLeave : undefined}
         onDrop={isDirectory ? handleRowDrop : undefined}
       >
-        {isDirectory ? (
+        {section ? null : isDirectory ? (
           <IconButton
             aria-expanded={isExpanded}
             className={`da-file-explorer__toggle${isExpanded ? ' is-expanded' : ''}`}
@@ -373,13 +385,17 @@ function FileExplorerNode({
           onDragStart={canDrag ? handleDragStart : undefined}
           onDragEnd={canDrag ? onNodeDragEnd : undefined}
           onKeyDown={handleRowKeyDown}
+          size={section ? 'sm' : undefined}
           title={canDrag ? `Drag ${label} into a folder to move it` : undefined}
           variant="text"
         >
-          <span className="da-file-explorer__icon" aria-hidden="true">
-            {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
-          </span>
-          <span className="da-file-explorer__name">{label}</span>
+          {section ? null : (
+            <span className="da-file-explorer__icon" aria-hidden="true">
+              {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
+            </span>
+          )}
+          {/* A section label is plain button text, exactly like "Shared with me". */}
+          {section ? label : <span className="da-file-explorer__name">{label}</span>}
           {/* Rendered inside the label so "No access" joins the row's accessible
               name, matching the Files page's row affordance. */}
           {isUnreadable ? (
@@ -390,7 +406,10 @@ function FileExplorerNode({
         </Button>
       </div>
       {isExpanded ? (
-        <div className="da-file-explorer__group" role="group">
+        <div
+          className={`da-file-explorer__group${section ? ' da-file-explorer__group--section' : ''}`}
+          role="group"
+        >
           {loadingChildren ? (
             <p className="da-file-explorer__message muted" role="status">
               Loading…
@@ -1007,6 +1026,7 @@ export function FileExplorerTree({
               expandedIds={expandedIds}
               homeResourceId={homeRoot.resourceId}
               level={1}
+              section
               movingResourceId={movingResourceId}
               node={homeRoot}
               onActivateFile={handleActivateFile}
@@ -1054,9 +1074,9 @@ export function FileExplorerTree({
             size="sm"
             type="button"
             variant="text"
-            onClick={() => onOpenFolder(null)}
+            onClick={() => onOpenFolder(GFS_SHARED_WITH_ME_LOCATION)}
           >
-            Shared with me
+            {GFS_SHARED_WITH_ME_LABEL}
           </Button>
         </div>
       ) : null}

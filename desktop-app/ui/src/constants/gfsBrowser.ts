@@ -26,3 +26,14 @@ export const DRAG_COLD_CHECK_MAX_CONCURRENCY = 2
 
 /** Label of the caller's own home wherever EvenDrive shows it as a root. */
 export const GFS_MY_HOME_LABEL = 'My home'
+
+/** Label of the collection of resources others share with the caller. */
+export const GFS_SHARED_WITH_ME_LABEL = 'Shared with me'
+
+/**
+ * Files-tab location of the "Shared with me" view. A `null` location is the
+ * EvenDrive overview (the caller's home plus what others share); this one
+ * lists only what others share. It is a client view id, never a `gfs://` URI,
+ * so it is never resolved against the server.
+ */
+export const GFS_SHARED_WITH_ME_LOCATION = 'evendrive:shared-with-me'
