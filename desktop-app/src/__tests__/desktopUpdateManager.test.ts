@@ -628,6 +628,51 @@ describe('DesktopUpdateManager', () => {
     ).resolves.toBe('published-dmg')
   })
 
+  it('rejects pending installer reuse when the current architecture differs', async () => {
+    dependencies = createDependencies({ platform: 'darwin', architecture: 'x64' })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+
+    dependencies = createDependencies({ platform: 'darwin', architecture: 'arm64' })
+    const restartedManager = new DesktopUpdateManager(
+      service,
+      event => events.push(event),
+      dependencies
+    )
+
+    await expect(restartedManager.getPendingDesktopUpdate()).resolves.toBeNull()
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
+  })
+
+  it('rechecks architecture at the final macOS open authorization', async () => {
+    const openMacInstaller = vi.fn(async () => '')
+    dependencies = createDependencies({ platform: 'darwin', architecture: 'x64' })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+
+    dependencies = createDependencies({
+      platform: 'darwin',
+      architecture: 'arm64',
+      openMacInstaller,
+    })
+    const restartedManager = new DesktopUpdateManager(
+      service,
+      event => events.push(event),
+      dependencies
+    )
+
+    await expect(restartedManager.openDownloadedMacInstaller(UPDATE_VERSION)).rejects.toThrow(
+      'selected backend or installed build changed'
+    )
+    expect(openMacInstaller).not.toHaveBeenCalled()
+    expect(mockApp.quit).not.toHaveBeenCalled()
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
+  })
+
   it('refuses to open a saved DMG after the installed app reaches its target version', async () => {
     const openMacInstaller = vi.fn(async (_filePath: string) => '')
     const currentStatus = await service.getDesktopReleaseStatus()

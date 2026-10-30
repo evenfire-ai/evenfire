@@ -295,6 +295,7 @@ export class DesktopUpdateManager {
         if (
           app.getVersion() === operation.version ||
           app.getVersion() !== operation.currentVersion ||
+          operation.architecture !== this.architecture ||
           !operation.manualInstallerPath ||
           !operation.manualInstallerSha256 ||
           !installerIsVerified
@@ -375,6 +376,7 @@ export class DesktopUpdateManager {
     if (
       operation.environmentBindingId !== environmentBindingId ||
       operation.currentVersion !== app.getVersion() ||
+      operation.architecture !== this.architecture ||
       app.getVersion() === expectedVersion ||
       !operation.manualInstallerPath ||
       !operation.manualInstallerSha256
