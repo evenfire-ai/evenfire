@@ -1,0 +1,366 @@
+import { describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import request from 'supertest'
+import { fakeCustomObjectsApiserver } from './fixtures/fakeCustomObjectsApiserver.js'
+import { remoteOAuthMcpServer } from './fixtures/remoteOAuthMcpServer.js'
+
+// The McpServer preflight resolves every egress binding's host.
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]),
+}))
+
+vi.mock('../src/db.js', async importActual => {
+  const actual = await importActual<typeof import('../src/db.js')>()
+  return { ...actual, pool: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } }
+})
+
+const { config } = await import('../src/config.js')
+const { createAdminResourcesRouter } = await import('../src/routes/admin/resources.js')
+const { clerumErrorHandler } = await import('../src/http/errorHandler.js')
+
+/**
+ * The generic McpServer create and replace cannot forge or rewrite the identity of a
+ * catalog remote-OAuth instance. CRs come from the real install builders (fixture),
+ * and the real ResourceService runs over an in-memory apiserver that enforces the
+ * replace's uid and resourceVersion preconditions.
+ */
+const MCP_NS = config.mcpServersNamespace
+const CATALOG = { id: 'org/notion', version: '1.0.0' }
+
+function setup() {
+  const api = fakeCustomObjectsApiserver({
+    namespaces: { contexts: config.contextsNamespace, mcpservers: MCP_NS },
+  })
+  const app = express()
+  app.use(express.json())
+  app.use(createAdminResourcesRouter(api.gateway as never))
+  app.use(clerumErrorHandler)
+  return { ...api, app }
+}
+
+type Api = ReturnType<typeof setup>
+type Spec = Record<string, unknown> & {
+  remote: Record<string, unknown>
+  transport: Record<string, unknown>
+  oauth: Record<string, unknown>
+  egressBindings: Array<Record<string, unknown>>
+}
+
+async function installCatalogInstance(
+  api: Api,
+  name = 'notion-user',
+  catalog: { id: string; version: string } | null = CATALOG
+) {
+  const cr = await remoteOAuthMcpServer({
+    serverName: name,
+    namespace: MCP_NS,
+    grantScope: 'user',
+    ...(catalog ? { catalog } : {}),
+  })
+  return (await api.gateway.createResource('mcpservers', cr, MCP_NS)) as {
+    metadata: { uid: string; annotations?: Record<string, string> }
+    spec: Spec
+  }
+}
+
+function stored(api: Api, name = 'notion-user') {
+  return api.peek('mcpservers', MCP_NS, name) as
+    | { metadata: { uid: string; annotations?: Record<string, string> }; spec: Spec }
+    | undefined
+}
+
+/** What the edit page sends: the spec it read, edited, and nothing else. */
+function editPagePut(api: Api, spec: Spec, name = 'notion-user') {
+  return request(api.app).put(`/admin/mcp-servers/${name}`).send({ spec })
+}
+
+describe('generic McpServer PUT on a catalog instance', () => {
+  it('refuses to change the remote base URL and transport URL (409), writing nothing', async () => {
+    const api = setup()
+    const cr = await installCatalogInstance(api)
+    api.customApi.replaceNamespacedCustomObject.mockClear()
+
+    const res = await editPagePut(api, {
+      ...cr.spec,
+      remote: { baseUrl: 'https://evil.example.com/mcp' },
+      transport: { ...cr.spec.transport, url: 'http://evil.example.com:3000/mcp' },
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('catalog_instance_immutable')
+    expect(res.body.fields).toEqual(['spec.remote.baseUrl', 'spec.transport.url'])
+    expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(stored(api)!.spec.remote.baseUrl).toBe(cr.spec.remote.baseUrl)
+  })
+
+  it('refuses to change the grant scope (409)', async () => {
+    const api = setup()
+    const cr = await installCatalogInstance(api)
+
+    const res = await editPagePut(api, {
+      ...cr.spec,
+      oauth: { ...cr.spec.oauth, grantScope: 'context' },
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.body.fields).toEqual(['spec.oauth.grantScope'])
+    expect(stored(api)!.spec.oauth.grantScope).toBe('user')
+  })
+
+  it('refuses to clear the catalog-id annotation (409)', async () => {
+    const api = setup()
+    const cr = await installCatalogInstance(api)
+
+    const res = await request(api.app)
+      .put('/admin/mcp-servers/notion-user')
+      .send({ metadata: { annotations: { 'clerum.io/catalog-id': '' } }, spec: cr.spec })
+
+    expect(res.status).toBe(409)
+    expect(res.body.fields).toEqual(['metadata.annotations.clerum.io/catalog-id'])
+    expect(stored(api)!.metadata.annotations?.['clerum.io/catalog-id']).toBe(CATALOG.id)
+  })
+
+  it('lets scopes and egress bindings change, and keeps the catalog identity', async () => {
+    const api = setup()
+    const cr = await installCatalogInstance(api)
+    api.customApi.getNamespacedCustomObject.mockClear()
+
+    const res = await editPagePut(api, {
+      ...cr.spec,
+      oauth: { ...cr.spec.oauth, scopes: ['read', 'write'] },
+      egressBindings: [
+        ...cr.spec.egressBindings,
+        { egressClass: 'exact-host', dns: 'files.notion.com', port: 443, protocol: 'TCP' },
+      ],
+    })
+
+    expect(res.status).toBe(200)
+    // The guard's read is the only one: updateResource reuses it.
+    expect(api.customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    const after = stored(api)!
+    expect(after.spec.oauth.scopes).toEqual(['read', 'write'])
+    expect(after.spec.egressBindings).toHaveLength(2)
+    expect(after.metadata.uid).toBe(cr.metadata.uid)
+    expect(after.metadata.annotations).toMatchObject({
+      'clerum.io/catalog-id': CATALOG.id,
+      'clerum.io/catalog-version': CATALOG.version,
+    })
+  })
+
+  it('does not apply to a manually installed remote connector', async () => {
+    const api = setup()
+    const cr = await installCatalogInstance(api, 'manual-notion', null)
+
+    const res = await editPagePut(
+      api,
+      { ...cr.spec, remote: { baseUrl: 'https://other.example.com/mcp' } },
+      'manual-notion'
+    )
+
+    expect(res.status).toBe(200)
+    expect(stored(api, 'manual-notion')!.spec.remote.baseUrl).toBe('https://other.example.com/mcp')
+  })
+
+  // The edit page sends neither uid nor resourceVersion. If the instance it validated
+  // is uninstalled and reinstalled before the replace, the replace's retry would read
+  // the reinstall and overwrite it; the validated uid makes that retry refuse instead.
+  it('a reinstall between the guard read and the replace is not overwritten', async () => {
+    const api = setup()
+    const a = await installCatalogInstance(api)
+
+    // Deferreds: `parked` resolves when the PUT, past the guard's read, reaches its
+    // next apiserver call on this object; that call waits for `release`.
+    let parkedResolve!: () => void
+    const parked = new Promise<void>(resolve => (parkedResolve = resolve))
+    let release!: () => void
+    const released = new Promise<void>(resolve => (release = resolve))
+    let putCalls = 0
+    let otherActor = false
+    api.hooks.beforeCall = async (_verb, args) => {
+      if (otherActor || args.plural !== 'mcpservers' || args.name !== 'notion-user') return
+      putCalls += 1
+      if (putCalls === 2) {
+        parkedResolve()
+        await released
+      }
+    }
+
+    const pending = editPagePut(api, {
+      ...a.spec,
+      oauth: { ...a.spec.oauth, scopes: ['stale'] },
+    }).then(res => res)
+    await parked
+    // E3 + E1 by another actor while the PUT is parked after the guard validated A.
+    otherActor = true
+    await api.gateway.deleteResource('mcpservers', 'notion-user', MCP_NS)
+    const b = await installCatalogInstance(api)
+    const bSpec = structuredClone(stored(api)!.spec)
+    otherActor = false
+    release()
+    const res = await pending
+
+    expect(b.metadata.uid).not.toBe(a.metadata.uid)
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'conflict', reason: 'resource_changed' })
+    const after = stored(api)!
+    expect(after.metadata.uid).toBe(b.metadata.uid)
+    expect(after.spec).toEqual(bSpec)
+  })
+
+  it.each([
+    ['absent', undefined],
+    ['not an object', 'oops'],
+  ])('refuses a PUT whose spec is %s (400), leaving the CR intact', async (_, spec) => {
+    const api = setup()
+    const cr = await installCatalogInstance(api)
+    api.customApi.replaceNamespacedCustomObject.mockClear()
+
+    const res = await request(api.app)
+      .put('/admin/mcp-servers/notion-user')
+      .send({
+        metadata: { annotations: { 'clerum.io/catalog-id': 'org/other' } },
+        ...(spec === undefined ? {} : { spec }),
+      })
+
+    expect(res.status).toBe(400)
+    expect(api.customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(stored(api)).toEqual(
+      expect.objectContaining({ metadata: expect.objectContaining({ uid: cr.metadata.uid }) })
+    )
+    expect(stored(api)!.spec).toEqual(cr.spec)
+    expect(stored(api)!.metadata.annotations?.['clerum.io/catalog-id']).toBe(CATALOG.id)
+  })
+
+  // The guard read nothing, so nothing it would check about an object created right
+  // after that read has been checked: the PUT answers the 404 it saw.
+  it('answers 404 from the guard read and does not replace an object created after it', async () => {
+    const api = setup()
+    const template = await remoteOAuthMcpServer({
+      serverName: 'notion-user',
+      namespace: MCP_NS,
+      grantScope: 'user',
+      catalog: CATALOG,
+    })
+    const realGet = api.customApi.getNamespacedCustomObject.getMockImplementation()!
+    let created = false
+    api.customApi.getNamespacedCustomObject.mockImplementation(async args => {
+      try {
+        return await realGet(args)
+      } finally {
+        if (!created && args.plural === 'mcpservers' && args.name === 'notion-user') {
+          created = true
+          await api.gateway.createResource('mcpservers', template, MCP_NS)
+        }
+      }
+    })
+    const spec = structuredClone(template.spec) as Spec
+
+    const res = await editPagePut(api, {
+      ...spec,
+      remote: { baseUrl: 'https://evil.example.com/mcp' },
+    })
+
+    expect(res.status).toBe(404)
+    expect(stored(api)!.spec.remote.baseUrl).toBe(spec.remote.baseUrl)
+  })
+
+  // Same protection for a connector that is not a catalog instance: the replace
+  // lands on the object the guard read or nowhere.
+  it('a manual connector recreated between the guard read and the replace is not overwritten', async () => {
+    const api = setup()
+    const a = await installCatalogInstance(api, 'manual-notion', null)
+
+    let parkedResolve!: () => void
+    const parked = new Promise<void>(resolve => (parkedResolve = resolve))
+    let release!: () => void
+    const released = new Promise<void>(resolve => (release = resolve))
+    let putCalls = 0
+    let otherActor = false
+    api.hooks.beforeCall = async (_verb, args) => {
+      if (otherActor || args.plural !== 'mcpservers' || args.name !== 'manual-notion') return
+      putCalls += 1
+      if (putCalls === 2) {
+        parkedResolve()
+        await released
+      }
+    }
+
+    const pending = editPagePut(
+      api,
+      { ...a.spec, remote: { baseUrl: 'https://stale.example.com/mcp' } },
+      'manual-notion'
+    ).then(res => res)
+    await parked
+    otherActor = true
+    await api.gateway.deleteResource('mcpservers', 'manual-notion', MCP_NS)
+    const b = await installCatalogInstance(api, 'manual-notion', null)
+    const bSpec = structuredClone(stored(api, 'manual-notion')!.spec)
+    otherActor = false
+    release()
+    const res = await pending
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'conflict', reason: 'resource_changed' })
+    const after = stored(api, 'manual-notion')!
+    expect(after.metadata.uid).toBe(b.metadata.uid)
+    expect(after.spec).toEqual(bSpec)
+  })
+})
+
+describe('generic McpServer POST', () => {
+  async function postWith(
+    api: Api,
+    annotations: Record<string, string> | undefined,
+    source?: string
+  ) {
+    const cr = await remoteOAuthMcpServer({
+      serverName: 'forged',
+      namespace: MCP_NS,
+      grantScope: 'user',
+      catalog: CATALOG,
+    })
+    const spec = structuredClone(cr.spec) as Spec
+    if (source !== undefined) spec.oauth = { ...spec.oauth, source }
+    return request(api.app)
+      .post('/admin/mcp-servers')
+      .send({
+        metadata: { name: 'forged', ...(annotations ? { annotations } : {}) },
+        spec,
+      })
+  }
+
+  it.each([
+    ['catalog-id', { 'clerum.io/catalog-id': CATALOG.id }],
+    ['catalog-version only', { 'clerum.io/catalog-version': CATALOG.version }],
+  ])(
+    'refuses a remote-OAuth create carrying %s (400), creating nothing',
+    async (_, annotations) => {
+      const api = setup()
+
+      const res = await postWith(api, annotations)
+
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('catalog_annotations_not_allowed')
+      expect(api.customApi.createNamespacedCustomObject).not.toHaveBeenCalled()
+      expect(stored(api, 'forged')).toBeUndefined()
+    }
+  )
+
+  it('lets a create with catalog annotations through when the OAuth source is not remote', async () => {
+    const api = setup()
+
+    const res = await postWith(api, { 'clerum.io/catalog-id': CATALOG.id }, 'notion')
+
+    expect(res.status).toBe(201)
+    expect(stored(api, 'forged')).toBeDefined()
+  })
+
+  it('lets a remote-OAuth create without catalog annotations through', async () => {
+    const api = setup()
+
+    const res = await postWith(api, { 'example.com/note': 'x' })
+
+    expect(res.status).toBe(201)
+    expect(stored(api, 'forged')).toBeDefined()
+  })
+})

@@ -223,7 +223,7 @@ describe('routes/resources — context spec.displayName deploy-order guard (R1-M
 
     await request(app)
       .put('/admin/contexts/ctx-nodisplay')
-      .send({ spec: { contextId: 'ctx-nodisplay', mcpServers: ['a'] } })
+      .send({ spec: { contextId: 'ctx-nodisplay', mcpServers: [], description: 'edited' } })
       .expect(200)
   })
 

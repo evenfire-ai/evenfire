@@ -58,6 +58,7 @@ import {
   remoteCallbackVariant,
 } from '../../oauth/remoteCallback.js'
 import { rootLogger } from '../../observability/logger.js'
+import { readLiveMcpServerUid, resourceUidFrom } from '../../services/liveMcpServer.js'
 import { type RegistryEntry, reportInstall } from '../../services/registryClient.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import type { SecretSnapshot } from '../../services/secretRepository.js'
@@ -361,31 +362,6 @@ async function authorizationServerKernelErrors(
 ): Promise<ValidationError[]> {
   if (authorizationServer === undefined) return []
   return validateOAuthEndpointUrl(authorizationServer, 'authorizationServer')
-}
-
-/** The server-assigned `metadata.uid`, or undefined when the response carried none. */
-function resourceUidFrom(resource: unknown): string | undefined {
-  const uid = (resource as { metadata?: { uid?: unknown } } | null)?.metadata?.uid
-  return typeof uid === 'string' && uid ? uid : undefined
-}
-
-/**
- * The uid of a live McpServer with this name, or undefined when none exists. A live
- * CR owns the name: the reclaim/classify path treats a conflict against a live uid as
- * `in-use` regardless of the persisted row's state. A 404 is "no live CR" (undefined);
- * any other read error propagates (fail closed, not "assume free").
- */
-async function readLiveMcpServerUid(
-  gateway: K8sGateway,
-  name: string,
-  namespace: string
-): Promise<string | undefined> {
-  try {
-    return resourceUidFrom(await gateway.getResource('mcpservers', name, namespace))
-  } catch (err) {
-    if (err instanceof K8sNotFoundError || extractK8sError(err)?.status === 404) return undefined
-    throw err
-  }
 }
 
 /**

@@ -96,7 +96,9 @@ function apiserverGateway(opts: { pruneDisplayName?: boolean; dropServer?: strin
   let rv = 0
   let uidSeq = 0
   const store = new Map<string, Stored>()
-  const key = (namespace: string, name: string) => `${namespace}/${name}`
+  // Keyed by plural too: the Context routes also read McpServers, which share the
+  // namespace by default and must never show up in a Context listing.
+  const key = (plural: string, namespace: string, name: string) => `${plural}/${namespace}/${name}`
   const persist = (body: Stored): Stored => {
     const spec = { ...body.spec }
     if (opts.pruneDisplayName) delete spec.displayName
@@ -107,16 +109,26 @@ function apiserverGateway(opts: { pruneDisplayName?: boolean; dropServer?: strin
   }
   const customApi = {
     getNamespacedCustomObject: vi.fn(
-      async ({ namespace, name }: { namespace: string; name: string }) => {
-        const obj = store.get(key(namespace, name))
-        if (!obj) throw k8sError(`contexts "${name}" not found`, 404)
+      async ({ plural, namespace, name }: { plural: string; namespace: string; name: string }) => {
+        const obj = store.get(key(plural, namespace, name))
+        if (!obj) throw k8sError(`${plural} "${name}" not found`, 404)
         return obj
       }
     ),
     replaceNamespacedCustomObject: vi.fn(
-      async ({ namespace, name, body }: { namespace: string; name: string; body: Stored }) => {
-        const existing = store.get(key(namespace, name))
-        if (!existing) throw k8sError(`contexts "${name}" not found`, 404)
+      async ({
+        plural,
+        namespace,
+        name,
+        body,
+      }: {
+        plural: string
+        namespace: string
+        name: string
+        body: Stored
+      }) => {
+        const existing = store.get(key(plural, namespace, name))
+        if (!existing) throw k8sError(`${plural} "${name}" not found`, 404)
         const sentRv = (body.metadata as { resourceVersion?: string }).resourceVersion
         if (sentRv && sentRv !== existing.metadata.resourceVersion) {
           throw k8sError('the object has been modified', 409)
@@ -129,14 +141,14 @@ function apiserverGateway(opts: { pruneDisplayName?: boolean; dropServer?: strin
           uid: existing.metadata.uid,
           resourceVersion: String(++rv),
         }
-        store.set(key(namespace, name), stored)
+        store.set(key(plural, namespace, name), stored)
         return stored
       }
     ),
     createNamespacedCustomObject: vi.fn(
-      async ({ namespace, body }: { namespace: string; body: Stored }) => {
-        const k = key(namespace, body.metadata.name)
-        if (store.has(k)) throw k8sError(`contexts "${body.metadata.name}" already exists`, 409)
+      async ({ plural, namespace, body }: { plural: string; namespace: string; body: Stored }) => {
+        const k = key(plural, namespace, body.metadata.name)
+        if (store.has(k)) throw k8sError(`${plural} "${body.metadata.name}" already exists`, 409)
         const stored = persist(body)
         stored.metadata = {
           ...stored.metadata,
@@ -149,16 +161,38 @@ function apiserverGateway(opts: { pruneDisplayName?: boolean; dropServer?: strin
       }
     ),
     deleteNamespacedCustomObject: vi.fn(
-      async ({ namespace, name }: { namespace: string; name: string }) => {
-        if (!store.delete(key(namespace, name))) throw k8sError(`contexts "${name}" not found`, 404)
+      async ({ plural, namespace, name }: { plural: string; namespace: string; name: string }) => {
+        if (!store.delete(key(plural, namespace, name))) {
+          throw k8sError(`${plural} "${name}" not found`, 404)
+        }
         return { status: 'Success' }
       }
     ),
-    listNamespacedCustomObject: vi.fn(async ({ namespace }: { namespace: string }) => ({
-      items: [...store.entries()].filter(([k]) => k.startsWith(`${namespace}/`)).map(([, v]) => v),
-    })),
+    listNamespacedCustomObject: vi.fn(
+      async ({ plural, namespace }: { plural: string; namespace: string }) => ({
+        items: [...store.entries()]
+          .filter(([k]) => k.startsWith(`${plural}/${namespace}/`))
+          .map(([, v]) => v),
+      })
+    ),
   } as unknown as ConstructorParameters<typeof ResourceService>[0]
-  const svc = new ResourceService(customApi, ctxNs, { contexts: ctxNs })
+  const svc = new ResourceService(customApi, ctxNs, {
+    contexts: ctxNs,
+    mcpservers: config.mcpServersNamespace,
+  })
+  // Every server these tests put in an allowlist exists: a Context write refuses an
+  // added name with no live McpServer, and that refusal is not what they test.
+  for (const name of [S1, S2, DROPPED]) {
+    store.set(key('mcpservers', config.mcpServersNamespace, name), {
+      metadata: {
+        name,
+        namespace: config.mcpServersNamespace,
+        uid: `uid-${name}`,
+        resourceVersion: '1',
+      },
+      spec: {},
+    } as Stored)
+  }
   const gateway = {
     getResource: svc.getResource.bind(svc),
     updateResource: svc.updateResource.bind(svc),
@@ -435,7 +469,8 @@ describeRealPostgres('admin Context routes purge orphaned shared grants (real Po
 
     expect(res.status, res.text).toBe(409)
     expect(res.body.code).toBe('context_crd_outdated')
-    expect(store.size).toBe(0)
+    // The pruned Context was rolled back; only the seeded McpServers remain.
+    expect([...store.keys()].filter(k => k.startsWith('contexts/'))).toEqual([])
     expect(await grants()).toEqual([])
   })
 
