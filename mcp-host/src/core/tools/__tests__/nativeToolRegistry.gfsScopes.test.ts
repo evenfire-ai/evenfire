@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import type { IncomingMessage } from '../../../server'
 import type { NativeToolConfig } from '../../interfaces'
 import { NativeToolRegistry } from '../nativeToolRegistry'
 
@@ -30,6 +31,35 @@ function gfsNames(scopes: unknown): string[] {
     .sort()
 }
 
+function gfsNamesWith(scopes: unknown, sourceMessage?: IncomingMessage): string[] {
+  process.env[ACCESS_ENV] = encodedClaims(scopes)
+  return new NativeToolRegistry(config, 'gfs-scope-test', undefined, sourceMessage)
+    .listDefinitions()
+    .map(definition => definition.name)
+    .filter(name => name.startsWith('clerum__gfs_'))
+    .sort()
+}
+
+const withImage = {
+  sender: 'u',
+  content: 'save it',
+  channelType: 'rpc',
+  channelId: 'c',
+  messageId: 'm',
+  timestamp: new Date().toISOString(),
+  hostRef: 'h',
+  attachments: [
+    {
+      id: 'img-1',
+      kind: 'image',
+      mimeType: 'image/png',
+      encoding: 'base64',
+      dataBase64: 'iVBORw0KGgo=',
+      filename: 'a.png',
+    },
+  ],
+} as IncomingMessage
+
 afterEach(() => {
   if (previousAccess === undefined) delete process.env[ACCESS_ENV]
   else process.env[ACCESS_ENV] = previousAccess
@@ -56,6 +86,16 @@ describe('NativeToolRegistry GFS scope visibility', () => {
     expect(gfsNames(['gfs.read', 'gfs.write'])).toEqual(
       [...readTools, ...writeTools, 'clerum__gfs_copy'].sort()
     )
+  })
+
+  it('offers clerum__gfs_save_attachment only with gfs.write and current-message bytes', () => {
+    // Witness: the other write tools are registered in every gfs.write case.
+    expect(gfsNamesWith(['gfs.write'], withImage)).toEqual(
+      [...writeTools, 'clerum__gfs_save_attachment'].sort()
+    )
+    expect(gfsNamesWith(['gfs.write'], { ...withImage, attachments: [] })).toEqual(writeTools)
+    expect(gfsNamesWith(['gfs.write'], undefined)).toEqual(writeTools)
+    expect(gfsNamesWith(['gfs.read'], withImage)).toEqual(readTools)
   })
 
   it('fails closed when destructive, governance, or unknown scopes are present', () => {
