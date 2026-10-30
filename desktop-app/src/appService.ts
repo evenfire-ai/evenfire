@@ -3505,7 +3505,7 @@ export class AppService {
     if (!this.sessionToken || !this.me) {
       if (this.restoreSavedSessionInFlight) {
         const restored = await this.restoreSavedSession()
-        return { ...restored, sessionGeneration: this.sessionGeneration }
+        return restored
       }
       // createWindow() already performs the saved-token restore before showing
       // the renderer. Do not immediately repeat a failed 60-second network
@@ -3518,7 +3518,7 @@ export class AppService {
         return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       }
       const restored = await this.restoreSavedSession()
-      return { ...restored, sessionGeneration: this.sessionGeneration }
+      return restored
     }
     return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
   }

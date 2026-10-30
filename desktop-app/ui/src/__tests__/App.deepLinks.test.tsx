@@ -6080,7 +6080,11 @@ describe('App deep-link orchestration', () => {
     sessionAuthority.sessionGeneration = 7
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
-    sessionAuthority.restoreSavedSession = async () => ({ authenticated: false, me: null })
+    sessionAuthority.restoreSavedSession = async () => ({
+      authenticated: false,
+      me: null,
+      sessionGeneration: sessionAuthority.sessionGeneration,
+    })
 
     const appQueue = new SandboxUiDeepLinkQueue()
     main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
