@@ -476,6 +476,87 @@ describe('generic OIDC protocol foundation', () => {
     expect(f.requestedUrls).toContain(`${GENERIC_ISSUER}/keys`)
   })
 
+  it('projects bounded immutable typed evidence from the validated ID token', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const f = fixture({
+      claims: nonce => ({
+        iss: GENERIC_ISSUER,
+        sub: 'opaque-subject-claims',
+        aud: CLIENT_ID,
+        azp: CLIENT_ID,
+        exp: now + 300,
+        iat: now,
+        nonce,
+        auth_time: now,
+        tid: 'tenant-42',
+        idp: 'external-idp',
+        roles: ['Evenfire.User', 'Billing.Read'],
+        accountEnabled: false,
+        quotaLevel: 0,
+        email: 'member@example.test',
+        email_verified: true,
+        unsupportedNested: { privilege: 'must-not-be-forwarded' },
+        oversized: 'x'.repeat(513),
+      }),
+    })
+    const { params } = await begin(f)
+
+    const proof = await f.engine.completeIdentityProofAttempt({
+      state: params.get('state')!,
+      code: 'fixture-code',
+      issuer: GENERIC_ISSUER,
+    })
+
+    expect(isVerifiedOidcIdentityProof(proof)).toBe(true)
+    expect(proof.verifiedClaims).toEqual({
+      source: 'validated_id_token',
+      claims: {
+        accountEnabled: false,
+        email: 'member@example.test',
+        email_verified: true,
+        idp: 'external-idp',
+        quotaLevel: 0,
+        roles: ['Evenfire.User', 'Billing.Read'],
+        tid: 'tenant-42',
+      },
+    })
+    expect(Object.isFrozen(proof.verifiedClaims)).toBe(true)
+    expect(Object.isFrozen(proof.verifiedClaims.claims)).toBe(true)
+    expect(Object.isFrozen(proof.verifiedClaims.claims.roles)).toBe(true)
+    expect(proof.verifiedClaims.claims).not.toHaveProperty('unsupportedNested')
+    expect(proof.verifiedClaims.claims).not.toHaveProperty('oversized')
+    expect(isVerifiedOidcIdentityProof({ ...proof })).toBe(false)
+    expect(JSON.stringify(proof)).not.toContain(CLIENT_SECRET)
+  })
+
+  it('rejects proof construction when validated policy claims exceed the evidence bound', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const f = fixture({
+      claims: nonce => ({
+        iss: GENERIC_ISSUER,
+        sub: 'opaque-subject-too-many-claims',
+        aud: CLIENT_ID,
+        azp: CLIENT_ID,
+        exp: now + 300,
+        iat: now,
+        nonce,
+        ...Object.fromEntries(
+          Array.from({ length: 65 }, (_, index) => [`policyClaim${index}`, `value-${index}`])
+        ),
+      }),
+    })
+    const { params } = await begin(f)
+
+    await expect(
+      f.engine.completeIdentityProofAttempt({
+        state: params.get('state')!,
+        code: 'fixture-code',
+        issuer: GENERIC_ISSUER,
+      })
+    ).rejects.toMatchObject({ attemptReason: 'verified-token' })
+    expect([...f.db.rows.values()][0]?.status).toBe('failed')
+  })
+
   it('fails closed for wrong state, callback issuer, and replay without a second exchange', async () => {
     const f = fixture()
     const { params } = await begin(f)

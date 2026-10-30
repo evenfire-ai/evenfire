@@ -86,6 +86,13 @@ export type OidcVerifiedAttributes = Readonly<{
   locale?: string
 }>
 
+export type OidcVerifiedClaimScalar = string | number | boolean
+export type OidcVerifiedClaimValue = OidcVerifiedClaimScalar | readonly OidcVerifiedClaimScalar[]
+export type OidcVerifiedClaimEvidence = Readonly<{
+  source: 'validated_id_token'
+  claims: Readonly<Record<string, OidcVerifiedClaimValue>>
+}>
+
 export type VerifiedOidcIdentityProof = Readonly<{
   purpose: typeof PROOF_PURPOSE
   issuer: string
@@ -97,9 +104,31 @@ export type VerifiedOidcIdentityProof = Readonly<{
   issuedAt: number
   authenticationTime?: number
   attributes: OidcVerifiedAttributes
+  verifiedClaims: OidcVerifiedClaimEvidence
 }>
 
 const validProofs = new WeakSet<object>()
+const MAX_VERIFIED_CLAIMS = 64
+const MAX_VERIFIED_CLAIMS_BYTES = 16_384
+const MAX_VERIFIED_CLAIM_NAME_LENGTH = 128
+const MAX_VERIFIED_CLAIM_STRING_LENGTH = 512
+const MAX_VERIFIED_CLAIM_ARRAY_LENGTH = 32
+const OIDC_PROTOCOL_CLAIMS = new Set([
+  'iss',
+  'sub',
+  'aud',
+  'exp',
+  'iat',
+  'nbf',
+  'jti',
+  'nonce',
+  'azp',
+  'auth_time',
+  'at_hash',
+  'c_hash',
+  's_hash',
+  'sid',
+])
 
 /** Runtime provenance check for future in-process composition; this is not a token. */
 export function isVerifiedOidcIdentityProof(value: unknown): value is VerifiedOidcIdentityProof {
@@ -394,6 +423,7 @@ export class OidcProtocolEngine {
     }
 
     const attributes = this.readValidatedAttributes(claims)
+    const verifiedClaims = this.readVerifiedClaims(claims)
     const authenticationTime = typeof claims.auth_time === 'number' ? claims.auth_time : undefined
     const proof: VerifiedOidcIdentityProof = Object.freeze({
       purpose: PROOF_PURPOSE,
@@ -406,6 +436,7 @@ export class OidcProtocolEngine {
       issuedAt,
       ...(authenticationTime !== undefined ? { authenticationTime } : {}),
       attributes,
+      verifiedClaims,
     })
     validProofs.add(proof)
     return proof
@@ -430,6 +461,69 @@ export class OidcProtocolEngine {
     if (typeof claims.locale === 'string' && claims.locale.length <= 64)
       attributes.locale = claims.locale
     return Object.freeze(attributes)
+  }
+
+  private readVerifiedClaims(claims: Record<string, unknown>): OidcVerifiedClaimEvidence {
+    const projected: Record<string, OidcVerifiedClaimValue> = Object.create(null)
+    const names = Object.keys(claims)
+      .filter(name => !OIDC_PROTOCOL_CLAIMS.has(name))
+      .sort()
+    if (names.length > MAX_VERIFIED_CLAIMS) {
+      throw new OidcAttemptRejectedError(
+        'verified-token',
+        'OIDC ID token contains too many policy-evidence claims'
+      )
+    }
+    let projectedBytes = 0
+
+    for (const name of names) {
+      if (
+        name.length === 0 ||
+        name.length > MAX_VERIFIED_CLAIM_NAME_LENGTH ||
+        /[\u0000-\u001f\u007f]/.test(name)
+      ) {
+        continue
+      }
+      const value = this.projectVerifiedClaimValue(claims[name])
+      if (value !== undefined) {
+        projectedBytes += Buffer.byteLength(name) + Buffer.byteLength(JSON.stringify(value)) + 4
+        if (projectedBytes > MAX_VERIFIED_CLAIMS_BYTES) {
+          throw new OidcAttemptRejectedError(
+            'verified-token',
+            'OIDC ID token policy-evidence claims exceed the supported size'
+          )
+        }
+        projected[name] = value
+      }
+    }
+
+    return Object.freeze({
+      source: 'validated_id_token',
+      claims: Object.freeze(projected),
+    })
+  }
+
+  private projectVerifiedClaimValue(value: unknown): OidcVerifiedClaimValue | undefined {
+    if (typeof value === 'string') {
+      return value.length <= MAX_VERIFIED_CLAIM_STRING_LENGTH ? value : undefined
+    }
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+    if (!Array.isArray(value) || value.length > MAX_VERIFIED_CLAIM_ARRAY_LENGTH) return undefined
+
+    const projected: OidcVerifiedClaimScalar[] = []
+    for (const entry of value) {
+      if (typeof entry === 'string' && entry.length <= MAX_VERIFIED_CLAIM_STRING_LENGTH) {
+        projected.push(entry)
+      } else if (typeof entry === 'boolean') {
+        projected.push(entry)
+      } else if (typeof entry === 'number' && Number.isFinite(entry)) {
+        projected.push(entry)
+      } else {
+        return undefined
+      }
+    }
+    return Object.freeze(projected)
   }
 
   private async getTrustedConfiguration(): Promise<TrustedConfiguration> {
