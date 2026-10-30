@@ -548,6 +548,10 @@ export function registerIpcHandlers(
     assertTrustedSender(event)
     return (await desktopUpdates?.getPendingDesktopUpdate()) ?? null
   })
+  ipcMain.handle('auth:getDesktopUpdatePresentation', async event => {
+    assertTrustedSender(event)
+    return { manualInstall: process.platform === 'darwin' }
+  })
   ipcMain.handle(
     'auth:downloadDesktopUpdate',
     async (event, payload: { expectedVersion?: unknown; restartAfterDownload?: unknown }) => {
@@ -570,6 +574,14 @@ export function registerIpcHandlers(
       assertTrustedSender(event)
       if (!desktopUpdates) throw new Error('Desktop updates are unavailable.')
       return desktopUpdates.installDownloadedUpdate(sanitizeString(payload?.expectedVersion))
+    }
+  )
+  ipcMain.handle(
+    'auth:openDesktopUpdateInstaller',
+    async (event, payload: { expectedVersion?: unknown }) => {
+      assertTrustedSender(event)
+      if (!desktopUpdates) throw new Error('Desktop updates are unavailable.')
+      return desktopUpdates.openDownloadedMacInstaller(sanitizeString(payload?.expectedVersion))
     }
   )
   ipcMain.handle('auth:getDesktopAppInfo', async event => {

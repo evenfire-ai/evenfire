@@ -1,5 +1,4 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
-import { homedir } from 'node:os'
 import path from 'node:path'
 import type {
   DesktopReleaseArchitecture,
@@ -7,15 +6,10 @@ import type {
   DesktopReleasePlatform,
   VerifiedDesktopPayload,
 } from './desktopUpdateArtifacts.js'
-import {
-  openRegularFileNoFollow,
-  readFileSha256,
-  readRegularFileNoFollow,
-  updaterFileSystem,
-} from './desktopUpdateFileSystem.js'
+import { readFileSha256, updaterFileSystem } from './desktopUpdateFileSystem.js'
 
 const { constants } = updaterFileSystem
-const { access, lstat, open, realpath, unlink, writeFile } = updaterFileSystem.promises
+const { access, lstat, realpath, unlink } = updaterFileSystem.promises
 
 export type DesktopInstallLocation = {
   platform: DesktopReleasePlatform
@@ -40,156 +34,6 @@ export type DesktopInstallPlan = {
   rollbackPackagePath?: string
   rollbackPackageSha256?: string
 }
-
-const MAC_SCRIPT = String.raw`set -eu
-PATH=/usr/bin:/bin; export PATH
-root="$1"; stage="$2"; id="$3"; app="$4"; staged="$5"; fresh="$6"; old="$7"
-version="$8"; digest="$9"; capable="@@ARG10@@"; parent="@@ARG11@@"; uid="@@ARG12@@"; pending="@@ARG13@@"
-job="@@ARG14@@"; sourceVersion="@@ARG15@@"; sourceDigest="@@ARG16@@"
-log="$stage/install.log"; phase=preflight; ownsFresh=0; openPid=''
-run_as_user() {
-  if [ "$(/usr/bin/id -u)" = "$uid" ]; then "$@"; else /bin/launchctl asuser "$uid" "$@"; fi
-}
-verify_source() {
-  source_path="$1"
-  [ -d "$source_path" ] && [ ! -L "$source_path" ] || return 1
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$source_path/Contents/Info.plist")" = ai.evenfire.desktop ] || return 1
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$source_path/Contents/Info.plist")" = "$sourceVersion" ] || return 1
-  [ "$(/usr/bin/shasum -a 256 "$source_path/Contents/Resources/app.asar" | /usr/bin/awk '{print $1}')" = "$sourceDigest" ]
-}
-verify_target() {
-  target_path="$1"
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$target_path/Contents/Info.plist")" = ai.evenfire.desktop ] || return 1
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$target_path/Contents/Info.plist")" = "$version" ] || return 1
-  [ "$(/usr/bin/shasum -a 256 "$target_path/Contents/Resources/app.asar" | /usr/bin/awk '{print $1}')" = "$digest" ] || return 1
-  /usr/bin/codesign --verify --deep --strict "$target_path" || return 1
-  signer=$(/usr/bin/codesign -dv --verbose=4 "$target_path" 2>&1 | /usr/bin/grep '^TeamIdentifier=' || true)
-  [ "$signer" = 'TeamIdentifier=XV6G8QZD5D' ] || return 1
-  /usr/sbin/spctl --assess --type execute "$target_path"
-}
-target_pid() {
-  probeStatus=0
-  if [ "$#" -gt 0 ] && [ "$1" = source ]; then
-    probeOutput=$(/usr/sbin/lsof -t -a -d txt -- "$app/Contents/MacOS/Evenfire" 2>&1) || probeStatus=$?
-  else
-    probeOutput=$(/usr/sbin/lsof -t -a -u "$uid" -d txt -- "$app/Contents/MacOS/Evenfire" 2>&1) || probeStatus=$?
-  fi
-  if [ "$probeStatus" = 1 ] && [ -z "$probeOutput" ]; then return 1; fi
-  [ "$probeStatus" = 0 ] || return 2
-  firstPid=$(printf '%s\n' "$probeOutput" | /usr/bin/head -n 1)
-  case "$firstPid" in ''|*[!0-9]*) return 2;; esac
-  printf '%s' "$firstPid"
-}
-clear_pending() {
-  if [ -f "$pending" ] && [ ! -L "$pending" ] && /usr/bin/grep -Fq "\"operationId\":\"$id\"" "$pending"; then /bin/rm -f "$pending"; fi
-}
-fail() { printf '%s: %s\n' "$phase" "$1" >> "$log"; exit 1; }
-finish() {
-  result=$?; trap - EXIT INT TERM HUP
-  set +e
-  if [ "$result" -ne 0 ] && [ "$result" -ne 6 ] && [ -d "$stage" ] && [ ! -L "$stage" ]; then
-    printf '%s: helper exited with status %s\n' "$phase" "$result" >> "$log"
-    restored=false
-    observed=0; livePid=$(target_pid source) || observed=$?
-    wrapperLive=0
-    if [ -n "$openPid" ] && /bin/kill -0 "$openPid" 2>/dev/null; then wrapperLive=1; fi
-    if [ "$observed" = 1 ] && [ "$wrapperLive" = 0 ]; then
-      if [ -d "$old" ] && [ ! -L "$old" ] && verify_source "$old"; then
-        if [ -d "$app" ] && [ ! -L "$app" ] && [ ! -e "$fresh" ] && [ ! -L "$fresh" ]; then
-          /bin/mv "$app" "$fresh" && ownsFresh=1
-        fi
-        if [ ! -e "$app" ] && [ ! -L "$app" ]; then /bin/mv "$old" "$app" || true; fi
-      fi
-    fi
-    # A verified source still at its original path needs no replacement, even if running.
-    if verify_source "$app" && [ ! -e "$old" ] && [ ! -L "$old" ]; then
-        restored=true
-        if [ "$ownsFresh" = 1 ] && [ -d "$fresh" ] && [ ! -L "$fresh" ]; then /bin/rm -rf "$fresh"; fi
-        if [ -d "$stage/payload" ] && [ ! -L "$stage/payload" ]; then /bin/rm -rf "$stage/payload"; fi
-        clear_pending
-        printf '%s: previous application restored or preserved\n' "$phase" >> "$log"
-        if [ "$observed" = 1 ] && ! /bin/kill -0 "$parent" 2>/dev/null; then run_as_user /usr/bin/open -n "$app" --args "--user-data-dir=$(dirname "$root")" >> "$log" 2>&1 || true; fi
-    fi
-    printf '{"id":"%s","state":"failed","phase":"%s","sourceRestored":%s}\n' "$id" "$phase" "$restored" > "$stage/helper-result.json"
-    if ! /bin/kill -0 "$parent" 2>/dev/null; then
-      if [ "$restored" = true ]; then
-        run_as_user /usr/bin/osascript -e 'display alert "Evenfire update failed" message "Your previous version was preserved. Reopen Evenfire and check for updates to try again."' >> "$log" 2>&1 || true
-      else
-        run_as_user /usr/bin/osascript -e 'display alert "Evenfire update needs recovery" message "The update could not be confirmed. Recovery files were preserved. Please contact support before retrying."' >> "$log" 2>&1 || true
-      fi
-    fi
-  fi
-  run_as_user /bin/launchctl remove "$job" >/dev/null 2>&1 || true
-  exit "$result"
-}
-case "$id" in *[!0-9a-f-]*|'') exit 1;; esac
-[ "$stage" = "$root/$id" ] && [ "$pending" = "$root/pending.json" ] || exit 1
-[ "$job" = "ai.evenfire.desktop.update.$id" ] || exit 1
-[ ! -L "$stage" ] && [ -f "$stage/operation.json" ] && [ ! -L "$stage/operation.json" ] || exit 1
-/usr/bin/grep -Fq "\"id\":\"$id\"" "$stage/operation.json" || exit 1
-trap finish EXIT
-trap 'exit 1' INT TERM HUP
-printf '%s: helper started\n' "$phase" >> "$log"
-[ "$fresh" = "$app.evenfire-new-$id" ] && [ "$old" = "$app.evenfire-rollback-$id" ] || fail 'install path mismatch'
-[ "$staged" = "$stage/payload/application/Evenfire.app" ] || fail 'staged app path mismatch'
-[ ! -e "$fresh" ] && [ ! -L "$fresh" ] && [ ! -e "$old" ] && [ ! -L "$old" ] || fail 'install or rollback path already exists'
-printf '%s\n' "$$" > "$stage/helper.pid"
-phase=waiting-for-app-exit
-for i in $(/usr/bin/jot - 1 180); do
-  [ ! -f "$stage/cancel-install.json" ] || exit 6
-  if ! /bin/kill -0 "$parent" 2>/dev/null; then break; fi
-  /bin/sleep 0.2
-done
-/bin/kill -0 "$parent" 2>/dev/null && fail 'Evenfire did not exit'
-[ ! -f "$stage/cancel-install.json" ] || exit 6
-/usr/bin/grep -Fq '"state":"installing"' "$stage/operation.json" || fail 'installation authorization changed'
-verify_source "$app" || fail 'installed source identity or contents changed'
-phase=copying-target
-/bin/mkdir -m 700 "$fresh" || fail 'could not reserve fresh app path'
-ownsFresh=1
-/usr/bin/ditto "$staged" "$fresh" || fail 'could not copy the verified app'
-phase=verifying-copied-target
-verify_target "$fresh" || fail 'downloaded macOS target signature or trust verification failed'
-phase=replacing-app
-observed=0; sourcePid=$(target_pid source) || observed=$?
-[ "$observed" = 1 ] || fail 'source application is running or process inspection is unavailable; close other instances and retry'
-/bin/mv "$app" "$old" || fail 'could not preserve previous app'
-/bin/mv "$fresh" "$app" || fail 'could not install the verified app'
-ownsFresh=0
-phase=verifying-installed-target
-verify_target "$app" || fail 'installed target verification failed'
-phase=launching-target
-run_as_user /usr/bin/open -n -W "$app" --args "--user-data-dir=$(dirname "$root")" "--evenfire-update-operation=$id" >> "$log" 2>&1 &
-openPid=$!; verified=0
-phase=verifying-startup
-for i in $(/usr/bin/jot - 1 300); do
-  observed=0; livePid=$(target_pid) || observed=$?
-  [ "$observed" != 2 ] || fail 'startup process inspection failed; recovery files preserved'
-  if [ -n "$livePid" ] && /bin/kill -0 "$livePid" 2>/dev/null; then
-    if [ "$capable" = true ] && [ -f "$stage/startup-ok.json" ] && [ ! -L "$stage/startup-ok.json" ] && /usr/bin/grep -Fq "\"id\":\"$id\"" "$stage/startup-ok.json" && /usr/bin/grep -Fq "\"version\":\"$version\"" "$stage/startup-ok.json"; then verified=1; break; fi
-    if [ "$capable" = false ] && [ "$i" -ge 50 ]; then verified=1; break; fi
-  fi
-  if ! /bin/kill -0 "$openPid" 2>/dev/null; then break; fi
-  /bin/sleep 0.2
-done
-[ "$verified" = 1 ] || fail 'target startup was not confirmed; recovery files retained if still running'
-verify_target "$app" || fail 'restarted target identity or contents changed'
-phase=finalizing
-verify_source "$old" || fail 'rollback identity or contents changed'
-/bin/rm -rf "$old"
-printf '{"id":"%s","state":"installed"}\n' "$id" > "$stage/cleanup-safe.json"
-printf '{"id":"%s","state":"safe-to-delete"}\n' "$id" > "$root/cleanup.json"
-clear_pending
-/bin/rm -rf "$stage"
-if /usr/bin/grep -Fq "\"id\":\"$id\"" "$root/cleanup.json"; then /bin/rm -f "$root/cleanup.json"; fi
-`
-  .replaceAll('@@ARG10@@', () => '${10}')
-  .replaceAll('@@ARG11@@', () => '${11}')
-  .replaceAll('@@ARG12@@', () => '${12}')
-  .replaceAll('@@ARG13@@', () => '${13}')
-  .replaceAll('@@ARG14@@', () => '${14}')
-  .replaceAll('@@ARG15@@', () => '${15}')
-  .replaceAll('@@ARG16@@', () => '${16}')
 
 const USER_DIR_SCRIPT = String.raw`set -eu
 PATH=/usr/bin:/bin; export PATH
@@ -459,8 +303,7 @@ try {
 async function waitForHelper(
   createChild: () => ChildProcess,
   markerPath: string,
-  standardInput?: string,
-  macOperationId?: string
+  standardInput?: string
 ): Promise<void> {
   try {
     const marker = await lstat(markerPath)
@@ -484,26 +327,7 @@ async function waitForHelper(
           const info = await lstat(markerPath)
           if (info.isFile() && !info.isSymbolicLink()) finish()
         } catch {
-          if (!macOperationId) return
-          try {
-            const result = JSON.parse(
-              (
-                await readRegularFileNoFollow(
-                  path.join(path.dirname(markerPath), 'helper-result.json'),
-                  1024
-                )
-              ).toString('utf8')
-            )
-            if (result.id === macOperationId && result.state === 'failed') {
-              finish(
-                new Error(
-                  'The macOS update helper could not start. Your current app was preserved.'
-                )
-              )
-            }
-          } catch {
-            /* The helper has not published a result yet. */
-          }
+          // The helper has not published readiness yet.
         }
       })()
     }, 100)
@@ -512,30 +336,17 @@ async function waitForHelper(
       settled = true
       clearTimeout(timeout)
       clearInterval(poll)
-      if (error && macOperationId) {
-        void (async () => {
-          const cancel = path.join(path.dirname(markerPath), 'cancel-install.json')
-          try {
-            await writeFile(cancel, JSON.stringify({ id: macOperationId }), {
-              flag: 'wx',
-              mode: 0o600,
-            })
-          } catch (writeError) {
-            if ((writeError as NodeJS.ErrnoException).code !== 'EEXIST') throw writeError
-          }
-          await stopMacDesktopInstallJob(macOperationId)
-        })().then(() => reject(error), reject)
-      } else if (error) reject(error)
+      if (error) reject(error)
       else resolve()
     }
     child.once('error', error => finish(error))
     child.once('exit', (code, signal) => {
-      // launchctl exits after submission; the independent helper publishes readiness later.
-      if (macOperationId && code === 0 && !signal) return
       if (!settled) {
         finish(
           new Error(
-            `The OS update helper exited before installation was ready (${signal ?? code ?? 'unknown'}).`
+            'The OS update helper exited before installation was ready (' +
+              (signal ?? code ?? 'unknown') +
+              ').'
           )
         )
       }
@@ -568,72 +379,6 @@ function launchDetachedAndWaitForMarker(
     markerPath,
     standardInput
   )
-}
-
-function launchMacDesktopInstallJob(
-  args: string[],
-  markerPath: string,
-  operationId: string
-): Promise<void> {
-  return waitForHelper(
-    () =>
-      spawn('/bin/launchctl', args, {
-        detached: true,
-        shell: false,
-        stdio: 'ignore',
-        windowsHide: true,
-      }),
-    markerPath,
-    undefined,
-    operationId
-  )
-}
-
-function macJobLabel(operationId: string): string {
-  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(operationId)) {
-    throw new Error('Invalid macOS update operation identity.')
-  }
-  return `ai.evenfire.desktop.update.${operationId}`
-}
-
-export async function stopMacDesktopInstallJob(operationId: string): Promise<void> {
-  const label = macJobLabel(operationId)
-  if (process.platform !== 'darwin') return
-  const removed = spawnSync('/bin/launchctl', ['remove', label], { timeout: 10_000 })
-  if (removed.error || (removed.status !== 0 && removed.status !== 3)) {
-    throw new Error(
-      'The macOS update job could not be safely stopped; recovery files were preserved.'
-    )
-  }
-  for (let attempt = 0; attempt < 40; attempt++) {
-    const status = spawnSync('/bin/launchctl', ['print', `gui/${process.getuid!()}/${label}`], {
-      timeout: 10_000,
-    })
-    if (!status.error && status.status === 113) return
-    if (status.error || status.status !== 0) break
-    await new Promise(resolve => setTimeout(resolve, 50))
-  }
-  throw new Error('The macOS update job is still registered; cancellation was preserved.')
-}
-
-async function ensureMacHelperLog(operationPath: string): Promise<string> {
-  const logPath = path.join(operationPath, 'install.log')
-  try {
-    const file = await open(logPath, 'wx', 0o600)
-    await file.close()
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    const file = await openRegularFileNoFollow(logPath)
-    try {
-      const info = await file.handle.stat()
-      if (info.uid !== process.getuid!() || (info.mode & 0o077) !== 0) {
-        throw new Error('The macOS update log is not owned by this operation.')
-      }
-    } finally {
-      await file.handle.close()
-    }
-  }
-  return logPath
 }
 
 function packageManagerOwns(binaryPath: string): 'deb' | 'rpm' | null {
@@ -672,22 +417,6 @@ function windowsPowerShellPath(): string {
   )
 }
 
-export function isSupportedMacInstallPath(
-  appPath: string,
-  homeDirectory: string,
-  applicationsDirectory = '/Applications'
-): boolean {
-  const resolvedPath = path.resolve(appPath)
-  const allowedParents = [
-    path.resolve(applicationsDirectory),
-    path.resolve(homeDirectory, 'Applications'),
-  ]
-  return (
-    path.basename(resolvedPath) === 'Evenfire.app' &&
-    allowedParents.includes(path.dirname(resolvedPath))
-  )
-}
-
 export async function detectDesktopInstall(args: {
   platform: string
   architecture: string
@@ -709,16 +438,6 @@ export async function detectDesktopInstall(args: {
     const bundle = await lstat(appPath)
     if (!bundle.isDirectory() || bundle.isSymbolicLink() || !appPath.endsWith('.app')) {
       throw new Error('The installed macOS app bundle location could not be verified.')
-    }
-    const applicationsDirectory = await realpath('/Applications').catch(() => '/Applications')
-    const userApplicationsDirectory = await realpath(path.join(homedir(), 'Applications')).catch(
-      () => path.join(homedir(), 'Applications')
-    )
-    if (
-      !isSupportedMacInstallPath(appPath, homedir(), applicationsDirectory) &&
-      !isSupportedMacInstallPath(appPath, homedir(), userApplicationsDirectory)
-    ) {
-      throw new Error('Automatic macOS updates require Evenfire.app in Applications.')
     }
     return {
       platform,
@@ -827,7 +546,9 @@ export async function launchDesktopInstallHelper(plan: DesktopInstallPlan): Prom
   await verifyStage(plan)
   if (plan.pendingPath !== path.join(plan.stageRoot, 'pending.json'))
     throw new Error('Invalid pending update path.')
-  if (plan.location.packageType === 'app-zip') return launchDirectoryInstall(plan)
+  if (plan.location.platform === 'linux' && plan.location.packageType === 'app-zip') {
+    return launchDirectoryInstall(plan)
+  }
   if (plan.location.platform === 'win32' && plan.location.packageType === 'squirrel')
     return launchSquirrelInstall(plan)
   if (plan.location.platform === 'linux' && ['deb', 'rpm'].includes(plan.location.packageType)) {
@@ -838,95 +559,21 @@ export async function launchDesktopInstallHelper(plan: DesktopInstallPlan): Prom
 
 async function launchDirectoryInstall(plan: DesktopInstallPlan): Promise<void> {
   const { location, operationId, operationPath, stageRoot, payload } = plan
+  if (location.platform !== 'linux') {
+    throw new Error('Automatic directory installation is supported only for Linux.')
+  }
   const installRoot = await realpath(location.installRoot)
   const writable = await access(path.dirname(installRoot), constants.W_OK).then(
     () => true,
     () => false
   )
-  const fresh = installRoot + '.evenfire-new-' + operationId
-  const old = installRoot + '.evenfire-rollback-' + operationId
-  const asar = path.join(
-    payload.appPath,
-    location.platform === 'darwin' ? 'Contents/Resources/app.asar' : 'resources/app.asar'
-  )
-  const digest = await readFileSha256(asar)
-  if (location.platform === 'darwin') {
-    const args = [
-      stageRoot,
-      operationPath,
-      operationId,
-      installRoot,
-      payload.appPath,
-      fresh,
-      old,
-      payload.appVersion,
-      digest,
-      String(payload.updaterCapable),
-      String(process.pid),
-      String(typeof process.getuid === 'function' ? process.getuid() : 0),
-      path.join(stageRoot, 'pending.json'),
-      macJobLabel(operationId),
-      plan.currentVersion,
-      plan.currentAsarSha256,
-    ]
-    const logPath = await ensureMacHelperLog(operationPath)
-    if (writable) {
-      await launchMacDesktopInstallJob(
-        [
-          'submit',
-          '-l',
-          macJobLabel(operationId),
-          '-o',
-          logPath,
-          '-e',
-          logPath,
-          '--',
-          '/bin/sh',
-          '-c',
-          MAC_SCRIPT,
-          'evenfire-update-helper',
-          ...args,
-        ],
-        path.join(operationPath, 'helper.pid'),
-        operationId
-      )
-      return
-    }
-    const appleScript = [
-      'on run argv',
-      'set scriptText to item 1 of argv',
-      'set commandLine to "/bin/sh -c " & quoted form of scriptText & " evenfire-update-helper"',
-      'repeat with index from 2 to count of argv',
-      'set commandLine to commandLine & " " & quoted form of item index of argv',
-      'end repeat',
-      'do shell script commandLine with administrator privileges',
-      'end run',
-    ].join('\n')
-    await launchMacDesktopInstallJob(
-      [
-        'submit',
-        '-l',
-        macJobLabel(operationId),
-        '-o',
-        logPath,
-        '-e',
-        logPath,
-        '--',
-        '/usr/bin/osascript',
-        '-e',
-        appleScript,
-        '--',
-        MAC_SCRIPT,
-        ...args,
-      ],
-      path.join(operationPath, 'helper.pid'),
-      operationId
-    )
-    return
-  }
-  if (location.platform !== 'linux' || !writable) {
+  if (!writable) {
     throw new Error('The Linux Forge ZIP install folder is not user-writable; install it manually.')
   }
+  const fresh = installRoot + '.evenfire-new-' + operationId
+  const old = installRoot + '.evenfire-rollback-' + operationId
+  const asar = path.join(payload.appPath, 'resources/app.asar')
+  const digest = await readFileSha256(asar)
   const args = [
     stageRoot,
     operationPath,

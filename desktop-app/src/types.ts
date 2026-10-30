@@ -141,16 +141,19 @@ export type DesktopUpdateDownloadResult = {
   downloaded: true
   version: string
   updaterCapable: boolean
+  manualInstall: boolean
 }
 
 export type DesktopUpdateDownloadedEvent = {
   version: string
   updaterCapable: boolean
+  manualInstall: boolean
 }
 
 export type PendingDesktopUpdate = {
   version: string
   updaterCapable: boolean
+  manualInstall: boolean
 }
 
 export type PendingWorkflowApproval = {

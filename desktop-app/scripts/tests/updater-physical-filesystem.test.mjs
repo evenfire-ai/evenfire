@@ -9,7 +9,8 @@ import { buildDesktopReleasePolicy } from '../../../external-rest-api/src/deskto
 import { releaseManifest } from '../../../external-rest-api/src/releaseManifest.ts'
 
 const desktopRoot = fileURLToPath(new URL('../..', import.meta.url))
-const sourceApp = process.env.EVENFIRE_DESKTOP_UNSIGNED_SOURCE_APP
+const sourceApp =
+  process.env.EVENFIRE_DESKTOP_SOURCE_APP ?? process.env.EVENFIRE_DESKTOP_UNSIGNED_SOURCE_APP
 const fixtureDirectory = process.env.EVENFIRE_DESKTOP_RELEASE_FIXTURE_DIR
 const available =
   process.platform === 'darwin' && process.arch === 'arm64' && sourceApp && fixtureDirectory

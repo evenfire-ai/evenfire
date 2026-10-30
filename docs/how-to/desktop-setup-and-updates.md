@@ -125,28 +125,31 @@ latest release.
 
 If the installed version is in the compatible set, the app remains usable and
 does not prompt at startup, even if the backend recommends a newer build. If it
-is outside the set, a dismissible notice offers **Update and restart**. Choosing
-that action downloads the backend's selected compatible build with visible
-progress, then installs and restarts. Dismissing the notice does not block
-app use and does not persist an opt-out: an incompatible build is checked again
-on the next launch. The same consent applies when the target predates the updater;
-the external helper installs and relaunches it. Those targets still lack future
-in-app update functionality until an updater-capable build is installed.
+is outside the set, a dismissible notice offers the backend's recommended
+update. Windows and Linux download, install, and restart after the user's
+consent. On macOS, Desktop downloads and verifies the published DMG, then asks
+the user to open it and manually replace Evenfire in Applications. Dismissing
+the notice does not block app use or persist an opt-out: an incompatible build
+is checked again on the next launch.
 
 Choose **Evenfire → Check for Updates** on macOS, **Help → Check for Updates**
 on Windows/Linux, or **Settings → Information → Check for updates** to check
 manually. If a different compatible build is available, Desktop downloads the
-exact ZIP for the backend-selected version and current OS/architecture, checks
-the SHA-256 digest published in GitHub release metadata, and then asks whether
-to restart now or later. A deferred update is checked against the selected
-backend and environment again before installation. The minimum supported
-target is v0.8.0.
+exact release ZIP for the backend-selected version and current OS/architecture,
+and checks its size and SHA-256 digest against GitHub release metadata. On
+macOS, it extracts the original DMG, verifies the application version,
+architecture, signature, developer team, and macOS trust assessment, then saves
+`Evenfire-v<VERSION>.dmg` in Downloads. Open installer and drag Evenfire into
+Applications to replace the existing app, then reopen it. Opening the DMG does
+not install the update. On Windows and Linux, Desktop installs after consent and
+offers the existing restart timing controls. The minimum supported target is
+v0.8.0.
 
 If the compatibility check fails, Desktop reports that it could not verify the
 build and leaves the app available. Try again from Settings or close and reopen
-the app. An update is installed only from the verified asset chosen by the app;
-users do not select another build on GitHub during the normal flow. The existing
-Forge release process remains unchanged.
+the app. An update uses only the verified asset chosen by the app; users do not
+select another build on GitHub during the normal flow. The existing Forge
+release process remains unchanged.
 
 Existing releases without the integrated updater cannot acquire it remotely.
 The first updater-capable version must be installed through the normal

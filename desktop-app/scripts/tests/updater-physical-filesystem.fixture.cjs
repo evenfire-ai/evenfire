@@ -13,6 +13,7 @@ const app = native ? require('electron').app : null
 if (app) {
   app.setPath('userData', scratch)
   app.setPath('sessionData', scratch)
+  app.setPath('downloads', path.join(scratch, 'Downloads'))
   app.setName('EvenfireUpdaterFilesystemTest')
   app.setActivationPolicy('prohibited')
 }
@@ -27,6 +28,7 @@ async function run() {
   const artifacts = await import(
     pathToFileURL(path.join(desktopRoot, 'dist/desktopUpdateArtifacts.js'))
   )
+  const macDmg = await import(pathToFileURL(path.join(desktopRoot, 'dist/desktopUpdateMacDmg.js')))
   const asar = path.join(sourceApp, 'Contents/Resources/app.asar')
   const source = artifacts.readPackagedAppManifest(asar)
   const sourceDigest = await rawDigest(asar)
@@ -37,23 +39,30 @@ async function run() {
       await rawDigest(archive),
       '858666e54d93b8e73672ec78145af53f7b0aa523cb8706866d574e6d19b54018'
     )
-    const destination = path.join(scratch, 'payload')
-    await fs.promises.mkdir(destination)
-    const payload = await artifacts.prepareVerifiedDesktopPayload({
+    const dmg = path.join(scratch, 'original.dmg')
+    const mount = path.join(scratch, 'mount')
+    await artifacts.extractMacDmgFromReleaseArchive({
       archivePath: archive,
-      destination,
+      destination: dmg,
       version: '0.12.0',
-      platform: 'darwin',
       architecture: 'arm64',
-      packageType: 'app-zip',
     })
-    assert.equal(payload.appVersion, '0.12.0')
-    assert.equal(payload.appId, 'ai.evenfire.desktop')
-    assert.equal(payload.architecture, 'arm64')
-    assert.equal(payload.updaterCapable, false)
-    assert.ok(
-      (await fs.promises.stat(path.join(payload.appPath, 'Contents/Resources/app.asar'))).isFile()
-    )
+    await macDmg.verifyMacInstallerDmg({
+      dmgPath: dmg,
+      mountPath: mount,
+      version: '0.12.0',
+      architecture: 'arm64',
+    })
+    const downloads = path.join(scratch, 'Downloads')
+    await fs.promises.mkdir(downloads)
+    const saved = await macDmg.saveVerifiedMacInstaller({
+      sourcePath: dmg,
+      downloadsDirectory: downloads,
+      version: '0.12.0',
+      expectedSha256: await artifacts.readFileSha256(dmg),
+    })
+    assert.equal(path.basename(saved.filePath), 'Evenfire-v0.12.0.dmg')
+    assert.equal(saved.sha256, await artifacts.readFileSha256(dmg))
   } else if (mode === 'safety') {
     const { release } = JSON.parse(await fs.promises.readFile(policyFile, 'utf8'))
     const asset = await artifacts.resolveGitHubReleaseAsset('0.12.0', 'darwin', 'arm64', {
@@ -92,6 +101,7 @@ async function run() {
     app.getVersion = () => source.version
     app.whenReady = () => new Promise(() => {})
     app.quit = () => assert.fail('staging must never quit or install')
+    await fs.promises.mkdir(app.getPath('downloads'), { recursive: true })
     const stub = path.join(scratch, 'config.mjs')
     await fs.promises.writeFile(stub, 'export const getActiveRuntimeConfigOptionId = () => null;\n')
     registerHooks({
@@ -112,6 +122,7 @@ async function run() {
     const asset = release.assets.find(a => a.name === 'evenfire-desktop-v0.12.0-mac-arm64.zip')
     let binding = 'native-fixture-backend'
     let downloadEvents = 0
+    let extractingEvents = 0
     const manager = new DesktopUpdateManager(
       {
         getDesktopReleaseStatus: async () => ({
@@ -125,6 +136,7 @@ async function run() {
       },
       event => {
         if (event.type === 'downloaded') downloadEvents++
+        if (event.type === 'extracting') extractingEvents++
       },
       {
         platform: 'darwin',
@@ -147,23 +159,36 @@ async function run() {
                 })
               },
         launchInstallHelper: async () => assert.fail('staging must never launch an installer'),
+        openMacInstaller: async () => assert.fail('staging must never open an installer'),
       }
     )
     assert.deepEqual(await manager.downloadDesktopUpdate('0.12.0', false), {
       downloaded: true,
       version: '0.12.0',
       updaterCapable: false,
+      manualInstall: true,
     })
     assert.equal(downloadEvents, 1)
+    assert.equal(extractingEvents, 1)
     assert.deepEqual(await manager.getPendingDesktopUpdate(), {
       version: '0.12.0',
       updaterCapable: false,
+      manualInstall: true,
     })
+    const installerPath = path.join(app.getPath('downloads'), 'Evenfire-v0.12.0.dmg')
+    assert.equal(
+      await rawDigest(installerPath),
+      '131bf1f4c19dc540d1ce14bc0decbb9d055deda67084bebf441c3f6474810afe'
+    )
     const staging = path.join(scratch, 'desktop-update-staging')
     assert.ok((await fs.promises.readdir(staging)).includes('pending.json'))
     binding = 'changed-backend'
     assert.equal(await manager.getPendingDesktopUpdate(), null)
     assert.deepEqual(await fs.promises.readdir(staging), [])
+    assert.equal(
+      await rawDigest(installerPath),
+      '131bf1f4c19dc540d1ce14bc0decbb9d055deda67084bebf441c3f6474810afe'
+    )
   } else {
     assert.fail('unknown native test mode')
   }

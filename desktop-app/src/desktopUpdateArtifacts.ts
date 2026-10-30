@@ -14,7 +14,7 @@ import {
 export { readFileSha256 } from './desktopUpdateFileSystem.js'
 
 const { createReadStream, createWriteStream } = updaterFileSystem
-const { lstat, mkdir, readFile, realpath, symlink, unlink } = updaterFileSystem.promises
+const { lstat, mkdir, readFile, realpath, unlink } = updaterFileSystem.promises
 
 const GITHUB_REPOSITORY = 'evenfire-ai/evenfire'
 const GITHUB_API_BASE = `https://api.github.com/repos/${GITHUB_REPOSITORY}`
@@ -24,7 +24,6 @@ const MAX_ZIP_ENTRIES = 50_000
 const MAX_ENTRY_BYTES = 1024 * 1024 * 1024
 const MAX_ARCHIVE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 const MAX_COMPRESSION_RATIO = 250
-const MAX_SYMLINK_BYTES = 4096
 const ALLOWED_DOWNLOAD_HOSTS = new Set([
   'github.com',
   'release-assets.githubusercontent.com',
@@ -80,7 +79,6 @@ type SafeEntry = {
   entry: Entry
   name: string
   isDirectory: boolean
-  isSymlink: boolean
   mode: number
 }
 
@@ -123,11 +121,39 @@ export function getDesktopReleaseAssetName(
 
 export function getNestedApplicationZipPath(
   version: string,
-  platform: DesktopReleasePlatform,
+  platform: 'win32' | 'linux',
   architecture: DesktopReleaseArchitecture
 ): string {
-  const appPlatform = { darwin: 'darwin', win32: 'win32', linux: 'linux' }[platform]
+  const appPlatform = platform
   return `zip/${appPlatform}/${architecture}/Evenfire-${appPlatform}-${architecture}-${version}.zip`
+}
+
+export function getMacDmgArchiveEntry(
+  version: string,
+  architecture: DesktopReleaseArchitecture
+): string {
+  if (!['x64', 'arm64'].includes(architecture)) {
+    throw new Error('This Desktop platform or architecture is not supported for updates.')
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error('The Desktop release version is not a stable x.y.z version.')
+  }
+  return `Evenfire-${version}-${architecture}.dmg`
+}
+
+export async function extractMacDmgFromReleaseArchive(args: {
+  archivePath: string
+  destination: string
+  version: string
+  architecture: DesktopReleaseArchitecture
+  signal?: AbortSignal
+}): Promise<void> {
+  await extractOuterZipEntry(
+    args.archivePath,
+    getMacDmgArchiveEntry(args.version, args.architecture),
+    args.destination,
+    { signal: args.signal }
+  )
 }
 
 function expectedReleaseDownloadUrl(version: string, assetName: string): string {
@@ -395,14 +421,13 @@ function normalizeArchiveName(name: string): string {
   return segments.join('/') + (directorySuffix ? '/' : '')
 }
 
-function entryKind(entry: Entry, name: string, allowSymlinks: boolean): SafeEntry {
+function entryKind(entry: Entry, name: string): SafeEntry {
   const unixCreator = entry.versionMadeBy >>> 8 === 3
   const mode = unixCreator ? (entry.externalFileAttributes >>> 16) & 0xffff : 0
   const type = mode & 0o170000
   const isDirectory = type === 0o040000 || (!type && name.endsWith('/'))
-  const isSymlink = type === 0o120000
   const isRegular = type === 0o100000 || (!type && !name.endsWith('/'))
-  if ((!isDirectory && !isSymlink && !isRegular) || (isSymlink && !allowSymlinks)) {
+  if (!isDirectory && !isRegular) {
     throw new Error('The Desktop release archive contains an unsupported entry type.')
   }
   if (entry.isEncrypted() || ![0, 8].includes(entry.compressionMethod)) {
@@ -416,10 +441,10 @@ function entryKind(entry: Entry, name: string, allowSymlinks: boolean): SafeEntr
   ) {
     throw new Error('The Desktop release archive exceeds its safe expansion limits.')
   }
-  return { entry, name, isDirectory, isSymlink, mode: mode & 0o777 }
+  return { entry, name, isDirectory, mode: mode & 0o777 }
 }
 
-function validateArchiveEntries(entries: Entry[], allowSymlinks: boolean): SafeEntry[] {
+function validateArchiveEntries(entries: Entry[]): SafeEntry[] {
   let totalBytes = 0
   const safeEntries = entries.map(entry => {
     const name = normalizeArchiveName(entry.fileName)
@@ -427,7 +452,7 @@ function validateArchiveEntries(entries: Entry[], allowSymlinks: boolean): SafeE
     if (totalBytes > MAX_ARCHIVE_EXPANDED_BYTES) {
       throw new Error('The Desktop release archive exceeds its safe expansion limits.')
     }
-    return entryKind(entry, name, allowSymlinks)
+    return entryKind(entry, name)
   })
 
   const collisionKey = (name: string) =>
@@ -488,7 +513,7 @@ async function writeEntryToFile(zipFile: ZipFile, safeEntry: SafeEntry, destinat
 
 async function readEntryBytes(zipFile: ZipFile, entry: Entry, byteLimit: number): Promise<Buffer> {
   if (entry.uncompressedSize > byteLimit) {
-    throw new Error('A Desktop archive link entry exceeds its safe size limit.')
+    throw new Error('A Desktop archive entry exceeds its safe size limit.')
   }
   const stream = await openEntryStream(zipFile, entry)
   const chunks: Buffer[] = []
@@ -496,11 +521,10 @@ async function readEntryBytes(zipFile: ZipFile, entry: Entry, byteLimit: number)
   for await (const chunk of stream) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += bytes.length
-    if (size > byteLimit)
-      throw new Error('A Desktop archive link entry exceeds its safe size limit.')
+    if (size > byteLimit) throw new Error('A Desktop archive entry exceeds its safe size limit.')
     chunks.push(bytes)
   }
-  if (size !== entry.uncompressedSize) throw new Error('A Desktop archive link entry is truncated.')
+  if (size !== entry.uncompressedSize) throw new Error('A Desktop archive entry is truncated.')
   return Buffer.concat(chunks)
 }
 
@@ -533,57 +557,25 @@ async function ensureDirectoryChain(root: string, relativeDirectory: string): Pr
   }
 }
 
-async function validateSymlinkTarget(linkName: string, target: string): Promise<void> {
-  if (
-    !target ||
-    target.includes('\0') ||
-    target.startsWith('/') ||
-    target.startsWith('\\') ||
-    /^[a-z]:/i.test(target) ||
-    target.split(/[\\/]/).some(segment => segment === '..' || segment === '.')
-  ) {
-    throw new Error('The Desktop release archive contains an unsafe symbolic link.')
-  }
-  const parent = path.posix.dirname(linkName)
-  const resolved = path.posix.normalize(path.posix.join(parent, target))
-  if (resolved === '..' || resolved.startsWith('../') || path.posix.isAbsolute(resolved)) {
-    throw new Error('The Desktop release archive contains an escaping symbolic link.')
-  }
-}
-
 export async function extractValidatedZip(
   zipPath: string,
-  destination: string,
-  options: { allowSymlinks?: boolean } = {}
+  destination: string
 ): Promise<SafeEntry[]> {
   await mkdir(destination, { recursive: false, mode: 0o700 })
   const realDestination = await realpath(destination)
   const zipFile = await openZip(zipPath)
   try {
-    const safeEntries = validateArchiveEntries(
-      await readZipEntries(zipFile),
-      options.allowSymlinks === true
-    )
+    const safeEntries = validateArchiveEntries(await readZipEntries(zipFile))
     for (const safeEntry of safeEntries) {
       if (safeEntry.isDirectory) {
         await ensureDirectoryChain(realDestination, safeEntry.name.replace(/\/$/, ''))
       }
     }
     for (const safeEntry of safeEntries) {
-      if (safeEntry.isDirectory || safeEntry.isSymlink) continue
+      if (safeEntry.isDirectory) continue
       const target = resolveInside(realDestination, safeEntry.name)
       await ensureDirectoryChain(realDestination, path.posix.dirname(safeEntry.name))
       await writeEntryToFile(zipFile, safeEntry, target)
-    }
-    for (const safeEntry of safeEntries) {
-      if (!safeEntry.isSymlink) continue
-      const linkTarget = (
-        await readEntryBytes(zipFile, safeEntry.entry, MAX_SYMLINK_BYTES)
-      ).toString('utf8')
-      await validateSymlinkTarget(safeEntry.name, linkTarget)
-      const target = resolveInside(realDestination, safeEntry.name)
-      await ensureDirectoryChain(realDestination, path.posix.dirname(safeEntry.name))
-      await symlink(linkTarget, target)
     }
     return safeEntries
   } catch (error) {
@@ -597,15 +589,15 @@ export async function extractValidatedZip(
 export async function extractOuterZipEntry(
   archivePath: string,
   entryName: string,
-  destination: string
+  destination: string,
+  options: { signal?: AbortSignal } = {}
 ): Promise<void> {
   const zipFile = await openZip(archivePath)
   try {
-    // The outer Forge bundle never needs symlinks: only the nested macOS app ZIP does.
-    const entries = validateArchiveEntries(await readZipEntries(zipFile), false)
+    const entries = validateArchiveEntries(await readZipEntries(zipFile))
     const matches = entries.filter(entry => entry.name === entryName)
     const match = matches[0]
-    if (matches.length !== 1 || !match || match.isDirectory || match.isSymlink) {
+    if (matches.length !== 1 || !match || match.isDirectory) {
       throw new Error(`The selected Desktop release does not contain exactly one ${entryName}.`)
     }
     if (match.entry.uncompressedSize > MAX_RELEASE_BYTES) {
@@ -613,7 +605,8 @@ export async function extractOuterZipEntry(
     }
     await pipeline(
       await openEntryStream(zipFile, match.entry),
-      createWriteStream(destination, { flags: 'wx', mode: 0o600 })
+      createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
+      { signal: options.signal }
     )
   } finally {
     if (zipFile.isOpen) zipFile.close()
@@ -789,7 +782,7 @@ function readMacBundleValue(appPath: string, key: string): string {
   ).trim()
 }
 
-function verifyMacReleaseSignature(appPath: string): void {
+export function verifyMacReleaseSignature(appPath: string): void {
   runNativeTool(
     '/usr/bin/codesign',
     ['--verify', '--deep', '--strict', '--verbose=2', appPath],
@@ -826,6 +819,9 @@ export async function prepareVerifiedDesktopPayload(args: {
   packageType: DesktopReleasePackageType
 }): Promise<VerifiedDesktopPayload> {
   const { archivePath, destination, version, platform, architecture, packageType } = args
+  if (platform === 'darwin') {
+    throw new Error('macOS updates use the original DMG from the verified release archive.')
+  }
   const assetName = getDesktopReleaseAssetName(version, platform, architecture)
   let packagePath: string
   let appPath: string
@@ -878,18 +874,12 @@ export async function prepareVerifiedDesktopPayload(args: {
       appZipPath
     )
     const appRoot = path.join(destination, 'application')
-    await extractValidatedZip(appZipPath, appRoot, { allowSymlinks: platform === 'darwin' })
-    appPath =
-      platform === 'darwin'
-        ? path.join(appRoot, 'Evenfire.app')
-        : platform === 'linux'
-          ? path.join(appRoot, `Evenfire-linux-${architecture}`)
-          : appRoot
+    await extractValidatedZip(appZipPath, appRoot)
+    appPath = platform === 'linux' ? path.join(appRoot, `Evenfire-linux-${architecture}`) : appRoot
     packagePath = appZipPath
   }
 
   const verified = await verifyAppTree(appPath, version, platform, architecture)
-  if (platform === 'darwin') verifyMacReleaseSignature(appPath)
   if (packageType === 'squirrel') verifyWindowsAuthenticodeIfSigned(packagePath)
   return {
     packageType,
@@ -912,7 +902,7 @@ export async function verifySquirrelPackage(
 ): Promise<void> {
   const zipFile = await openZip(nupkgPath)
   try {
-    const entries = validateArchiveEntries(await readZipEntries(zipFile), false)
+    const entries = validateArchiveEntries(await readZipEntries(zipFile))
     const manifests = entries.filter(entry => entry.name.toLowerCase() === 'evenfire.nuspec')
     const manifest = manifests[0]
     if (manifests.length !== 1 || !manifest || manifest.entry.uncompressedSize > 32 * 1024) {

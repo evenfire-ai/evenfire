@@ -161,12 +161,18 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('auth:desktopEnvironmentSetup', listener)
     },
     getDesktopReleaseStatus: () => ipcRenderer.invoke('auth:getDesktopReleaseStatus'),
+    getDesktopUpdatePresentation: () =>
+      ipcRenderer.invoke('auth:getDesktopUpdatePresentation') as Promise<{
+        manualInstall: boolean
+      }>,
     getPendingDesktopUpdate: () => ipcRenderer.invoke('auth:getPendingDesktopUpdate'),
     downloadDesktopUpdate: (expectedVersion: string, restartAfterDownload = false) =>
       ipcRenderer.invoke('auth:downloadDesktopUpdate', { expectedVersion, restartAfterDownload }),
     cancelDesktopUpdate: () => ipcRenderer.invoke('auth:cancelDesktopUpdate'),
     installDesktopUpdate: (expectedVersion: string) =>
       ipcRenderer.invoke('auth:installDesktopUpdate', { expectedVersion }),
+    openDesktopUpdateInstaller: (expectedVersion: string) =>
+      ipcRenderer.invoke('auth:openDesktopUpdateInstaller', { expectedVersion }),
     onDesktopUpdateCheckRequested: (callback: () => void) => {
       const listener = () => callback()
       ipcRenderer.on('desktopUpdate:checkRequested', listener)
@@ -179,6 +185,24 @@ const clerum = Object.freeze({
       ) => callback(payload.progress)
       ipcRenderer.on('desktopUpdate:progress', listener)
       return () => ipcRenderer.off('desktopUpdate:progress', listener)
+    },
+    onDesktopUpdateExtracting: (callback: (version: string) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { version: string }) =>
+        callback(payload.version)
+      ipcRenderer.on('desktopUpdate:extracting', listener)
+      return () => ipcRenderer.off('desktopUpdate:extracting', listener)
+    },
+    onDesktopUpdateSaving: (callback: (version: string) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { version: string }) =>
+        callback(payload.version)
+      ipcRenderer.on('desktopUpdate:saving', listener)
+      return () => ipcRenderer.off('desktopUpdate:saving', listener)
+    },
+    onDesktopUpdateOpening: (callback: (version: string) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { version: string }) =>
+        callback(payload.version)
+      ipcRenderer.on('desktopUpdate:opening', listener)
+      return () => ipcRenderer.off('desktopUpdate:opening', listener)
     },
     onDesktopUpdateDownloaded: (callback: (payload: DesktopUpdateDownloadedEvent) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: DesktopUpdateDownloadedEvent) =>

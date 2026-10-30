@@ -62,18 +62,32 @@ function createPolicyBackedService(version = UPDATE_VERSION) {
 
 function createDependencies(
   options: {
+    platform?: 'darwin' | 'win32' | 'linux'
+    architecture?: 'x64' | 'arm64'
     updaterCapable?: boolean
     downloadAsset?: DesktopUpdateManagerDependencies['downloadAsset']
     preparePayload?: DesktopUpdateManagerDependencies['preparePayload']
     launchInstallHelper?: DesktopUpdateManagerDependencies['launchInstallHelper']
+    extractMacDmg?: DesktopUpdateManagerDependencies['extractMacDmg']
+    verifyMacDmg?: DesktopUpdateManagerDependencies['verifyMacDmg']
+    saveMacInstaller?: DesktopUpdateManagerDependencies['saveMacInstaller']
+    openMacInstaller?: DesktopUpdateManagerDependencies['openMacInstaller']
+    hashFile?: DesktopUpdateManagerDependencies['hashFile']
     bindingId?: () => string | null
   } = {}
 ): DesktopUpdateManagerDependencies {
-  const appRoot = '/Applications/Evenfire.app'
+  const platform = options.platform ?? 'linux'
+  const architecture = options.architecture ?? 'x64'
+  const appRoot =
+    platform === 'darwin'
+      ? '/Applications/Evenfire.app'
+      : platform === 'win32'
+        ? 'C:/Users/alice/AppData/Local/Programs/Evenfire/app-0.11.0'
+        : '/opt/evenfire/Evenfire-linux-x64'
   const location: DesktopInstallLocation = {
-    platform: 'darwin',
-    architecture: 'arm64',
-    packageType: 'app-zip',
+    platform,
+    architecture,
+    packageType: platform === 'win32' ? 'squirrel' : 'app-zip',
     installRoot: appRoot,
     appPath: appRoot,
     executablePath: `${appRoot}/Contents/MacOS/Evenfire`,
@@ -122,14 +136,40 @@ function createDependencies(
   const detectInstall: NonNullable<DesktopUpdateManagerDependencies['detectInstall']> = vi.fn(
     async () => location
   )
-  const hashFile: NonNullable<DesktopUpdateManagerDependencies['hashFile']> = vi.fn(
-    async () => EXPECTED_DIGEST
-  )
+  const hashFile: NonNullable<DesktopUpdateManagerDependencies['hashFile']> =
+    options.hashFile ?? vi.fn(async () => EXPECTED_DIGEST)
   const launchInstallHelper =
     options.launchInstallHelper ?? vi.fn(async (_plan: DesktopInstallPlan) => undefined)
+  const extractMacDmg =
+    options.extractMacDmg ??
+    vi.fn(async ({ destination }) => {
+      await fs.writeFile(destination, 'published-dmg')
+    })
+  const verifyMacDmg = options.verifyMacDmg ?? vi.fn(async () => undefined)
+  const saveMacInstaller =
+    options.saveMacInstaller ??
+    vi.fn(
+      async ({
+        version,
+        downloadsDirectory,
+      }: {
+        sourcePath: string
+        downloadsDirectory: string
+        version: string
+      }) => {
+        await fs.mkdir(downloadsDirectory, { recursive: true })
+        const filePath = path.join(
+          await fs.realpath(downloadsDirectory),
+          `Evenfire-v${version}.dmg`
+        )
+        await fs.mkdir(path.dirname(filePath), { recursive: true })
+        await fs.writeFile(filePath, 'published-dmg')
+        return { filePath, sha256: EXPECTED_DIGEST }
+      }
+    )
   return {
-    platform: 'darwin',
-    architecture: 'arm64',
+    platform,
+    architecture,
     executablePath: location.executablePath,
     getEnvironmentBindingId: options.bindingId ?? (() => environment.key),
     resolveAsset,
@@ -139,6 +179,10 @@ function createDependencies(
     verifyApp,
     hashFile,
     launchInstallHelper,
+    extractMacDmg,
+    verifyMacDmg,
+    saveMacInstaller,
+    openMacInstaller: options.openMacInstaller ?? vi.fn(async () => ''),
   }
 }
 
@@ -157,7 +201,9 @@ describe('DesktopUpdateManager', () => {
     environment.key = 'prod'
     mockApp.isPackaged = true
     mockApp.getVersion.mockReturnValue('0.11.0')
-    mockApp.getPath.mockReturnValue(userDataPath)
+    mockApp.getPath.mockImplementation((name: string) =>
+      name === 'downloads' ? path.join(userDataPath, 'Downloads') : userDataPath
+    )
     events = []
     const created = createPolicyBackedService()
     service = created.service
@@ -175,12 +221,13 @@ describe('DesktopUpdateManager', () => {
       downloaded: true,
       version: UPDATE_VERSION,
       updaterCapable: false,
+      manualInstall: false,
     })
 
     expect(dependencies.resolveAsset).toHaveBeenCalledWith(
       UPDATE_VERSION,
-      'darwin',
-      'arm64',
+      'linux',
+      'x64',
       expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
     expect(dependencies.downloadAsset).toHaveBeenCalledOnce()
@@ -188,9 +235,14 @@ describe('DesktopUpdateManager', () => {
       type: 'downloaded',
       version: UPDATE_VERSION,
       updaterCapable: false,
+      manualInstall: false,
     })
     const pending = await manager.getPendingDesktopUpdate()
-    expect(pending).toEqual({ version: UPDATE_VERSION, updaterCapable: false })
+    expect(pending).toEqual({
+      version: UPDATE_VERSION,
+      updaterCapable: false,
+      manualInstall: false,
+    })
   })
 
   it('does not persist the backend release identity in the operation journal', async () => {
@@ -217,6 +269,7 @@ describe('DesktopUpdateManager', () => {
     await expect(manager.getPendingDesktopUpdate()).resolves.toEqual({
       version: UPDATE_VERSION,
       updaterCapable: false,
+      manualInstall: false,
     })
   })
 
@@ -260,8 +313,8 @@ describe('DesktopUpdateManager', () => {
     )
     finishDownload()
     await expect(Promise.all([first, second])).resolves.toEqual([
-      { downloaded: true, version: UPDATE_VERSION, updaterCapable: false },
-      { downloaded: true, version: UPDATE_VERSION, updaterCapable: false },
+      { downloaded: true, version: UPDATE_VERSION, updaterCapable: false, manualInstall: false },
+      { downloaded: true, version: UPDATE_VERSION, updaterCapable: false, manualInstall: false },
     ])
     expect(blockedDownload).toHaveBeenCalledOnce()
   })
@@ -343,6 +396,46 @@ describe('DesktopUpdateManager', () => {
     await expect(fs.readdir(path.join(userDataPath, 'desktop-update-staging'))).resolves.toEqual([])
   })
 
+  it('cleans macOS staging after DMG extraction fails', async () => {
+    dependencies = createDependencies({
+      platform: 'darwin',
+      architecture: 'arm64',
+      extractMacDmg: vi.fn().mockRejectedValue(new Error('the release ZIP has no safe DMG entry')),
+    })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+
+    await expect(manager.downloadDesktopUpdate(UPDATE_VERSION)).rejects.toThrow('no safe DMG entry')
+    await expect(fs.readdir(path.join(userDataPath, 'desktop-update-staging'))).resolves.toEqual([])
+    await expect(fs.readdir(path.join(userDataPath, 'Downloads'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  })
+
+  it('invalidates a prepared macOS installer when the backend changes before handoff', async () => {
+    let finishExtraction!: () => void
+    const extractMacDmg: NonNullable<DesktopUpdateManagerDependencies['extractMacDmg']> = vi.fn(
+      async ({ destination }) => {
+        await new Promise<void>(resolve => {
+          finishExtraction = resolve
+        })
+        await fs.writeFile(destination, 'published-dmg')
+      }
+    )
+    dependencies = createDependencies({ platform: 'darwin', architecture: 'arm64', extractMacDmg })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    const pending = manager.downloadDesktopUpdate(UPDATE_VERSION)
+    await vi.waitFor(() => expect(extractMacDmg).toHaveBeenCalledOnce())
+    environment.key = 'dev'
+    finishExtraction()
+
+    await expect(pending).rejects.toThrow('backend changed during the update')
+    await expect(fs.readdir(path.join(userDataPath, 'desktop-update-staging'))).resolves.toEqual([])
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
+    environment.key = 'prod'
+  })
+
   it('rechecks the backend before install and leaves deferred staging intact when policy changes', async () => {
     await manager.downloadDesktopUpdate(UPDATE_VERSION)
     getDesktopReleasePolicy.mockResolvedValue(createReleasePolicy('0.13.0'))
@@ -386,6 +479,7 @@ describe('DesktopUpdateManager', () => {
       await expect(restartedManager.getPendingDesktopUpdate()).resolves.toEqual({
         version: UPDATE_VERSION,
         updaterCapable: false,
+        manualInstall: false,
       })
     })
   })
@@ -393,12 +487,12 @@ describe('DesktopUpdateManager', () => {
   it('finalizes an interrupted successful install before deleting its staged rollback copy', async () => {
     const installRoot = path.join(userDataPath, 'install', 'Evenfire.app')
     const location: DesktopInstallLocation = {
-      platform: 'darwin',
-      architecture: 'arm64',
+      platform: 'linux',
+      architecture: 'x64',
       packageType: 'app-zip',
       installRoot,
       appPath: installRoot,
-      executablePath: path.join(installRoot, 'Contents/MacOS/Evenfire'),
+      executablePath: path.join(installRoot, 'Evenfire'),
     }
     dependencies = createDependencies({ updaterCapable: true })
     dependencies.detectInstall = vi.fn(async () => location)
@@ -478,44 +572,195 @@ describe('DesktopUpdateManager', () => {
     })
   })
 
-  it('keeps the app running and requires a fresh Mac attempt after authorization is refused', async () => {
-    const launchInstallHelper = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('authorization was canceled'))
-      .mockResolvedValue(undefined)
-    dependencies = createDependencies({ launchInstallHelper })
-    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
-    await manager.downloadDesktopUpdate(UPDATE_VERSION)
-
-    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow(
-      'authorization was canceled'
-    )
-    expect(mockApp.quit).not.toHaveBeenCalled()
-    await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
-    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow('not staged')
-    await manager.downloadDesktopUpdate(UPDATE_VERSION)
-    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).resolves.toEqual({
-      installed: true,
+  it('opens the exact saved DMG before quitting and preserves the installer', async () => {
+    const openMacInstaller = vi.fn(async (_filePath: string) => '')
+    dependencies = createDependencies({
+      platform: 'darwin',
+      architecture: 'arm64',
+      openMacInstaller,
     })
-    expect(launchInstallHelper).toHaveBeenCalledTimes(2)
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await expect(manager.downloadDesktopUpdate(UPDATE_VERSION, true)).resolves.toMatchObject({
+      manualInstall: true,
+    })
+    expect(await fs.readdir(path.join(userDataPath, 'Downloads'))).toEqual(['Evenfire-v0.12.0.dmg'])
+    const stageRoot = path.join(userDataPath, 'desktop-update-staging')
+    const operationId = (await fs.readdir(stageRoot)).find(name => name !== 'pending.json')!
+    const operation = JSON.parse(
+      await fs.readFile(path.join(stageRoot, operationId, 'operation.json'), 'utf8')
+    ) as { manualInstallerPath: string; manualInstallerSha256: string }
+    expect(operation.manualInstallerPath).toBe(
+      path.join(await fs.realpath(path.join(userDataPath, 'Downloads')), 'Evenfire-v0.12.0.dmg')
+    )
+    expect(operation.manualInstallerSha256).toBe(EXPECTED_DIGEST)
+    await expect(manager.getPendingDesktopUpdate()).resolves.toMatchObject({ manualInstall: true })
+
+    await expect(manager.openDownloadedMacInstaller(UPDATE_VERSION)).resolves.toEqual({
+      opened: true,
+    })
+    expect(openMacInstaller).toHaveBeenCalledOnce()
+    expect(openMacInstaller).toHaveBeenCalledWith(
+      path.join(await fs.realpath(path.join(userDataPath, 'Downloads')), 'Evenfire-v0.12.0.dmg')
+    )
+    expect(dependencies.launchInstallHelper).not.toHaveBeenCalled()
+    expect(mockApp.quit).toHaveBeenCalledOnce()
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
   })
 
-  it('never advertises a canceled Mac attempt when interrupted cleanup leaves its journal', async () => {
+  it('keeps Evenfire running with an actionable error when macOS cannot open the DMG', async () => {
+    const openMacInstaller = vi.fn(async (_filePath: string) => 'Launch Services refused')
     dependencies = createDependencies({
-      launchInstallHelper: vi.fn().mockRejectedValue(new Error('authorization failed')),
+      platform: 'darwin',
+      architecture: 'arm64',
+      openMacInstaller,
     })
     manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
     await manager.downloadDesktopUpdate(UPDATE_VERSION)
-    vi.spyOn(
-      manager as unknown as { discardOperation: () => Promise<void> },
-      'discardOperation'
-    ).mockRejectedValueOnce(new Error('cleanup interrupted'))
-    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow(
-      'cleanup interrupted'
+
+    await expect(manager.openDownloadedMacInstaller(UPDATE_VERSION)).rejects.toThrow(
+      'DMG remains in Downloads'
     )
-    await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
-    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).rejects.toThrow('not staged')
     expect(mockApp.quit).not.toHaveBeenCalled()
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
+  })
+
+  it('refuses to open a saved DMG after the installed app reaches its target version', async () => {
+    const openMacInstaller = vi.fn(async (_filePath: string) => '')
+    const currentStatus = await service.getDesktopReleaseStatus()
+    vi.spyOn(service, 'getDesktopReleaseStatus').mockResolvedValue(currentStatus)
+    dependencies = createDependencies({
+      platform: 'darwin',
+      architecture: 'arm64',
+      openMacInstaller,
+    })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+    mockApp.getVersion.mockReturnValue(UPDATE_VERSION)
+
+    await expect(manager.openDownloadedMacInstaller(UPDATE_VERSION)).rejects.toThrow(
+      'selected backend or installed build changed'
+    )
+    expect(openMacInstaller).not.toHaveBeenCalled()
+    expect(mockApp.quit).not.toHaveBeenCalled()
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
+  })
+
+  it('does not present a pending DMG after the installed app version changes', async () => {
+    dependencies = createDependencies({ platform: 'darwin', architecture: 'arm64' })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+    mockApp.getVersion.mockReturnValue('0.11.1')
+
+    await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
+    await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
+  })
+
+  it('invalidates a saved DMG when the backend changes during handoff integrity verification', async () => {
+    let releaseHash!: () => void
+    let markHashStarted!: () => void
+    const hashStarted = new Promise<void>(resolve => {
+      markHashStarted = resolve
+    })
+    const hashGate = new Promise<void>(resolve => {
+      releaseHash = resolve
+    })
+    let holdInstallerHash = false
+    const hashFile = vi.fn(async (filePath: string) => {
+      if (holdInstallerHash && path.basename(filePath) === 'Evenfire-v0.12.0.dmg') {
+        holdInstallerHash = false
+        markHashStarted()
+        await hashGate
+      }
+      return EXPECTED_DIGEST
+    })
+    const openMacInstaller = vi.fn(async () => '')
+    dependencies = createDependencies({
+      platform: 'darwin',
+      architecture: 'arm64',
+      hashFile,
+      openMacInstaller,
+    })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+
+    holdInstallerHash = true
+    const openPromise = manager.openDownloadedMacInstaller(UPDATE_VERSION)
+    await hashStarted
+    environment.key = 'staging'
+    releaseHash()
+
+    await expect(openPromise).rejects.toThrow('selected backend or installed build changed')
+    expect(openMacInstaller).not.toHaveBeenCalled()
+    expect(mockApp.quit).not.toHaveBeenCalled()
+    await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
+  })
+
+  it('does not return a ready macOS update when the backend changes during integrity verification', async () => {
+    let releaseHash!: () => void
+    let markHashStarted!: () => void
+    const hashStarted = new Promise<void>(resolve => {
+      markHashStarted = resolve
+    })
+    const hashGate = new Promise<void>(resolve => {
+      releaseHash = resolve
+    })
+    let holdInstallerHash = false
+    const hashFile = vi.fn(async (filePath: string) => {
+      if (holdInstallerHash && path.basename(filePath) === 'Evenfire-v0.12.0.dmg') {
+        holdInstallerHash = false
+        markHashStarted()
+        await hashGate
+      }
+      return EXPECTED_DIGEST
+    })
+    dependencies = createDependencies({ platform: 'darwin', architecture: 'arm64', hashFile })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+
+    holdInstallerHash = true
+    const pendingPromise = manager.getPendingDesktopUpdate()
+    await hashStarted
+    environment.key = 'staging'
+    releaseHash()
+
+    await expect(pendingPromise).resolves.toBeNull()
+    await expect(manager.getPendingDesktopUpdate()).resolves.toBeNull()
+    await expect(
+      fs.readFile(path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg'), 'utf8')
+    ).resolves.toBe('published-dmg')
+  })
+
+  it('invalidates the macOS action when the saved DMG changes but preserves the file', async () => {
+    const hashFile = vi.fn(async (filePath: string) =>
+      (await fs.readFile(filePath, 'utf8')) === 'published-dmg' ? EXPECTED_DIGEST : 'b'.repeat(64)
+    )
+    dependencies = createDependencies({
+      platform: 'darwin',
+      architecture: 'arm64',
+      hashFile,
+    })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+    const installerPath = path.join(userDataPath, 'Downloads', 'Evenfire-v0.12.0.dmg')
+    await fs.writeFile(installerPath, 'tampered-dmg')
+
+    await expect(manager.openDownloadedMacInstaller(UPDATE_VERSION)).rejects.toThrow(
+      'saved macOS installer is missing or has changed'
+    )
+    expect(mockApp.quit).not.toHaveBeenCalled()
+    await expect(fs.readFile(installerPath, 'utf8')).resolves.toBe('tampered-dmg')
   })
 
   it('cancels the helper handoff if the backend recommendation changes during authorization', async () => {
@@ -562,6 +807,27 @@ describe('DesktopUpdateManager', () => {
       { installed: true },
       { installed: true },
     ])
+    expect(dependencies.launchInstallHelper).toHaveBeenCalledOnce()
+    expect(mockApp.quit).toHaveBeenCalledOnce()
+  })
+
+  it('retains the Windows Squirrel automatic installer dispatch', async () => {
+    dependencies = createDependencies({ platform: 'win32', architecture: 'x64' })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    await manager.downloadDesktopUpdate(UPDATE_VERSION)
+
+    expect(dependencies.resolveAsset).toHaveBeenCalledWith(
+      UPDATE_VERSION,
+      'win32',
+      'x64',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(dependencies.preparePayload).toHaveBeenCalledWith(
+      expect.objectContaining({ packageType: 'squirrel', platform: 'win32' })
+    )
+    await expect(manager.installDownloadedUpdate(UPDATE_VERSION)).resolves.toEqual({
+      installed: true,
+    })
     expect(dependencies.launchInstallHelper).toHaveBeenCalledOnce()
     expect(mockApp.quit).toHaveBeenCalledOnce()
   })

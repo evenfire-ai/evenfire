@@ -267,15 +267,19 @@ receive no compatibility adapters or backports.
 At startup, a packaged Desktop app checks the selected External REST API
 deployment, before sign-in when an environment is configured. A compatible
 build remains usable without an update prompt. A mismatch shows a dismissible
-notice with **Update and restart**; dismissing it does not restrict app use.
-Failures are reported as unverified and leave the app usable.
+notice. macOS offers a verified DMG download and manual replacement; Windows
+and Linux retain **Update and restart**. Dismissing the notice does not restrict
+app use. Failures are reported as unverified and leave the app usable.
 
 Use **Evenfire → Check for Updates** on macOS, **Help → Check for Updates** on
 Windows/Linux, or **Settings → Information → Check for updates** to download
-the backend's recommended compatible build. Desktop shows download progress and
-then offers **Restart now** or **Restart later**. Deferred installation is
-revalidated against the selected backend before restart. The updater uses the
-exact release tag returned by that backend, never GitHub's global latest.
+the backend's recommended compatible build. On macOS, Desktop verifies the
+original DMG from the exact release ZIP, saves it in Downloads, and opens it on
+request. Drag Evenfire into Applications to replace the existing app, then
+reopen it. Opening the DMG does not install the update. Windows and Linux retain
+automatic installation and the **Restart now** / **Restart later** choices.
+The updater uses the exact release tag returned by the selected backend, never
+GitHub's global latest.
 
 The release response is public and contains only non-secret version/release
 metadata. Each External REST API deployment selects its own target and

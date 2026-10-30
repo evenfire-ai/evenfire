@@ -1,17 +1,18 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
   getAppArchivePath,
-  getNestedApplicationZipPath,
-  prepareVerifiedDesktopPayload,
   readPackagedAppManifest,
   verifyAppTree,
 } from '../desktopUpdateArtifacts.js'
+import { verifyMacInstallerDmg } from '../desktopUpdateMacDmg.js'
 
-const sourceAppPath = process.env.EVENFIRE_DESKTOP_UNSIGNED_SOURCE_APP
+const sourceAppPath =
+  process.env.EVENFIRE_DESKTOP_SOURCE_APP ?? process.env.EVENFIRE_DESKTOP_UNSIGNED_SOURCE_APP
+const unsignedTargetAppPath = process.env.EVENFIRE_DESKTOP_UNSIGNED_SOURCE_APP
 let temporaryRoot = ''
 
 afterEach(async () => {
@@ -19,16 +20,30 @@ afterEach(async () => {
   temporaryRoot = ''
 })
 
-function createDittoArchive(args: string[]): void {
-  const result = spawnSync('/usr/bin/ditto', args, { encoding: 'utf8', timeout: 60_000 })
+function createUnsignedDmg(sourceApp: string, destination: string): void {
+  const result = spawnSync(
+    '/usr/bin/hdiutil',
+    [
+      'create',
+      '-volname',
+      'Evenfire',
+      '-srcfolder',
+      sourceApp,
+      '-ov',
+      '-format',
+      'UDZO',
+      destination,
+    ],
+    { encoding: 'utf8', timeout: 60_000 }
+  )
   if (result.error || result.status !== 0) {
-    throw new Error('Could not create the isolated Forge-layout ZIP fixture with ditto.')
+    throw new Error('Could not create the isolated unsigned macOS DMG fixture.')
   }
 }
 
-describe('macOS updater source and target verification roles', () => {
+describe('macOS updater source and release DMG trust roles', () => {
   it.skipIf(!sourceAppPath || process.platform !== 'darwin')(
-    'accepts the actual locally built unsigned app as an installed source',
+    'accepts the versioned app bundle as an installed source',
     async () => {
       const manifest = readPackagedAppManifest(getAppArchivePath(sourceAppPath!, 'darwin'))
       await expect(
@@ -40,34 +55,26 @@ describe('macOS updater source and target verification roles', () => {
     }
   )
 
-  it.skipIf(!sourceAppPath || process.platform !== 'darwin')(
-    'attributes an unsigned locally built app as an invalid release target',
+  it.skipIf(!unsignedTargetAppPath || process.platform !== 'darwin')(
+    'rejects an unsigned locally built app when it is offered as a release DMG',
     async () => {
-      temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'evenfire-update-mac-target-'))
-      const manifest = readPackagedAppManifest(getAppArchivePath(sourceAppPath!, 'darwin'))
-      const bundleRoot = path.join(temporaryRoot, 'outer')
-      const nestedZipPath = path.join(
-        bundleRoot,
-        getNestedApplicationZipPath(manifest.version, 'darwin', 'arm64')
-      )
-      await mkdir(path.dirname(nestedZipPath), { recursive: true })
-      createDittoArchive(['-c', '-k', '--keepParent', sourceAppPath!, nestedZipPath])
-
-      const archivePath = path.join(temporaryRoot, 'release.zip')
-      createDittoArchive(['-c', '-k', bundleRoot, archivePath])
-      const destination = path.join(temporaryRoot, 'payload')
-      await mkdir(destination)
+      temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'evenfire-update-mac-dmg-trust-'))
+      const manifest = readPackagedAppManifest(getAppArchivePath(unsignedTargetAppPath!, 'darwin'))
+      const bundleRoot = path.join(temporaryRoot, 'bundle')
+      const dmgPath = path.join(temporaryRoot, 'unsigned.dmg')
+      const mountPath = path.join(temporaryRoot, 'mounted')
+      await mkdir(bundleRoot)
+      await cp(unsignedTargetAppPath!, path.join(bundleRoot, 'Evenfire.app'), { recursive: true })
+      createUnsignedDmg(bundleRoot, dmgPath)
 
       await expect(
-        prepareVerifiedDesktopPayload({
-          archivePath,
-          destination,
+        verifyMacInstallerDmg({
+          dmgPath,
+          mountPath,
           version: manifest.version,
-          platform: 'darwin',
           architecture: 'arm64',
-          packageType: 'app-zip',
         })
-      ).rejects.toThrow('The downloaded macOS target failed signature verification.')
+      ).rejects.toThrow('target failed signature verification')
     }
   )
 })

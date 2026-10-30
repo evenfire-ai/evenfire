@@ -7,15 +7,16 @@ import { deflateRawSync } from 'node:zlib'
 import {
   type GitHubReleaseAsset,
   downloadVerifiedReleaseAsset,
+  extractMacDmgFromReleaseArchive,
   extractOuterZipEntry,
   extractValidatedZip,
   getDesktopReleaseAssetName,
+  getMacDmgArchiveEntry,
   getNestedApplicationZipPath,
   prepareVerifiedDesktopPayload,
   readFileSha256,
   readPackagedAppManifest,
   resolveGitHubReleaseAsset,
-  verifyAppTree,
   verifySquirrelPackage,
 } from '../desktopUpdateArtifacts.js'
 import release from './fixtures/github-release-v0.12.0.json' with { type: 'json' }
@@ -160,8 +161,6 @@ describe('desktop release artifact selection', () => {
   })
 
   it.each([
-    ['darwin', 'x64', 'zip/darwin/x64/Evenfire-darwin-x64-0.12.0.zip'],
-    ['darwin', 'arm64', 'zip/darwin/arm64/Evenfire-darwin-arm64-0.12.0.zip'],
     ['win32', 'x64', 'zip/win32/x64/Evenfire-win32-x64-0.12.0.zip'],
     ['win32', 'arm64', 'zip/win32/arm64/Evenfire-win32-arm64-0.12.0.zip'],
     ['linux', 'x64', 'zip/linux/x64/Evenfire-linux-x64-0.12.0.zip'],
@@ -311,12 +310,6 @@ describe('verified artifact download and ZIP extraction', () => {
     await expect(
       extractValidatedZip(linkArchive, path.join(temporaryRoot, 'link'))
     ).rejects.toThrow('unsupported entry type')
-
-    await expect(
-      extractValidatedZip(linkArchive, path.join(temporaryRoot, 'unsafe-link'), {
-        allowSymlinks: true,
-      })
-    ).rejects.toThrow('unsafe symbolic link')
   })
 
   it('rejects an archive with an excessive compressed expansion ratio before extraction', async () => {
@@ -336,58 +329,47 @@ describe('verified artifact download and ZIP extraction', () => {
 
 describe('published macOS v0.12.0 artifact', () => {
   it.skipIf(!process.env.EVENFIRE_DESKTOP_RELEASE_FIXTURE_DIR)(
-    'extracts and verifies the real signed arm64 app from the published Forge ZIP',
+    'extracts the original arm64 DMG from the published Forge ZIP without rebuilding it',
     async () => {
       temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'evenfire-update-real-mac-test-'))
       const archivePath = path.join(
         process.env.EVENFIRE_DESKTOP_RELEASE_FIXTURE_DIR!,
         'mac-v0.12.0.zip'
       )
-      const destination = path.join(temporaryRoot, 'payload')
       await mkdir(temporaryRoot, { recursive: true })
-      await mkdir(destination)
-      const payload = await prepareVerifiedDesktopPayload({
+      const destination = path.join(temporaryRoot, 'Evenfire-0.12.0-arm64.dmg')
+      await extractMacDmgFromReleaseArchive({
         archivePath,
         destination,
         version: '0.12.0',
-        platform: 'darwin',
         architecture: 'arm64',
-        packageType: 'app-zip',
       })
-      expect(payload).toMatchObject({
-        appVersion: '0.12.0',
-        appId: 'ai.evenfire.desktop',
-        architecture: 'arm64',
-        updaterCapable: false,
-      })
-      expect(payload.assetSha256).toBe(
+      expect(path.basename(destination)).toBe(getMacDmgArchiveEntry('0.12.0', 'arm64'))
+      expect(await readFileSha256(archivePath)).toBe(
         '858666e54d93b8e73672ec78145af53f7b0aa523cb8706866d574e6d19b54018'
+      )
+      expect(await readFileSha256(destination)).toBe(
+        '131bf1f4c19dc540d1ce14bc0decbb9d055deda67084bebf441c3f6474810afe'
       )
     }
   )
 
   it.skipIf(!process.env.EVENFIRE_DESKTOP_RELEASE_FIXTURE_DIR)(
-    'rejects the real app when its packaged version differs from the requested version',
+    'rejects a release archive without the exact requested DMG entry',
     async () => {
       temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'evenfire-update-real-mac-version-'))
       const archivePath = path.join(
         process.env.EVENFIRE_DESKTOP_RELEASE_FIXTURE_DIR!,
         'mac-v0.12.0.zip'
       )
-      const destination = path.join(temporaryRoot, 'payload')
-      await mkdir(destination)
-      const payload = await prepareVerifiedDesktopPayload({
-        archivePath,
-        destination,
-        version: '0.12.0',
-        platform: 'darwin',
-        architecture: 'arm64',
-        packageType: 'app-zip',
-      })
-
-      await expect(verifyAppTree(payload.appPath, '0.11.9', 'darwin', 'arm64')).rejects.toThrow(
-        'The Desktop app is 0.12.0; expected 0.11.9.'
-      )
+      await expect(
+        extractMacDmgFromReleaseArchive({
+          archivePath,
+          destination: path.join(temporaryRoot, 'wrong-version.dmg'),
+          version: '0.11.9',
+          architecture: 'arm64',
+        })
+      ).rejects.toThrow('does not contain exactly one Evenfire-0.11.9-arm64.dmg')
     }
   )
 })

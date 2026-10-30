@@ -216,10 +216,17 @@ const settingsPageHarness = vi.hoisted(() => ({
 const desktopUpdateCheckHarness = vi.hoisted(() => ({
   onRequested: null as null | (() => void),
   getStatus: vi.fn<() => Promise<unknown>>(),
-  onDownloaded: null as null | ((update: { version: string; updaterCapable: boolean }) => void),
+  getPresentation: vi.fn<() => Promise<{ manualInstall: boolean }>>(),
+  onDownloaded: null as
+    | null
+    | ((update: { version: string; updaterCapable: boolean; manualInstall?: boolean }) => void),
+  onExtracting: null as null | ((version: string) => void),
+  onSaving: null as null | ((version: string) => void),
+  onOpening: null as null | ((version: string) => void),
   renderButtons: false,
   download: vi.fn(),
   install: vi.fn(),
+  openInstaller: vi.fn(),
 }))
 vi.mock('@pages/SettingsPage', () => ({
   SettingsPage: (props: NonNullable<typeof settingsPageHarness.props>) => {
@@ -555,9 +562,11 @@ describe('App deep-link orchestration', () => {
     })
     const view = renderApp(<App />)
 
-    expect(
-      view.container.querySelector('[role="region"][aria-label="Desktop update notice"]')
-    ).not.toBeNull()
+    await waitFor(() =>
+      expect(
+        view.container.querySelector('[role="region"][aria-label="Desktop update notice"]')
+      ).not.toBeNull()
+    )
 
     act(() => {
       currentController.desktopReleaseStatus = null
@@ -584,6 +593,9 @@ describe('App deep-link orchestration', () => {
     })
     const view = renderApp(<App />)
 
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: 'Update and restart' })).not.toBeNull()
+    )
     await userEvent.click(view.getByRole('button', { name: 'Update and restart' }))
 
     await waitFor(() =>
@@ -593,6 +605,67 @@ describe('App deep-link orchestration', () => {
     expect(view.container.textContent).not.toContain('predates')
     expect(view.queryByRole('button', { name: 'Install and restart' })).toBeNull()
     expect(view.queryByRole('button', { name: 'Restart now' })).toBeNull()
+  })
+
+  it('shows the manual DMG extraction and open handoff states on macOS', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.getPresentation.mockResolvedValue({ manualInstall: true })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    let finishDownload!: () => void
+    let finishExtraction!: () => void
+    desktopUpdateCheckHarness.download.mockImplementation(
+      (version: string, restartAfterDownload: boolean) =>
+        new Promise(resolve => {
+          expect(restartAfterDownload).toBe(true)
+          desktopUpdateCheckHarness.onExtracting?.(version)
+          finishExtraction = () => desktopUpdateCheckHarness.onSaving?.(version)
+          finishDownload = () => {
+            desktopUpdateCheckHarness.onDownloaded?.({
+              version,
+              updaterCapable: false,
+              manualInstall: true,
+            })
+            resolve({ downloaded: true, version, updaterCapable: false, manualInstall: true })
+          }
+        })
+    )
+    desktopUpdateCheckHarness.openInstaller.mockRejectedValue(
+      new Error(
+        'macOS could not open the installer. The DMG remains in Downloads; open it manually to continue.'
+      )
+    )
+    const view = renderApp(<App />)
+
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: 'Download installer' })).not.toBeNull()
+    )
+    expect(view.queryByRole('button', { name: 'Update and restart' })).toBeNull()
+    await userEvent.click(view.getByRole('button', { name: 'Download installer' }))
+    await waitFor(() => expect(view.getByText('Extracting installer')).not.toBeNull())
+    expect(view.getByText(/extracting the original Evenfire Desktop installer/)).not.toBeNull()
+
+    finishExtraction()
+    await waitFor(() => expect(view.getByText('Saving installer')).not.toBeNull())
+    expect(view.getByText('Saving the verified installer to Downloads.')).not.toBeNull()
+    finishDownload()
+    await waitFor(() => expect(view.getByText('Ready to install')).not.toBeNull())
+    expect(
+      view.getByText(/drag Evenfire into Applications, replace the existing app, then reopen/)
+    ).not.toBeNull()
+    await userEvent.click(view.getByRole('button', { name: 'Open installer & Quit Evenfire' }))
+    await waitFor(() =>
+      expect(
+        view.getByText(
+          'macOS could not open the installer. The DMG remains in Downloads; open it manually to continue. You can keep using the app.'
+        )
+      ).not.toBeNull()
+    )
+    expect(desktopUpdateCheckHarness.openInstaller).toHaveBeenCalledWith('0.12.0')
+    expect(view.container.querySelector('.app-frame')).not.toBeNull()
   })
 
   it('keeps manual restart choices and installs a pre-updater target on the first restart action', async () => {
@@ -627,6 +700,9 @@ describe('App deep-link orchestration', () => {
     })
     const view = renderApp(<App />)
     try {
+      await waitFor(() =>
+        expect(within(view.container).getByRole('button', { name: 'More info' })).not.toBeNull()
+      )
       const moreInfo = within(view.container).getByRole('button', { name: 'More info' })
       await userEvent.click(moreInfo)
       expect(moreInfo.getAttribute('aria-expanded')).toBe('true')
@@ -655,6 +731,9 @@ describe('App deep-link orchestration', () => {
     const view = renderApp(<App />)
 
     const notice = within(view.container)
+    await waitFor(() =>
+      expect(notice.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
+    )
     expect(notice.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
     await userEvent.click(notice.getByRole('button', { name: 'Later' }))
 
@@ -669,6 +748,9 @@ describe('App deep-link orchestration', () => {
     const nextLaunch = renderApp(<App />)
     try {
       const launched = within(nextLaunch.container)
+      await waitFor(() =>
+        expect(launched.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
+      )
       expect(launched.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
       expect(launched.getByRole('button', { name: 'Later' })).not.toBeNull()
     } finally {
@@ -766,10 +848,15 @@ describe('App deep-link orchestration', () => {
     settingsPageHarness.props = null
     desktopUpdateCheckHarness.onRequested = null
     desktopUpdateCheckHarness.getStatus = vi.fn().mockResolvedValue(null)
+    desktopUpdateCheckHarness.getPresentation = vi.fn().mockResolvedValue({ manualInstall: false })
     desktopUpdateCheckHarness.onDownloaded = null
+    desktopUpdateCheckHarness.onExtracting = null
+    desktopUpdateCheckHarness.onSaving = null
+    desktopUpdateCheckHarness.onOpening = null
     desktopUpdateCheckHarness.renderButtons = false
     desktopUpdateCheckHarness.download = vi.fn().mockResolvedValue(undefined)
     desktopUpdateCheckHarness.install = vi.fn().mockResolvedValue({ installed: true })
+    desktopUpdateCheckHarness.openInstaller = vi.fn().mockResolvedValue({ opened: true })
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
@@ -786,11 +873,32 @@ describe('App deep-link orchestration', () => {
       value: {
         auth: {
           getDesktopReleaseStatus: () => desktopUpdateCheckHarness.getStatus(),
+          getDesktopUpdatePresentation: () => desktopUpdateCheckHarness.getPresentation(),
+          getPendingDesktopUpdate: vi.fn().mockResolvedValue(null),
           downloadDesktopUpdate: (...args: unknown[]) =>
             desktopUpdateCheckHarness.download(...args),
           installDesktopUpdate: (...args: unknown[]) => desktopUpdateCheckHarness.install(...args),
+          openDesktopUpdateInstaller: (...args: unknown[]) =>
+            desktopUpdateCheckHarness.openInstaller(...args),
+          onDesktopUpdateProgress: () => vi.fn(),
+          onDesktopUpdateExtracting: (callback: (version: string) => void) => {
+            desktopUpdateCheckHarness.onExtracting = callback
+            return vi.fn()
+          },
+          onDesktopUpdateSaving: (callback: (version: string) => void) => {
+            desktopUpdateCheckHarness.onSaving = callback
+            return vi.fn()
+          },
+          onDesktopUpdateOpening: (callback: (version: string) => void) => {
+            desktopUpdateCheckHarness.onOpening = callback
+            return vi.fn()
+          },
           onDesktopUpdateDownloaded: (
-            callback: (update: { version: string; updaterCapable: boolean }) => void
+            callback: (update: {
+              version: string
+              updaterCapable: boolean
+              manualInstall?: boolean
+            }) => void
           ) => {
             desktopUpdateCheckHarness.onDownloaded = callback
             return vi.fn()

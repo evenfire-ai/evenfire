@@ -1,4 +1,4 @@
-import { BrowserWindow, app } from 'electron'
+import { BrowserWindow, app, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import type { AppService } from './appService.js'
@@ -11,6 +11,7 @@ import {
   type VerifiedDesktopPayload,
   compareDesktopVersions,
   downloadVerifiedReleaseAsset,
+  extractMacDmgFromReleaseArchive,
   getAppArchivePath,
   getDesktopReleaseAssetName,
   prepareVerifiedDesktopPayload,
@@ -25,8 +26,8 @@ import {
   type DesktopInstallPlan,
   detectDesktopInstall,
   launchDesktopInstallHelper,
-  stopMacDesktopInstallJob,
 } from './desktopUpdateInstaller.js'
+import { saveVerifiedMacInstaller, verifyMacInstallerDmg } from './desktopUpdateMacDmg.js'
 import type { DesktopReleaseStatus, DesktopUpdateProgress, PendingDesktopUpdate } from './types.js'
 
 const { lstat, mkdir, readdir, rename, rm, unlink, writeFile } = updaterFileSystem.promises
@@ -39,7 +40,10 @@ const MAX_ENVIRONMENT_BINDING_ID_LENGTH = 256
 
 export type UpdateEvent =
   | { type: 'progress'; progress: DesktopUpdateProgress }
-  | { type: 'downloaded'; version: string; updaterCapable: boolean }
+  | { type: 'extracting'; version: string }
+  | { type: 'saving'; version: string }
+  | { type: 'opening'; version: string }
+  | { type: 'downloaded'; version: string; updaterCapable: boolean; manualInstall: boolean }
   | { type: 'error'; message: string }
 
 type UpdateOperation = {
@@ -63,6 +67,8 @@ type UpdateOperation = {
   rollbackPackagePath?: string
   rollbackPackageSha256?: string
   currentAsarSha256: string
+  manualInstallerPath?: string
+  manualInstallerSha256?: string
 }
 
 type PendingUpdatePointer = { operationId: string }
@@ -70,6 +76,7 @@ type DownloadResult = {
   downloaded: true
   version: string
   updaterCapable: boolean
+  manualInstall: boolean
 }
 
 export type DesktopUpdateManagerDependencies = {
@@ -85,6 +92,10 @@ export type DesktopUpdateManagerDependencies = {
   verifyApp?: typeof verifyAppTree
   hashFile?: typeof readFileSha256
   launchInstallHelper?: (plan: DesktopInstallPlan) => Promise<void>
+  extractMacDmg?: typeof extractMacDmgFromReleaseArchive
+  verifyMacDmg?: typeof verifyMacInstallerDmg
+  saveMacInstaller?: typeof saveVerifiedMacInstaller
+  openMacInstaller?: (filePath: string) => Promise<string>
 }
 
 function errorMessage(error: unknown): string {
@@ -148,7 +159,16 @@ function isUpdateOperation(value: unknown, operationId: string): value is Update
     rollbackFieldsValid &&
     typeof value.updaterCapable === 'boolean' &&
     typeof value.currentAsarSha256 === 'string' &&
-    /^[a-f0-9]{64}$/.test(value.currentAsarSha256)
+    /^[a-f0-9]{64}$/.test(value.currentAsarSha256) &&
+    ((value.manualInstallerPath === undefined && value.manualInstallerSha256 === undefined) ||
+      (platform === 'darwin' &&
+        typeof value.manualInstallerPath === 'string' &&
+        (path.basename(value.manualInstallerPath) === `Evenfire-v${String(value.version)}.dmg` ||
+          new RegExp(
+            `^Evenfire-v${String(value.version).replaceAll('.', '\\.')} \\([1-9][0-9]*\\)\\.dmg$`
+          ).test(path.basename(value.manualInstallerPath))) &&
+        typeof value.manualInstallerSha256 === 'string' &&
+        /^[a-f0-9]{64}$/.test(value.manualInstallerSha256)))
   )
 }
 
@@ -198,6 +218,10 @@ export class DesktopUpdateManager {
   private readonly verifyApp: typeof verifyAppTree
   private readonly hashFile: typeof readFileSha256
   private readonly launchInstallHelper: (plan: DesktopInstallPlan) => Promise<void>
+  private readonly extractMacDmg: typeof extractMacDmgFromReleaseArchive
+  private readonly verifyMacDmg: typeof verifyMacInstallerDmg
+  private readonly saveMacInstaller: typeof saveVerifiedMacInstaller
+  private readonly openMacInstaller: (filePath: string) => Promise<string>
 
   constructor(
     private readonly service: AppService,
@@ -217,6 +241,10 @@ export class DesktopUpdateManager {
     this.verifyApp = dependencies.verifyApp ?? verifyAppTree
     this.hashFile = dependencies.hashFile ?? readFileSha256
     this.launchInstallHelper = dependencies.launchInstallHelper ?? launchDesktopInstallHelper
+    this.extractMacDmg = dependencies.extractMacDmg ?? extractMacDmgFromReleaseArchive
+    this.verifyMacDmg = dependencies.verifyMacDmg ?? verifyMacInstallerDmg
+    this.saveMacInstaller = dependencies.saveMacInstaller ?? saveVerifiedMacInstaller
+    this.openMacInstaller = dependencies.openMacInstaller ?? (filePath => shell.openPath(filePath))
 
     void app
       .whenReady()
@@ -255,7 +283,31 @@ export class DesktopUpdateManager {
       return null
     }
     if (this.statusRecommends(status, operation.version)) {
-      return { version: operation.version, updaterCapable: operation.updaterCapable }
+      if (operation.platform === 'darwin') {
+        const installerIsVerified = await this.isVerifiedMacInstaller(operation)
+        if (
+          this.getEnvironmentBindingId() !== initialEnvironmentBindingId ||
+          operation.environmentBindingId !== initialEnvironmentBindingId
+        ) {
+          await this.discardOperation(operationPath, operation.id)
+          return null
+        }
+        if (
+          app.getVersion() === operation.version ||
+          app.getVersion() !== operation.currentVersion ||
+          !operation.manualInstallerPath ||
+          !operation.manualInstallerSha256 ||
+          !installerIsVerified
+        ) {
+          await this.discardOperation(operationPath, operation.id)
+          return null
+        }
+      }
+      return {
+        version: operation.version,
+        updaterCapable: operation.updaterCapable,
+        manualInstall: operation.platform === 'darwin',
+      }
     }
     await this.discardOperation(operationPath, operation.id)
     return null
@@ -273,7 +325,7 @@ export class DesktopUpdateManager {
         throw new Error('A different Desktop update is already being downloaded.')
       }
       const result = await this.activeDownload.promise
-      if (restartAfterDownload) {
+      if (restartAfterDownload && this.platform !== 'darwin') {
         await this.installDownloadedUpdate(expectedVersion)
       }
       return result
@@ -285,7 +337,7 @@ export class DesktopUpdateManager {
     this.activeDownload = activeDownload
     try {
       const result = await operation
-      if (restartAfterDownload) {
+      if (restartAfterDownload && this.platform !== 'darwin') {
         await this.installDownloadedUpdate(expectedVersion)
       }
       return result
@@ -301,9 +353,64 @@ export class DesktopUpdateManager {
     await active.promise.catch(() => undefined)
   }
 
+  async openDownloadedMacInstaller(expectedVersion: string): Promise<{ opened: true }> {
+    this.assertPackagedBuild()
+    this.assertValidTargetVersion(expectedVersion)
+    const pending = await this.readPendingOperation()
+    if (
+      this.platform !== 'darwin' ||
+      !pending ||
+      pending.operation.version !== expectedVersion ||
+      pending.operation.platform !== 'darwin' ||
+      pending.operation.state !== 'downloaded'
+    ) {
+      throw new Error('The verified macOS installer is not ready. Download it again to continue.')
+    }
+
+    const { operationPath, operation } = pending
+    const environmentBindingId = this.requireEnvironmentBindingId()
+    const status = await this.service.getDesktopReleaseStatus()
+    this.assertEnvironmentUnchanged(environmentBindingId)
+    this.assertTargetIsCurrent(status, expectedVersion)
+    if (
+      operation.environmentBindingId !== environmentBindingId ||
+      operation.currentVersion !== app.getVersion() ||
+      app.getVersion() === expectedVersion ||
+      !operation.manualInstallerPath ||
+      !operation.manualInstallerSha256
+    ) {
+      await this.discardOperation(operationPath, operation.id)
+      throw new Error('The selected backend or installed build changed. Check for updates again.')
+    }
+    const installerIsVerified = await this.isVerifiedMacInstaller(operation)
+    if (this.getEnvironmentBindingId() !== environmentBindingId) {
+      await this.discardOperation(operationPath, operation.id)
+      throw new Error('The selected backend or installed build changed. Check for updates again.')
+    }
+    if (!installerIsVerified) {
+      throw new Error(
+        'The saved macOS installer is missing or has changed. Download it again before opening.'
+      )
+    }
+    this.sendEvent({ type: 'opening', version: expectedVersion })
+    const openError = await this.openMacInstaller(operation.manualInstallerPath)
+    if (openError) {
+      const error = new Error(
+        'macOS could not open the installer. The DMG remains in Downloads; open it manually to continue.'
+      )
+      this.sendEvent({ type: 'error', message: error.message })
+      throw error
+    }
+    app.quit()
+    return { opened: true }
+  }
+
   async installDownloadedUpdate(expectedVersion: string): Promise<{ installed: true }> {
     this.assertPackagedBuild()
     this.assertValidTargetVersion(expectedVersion)
+    if (this.platform === 'darwin') {
+      throw new Error('On macOS, open the verified DMG and install Evenfire from Applications.')
+    }
 
     if (this.activeDownload) {
       if (this.activeDownload.version !== expectedVersion) {
@@ -427,6 +534,69 @@ export class DesktopUpdateManager {
       })
       if (signal.aborted) throw new Error('Desktop update download canceled.')
 
+      if (platform === 'darwin') {
+        this.sendEvent({ type: 'extracting', version: expectedVersion })
+        const dmgPath = path.join(operationPath, 'verified-installer.dmg')
+        await this.extractMacDmg({
+          archivePath,
+          destination: dmgPath,
+          version: expectedVersion,
+          architecture,
+          signal,
+        })
+        const dmgSha256 = await this.hashFile(dmgPath)
+        await this.verifyMacDmg({
+          dmgPath,
+          mountPath: path.join(operationPath, 'mounted-installer'),
+          version: expectedVersion,
+          architecture,
+        })
+        if (signal.aborted) throw new Error('Desktop update download canceled.')
+        this.sendEvent({ type: 'saving', version: expectedVersion })
+        const saved = await this.saveMacInstaller({
+          sourcePath: dmgPath,
+          downloadsDirectory: app.getPath('downloads'),
+          version: expectedVersion,
+          expectedSha256: dmgSha256,
+          signal,
+        })
+        await unlink(archivePath)
+        await unlink(dmgPath)
+
+        const finalStatus = await this.service.getDesktopReleaseStatus()
+        if (signal.aborted) throw new Error('Desktop update download canceled.')
+        this.assertEnvironmentUnchanged(environmentBindingId)
+        this.assertTargetIsCurrent(finalStatus, expectedVersion)
+        operation = {
+          ...operation,
+          state: 'downloaded',
+          assetSha256: asset.digest,
+          assetSize: asset.size,
+          packagePath: 'manual-installer',
+          packageSha256: saved.sha256,
+          appPath: 'manual-installer',
+          appVersion: expectedVersion,
+          appId: 'ai.evenfire.desktop',
+          updaterCapable: false,
+          manualInstallerPath: saved.filePath,
+          manualInstallerSha256: saved.sha256,
+        }
+        await this.writeOperation(journalPath, operation)
+        await this.writePendingPointer(stageRoot, { operationId })
+        this.sendEvent({
+          type: 'downloaded',
+          version: expectedVersion,
+          updaterCapable: false,
+          manualInstall: true,
+        })
+        return {
+          downloaded: true,
+          version: expectedVersion,
+          updaterCapable: false,
+          manualInstall: true,
+        }
+      }
+
       await mkdir(payloadRoot, { mode: 0o700 })
       const payload = await this.preparePayload({
         archivePath,
@@ -496,17 +666,23 @@ export class DesktopUpdateManager {
         type: 'downloaded',
         version: expectedVersion,
         updaterCapable: operation.updaterCapable,
+        manualInstall: false,
       })
       return {
         downloaded: true,
         version: expectedVersion,
         updaterCapable: operation.updaterCapable,
+        manualInstall: false,
       }
     } catch (error) {
       if (operation && (await this.readPendingPointer(stageRoot))?.operationId === operationId) {
         await this.removePendingPointer(stageRoot).catch(() => undefined)
       }
-      await this.discardOperation(operationPath, operationId).catch(() => undefined)
+      const mountRecoveryMarker = path.join(operationPath, 'mac-dmg-mount-active.json')
+      const preserveMountedRecovery = await this.isRegularFile(mountRecoveryMarker)
+      if (!preserveMountedRecovery) {
+        await this.discardOperation(operationPath, operationId).catch(() => undefined)
+      }
       if (
         operation &&
         (await verifyRecordedOperationDirectory(stageRoot, operationPath, operationId)) &&
@@ -688,6 +864,7 @@ export class DesktopUpdateManager {
       const operationPath = path.join(stageRoot, entry.name)
       const operation = await this.readOperation(operationPath, entry.name)
       if (!operation) continue
+      if (await this.isRegularFile(path.join(operationPath, 'mac-dmg-mount-active.json'))) continue
       const safeCleanupMarker = await this.readMarker(path.join(operationPath, 'cleanup-safe.json'))
       const startupMarker = await this.readMarker(path.join(operationPath, 'startup-ok.json'))
       const helperPid = await this.readHelperPid(operationPath)
@@ -975,14 +1152,6 @@ export class DesktopUpdateManager {
       return null
     }
     const operation = await this.readOperation(operationPath, pointer.operationId)
-    if (this.platform === 'darwin') {
-      try {
-        await lstat(path.join(operationPath, 'cancel-install.json'))
-        return null
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      }
-    }
     return operation ? { operationPath, operation } : null
   }
 
@@ -1060,6 +1229,29 @@ export class DesktopUpdateManager {
     }
   }
 
+  private async isVerifiedMacInstaller(operation: UpdateOperation): Promise<boolean> {
+    const installerPath = operation.manualInstallerPath
+    const expectedSha256 = operation.manualInstallerSha256
+    if (!installerPath || !expectedSha256 || operation.platform !== 'darwin') return false
+    try {
+      const downloadsDirectory = await updaterFileSystem.promises.realpath(app.getPath('downloads'))
+      const resolvedInstaller = path.resolve(installerPath)
+      if (
+        path.dirname(resolvedInstaller) !== downloadsDirectory ||
+        !/^Evenfire-v\d+\.\d+\.\d+(?: \([1-9][0-9]*\))?\.dmg$/.test(
+          path.basename(resolvedInstaller)
+        )
+      ) {
+        return false
+      }
+      const info = await lstat(resolvedInstaller)
+      if (!info.isFile() || info.isSymbolicLink()) return false
+      return (await this.hashFile(resolvedInstaller)) === expectedSha256
+    } catch {
+      return false
+    }
+  }
+
   private async readMarker(filePath: string): Promise<Record<string, unknown> | null> {
     try {
       const bytes = await readRegularFileNoFollow(filePath, 16 * 1024)
@@ -1092,14 +1284,10 @@ export class DesktopUpdateManager {
 
   private async cancelStartedHelper(operationPath: string, operationId: string): Promise<void> {
     await this.writeJsonFile(path.join(operationPath, 'cancel-install.json'), { id: operationId })
-    if (this.platform === 'darwin') await stopMacDesktopInstallJob(operationId)
     for (let attempt = 0; attempt < 400; attempt += 1) {
       const pid = await this.readHelperPid(operationPath)
       if (pid === null || !this.isProcessAlive(pid)) {
-        // Keep Mac cancellation durable: a queued authorization must never run later.
-        if (this.platform !== 'darwin') {
-          await this.removeOwnedFile(path.join(operationPath, 'cancel-install.json'))
-        }
+        await this.removeOwnedFile(path.join(operationPath, 'cancel-install.json'))
         return
       }
       await new Promise(resolve => setTimeout(resolve, 100))
@@ -1120,6 +1308,9 @@ export class DesktopUpdateManager {
 export function sendDesktopUpdateEvent(event: UpdateEvent): void {
   const channel = {
     progress: 'desktopUpdate:progress',
+    extracting: 'desktopUpdate:extracting',
+    saving: 'desktopUpdate:saving',
+    opening: 'desktopUpdate:opening',
     downloaded: 'desktopUpdate:downloaded',
     error: 'desktopUpdate:error',
   }[event.type]

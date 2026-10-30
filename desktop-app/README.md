@@ -140,13 +140,14 @@ GitHub release tag chosen by the active backend and verifies its GitHub
 SHA-256 digest before reading it. It does not use electron-builder feed files
 or GitHub's global latest release.
 
-Updates support macOS and Windows x64/arm64 and Linux x64/arm64. Installation
-uses the detected app bundle, Squirrel, native Linux package, or user-owned ZIP
-install. The app leaves the current installation intact when it cannot prove a
-safe install path or obtain required OS authorization. Releases before the
-updater was introduced (currently v0.8.0 through v0.12.0) do not contain the
-updater. The external helper still installs and relaunches those targets after
-the normal update consent; future in-app updates require an updater-capable build.
+Updates support macOS and Windows x64/arm64 and Linux x64/arm64. On macOS the
+app verifies the original DMG in the selected release ZIP and saves
+`Evenfire-v<VERSION>.dmg` in Downloads. The user opens the DMG, replaces Evenfire
+in Applications, and reopens it. Windows retains per-user Squirrel updates;
+Linux retains native package and user-owned ZIP installation. Releases before
+the updater was introduced (currently v0.8.0 through v0.12.0) do not contain
+the updater; after the first manual installation, later macOS versions can
+prepare the verified DMG in-app.
 
 The backend policy and user flows are documented in
 [Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users)

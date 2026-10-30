@@ -224,10 +224,21 @@ function getInitialSidebarCollapsed(): boolean {
 
 type DesktopUpdateFlow = {
   mode: 'startup' | 'manual'
-  phase: 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'error'
+  phase:
+    | 'checking'
+    | 'available'
+    | 'downloading'
+    | 'extracting'
+    | 'saving'
+    | 'ready'
+    | 'downloaded'
+    | 'installing'
+    | 'opening'
+    | 'error'
   status: DesktopReleaseStatus | null
   progress: DesktopUpdateProgress
   updaterCapable?: boolean
+  manualInstall?: boolean
   error?: string
 }
 
@@ -273,12 +284,25 @@ function getSafeDesktopUpdateFailure(error: string | undefined, backendOrigin?: 
   } else if (error === 'The downloaded macOS target failed macOS trust assessment.') {
     category = 'macOS rejected the downloaded target'
     message = error
+  } else if (
+    error ===
+      'macOS could not open the installer. The DMG remains in Downloads; open it manually to continue.' ||
+    error ===
+      'The saved macOS installer is missing or has changed. Download it again before opening.'
+  ) {
+    category = 'Manual installer handoff failed'
+    message = error
   }
 
   if (category) details.push({ label: 'Failure category', value: category })
   if (status) details.push({ label: 'HTTP status', value: status })
   if (backendOrigin) details.push({ label: 'Selected backend origin', value: backendOrigin })
   return { message, details }
+}
+
+async function getDesktopUpdatePresentation(): Promise<{ manualInstall: boolean }> {
+  const getPresentation = window.clerum?.auth?.getDesktopUpdatePresentation
+  return typeof getPresentation === 'function' ? getPresentation() : { manualInstall: false }
 }
 
 function DesktopUpdatePanel({
@@ -307,13 +331,21 @@ function DesktopUpdatePanel({
       ? 'Checking for updates'
       : flow.phase === 'downloading'
         ? 'Downloading Desktop update'
-        : flow.phase === 'downloaded'
-          ? 'Desktop update ready'
-          : flow.phase === 'installing'
-            ? 'Restarting to install Desktop update'
-            : flow.phase === 'error'
-              ? 'Desktop update check failed'
-              : 'Desktop update available'
+        : flow.phase === 'extracting'
+          ? 'Extracting installer'
+          : flow.phase === 'saving'
+            ? 'Saving installer'
+            : flow.phase === 'ready'
+              ? 'Ready to install'
+              : flow.phase === 'downloaded'
+                ? 'Desktop update ready'
+                : flow.phase === 'installing'
+                  ? 'Restarting to install Desktop update'
+                  : flow.phase === 'opening'
+                    ? 'Opening installer'
+                    : flow.phase === 'error'
+                      ? 'Desktop update check failed'
+                      : 'Desktop update available'
 
   return (
     <div className="desktop-update-dialog-backdrop" role="presentation">
@@ -359,6 +391,19 @@ function DesktopUpdatePanel({
               <span aria-live="polite">{Math.floor(flow.progress.percent)}%</span>
             </>
           ) : null}
+          {flow.phase === 'extracting' && status ? (
+            <p>Verifying and extracting the original Evenfire Desktop installer.</p>
+          ) : null}
+          {flow.phase === 'saving' && status ? (
+            <p>Saving the verified installer to Downloads.</p>
+          ) : null}
+          {flow.phase === 'ready' && status ? (
+            <p>
+              Evenfire Desktop {status.latestVersion} is ready. Open the saved DMG, drag Evenfire
+              into Applications, replace the existing app, then reopen Evenfire. Opening the DMG
+              does not install the update.
+            </p>
+          ) : null}
           {flow.phase === 'downloaded' && status ? (
             <p>
               Evenfire Desktop {status.latestVersion} is ready. Restart now to install it, or keep
@@ -380,7 +425,17 @@ function DesktopUpdatePanel({
         {flow.phase === 'available' ? (
           <div className="desktop-update-dialog__actions">
             <Button block onClick={onDownload}>
-              Update and restart
+              {flow.manualInstall ? 'Download installer' : 'Update and restart'}
+            </Button>
+            <Button block color="neutral" onClick={onClose}>
+              Later
+            </Button>
+          </div>
+        ) : null}
+        {flow.phase === 'ready' ? (
+          <div className="desktop-update-dialog__actions">
+            <Button block onClick={onRestart}>
+              Open installer &amp; Quit Evenfire
             </Button>
             <Button block color="neutral" onClick={onClose}>
               Later
@@ -460,7 +515,11 @@ export function App() {
   const [desktopUpdateFlow, setDesktopUpdateFlow] = React.useState<DesktopUpdateFlow | null>(null)
   const desktopUpdateRequestRef = React.useRef(0)
   const dismissDesktopUpdateFlow = React.useCallback(() => {
-    if (desktopUpdateFlow?.phase === 'downloading') {
+    if (
+      desktopUpdateFlow?.phase === 'downloading' ||
+      desktopUpdateFlow?.phase === 'extracting' ||
+      desktopUpdateFlow?.phase === 'saving'
+    ) {
       void window.clerum.auth.cancelDesktopUpdate().catch(() => undefined)
     }
     desktopUpdateRequestRef.current += 1
@@ -468,11 +527,19 @@ export function App() {
   }, [desktopUpdateFlow?.phase])
   const checkForDesktopUpdates = React.useCallback(async () => {
     const requestId = ++desktopUpdateRequestRef.current
+    let manualInstall = false
+    try {
+      manualInstall = (await getDesktopUpdatePresentation()).manualInstall
+    } catch {
+      // An unavailable presentation query leaves the established automatic path usable.
+    }
+    if (requestId !== desktopUpdateRequestRef.current) return
     setDesktopUpdateFlow({
       mode: 'manual',
       phase: 'checking',
       status: null,
       progress: { percent: 0, transferred: 0, total: 0 },
+      manualInstall,
     })
     try {
       const status = await window.clerum.auth.getDesktopReleaseStatus()
@@ -487,6 +554,7 @@ export function App() {
         phase: 'downloading',
         status,
         progress: { percent: 0, transferred: 0, total: 0 },
+        manualInstall,
       })
       await window.clerum.auth.downloadDesktopUpdate(status.latestVersion)
     } catch (error) {
@@ -522,15 +590,48 @@ export function App() {
             )
           })
         : () => {}
+    const removeExtracting =
+      typeof authBridge?.onDesktopUpdateExtracting === 'function'
+        ? authBridge.onDesktopUpdateExtracting(version => {
+            setDesktopUpdateFlow(current =>
+              current?.status?.latestVersion === version
+                ? { ...current, phase: 'extracting' }
+                : current
+            )
+          })
+        : () => {}
+    const removeSaving =
+      typeof authBridge?.onDesktopUpdateSaving === 'function'
+        ? authBridge.onDesktopUpdateSaving(version => {
+            setDesktopUpdateFlow(current =>
+              current?.status?.latestVersion === version ? { ...current, phase: 'saving' } : current
+            )
+          })
+        : () => {}
+    const removeOpening =
+      typeof authBridge?.onDesktopUpdateOpening === 'function'
+        ? authBridge.onDesktopUpdateOpening(version => {
+            setDesktopUpdateFlow(current =>
+              current?.status?.latestVersion === version
+                ? { ...current, phase: 'opening' }
+                : current
+            )
+          })
+        : () => {}
     const removeDownloaded =
       typeof authBridge?.onDesktopUpdateDownloaded === 'function'
-        ? authBridge.onDesktopUpdateDownloaded(({ version, updaterCapable }) => {
+        ? authBridge.onDesktopUpdateDownloaded(({ version, updaterCapable, manualInstall }) => {
             setDesktopUpdateFlow(current => {
               if (!current || current.status?.latestVersion !== version) return current
               return {
                 ...current,
-                phase: current.mode === 'startup' ? 'installing' : 'downloaded',
+                phase: manualInstall
+                  ? 'ready'
+                  : current.mode === 'startup'
+                    ? 'installing'
+                    : 'downloaded',
                 updaterCapable,
+                manualInstall,
                 progress: {
                   percent: 100,
                   transferred: current.progress.total,
@@ -550,6 +651,9 @@ export function App() {
         : () => {}
     return () => {
       removeProgress()
+      removeExtracting()
+      removeSaving()
+      removeOpening()
       removeDownloaded()
       removeError()
     }
@@ -563,11 +667,16 @@ export function App() {
       return
     }
     if (status.updateRequired) {
-      setDesktopUpdateFlow({
-        mode: 'startup',
-        phase: 'available',
-        status,
-        progress: { percent: 0, transferred: 0, total: 0 },
+      const requestId = ++desktopUpdateRequestRef.current
+      void getDesktopUpdatePresentation().then(presentation => {
+        if (requestId !== desktopUpdateRequestRef.current) return
+        setDesktopUpdateFlow({
+          mode: 'startup',
+          phase: 'available',
+          status,
+          progress: { percent: 0, transferred: 0, total: 0 },
+          manualInstall: presentation.manualInstall,
+        })
       })
       return
     }
@@ -578,9 +687,10 @@ export function App() {
         if (!pending || pending.version !== status.latestVersion) return
         setDesktopUpdateFlow({
           mode: 'manual',
-          phase: 'downloaded',
+          phase: pending.manualInstall ? 'ready' : 'downloaded',
           status,
           updaterCapable: pending.updaterCapable,
+          manualInstall: pending.manualInstall,
           progress: { percent: 100, transferred: 0, total: 0 },
         })
       })
@@ -603,6 +713,15 @@ export function App() {
   const restartDesktopUpdate = React.useCallback(() => {
     const flow = desktopUpdateFlow
     if (!flow?.status) return
+    if (flow.manualInstall) {
+      setDesktopUpdateFlow({ ...flow, phase: 'opening', error: undefined })
+      void window.clerum.auth.openDesktopUpdateInstaller(flow.status.latestVersion).catch(error => {
+        setDesktopUpdateFlow(current =>
+          current ? { ...current, phase: 'error', error: errorMessage(error) } : current
+        )
+      })
+      return
+    }
     setDesktopUpdateFlow({ ...flow, phase: 'installing', error: undefined })
     void window.clerum.auth.installDesktopUpdate(flow.status.latestVersion).catch(error => {
       setDesktopUpdateFlow(current =>
