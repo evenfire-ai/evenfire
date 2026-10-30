@@ -11,6 +11,10 @@ import {
 } from '../../../tests/e2e/gfsResourceFixtures'
 import { getE2EUserId } from '../../../tests/e2e/gfsUserTeamFixtures'
 import {
+  COMPOSER_MAX_FILE_BYTES,
+  COMPOSER_MAX_IMAGE_BYTES,
+} from '../../ui/src/constants/attachments'
+import {
   FIXTURE_RESPONSE_KIND,
   IMAGE_CAPABILITY_FIXTURE_MODELS,
   type ImageCapabilitiesFixtureEnv,
@@ -20,7 +24,7 @@ import {
   resolveImageCapabilitiesMode,
   sha256Hex,
 } from './helpers/imageCapabilityEvidence'
-import { buildImageFixture } from './helpers/qaRecorderImageFixture'
+import { buildImageFixture, encodePng } from './helpers/qaRecorderImageFixture'
 import { openResourcesNavItem } from './navigationHelpers'
 import {
   EXTERNAL_REST_API_BASE_URL,
@@ -166,6 +170,41 @@ async function attachDocument(
     mimeType: document.mimeType,
     buffer: document.buffer,
   })
+}
+
+/*
+ * The stepper is asserted only for `gfs_save_attachment`. The Host's progress
+ * reporter does not replay tool events to a subscriber that arrives after them
+ * (`mcp-host/src/progress/sseProgressReporter.ts` replays terminal and suspended
+ * only), and Desktop subscribes after the send returns the task id. The fixture
+ * answers in milliseconds, so the discovery call can finish before the stream
+ * opens and never reach the stepper. Discovery is proven by the ledger instead:
+ * the fixture requests the save only after it parsed a successful
+ * `clerum__gfs_accessible` result.
+ */
+/** Side of the large PNG: 1000x1000 random RGB pixels, about 2.86 MiB once encoded. */
+const LARGE_PNG_SIDE = 1000
+/** Size of the large binary attachment, well over a single chunk of any hop. */
+const LARGE_BINARY_BYTES = 6 * 1024 * 1024
+
+/**
+ * A PNG of random pixels. Deflate cannot shrink random data, so the file stays
+ * close to its raw size and lands just under the general per-image composer cap
+ * that GLM-5.3-Flash uses, the model this lane runs on.
+ */
+function buildLargePng(): Buffer {
+  const pixels = randomBytes(LARGE_PNG_SIDE * LARGE_PNG_SIDE * 3)
+  const png = encodePng(LARGE_PNG_SIDE, LARGE_PNG_SIDE, (x, y) => {
+    const offset = (y * LARGE_PNG_SIDE + x) * 3
+    return [pixels[offset], pixels[offset + 1], pixels[offset + 2]]
+  })
+  if (png.length <= 2 * 1024 * 1024 || png.length >= COMPOSER_MAX_IMAGE_BYTES) {
+    throw new Error(
+      `large PNG fixture is ${png.length} bytes; it must be over 2 MiB and under ` +
+        `the ${COMPOSER_MAX_IMAGE_BYTES}-byte composer image cap`
+    )
+  }
+  return png
 }
 
 const SENSITIVE_OUTPUT =
@@ -410,7 +449,7 @@ test.describe('attachment-gfs-save fixture', () => {
   })
 
   test('attachment-gfs-save fixture: saves an attached PNG byte for byte', async () => {
-    const png = buildImageFixture().png
+    const png = buildLargePng()
     const fileName = `logo-${randomBytes(3).toString('hex')}.png`
     fixtureName = uniqueGfsFixtureName('e2e-gfs-save-png')
     const folder = seedGfsDirectoryFixture(fixtureName)
@@ -458,12 +497,10 @@ test.describe('attachment-gfs-save fixture', () => {
       await expect(sentMessageAttachments(page).filter({ hasText: fileName })).toBeVisible()
       await expect(page.getByText(SAVE_ANSWER_SUCCESS)).toBeVisible({ timeout: 60_000 })
     })
-    await test.step('discovery and save ran without error', async () => {
+    await test.step('the save ran without error', async () => {
       const expand = page.getByTestId('progress-expand-btn').nth(progressIndex)
       await expand.click()
-      const stepper = expand.locator('..')
-      await expectToolSuccess(stepper, 'gfs_accessible')
-      await expectToolSuccess(stepper, 'gfs_save_attachment')
+      await expectToolSuccess(expand.locator('..'), 'gfs_save_attachment')
     })
     await test.step('business signal: one file with the same length in GFS', async () => {
       await expect
@@ -501,7 +538,8 @@ test.describe('attachment-gfs-save fixture', () => {
   })
 
   test('attachment-gfs-save fixture: saves an attached binary byte for byte', async () => {
-    const blob = randomBytes(4096)
+    expect(LARGE_BINARY_BYTES).toBeLessThan(COMPOSER_MAX_FILE_BYTES)
+    const blob = randomBytes(LARGE_BINARY_BYTES)
     const fileName = `blob-${randomBytes(3).toString('hex')}.bin`
     fixtureName = uniqueGfsFixtureName('e2e-gfs-save-bin')
     const folder = seedGfsDirectoryFixture(fixtureName)
@@ -549,12 +587,10 @@ test.describe('attachment-gfs-save fixture', () => {
       await expect(sentMessageAttachments(page).filter({ hasText: fileName })).toBeVisible()
       await expect(page.getByText(SAVE_ANSWER_SUCCESS)).toBeVisible({ timeout: 60_000 })
     })
-    await test.step('discovery and save ran without error', async () => {
+    await test.step('the save ran without error', async () => {
       const expand = page.getByTestId('progress-expand-btn').nth(progressIndex)
       await expand.click()
-      const stepper = expand.locator('..')
-      await expectToolSuccess(stepper, 'gfs_accessible')
-      await expectToolSuccess(stepper, 'gfs_save_attachment')
+      await expectToolSuccess(expand.locator('..'), 'gfs_save_attachment')
     })
     await test.step('business signal: one file with the same length in GFS', async () => {
       await expect
@@ -688,13 +724,10 @@ test.describe('attachment-gfs-save fixture', () => {
       await expect(sentMessageAttachments(page).filter({ hasText: fileName })).toBeVisible()
       await expect(page.getByText(SAVE_ANSWER_FAILURE)).toBeVisible({ timeout: 60_000 })
     })
-    await test.step('discovery ran and the save was forbidden', async () => {
+    await test.step('the save was forbidden', async () => {
       const expand = page.getByTestId('progress-expand-btn').nth(progressIndex)
       await expand.click()
-      const stepper = expand.locator('..')
-      // Witness: discovery reached gfsc, so the denial is the save's own 403.
-      await expectToolSuccess(stepper, 'gfs_accessible')
-      await expectToolForbidden(stepper, 'gfs_save_attachment')
+      await expectToolForbidden(expand.locator('..'), 'gfs_save_attachment')
     })
     await test.step('business signal: no file was written', async () => {
       expect(
@@ -707,7 +740,8 @@ test.describe('attachment-gfs-save fixture', () => {
       expect(
         kinds.filter(k => k === FIXTURE_RESPONSE_KIND.attachmentSaveDiscoveryRequested)
       ).toHaveLength(1)
-      // Witness: the save was actually requested before gfsc refused it.
+      // Witness: the fixture requests the save only after a successful discovery
+      // result, so discovery reached gfsc and the denial is the save's own 403.
       expect(kinds.filter(k => k === FIXTURE_RESPONSE_KIND.attachmentSaveRequested)).toHaveLength(1)
       const answers = appended.filter(
         row => row.responseKind === FIXTURE_RESPONSE_KIND.attachmentSaveAnswer
