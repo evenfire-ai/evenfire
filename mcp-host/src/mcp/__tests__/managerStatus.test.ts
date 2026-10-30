@@ -12,7 +12,6 @@ import { MCP_INIT_AUTH_FAILED_MESSAGE, MCP_NOT_READY_MESSAGE } from '../serverSt
 function serverInfo(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
   return {
     name: 'svc',
-    contextRef: 'ctx',
     transport: { type: 'streamableHttp', url: 'http://svc/mcp' },
     enabled: true,
     status: { deployed: true, ready: true },

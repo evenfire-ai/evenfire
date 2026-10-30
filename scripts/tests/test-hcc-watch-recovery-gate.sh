@@ -1681,8 +1681,9 @@ else
 fi
 
 # The caller-selected v1 Context route is a 410 tombstone. This readiness gate
-# may use the temporary PR 2 global metadata inventory, but it must bind the
-# uniquely named fixture back to the expected Context before claiming success.
+# may use the temporary PR 2 global metadata inventory, which is Context-anonymous
+# and carries no per-server Context, so the fixture is bound back to the expected
+# Context through that Context's allowlist before claiming success.
 mcp_final_context_probe="$(
   sed -n '/^probe_hcc_final_context() {$/,/^probe_hcc_ready_pod() {$/p' \
     "$MCP_READINESS_GATE"
@@ -1690,10 +1691,14 @@ mcp_final_context_probe="$(
 # Literal source-code assertions.
 # shellcheck disable=SC2016
 if [[ "$mcp_final_context_probe" == *"get('/api/v1/mcpservers')"* ]] &&
-   [[ "$mcp_final_context_probe" == *'server.contextRef === context'* ]] &&
+   [[ "$mcp_final_context_probe" == *"body.contextRef !== '*'"* ]] &&
+   [[ "$mcp_final_context_probe" != *'server.contextRef'* ]] &&
+   [[ "$mcp_final_context_probe" == *'kctl get context "$CONTEXT_NAME"'* ]] &&
+   [[ "$mcp_final_context_probe" == *'index($server) != null'* ]] &&
+   grep -Fq '.allowlistedBy == $context' "$MCP_READINESS_GATE" &&
    [[ "$mcp_final_context_probe" == *'fixture.status?.ready !== true'* ]] &&
    [[ "$mcp_final_context_probe" != *'/api/v1/mcpservers/context/'* ]]; then
-  pass "MCP readiness final probe uses global metadata and binds the fixture to its Context"
+  pass "MCP readiness final probe uses global metadata and binds the fixture to its Context allowlist"
 else
   fail "MCP readiness final probe calls a retired route or loses Context binding"
 fi

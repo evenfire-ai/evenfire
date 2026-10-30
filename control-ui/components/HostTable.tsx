@@ -110,8 +110,7 @@ export function HostTable({
       defaultKey: 'name',
       accessors: {
         name: row => row.displayName,
-        connectors: row =>
-          contextsByRef?.[String(row.item.spec?.contextRef || '').trim()]?.length ?? 0,
+        connectors: row => contextsByRef?.[String(row.item.spec?.contextRef || '')]?.length ?? 0,
         providers: row => collectProviderIds(row.item.spec || {}).join(','),
       },
       identity: row => row.key,
@@ -194,7 +193,7 @@ export function HostTable({
               />
             ) : (
               hostSort.sortedRows.map(({ key, namespace, name, displayName, item }) => {
-                const rawContext = String(item.spec?.contextRef || '').trim()
+                const rawContext = String(item.spec?.contextRef || '')
                 const contextServers = rawContext ? contextsByRef?.[rawContext] : undefined
                 const providers = collectProviderIds(item.spec || {})
                 const openAgent = () => onOpen({ namespace, name })

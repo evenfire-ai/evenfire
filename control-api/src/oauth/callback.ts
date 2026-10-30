@@ -8,6 +8,8 @@ import { getDynamicClient } from './dynamicClientStore.js'
 import {
   type RemoteOAuthSpecIncoherence,
   RemoteOAuthSpecIncoherentError,
+  type ResolvedServerOAuth,
+  buildMcpServerGrantKey,
 } from './mcpServerOAuthSpec.js'
 import { buildPerServerRedirectUri, resolvePerServerRegistration } from './perServerRegistration.js'
 import { deriveCodeVerifier } from './pkce.js'
@@ -29,7 +31,12 @@ import {
 } from './remoteCallback.js'
 import type { OAuthMcpStateClaims } from './state.js'
 import { signOAuthState, verifyOAuthStateSignature } from './state.js'
-import { bootstrapSharedOAuthGrant, setUserGrantBackground, upsertOAuthGrant } from './store.js'
+import {
+  type OAuthGrantKey,
+  bootstrapSharedOAuthGrant,
+  setUserGrantBackground,
+  upsertOAuthGrant,
+} from './store.js'
 
 // Reserved last URL segment of the shared remote OAuth callback. Defined in
 // `remoteCallback.ts` (the single redirect-URI builder); re-exported for the existing
@@ -192,15 +199,13 @@ export type OwnerDeclReader = RecipeReader
  *     also the grant owner coordinate. Kept on the subject so the pure callback
  *     never imports config.
  *   - `grantScope` — `'user'` → per-user grant `(server, userId)`;
- *     `'context'` → shared grant `(server, contextRef)` (U6 governance).
- *   - `contextRef` — the AUTHORITATIVE Context (`spec.contextRef`), the shared
- *     grant coordinate. NEVER taken from the state or a body param.
+ *     `'context'` → shared grant `(server, Context)`, the Context being the one
+ *     signed into the state at mint time, so one consent serves that Context only.
  */
 export interface McpServerOAuthSubject {
   namespace: string
   decl: OAuthClientDecl
   grantScope: 'user' | 'context'
-  contextRef?: string
   /**
    * metadata.uid of the McpServer CR the subject was read from. The callback seals
    * the grant it writes with it and fences the DCR credential read by it; the
@@ -208,6 +213,8 @@ export interface McpServerOAuthSubject {
    * the CR carried no uid.
    */
   crUid?: string
+  /** The grant coordinate of the same CR (`resolveServerOAuth`); keys the grant written. */
+  coordinate: ResolvedServerOAuth
 }
 
 export interface McpServerOAuthReader {
@@ -285,16 +292,20 @@ export interface CallbackDeps {
    */
   mcpServerReader?: McpServerOAuthReader
   /**
-   * Resolve the Contexts a user is a member of (via `user_contexts`). Required
-   * ONLY for the shared-identity mcp bootstrap (`grantScope='context'`): a
-   * shared grant plants a team credential for everyone in the Context, so the
-   * consenting user MUST be a member first. Injected so the pure callback stays
-   * testable; the route wires the real `getUserContexts`. When absent on a
-   * shared-context path, that path fails closed (`context_membership_denied`).
-   * The per-user path never touches it: its access check is
-   * `userServerAccessReader`.
+   * Whether the user may still create the shared grant of `contextName`: the
+   * Context is live, allowlists the server, and the user reaches it (directly
+   * or through an assigned agent's Host). Required ONLY for the shared-identity
+   * mcp bootstrap (`grantScope='context'`): a shared grant plants a team
+   * credential for everyone in the Context. The route wires the same rule the
+   * authorize-URL mint applies. When absent on a shared-context path, that path
+   * fails closed (`context_membership_denied`). The per-user path never touches
+   * it: its access check is `userServerAccessReader`.
    */
-  userContextsReader?: (userId: string) => Promise<{ contextIds: string[] }>
+  contextAccessReader?: (
+    userId: string,
+    contextName: string,
+    mcpServerName: string
+  ) => Promise<boolean>
   /**
    * Whether some Context the user reaches (directly, or through an agent
    * assigned to them) still enables the server through its `spec.mcpServers`
@@ -368,6 +379,13 @@ export type CallbackResult =
     }
   | { kind: 'invalid_state'; reason: string }
   /**
+   * A validly signed mcp state for a `grantScope='context'` server that names no
+   * Context: it was minted before states carried one, so there is no Context to
+   * create the grant for. Refused before the code is exchanged; the user starts
+   * the consent again.
+   */
+  | { kind: 'oauth_state_outdated' }
+  /**
    * RFC 9207 authorization-server mix-up defence: the callback `iss` did not
    * match the AS issuer pinned on the remote server (`issForCallback`), or was
    * absent when one was advertised. Fail closed BEFORE the single-use code is
@@ -391,15 +409,10 @@ export type CallbackResult =
   /** mcp subject: the McpServer named in the signed state does not exist / is not OAuth. */
   | { kind: 'server_not_found' }
   /**
-   * mcp subject with `grantScope='context'` but no authoritative `spec.contextRef`
-   * — the shared grant coordinate is unresolvable, so there is nothing safe to
-   * persist. Fail closed (mini-spec 05 §2).
-   */
-  | { kind: 'server_missing_context' }
-  /**
    * mcp subject whose consenting (signed) user lacks access, by flavor:
-   *   - `grantScope='context'`: not a member of the server's `spec.contextRef`
-   *     (a shared grant lends a Context-wide credential);
+   *   - `grantScope='context'`: the signed Context no longer exists, no longer
+   *     allowlists the server, or the user no longer reaches it (a shared grant
+   *     lends a Context-wide credential);
    *   - `grantScope='user'`: no Context the user reaches (directly or through an
    *     assigned agent) still lists the server in its `spec.mcpServers` allowlist.
    * Also returned when the reader for that flavor is not wired. Fail closed →
@@ -417,6 +430,8 @@ export type CallbackResult =
   | { kind: 'provider_response_invalid'; detail: string }
 
 const BINDING_MISMATCH = { kind: 'invalid_state', reason: 'binding_mismatch' } as const
+
+type SharedGrantKey = Extract<OAuthGrantKey, { grantKind: 'shared' }>
 
 /**
  * Run the full callback flow. Pure relative to its `CallbackDeps` so tests
@@ -564,17 +579,18 @@ export async function handleOAuthCallback(
  * Access is re-checked BEFORE the code exchange, by flavor:
  *   - `grantScope='user'`    → some Context the signed user reaches (directly or
  *     through an assigned agent) must still allowlist the server
- *     (`userServerAccessReader`); `spec.contextRef` is not consulted.
- *   - `grantScope='context'` → the signed user must be a member of the server's
- *     `spec.contextRef` (`userContextsReader`).
+ *     (`userServerAccessReader`).
+ *   - `grantScope='context'` → the Context signed into the state must still be
+ *     live, allowlist the server and be reached by the signed user
+ *     (`contextAccessReader`). A state without a Context is refused first
+ *     (`oauth_state_outdated`).
  *
  * Persistence connects to the U1 store primitives (no reimplementation):
  *   - `grantScope='user'`    → `upsertOAuthGrant` `(mcpserver, ns, name, userId)`.
- *   - `grantScope='context'` → `bootstrapSharedOAuthGrant` `(mcpserver, ns, name,
- *     spec.contextRef)`, bootstrapper = the signed `userId` (first-consent wins;
- *     U6 governance). The Context comes from the AUTHORITATIVE `spec.contextRef`,
- *     never the state — so no context field is (or needs to be) bound into the
- *     mcp state.
+ *   - `grantScope='context'` → `bootstrapSharedOAuthGrant` keyed by
+ *     `buildMcpServerGrantKey` with the signed Context, bootstrapper = the signed
+ *     `userId` (the first consent wins, keeping the Context's credential and
+ *     its audit trail stable while other members consent again).
  */
 async function handleMcpOAuthCallback(
   claims: OAuthMcpStateClaims,
@@ -600,6 +616,17 @@ async function handleMcpOAuthCallback(
   // client id bound in the signed state. Checked against `claims.oauthClientId`
   // because on the remote callbacks the URL carries no client id at all.
   if (subject.decl.id !== claims.oauthClientId) return BINDING_MISMATCH
+
+  // A context-scope grant is created for the Context signed into the state at
+  // mint time, never for anything the request carries now. A state without one
+  // was minted before states carried it: refused here, before any further read
+  // and before the single-use code reaches the provider; the user simply starts
+  // the consent again.
+  let signedContext: string | undefined
+  if (subject.grantScope === 'context') {
+    if (!claims.contextId) return { kind: 'oauth_state_outdated' }
+    signedContext = claims.contextId
+  }
 
   // The callback URL must be the one this server's lane registers, in both
   // directions: remote servers only ever register a remote URI, and the remote
@@ -633,33 +660,34 @@ async function handleMcpOAuthCallback(
   }
 
   // ─── Access guards run BEFORE the token exchange (R3-L1) ──────────────────
-  // These guards depend only on the signed claims + the resolved subject
-  // (`subject.contextRef`, `claims.userId`, `claims.mcpServerName`) and the
-  // injected readers — never on the token. Running them first means a user who
-  // lost access during the ~600s mint→callback window fails here instead of
+  // These guards depend only on the signed claims + the resolved subject and
+  // the injected readers — never on the token. Running them first means a user
+  // who lost access during the ~600s mint→callback window fails here instead of
   // first driving `exchangeAuthCode`, which burns the single-use auth-code
   // against the provider and yields a real token only to discard it at a 403.
   // The mint is still the primary gate; this re-check closes the window between
   // the two. Persistence (below) stays after the exchange.
   //
-  // `contextRef` is set iff this is a context-scoped grant that passed the
-  // membership guard; the persistence dispatch below keys off it (non-undefined
-  // ⇒ shared bootstrap), which also re-narrows it to `string` without a `!`.
-  let contextRef: string | undefined
+  // `sharedKey` is set iff this is a context-scoped grant that passed its
+  // guard; the persistence dispatch below keys off it.
+  let sharedKey: SharedGrantKey | undefined
   if (subject.grantScope === 'context') {
-    // Shared identity — the coordinate is the server's authoritative contextRef.
-    // Without it there is nothing safe to key the grant on: fail closed.
-    if (!subject.contextRef) return { kind: 'server_missing_context' }
-    // Defence in depth: a shared grant lends a team-wide credential to every
-    // member of the Context, so the consenting (signed) user must be a member
-    // of that Context before we let them bootstrap it. Fail closed when the
-    // membership reader is unwired or the user is not a member — NEVER persist.
-    if (!deps.userContextsReader) return { kind: 'context_membership_denied' }
-    const { contextIds } = await deps.userContextsReader(claims.userId)
-    if (!contextIds.includes(subject.contextRef)) {
+    // Fail closed when the signed Context or the reader is missing.
+    const contextName = signedContext
+    if (contextName === undefined || !deps.contextAccessReader) {
       return { kind: 'context_membership_denied' }
     }
-    contextRef = subject.contextRef
+    const allowed = await deps.contextAccessReader(claims.userId, contextName, claims.mcpServerName)
+    if (!allowed) return { kind: 'context_membership_denied' }
+    // The single key derivation shared with the broker, the presence rails and
+    // the disconnect, so the row written here is the one they look up.
+    const key = buildMcpServerGrantKey(subject.coordinate, {
+      mcpServerName: claims.mcpServerName,
+      mcpServersNamespace: subject.namespace,
+      contextId: contextName,
+    })
+    if (!key || key.grantKind !== 'shared') return { kind: 'context_membership_denied' }
+    sharedKey = key
   } else {
     // Per-user identity — the grant serves every Context that enables the
     // server, so access is "some Context the user reaches still allowlists
@@ -680,18 +708,17 @@ async function handleMcpOAuthCallback(
   if (exchanged.kind !== 'ok') return exchanged
   const { provider, parsed } = exchanged
 
-  if (contextRef !== undefined) {
-    // Context-scoped grant, membership already verified above.
+  if (sharedKey !== undefined) {
+    // Context-scoped grant, access already verified above.
     await bootstrapSharedOAuthGrant(deps.db, deps.encryptionKey, {
-      ownerKind: 'mcpserver',
-      recipeNamespace: subject.namespace,
-      recipeName: claims.mcpServerName,
-      contextId: contextRef,
+      ownerKind: sharedKey.ownerKind,
+      recipeNamespace: sharedKey.recipeNamespace,
+      recipeName: sharedKey.recipeName,
+      contextId: sharedKey.contextId,
       // Grant coordinate = the resolved client id (`oauth.id`), NEVER the URL: the
       // remote callbacks carry no client id in it. `subject.decl.id ===
-      // claims.oauthClientId` (checked above), and it matches what the token broker
-      // keys by (`resolveServerOAuth`, D4).
-      oauthClientId: subject.decl.id,
+      // claims.oauthClientId` (checked above).
+      oauthClientId: sharedKey.oauthClientId,
       // Bootstrapper = the signed initiator. Audit-only, first-wins on conflict.
       bootstrappedByUserId: claims.userId,
       provider,
@@ -699,7 +726,7 @@ async function handleMcpOAuthCallback(
       refreshToken: parsed.refreshToken,
       accessTokenExpiresInSec: parsed.expiresIn,
       // Seal to this installation so a same-name reinstall's teardown never purges it.
-      crUid: subject.crUid,
+      crUid: sharedKey.crUid,
     })
   } else {
     await upsertOAuthGrant(deps.db, deps.encryptionKey, {

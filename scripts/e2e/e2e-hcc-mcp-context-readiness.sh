@@ -683,7 +683,6 @@ metadata:
     e2e.clerum.io/suite: ${SUITE_NAME}
     e2e.clerum.io/run: "${RUN_LABEL}"
 spec:
-  contextRef: ${context}
   description: Gate-owned peer McpServer for bounded HCC fleet coverage.
   image: clerum/mock-mcp-server:test
   imagePullPolicy: IfNotPresent
@@ -708,12 +707,13 @@ fixture_converged() {
   context_policies_converged
 }
 
+# The v1 inventory is Context-anonymous (contextRef '*'): it proves the fixture is
+# served and Ready, while the Context allowlist is the only server-Context relation.
 probe_hcc_final_context() {
-  local probe_script
+  local probe_script inventory_probe allowlisted_by=""
   probe_script="$(cat <<'NODE'
 const http = require('http');
-const context = process.argv[1];
-const expected = process.argv[2];
+const expected = process.argv[1];
 function get(path) {
   return new Promise((resolve, reject) => {
     const request = http.get({
@@ -734,31 +734,42 @@ function get(path) {
   const ready = await get('/ready');
   const inventory = await get('/api/v1/mcpservers');
   const body = JSON.parse(inventory.body);
-  const fixture = body.servers?.find(
-    server => server.name === expected && server.contextRef === context
-  );
+  const fixture = body.servers?.find(server => server.name === expected);
   if (ready.status !== 200 || JSON.parse(ready.body).ready !== true) {
     throw new Error('readiness regressed: ' + ready.status + ' ' + ready.body);
   }
-  if (inventory.status !== 200 || !fixture || fixture.status?.ready !== true) {
+  if (inventory.status !== 200 || body.contextRef !== '*' || !fixture ||
+      fixture.status?.ready !== true) {
     throw new Error(
-      'latest Context did not converge in global metadata inventory: ' +
+      'fixture did not converge in the anonymous global metadata inventory: ' +
       inventory.status + ' ' + inventory.body
     );
   }
   console.log(JSON.stringify({
     readyStatus: ready.status,
     globalInventoryStatus: inventory.status,
-    contextRef: fixture.contextRef,
+    inventoryContextRef: body.contextRef,
     fixture: fixture.name,
     fixtureReady: fixture.status.ready
   }));
 })().catch(error => { console.error(error.message); process.exit(1); });
 NODE
 )"
-  kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
-    env "HCC_E2E_PORT=${HCC_PORT}" \
-    node -e "$probe_script" "$CONTEXT_NAME" "$MCP_NAME"
+  inventory_probe="$(
+    kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
+      env "HCC_E2E_PORT=${HCC_PORT}" \
+      node -e "$probe_script" "$MCP_NAME"
+  )" || return 1
+  # This only reads the allowlist back from the apiserver. That HCC actually bound
+  # the server to this Context is proven by context_policies_converged, whose
+  # per-Context NetworkPolicies exist only for allowlisted servers.
+  if kctl get context "$CONTEXT_NAME" -n "$MCP_NS" -o json |
+    jq -e --arg server "$MCP_NAME" '(.spec.mcpServers // []) | index($server) != null' \
+      >/dev/null; then
+    allowlisted_by="$CONTEXT_NAME"
+  fi
+  jq -c --arg allowlistedBy "$allowlisted_by" '. + {allowlistedBy: $allowlistedBy}' \
+    <<<"$inventory_probe"
 }
 
 probe_hcc_ready_pod() {
@@ -1576,7 +1587,6 @@ metadata:
     e2e.clerum.io/suite: ${SUITE_NAME}
     e2e.clerum.io/run: "${RUN_LABEL}"
 spec:
-  contextRef: ${CONTEXT_NAME}
   description: E2E MCP fixture for initial fleet readiness.
   image: clerum/mock-mcp-server:test
   imagePullPolicy: IfNotPresent
@@ -1791,11 +1801,12 @@ wait_until 300 "all peer MCP/Context runtimes to converge after releasing the he
 hcc_identity_is_stable ||
   die "HCC restarted instead of completing the released background convergence"
 final_probe="$(probe_hcc_final_context)" ||
-  die "HCC final global metadata inventory did not expose the converged fixture in its Context"
+  die "HCC final global metadata inventory did not expose the converged fixture, or its Context does not allowlist it"
 echo "$final_probe" | jq -e \
   --arg fixture "$MCP_NAME" --arg context "$CONTEXT_NAME" '
     .readyStatus == 200 and .globalInventoryStatus == 200 and
-    .fixture == $fixture and .fixtureReady == true and .contextRef == $context
+    .inventoryContextRef == "*" and
+    .fixture == $fixture and .fixtureReady == true and .allowlistedBy == $context
   ' >/dev/null ||
   die "HCC final probe returned an invalid result: ${final_probe}"
 baseline_policies_unchanged ||

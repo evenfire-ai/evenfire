@@ -398,7 +398,6 @@ export function McpServerTable({
               <ConnectorAgentAccessDialog
                 key={serverKeyAddingAgents}
                 server={{ namespace: row.namespace, name: row.name }}
-                connectorSpec={row.item.spec}
                 agentTargets={agentTargets}
                 boundAgentNames={bindingsForConnector(row.name).flatMap(binding =>
                   binding.agents.map(agent => agent.id)

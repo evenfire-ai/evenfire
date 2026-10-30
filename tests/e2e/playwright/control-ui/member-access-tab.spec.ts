@@ -14,7 +14,6 @@ import { expect, test } from '../helpers/auth-fixture'
 
 const RUN = Date.now()
 const CONTEXT_NAME = `e2e-member-access-ctx-${RUN}`
-const CONTEXT_ID = `e2e-member-access-scope-${RUN}`
 const HOST_NAME = `e2e-member-access-host-${RUN}`
 const HOST_DISPLAY_NAME = `e2e-member-access-agent-${RUN}`
 
@@ -37,18 +36,18 @@ test.describe('Control UI — Member Agents tab', () => {
 
     await controlApi.createContext({
       metadata: { name: CONTEXT_NAME },
-      spec: { contextId: CONTEXT_ID, description: 'E2E member access scope' },
+      spec: { contextId: CONTEXT_NAME, description: 'E2E member access scope' },
     })
     await controlApi.createHost({
       metadata: { name: HOST_NAME },
       spec: {
         host: HOST_DISPLAY_NAME,
-        contextRef: CONTEXT_ID,
+        contextRef: CONTEXT_NAME,
         secretRef: '',
         channels: [],
       },
     })
-    await controlApi.updateUserContexts(userId, [...originalContextIds, CONTEXT_ID])
+    await controlApi.updateUserContexts(userId, [...originalContextIds, CONTEXT_NAME])
   })
 
   test.afterAll(async () => {
@@ -87,7 +86,7 @@ test.describe('Control UI — Member Agents tab', () => {
       .getByRole('row')
       .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
     await expect(row).toHaveCount(1)
-    await expect(row).not.toContainText(CONTEXT_ID)
+    await expect(row).not.toContainText(CONTEXT_NAME)
   })
 
   test("'Add agents' opens the agent picker modal", async ({ authedPage }) => {
@@ -134,7 +133,7 @@ test.describe('Control UI — Member Agents tab', () => {
     }
 
     const { contextIds } = await controlApi.getUserContexts(userId)
-    expect(contextIds ?? []).not.toContain(CONTEXT_ID)
+    expect(contextIds ?? []).not.toContain(CONTEXT_NAME)
     const { agentNames } = await controlApi.getUserAgents(userId)
     expect(agentNames ?? []).not.toContain(HOST_NAME)
   })

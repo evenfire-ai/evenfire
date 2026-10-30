@@ -128,7 +128,6 @@ function makeServer(
     name: name ?? 'test-server',
     namespace: 'mcp-server',
     spec: {
-      contextRef: 'ctx1',
       image: 'test:latest',
       transport: {
         type: 'streamableHttp',
@@ -2477,7 +2476,6 @@ describe('full reconciliation inventory authority', () => {
       ...makeServer({ name: 'updated-server' }),
       generation: 1,
       spec: {
-        contextRef: 'default',
         image: 'clerum/updated-server:old',
         transport: { type: 'streamableHttp', port: 3000 },
       },
@@ -2486,7 +2484,6 @@ describe('full reconciliation inventory authority', () => {
       ...makeServer({ name: 'updated-server' }),
       generation: 2,
       spec: {
-        contextRef: 'default',
         image: 'clerum/updated-server:new',
         transport: { type: 'streamableHttp', port: 3000 },
         egressBindings: [{ dns: 'new.example', port: 443 }],

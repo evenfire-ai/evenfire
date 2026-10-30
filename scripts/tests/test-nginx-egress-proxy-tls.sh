@@ -658,7 +658,6 @@ const server = (baseUrl: string): any => ({
   name: "tls-test",
   namespace: "mcp-server",
   spec: {
-    contextRef: "tls-test",
     image: "clerum/nginx-egress-proxy:0.1.0",
     transport: { type: "streamableHttp", port: 3000 },
     managed: true,

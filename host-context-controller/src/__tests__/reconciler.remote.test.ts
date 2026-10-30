@@ -54,7 +54,6 @@ const REMOTE_SERVER: McpServerCRD = {
   namespace: 'mcp-server',
   uid: 'test-uid-123',
   spec: {
-    contextRef: 'context1',
     image: 'clerum/nginx-egress-proxy:0.1.0',
     transport: { type: 'streamableHttp', port: 3000 },
     managed: true,
@@ -73,7 +72,6 @@ const LOCAL_SERVER: McpServerCRD = {
   namespace: 'mcp-server',
   uid: 'test-uid-456',
   spec: {
-    contextRef: 'context1',
     image: 'clerum/mongodb-mcp:0.9.5',
     transport: { type: 'streamableHttp', port: 3000 },
     managed: true,
