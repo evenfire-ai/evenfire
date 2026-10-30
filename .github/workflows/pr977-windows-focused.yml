@@ -133,7 +133,9 @@ jobs:
           $caseManifest = Get-Content ../../validation/.validation/windows/focused-test-cases.json -Raw |
             ConvertFrom-Json
           $patternParts = @($caseManifest.selected | ForEach-Object { [regex]::Escape([string]$_) })
-          $testNamePattern = '^(?:' + ($patternParts -join '|') + ')$'
+          # Vitest matches the full name (suite plus test); an unanchored title matches across
+          # the Vitest 4/5 suite-name separator without selecting sibling cases.
+          $testNamePattern = '(?:' + ($patternParts -join '|') + ')'
           $env:PR977_DESKTOP_ROOT = (Get-Location).Path
           node ../../validation/scripts/pr977/run-vitest-with-watchdog.mjs `
             --maximum-runtime-ms=480000 `

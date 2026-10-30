@@ -116,11 +116,68 @@ import { describe, it, expect } from 'vitest'
 describe('outer', () => { describe('inner', () => { it('passes', ({ task }) => { expect(task.timeout).toBe(150000); expect(1).toBe(1) }) }) })
 `
   )
+  const caseManifest = JSON.parse(
+    readFileSync(path.join(here, '../../.validation/windows/focused-test-cases.json'), 'utf8')
+  )
+  const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const alternatives = caseManifest.selected.map(escapeRegExp).join('|')
+  writeFileSync(
+    path.join(directory, 'selection.test.ts'),
+    `import { describe, it, expect } from 'vitest'
+describe('Windows plugin storage DACL privacy', () => {
+  ${[...caseManifest.selected, ...caseManifest.deselected]
+    .map(title => `it(${JSON.stringify(title)}, () => expect(true).toBe(true))`)
+    .join('\n  ')}
+})
+`
+  )
   writeFileSync(
     path.join(directory, 'collection.test.ts'),
     `import './missing-collection-module.js'\n`
   )
+  const selectionFile = path.join(directory, 'selection.test.ts')
   const vitest = path.join(dependencyRoot, 'node_modules/vitest/vitest.mjs')
+  function runSelection(pattern, outputName) {
+    const output = path.join(directory, outputName)
+    const processResult = spawnSync(
+      process.execPath,
+      [
+        vitest,
+        'run',
+        '--root',
+        directory,
+        '--maxWorkers=1',
+        '--no-file-parallelism',
+        '--reporter=json',
+        `--outputFile.json=${output}`,
+        '--testNamePattern',
+        pattern,
+        selectionFile,
+      ],
+      { encoding: 'utf8', timeout: 30000, cwd: directory }
+    )
+    assert.equal(processResult.status, 0, processResult.stderr)
+    return JSON.parse(readFileSync(output, 'utf8'))
+  }
+  const anchoredSelection = runSelection(`^(?:${alternatives})$`, 'anchored-selection.json')
+  assert.equal(anchoredSelection.numPassedTests, 0)
+  assert.equal(
+    anchoredSelection.numPendingTests,
+    caseManifest.selected.length + caseManifest.deselected.length
+  )
+  const workingSelection = runSelection(`(?:${alternatives})`, 'working-selection.json')
+  assert.equal(workingSelection.numPassedTests, caseManifest.selected.length)
+  assert.equal(workingSelection.numPendingTests, caseManifest.deselected.length)
+  assert.equal(workingSelection.numFailedTests, 0)
+  const selectedStatuses = new Map(
+    workingSelection.testResults.flatMap(file =>
+      file.assertionResults.map(item => [item.title, item.status])
+    )
+  )
+  for (const title of caseManifest.selected) assert.equal(selectedStatuses.get(title), 'passed')
+  for (const title of caseManifest.deselected)
+    assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(title)))
+  rmSync(selectionFile)
   const outputs = {}
   for (const [name, reporter] of [
     ['standard', 'json'],
