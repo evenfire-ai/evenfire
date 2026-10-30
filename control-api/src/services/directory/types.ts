@@ -25,6 +25,15 @@ export function roleCanDeleteMembers(role: TeamRole | null | undefined): boolean
   return role === 'admin'
 }
 
+export function canManagerInviteAssignment(
+  managerRole: TeamRole | null | undefined,
+  assignmentRole: InviteRole
+): boolean {
+  if (!roleCanInviteMembers(managerRole)) return false
+  if (assignmentRole === 'admin') return roleCanDeleteMembers(managerRole)
+  return true
+}
+
 export type ChannelMapping = {
   emails: string[]
   telegramHandles: string[]

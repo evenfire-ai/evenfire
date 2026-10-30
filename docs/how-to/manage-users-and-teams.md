@@ -45,10 +45,13 @@ These roles govern what a member can do **for their own teams** from the
 [profile UI](../surfaces/profile-ui.md). There:
 
 - An `admin` or `inviter` can send, resend, and revoke member invitations for
-  teams where they hold that role.
-- Only an `admin` can change another member's role or remove them from the
-  team. The `/external/members/*` routes reject changes to your own
-  membership.
+  teams where they hold that role. An `inviter` can invite only as `inviter`
+  or `member`; only an `admin` can invite someone as `admin`.
+- Accepting an invitation never lowers the role of someone who is already an
+  active member of that team.
+- Only an `admin` can change another member's role, remove them from the
+  team, or rename the team. The `/external/members/*` routes reject changes to
+  your own membership.
 - An `admin` can delete another member's account only if they are `admin` on
   **every** team that member belongs to.
 

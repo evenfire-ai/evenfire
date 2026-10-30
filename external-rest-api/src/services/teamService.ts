@@ -1,4 +1,4 @@
-import { controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 import { TeamAgentsResponse, TeamRole } from '../types.js'
 
 type AuthContext = {
@@ -9,16 +9,23 @@ type AuthContext = {
   sessionToken: string
 }
 
-function canInvite(role: TeamRole): boolean {
-  return role === 'admin' || role === 'inviter'
+// A team management failure reported without the upstream path or message.
+export class TeamRequestError extends Error {
+  status: number
+  constructor(status: number) {
+    super(status >= 500 ? 'Team service unavailable' : 'Team request failed')
+    this.name = 'TeamRequestError'
+    this.status = status
+  }
 }
 
-function canDelete(role: TeamRole): boolean {
-  return role === 'admin'
-}
-
-function canManageRoles(role: TeamRole): boolean {
-  return role === 'admin'
+// Control API authorizes team management from the caller's current team
+// membership; translate its refusals instead of re-deciding from the session.
+function controlApiRefusal(error: unknown): 'forbidden' | 'not_found' {
+  if (!(error instanceof ControlApiError)) throw error
+  if (error.status === 403) return 'forbidden'
+  if (error.status === 404) return 'not_found'
+  throw new TeamRequestError(error.status >= 400 && error.status < 500 ? error.status : 502)
 }
 
 export async function getCurrentTeam(auth: AuthContext) {
@@ -72,10 +79,6 @@ export async function renameTeam(
   auth: Pick<AuthContext, 'teamId' | 'role' | 'sessionToken'>,
   name: string
 ) {
-  if (auth.role !== 'admin') {
-    return { error: 'forbidden' as const }
-  }
-
   let team: { id: string; name: string }
   try {
     team = await controlApiRequest<{ id: string; name: string }>(
@@ -86,8 +89,8 @@ export async function renameTeam(
         userSessionToken: auth.sessionToken,
       }
     )
-  } catch {
-    return { error: 'not_found' as const }
+  } catch (error) {
+    return { error: controlApiRefusal(error) }
   }
 
   return {
@@ -130,9 +133,6 @@ export async function updateMemberRole(
   targetUserId: string,
   newRole: TeamRole
 ): Promise<{ error?: 'forbidden' | 'not_found' | 'bad_request'; data?: unknown }> {
-  if (!canManageRoles(auth.role)) {
-    return { error: 'forbidden' }
-  }
   if (targetUserId === auth.userId) {
     return { error: 'bad_request' }
   }
@@ -140,48 +140,50 @@ export async function updateMemberRole(
   try {
     target = await controlApiRequest<{ role: TeamRole }>(
       'GET',
-      `/external/teams/${auth.teamId}/members/${targetUserId}/role`,
+      `/external/teams/${encodeURIComponent(auth.teamId)}/members/${encodeURIComponent(targetUserId)}/role`,
       { userSessionToken: auth.sessionToken }
     )
-  } catch {
-    return { error: 'not_found' }
+  } catch (error) {
+    return { error: controlApiRefusal(error) }
   }
-  const updated = await controlApiRequest<unknown>(
-    'PATCH',
-    `/external/teams/${auth.teamId}/members/${targetUserId}/role`,
-    {
-      body: {
-        role: newRole,
-      },
-      userSessionToken: auth.sessionToken,
-    }
-  )
-  return { data: updated }
+  try {
+    const updated = await controlApiRequest<unknown>(
+      'PATCH',
+      `/external/teams/${encodeURIComponent(auth.teamId)}/members/${encodeURIComponent(targetUserId)}/role`,
+      {
+        body: {
+          role: newRole,
+        },
+        userSessionToken: auth.sessionToken,
+      }
+    )
+    return { data: updated }
+  } catch (error) {
+    return { error: controlApiRefusal(error) }
+  }
 }
 
 export async function inviteMember(auth: AuthContext, email: string, role: TeamRole) {
-  if (!canInvite(auth.role)) {
-    return { error: 'forbidden' as const }
+  try {
+    const invited = await controlApiRequest<{ email: string; token: string }>(
+      'POST',
+      `/external/teams/${auth.teamId}/invitations`,
+      {
+        body: {
+          email,
+          role,
+        },
+        userSessionToken: auth.sessionToken,
+      }
+    )
+    return { invited }
+  } catch (error) {
+    if (controlApiRefusal(error) === 'forbidden') return { error: 'forbidden' as const }
+    throw new TeamRequestError(404)
   }
-
-  const invited = await controlApiRequest<{ email: string; token: string }>(
-    'POST',
-    `/external/teams/${auth.teamId}/invitations`,
-    {
-      body: {
-        email,
-        role,
-      },
-      userSessionToken: auth.sessionToken,
-    }
-  )
-  return { invited }
 }
 
 export async function deleteMember(auth: AuthContext, userId: string) {
-  if (!canDelete(auth.role)) {
-    return { error: 'forbidden' as const }
-  }
   if (!userId || userId === auth.userId) {
     return { error: 'bad_request' as const }
   }
@@ -190,13 +192,13 @@ export async function deleteMember(auth: AuthContext, userId: string) {
   try {
     deleted = await controlApiRequest<unknown>(
       'DELETE',
-      `/external/teams/${auth.teamId}/members/${userId}`,
+      `/external/teams/${encodeURIComponent(auth.teamId)}/members/${encodeURIComponent(userId)}`,
       {
         userSessionToken: auth.sessionToken,
       }
     )
-  } catch {
-    return { error: 'not_found' as const }
+  } catch (error) {
+    return { error: controlApiRefusal(error) }
   }
   return { deleted }
 }

@@ -171,7 +171,7 @@ export async function ensureInvitationUser(
         [normalizedEmail, normalizedInviteeName]
       )
     ).rows[0] as InvitationUserRow
-  } else if (normalizedInviteeName && user.name !== normalizedInviteeName) {
+  } else if (normalizedInviteeName && !user.name) {
     user = (
       await db.query(
         `UPDATE users
@@ -195,7 +195,8 @@ export async function ensureInvitationUser(
       `UPDATE profiles
           SET display_name = $2,
               updated_at = NOW()
-        WHERE user_id = $1`,
+        WHERE user_id = $1
+          AND display_name IS NULL`,
       [user.id, normalizedInviteeName]
     )
   }
