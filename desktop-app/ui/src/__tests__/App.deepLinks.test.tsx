@@ -2,7 +2,7 @@
 import { type ReactElement, type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
@@ -617,6 +617,63 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(desktopUpdateCheckHarness.install).toHaveBeenCalledWith('0.12.0'))
     expect(view.container.textContent).not.toContain('predates')
     expect(view.queryByRole('button', { name: 'Install and restart' })).toBeNull()
+  })
+
+  it('shows exactly two version fields in the update notice', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+    try {
+      const moreInfo = within(view.container).getByRole('button', { name: 'More info' })
+      await userEvent.click(moreInfo)
+      expect(moreInfo.getAttribute('aria-expanded')).toBe('true')
+      const details = view.container.querySelector('.desktop-update-dialog__versions')!
+      expect(Array.from(details.querySelectorAll('dt'), node => node.textContent)).toEqual([
+        'Current version',
+        'Version to install',
+      ])
+      expect(Array.from(details.querySelectorAll('dd'), node => node.textContent)).toEqual([
+        '0.11.9',
+        '0.12.0',
+      ])
+      expect(details.textContent).not.toContain('Compatible versions')
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('dismisses Later for this session and shows an incompatible notice on a fresh launch', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    desktopUpdateCheckHarness.renderButtons = true
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+
+    const notice = within(view.container)
+    expect(notice.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
+    await userEvent.click(notice.getByRole('button', { name: 'Later' }))
+
+    expect(notice.queryByRole('region', { name: 'Desktop update available' })).toBeNull()
+    expect(view.container.querySelector('.app-frame')).not.toBeNull()
+    view.unmount()
+
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: await createOutdatedDesktopReleaseStatus('0.11.9'),
+    })
+    const nextLaunch = renderApp(<App />)
+    try {
+      const launched = within(nextLaunch.container)
+      expect(launched.getByRole('region', { name: 'Desktop update available' })).not.toBeNull()
+      expect(launched.getByRole('button', { name: 'Later' })).not.toBeNull()
+    } finally {
+      nextLaunch.unmount()
+    }
   })
 
   it('shows safe populated failure details and keeps the update notice dismissible', async () => {

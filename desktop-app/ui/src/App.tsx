@@ -425,16 +425,12 @@ function DesktopUpdatePanel({
                 {status ? (
                   <>
                     <div>
-                      <dt>Installed</dt>
+                      <dt>Current version</dt>
                       <dd>{status.currentVersion}</dd>
                     </div>
                     <div>
-                      <dt>Backend target</dt>
+                      <dt>Version to install</dt>
                       <dd>{status.latestVersion}</dd>
-                    </div>
-                    <div>
-                      <dt>Compatible versions</dt>
-                      <dd>{status.compatibleVersions.join(', ')}</dd>
                     </div>
                   </>
                 ) : (
