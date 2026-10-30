@@ -65,6 +65,7 @@ function ScopeRaceHarness({
 
   const auth = {
     isAuthenticated: true,
+    sessionGeneration: 1,
     me,
     runtimeConfigState: null,
   } as AuthContextValue
@@ -118,7 +119,7 @@ describe('useGfsBrowserController authorization-scope continuations', () => {
       </ScopeRaceHarness>
     )
     fireEvent.click(screen.getByRole('button', { name: 'Open delayed GFS resource' }))
-    expect(resolve).toHaveBeenCalledWith(resource.gfsUri)
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(resource.gfsUri))
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Switch to Team B' }))

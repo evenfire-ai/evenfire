@@ -581,7 +581,8 @@ describe('AppService.invokeHostMessage', () => {
           () => service.createGfsFile('parent-a', 'file.txt', 'ZGF0YQ=='),
           () => service.replaceGfsFile('resource-a', 'ZGF0YQ=='),
           () => service.renameGfsResource('resource-a', 'renamed'),
-          () => service.moveGfsResource('resource-a', 'destination-a'),
+          () =>
+            service.moveGfsResource('resource-a', 'destination-a', service.getSessionGeneration()),
           () => service.deleteGfsResource('resource-a'),
         ]
 

@@ -28,6 +28,7 @@ vi.mock('../appService.js', () => ({ AppService: class {} }))
 const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
 const sharedUrl = buildGfsResourceWebLink('https://profile.example', uri)
 const service = {
+  getSessionGeneration: () => 1,
   createGfsResourceDeepLink: vi.fn(async () => ({ url: sharedUrl })),
 }
 const trusted = { senderFrame: { url: 'file:///app/index.html' } }
