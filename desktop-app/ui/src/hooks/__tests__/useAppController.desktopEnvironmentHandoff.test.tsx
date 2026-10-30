@@ -13,6 +13,20 @@ import {
 } from '../domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
 
+vi.mock('../../../../src/windowsSessionAuthorityAcl.js', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../../../../src/windowsSessionAuthorityAcl.js')>()
+  const { createWindowsSessionAuthorityAclUnitFixture } =
+    await import('../../../../testSupport/windowsSessionAuthorityAclUnitFixture.js')
+  return createWindowsSessionAuthorityAclUnitFixture(actual)
+})
+vi.mock('../../../../src/windowsSessionAuthorityFileOps.js', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../../../../src/windowsSessionAuthorityFileOps.js')>()
+  const { createWindowsSessionAuthorityFileOpsUnitFixture } =
+    await import('../../../../testSupport/windowsSessionAuthorityFileOpsUnitFixture.js')
+  return createWindowsSessionAuthorityFileOpsUnitFixture(actual)
+})
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 describe('useAppController login-screen environment selection', () => {
