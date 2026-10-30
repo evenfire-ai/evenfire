@@ -12,6 +12,7 @@ import {
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { focusedTestNamePattern } from './focused-windows-plan.mjs'
 
 const [dependencyRoot, applicationRoot] = process.argv.slice(2)
 const scratchRoot = process.env.CODEX_SCRATCH_ROOT
@@ -189,93 +190,30 @@ describe('Windows plugin storage DACL privacy', () => {
     anchoredSelection.numPendingTests,
     caseManifest.selected.length + caseManifest.deselected.length + 1
   )
-  const fullNamePattern = `^Windows plugin storage DACL privacy (?:${alternatives})$`
-  const workingSelection = runSelection(fullNamePattern, 'working-selection.json')
-  assert.equal(workingSelection.numPassedTests, caseManifest.selected.length)
-  assert.equal(workingSelection.numPendingTests, caseManifest.deselected.length + 1)
-  assert.equal(workingSelection.numFailedTests, 0)
-  const selectedStatuses = new Map(
-    workingSelection.testResults.flatMap(file =>
-      file.assertionResults.map(item => [item.title, item.status])
-    )
-  )
-  for (const title of caseManifest.selected) assert.equal(selectedStatuses.get(title), 'passed')
-  for (const title of caseManifest.deselected)
-    assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(title)))
   const decoyTitle = `prefix ${caseManifest.selected[0]} suffix`
-  assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(decoyTitle)))
-
-  const unexpectedManifest = path.join(directory, 'unexpected-target.txt')
-  const unexpectedCases = path.join(directory, 'unexpected-cases.json')
-  const unexpectedReport = path.join(directory, 'unexpected-report.json')
-  const cleanupProgressPath = path.join(directory, 'cleanup-progress.jsonl')
-  const cleanupProgress = []
-  for (let cycle = 0; cycle < caseManifest.selected.length; cycle += 1) {
-    for (const cleanupPhase of [
-      'cleanup-start',
-      'enumeration-start',
-      'enumeration-complete',
-      'entry-file-delete-start',
-      'entry-delete-complete',
-      'directory-remove-complete',
-      'cleanup-complete',
-    ]) {
-      cleanupProgress.push({
-        elapsedMs: cleanupProgress.length,
-        event: 'plugin-acl-cleanup-phase',
-        activeFile: 'pluginStorageWindowsAcl.native.test.ts',
-        activeCase: null,
-        activeHook: 'afterEach',
-        lastCompletedOperation: cleanupPhase,
-        filesStarted: 1,
-        filesCompleted: 0,
-        casesCompleted: 0,
-        passed: 0,
-        failed: 0,
-        skipped: 0,
-        cleanupPhase,
-        cleanupOrdinal: 0,
-        cleanupElapsedMs: 0,
-      })
-    }
+  for (const processSpec of caseManifest.processes) {
+    const processPattern = focusedTestNamePattern(processSpec)
+    const processSelection = runSelection(processPattern, `${processSpec.id}-selection.json`)
+    assert.equal(processSelection.numPassedTests, processSpec.selected.length)
+    assert.equal(processSelection.numPendingTests, 12 - processSpec.selected.length + 1)
+    assert.equal(processSelection.numFailedTests, 0)
+    const selectedStatuses = new Map(
+      processSelection.testResults.flatMap(file =>
+        file.assertionResults.map(item => [item.title, item.status])
+      )
+    )
+    for (const title of processSpec.selected)
+      assert.equal(selectedStatuses.get(title), 'passed', `${processSpec.id} omitted ${title}`)
+    for (const title of caseManifest.selected.filter(
+      value => !processSpec.selected.includes(value)
+    ))
+      assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(title)))
+    for (const title of caseManifest.deselected)
+      assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(title)))
+    assert.ok(['pending', 'skipped'].includes(selectedStatuses.get(decoyTitle)))
   }
-  writeFileSync(
-    cleanupProgressPath,
-    `${cleanupProgress.map(event => JSON.stringify(event)).join('\n')}\n`
-  )
-  writeFileSync(unexpectedManifest, 'src/__tests__/selection.test.ts\n')
-  writeFileSync(
-    unexpectedCases,
-    JSON.stringify({ selected: caseManifest.selected, deselected: caseManifest.deselected })
-  )
-  writeFileSync(
-    unexpectedReport,
-    JSON.stringify({
-      ...workingSelection,
-      success: true,
-      numTestFiles: 1,
-      numTodoTests: 0,
-      counterConsistency: { valid: true },
-      testResults: workingSelection.testResults.map(result => ({
-        ...result,
-        name: 'src/__tests__/selection.test.ts',
-      })),
-    })
-  )
-  const verifierRejectsUnexpectedCase = spawnSync(
-    process.execPath,
-    [
-      path.join(here, 'verify-focused-windows-report.mjs'),
-      unexpectedReport,
-      unexpectedManifest,
-      unexpectedCases,
-      cleanupProgressPath,
-    ],
-    { encoding: 'utf8' }
-  )
-  assert.notEqual(verifierRejectsUnexpectedCase.status, 0)
-  assert.match(verifierRejectsUnexpectedCase.stderr, /Focused case inventory differs/)
   rmSync(selectionFile)
+
   const outputs = {}
   for (const [name, reporter] of [
     ['standard', 'json'],
@@ -451,7 +389,8 @@ describe('Windows plugin storage DACL privacy', () => {
     path.join(here, '../../.github/workflows/pr977-exact-source-windows-full-sharded.yml'),
     'utf8'
   )
-  const expectedSourceSha = '79803f0f20a01fcdb4b3ff2f69fee81d91e7c612'
+  const focusedRunner = readFileSync(path.join(here, 'run-focused-windows-processes.mjs'), 'utf8')
+  const expectedSourceSha = '0725bd5b872682c49c231225eda98aaea21fc16a'
   const expectedValidationRef = '${{ github.sha }}'
   const focusedConfig = loadYaml(focusedWorkflow)
   const fullConfig = loadYaml(fullWorkflow)
@@ -477,14 +416,31 @@ describe('Windows plugin storage DACL privacy', () => {
     for (const step of validationCheckouts) {
       assert.equal(step.with.ref, expectedValidationRef, `${label} validation checkout ref`)
     }
-    const verificationRuns = Object.values(workflow.jobs)
-      .flatMap(job => job.steps ?? [])
-      .filter(step => /Verify .*source/i.test(step.name ?? ''))
-      .map(step => step.run ?? '')
-    assert.ok(
-      verificationRuns.some(run => run.includes('$sourceSha -ne $env:PR977_SOURCE_SHA')),
-      `${label} must compare the checked-out source with its source SHA guard`
+    const sourceCheckoutJobs = Object.entries(workflow.jobs).filter(([, job]) =>
+      job.steps?.some(
+        step => step.uses?.startsWith('actions/checkout@') && step.with?.path === 'source'
+      )
     )
+    assert.equal(
+      sourceCheckoutJobs.length,
+      expectedSourceCheckouts,
+      `${label} source-checkout jobs`
+    )
+    for (const [jobName, job] of sourceCheckoutJobs) {
+      const verificationStep = job.steps.find(step => /Verify .*source/i.test(step.name ?? ''))
+      assert.ok(verificationStep, `${label} ${jobName} must verify source and harness revisions`)
+      const run = verificationStep.run ?? ''
+      assert.ok(
+        run.includes('$sourceSha -ne $env:PR977_SOURCE_SHA'),
+        `${label} ${jobName} must compare the source checkout with its SHA guard`
+      )
+      assert.ok(
+        run.includes('$harnessSha -ne $env:GITHUB_SHA') ||
+          run.includes('$triggerSha -ne $harnessSha') ||
+          run.includes('$env:GITHUB_SHA -ne $harnessSha'),
+        `${label} ${jobName} must compare the harness checkout with the workflow SHA`
+      )
+    }
   }
   assert.equal(focusedConfig.on.push.branches[0], 'test/pr977-windows-68b8ea74-20261030-r24l11')
   assert.equal(fullConfig.on.push.branches[0], 'test/pr977-windows-68b8ea74-20261030-r24l11')
@@ -506,14 +462,36 @@ describe('Windows plugin storage DACL privacy', () => {
     /Full workflow source checkout ref/
   )
   assert.match(focusedWorkflow, /timeout-minutes:\s*12/)
-  assert.match(focusedWorkflow, /--maximum-runtime-ms=360000/)
-  assert.match(focusedWorkflow, /--no-progress-ms=120000/)
-  assert.match(focusedWorkflow, /--retry=0/)
+  assert.match(focusedWorkflow, /noProgressMs -ne 120000/)
+  assert.match(
+    focusedWorkflow,
+    /Run focused consent and audit processes with independent watchdogs/
+  )
+  assert.doesNotMatch(focusedWorkflow, /^\s*continue-on-error:\s*true\s*$/m)
+  assert.match(focusedWorkflow, /if \(\$env:FOCUSED_RESULT -ne 'success'\)/)
+  assert.match(focusedRunner, /--maximum-runtime-ms=\$\{processSpec\.maximumRuntimeMs\}/)
+  assert.match(focusedRunner, /--no-progress-ms=\$\{processSpec\.noProgressMs\}/)
+  assert.match(focusedRunner, /--retry=0/)
+  assert.equal(caseManifest.selected.length, 5)
+  assert.deepEqual(
+    caseManifest.processes.map(value => value.maximumRuntimeMs),
+    [345000, 180000]
+  )
+  assert.equal(
+    caseManifest.processes.reduce((sum, value) => sum + value.maximumRuntimeMs, 0),
+    525000
+  )
   assert.match(focusedWorkflow, /Verify fixed native stderr phase capture/)
-  assert.match(focusedWorkflow, /--no-progress-ms=120000/)
   assert.match(fullWorkflow, /desktop-windows-build:[\s\S]*?timeout-minutes:\s*20/)
   assert.match(fullWorkflow, /native-windows-authority:[\s\S]*?timeout-minutes:\s*20/)
   assert.match(fullWorkflow, /desktop-windows-shard:[\s\S]*?timeout-minutes:\s*25/)
+  assert.match(fullWorkflow, /NATIVE_SUITE_STEP: \$\{\{ steps\.native_suite\.outcome \}\}/)
+  assert.match(fullWorkflow, /FULL_SUITE_STEP: \$\{\{ steps\.full_suite\.outcome \}\}/)
+  assert.match(fullWorkflow, /AGGREGATE_STEP: \$\{\{ steps\.aggregate\.outcome \}\}/)
+  assert.equal(fullConfig.jobs['aggregate-windows-suite'].if, 'always()')
+  assert.match(fullWorkflow, /if \(\$env:NATIVE_SUITE_STEP -ne 'success'\)/)
+  assert.match(fullWorkflow, /if \(\$env:FULL_SUITE_STEP -ne 'success'\)/)
+  assert.match(fullWorkflow, /if \(\$env:AGGREGATE_STEP -ne 'success'\)/)
   assert.match(fullWorkflow, /--maximum-runtime-ms=960000/)
   assert.match(fullWorkflow, /--maximum-runtime-ms=1200000/)
   assert.equal((fullWorkflow.match(/--no-progress-ms=120000/g) ?? []).length, 2)

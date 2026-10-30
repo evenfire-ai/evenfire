@@ -135,22 +135,24 @@ clearInterval(watchdogPoll)
 clearInterval(timer)
 
 if (termination) {
+  const finalProgress = lastValidProgress(progress) ?? latestProgress
   writeStatus(status, {
     outcome: 'watchdog-expired',
     reason: termination.reason,
     elapsedMs: Date.now() - startedAt,
     termination: termination.action,
-    lastProgress: latestProgress ?? lastValidProgress(progress),
+    lastProgress: finalProgress,
   })
   process.exitCode = 124
 } else {
   const exitCode = Number.isInteger(result.code) ? result.code : 1
+  const finalProgress = lastValidProgress(progress) ?? latestProgress
   writeStatus(status, {
     outcome: exitCode === 0 ? 'completed' : 'failed',
     exitCode,
     signal: result.signal ?? null,
     elapsedMs: Date.now() - startedAt,
-    lastProgress: latestProgress ?? lastValidProgress(progress),
+    lastProgress: finalProgress,
   })
   process.exitCode = exitCode
 }

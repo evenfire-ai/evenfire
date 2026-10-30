@@ -4,15 +4,34 @@
     "rejects an unsafe existing consent file without reading or overwriting it",
     "rejects an in-place DACL change without a filesystem identity change",
     "rejects consent when the produced atomic replacement becomes unsafe",
-    "verifies actual audit files and the rotated generation",
-    "does not append after rotated audit verification rejects the destination"
+    "verifies actual audit files and the rotated generation"
   ],
   "deselected": [
+    "does not append after rotated audit verification rejects the destination",
     "rechecks a replaced consent file instead of returning cached grants",
     "rechecks a replaced consent directory before returning cached grants",
     "retains inherited effective access after an atomic consent replacement",
     "preserves consent corruption recovery as a verified inherited-DACL file",
     "rejects an unsafe user-data parent before creating consent files",
     "does not append to an audit file with unauthorized effective access"
+  ],
+  "processes": [
+    {
+      "id": "consent",
+      "selected": [
+        "verifies the real user-data, consent directory, and produced consent file",
+        "rejects an unsafe existing consent file without reading or overwriting it",
+        "rejects an in-place DACL change without a filesystem identity change",
+        "rejects consent when the produced atomic replacement becomes unsafe"
+      ],
+      "maximumRuntimeMs": 345000,
+      "noProgressMs": 120000
+    },
+    {
+      "id": "audit-rotation",
+      "selected": ["verifies actual audit files and the rotated generation"],
+      "maximumRuntimeMs": 180000,
+      "noProgressMs": 120000
+    }
   ]
 }

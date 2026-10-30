@@ -35,9 +35,14 @@ function run(name, childSource, noProgressMs = 1000) {
 }
 
 try {
-  const completed = run('completed', 'process.exit(0)')
+  const completed = run(
+    'completed',
+    `require('node:fs').appendFileSync(process.env.PR977_PROGRESS_PATH, JSON.stringify({elapsedMs:1,event:'run-completed',activeFile:null,activeCase:null,activeHook:null,lastCompletedOperation:'run-completed',filesStarted:1,filesCompleted:1,casesCompleted:12,passed:4,failed:0,skipped:8})+'\\n'); process.exit(0)`
+  )
   assert.equal(completed.result.status, 0)
   assert.equal(completed.status.outcome, 'completed')
+  assert.equal(completed.status.lastProgress.event, 'run-completed')
+  assert.equal(completed.status.lastProgress.casesCompleted, 12)
 
   const failed = run('failed', 'process.exit(7)')
   assert.equal(failed.result.status, 7, 'Vitest failures must propagate through the watchdog')

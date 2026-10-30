@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 79803f0f20a01fcdb4b3ff2f69fee81d91e7c612
+  PR977_SOURCE_SHA: 0725bd5b872682c49c231225eda98aaea21fc16a
 
 jobs:
   desktop-windows-build:
@@ -25,7 +25,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 79803f0f20a01fcdb4b3ff2f69fee81d91e7c612
+          ref: 0725bd5b872682c49c231225eda98aaea21fc16a
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -95,7 +95,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 79803f0f20a01fcdb4b3ff2f69fee81d91e7c612
+          ref: 0725bd5b872682c49c231225eda98aaea21fc16a
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -217,7 +217,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 79803f0f20a01fcdb4b3ff2f69fee81d91e7c612
+          ref: 0725bd5b872682c49c231225eda98aaea21fc16a
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -335,7 +335,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 79803f0f20a01fcdb4b3ff2f69fee81d91e7c612
+          ref: 0725bd5b872682c49c231225eda98aaea21fc16a
           path: source
           persist-credentials: false
           fetch-depth: 1
