@@ -5,10 +5,11 @@ import { config } from '../src/config.js'
 import type { DiscoveryResult } from '../src/oauth/discovery.js'
 import { claimDeleteDynamicClientForResource } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
-import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import { buildOAuthCallbackDeps } from '../src/routes/external/oauthCallback.js'
 import { attachServerToContext } from '../src/services/contextAllowlist.js'
 import { membershipResult } from './fixtures/contextAllowlist.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 import {
   discoverPilot,
   enableServerInContext,
@@ -174,14 +175,11 @@ async function oauthOf(name: string): Promise<Record<string, unknown>> {
 }
 
 async function stateFor(name: string): Promise<string> {
-  return signOAuthState(config.oauthStateHmacSecret, {
-    subjectKind: 'mcp',
+  return mintMcpState(buildOAuthCallbackDeps(gateway as never), config.oauthStateHmacSecret, {
     mcpServerName: name,
     userId: 'user-9',
     oauthClientId: String((await oauthOf(name)).id),
-    grantKind: 'user',
-    background: false,
-  } as Parameters<typeof signOAuthState>[1])
+  })
 }
 
 function deepLinkOf(html: string): URL {

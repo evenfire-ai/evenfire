@@ -8,14 +8,14 @@
  *     builders (`buildGenericOAuthSpec`, `buildRemoteOAuthSpec` over a real
  *     `discoverRemoteOAuth` result); baked specs are the CRD shape the registry
  *     writes (`id` + `provider` + both refs).
- *   - Legacy rows are written by the real consent callback (`handleOAuthCallback`),
- *     so `provider` is whatever `exchangeAuthCode` persists. The only thing
- *     simulated is the pod that predates install identity: its subject reader
- *     never read `metadata.uid`, so the callback persists `cr_uid` NULL.
+ *   - Legacy rows are written by the producers the pod that predates install
+ *     identity ran on consent: the provider adapter's token parse and the store
+ *     primitive, with `cr_uid` NULL because that pod never read `metadata.uid`.
+ *     This build's callback refuses such a consent, so it cannot write them.
+ *   - Current consents run the real callback on a state from the real mint.
  *   - Reader keys come from `resolveServerOAuth` + `buildMcpServerGrantKey` over
  *     the CR the gateway returns.
  */
-import { vi } from 'vitest'
 import { config } from '../../src/config.js'
 import type { DbClient } from '../../src/db.js'
 import type { PinnedTransport } from '../../src/http/pinnedFetch.js'
@@ -31,11 +31,16 @@ import {
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../../src/oauth/mcpServerOAuthSpec.js'
-import { signOAuthState } from '../../src/oauth/state.js'
-import type { OAuthGrantKey } from '../../src/oauth/store.js'
+import { getOAuthProviderAdapter, isKnownOAuthProvider } from '../../src/oauth/providers.js'
+import {
+  type OAuthGrantKey,
+  bootstrapSharedOAuthGrant,
+  upsertOAuthGrant,
+} from '../../src/oauth/store.js'
 import { buildGenericOAuthSpec } from '../../src/routes/admin/registryGenericOauth.js'
 import { buildRemoteOAuthSpec } from '../../src/routes/admin/remoteMcp.js'
 import type { MockGateway } from '../mockGateway.js'
+import { mintMcpState } from './mcpOAuthState.js'
 import { PILOTS, makeDiscoveryTransport } from './remoteOAuthDiscovery.js'
 
 export const NS = config.mcpServersNamespace
@@ -169,10 +174,17 @@ function tokenResponse(tokens: ConsentTokens) {
 }
 
 /**
- * The consent request the mint would have signed: a context-scope server's state
- * carries the Context it was validated for, a per-user one carries none.
+ * The consent request as the authorize-URL mint signs it today (the real mint, over
+ * the CR currently in the gateway): a context-scope server's state carries the
+ * Context it was validated for, a per-user one carries none.
  */
-function consentInput(name: string, userId: string, server: ServerCR, target?: CallbackTarget) {
+async function consentInput(
+  gateway: MockGateway,
+  name: string,
+  userId: string,
+  server: ServerCR,
+  target?: CallbackTarget
+) {
   const contextScoped =
     (server.spec as { oauth?: { grantScope?: unknown } }).oauth?.grantScope === 'context'
   return {
@@ -182,23 +194,44 @@ function consentInput(name: string, userId: string, server: ServerCR, target?: C
       redirectUri: `https://control.example.com/api/v1/oauth-callback/${OAUTH_ID}`,
     },
     code: `code-${name}-${userId}`,
-    state: signOAuthState(STATE_SECRET, {
-      subjectKind: 'mcp',
-      mcpServerName: name,
-      userId,
-      oauthClientId: OAUTH_ID,
-      grantKind: 'user',
-      background: false,
-      ...(contextScoped ? { contextId: CONTEXT } : {}),
-    }),
+    state: await mintMcpState(
+      {
+        mcpServerReader: currentSubjectReader(gateway),
+        secretReader: { read: async () => ({ 'client-id': 'CID' }) },
+      },
+      STATE_SECRET,
+      {
+        mcpServerName: name,
+        userId,
+        oauthClientId: OAUTH_ID,
+        ...(contextScoped ? { contextId: CONTEXT } : {}),
+      }
+    ),
+  }
+}
+
+/** The production subject reader (uid included) over the gateway. */
+function currentSubjectReader(gateway: MockGateway) {
+  return {
+    async read(serverName: string): Promise<McpServerOAuthSubject | null> {
+      const cr = (await gateway.getResource('mcpservers', serverName, NS)) as ServerCR
+      const resolved = resolveServerOAuthSubject(cr, 'consent')
+      return resolved ? { namespace: NS, ...resolved } : null
+    },
   }
 }
 
 /**
- * Consent through the real callback as a pod WITHOUT install identity did: the CR
- * currently in the gateway (baked) is read as that pod read it, without its uid.
- * The flavor follows the CR's `grantScope` (user → `upsertOAuthGrant`, context →
- * `bootstrapSharedOAuthGrant` with `userId` as bootstrapper).
+ * The grant a pod WITHOUT install identity persisted on consent: the CR currently in
+ * the gateway (baked) read as that pod read it, without its uid, so the row is
+ * written with `cr_uid` NULL.
+ *
+ * This build's callback can no longer produce such a row (it refuses any consent
+ * whose installation it cannot identify), so the fixture runs the two producers
+ * that pod's persistence step ran: the provider adapter parses the token response
+ * and the store primitive writes it, with the same coordinates the callback passes
+ * (user → `upsertOAuthGrant`, context → `bootstrapSharedOAuthGrant` keyed by
+ * `buildMcpServerGrantKey`, `userId` as bootstrapper).
  */
 export async function legacyConsent(
   db: DbClient,
@@ -208,36 +241,50 @@ export async function legacyConsent(
   userId: string,
   tokens: ConsentTokens
 ): Promise<void> {
-  const fetchFn = vi.fn(
-    async () =>
-      ({
-        ok: true,
-        status: 200,
-        json: async () => tokenResponse(tokens),
-        text: async () => JSON.stringify(tokenResponse(tokens)),
-      }) as Response
-  )
-  const current = (await gateway.getResource('mcpservers', name, NS)) as ServerCR
-  const result = await handleOAuthCallback(consentInput(name, userId, current), {
-    db,
-    recipeReader: { read: async () => null },
-    secretReader: { read: async () => ({ 'client-id': 'CID', 'client-secret': 'CSEC' }) },
-    mcpServerReader: {
-      async read(serverName): Promise<McpServerOAuthSubject | null> {
-        const cr = (await gateway.getResource('mcpservers', serverName, NS)) as ServerCR
-        const { uid: _preIdentityPodNeverReadIt, ...metadata } = cr.metadata
-        const resolved = resolveServerOAuthSubject({ ...cr, metadata }, 'consent')
-        return resolved ? { namespace: NS, ...resolved } : null
-      },
-    },
-    contextAccessReader: async () => true,
-    userServerAccessReader: async () => true,
-    fetchFn: fetchFn as unknown as typeof fetch,
-    stateSecret: STATE_SECRET,
-    encryptionKey,
+  const cr = (await gateway.getResource('mcpservers', name, NS)) as ServerCR
+  const { uid: _preIdentityPodNeverReadIt, ...metadata } = cr.metadata
+  const subject = resolveServerOAuthSubject({ ...cr, metadata }, 'consent')
+  if (!subject) throw new Error('fixture: legacy server did not resolve as OAuth')
+  if (subject.crUid !== undefined) throw new Error('fixture: legacy subject carries a uid')
+  const provider = subject.decl.provider
+  if (!isKnownOAuthProvider(provider)) throw new Error('fixture: legacy consent must be baked')
+  const parsed = getOAuthProviderAdapter(provider).parseTokenResponse(tokenResponse(tokens))
+
+  if (subject.grantScope === 'context') {
+    const key = buildMcpServerGrantKey(subject.coordinate, {
+      mcpServerName: name,
+      mcpServersNamespace: NS,
+      contextId: CONTEXT,
+    })
+    if (!key || key.grantKind !== 'shared') throw new Error('fixture: no shared grant key')
+    await bootstrapSharedOAuthGrant(db, encryptionKey, {
+      ownerKind: key.ownerKind,
+      recipeNamespace: key.recipeNamespace,
+      recipeName: key.recipeName,
+      contextId: key.contextId,
+      oauthClientId: key.oauthClientId,
+      bootstrappedByUserId: userId,
+      provider,
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken,
+      accessTokenExpiresInSec: parsed.expiresIn,
+      crUid: key.crUid,
+    })
+    return
+  }
+  await upsertOAuthGrant(db, encryptionKey, {
+    grantKind: 'user',
+    ownerKind: 'mcpserver',
+    recipeNamespace: NS,
+    recipeName: name,
+    userId,
+    oauthClientId: subject.decl.id,
+    provider,
+    accessToken: parsed.accessToken,
+    refreshToken: parsed.refreshToken,
+    accessTokenExpiresInSec: parsed.expiresIn,
+    crUid: subject.crUid,
   })
-  if (result.kind !== 'ok') throw new Error(`fixture: legacy consent failed: ${result.kind}`)
-  if (fetchFn.mock.calls.length !== 1) throw new Error('fixture: baked exchange did not run')
 }
 
 /**
@@ -263,18 +310,12 @@ export async function currentConsent(
       ? { kind: 'remote-shared', origin: 'https://control.example.com' }
       : undefined
   const result = await handleOAuthCallback(
-    { ...consentInput(name, userId, cr, target), iss },
+    { ...(await consentInput(gateway, name, userId, cr, target)), iss },
     {
       db,
       recipeReader: { read: async () => null },
       secretReader: { read: async () => ({}) },
-      mcpServerReader: {
-        async read(serverName): Promise<McpServerOAuthSubject | null> {
-          const cr = (await gateway.getResource('mcpservers', serverName, NS)) as ServerCR
-          const resolved = resolveServerOAuthSubject(cr, 'consent')
-          return resolved ? { namespace: NS, ...resolved } : null
-        },
-      },
+      mcpServerReader: currentSubjectReader(gateway),
       contextAccessReader: async () => true,
       userServerAccessReader: async () => true,
       fetchFn: (async () => {

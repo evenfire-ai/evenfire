@@ -204,9 +204,10 @@ describe('OAuth state — mcp subject round-trip + fail-closed (U5)', () => {
     oauthClientId: 'google-drive',
     grantKind: 'user' as const,
     background: false,
+    crUid: 'uid-gdrive-1',
   }
 
-  it('round-trips subjectKind + mcpServerName + userId + oauthClientId', () => {
+  it('round-trips subjectKind + mcpServerName + userId + oauthClientId + crUid', () => {
     const state = signOAuthState(SECRET, MCP_INPUT)
     const r = verifyOAuthStateSignature(SECRET, state)
     expect(r.kind).toBe('ok')
@@ -215,6 +216,7 @@ describe('OAuth state — mcp subject round-trip + fail-closed (U5)', () => {
       // Narrow to the mcp variant to read mcpServerName.
       if (r.claims.subjectKind === 'mcp') {
         expect(r.claims.mcpServerName).toBe('gdrive')
+        expect(r.claims.crUid).toBe('uid-gdrive-1')
       }
       expect(r.claims.userId).toBe('user-uuid-9')
       expect(r.claims.oauthClientId).toBe('google-drive')
@@ -258,6 +260,39 @@ describe('OAuth state — mcp subject round-trip + fail-closed (U5)', () => {
     const sig = createHmac('sha256', SECRET).update(`v1.${payload}`).digest('base64url')
     const r = verifyOAuthStateSignature(SECRET, `v1.${payload}.${sig}`)
     // Signature is valid, but the malformed mcp shape is rejected at decode.
+    expect(r.kind).toBe('invalid_format')
+  })
+
+  // A state minted before the uid was signed still verifies, so the callback can
+  // refuse it as outdated rather than as an invalid state.
+  it('decodes an mcp state signed without crUid, with no crUid claim', () => {
+    const { crUid: _absent, ...preDeploy } = MCP_INPUT
+    const state = signOAuthState(SECRET, preDeploy as Parameters<typeof signOAuthState>[1])
+    const r = verifyOAuthStateSignature(SECRET, state)
+    expect(r.kind).toBe('ok')
+    if (r.kind === 'ok' && r.claims.subjectKind === 'mcp') {
+      expect('crUid' in r.claims).toBe(false)
+    }
+  })
+
+  it.each([
+    ['empty', ''],
+    ['non-string', 42],
+  ])('fails closed on a validly-signed mcp state with a %s crUid', (_label, crUid) => {
+    const bad = {
+      subjectKind: 'mcp',
+      mcpServerName: 'gdrive',
+      crUid,
+      userId: 'u',
+      oauthClientId: 'c',
+      grantKind: 'user',
+      background: false,
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      nonce: 'n',
+    }
+    const payload = Buffer.from(JSON.stringify(bad)).toString('base64url')
+    const sig = createHmac('sha256', SECRET).update(`v1.${payload}`).digest('base64url')
+    const r = verifyOAuthStateSignature(SECRET, `v1.${payload}.${sig}`)
     expect(r.kind).toBe('invalid_format')
   })
 

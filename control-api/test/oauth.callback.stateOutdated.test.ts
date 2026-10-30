@@ -3,9 +3,12 @@ import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
-import { signOAuthState } from '../src/oauth/state.js'
-import { createOAuthCallbackRouter } from '../src/routes/external/oauthCallback.js'
+import {
+  buildOAuthCallbackDeps,
+  createOAuthCallbackRouter,
+} from '../src/routes/external/oauthCallback.js'
 import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -15,8 +18,10 @@ import { MockGateway } from './mockGateway.js'
  * provider and before touching any table, even when the signed user would
  * pass every access check.
  *
- * The state comes from the real signer without the field, which is exactly
- * what the previous minter emitted. Production callback wiring, mocked pool.
+ * The state comes from the real authorize-URL mint over the live CR, called
+ * without a Context the way the previous minter was: it carries this
+ * installation's uid, so only the missing Context can refuse it. Production
+ * callback wiring, mocked pool.
  */
 
 const mockPoolQuery = vi.fn()
@@ -76,14 +81,11 @@ describe('GET /api/v1/oauth-callback/:id — state without contextId for a conte
   })
 
   it('400 oauth_state_outdated, no provider exchange and no database access', async () => {
-    const legacyState = signOAuthState(config.oauthStateHmacSecret, {
-      subjectKind: 'mcp',
-      mcpServerName: SERVER,
-      userId: MEMBER,
-      oauthClientId: CLIENT,
-      grantKind: 'user',
-      background: false,
-    })
+    const legacyState = await mintMcpState(
+      buildOAuthCallbackDeps(gateway as never),
+      config.oauthStateHmacSecret,
+      { mcpServerName: SERVER, userId: MEMBER, oauthClientId: CLIENT }
+    )
 
     const res = await request(app)
       .get(`/api/v1/oauth-callback/${CLIENT}`)

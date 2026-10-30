@@ -31,8 +31,8 @@ import { config } from '../src/config.js'
 import type { DbClient } from '../src/db.js'
 import { initDb } from '../src/db.js'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
-import { signOAuthState } from '../src/oauth/state.js'
 import { createAdminRouter } from '../src/routes/admin/index.js'
+import { buildOAuthCallbackDeps } from '../src/routes/external/oauthCallback.js'
 import {
   resolveConnectorsForAgents,
   resolveInvocableMcpServersForContexts,
@@ -41,6 +41,7 @@ import { getUserAgents } from '../src/services/directory/agentAccess.js'
 import { getUserContexts, setUserContexts } from '../src/services/directory/contextAccess.js'
 import { seedActiveMember, seedAgentHost, seedControlAdmin } from './fixtures/contextAllowlist.js'
 import { mintHccControlToken } from './fixtures/hccControlToken.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -460,14 +461,14 @@ describeRealPostgres('context-scope grant lifecycle (real Postgres)', () => {
     await connect(u1, 'c2')
     const snapshot = await rows()
     const callsBefore = idp.calls
-    const legacyState = signOAuthState(config.oauthStateHmacSecret, {
-      subjectKind: 'mcp',
-      mcpServerName: SERVER,
-      userId: u1,
-      oauthClientId: CLIENT,
-      grantKind: 'user',
-      background: false,
-    })
+    // The authorize-URL mint over the live CR, without the Context the route would
+    // have validated: the state carries this installation's uid, so only the missing
+    // Context can refuse it.
+    const legacyState = await mintMcpState(
+      buildOAuthCallbackDeps(gateway as never),
+      config.oauthStateHmacSecret,
+      { mcpServerName: SERVER, userId: u1, oauthClientId: CLIENT }
+    )
 
     const res = await callback(legacyState)
 

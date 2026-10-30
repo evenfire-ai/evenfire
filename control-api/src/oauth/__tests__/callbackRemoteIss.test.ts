@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+// State is derived from the REAL producer (T1): the authorize-URL mint, reading the
+// same subject the callback reads. Never hand-write the signed claims.
+import { mintMcpState } from '../../../test/fixtures/mcpOAuthState.js'
 import type { PinnedRawResponse, PinnedTransport } from '../../http/pinnedFetch.js'
 import type { DnsResolver } from '../../http/validateMcpServerSpec.js'
 import {
@@ -7,9 +10,6 @@ import {
   type McpServerOAuthSubject,
   handleOAuthCallback,
 } from '../callback.js'
-// State is derived from the REAL producer (T1): never hand-write the signed
-// wire format. `signOAuthState` is the same signer the authorize-URL path uses.
-import { signOAuthState } from '../state.js'
 
 /**
  * RFC 9207 issuer validation on the remote OAuth lane (H-1).
@@ -46,6 +46,7 @@ function remoteSubject(
   return {
     namespace: 'mcp-servers',
     grantScope: 'user',
+    crUid: 'uid-remote-gdrive',
     decl: {
       id: OAUTH_CLIENT_ID,
       provider: 'remote',
@@ -63,24 +64,20 @@ function remoteSubject(
   }
 }
 
-function signedMcpState(): string {
-  return signOAuthState(STATE_SECRET, {
-    subjectKind: 'mcp',
-    mcpServerName: MCP_SERVER_NAME,
-    userId: USER_ID,
-    oauthClientId: OAUTH_CLIENT_ID,
-    grantKind: 'user',
-    background: false,
-  })
-}
-
-function input(overrides: Partial<CallbackInput> = {}): CallbackInput {
+async function input(
+  deps: CallbackDeps,
+  overrides: Partial<CallbackInput> = {}
+): Promise<CallbackInput> {
   return {
     // Shared remote callback: the URL carries no client id, the real one rides the
     // signed state.
     target: { kind: 'remote-shared', origin: 'https://callback.example.test' },
     code: 'auth-code-single-use',
-    state: signedMcpState(),
+    state: await mintMcpState(deps, STATE_SECRET, {
+      mcpServerName: MCP_SERVER_NAME,
+      userId: USER_ID,
+      oauthClientId: OAUTH_CLIENT_ID,
+    }),
     ...overrides,
   }
 }
@@ -146,7 +143,10 @@ describe('handleOAuthCallback — remote lane RFC 9207 iss validation (H-1)', ()
       pinnedTransport,
     })
 
-    const result = await handleOAuthCallback(input({ iss: 'https://evil.example.test' }), deps)
+    const result = await handleOAuthCallback(
+      await input(deps, { iss: 'https://evil.example.test' }),
+      deps
+    )
 
     // Observable outcome (T4).
     expect(result.kind).toBe('issuer_mismatch')
@@ -162,7 +162,7 @@ describe('handleOAuthCallback — remote lane RFC 9207 iss validation (H-1)', ()
       pinnedTransport,
     })
 
-    const result = await handleOAuthCallback(input({ iss: undefined }), deps)
+    const result = await handleOAuthCallback(await input(deps, { iss: undefined }), deps)
 
     expect(result.kind).toBe('issuer_mismatch')
     expect(pinnedTransport).not.toHaveBeenCalled()
@@ -176,7 +176,7 @@ describe('handleOAuthCallback — remote lane RFC 9207 iss validation (H-1)', ()
       pinnedTransport,
     })
 
-    const result = await handleOAuthCallback(input({ iss: ADVERTISED_ISS }), deps)
+    const result = await handleOAuthCallback(await input(deps, { iss: ADVERTISED_ISS }), deps)
 
     expect(result.kind).toBe('ok')
     expect(pinnedTransport).toHaveBeenCalledTimes(1)
@@ -196,7 +196,7 @@ describe('handleOAuthCallback — remote lane RFC 9207 iss validation (H-1)', ()
       pinnedTransport,
     })
 
-    const result = await handleOAuthCallback(input({ iss: undefined }), deps)
+    const result = await handleOAuthCallback(await input(deps, { iss: undefined }), deps)
 
     expect(result.kind).toBe('issuer_binding_required')
     expect(pinnedTransport).not.toHaveBeenCalled()
@@ -214,7 +214,7 @@ describe('handleOAuthCallback — remote lane RFC 9207 iss validation (H-1)', ()
       pinnedTransport,
     })
 
-    const result = await handleOAuthCallback(input({ iss: ADVERTISED_ISS }), deps)
+    const result = await handleOAuthCallback(await input(deps, { iss: ADVERTISED_ISS }), deps)
 
     expect(result.kind).toBe('issuer_binding_required')
     expect(pinnedTransport).not.toHaveBeenCalled()

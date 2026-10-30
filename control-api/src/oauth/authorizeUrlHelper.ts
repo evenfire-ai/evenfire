@@ -115,9 +115,17 @@ export async function buildAuthorizeUrl(
 
     const decl = subject.decl
     if (decl.id !== input.oauthClientId) return { kind: 'unknown_oauth_client' }
+    // The uid comes from this same read, never from a separate one: a state whose
+    // decl and uid came from two different installations would be sealed onto
+    // whichever one is live at the callback. Without a uid the callback could not
+    // tell installations apart, so no state is signed at all.
+    const crUid = subject.crUid
+    if (!crUid) {
+      throw new Error(`buildAuthorizeUrl: McpServer ${input.mcpServerName} has no metadata.uid`)
+    }
 
-    // The state binds the initiating user, the server and, for a context-scope
-    // consent, the Context the caller validated; the grant scope itself is read
+    // The state binds the initiating user, the server installation and, for a
+    // context-scope consent, the Context the caller validated; the grant scope itself is read
     // again from the CR on the callback.
     return mintAuthorizeUrl(decl, subject.namespace, input, deps, {
       subjectKind: 'mcp',
@@ -127,6 +135,7 @@ export async function buildAuthorizeUrl(
       grantKind: input.grantKind,
       background: input.background ?? false,
       ...(input.contextId !== undefined ? { contextId: input.contextId } : {}),
+      crUid,
     })
   }
 
