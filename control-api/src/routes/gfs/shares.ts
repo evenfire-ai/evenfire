@@ -171,13 +171,15 @@ export async function writeGfsShareBatchInTransaction(
     const ids = params.subjects.map(subject => subject.id ?? '')
     await db.query(
       `INSERT INTO gfs_shares
-         (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by)
-       SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7
+         (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by, introduced_by)
+       SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7, $7
          FROM unnest($3::text[], $4::text[]) AS input(subject_type, subject_id)
        ON CONFLICT (drive, resource_id, subject_type, subject_id)
        DO UPDATE SET permissions = EXCLUDED.permissions,
                      include_descendants = EXCLUDED.include_descendants,
-                     created_by = EXCLUDED.created_by`,
+                     created_by = EXCLUDED.created_by,
+                     introduced_by = COALESCE(gfs_shares.introduced_by, gfs_shares.created_by,
+                                              EXCLUDED.introduced_by)`,
       [
         params.drive,
         params.resourceId,

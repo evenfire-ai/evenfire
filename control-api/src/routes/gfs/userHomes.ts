@@ -340,11 +340,14 @@ export async function restoreUserHomeOwnerInTransaction(
     async binding => {
       await db.query(
         `INSERT INTO gfs_grants
-           (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
-         VALUES ($1, $2, 'user', $3, $4::text[], true, 'platform:user-home')
+           (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by, introduced_by)
+         VALUES ($1, $2, 'user', $3, $4::text[], true, 'platform:user-home', 'platform:user-home')
          ON CONFLICT (drive, resource_id, subject_type, subject_id)
          DO UPDATE SET permissions = EXCLUDED.permissions, inherit = true,
-                       granted_by = 'platform:user-home', updated_at = now()`,
+                       granted_by = 'platform:user-home',
+                       introduced_by = COALESCE(gfs_grants.introduced_by, gfs_grants.granted_by,
+                                                EXCLUDED.introduced_by),
+                       updated_at = now()`,
         [binding.drive, binding.resourceId, binding.userId, [...USER_HOME_OWNER_PERMISSIONS]]
       )
     }

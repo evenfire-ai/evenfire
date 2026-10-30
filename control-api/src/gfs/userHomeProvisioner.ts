@@ -581,8 +581,8 @@ async function installHome(
     }
   } else {
     await db.query(
-      `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
-       VALUES ($1, $2::uuid, 'user', $3, $4::text[], true, 'platform:user-home')
+      `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by, introduced_by)
+       VALUES ($1, $2::uuid, 'user', $3, $4::text[], true, 'platform:user-home', 'platform:user-home')
        ON CONFLICT DO NOTHING`,
       [drive, resource.resource_id, userId, OWNER_PERMISSIONS]
     )
