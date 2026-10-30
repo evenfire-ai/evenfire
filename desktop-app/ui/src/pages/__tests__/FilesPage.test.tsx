@@ -678,6 +678,43 @@ describe('FilesPage', () => {
     expect(replaceFileFromPath).not.toHaveBeenCalled()
   })
 
+  it('holds a root-row Move until the current root view is ready', async () => {
+    const page = await listAccessiblePage([
+      accessibleResource('abcdefabcdefabcdefabcdefabcdefab', 'shared-note.txt', 'file', {
+        parentResourceId: '0123456789abcdef0123456789abcdef',
+        sources: ['grant'],
+        permissions: ['read'],
+      }),
+    ])
+    const resource = page.items[0]
+    if (!resource?.parentResourceId) throw new Error('Missing shared-root producer parent')
+    let finishLoading: (loading: boolean) => void = () => undefined
+    hookMock.useGfsBrowserController.mockImplementation(() => {
+      const [loadingCurrentView, setLoading] = useState(true)
+      finishLoading = setLoading
+      return { ...baseController(), accessibleResources: [resource], loadingCurrentView }
+    })
+    const handled = vi.fn()
+    renderFilesPage(undefined, undefined, null, undefined, {
+      id: 16,
+      targetUri: resource.gfsUri,
+      navigationUri: null,
+      actionId: 'move',
+      targetResource: {
+        resourceId: resource.resourceId,
+        name: resource.name,
+        kind: resource.kind,
+        version: resource.version,
+        parentResourceId: resource.parentResourceId,
+      },
+    }, handled)
+    expect(screen.queryByRole('dialog', { name: 'Move file shared-note.txt' })).toBeNull()
+    expect(handled).not.toHaveBeenCalled()
+    act(() => finishLoading(false))
+    expect(await screen.findByRole('dialog', { name: 'Move file shared-note.txt' })).toBeTruthy()
+    expect(handled).toHaveBeenCalledWith(16)
+  })
+
   it('opens Move for an unreadable row from its parent route', async () => {
     const parentResourceId = '0123456789abcdef0123456789abcdef'
     const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Shared folder'))
@@ -699,11 +736,17 @@ describe('FilesPage', () => {
       bytes: 0,
     }
     const handled = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: parentCrumb,
-      crumbs: [parentCrumb],
-      items: [child],
+    let setLoadingCurrentView: (loading: boolean) => void = () => undefined
+    hookMock.useGfsBrowserController.mockImplementation(() => {
+      const [loadingCurrentView, setLoading] = useState(true)
+      setLoadingCurrentView = setLoading
+      return {
+        ...baseController(),
+        current: parentCrumb,
+        crumbs: [parentCrumb],
+        items: [child],
+        loadingCurrentView,
+      }
     })
 
     renderFilesPage(
@@ -727,6 +770,9 @@ describe('FilesPage', () => {
       handled
     )
 
+    expect(screen.queryByRole('dialog', { name: 'Move file secret.pdf' })).toBeNull()
+    expect(handled).not.toHaveBeenCalled()
+    act(() => setLoadingCurrentView(false))
     expect(await screen.findByRole('dialog', { name: 'Move file secret.pdf' })).toBeTruthy()
     expect(handled).toHaveBeenCalledWith(15)
   })
@@ -1294,7 +1340,15 @@ describe('FilesPage', () => {
 
     const titlebarLeadingRoot = document.createElement('div')
     document.body.appendChild(titlebarLeadingRoot)
-    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    const view = renderFilesPage(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
 
     const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', { name: 'EvenDrive actions' })
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Refresh' }))
@@ -6518,7 +6572,8 @@ describe('FilesPage', () => {
         bytes: 3,
         version: 1,
       },
-      'env-1:user-1:team-1'
+      'env-1:user-1:team-1',
+      0
     )
     // No modal, and FilesPage itself never fetches the bytes.
     expect(screen.queryByRole('dialog', { name: 'diagram.PNG' })).toBeNull()
@@ -6530,7 +6585,15 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue({ ...baseController(), openUri })
     const titlebarLeadingRoot = document.createElement('div')
     document.body.appendChild(titlebarLeadingRoot)
-    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    const view = renderFilesPage(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
     const uri = 'gfs://main/11111111111111111111111111111111'
     const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', { name: 'EvenDrive actions' })
     const copyButton = within(toolbar).getByRole('button', { name: 'Copy link' })
@@ -6578,7 +6641,8 @@ describe('FilesPage', () => {
         bytes: 12,
         version: 1,
       },
-      'env-1:user-1:team-1'
+      'env-1:user-1:team-1',
+      0
     )
   })
 
@@ -6601,7 +6665,8 @@ describe('FilesPage', () => {
         bytes: 3,
         version: 1,
       },
-      'env-1:user-1:team-1'
+      'env-1:user-1:team-1',
+      0
     )
   })
 
@@ -6666,6 +6731,8 @@ describe('FilesPage', () => {
       onOpenPreview,
       undefined,
       undefined,
+      undefined,
+      undefined,
       titlebarLeadingRoot
     )
     fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Open link' }))
@@ -6685,7 +6752,8 @@ describe('FilesPage', () => {
           bytes: 4,
           version: 1,
         },
-        'env-1:user-1:team-1'
+        'env-1:user-1:team-1',
+        0
       )
     )
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from link' })).toBeNull())
@@ -6839,7 +6907,15 @@ describe('FilesPage', () => {
     })
     const titlebarLeadingRoot = document.createElement('div')
     document.body.appendChild(titlebarLeadingRoot)
-    renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    renderFilesPage(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
 
     let breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
     let titleRow = document.querySelector<HTMLElement>('.da-gfs-drive__title-row')
@@ -6882,6 +6958,8 @@ describe('FilesPage', () => {
       moveSourceParentAffordancesById: { 'folder-1': fullBits },
     })
     const phaseThreeView = renderFilesPage(
+      undefined,
+      undefined,
       undefined,
       undefined,
       undefined,

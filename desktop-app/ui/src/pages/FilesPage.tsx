@@ -3241,7 +3241,7 @@ export function FilesPage({
           pushToast?.('The parent location changed before this action could run.', 'error')
           return
         }
-        if (loadingAccessible || ctrl.authorityPending) return
+        if (loadingCurrentView || ctrl.authorityPending) return
         if (accessibleError || ctrl.discoveryFailure) {
           markHandled()
           pushToast?.(
@@ -3262,7 +3262,7 @@ export function FilesPage({
         }
         return
       } else {
-        if (loading || ctrl.authorityPending) return
+        if (loadingCurrentView || ctrl.authorityPending) return
         if (error) {
           markHandled()
           pushToast?.(error, 'error')
@@ -3323,8 +3323,7 @@ export function FilesPage({
     current?.kind,
     currentResourceActions,
     error,
-    loading,
-    loadingAccessible,
+    loadingCurrentView,
     onPendingResourceActionHandled,
     pendingGfsUri,
     pendingResourceAction,
