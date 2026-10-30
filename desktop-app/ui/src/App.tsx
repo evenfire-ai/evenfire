@@ -42,8 +42,8 @@ import {
   revokeGfsSessionAccess,
   useGfsSessionAccessState,
 } from '@hooks/domain/useGfsBrowserController'
-import type { WorkspaceNavigationSnapshot } from '@hooks/domain/useNavigationController'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
+import type { WorkspaceNavigationSnapshot } from '@hooks/domain/useNavigationController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -343,9 +343,18 @@ export function App() {
     vm.isAuthenticated,
     vm.me
   )
+  const gfsSessionGeneration = isGfsSessionGeneration(vm.sessionGeneration)
+    ? vm.sessionGeneration
+    : null
+  const gfsSessionGenerationRef = React.useRef(gfsSessionGeneration)
+  gfsSessionGenerationRef.current = gfsSessionGeneration
   const gfsSessionScopeRef = React.useRef(gfsSessionScope)
   gfsSessionScopeRef.current = gfsSessionScope
-  const gfsSessionAccessState = useGfsSessionAccessState(gfsSessionScope, queryClient)
+  const gfsSessionAccessState = useGfsSessionAccessState(
+    gfsSessionScope,
+    gfsSessionGeneration,
+    queryClient
+  )
   const entityChangeRegistry = React.useMemo(() => new EntityChangeRegistry(), [])
   // Electron never fires `visibilitychange` on OS-window switching; bridge
   // DOM focus/blur so focus-aware query revalidation actually runs.
@@ -870,7 +879,12 @@ export function App() {
         ACTIVE_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, cancelPendingGfsResourceAction, revealWorkspaceTab, vm.beginUserNavigationIntent]
+    [
+      activateAndLaunch,
+      cancelPendingGfsResourceAction,
+      revealWorkspaceTab,
+      vm.beginUserNavigationIntent,
+    ]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -910,7 +924,12 @@ export function App() {
         ACTIVATED_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, cancelPendingGfsResourceAction, revealWorkspaceTab, vm.beginUserNavigationIntent]
+    [
+      activateAndLaunch,
+      cancelPendingGfsResourceAction,
+      revealWorkspaceTab,
+      vm.beginUserNavigationIntent,
+    ]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -1000,28 +1019,39 @@ export function App() {
   )
 
   const openScopedPreviewSection = React.useCallback(
-    (preview: GfsPreviewResource, originatingSessionScope = gfsSessionScope) => {
+    (
+      preview: GfsPreviewResource,
+      originatingSessionScope = gfsSessionScope,
+      originatingSessionGeneration = gfsSessionGeneration
+    ) => {
       if (
         !originatingSessionScope ||
-        gfsSessionScopeRef.current !== originatingSessionScope ||
-        queryClient.getQueryData(desktopQueryKeys.gfsAccessState(originatingSessionScope)) ===
-          'revoked'
+        !isGfsSessionAuthorityCurrent(
+          originatingSessionScope,
+          originatingSessionGeneration,
+          gfsSessionScopeRef.current,
+          gfsSessionGenerationRef.current
+        ) ||
+        queryClient.getQueryData(
+          desktopQueryKeys.gfsAccessState(originatingSessionScope, originatingSessionGeneration)
+        ) === 'revoked'
       ) {
         return false
       }
       vm.openPreviewSection(preview, originatingSessionScope)
       return true
     },
-    [gfsSessionScope, queryClient, vm.openPreviewSection]
+    [gfsSessionScope, gfsSessionGeneration, queryClient, vm.openPreviewSection]
   )
 
   const handleSidebarOpenPreviewSection = React.useCallback(
     (
       preview: Parameters<typeof vm.openPreviewSection>[0],
-      originatingSessionScope?: string | null
+      originatingSessionScope?: string | null,
+      originatingSessionGeneration?: number | null
     ) => {
       cancelPendingGfsResourceAction()
-      openScopedPreviewSection(preview, originatingSessionScope)
+      openScopedPreviewSection(preview, originatingSessionScope, originatingSessionGeneration)
     },
     [cancelPendingGfsResourceAction, openScopedPreviewSection]
   )
@@ -1441,6 +1471,7 @@ export function App() {
    */
   const [pluginGfsPreview, setPluginGfsPreview] = React.useState<{
     sessionScope: string
+    sessionGeneration: number
     gfsUri: string
     name: string
     bytes: number
@@ -1452,6 +1483,7 @@ export function App() {
   const pluginGfsPreviewRef = React.useRef(pluginGfsPreview)
   pluginGfsPreviewRef.current = pluginGfsPreview
   const previousPluginPreviewScopeRef = React.useRef(gfsSessionScope)
+  const previousPluginPreviewGenerationRef = React.useRef(gfsSessionGeneration)
   const previewRefreshGenerationRef = React.useRef(new Map<string, number>())
   const previewRetryTimersRef = React.useRef(new Map<string, number>())
   const previewRetryAttemptRef = React.useRef(new Map<string, number>())
@@ -1473,12 +1505,17 @@ export function App() {
   }, [setWorkspaceTabs])
 
   React.useEffect(() => {
-    if (previousPluginPreviewScopeRef.current === gfsSessionScope) return
+    if (
+      previousPluginPreviewScopeRef.current === gfsSessionScope &&
+      previousPluginPreviewGenerationRef.current === gfsSessionGeneration
+    )
+      return
+    previousPluginPreviewGenerationRef.current = gfsSessionGeneration
     previousPluginPreviewScopeRef.current = gfsSessionScope
     if (!pluginGfsPreviewRef.current) return
     setPluginGfsPreview(null)
     void window.clerum.sandboxUi.setVisible(true).catch(() => undefined)
-  }, [gfsSessionScope])
+  }, [gfsSessionScope, gfsSessionGeneration])
 
   const previousWorkspacePreviewScopeRef = React.useRef(gfsSessionScope)
   React.useLayoutEffect(() => {
@@ -1501,6 +1538,7 @@ export function App() {
   }, [
     cancelPendingGfsResourceAction,
     gfsSessionScope,
+    gfsSessionGeneration,
     revealWorkspaceTab,
     vm.setWorkspaceTabs,
     vm.workspaceTabs,
@@ -1543,10 +1581,20 @@ export function App() {
             })
           : null
       if (preview?.kind === 'image') {
-        const sessionScope = gfsSessionScopeRef.current
+        const sessionScope = gfsSessionScope
+        const sessionGeneration = gfsSessionGeneration
         if (
+          !isGfsSessionAuthorityCurrent(
+            sessionScope,
+            sessionGeneration,
+            gfsSessionScopeRef.current,
+            gfsSessionGenerationRef.current
+          ) ||
           !sessionScope ||
-          queryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope)) === 'revoked'
+          !isGfsSessionGeneration(sessionGeneration) ||
+          queryClient.getQueryData(
+            desktopQueryKeys.gfsAccessState(sessionScope, sessionGeneration)
+          ) === 'revoked'
         )
           return
         // An image opens as an overlay OVER the plugin, keeping the user in the
@@ -1556,6 +1604,7 @@ export function App() {
         void window.clerum.sandboxUi.setVisible(false).catch(() => undefined)
         setPluginGfsPreview({
           sessionScope,
+          sessionGeneration,
           gfsUri: preview.gfsUri,
           name: preview.name,
           bytes: preview.bytes,
@@ -1580,19 +1629,30 @@ export function App() {
       vm.openFilesSection(resource.gfsUri)
     })
     return () => off?.()
-  }, [openScopedPreviewSection, queryClient, vm.openFilesSection])
+  }, [
+    gfsSessionScope,
+    gfsSessionGeneration,
+    openScopedPreviewSection,
+    queryClient,
+    vm.openFilesSection,
+  ])
 
   const handlePluginGfsPreviewDownloadError = React.useCallback(
     (owner: NonNullable<typeof pluginGfsPreview>, error: unknown) => {
       if (
         pluginGfsPreviewRef.current !== owner ||
-        gfsSessionScopeRef.current !== owner.sessionScope ||
+        !isGfsSessionAuthorityCurrent(
+          owner.sessionScope,
+          owner.sessionGeneration,
+          gfsSessionScopeRef.current,
+          gfsSessionGenerationRef.current
+        ) ||
         isGfsStaleSessionAuthorityFailure(error)
       )
         return
       const status = authoritativeGfsStatus(error)
       if (status === 401 || isGfsSessionAuthorityFailure(error, 'operation')) {
-        revokeGfsSessionAccess(queryClient, owner.sessionScope)
+        revokeGfsSessionAccess(queryClient, owner.sessionScope, owner.sessionGeneration)
         expireAppGfsPreviews()
       } else if (status === 403 || status === 404) {
         return
@@ -1681,7 +1741,8 @@ export function App() {
       id: number,
       preview: GfsPreviewResource,
       returnLocation: { gfsUri: string | null; name: string | null },
-      originatingSessionScope?: string | null
+      originatingSessionScope?: string | null,
+      originatingSessionGeneration = gfsSessionGeneration
     ) => {
       const request = activeGfsDeepLinkRef.current
       const sessionScope = originatingSessionScope
@@ -1689,8 +1750,15 @@ export function App() {
         !request ||
         request.id !== id ||
         !sessionScope ||
-        gfsSessionScopeRef.current !== sessionScope ||
-        queryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope)) === 'revoked'
+        !isGfsSessionAuthorityCurrent(
+          sessionScope,
+          originatingSessionGeneration,
+          gfsSessionScopeRef.current,
+          gfsSessionGenerationRef.current
+        ) ||
+        queryClient.getQueryData(
+          desktopQueryKeys.gfsAccessState(sessionScope, originatingSessionGeneration)
+        ) === 'revoked'
       ) {
         return false
       }
@@ -1702,7 +1770,7 @@ export function App() {
         sessionScope
       )
     },
-    [gfsSessionScope, queryClient, vm.completeGfsResourceNavigationPreview]
+    [gfsSessionScope, gfsSessionGeneration, queryClient, vm.completeGfsResourceNavigationPreview]
   )
 
   const previewSessionScope =
@@ -1729,7 +1797,10 @@ export function App() {
           previewSessionGeneration,
           livePreviewAuthorityRef.current.scope,
           livePreviewAuthorityRef.current.generation
-        )
+        ) &&
+        queryClient.getQueryData(
+          desktopQueryKeys.gfsAccessState(previewSessionScope!, previewSessionGeneration)
+        ) !== 'revoked'
       if (!ownsAuthority()) return
       const queryFilter = {
         queryKey: desktopQueryKeys.gfsRoot,
@@ -1804,6 +1875,7 @@ export function App() {
             return current
           return {
             sessionScope: current.sessionScope,
+            sessionGeneration: current.sessionGeneration,
             gfsUri,
             name: preview.name,
             bytes: preview.bytes,
@@ -1824,6 +1896,7 @@ export function App() {
           !isGfsStaleSessionAuthorityFailure(error) &&
           (status === 401 || isGfsSessionAuthorityFailure(error, 'operation'))
         ) {
+          revokeGfsSessionAccess(queryClient, previewSessionScope!, previewSessionGeneration)
           // A 401 is session-wide, unlike a resource-scoped 403/404. Purge
           // and typed session-authority failures are session-wide. Purge every
           // open GFS preview immediately; never keep displaying bytes fetched
@@ -1893,10 +1966,16 @@ export function App() {
     }
     const revalidateGfs = (hardRecovery = false) => {
       if (!active) return
-      const currentSessionScope = gfsSessionScopeRef.current
       if (
-        !currentSessionScope ||
-        queryClient.getQueryData(desktopQueryKeys.gfsAccessState(currentSessionScope)) === 'revoked'
+        !isGfsSessionAuthorityCurrent(
+          previewSessionScope,
+          previewSessionGeneration,
+          gfsSessionScopeRef.current,
+          gfsSessionGenerationRef.current
+        ) ||
+        queryClient.getQueryData(
+          desktopQueryKeys.gfsAccessState(previewSessionScope!, previewSessionGeneration)
+        ) === 'revoked'
       )
         return
       if (gfsRevalidationInFlight) {
@@ -1954,11 +2033,17 @@ export function App() {
     void entityChangeBridge
       .subscribe(event => {
         if (event.type === 'stream.closing' && event.reason === 'session_expired') {
-          const currentSessionScope = gfsSessionScopeRef.current
-          if (currentSessionScope) {
+          if (
+            isGfsSessionAuthorityCurrent(
+              previewSessionScope,
+              previewSessionGeneration,
+              gfsSessionScopeRef.current,
+              gfsSessionGenerationRef.current
+            )
+          ) {
             // Preserve the original authority signal before the registry maps it
             // to a generic resync event for its other subscribers.
-            revokeGfsSessionAccess(queryClient, currentSessionScope)
+            revokeGfsSessionAccess(queryClient, previewSessionScope!, previewSessionGeneration)
             expireAppGfsPreviews()
           }
         }
@@ -2006,15 +2091,33 @@ export function App() {
     vm.activeWorkspaceTab?.kind === 'preview' ? vm.activeWorkspaceTab : undefined
   const activePreviewTabId = activePreviewTab?.id ?? null
   const activePreviewPayload =
-    activePreviewTab?.preview?.sessionScope === gfsSessionScope ? activePreviewTab.preview : null
+    activePreviewTab?.preview?.sessionScope === gfsSessionScope &&
+    isGfsSessionGeneration(gfsSessionGeneration)
+      ? activePreviewTab.preview
+      : null
   const isGfsPreviewSessionScopeCurrent = React.useCallback(
     (sessionScope: string) =>
-      gfsSessionScopeRef.current === sessionScope &&
-      queryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope)) !== 'revoked',
-    [queryClient]
+      isGfsSessionAuthorityCurrent(
+        sessionScope,
+        gfsSessionGeneration,
+        gfsSessionScopeRef.current,
+        gfsSessionGenerationRef.current
+      ) &&
+      queryClient.getQueryData(
+        desktopQueryKeys.gfsAccessState(sessionScope, gfsSessionGeneration)
+      ) !== 'revoked',
+    [gfsSessionGeneration, queryClient]
   )
   const activePluginGfsPreview =
-    pluginGfsPreview?.sessionScope === gfsSessionScope ? pluginGfsPreview : null
+    pluginGfsPreview &&
+    isGfsSessionAuthorityCurrent(
+      pluginGfsPreview.sessionScope,
+      pluginGfsPreview.sessionGeneration,
+      gfsSessionScope,
+      gfsSessionGeneration
+    )
+      ? pluginGfsPreview
+      : null
   const isActivePluginGfsPreviewScopeCurrent = React.useCallback(
     () =>
       activePluginGfsPreview !== null &&
@@ -4851,7 +4954,9 @@ export function App() {
                                       onOpenPreview={handleSidebarOpenPreviewSection}
                                       onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
                                       pendingResourceAction={pendingGfsResourceAction}
-                                      onPendingResourceActionHandled={handleGfsResourceActionHandled}
+                                      onPendingResourceActionHandled={
+                                        handleGfsResourceActionHandled
+                                      }
                                       routeDialogRequestId={gfsRouteDialogRequestId}
                                       onRouteDialogRequestHandled={
                                         handleGfsRouteDialogRequestHandled
@@ -4870,9 +4975,13 @@ export function App() {
                                         reloadVersion={activePreviewPayload.reloadVersion}
                                         unavailable={activePreviewPayload.unavailable}
                                         sessionScope={activePreviewPayload.sessionScope}
-                                        isGfsPreviewSessionScopeCurrent={isGfsPreviewSessionScopeCurrent}
+                                        isGfsPreviewSessionScopeCurrent={
+                                          isGfsPreviewSessionScopeCurrent
+                                        }
                                         pendingResourceAction={pendingGfsResourceAction}
-                                        onPendingResourceActionHandled={handleGfsResourceActionHandled}
+                                        onPendingResourceActionHandled={
+                                          handleGfsResourceActionHandled
+                                        }
                                         pushToast={vm.pushToast}
                                         onOpenRoute={handleOpenGfsRoute}
                                         onRenameCommitted={renamedUri => {
@@ -5002,29 +5111,30 @@ export function App() {
                                 onResolve={resolvePluginConsent}
                               />
                             ) : null}
-                          {activePluginGfsPreview ? (
-                            <GfsImagePreview
-                              key={`${activePluginGfsPreview.gfsUri}:${activePluginGfsPreview.reloadVersion}`}
-                              byteLength={activePluginGfsPreview.bytes}
-                              fileName={activePluginGfsPreview.name}
-                              gfsUri={activePluginGfsPreview.gfsUri}
-                              mimeType={activePluginGfsPreview.mimeType}
-                              unavailable={
-                                activePluginGfsPreview.unavailable ||
-                                gfsSessionAccessState === 'revoked' ||
-                                queryClient.getQueryData(
-                                  desktopQueryKeys.gfsAccessState(
-                                    activePluginGfsPreview.sessionScope
-                                  )
-                                ) === 'revoked'
-                              }
-                              onDownloadError={error =>
-                                handlePluginGfsPreviewDownloadError(activePluginGfsPreview, error)
-                              }
-                              isScopeCurrent={isActivePluginGfsPreviewScopeCurrent}
-                              onClose={closePluginGfsPreview}
-                            />
-                          ) : null}
+                            {activePluginGfsPreview ? (
+                              <GfsImagePreview
+                                key={`${activePluginGfsPreview.gfsUri}:${activePluginGfsPreview.reloadVersion}`}
+                                byteLength={activePluginGfsPreview.bytes}
+                                fileName={activePluginGfsPreview.name}
+                                gfsUri={activePluginGfsPreview.gfsUri}
+                                mimeType={activePluginGfsPreview.mimeType}
+                                unavailable={
+                                  activePluginGfsPreview.unavailable ||
+                                  gfsSessionAccessState === 'revoked' ||
+                                  queryClient.getQueryData(
+                                    desktopQueryKeys.gfsAccessState(
+                                      activePluginGfsPreview.sessionScope,
+                                      activePluginGfsPreview.sessionGeneration
+                                    )
+                                  ) === 'revoked'
+                                }
+                                onDownloadError={error =>
+                                  handlePluginGfsPreviewDownloadError(activePluginGfsPreview, error)
+                                }
+                                isScopeCurrent={isActivePluginGfsPreviewScopeCurrent}
+                                onClose={closePluginGfsPreview}
+                              />
+                            ) : null}
                           </GfsDragSessionProvider>
                         </DesktopStateProvider>
                       </McpRuntimeProvider>

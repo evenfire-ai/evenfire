@@ -10,6 +10,7 @@ import { Button, IconButton, Pill, SelectableOption, TextInput } from '@componen
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { IconChat, IconContexts } from '@components/SidebarNav/icons'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { isGfsSessionGeneration } from '@hooks/domain/queryKeys'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import {
   isGfsSessionAuthorityFailure,
@@ -117,7 +118,12 @@ export const HeaderActions = React.memo(function HeaderActions({
     auth?.isAuthenticated && !auth.authTransitioning && auth.me
       ? `${auth.runtimeConfigState?.envKey ?? ''}:${auth.me.id}:${auth.me.teamId ?? ''}`
       : null
-  const gfsAccessState = useGfsSessionAccessState(principalIdentity)
+  const publishedSessionGeneration = isGfsSessionGeneration(auth?.sessionGeneration)
+    ? auth.sessionGeneration
+    : null
+  const publishedSessionGenerationRef = useRef(publishedSessionGeneration)
+  publishedSessionGenerationRef.current = publishedSessionGeneration
+  const gfsAccessState = useGfsSessionAccessState(principalIdentity, publishedSessionGeneration)
   const { accessCatalog: agentsAccessCatalog, loading: agentsCatalogLoading } =
     useAgentsDataController()
   const { globalMcpServers, mcpServersByAgent } = useMcpServersDataController()
@@ -163,6 +169,7 @@ export const HeaderActions = React.memo(function HeaderActions({
     uri: string
     principalIdentity: string | null
     authorizationEpoch: number
+    sessionGeneration: number | null
     status: 'loading' | 'resolved' | 'unavailable'
     name?: string
     kind?: 'directory' | 'file'
@@ -270,6 +277,7 @@ export const HeaderActions = React.memo(function HeaderActions({
         uri: exactGfsUri,
         principalIdentity: null,
         authorizationEpoch: gfsAuthorizationChangeEpoch,
+        sessionGeneration: publishedSessionGeneration,
         status: 'unavailable',
       })
       return
@@ -281,6 +289,7 @@ export const HeaderActions = React.memo(function HeaderActions({
       uri: exactGfsUri,
       principalIdentity: currentIdentity,
       authorizationEpoch: gfsAuthorizationChangeEpoch,
+      sessionGeneration: publishedSessionGeneration,
       status: 'loading',
     })
     let cancelled = false
@@ -289,6 +298,7 @@ export const HeaderActions = React.memo(function HeaderActions({
       generation === gfsSearchGenerationRef.current &&
       searchQueryRef.current === searchQuery &&
       principalIdentityRef.current === currentIdentity &&
+      publishedSessionGenerationRef.current === publishedSessionGeneration &&
       gfsAuthorizationChangeEpochRef.current === gfsAuthorizationChangeEpoch &&
       gfsAccessStateRef.current === 'active'
     void (async () => {
@@ -297,7 +307,10 @@ export const HeaderActions = React.memo(function HeaderActions({
         const getSessionGeneration = window.clerum.auth?.getSessionGeneration
         if (!getSessionGeneration) throw new Error('Main session ownership is unavailable')
         expectedSessionGeneration = await getSessionGeneration()
-        if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+        if (
+          !isGfsSessionGeneration(expectedSessionGeneration) ||
+          expectedSessionGeneration !== publishedSessionGeneration
+        ) {
           throw new Error('Main session ownership is unavailable')
         }
         if (!isCurrentRequest()) return
@@ -318,6 +331,7 @@ export const HeaderActions = React.memo(function HeaderActions({
             uri: exactGfsUri,
             principalIdentity: currentIdentity,
             authorizationEpoch: gfsAuthorizationChangeEpoch,
+            sessionGeneration: publishedSessionGeneration,
             status: 'unavailable',
           })
           return
@@ -327,6 +341,7 @@ export const HeaderActions = React.memo(function HeaderActions({
           uri: exactGfsUri,
           principalIdentity: currentIdentity,
           authorizationEpoch: gfsAuthorizationChangeEpoch,
+          sessionGeneration: publishedSessionGeneration,
           status: 'resolved',
           name: sanitizeAppTabTitle(resource.name) || 'Unnamed',
           kind,
@@ -339,6 +354,7 @@ export const HeaderActions = React.memo(function HeaderActions({
               uri: exactGfsUri,
               principalIdentity: currentIdentity,
               authorizationEpoch: gfsAuthorizationChangeEpoch,
+              sessionGeneration: publishedSessionGeneration,
               status: 'unavailable',
             })
           }
@@ -355,15 +371,15 @@ export const HeaderActions = React.memo(function HeaderActions({
         if (currentSessionGeneration !== expectedSessionGeneration || !isCurrentRequest()) {
           return
         }
-        const message = error instanceof Error ? error.message : String(error)
-        if (queryClient && isGfsSessionAuthorityFailure(message, 'operation')) {
-          revokeGfsSessionAccess(queryClient, currentIdentity)
+        if (queryClient && isGfsSessionAuthorityFailure(error, 'operation')) {
+          revokeGfsSessionAccess(queryClient, currentIdentity, expectedSessionGeneration)
         }
         setGfsSearchResult({
           query: searchQuery,
           uri: exactGfsUri,
           principalIdentity: currentIdentity,
           authorizationEpoch: gfsAuthorizationChangeEpoch,
+          sessionGeneration: publishedSessionGeneration,
           status: 'unavailable',
         })
       }
@@ -378,6 +394,7 @@ export const HeaderActions = React.memo(function HeaderActions({
     gfsAccessState,
     gfsAuthorizationChangeEpoch,
     principalIdentity,
+    publishedSessionGeneration,
     queryClient,
     searchOpen,
     searchQuery,
@@ -600,7 +617,8 @@ export const HeaderActions = React.memo(function HeaderActions({
     gfsSearchResult?.query === searchQuery &&
     gfsSearchResult.uri === exactGfsUri &&
     gfsSearchResult.principalIdentity === principalIdentity &&
-    gfsSearchResult.authorizationEpoch === gfsAuthorizationChangeEpoch
+    gfsSearchResult.authorizationEpoch === gfsAuthorizationChangeEpoch &&
+    gfsSearchResult.sessionGeneration === publishedSessionGeneration
       ? gfsSearchResult
       : null
   const totalMatches = isExactGfsLinkQuery

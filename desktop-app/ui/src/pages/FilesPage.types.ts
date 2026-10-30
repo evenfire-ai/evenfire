@@ -52,14 +52,16 @@ export interface FilesPageProps {
    */
   onOpenPreview?: (
     preview: GfsPreviewResource,
-    originatingSessionScope?: string | null
+    originatingSessionScope?: string | null,
+    originatingSessionGeneration?: number | null
   ) => void | boolean
   /** Guarded preview completion for the queued resource-link request. */
   onOpenPendingGfsPreview?: (
     id: number,
     preview: GfsPreviewResource,
     returnLocation: { gfsUri: string | null; name: string | null },
-    originatingSessionScope?: string | null
+    originatingSessionScope?: string | null,
+    originatingSessionGeneration?: number | null
   ) => boolean
   /** Monotonic App request to open the existing route-entry dialog. */
   routeDialogRequestId?: number

@@ -113,10 +113,10 @@ export function FilePreviewPage({
   const capturedSessionGeneration = ctrl.sessionGeneration
   const handlePreviewAuthorityFailure = useCallback(
     (
-      message: string,
+      error: unknown,
       scope: string | null = capturedSessionScope,
       generation: number | null = capturedSessionGeneration
-    ) => ctrl.handleAuthorityFailure(message, 'operation', scope, generation),
+    ) => ctrl.handleAuthorityFailure(error, 'operation', scope, generation),
     [ctrl.handleAuthorityFailure, capturedSessionGeneration, capturedSessionScope]
   )
 

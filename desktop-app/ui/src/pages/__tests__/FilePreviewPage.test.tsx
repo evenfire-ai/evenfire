@@ -145,6 +145,43 @@ describe('FilePreviewPage', () => {
     vi.restoreAllMocks()
   })
 
+  it('keeps the current preview when a delayed resource error belongs to a replaced session', async () => {
+    const authority = await vi.importActual<typeof import('@hooks/domain/useGfsBrowserController')>('@hooks/domain/useGfsBrowserController')
+    const staleError = new Error(await resolveDeniedMessage('gfs://main/current-preview', { code: 'unauthorized', message: 'not authenticated' }, 401))
+    staleError.name = 'GfsStaleSessionAuthorityError'
+    let setAccessState: (state: 'active' | 'revoked') => void = () => undefined
+    const handleAuthorityFailure = vi.fn((error: unknown) => {
+      const isAuthorityFailure = authority.isGfsSessionAuthorityFailure(error, 'operation')
+      if (isAuthorityFailure) setAccessState('revoked')
+      return isAuthorityFailure
+    })
+    hookMock.useGfsBrowserController.mockImplementation(() => {
+      const [accessState, setState] = useState<'active' | 'revoked'>('active')
+      setAccessState = setState
+      return { ...controller(accessState), handleAuthorityFailure }
+    })
+    let rejectRefresh: (error: Error) => void = () => undefined
+    const delayedRefresh = new Promise<never>((_resolve, reject) => { rejectRefresh = reject })
+    let resolveCalls = 0
+    stubGfs({
+      downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
+      resolve: async uri => {
+        resolveCalls += 1
+        if (resolveCalls === 1) return resolvePreviewResource(uri)
+        return delayedRefresh
+      },
+    })
+    render(<FilePreviewPage gfsUri="gfs://main/current-preview" fileName="current.png" fileKind="image" mimeType="image/png" byteLength={3} />)
+    expect(await screen.findByAltText('Preview of current.png')).toBeTruthy()
+    fireEvent.focus(window)
+    await waitFor(() => expect(resolveCalls).toBeGreaterThan(1))
+    await act(async () => rejectRefresh(staleError))
+    await waitFor(() => expect(handleAuthorityFailure).toHaveBeenCalled())
+    expect(screen.queryByAltText('Preview of current.png')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'File unavailable' })).toBeNull()
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(staleError, 'operation', 'preview-test-user:main', 1)
+  })
+
   it('mounts the image body for an image preview tab', async () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
     stubDownload(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
@@ -1038,7 +1075,7 @@ describe('FilePreviewPage', () => {
       downloadPreview: async () => ({
         bytes: new TextEncoder().encode('# Keyboard copy').buffer,
       }),
-      resolve: async () => ({ kind: 'file' }),
+      resolve: resolvePreviewResource,
     })
 
     render(
@@ -1055,10 +1092,13 @@ describe('FilePreviewPage', () => {
     trigger.focus()
     await user.keyboard('{Enter}')
     const menu = screen.getByRole('menu', { name: 'Actions for keyboard.md' })
-    await user.keyboard('{End}')
-    expect(document.activeElement).toBe(
-      within(menu).getByRole('menuitem', { name: 'Copy content' })
-    )
+    const copyItem = within(menu).getByRole('menuitem', { name: 'Copy content' })
+    const enabledItems = within(menu).getAllByRole('menuitem').filter(item => !(item as HTMLButtonElement).disabled)
+    const copyIndex = enabledItems.indexOf(copyItem)
+    expect(copyIndex).toBeGreaterThanOrEqual(0)
+    await user.keyboard('{Home}')
+    for (let index = 0; index < copyIndex; index += 1) await user.keyboard('{ArrowDown}')
+    expect(document.activeElement).toBe(copyItem)
     await user.keyboard('{Enter}')
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('# Keyboard copy'))
@@ -1428,6 +1468,7 @@ describe('FilePreviewPage', () => {
       401
     )
 
+    const sessionError = new Error(sessionMessage)
     // The controller classifies this as a session-authority failure (revokes).
     const controllerState = controller('active', () => true)
     hookMock.useGfsBrowserController.mockReturnValue(controllerState)
@@ -1437,7 +1478,7 @@ describe('FilePreviewPage', () => {
       resolve: async () => {
         resolveCount += 1
         if (resolveCount === 1) return await resolvePreviewResource('gfs://main/secret')
-        throw new Error(sessionMessage)
+        throw sessionError
       },
     })
 
@@ -1457,7 +1498,7 @@ describe('FilePreviewPage', () => {
 
     await waitFor(() =>
       expect(controllerState.handleAuthorityFailure).toHaveBeenCalledWith(
-        sessionMessage,
+        sessionError,
         'operation',
         'preview-test-user:main',
         1

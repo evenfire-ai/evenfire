@@ -1128,11 +1128,12 @@ export function FilesPage({
   const openFilePreview = (
     resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name' | 'version'>,
     openPreview = onOpenPreview,
-    originatingSessionScope: string | null = ctrl.sessionScope
+    originatingSessionScope: string | null = ctrl.sessionScope,
+    originatingSessionGeneration: number | null = ctrl.sessionGeneration
   ): boolean => {
     const preview = resolveGfsPreview(resource)
     if (!preview || !openPreview) return false
-    return openPreview(preview, originatingSessionScope) !== false
+    return openPreview(preview, originatingSessionScope, originatingSessionGeneration) !== false
   }
 
   useEffect(() => {
@@ -1682,7 +1683,8 @@ export function FilesPage({
     openPendingPreview?: (
       preview: GfsPreviewResource,
       returnLocation: { gfsUri: string | null; name: string | null },
-      originatingSessionScope: string | null
+      originatingSessionScope: string | null,
+      originatingSessionGeneration: number | null
     ) => boolean,
     filesActionSeedRequestId?: number
   ) => {
@@ -1711,7 +1713,8 @@ export function FilesPage({
             gfsUri: returnCrumb?.gfsUri ?? null,
             name: returnCrumb?.name ?? null,
           },
-          opened.originatingSessionScope
+          opened.originatingSessionScope,
+          opened.originatingSessionGeneration
         )
         if (!previewOpened) return false
         onOpened?.()
@@ -1735,7 +1738,12 @@ export function FilesPage({
         onOpened?.()
         return true
       }
-      const previewOpened = openFilePreview(opened, onOpenPreview, opened.originatingSessionScope)
+      const previewOpened = openFilePreview(
+        opened,
+        onOpenPreview,
+        opened.originatingSessionScope,
+        opened.originatingSessionGeneration
+      )
       if (!shouldContinue()) return false
       ctrl.restoreCrumbs(returnCrumbs)
       if (!previewOpened) {
@@ -1867,8 +1875,14 @@ export function FilesPage({
       },
       isCurrent,
       onOpenPendingGfsPreview
-        ? (preview, returnLocation, originatingSessionScope) =>
-            onOpenPendingGfsPreview(link.id, preview, returnLocation, originatingSessionScope)
+        ? (preview, returnLocation, originatingSessionScope, originatingSessionGeneration) =>
+            onOpenPendingGfsPreview(
+              link.id,
+              preview,
+              returnLocation,
+              originatingSessionScope,
+              originatingSessionGeneration
+            )
         : undefined
     ).catch(error => reportFailure({ kind: 'error', error }))
 

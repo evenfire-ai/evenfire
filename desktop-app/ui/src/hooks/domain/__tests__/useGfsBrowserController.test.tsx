@@ -300,8 +300,8 @@ function Probe() {
   )
 }
 
-function GfsAccessStateProbe() {
-  const accessState = useGfsSessionAccessState(':user-a:team-a')
+function GfsAccessStateProbe({ generation = 1 }: { generation?: number | null }) {
+  const accessState = useGfsSessionAccessState(':user-a:team-a', generation)
   return <div data-testid="shared-access-state">{accessState}</div>
 }
 
@@ -340,6 +340,58 @@ function ProductionHarness({ children }: { children: ReactNode }) {
 }
 
 describe('useGfsBrowserController', () => {
+  it('shares current-generation revocation and preserves other authority cache generations', async () => {
+    const root = await resolveResource(resolvedDirectory('root', 'Private Folder'))
+    const emptyRoots = await listAccessiblePage([])
+    const emptyChildren = await listChildrenPage([])
+    const readAffordances = await heldAffordances(['read'])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => emptyRoots),
+          resolve: vi.fn(async () => root),
+          listChildren: vi.fn(async () => emptyChildren),
+          affordances: vi.fn(async () => readAffordances),
+        },
+      },
+    })
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    const client = lastHarnessQueryClient!
+    const currentKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
+    const futureKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'future-root', 'main', 2)
+    const otherTeamKey = desktopQueryKeys.gfsChildren(':user-a:team-b', 'other-root', 'main', 1)
+    client.setQueryData(futureKey, { pages: [emptyChildren], pageParams: [undefined] })
+    client.setQueryData(otherTeamKey, { pages: [emptyChildren], pageParams: [undefined] })
+    act(() => revokeGfsSessionAccess(client, ':user-a:team-a', 1))
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('current').textContent).toBe('none')
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
+    expect(client.getQueryData(currentKey)).toBeUndefined()
+    expect(client.getQueryData(futureKey)).toBeDefined()
+    expect(client.getQueryData(otherTeamKey)).toBeDefined()
+  })
+  it('withholds shared authority while the published generation is missing', () => {
+    render(<GfsAccessStateProbe generation={null} />, { wrapper: Harness })
+    expect(screen.getByTestId('shared-access-state').textContent).toBe('revoked')
+  })
+
+  it('does not recreate cleared authority or purge another generation for an invalid receipt', () => {
+    const client = new QueryClient()
+    const scope = ':user-a:team-a'
+    const liveKey = desktopQueryKeys.gfsAccessState(scope, 2)
+    client.setQueryData(liveKey, 'active')
+    revokeGfsSessionAccess(client, scope, undefined)
+    revokeGfsSessionAccess(client, scope, 1)
+    expect(client.getQueryData(liveKey)).toBe('active')
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scope, 1))).toBeUndefined()
+    client.clear()
+    revokeGfsSessionAccess(client, scope, 2)
+    expect(client.getQueryData(liveKey)).toBeUndefined()
+  })
+
   it('resolves move authority from a shared-root row’s exact source parent', async () => {
     const accessiblePage = await listAccessiblePage([
       accessibleResource('shared-file', 'report.txt', 'file', {
@@ -902,7 +954,7 @@ describe('useGfsBrowserController', () => {
 
     act(() => {
       if (!lastHarnessQueryClient) throw new Error('GFS browser query client is missing')
-      revokeGfsSessionAccess(lastHarnessQueryClient, ':user-a:team-a')
+      revokeGfsSessionAccess(lastHarnessQueryClient, ':user-a:team-a', 1)
     })
 
     await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
@@ -914,11 +966,11 @@ describe('useGfsBrowserController', () => {
     const { unmount } = render(<GfsAccessStateProbe />, { wrapper: ProductionHarness })
     const client = lastHarnessQueryClient
     if (!client) throw new Error('GFS browser query client is missing')
-    const accessKey = desktopQueryKeys.gfsAccessState(':user-a:team-a')
+    const accessKey = desktopQueryKeys.gfsAccessState(':user-a:team-a', 1)
 
     expect(screen.getByTestId('shared-access-state').textContent).toBe('active')
     expect(client.getQueryData(accessKey)).toBe('active')
-    act(() => revokeGfsSessionAccess(client, ':user-a:team-a'))
+    act(() => revokeGfsSessionAccess(client, ':user-a:team-a', 1))
     expect(client.getQueryData(accessKey)).toBe('revoked')
     await waitFor(() =>
       expect(screen.getByTestId('shared-access-state').textContent).toBe('revoked')
@@ -971,7 +1023,7 @@ describe('useGfsBrowserController', () => {
     const staleUnauthorized = new Error(await listChildrenDeniedMessage('root'))
     staleUnauthorized.name = 'GfsStaleSessionAuthorityError'
     await act(async () => rejectOldRequest(staleUnauthorized))
-    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
     await waitFor(() =>
       expect(lastHarnessQueryClient?.getQueryState(childrenKey)?.status).toBe('error')
     )

@@ -98,7 +98,11 @@ function render(ui: React.ReactNode, options?: Parameters<typeof renderTestingLi
   const ExistingWrapper = options?.wrapper
   function TestProviders({ children }: { children: React.ReactNode }) {
     const wrapped = ExistingWrapper ? <ExistingWrapper>{children}</ExistingWrapper> : children
-    return <QueryClientProvider client={client}><AuthContext.Provider value={{ me: null } as never}>{wrapped}</AuthContext.Provider></QueryClientProvider>
+    return (
+      <QueryClientProvider client={client}>
+        <AuthContext.Provider value={{ me: null } as never}>{wrapped}</AuthContext.Provider>
+      </QueryClientProvider>
+    )
   }
   return renderTestingLibrary(ui, { ...options, wrapper: TestProviders })
 }
@@ -229,6 +233,7 @@ describe('AppHeader global search idle collapse', () => {
     const openResource = vi.fn()
     const authValue = {
       isAuthenticated: true,
+      sessionGeneration: 2,
       me: { id: 'user-1', teamId: 'team-1' },
       runtimeConfigState: {
         envKey: 'fixture-env',
@@ -283,6 +288,7 @@ describe('AppHeader global search idle collapse', () => {
     })
     const authValue = {
       isAuthenticated: true,
+      sessionGeneration: 2,
       me: { id: 'user-authority-failure', teamId: 'team-1' },
       runtimeConfigState: { envKey: 'fixture-env' },
     }
@@ -305,7 +311,7 @@ describe('AppHeader global search idle collapse', () => {
     await waitFor(() =>
       expect(
         queryClient.getQueryData(
-          desktopQueryKeys.gfsAccessState('fixture-env:user-authority-failure:team-1')
+          desktopQueryKeys.gfsAccessState('fixture-env:user-authority-failure:team-1', 2)
         )
       ).toBe('revoked')
     )
@@ -335,6 +341,7 @@ describe('AppHeader global search idle collapse', () => {
     })
     const authValue = {
       isAuthenticated: true,
+      sessionGeneration: 2,
       me: { id: 'user-search-revoked', teamId: 'team-1' },
       runtimeConfigState: { envKey: 'fixture-env' },
     }
@@ -352,15 +359,15 @@ describe('AppHeader global search idle collapse', () => {
 
     expect(
       queryClient.getQueryData(
-        desktopQueryKeys.gfsAccessState('fixture-env:user-search-revoked:team-1')
+        desktopQueryKeys.gfsAccessState('fixture-env:user-search-revoked:team-1', 2)
       )
     ).toBe('active')
-    act(() => revokeGfsSessionAccess(queryClient, 'fixture-env:user-search-revoked:team-1'))
+    act(() => revokeGfsSessionAccess(queryClient, 'fixture-env:user-search-revoked:team-1', 2))
 
     await waitFor(() =>
       expect(
         queryClient.getQueryData(
-          desktopQueryKeys.gfsAccessState('fixture-env:user-search-revoked:team-1')
+          desktopQueryKeys.gfsAccessState('fixture-env:user-search-revoked:team-1', 2)
         )
       ).toBe('revoked')
     )
@@ -407,6 +414,7 @@ describe('AppHeader global search idle collapse', () => {
           value={
             {
               isAuthenticated: true,
+              sessionGeneration: 1,
               me: { id: 'user-old-search-session', teamId: 'team-1' },
               runtimeConfigState: { envKey: 'fixture-env' },
             } as never
@@ -452,6 +460,7 @@ describe('AppHeader global search idle collapse', () => {
     })
     const authValue = {
       isAuthenticated: true,
+      sessionGeneration: 2,
       me: { id: 'user-1', teamId: 'team-1' },
       runtimeConfigState: { envKey: 'fixture-env' },
     }
@@ -501,6 +510,7 @@ describe('AppHeader global search idle collapse', () => {
     })
     const authValue = {
       isAuthenticated: true,
+      sessionGeneration: 2,
       me: { id: 'user-1', teamId: 'team-1' },
       runtimeConfigState: {
         envKey: 'fixture-env',
@@ -558,6 +568,7 @@ describe('AppHeader global search idle collapse', () => {
     })
     const authValue = {
       isAuthenticated: true,
+      sessionGeneration: 2,
       me: { id: 'user-1', teamId: 'team-1' },
       runtimeConfigState: {
         envKey: 'fixture-env',
@@ -607,6 +618,7 @@ describe('AppHeader global search idle collapse', () => {
     })
     const authValue = {
       isAuthenticated: true,
+      sessionGeneration: 2,
       me: { id: 'user-1', teamId: 'team-1' },
       runtimeConfigState: {
         envKey: 'fixture-env',

@@ -13,6 +13,7 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import { httpErrorStatus } from '@lib/format'
+import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
 import {
   GFS_AUTHORITY_STALE_TIME_MS,
   assertGfsAuthorityRetryAllowed,
@@ -22,7 +23,6 @@ import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import {
   describeGfsGrantError,
   describeGfsReadError,
-  isGfsSessionAuthorityFailure,
 } from '@lib/gfsGrantErrors'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
@@ -49,7 +49,7 @@ type FilePreviewResourceActionsProps = {
   principalScope: string | null
   canResolve: boolean
   onAuthorityFailure: (
-    message: string,
+    error: unknown,
     scope?: string | null,
     generation?: number | null
   ) => boolean
@@ -466,7 +466,7 @@ export function useFilePreviewResourceActions({
         moveContextRef.current.sessionGeneration
       )
     )
-      onAuthorityFailure(errorMessage(resourceQuery.error), sessionScope, sessionGeneration)
+      onAuthorityFailure(resourceQuery.error, sessionScope, sessionGeneration)
   }, [onAuthorityFailure, resourceQuery.error, sessionGeneration, sessionScope])
   useEffect(() => {
     if (
@@ -478,7 +478,7 @@ export function useFilePreviewResourceActions({
         moveContextRef.current.sessionGeneration
       )
     )
-      onAuthorityFailure(errorMessage(affordancesQuery.error), sessionScope, sessionGeneration)
+      onAuthorityFailure(affordancesQuery.error, sessionScope, sessionGeneration)
   }, [affordancesQuery.error, onAuthorityFailure, sessionGeneration, sessionScope])
   useEffect(() => {
     if (
@@ -491,7 +491,7 @@ export function useFilePreviewResourceActions({
       )
     )
       onAuthorityFailure(
-        errorMessage(sourceParentAffordancesQuery.error),
+        sourceParentAffordancesQuery.error,
         sessionScope,
         sessionGeneration
       )
@@ -507,7 +507,7 @@ export function useFilePreviewResourceActions({
     )
       return
     for (const error of [grantsQuery.error, sharesQuery.error, inheritedQuery.error]) {
-      if (error) onAuthorityFailure(errorMessage(error), sessionScope, sessionGeneration)
+      if (error) onAuthorityFailure(error, sessionScope, sessionGeneration)
     }
   }, [
     grantsQuery.error,
@@ -616,7 +616,7 @@ export function useFilePreviewResourceActions({
           return false
         if (
           !onAuthorityFailure(
-            errorMessage(error),
+            error,
             captured.sessionScope,
             captured.sessionGeneration
           )
@@ -686,7 +686,7 @@ export function useFilePreviewResourceActions({
         return false
       if (
         !onAuthorityFailure(
-          errorMessage(error),
+          error,
           requestedContext.sessionScope,
           requestedContext.sessionGeneration ?? null
         )
@@ -825,7 +825,7 @@ export function useFilePreviewResourceActions({
               return
             if (
               !onAuthorityFailure(
-                errorMessage(error),
+                error,
                 captured.sessionScope,
                 captured.sessionGeneration
               )
@@ -916,7 +916,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          errorMessage(error),
+          error,
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )
@@ -1116,11 +1116,10 @@ export function useFilePreviewResourceActions({
             )
           },
           isSessionAuthorityFailure: error => {
-            const message = errorMessage(error)
             if (moveContextRef.current.sessionScope !== moveContext.sessionScope) {
-              return isGfsSessionAuthorityFailure(message, 'operation')
+              return isGfsSessionAuthorityFailure(error, 'operation')
             }
-            return onAuthorityFailure(message, moveContext.sessionScope, capturedSessionGeneration)
+            return onAuthorityFailure(error, moveContext.sessionScope, capturedSessionGeneration)
           },
           isSessionGenerationCurrent: isCurrentSessionGeneration,
           isCurrent: () =>
@@ -1212,7 +1211,7 @@ export function useFilePreviewResourceActions({
         }
         if (
           onAuthorityFailure(
-            errorMessage(error),
+            error,
             moveContext.sessionScope,
             capturedSessionGeneration
           )
@@ -1227,7 +1226,7 @@ export function useFilePreviewResourceActions({
       }
       if (!previewMountedRef.current || !hasCurrentMovePresentationContext()) return
       if (
-        onAuthorityFailure(errorMessage(error), moveContext.sessionScope, capturedSessionGeneration)
+        onAuthorityFailure(error, moveContext.sessionScope, capturedSessionGeneration)
       ) {
         if (isActiveMove() && (!isDialogCurrent || isDialogCurrent())) {
           setMoveOpen(false)
@@ -1353,7 +1352,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          errorMessage(error),
+          error,
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )
@@ -1402,7 +1401,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          errorMessage(error),
+          error,
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )
@@ -1460,7 +1459,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          errorMessage(error),
+          error,
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )
@@ -1542,7 +1541,7 @@ export function useFilePreviewResourceActions({
         return
       if (
         !onAuthorityFailure(
-          errorMessage(error),
+          error,
           operationContext.sessionScope,
           operationContext.sessionGeneration
         )

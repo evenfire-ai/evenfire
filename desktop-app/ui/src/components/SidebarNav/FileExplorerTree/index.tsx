@@ -129,9 +129,14 @@ function FileExplorerNode({
   const isUnreadable = node.readable === false
 
   const affordancesQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsAffordances(scope, node.resourceId, node.drive),
+    queryKey: desktopQueryKeys.gfsAffordances(
+      scope,
+      node.resourceId,
+      node.drive,
+      sessionGeneration
+    ),
     queryFn: () => window.clerum.gfs.affordances(node.resourceId, node.drive),
-    enabled: resourceMenuOpen && accessActive,
+    enabled: resourceMenuOpen && accessActive && isGfsSessionGeneration(sessionGeneration),
     refetchOnMount: 'always',
     refetchOnWindowFocus: 'always',
     staleTime: 0,
@@ -143,8 +148,10 @@ function FileExplorerNode({
     affordancesQuery.isFetching || affordancesQuery.error ? undefined : affordancesQuery.data
   useEffect(() => {
     if (!affordancesQuery.error) return
-    onAuthorityFailure(affordancesQuery.error)
-  }, [affordancesQuery.error, onAuthorityFailure])
+    if (isGfsSessionGeneration(sessionGeneration)) {
+      onAuthorityFailure(affordancesQuery.error, scope, sessionGeneration)
+    }
+  }, [affordancesQuery.error, onAuthorityFailure, scope, sessionGeneration])
   const preview = useMemo(() => resolveGfsPreview(node), [node])
   const canPreview = Boolean(preview && !isUnreadable)
   const canCopyContent = Boolean(

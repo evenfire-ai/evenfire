@@ -16,6 +16,7 @@ import { revokeGfsSessionAccess } from '@hooks/domain/useGfsBrowserController'
 import { useAppController } from '@hooks/useAppController'
 import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
+import { recordLatestGfsConversationContext } from '@lib/gfsConversationPrefill'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient, desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -273,6 +274,12 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
+  const beginUserNavigationIntent = vi.fn(() => {
+    const next = (controller.navigationIntentSequence ?? 0) + 1
+    controller.navigationIntentSequence = next
+    forceControllerRender()
+    return next
+  })
   // Faithful to the real controller's openFilesSection: open/focus a files tab at
   // `path` through the real store producer (dedupe by path lives in the store).
   const openFilesSection = vi.fn((path: string | null = null) => {
@@ -410,7 +417,10 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showAppsPicker,
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
-    beginUserNavigationIntent: vi.fn(),
+    navigationIntentSequence: 0,
+    beginUserNavigationIntent,
+    isNavigationIntentCurrent: (sequence: number) =>
+      sequence === controller.navigationIntentSequence,
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
@@ -605,6 +615,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     workspaceTabs = openFilesTab(workspaceTabs, { id: 'files-empty-tab', path: null })
     workspaceTabs = selectWorkspaceTab(workspaceTabs, 'files-resource-tab')
+    recordLatestGfsConversationContext(activeWorkspaceTab(workspaceTabs)!)
     currentController = makeController({
       selectedAgent: 'agent-a',
       activeChatId: null,
@@ -1291,7 +1302,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     appHeaderHarness.props = null
     appHeaderHarness.openNotification = null
     openGfsResourceCb = null
-    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope), 'active')
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     Object.defineProperty(window, 'clerum', {
@@ -1328,7 +1339,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     gfsImagePreviewHarness.onMount = null
     gfsImagePreviewHarness.onRender = null
     desktopQueryClient.removeQueries({
-      queryKey: desktopQueryKeys.gfsAccessState(sessionScope),
+      queryKey: desktopQueryKeys.gfsAccessState(sessionScope, 1),
     })
     delete (window as { clerum?: unknown }).clerum
   })
@@ -1392,14 +1403,14 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
         version: 3,
       })
     )
-    render(<App />)
+    renderApp(<App />)
 
     act(() => openGfsResourceCb?.(imagePayload))
     expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('false')
     let availableDuringRevokedRender = false
     gfsImagePreviewHarness.onRender = props => {
       if (
-        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope)) ===
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1)) ===
           'revoked' &&
         !props.unavailable
       ) {
@@ -1407,7 +1418,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
       }
     }
 
-    act(() => revokeGfsSessionAccess(desktopQueryClient, sessionScope))
+    act(() => revokeGfsSessionAccess(desktopQueryClient, sessionScope, 1))
 
     await waitFor(() =>
       expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('true')
@@ -1428,16 +1439,16 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
       { code: 'session_expired', message: 'The previous session expired.' },
       401
     )
-    render(<App />)
+    renderApp(<App />)
 
     act(() => openGfsResourceCb?.(imagePayload))
     expect(gfsImagePreviewHarness.props?.onDownloadError).toBeTypeOf('function')
     act(() => gfsImagePreviewHarness.props?.onDownloadError?.(new Error(deniedMessage)))
 
     await waitFor(() =>
-      expect(desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope))).toBe(
-        'revoked'
-      )
+      expect(
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))
+      ).toBe('revoked')
     )
     expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('true')
   })
@@ -1455,7 +1466,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
       { code: 'desktop_user_retired', message: 'The account is no longer active.' },
       403
     )
-    render(<App />)
+    renderApp(<App />)
 
     act(() => openGfsResourceCb?.(imagePayload))
     const onDownloadError = gfsImagePreviewHarness.props?.onDownloadError
@@ -1463,9 +1474,9 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     act(() => onDownloadError?.(new Error(deniedMessage)))
 
     await waitFor(() =>
-      expect(desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope))).toBe(
-        'revoked'
-      )
+      expect(
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))
+      ).toBe('revoked')
     )
     expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('true')
   })
@@ -1488,8 +1499,8 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
       { code: 'resource_missing', message: 'This resource no longer exists.' },
       404
     )
-    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope), 'active')
-    render(<App />)
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
+    renderApp(<App />)
 
     act(() => openGfsResourceCb?.(imagePayload))
     const onDownloadError = gfsImagePreviewHarness.props?.onDownloadError
@@ -1501,7 +1512,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     Object.assign(staleFailure, { code: 'GFS_STALE_SESSION_AUTHORITY' })
     act(() => onDownloadError?.(staleFailure))
 
-    expect(desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope))).toBe(
+    expect(desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))).toBe(
       'active'
     )
     expect(screen.getByTestId('gfs-image-preview').getAttribute('data-unavailable')).toBe('false')
@@ -1517,7 +1528,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     )
     const downloadOnMount = vi.fn()
     gfsImagePreviewHarness.onMount = downloadOnMount
-    render(<App />)
+    renderApp(<App />)
     act(() => openGfsResourceCb?.(imagePayload))
     await waitFor(() => expect(downloadOnMount).toHaveBeenCalledTimes(1))
 
@@ -1558,7 +1569,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     )
     const downloadOnMount = vi.fn()
     gfsImagePreviewHarness.onMount = downloadOnMount
-    render(<App />)
+    renderApp(<App />)
     act(() => openGfsResourceCb?.(imagePayload))
     await waitFor(() => expect(downloadOnMount).toHaveBeenCalledTimes(1))
 
@@ -1638,7 +1649,7 @@ describe('App live GFS preview revalidation', () => {
     cleanup()
     desktopQueryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
     desktopQueryClient.removeQueries({
-      queryKey: desktopQueryKeys.gfsAccessState(sessionScope),
+      queryKey: desktopQueryKeys.gfsAccessState(sessionScope, 1),
     })
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
@@ -1927,7 +1938,7 @@ describe('App live GFS preview revalidation', () => {
       .mockRejectedValueOnce(staleFailure as never)
       .mockRejectedValueOnce(staleFailure as never)
 
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
     act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
@@ -1982,9 +1993,9 @@ describe('App live GFS preview revalidation', () => {
     )
 
     await waitFor(() =>
-      expect(desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope))).toBe(
-        'revoked'
-      )
+      expect(
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))
+      ).toBe('revoked')
     )
 
     await waitFor(() => {
@@ -2024,27 +2035,27 @@ describe('App live GFS preview revalidation', () => {
   })
 
   it('revokes shared GFS access when an App-owned preview detects a current 401', async () => {
-    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope), 'active')
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
     const expiredSessionMessage = await resolveDeniedMessage(
       'gfs://main/readme',
       { code: 'session_expired', message: 'session expired' },
       401
     )
     vi.mocked(window.clerum.gfs.resolve).mockRejectedValue(new Error(expiredSessionMessage))
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
 
     act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
 
     await waitFor(() =>
-      expect(desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope))).toBe(
-        'revoked'
-      )
+      expect(
+        desktopQueryClient.getQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1))
+      ).toBe('revoked')
     )
   })
 
   it('does not republish a sibling preview after a current 401 expires all previews', async () => {
-    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope), 'active')
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
     currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
       id: 'preview-image',
       title: 'diagram.png',
@@ -2069,7 +2080,7 @@ describe('App live GFS preview revalidation', () => {
         finishSibling = resolvePromise
       }) as never
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
     act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
 
@@ -2098,7 +2109,7 @@ describe('App live GFS preview revalidation', () => {
   })
 
   it('expires pending previews when another GFS surface revokes shared access', async () => {
-    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope), 'active')
+    desktopQueryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope, 1), 'active')
     const resolve = vi.mocked(window.clerum.gfs.resolve)
     let finishPreview!: (value: ReturnType<typeof resolvedFile>) => void
     resolve.mockImplementation(
@@ -2107,13 +2118,13 @@ describe('App live GFS preview revalidation', () => {
           finishPreview = resolvePromise
         }) as never
     )
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
     act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
 
     act(() => {
-      revokeGfsSessionAccess(desktopQueryClient, sessionScope)
+      revokeGfsSessionAccess(desktopQueryClient, sessionScope, 1)
     })
 
     const previewsUnavailable = () => {
@@ -2173,7 +2184,7 @@ describe('App live GFS preview revalidation', () => {
       .mockImplementation(async uri =>
         uri === pluginUri ? refreshedPluginImage : unchangedWorkspacePreview
       )
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
     act(() => openGfsResource?.(imagePayload))
 
@@ -2320,7 +2331,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
   }
 
   it('passes one intent receipt to a full-screen same-team notification', async () => {
-    render(<App />)
+    renderApp(<App />)
 
     act(() => {
       sidebarHarness.props?.onOpenSandboxUiApp?.({

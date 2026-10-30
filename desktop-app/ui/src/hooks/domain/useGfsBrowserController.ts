@@ -79,13 +79,14 @@ export function buildGfsSessionScope(
 
 export function useGfsSessionAccessState(
   sessionScope: string | null,
+  sessionGeneration: number | null | undefined,
   queryClientOverride?: QueryClient
 ): GfsAccessState {
   const contextQueryClient = useContext(QueryClientContext)
   const queryClient = queryClientOverride ?? contextQueryClient ?? desktopQueryClient
   const queryKey = useMemo(
-    () => desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous'),
-    [sessionScope]
+    () => desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous', sessionGeneration ?? null),
+    [sessionScope, sessionGeneration]
   )
   const accessState = useQuery<GfsAccessState>(
     {
@@ -94,13 +95,15 @@ export function useGfsSessionAccessState(
       // observer keeps the shared decision alive across temporary unmounts;
       // explicit session-cache clearing still removes it on logout.
       queryFn: async () => queryClient.getQueryData<GfsAccessState>(queryKey) ?? 'active',
-      initialData: 'active',
+      initialData: sessionScope && isGfsSessionGeneration(sessionGeneration) ? 'active' : 'revoked',
       enabled: false,
       gcTime: Infinity,
     },
     queryClient
   )
-  return accessState.data ?? 'active'
+  return sessionScope && isGfsSessionGeneration(sessionGeneration)
+    ? (accessState.data ?? 'active')
+    : 'revoked'
 }
 
 export interface GfsBrowserChild {
@@ -197,6 +200,7 @@ export interface GfsCrumb {
 export type GfsUriOpenResult = GfsCrumb & {
   /** Session scope that owned the resolve when it was dispatched. */
   originatingSessionScope: string | null
+  originatingSessionGeneration: number | null
 }
 
 export interface GfsBrowserAffordances {
@@ -385,14 +389,24 @@ export function isGfsStaleSessionAuthorityFailure(error: unknown): boolean {
  * browser controller, such as a link-label lookup. The access flag is outside
  * `gfsRoot`, so it survives the metadata purge and gates every mounted surface.
  */
-export function revokeGfsSessionAccess(queryClient: QueryClient, sessionScope: string): void {
-  const accessStateKey = desktopQueryKeys.gfsAccessState(sessionScope)
+export function revokeGfsSessionAccess(
+  queryClient: QueryClient,
+  sessionScope: string,
+  sessionGeneration: number | null | undefined
+): void {
+  if (!sessionScope || !isGfsSessionGeneration(sessionGeneration)) return
+  const accessStateKey = desktopQueryKeys.gfsAccessState(sessionScope, sessionGeneration)
   // A cleared or superseded cache has no live authority owner. In particular,
   // a late request must not recreate an infinite-lived revoked flag after
   // logout has cleared the query client.
   if (queryClient.getQueryData<GfsAccessState>(accessStateKey) !== 'active') return
   queryClient.setQueryData(accessStateKey, 'revoked' as GfsAccessState)
-  queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+  queryClient.removeQueries({
+    queryKey: desktopQueryKeys.gfsRoot,
+    predicate: query =>
+      query.queryKey[2] === sessionScope &&
+      hasGfsSessionGeneration(query.queryKey, sessionGeneration),
+  })
 }
 
 export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
@@ -1228,7 +1242,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       : null,
   ]
     .filter(
-      (entry): entry is { error: unknown; surface: 'discovery' | 'operation' } => entry !== null
+      (entry): entry is NonNullable<typeof entry> => entry !== null
     )
     .find(entry => isGfsSessionAuthorityFailure(entry.error, entry.surface))
   useEffect(() => {
@@ -1578,7 +1592,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           backgroundLocationRetryAttemptRef.current = 0
         }
         setCrumbsState([...ancestors.reverse(), crumb])
-        return { ...crumb, originatingSessionScope }
+        return { ...crumb, originatingSessionScope, originatingSessionGeneration: sessionGeneration }
       } catch (error) {
         if (!(await isSessionGenerationCurrent()) || !isCurrent()) {
           await reportSuperseded()
