@@ -182,6 +182,22 @@ describe('ChatThread error code labels', () => {
     expect(details).toBe('proxy stream failed with provider_unavailable')
   })
 
+  // Same code, a different subscription: the title is keyed by code and the
+  // provider suffix is appended generically (ChatThread.tsx:808-811), so a Grok
+  // outage gets its own label with the same summary. Q1 of the #1048 audit: no
+  // test had ever rendered LLM_MODEL_OVERLOADED with grok-subscription.
+  it('labels a Grok provider outage with its own provider and the same summary', () => {
+    const { label, body, details, text } = renderErrorLabel(
+      'LLM_MODEL_OVERLOADED',
+      'grok-subscription',
+      'proxy stream failed with provider_unavailable'
+    )
+    expect(label).toBe('Provider Unavailable · GROK-SUBSCRIPTION')
+    expect(body).toBe('The model provider could not complete this response.')
+    expect(details).toBe('proxy stream failed with provider_unavailable')
+    expect(text).not.toContain('Too Many Tool Calls')
+  })
+
   // The summary is opt-in per code: a code without one keeps the Host message
   // as the body, so the mapping cannot silently replace every error's own text.
   it('keeps the Host message as the body for a code without a summary', () => {

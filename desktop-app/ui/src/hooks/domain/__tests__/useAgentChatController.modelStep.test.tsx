@@ -92,7 +92,7 @@ describe('model-step checkpoint in the controller (#1044)', () => {
     clerum.rpc.loadSessionMessages.mockResolvedValue(
       sessionWith(view('session-view.resumable.json'))
     )
-    const { result } = renderController()
+    const { result, spies } = renderController()
     await settleMount()
     await act(async () => {
       await result.current.handleSendAgentMessage(ORIGIN_PROMPT)
@@ -108,6 +108,32 @@ describe('model-step checkpoint in the controller (#1044)', () => {
     expect(clerum.rpc.loadSessionMessages).toHaveBeenCalled()
     expect(clerum.rpc.getTaskResult).not.toHaveBeenCalled()
     expect(result.current.failedAgentSend).toBeNull()
+
+    const userMessageId = result.current.chatMessages.find(message => message.role === 'user')!.id
+
+    // The turn is unfinished, not idle: the stepper and the activity turn red.
+    // Own `waitFor`: the checkpoint above is recorded inside the reconcile, but
+    // this paint runs after it resolves, so the earlier wait can return first.
+    await waitFor(() =>
+      expect(result.current.progressByAgentMessage['agent-x']?.[userMessageId]).toMatchObject({
+        taskId: ORIGIN_TASK_ID,
+        status: 'error',
+      })
+    )
+    await waitFor(() =>
+      expect(result.current.activityByMessageId[userMessageId]).toMatchObject({
+        taskId: ORIGIN_TASK_ID,
+        status: 'error',
+        errorMessage: 'Progress stream closed without terminal event',
+      })
+    )
+
+    // Witness that the red came from the model-step branch, not from
+    // `applyFallback`: the fallback is the only other paint site and it offers
+    // Resend plus this toast.
+    expect(result.current.failedAgentSend).toBeNull()
+    expect(result.current.agentError).toBeNull()
+    expect(spies.pushToast).not.toHaveBeenCalledWith('Message to agent-x failed.', 'error')
   })
 
   it('follows a claimed continuation found when the chat is opened', async () => {
