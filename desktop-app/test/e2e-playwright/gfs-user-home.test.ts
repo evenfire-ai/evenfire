@@ -350,7 +350,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         expect(home.drive).toBeTruthy()
         expect(home.storageUsername).toBe(owner.name)
         await openHomeFolder(page, home)
-        await new DesktopResourceView(page).expectYourAccess('Editor')
+        await new DesktopResourceView(page).expectWritable()
         const ownerGrant = fx.accessFor(home.resourceId!, 'user', owner.id)
         expect(ownerGrant).toMatchObject({
           relation: 'grant',
@@ -555,7 +555,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         const outerUri = `gfs://${home.drive}/${ridOf(outerId)}`
         const innerRow = cS.page.getByRole('button', { name: `Open ${inner}` })
         // C's effective bits on the folder, read through C's own authenticated
-        // Desktop session ("Your access" renders only inside the user's home).
+        // Desktop session.
         const cHeld = () =>
           cS.page.evaluate(
             async ([resourceId, drive]) =>
@@ -933,7 +933,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
             .getByRole('navigation', { name: 'File location' })
             .getByRole('button', { name: home.storageUsername!, exact: true })
         ).toHaveAttribute('aria-current', 'page')
-        await new DesktopResourceView(adminPage).expectYourAccess('Editor')
+        await new DesktopResourceView(adminPage).expectWritable()
       })
 
       await new DesktopResourceView(adminPage).uploadFile(
@@ -1173,7 +1173,11 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expectRefusedLinkAndClose(ownerS.page)
         await openEvenDriveLink(ownerS.page, `gfs://${home.drive}/${ridOf(home.resourceId!)}`)
         await expect(dialog).toBeHidden()
-        await expect(ownerS.page.getByLabel('Your access')).toBeVisible()
+        await expect(
+          ownerS.page
+            .getByRole('navigation', { name: 'File location' })
+            .getByRole('button', { name: home.storageUsername!, exact: true })
+        ).toHaveAttribute('aria-current', 'page')
       })
       await test.step('logout closes Files and it cannot be reopened from cache', async () => {
         await expect(ownerS.page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()

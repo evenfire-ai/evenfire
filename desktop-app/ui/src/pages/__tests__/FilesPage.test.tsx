@@ -155,63 +155,6 @@ describe('FilesPage', () => {
     vi.restoreAllMocks()
   })
 
-  it('shows live access inside the home and does not show it for an unrelated location', () => {
-    const home = {
-      resourceId: 'home',
-      gfsUri: 'gfs://private/home',
-      name: 'Home',
-      kind: 'directory',
-      version: 1,
-      bytes: 0,
-    }
-    const child = {
-      resourceId: 'child',
-      gfsUri: 'gfs://private/child',
-      name: 'Child',
-      kind: 'directory',
-      version: 1,
-      bytes: 0,
-    }
-    const base = {
-      ...baseController(),
-      drive: 'private',
-      current: child,
-      crumbs: [home, child],
-      home: { state: 'ready', drive: 'private', resourceId: 'home' },
-      affordances: {
-        held: ['read', 'write'],
-        canDelegate: false,
-        grantableBits: [],
-        canCreateShare: false,
-      },
-    }
-    hookMock.useGfsBrowserController.mockReturnValue(base)
-    const rendered = renderFilesPage()
-    // The line names the Share dialog role, never the raw permission bits.
-    expect(screen.getByLabelText('Your access').textContent).toBe('Your access: Editor')
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...base,
-      affordances: { ...base.affordances, held: ['read', 'share'] },
-    })
-    rendered.rerender(
-      <QueryClientProvider client={new QueryClient()}>
-        <FilesPage />
-      </QueryClientProvider>
-    )
-    expect(screen.getByLabelText('Your access').textContent).toBe('Your access: Read')
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...base,
-      crumbs: [child],
-      affordances: { ...base.affordances, held: ['read'] },
-    })
-    rendered.rerender(
-      <QueryClientProvider client={new QueryClient()}>
-        <FilesPage />
-      </QueryClientProvider>
-    )
-    expect(screen.queryByLabelText('Your access')).toBeNull()
-  })
-
   it('renders unavailable automatic discovery as an info notice, not a technical error', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),

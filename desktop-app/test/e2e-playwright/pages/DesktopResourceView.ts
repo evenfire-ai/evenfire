@@ -53,8 +53,10 @@ export class DesktopResourceView {
     await humanRecordedPause([600, 1200])
   }
 
-  async expectYourAccess(role: 'Read' | 'Editor'): Promise<void> {
-    await expect(this.page.getByLabel('Your access')).toHaveText(`Your access: ${role}`)
+  /** The open folder accepts writes: its header offers New folder only with write access. */
+  async expectWritable(): Promise<void> {
+    const browser = this.page.getByRole('region', { name: 'EvenDrive browser' })
+    await expect(browser.getByRole('button', { name: 'New folder' })).toBeVisible()
   }
 
   async expectRefused(code: string): Promise<void> {

@@ -17,7 +17,9 @@ export class DesktopFilesNav {
     await expect(home).toBeEnabled({ timeout: 150_000 })
     await home.click()
     await expect(this.page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
-    await expect(this.page.getByLabel('Your access')).toBeVisible()
+    await expect(
+      this.page.getByRole('navigation', { name: 'File location' }).locator('[aria-current="page"]')
+    ).toBeVisible()
     await humanRecordedPause([600, 1200])
   }
 

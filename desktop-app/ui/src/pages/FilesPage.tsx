@@ -2316,17 +2316,6 @@ export function FilesPage({
             ) : null}
           </div>
 
-          {current &&
-          ctrl.home?.state === 'ready' &&
-          ctrl.home.drive === ctrl.drive &&
-          crumbs.some(crumb => crumb.resourceId === ctrl.home?.resourceId) &&
-          affordances ? (
-            <p aria-label="Your access">
-              Your access:{' '}
-              {roleForAccessPermissions(affordances.held) === 'editor' ? 'Editor' : 'Read'}
-            </p>
-          ) : null}
-
           {dragActive || droppedUploadCount > 0 ? (
             <div className="composer-drop-overlay da-gfs-drop-overlay" role="status">
               {droppedUploadCount > 0
