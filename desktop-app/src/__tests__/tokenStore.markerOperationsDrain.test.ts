@@ -29,6 +29,12 @@ vi.mock('keytar', () => ({
     fixture.keychain.delete(account)
   ),
 }))
+vi.mock('../windowsSessionAuthorityFileOps.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../windowsSessionAuthorityFileOps.js')>()
+  const { createWindowsSessionAuthorityFileOpsUnitFixture } =
+    await import('../../testSupport/windowsSessionAuthorityFileOpsUnitFixture.js')
+  return createWindowsSessionAuthorityFileOpsUnitFixture(actual)
+})
 
 const ENV = 'drain-000000000000'
 const TOKEN = 'fixture-drain-token'
@@ -213,13 +219,36 @@ async function pauseBoundary(boundary: Operation['boundary'], store: TokenStore)
   const release = deferred()
   const keytar = await import('keytar')
   let predecessor: Promise<void> | undefined
-  if (boundary === 'snapshot-file-lane') {
-    const rename = fs.rename.bind(fs)
-    vi.spyOn(fs, 'rename').mockImplementationOnce(async (source, destination) => {
-      started.resolve()
-      await release.promise
-      return rename(source, destination)
+  const pauseAtomicFileWrite = () => {
+    const open = fs.open.bind(fs)
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args)
+      const file = String(args[0])
+      if (file.startsWith(`${encryptedPath()}.`) && file.endsWith('.tmp')) {
+        const sync = handle.sync.bind(handle)
+        vi.spyOn(handle, 'sync').mockImplementation(async () => {
+          started.resolve()
+          await release.promise
+          return sync()
+        })
+      }
+      return handle
     })
+  }
+  if (
+    boundary === 'snapshot-file-lane' ||
+    (process.platform === 'win32' && boundary === 'sync-directory')
+  ) {
+    if (process.platform === 'win32') {
+      pauseAtomicFileWrite()
+    } else {
+      const rename = fs.rename.bind(fs)
+      vi.spyOn(fs, 'rename').mockImplementationOnce(async (source, destination) => {
+        started.resolve()
+        await release.promise
+        return rename(source, destination)
+      })
+    }
     predecessor = new TokenStore().setSafeStorageSessionToken(TOKEN, ENV)
     try {
       await awaitStorageBoundary(started.promise, 'earlier actual encrypted producer')
@@ -242,14 +271,17 @@ async function pauseBoundary(boundary: Operation['boundary'], store: TokenStore)
       return selection
     })
   } else if (boundary === 'rename-file') {
-    const rename = fs.rename.bind(fs)
-    vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
-      if (String(destination) === encryptedPath()) {
-        started.resolve()
-        await release.promise
-      }
-      return rename(source, destination)
-    })
+    if (process.platform === 'win32') pauseAtomicFileWrite()
+    else {
+      const rename = fs.rename.bind(fs)
+      vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+        if (String(destination) === encryptedPath()) {
+          started.resolve()
+          await release.promise
+        }
+        return rename(source, destination)
+      })
+    }
   } else if (boundary === 'sync-directory') {
     const open = fs.open.bind(fs)
     vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
