@@ -997,9 +997,10 @@ apply_corefile() { # <rendered-file> <ip...>
   local patch ip
   patch="$(jq -cn --rawfile cf "$file" --arg key "$OVERRIDE_ANNOTATION" --arg value "$OVERRIDE_VALUE" \
     '{data:{Corefile:$cf},metadata:{annotations:{($key):$value}}}')"
+  # Set before the request: an interrupted patch may still have been applied.
+  COREFILE_TOUCHED=1
   kctl patch configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --type=merge -p "$patch" >/dev/null
   T_PATCH_MS="$(ms_now)"
-  COREFILE_TOUCHED=1
   # Read back: the ConfigMap must now hold exactly the rendered Corefile.
   kctl get configmap "$DNS_CONFIGMAP" -n "$DNS_NS" --request-timeout=20s -o json |
     jq -j '.data.Corefile' >"${EVIDENCE_DIR}/corefile-applied.txt"
