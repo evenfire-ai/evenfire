@@ -16,10 +16,13 @@ import { toModelStepCheckpointView } from '../../core/conversation/modelStepChec
 import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
 import { LlmErrorCode } from '../../core/errors'
+import { AUTO_RETRY_TEST_TIMEOUT_MS } from '../../core/orchestration/__tests__/modelStepRetryTestTimeout'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import { AttachmentReadTool } from '../../core/tools/attachmentRead'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
+import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
 import type { Task, TaskError } from '../../queue/types'
 import { createSessionRouteHandlers } from '../../server/sessionRouteHandlers'
@@ -58,7 +61,7 @@ function admittedFile(bytes: Buffer) {
  * `toolCallsBeforeOutage` completions request `clerum__attachment_read`; the
  * next one fails with an upstream 503.
  */
-function outageProvider(toolCallsBeforeOutage: number) {
+function outageProvider(toolCallsBeforeOutage: number, outages = Infinity) {
   let calls = 0
   const provider: SingleTurnProvider = {
     getProviderType: () => 'openai',
@@ -74,7 +77,15 @@ function outageProvider(toolCallsBeforeOutage: number) {
     },
     completeSingleTurnWithTools: async (_messages: ChatMessage[]) => {
       calls += 1
-      if (calls > toolCallsBeforeOutage) throw new Error('upstream 503')
+      if (calls > toolCallsBeforeOutage && calls <= toolCallsBeforeOutage + outages)
+        throw new Error('upstream 503')
+      if (calls > toolCallsBeforeOutage)
+        return {
+          content: 'Recovered after three outages',
+          tool_calls: [],
+          usage,
+          finish_reason: FinishReason.Stop,
+        }
       const call: ToolCall = {
         id: `read-${calls}`,
         name: 'clerum__attachment_read',
@@ -89,11 +100,12 @@ function outageProvider(toolCallsBeforeOutage: number) {
 async function runOutageTask(
   toolCallsBeforeOutage: number,
   withCheckpoints = true,
-  channelType: IncomingMessage['channelType'] = 'rpc'
+  channelType: IncomingMessage['channelType'] = 'rpc',
+  outages = Infinity
 ) {
   const attachment = admittedFile(UPLOAD)
   const handle = makeSqliteStore()
-  const { provider, calls } = outageProvider(toolCallsBeforeOutage)
+  const { provider, calls } = outageProvider(toolCallsBeforeOutage, outages)
   const task: Task = {
     id: 'model-step-origin',
     source: 'channel',
@@ -118,6 +130,8 @@ async function runOutageTask(
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
   const onFail = vi.fn<(task: Task, error: TaskError) => void>()
+  const onComplete = vi.fn()
+  const execute = vi.spyOn(AttachmentReadTool.prototype, 'execute')
   const deps: TaskExecutorDeps = {
     conversationManager: new ConversationManager(handle.store),
     llmProvider: provider,
@@ -136,7 +150,7 @@ async function runOutageTask(
     cronScheduler: null,
     taskLifecycle: lifecycle,
     onApprovalNeeded: vi.fn(),
-    onComplete: vi.fn(),
+    onComplete,
     onFail,
     dynamicEnvProvider: () => ({}),
     ...(withCheckpoints
@@ -160,7 +174,7 @@ async function runOutageTask(
   const executor = new TaskExecutor(task, deps)
   await executor.run()
   await handle.persistQueue.drain()
-  return { handle, attachment, onFail, providerCalls: calls() }
+  return { handle, attachment, onFail, onComplete, execute, providerCalls: calls() }
 }
 
 interface HeaderRow {
@@ -189,113 +203,152 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
     vi.restoreAllMocks()
   })
 
-  it('a 503 after a confirmed tool leaves a resumable checkpoint named in the TaskError', async () => {
-    Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
-    const { handle, attachment, onFail, providerCalls } = await runOutageTask(1)
-    try {
-      // The 503 is retried once automatically before it settles (N=1).
-      expect(providerCalls).toBe(3)
-      expect(onFail).toHaveBeenCalledTimes(1)
-      const taskError = onFail.mock.calls[0]![1]
-      expect(taskError).toMatchObject({
-        code: LlmErrorCode.ModelOverloaded,
-        providerCode: 'provider_unavailable',
-        retryable: true,
-      })
+  it(
+    'T6: four 503s after a confirmed tool leave a resumable checkpoint named in the TaskError',
+    async () => {
+      Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
+      const { handle, attachment, onFail, onComplete, execute, providerCalls } =
+        await runOutageTask(1, true, 'rpc', 4)
+      try {
+        // The initial outage and three retries fail; the sixth call would answer.
+        expect(providerCalls).toBe(5)
+        expect(execute).toHaveBeenCalledTimes(1)
+        expect(onComplete).not.toHaveBeenCalled()
+        expect(onFail).toHaveBeenCalledTimes(1)
+        const taskError = onFail.mock.calls[0]![1]
+        expect(taskError).toMatchObject({
+          code: LlmErrorCode.ModelOverloaded,
+          providerCode: 'provider_unavailable',
+          retryable: true,
+        })
 
-      const db = handle.worker.db
-      const headers = db.prepare('SELECT * FROM model_step_checkpoints').all() as HeaderRow[]
-      expect(headers).toHaveLength(1)
-      const header = headers[0]!
-      expect(taskError.modelStepCheckpointId).toBe(header.checkpoint_id)
-      const turnNumbers = db
-        .prepare("SELECT turn_number FROM messages WHERE role = 'user'")
-        .all() as Array<{ turn_number: number }>
-      expect(turnNumbers).toEqual([{ turn_number: header.origin_turn_number }])
-      expect(header).toMatchObject({
-        status: 'resumable',
-        origin_task_id: 'model-step-origin',
-        provider: 'openai',
-        model: 'test-model',
-        host_id: 'host-a',
-        principal: 'authenticated-user',
-        expires_at: NOW + RESUMABLE_TTL_MS,
-      })
+        const db = handle.worker.db
+        const headers = db.prepare('SELECT * FROM model_step_checkpoints').all() as HeaderRow[]
+        expect(headers).toHaveLength(1)
+        const header = headers[0]!
+        expect(taskError.modelStepCheckpointId).toBe(header.checkpoint_id)
+        const turnNumbers = db
+          .prepare("SELECT turn_number FROM messages WHERE role = 'user'")
+          .all() as Array<{ turn_number: number }>
+        expect(turnNumbers).toEqual([{ turn_number: header.origin_turn_number }])
+        expect(header).toMatchObject({
+          status: 'resumable',
+          origin_task_id: 'model-step-origin',
+          provider: 'openai',
+          model: 'test-model',
+          host_id: 'host-a',
+          principal: 'authenticated-user',
+          expires_at: NOW + RESUMABLE_TTL_MS,
+        })
 
-      const sourceMessage = JSON.parse(header.source_message!) as {
-        sender: string
-        attachments: Array<Record<string, unknown>>
-      }
-      expect(sourceMessage.sender).toBe('authenticated-user')
-      expect(sourceMessage.attachments.map(a => a.id)).toEqual(['file-1'])
-      expect(sourceMessage.attachments[0]).not.toHaveProperty('dataBase64')
+        const sourceMessage = JSON.parse(header.source_message!) as {
+          sender: string
+          attachments: Array<Record<string, unknown>>
+        }
+        expect(sourceMessage.sender).toBe('authenticated-user')
+        expect(sourceMessage.attachments.map(a => a.id)).toEqual(['file-1'])
+        expect(sourceMessage.attachments[0]).not.toHaveProperty('dataBase64')
 
-      const budget = JSON.parse(header.task_budget!) as {
-        iterationsUsed: number
-        attachmentReadLedger: unknown
-      }
-      expect(budget.iterationsUsed).toBeGreaterThan(0)
-      expect(budget.attachmentReadLedger).toBeDefined()
+        const budget = JSON.parse(header.task_budget!) as {
+          iterationsUsed: number
+          attachmentReadLedger: unknown
+        }
+        expect(budget.iterationsUsed).toBeGreaterThan(0)
+        expect(budget.attachmentReadLedger).toBeDefined()
 
-      const bytes = db
-        .prepare(
-          'SELECT attachment_id, digest_hex, size_bytes, bytes, expires_at FROM model_step_checkpoint_attachments'
+        const bytes = db
+          .prepare(
+            'SELECT attachment_id, digest_hex, size_bytes, bytes, expires_at FROM model_step_checkpoint_attachments'
+          )
+          .all() as Array<{
+          attachment_id: string
+          digest_hex: string
+          size_bytes: number
+          bytes: Buffer
+          expires_at: number
+        }>
+        expect(bytes).toHaveLength(1)
+        expect(bytes[0]).toMatchObject({
+          attachment_id: 'file-1',
+          digest_hex: attachment.digest!.hex,
+          size_bytes: UPLOAD.length,
+          expires_at: NOW + ATTACHMENT_TTL_MS,
+        })
+        expect(Buffer.compare(bytes[0]!.bytes, UPLOAD)).toBe(0)
+
+        // The session read serves the checkpoint under the same key the
+        // executor wrote it with.
+        expect(header.session_key).toBe('authenticated-user:rpc:isolated-channel:default')
+        const store = new ModelStepCheckpointStore(handle.persistQueue, {
+          now: () => NOW,
+          blockedTtlMs: RESUMABLE_TTL_MS,
+        })
+        const { handleSessionMessages } = createSessionRouteHandlers({
+          getConversationManager: () => new ConversationManager(handle.store),
+          redactToolError: (_tool, raw) => raw,
+          redactTitle: raw => raw,
+          loadModelStepCheckpoint: async sessionKey => {
+            const live = await store.loadLive(sessionKey)
+            return live ? toModelStepCheckpointView(live) : undefined
+          },
+        })
+        const page = await handleSessionMessages(
+          'authenticated-user',
+          'isolated-channel',
+          'default',
+          {}
         )
-        .all() as Array<{
-        attachment_id: string
-        digest_hex: string
-        size_bytes: number
-        bytes: Buffer
-        expires_at: number
-      }>
-      expect(bytes).toHaveLength(1)
-      expect(bytes[0]).toMatchObject({
-        attachment_id: 'file-1',
-        digest_hex: attachment.digest!.hex,
-        size_bytes: UPLOAD.length,
-        expires_at: NOW + ATTACHMENT_TTL_MS,
-      })
-      expect(Buffer.compare(bytes[0]!.bytes, UPLOAD)).toBe(0)
+        expect(page?.turns).toHaveLength(1)
+        expect(page?.modelStepCheckpoint).toEqual({
+          checkpointId: header.checkpoint_id,
+          version: 2,
+          status: 'resumable',
+          retryAvailable: true,
+          originTaskId: 'model-step-origin',
+          provider: 'openai',
+          model: 'test-model',
+          tools: { confirmed: 1, unknown: 0, notDispatched: 0 },
+          failedAt: new Date(NOW).toISOString(),
+          expiresAt: new Date(NOW + RESUMABLE_TTL_MS).toISOString(),
+        })
+      } finally {
+        await handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
-      // The session read serves the checkpoint under the same key the
-      // executor wrote it with.
-      expect(header.session_key).toBe('authenticated-user:rpc:isolated-channel:default')
-      const store = new ModelStepCheckpointStore(handle.persistQueue, {
-        now: () => NOW,
-        blockedTtlMs: RESUMABLE_TTL_MS,
-      })
-      const { handleSessionMessages } = createSessionRouteHandlers({
-        getConversationManager: () => new ConversationManager(handle.store),
-        redactToolError: (_tool, raw) => raw,
-        redactTitle: raw => raw,
-        loadModelStepCheckpoint: async sessionKey => {
-          const live = await store.loadLive(sessionKey)
-          return live ? toModelStepCheckpointView(live) : undefined
-        },
-      })
-      const page = await handleSessionMessages(
-        'authenticated-user',
-        'isolated-channel',
-        'default',
-        {}
+  it(
+    'T5: three 503s recover under the default with one tool execution and no checkpoint',
+    async () => {
+      Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
+      const warn = vi.spyOn(logger, 'warn')
+      const { handle, onFail, onComplete, execute, providerCalls } = await runOutageTask(
+        1,
+        true,
+        'rpc',
+        3
       )
-      expect(page?.turns).toHaveLength(1)
-      expect(page?.modelStepCheckpoint).toEqual({
-        checkpointId: header.checkpoint_id,
-        version: 2,
-        status: 'resumable',
-        retryAvailable: true,
-        originTaskId: 'model-step-origin',
-        provider: 'openai',
-        model: 'test-model',
-        tools: { confirmed: 1, unknown: 0, notDispatched: 0 },
-        failedAt: new Date(NOW).toISOString(),
-        expiresAt: new Date(NOW + RESUMABLE_TTL_MS).toISOString(),
-      })
-    } finally {
-      await handle.shutdown()
-    }
-  })
+      try {
+        expect(providerCalls).toBe(5)
+        expect(execute).toHaveBeenCalledTimes(1)
+        expect(onComplete).toHaveBeenCalledTimes(1)
+        expect(onFail).not.toHaveBeenCalled()
+        expect(
+          handle.worker.db.prepare("SELECT content FROM messages WHERE role = 'assistant'").all()
+        ).toContainEqual({ content: 'Recovered after three outages' })
+        expect(handle.worker.db.prepare('SELECT * FROM model_step_checkpoints').all()).toEqual([])
+        expect(
+          warn.mock.calls.filter(
+            call => call[1] === 'Retrying model step after provider_unavailable'
+          )
+        ).toHaveLength(3)
+      } finally {
+        await handle.shutdown()
+      }
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it('a 503 before any tool writes no checkpoint and the TaskError names none', async () => {
     Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
@@ -316,31 +369,37 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
     }
   })
 
-  it('records a dispatched RPC turn but writes no checkpoint for the same non-RPC turn', async () => {
-    Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
-    for (const channel of ['rpc', 'slack'] as const) {
-      const { handle, onFail, providerCalls } = await runOutageTask(1, true, channel)
-      try {
-        // Only the rpc channel records a checkpoint, so only it can retry the
-        // failed model step automatically (N=1).
-        expect(providerCalls).toBe(channel === 'rpc' ? 3 : 2)
-        expect(onFail).toHaveBeenCalledTimes(1)
-        const rows = handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').all()
-        if (channel === 'rpc') {
-          expect(rows).toEqual([{ status: 'resumable' }])
-          expect(
-            handle.worker.db
-              .prepare("SELECT kind FROM model_step_checkpoint_entries WHERE kind = 'tool_result'")
-              .all()
-          ).toEqual([{ kind: 'tool_result' }])
-        } else {
-          expect(rows).toEqual([])
+  it(
+    'records a dispatched RPC turn but writes no checkpoint for the same non-RPC turn',
+    async () => {
+      Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
+      for (const channel of ['rpc', 'slack'] as const) {
+        const { handle, onFail, providerCalls } = await runOutageTask(1, true, channel)
+        try {
+          // Only the rpc channel records a checkpoint, so only it can retry the
+          // failed model step automatically (N=3).
+          expect(providerCalls).toBe(channel === 'rpc' ? 5 : 2)
+          expect(onFail).toHaveBeenCalledTimes(1)
+          const rows = handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').all()
+          if (channel === 'rpc') {
+            expect(rows).toEqual([{ status: 'resumable' }])
+            expect(
+              handle.worker.db
+                .prepare(
+                  "SELECT kind FROM model_step_checkpoint_entries WHERE kind = 'tool_result'"
+                )
+                .all()
+            ).toEqual([{ kind: 'tool_result' }])
+          } else {
+            expect(rows).toEqual([])
+          }
+        } finally {
+          await handle.shutdown()
         }
-      } finally {
-        await handle.shutdown()
       }
-    }
-  })
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it('without checkpoint support the same failure writes no checkpoint', async () => {
     Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })

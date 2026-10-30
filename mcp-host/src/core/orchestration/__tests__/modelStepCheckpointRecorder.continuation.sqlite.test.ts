@@ -12,6 +12,7 @@ import type { SingleTurnProvider } from '../../../llm/types'
 import { McpManager } from '../../../mcp/manager'
 import type { Task, TaskError } from '../../../queue/types'
 import type { McpTool } from '../../../types'
+import { AUTO_RETRY_TEST_TIMEOUT_MS } from './modelStepRetryTestTimeout'
 
 const NOW = 1_700_000_000_000
 const SESSION_KEY = 'identity-user:rpc:identity-channel:default'
@@ -188,94 +189,98 @@ describe('E2 poisoned continuation settlement with SQLite', () => {
     vi.restoreAllMocks()
   })
 
-  it('M4: a failed abandon is not released and executor cleanup abandons the owned claim', async () => {
-    Object.assign(appConfig, {
-      enableApproval: false,
-      dynamicToolsEnabled: true,
-      promptCacheEnabled: false,
-    })
-    vi.spyOn(Date, 'now').mockReturnValue(NOW)
-    const handle = makeSqliteStore()
-    try {
-      const manager = new McpManager()
-      const tool: McpTool = {
-        name: 'server__read',
-        serverName: 'server',
-        inputSchema: { type: 'object' },
+  it(
+    'M4: a failed abandon is not released and executor cleanup abandons the owned claim',
+    async () => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: true,
+        promptCacheEnabled: false,
+      })
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      try {
+        const manager = new McpManager()
+        const tool: McpTool = {
+          name: 'server__read',
+          serverName: 'server',
+          inputSchema: { type: 'object' },
+        }
+        vi.spyOn(manager, 'getAllTools').mockReturnValue([tool])
+        const execution = vi.spyOn(manager, 'callTool').mockResolvedValue({
+          toolName: tool.name,
+          result: { content: [{ type: 'text', text: 'read completed' }] },
+          isError: false,
+        })
+        const llm = provider('openai', (_messages, call) =>
+          call === 1
+            ? {
+                calls: [
+                  {
+                    id: 'origin-call',
+                    name: 'clerum__tool_call',
+                    arguments: { name: tool.name, arguments: {} },
+                  },
+                ],
+              }
+            : { error: new Error('upstream 503') }
+        )
+        const original = task('identity-origin')
+        const originalDeps = deps(handle, llm, manager)
+        originalDeps.taskLifecycle.register(original)
+        await new TaskExecutor(original, originalDeps).run()
+        await handle.persistQueue.drain()
+        expect(header(handle).status).toBe('resumable')
+        expect(execution).toHaveBeenCalledTimes(1)
+        const store = originalDeps.modelStepCheckpoints!.store
+        const append = vi.spyOn(store, 'append').mockRejectedValueOnce(new Error('SQLITE_IOERR'))
+        const transition = store.transition.bind(store)
+        let abandonAttempts = 0
+        const transitions = vi.spyOn(store, 'transition').mockImplementation(async (...args) => {
+          if (args[2].to === 'abandoned' && ++abandonAttempts === 1)
+            throw new Error('SQLITE_IOERR abandon')
+          return transition(...args)
+        })
+        const cleanupPrototype = TaskExecutor.prototype as unknown as {
+          abandonModelStepContinuation(): Promise<void>
+          continuationClaimReleased: boolean
+        }
+        const abandon = cleanupPrototype.abandonModelStepContinuation
+        const releasedBeforeCleanup: boolean[] = []
+        vi.spyOn(cleanupPrototype, 'abandonModelStepContinuation').mockImplementation(
+          async function (this: typeof cleanupPrototype) {
+            releasedBeforeCleanup.push(this.continuationClaimReleased)
+            return abandon.call(this)
+          }
+        )
+        const resumed = provider('openai', (_messages, call) =>
+          call === 1
+            ? {
+                calls: [
+                  {
+                    id: 'resumed-call',
+                    name: 'clerum__tool_call',
+                    arguments: { name: tool.name, arguments: {} },
+                  },
+                ],
+              }
+            : { content: 'Read finished.' }
+        )
+        const { verdict, executor } = await continueTurn(handle, original, originalDeps, resumed)
+        expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
+        expect(resumed.calls()).toBe(2)
+        expect(append).toHaveBeenCalled()
+        expect(execution).toHaveBeenCalledTimes(2)
+        expect(transitions.mock.calls.filter(args => args[2].to === 'abandoned')).toHaveLength(2)
+        expect(releasedBeforeCleanup).toEqual([false])
+        expect(header(handle).status).toBe('abandoned')
+        expect(
+          (executor as unknown as { continuationClaimReleased: boolean }).continuationClaimReleased
+        ).toBe(true)
+      } finally {
+        await handle.shutdown()
       }
-      vi.spyOn(manager, 'getAllTools').mockReturnValue([tool])
-      const execution = vi.spyOn(manager, 'callTool').mockResolvedValue({
-        toolName: tool.name,
-        result: { content: [{ type: 'text', text: 'read completed' }] },
-        isError: false,
-      })
-      const llm = provider('openai', (_messages, call) =>
-        call === 1
-          ? {
-              calls: [
-                {
-                  id: 'origin-call',
-                  name: 'clerum__tool_call',
-                  arguments: { name: tool.name, arguments: {} },
-                },
-              ],
-            }
-          : { error: new Error('upstream 503') }
-      )
-      const original = task('identity-origin')
-      const originalDeps = deps(handle, llm, manager)
-      originalDeps.taskLifecycle.register(original)
-      await new TaskExecutor(original, originalDeps).run()
-      await handle.persistQueue.drain()
-      expect(header(handle).status).toBe('resumable')
-      expect(execution).toHaveBeenCalledTimes(1)
-      const store = originalDeps.modelStepCheckpoints!.store
-      const append = vi.spyOn(store, 'append').mockRejectedValueOnce(new Error('SQLITE_IOERR'))
-      const transition = store.transition.bind(store)
-      let abandonAttempts = 0
-      const transitions = vi.spyOn(store, 'transition').mockImplementation(async (...args) => {
-        if (args[2].to === 'abandoned' && ++abandonAttempts === 1)
-          throw new Error('SQLITE_IOERR abandon')
-        return transition(...args)
-      })
-      const cleanupPrototype = TaskExecutor.prototype as unknown as {
-        abandonModelStepContinuation(): Promise<void>
-        continuationClaimReleased: boolean
-      }
-      const abandon = cleanupPrototype.abandonModelStepContinuation
-      const releasedBeforeCleanup: boolean[] = []
-      vi.spyOn(cleanupPrototype, 'abandonModelStepContinuation').mockImplementation(async function (
-        this: typeof cleanupPrototype
-      ) {
-        releasedBeforeCleanup.push(this.continuationClaimReleased)
-        return abandon.call(this)
-      })
-      const resumed = provider('openai', (_messages, call) =>
-        call === 1
-          ? {
-              calls: [
-                {
-                  id: 'resumed-call',
-                  name: 'clerum__tool_call',
-                  arguments: { name: tool.name, arguments: {} },
-                },
-              ],
-            }
-          : { content: 'Read finished.' }
-      )
-      const { verdict, executor } = await continueTurn(handle, original, originalDeps, resumed)
-      expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
-      expect(resumed.calls()).toBe(2)
-      expect(append).toHaveBeenCalled()
-      expect(execution).toHaveBeenCalledTimes(2)
-      expect(transitions.mock.calls.filter(args => args[2].to === 'abandoned')).toHaveLength(2)
-      expect(releasedBeforeCleanup).toEqual([false])
-      expect(header(handle).status).toBe('abandoned')
-      expect(
-        (executor as unknown as { continuationClaimReleased: boolean }).continuationClaimReleased
-      ).toBe(true)
-    } finally {
-      await handle.shutdown()
-    }
-  })
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 })

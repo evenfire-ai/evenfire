@@ -75,7 +75,7 @@ describe('model-step checkpoint timing config', () => {
 })
 
 /**
- * #1043 §4 — the automatic model-step retry is bounded. Unset keeps 1, `0`
+ * #1043 §4 — the automatic model-step retry is bounded. Unset keeps 3, `0`
  * disables it, and any other value outside 0–5 stops the Host at config load
  * instead of silently multiplying billed model calls.
  */
@@ -97,11 +97,11 @@ describe('model-step automatic retry config', () => {
     expect(config.modelStepAutoRetries).toBe(2)
   })
 
-  it('keeps the documented default of 1 while the variable is absent', async () => {
+  it('keeps the documented default of 3 while the variable is absent', async () => {
     vi.resetModules()
     vi.stubEnv(KNOB, undefined)
     const { config } = await import('./config')
-    expect(config.modelStepAutoRetries).toBe(1)
+    expect(config.modelStepAutoRetries).toBe(3)
   })
 
   it('accepts 0 (retry disabled) and the upper bound 5', async () => {

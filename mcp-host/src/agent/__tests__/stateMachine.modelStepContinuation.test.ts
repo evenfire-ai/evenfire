@@ -15,6 +15,7 @@ import {
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
 import { SqliteColdStartLoader } from '../../core/conversation/persistence/sqliteColdStartLoader'
 import { LlmErrorCode } from '../../core/errors'
+import { AUTO_RETRY_TEST_TIMEOUT_MS } from '../../core/orchestration/__tests__/modelStepRetryTestTimeout'
 import { type ChatMessage, FinishReason } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { FailoverEngine } from '../../llm/failover/engine'
@@ -262,126 +263,132 @@ afterEach(async () => {
 })
 
 describe('AgentStateMachine model-step continuation model pinning (#1043)', () => {
-  it('C-1: fallback tool results continue through the Host-only resolver on the configured primary', async () => {
-    const handle = makeSqliteStore()
-    handles.push(handle)
-    const { stateMachine, lifecycle } = agent(handle)
-    const manager = stateMachine.getConversationManager()
-    const primary = provider('claude')
-    const fallback = provider('openai')
-    const unavailable = () => {
-      throw new Error('upstream 503')
-    }
-    for (const llm of [primary, fallback])
-      llm.classifyError = () => ({
-        code: LlmErrorCode.ModelOverloaded,
-        retryable: true,
-        message: 'upstream 503',
-        httpStatus: 503,
-        providerCode: 'provider_unavailable',
+  it(
+    'C-1: fallback tool results continue through the Host-only resolver on the configured primary',
+    async () => {
+      const handle = makeSqliteStore()
+      handles.push(handle)
+      const { stateMachine, lifecycle } = agent(handle)
+      const manager = stateMachine.getConversationManager()
+      const primary = provider('claude')
+      const fallback = provider('openai')
+      const unavailable = () => {
+        throw new Error('upstream 503')
+      }
+      for (const llm of [primary, fallback])
+        llm.classifyError = () => ({
+          code: LlmErrorCode.ModelOverloaded,
+          retryable: true,
+          message: 'upstream 503',
+          httpStatus: 503,
+          providerCode: 'provider_unavailable',
+        })
+      const primaryCall = vi
+        .spyOn(primary, 'completeSingleTurnWithTools')
+        .mockImplementationOnce(async () => unavailable())
+      const fallbackCall = vi
+        .spyOn(fallback, 'completeSingleTurnWithTools')
+        .mockResolvedValueOnce({
+          content: null,
+          tool_calls: [{ id: 'fallback-tool', name: 'server__write', arguments: {} }],
+          usage: USAGE,
+          finish_reason: FinishReason.ToolUse,
+        })
+        .mockImplementationOnce(async () => unavailable())
+        // The three automatic retries hit the fallback again (N=3).
+        .mockImplementationOnce(async () => unavailable())
+        .mockImplementationOnce(async () => unavailable())
+        .mockImplementationOnce(async () => unavailable())
+      const mcp = new McpManager()
+      vi.spyOn(mcp, 'getAllTools').mockReturnValue([
+        { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
+      ])
+      const execute = vi.spyOn(mcp, 'callTool').mockResolvedValue({
+        toolName: 'server__write',
+        result: { content: [{ type: 'text', text: 'fallback effect completed' }] },
+        isError: false,
       })
-    const primaryCall = vi
-      .spyOn(primary, 'completeSingleTurnWithTools')
-      .mockImplementationOnce(async () => unavailable())
-    const fallbackCall = vi
-      .spyOn(fallback, 'completeSingleTurnWithTools')
-      .mockResolvedValueOnce({
-        content: null,
-        tool_calls: [{ id: 'fallback-tool', name: 'server__write', arguments: {} }],
-        usage: USAGE,
-        finish_reason: FinishReason.ToolUse,
+      stateMachine.setMcpManager(mcp)
+      stateMachine.setLLMProvider(primary as never, 'primary-model')
+      const policy = {
+        cooldownSeconds: 300,
+        triggerOn: ['provider_unavailable'] as const,
+        fallbacks: [{ provider: 'openai', model: 'fallback-model' }],
+      }
+      stateMachine.setFailoverSupport(() => ({
+        policy: { ...policy, triggerOn: [...policy.triggerOn] },
+        engine: new FailoverEngine(
+          { ...policy, triggerOn: [...policy.triggerOn] },
+          { metricInc: () => {} }
+        ),
+        buildProvider: () => fallback,
+      }))
+      const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+        now: () => NOW,
+        blockedTtlMs: RESUMABLE_TTL_MS,
       })
-      .mockImplementationOnce(async () => unavailable())
-      // The automatic retry of the failed step hits the fallback again (N=1).
-      .mockImplementationOnce(async () => unavailable())
-    const mcp = new McpManager()
-    vi.spyOn(mcp, 'getAllTools').mockReturnValue([
-      { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
-    ])
-    const execute = vi.spyOn(mcp, 'callTool').mockResolvedValue({
-      toolName: 'server__write',
-      result: { content: [{ type: 'text', text: 'fallback effect completed' }] },
-      isError: false,
-    })
-    stateMachine.setMcpManager(mcp)
-    stateMachine.setLLMProvider(primary as never, 'primary-model')
-    const policy = {
-      cooldownSeconds: 300,
-      triggerOn: ['provider_unavailable'] as const,
-      fallbacks: [{ provider: 'openai', model: 'fallback-model' }],
-    }
-    stateMachine.setFailoverSupport(() => ({
-      policy: { ...policy, triggerOn: [...policy.triggerOn] },
-      engine: new FailoverEngine(
-        { ...policy, triggerOn: [...policy.triggerOn] },
-        { metricInc: () => {} }
-      ),
-      buildProvider: () => fallback,
-    }))
-    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
-      now: () => NOW,
-      blockedTtlMs: RESUMABLE_TTL_MS,
-    })
-    const checkpointSupport = support(handle, checkpoints)
-    stateMachine.setModelStepCheckpoints(checkpointSupport)
-    const origin: Task = {
-      id: 'fallback-origin',
-      source: 'channel',
-      sourceMessage: message(),
-      priority: 'normal',
-      status: 'pending',
-      createdAt: new Date(NOW),
-      conversationHistory: [],
-      responseCallback: vi.fn(async () => {}),
-    }
-    lifecycle.register(origin)
-    await stateMachine.executeTask(origin)
-    const snapshot = (await checkpoints.loadLive(SESSION_KEY))!
-    expect(primaryCall).toHaveBeenCalledTimes(1)
-    expect(fallbackCall).toHaveBeenCalledTimes(3)
-    expect(execute).toHaveBeenCalledTimes(1)
-    const resolver = vi.fn((selections: Record<string, string> | undefined) => ({
-      provider: primary,
-      model: selections?.claude ?? 'primary-model',
-      contextWindowTokens: 100_000,
-    }))
-    stateMachine.setTaskModelResolver(resolver)
-    const service = new ModelStepContinuationService({
-      checkpoints: checkpointSupport,
-      conversationManager: manager,
-      enqueue: async (sourceMessage, id, modelStepContinuation) => {
-        const next: Task = {
-          ...origin,
-          id,
-          sourceMessage,
-          modelStepContinuation,
-          status: 'pending',
-        }
-        lifecycle.register(next)
-        await stateMachine.executeTask(next)
-      },
-    })
-    const result = await service.continue({
-      userId: USER,
-      agent: AGENT,
-      chatId: CHAT,
-      checkpointId: snapshot.header.checkpoint_id,
-      version: snapshot.header.version,
-    })
-    expect(result).toMatchObject({ status: 202, body: { status: 'claimed' } })
-    expect(resolver).toHaveBeenCalledExactlyOnceWith({ claude: 'primary-model' })
-    expect(snapshot.header).toMatchObject({
-      provider: 'claude',
-      model: 'primary-model',
-      status: 'resumable',
-    })
-    expect(primaryCall).toHaveBeenCalledTimes(2)
-    expect(fallbackCall).toHaveBeenCalledTimes(3)
-    expect(execute).toHaveBeenCalledTimes(1)
-    expect(handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').get()).toEqual({
-      status: 'completed',
-    })
-  })
+      const checkpointSupport = support(handle, checkpoints)
+      stateMachine.setModelStepCheckpoints(checkpointSupport)
+      const origin: Task = {
+        id: 'fallback-origin',
+        source: 'channel',
+        sourceMessage: message(),
+        priority: 'normal',
+        status: 'pending',
+        createdAt: new Date(NOW),
+        conversationHistory: [],
+        responseCallback: vi.fn(async () => {}),
+      }
+      lifecycle.register(origin)
+      await stateMachine.executeTask(origin)
+      const snapshot = (await checkpoints.loadLive(SESSION_KEY))!
+      expect(primaryCall).toHaveBeenCalledTimes(1)
+      expect(fallbackCall).toHaveBeenCalledTimes(5)
+      expect(execute).toHaveBeenCalledTimes(1)
+      const resolver = vi.fn((selections: Record<string, string> | undefined) => ({
+        provider: primary,
+        model: selections?.claude ?? 'primary-model',
+        contextWindowTokens: 100_000,
+      }))
+      stateMachine.setTaskModelResolver(resolver)
+      const service = new ModelStepContinuationService({
+        checkpoints: checkpointSupport,
+        conversationManager: manager,
+        enqueue: async (sourceMessage, id, modelStepContinuation) => {
+          const next: Task = {
+            ...origin,
+            id,
+            sourceMessage,
+            modelStepContinuation,
+            status: 'pending',
+          }
+          lifecycle.register(next)
+          await stateMachine.executeTask(next)
+        },
+      })
+      const result = await service.continue({
+        userId: USER,
+        agent: AGENT,
+        chatId: CHAT,
+        checkpointId: snapshot.header.checkpoint_id,
+        version: snapshot.header.version,
+      })
+      expect(result).toMatchObject({ status: 202, body: { status: 'claimed' } })
+      expect(resolver).toHaveBeenCalledExactlyOnceWith({ claude: 'primary-model' })
+      expect(snapshot.header).toMatchObject({
+        provider: 'claude',
+        model: 'primary-model',
+        status: 'resumable',
+      })
+      expect(primaryCall).toHaveBeenCalledTimes(2)
+      expect(fallbackCall).toHaveBeenCalledTimes(5)
+      expect(execute).toHaveBeenCalledTimes(1)
+      expect(handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').get()).toEqual({
+        status: 'completed',
+      })
+    },
+    AUTO_RETRY_TEST_TIMEOUT_MS
+  )
 
   it('C-5: approval expiry denies the suspended origin and abandons its open checkpoint', async () => {
     Object.assign(appConfig, { enableApproval: true })
