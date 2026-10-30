@@ -270,8 +270,9 @@ describe('Windows plugin storage DACL privacy', () => {
     const before = await fs.readFile(file)
     await addAuthenticatedUsersAccess(file)
 
-    await log.append(ENV_KEY, auditEntry({ capability: 'org.read' }))
+    const reopened = new PluginAuditLog(directory)
+    await reopened.append(ENV_KEY, auditEntry({ capability: 'org.read' }))
     expect(await fs.readFile(file)).toEqual(before)
-    expect(await log.read(ENV_KEY)).toEqual([])
+    expect(await reopened.read(ENV_KEY)).toEqual([])
   })
 })

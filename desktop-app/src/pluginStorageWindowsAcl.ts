@@ -208,9 +208,10 @@ export function inspectWindowsPluginStoragePaths(
 }
 
 /**
- * Verify plugin storage directories and files once per object identity. A private parent prevents
- * unprivileged replacement; cheap lstat identity checks detect a changed object without launching
- * PowerShell for every consent lookup or audit append.
+ * Verify plugin storage directories and files once per object identity. A private parent and the
+ * verified allowlist prevent unprivileged replacement or DACL changes. The current user, SYSTEM,
+ * and Administrators are trusted to change their own DACLs. Cheap lstat identity checks detect a
+ * changed object without launching PowerShell for every consent lookup or audit append.
  */
 export class PluginStoragePrivacyGuard {
   private readonly verified = new Map<
