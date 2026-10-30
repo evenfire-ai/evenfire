@@ -525,8 +525,9 @@ type ContextGrantPurgeSource = 'context_create' | 'context_update' | 'context_de
  * same name.
  *
  * Never throws: the write already happened, so a failed purge must not change
- * the response. The periodic shared-grant sweep removes what is left, but only
- * while the server stays disabled: re-enabled before a tick, the row is served
+ * the response. The periodic shared-grant sweep removes what is left only while
+ * no live Context enables the server under that name: once one does (the
+ * server re-enabled, or the Context recreated with it), the row is served
  * again and the sweep keeps it.
  *
  * The rows are keyed by the McpServers' namespace, not the Contexts' one.

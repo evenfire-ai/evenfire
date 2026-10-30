@@ -92,11 +92,11 @@ Who may authorize depends on the Contexts that enable the server in their
   leave behind. If the server is enabled again, or the Context is recreated
   under the same name, before that cleanup removes the grant, the previous
   grant is served again without a new consent, and later sweeps keep it.
-  This happens when a change made outside control-api (kubectl, GitOps) is
-  undone before the next sweep, when the server is disabled and re-enabled
-  before a sweep sees the disabled state after a failed cleanup, or when a
-  consent completes while the server is being removed. To force a new
-  consent, disconnect the shared grant.
+  This happens when a change made outside control-api (the workflow-recipes
+  controller, kubectl, GitOps) is undone before the next sweep, when the
+  server is disabled and re-enabled before a sweep sees the disabled state
+  after a failed cleanup, or when a consent completes while the server is
+  being removed. To force a new consent, disconnect the shared grant.
 
 Membership through a team does not count as reaching a Context for either
 scope.
