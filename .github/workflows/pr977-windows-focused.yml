@@ -26,7 +26,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 7b9770947126def942fdca2a12eab2a12c24e653
+  PR977_SOURCE_SHA: 79803f0f20a01fcdb4b3ff2f69fee81d91e7c612
 
 jobs:
   focused-windows-plugin-dacl:
@@ -36,7 +36,7 @@ jobs:
       - name: Check out exact application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 7b9770947126def942fdca2a12eab2a12c24e653
+          ref: 79803f0f20a01fcdb4b3ff2f69fee81d91e7c612
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -71,7 +71,7 @@ jobs:
             ConvertFrom-Json
           $selectedCases = @($caseManifest.selected)
           $deselectedCases = @($caseManifest.deselected)
-          if ($selectedCases.Count -ne 4 -or $deselectedCases.Count -ne 8) {
+          if ($selectedCases.Count -ne 6 -or $deselectedCases.Count -ne 6) {
             throw 'Focused native plugin DACL case manifest has an unexpected selection size'
           }
           if (-not (Test-Path -LiteralPath (Join-Path source/desktop-app $targets[0]) -PathType Leaf)) {

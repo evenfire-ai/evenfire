@@ -436,7 +436,7 @@ describe('Windows plugin storage DACL privacy', () => {
     path.join(here, '../../.github/workflows/pr977-exact-source-windows-full-sharded.yml'),
     'utf8'
   )
-  const expectedSourceSha = '7b9770947126def942fdca2a12eab2a12c24e653'
+  const expectedSourceSha = '79803f0f20a01fcdb4b3ff2f69fee81d91e7c612'
   const expectedValidationRef = '${{ github.sha }}'
   const focusedConfig = loadYaml(focusedWorkflow)
   const fullConfig = loadYaml(fullWorkflow)
