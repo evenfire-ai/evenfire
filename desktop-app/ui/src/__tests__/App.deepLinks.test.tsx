@@ -14,6 +14,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
 import fc, { type AsyncCommand } from 'fast-check'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { flushSync } from 'react-dom'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
 import type { WorkspaceTabStripProps } from '@components/WorkspaceTabStrip/types'
@@ -28,6 +29,7 @@ import {
 } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import { readGfsOpenLocations } from '@lib/gfsOpenLocations'
+import { resolveGfsPreview } from '@lib/gfsPreview'
 import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
@@ -58,6 +60,7 @@ import {
   childView,
   gfsRouteFailureMessage,
   heldAffordances,
+  resolveResource,
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
@@ -186,6 +189,7 @@ const sidebarHarness = vi.hoisted(() => ({
     onCollapsedChange?: (next: boolean) => void
     availableSandboxUiApps?: SidebarLaunchApp[]
     onOpenSandboxUiApp?: (app: SidebarLaunchApp) => void
+    onGfsResourceAction?: Parameters<typeof FileExplorerTree>[0]['onResourceAction']
   },
 }))
 
@@ -351,6 +355,8 @@ vi.mock('@pages/FilesPage', async () => {
                 createElement(FileExplorerTree, {
                   onOpenFolder: () => undefined,
                   onOpenPreview: () => undefined,
+                  onResourceAction: (...args) =>
+                    sidebarHarness.props?.onGfsResourceAction?.(...args),
                   pushToast: () => undefined,
                 })
               )
@@ -516,8 +522,8 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     }
   )
   // Faithful nav: a store action; `navItem` is derived (useReactiveController).
-  const handleNavSelect = vi.fn((item: AppController['navItem']) => {
-    beginNavigationIntent()
+  const handleNavSelect = vi.fn((item: AppController['navItem'], options: Parameters<AppController['handleNavSelect']>[1] = {}) => {
+    if (options.source !== 'programmatic' && !options.navigationIntentAlreadyStarted) beginNavigationIntent()
     if (item === DESKTOP_ROUTES.chat) {
       controller.selectedAgent = null
       clearAppsPicker()
@@ -901,7 +907,8 @@ describe('App deep-link orchestration', () => {
 
   async function mountSessionBackedApp(
     me: NonNullable<AppController['me']>,
-    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+    onControllerRender?: (controller: AppController) => void
   ) {
     const actualControllerModule =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
@@ -930,6 +937,7 @@ describe('App deep-link orchestration', () => {
     })
     vi.mocked(useAppController).mockImplementation(() => {
       realController = actualControllerModule.useAppController()
+      onControllerRender?.(realController)
       return realController
     })
     commonHarness.renderWorkspaceSurfaces = true
@@ -5483,14 +5491,17 @@ describe('App deep-link orchestration', () => {
       .mockImplementationOnce(() => pending)
     window.clerum.gfs.resolve = resolve
     act(() =>
-      getController().openPreviewSection({
-        kind: 'image',
-        gfsUri: uri,
-        name: 'Captured.png',
-        bytes: 128,
-        mimeType: 'image/png',
-        version: 1,
-      })
+      getController().openPreviewSection(
+        {
+          kind: 'image',
+          gfsUri: uri,
+          name: 'Captured.png',
+          bytes: 128,
+          mimeType: 'image/png',
+          version: 1,
+        },
+        `${getController().runtimeConfigState?.envKey ?? ''}:${userA.id}:${userA.teamId ?? ''}`
+      )
     )
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(queryClient.isFetching()).toBe(0))
@@ -7562,6 +7573,115 @@ describe('App deep-link orchestration', () => {
       await new Promise(resolve => window.setTimeout(resolve, 0))
     })
   }
+
+  it.each([false, true])('mounts the selected adjacent app after GFS scope cleanup unless later explicit navigation supersedes it (%s)', async supersede => {
+    currentController = makeController({ initialExperienceLoading: false, sessionGeneration: 1 })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    renderApp(<App />)
+    await launchAppFromSidebar()
+    const appTabId = activeWorkspaceTab(currentController.workspaceTabs)!.id
+    const resource = await resolveResource(
+      resolvedFile('d'.repeat(32), 'Scoped.png', { bytes: 128 })
+    )
+    const preview = resolveGfsPreview({
+      gfsUri: resource.gfsUri,
+      name: resource.name,
+      bytes: resource.bytes ?? 0,
+      version: resource.version,
+    })
+    if (!preview) throw new Error('The producer-backed image is not previewable')
+    const scope = `${currentController.runtimeConfigState?.envKey ?? ''}:${currentController.me!.id}:${currentController.me!.teamId ?? ''}`
+    act(() => {
+      currentController.beginUserNavigationIntent()
+      currentController.setWorkspaceTabs(state => openPreviewTab(state, {
+        id: 'scope-fallback-preview',
+        title: preview.name,
+        gfsUri: preview.gfsUri,
+        sessionScope: scope,
+        fileKind: preview.kind,
+        byteLength: preview.bytes,
+        ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+      }))
+    })
+    await waitFor(() => expect(main.live()).toBeNull())
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('preview')
+    const intentBeforeCleanup = currentController.navigationIntentSequence
+
+    act(() => {
+      flushSync(() => {
+        currentController.me = { ...currentController.me!, teamId: 'team-b' }
+        currentController.currentTeamId = 'team-b'
+        forceControllerRender()
+      })
+      if (supersede) workspaceTabStripHarness.props?.onSelect('chat-tab-1')
+    })
+
+    await waitFor(() =>
+      expect(currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')).toHaveLength(0)
+    )
+    if (supersede) {
+      expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+      await act(async () => { await main.settle() })
+      expect(openSandboxUi()).toHaveBeenCalledTimes(1)
+      expect(main.live()).toBeNull()
+    } else {
+      expect(currentController.workspaceTabs.activeTabId).toBe(appTabId)
+      await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+      await waitForMounted()
+      expect(main.live()).toMatchObject({ appRef: READY_APP.appRef })
+    }
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeCleanup + (supersede ? 1 : 0))
+  })
+
+  it.each([false, true])('publishes same-principal team and generation together before Preview cleanup fallback (app neighbor=%s)', async appNeighbor => {
+    const { userA, service, transportBoundaries } = installSameIdentityLoginFixture()
+    await service.googleLogin('fixture-google-A')
+    const frames: Array<{ teamId: string | null | undefined; generation: number | null }> = []
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    const { getController } = await mountSessionBackedApp(userA, desktopQueryClient, controller => {
+      frames.push({ teamId: controller.me?.teamId, generation: controller.sessionGeneration })
+    })
+    if (appNeighbor) await launchAppFromSidebar()
+    const appTabId = activeWorkspaceTab(getController().workspaceTabs)!.id
+    const resource = await resolveResource(
+      resolvedFile('e'.repeat(32), 'Renewed.png', { bytes: 128 })
+    )
+    const preview = resolveGfsPreview({
+      gfsUri: resource.gfsUri, name: resource.name, bytes: resource.bytes ?? 0,
+      version: resource.version,
+    })
+    if (!preview) throw new Error('The producer-backed image is not previewable')
+    const scope = `${getController().runtimeConfigState?.envKey ?? ''}:${userA.id}:${userA.teamId ?? ''}`
+    act(() => getController().openPreviewSection(preview, scope))
+    await waitFor(() => expect(main.live()).toBeNull())
+    expect(activeWorkspaceTab(getController().workspaceTabs)?.kind).toBe('preview')
+    const intentBeforeCleanup = getController().navigationIntentSequence
+
+    transportBoundaries.authClient.googleLogin.mockReset().mockResolvedValueOnce({
+      token: 'synthetic-session-permission-B',
+      me: { ...userA, teamId: 'team-b', teamName: 'Team B' },
+    })
+    await service.googleLogin('fixture-google-B')
+    await act(async () => { await getController().loadSession({ preserveNav: true }) })
+    const publishedGeneration = service.getSessionGeneration()
+    await waitFor(() => expect(getController().me?.teamId).toBe('team-b'))
+    expect(getController().sessionGeneration).toBe(publishedGeneration)
+    const teamBFrames = frames.filter(frame => frame.teamId === 'team-b')
+    expect(teamBFrames.length).toBeGreaterThan(0)
+    expect(teamBFrames.every(frame => frame.generation === publishedGeneration)).toBe(true)
+    expect(getController().workspaceTabs.tabs.filter(tab => tab.kind === 'preview')).toHaveLength(0)
+    expect(getController().workspaceTabs.activeTabId).toBe(appTabId)
+    if (appNeighbor) {
+      await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+      await waitForMounted()
+      expect(main.live()).toMatchObject({ appRef: READY_APP.appRef })
+    } else {
+      expect(activeWorkspaceTab(getController().workspaceTabs)?.kind).toBe('chat')
+      expect(openSandboxUi()).not.toHaveBeenCalled()
+      expect(main.live()).toBeNull()
+    }
+    expect(getController().navigationIntentSequence).toBe(intentBeforeCleanup)
+  })
 
   it('restores the route an app tab was left on when it is reactivated', async () => {
     currentController = makeController({ initialExperienceLoading: false })

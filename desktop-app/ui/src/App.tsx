@@ -1534,14 +1534,41 @@ export function App() {
       }
       return next
     })
-    if (activeTransition) revealWorkspaceTab(activeWorkspaceTab(activeTransition.next), false)
+    if (activeTransition) {
+      const fallbackTabId = activeTransition.next.activeTabId
+      const intentSequence = vm.navigationIntentSequence
+      // The activation owner flushes the store, so invoke it only after this
+      // layout commit. The cleanup itself is internal navigation and reuses
+      // the existing receipt; a later explicit choice always wins.
+      queueMicrotask(() => {
+        if (
+          typeof intentSequence !== 'number' ||
+          !vm.isNavigationIntentCurrent(intentSequence) ||
+          workspaceTabsRef.current.activeTabId !== fallbackTabId ||
+          !isGfsSessionAuthorityCurrent(
+            gfsSessionScope,
+            gfsSessionGeneration,
+            gfsSessionScopeRef.current,
+            gfsSessionGenerationRef.current
+          )
+        ) return
+        activateAndLaunch(
+          state => state,
+          () => revealWorkspaceTab(activeWorkspaceTab(workspaceTabsRef.current), false, true),
+          ACTIVE_TAB_LAUNCH
+        )
+      })
+    }
   }, [
+    activateAndLaunch,
     cancelPendingGfsResourceAction,
     gfsSessionScope,
     gfsSessionGeneration,
     revealWorkspaceTab,
     vm.setWorkspaceTabs,
     vm.workspaceTabs,
+    vm.navigationIntentSequence,
+    vm.isNavigationIntentCurrent,
   ])
 
   React.useEffect(() => {
