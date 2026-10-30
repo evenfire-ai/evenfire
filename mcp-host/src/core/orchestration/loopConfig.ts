@@ -174,9 +174,18 @@ export interface LoopConfig {
    * (`modelStepCheckpointRecorder.canResume`). Absent means no automatic retry.
    * Set by `TaskExecutor.buildLoopConfig()` from
    * `config.modelStepAutoRetries`; the retry stays inside the current loop
-   * iteration and does not consume an iteration of the task budget.
+   * iteration and does not consume an iteration of the task budget. Retry k
+   * waits `MODEL_STEP_RETRY_DELAYS_MS[k]` shortened by up to 20 %; all retries
+   * of a step end `MODEL_STEP_RETRY_DEADLINE_MS` after the step's first
+   * `provider_unavailable`.
    */
   modelStepAutoRetries?: number
+
+  /**
+   * #1043 — random source for the retry-wait jitter, values in [0, 1).
+   * Absent means Math.random; tests pass a fixed source so the waits are exact.
+   */
+  modelStepRetryRandom?: () => number
 }
 
 /**

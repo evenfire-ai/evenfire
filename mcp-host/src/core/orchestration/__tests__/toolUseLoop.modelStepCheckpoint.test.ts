@@ -38,7 +38,9 @@ import type {
   AgentEvent,
   Attachment,
   ChatMessage,
+  LoopResult,
   MessageContentPart,
+  ReasoningContext,
   RespondResult,
   TaskExecutionBudgetSnapshot,
   ToolResult,
@@ -257,6 +259,7 @@ function withRecorder(
     events?: AgentEventEmitter
     abortSignal?: AbortSignal
     modelStepAutoRetries?: number
+    modelStepRetryRandom?: () => number
     progressReporter?: ProgressReporter
   } = {}
 ) {
@@ -2166,7 +2169,7 @@ describe('automatic model-step retry (#1043 §2.1)', () => {
       async (...args: Parameters<ReasoningPort['continueWithToolResults']>) => {
         const modelResult = await scripted.continueWithToolResults(...args)
         if (modelResult.type === 'error') {
-          // The user cancels while the retry waits out its delay (350 ms).
+          // The user cancels while the retry waits out its delay (400–500 ms).
           setTimeout(() => controller.abort(), 50)
         }
         return modelResult
@@ -2240,4 +2243,428 @@ describe('automatic model-step retry (#1043 §2.1)', () => {
       }
     }
   })
+})
+
+describe('model-step retry schedule and deadline (#1043)', () => {
+  const RETRY_WARNING = 'Retrying model step after provider_unavailable'
+  const DEADLINE_WARNING = 'Model step retry deadline reached'
+
+  type Warning = { mock: { calls: unknown[][] } }
+  const warnings = (warn: Warning, message = RETRY_WARNING) =>
+    warn.mock.calls.filter(call => call[1] === message).map(call => call[0])
+  const transitionsTo = (transition: { mock: { calls: unknown[][] } }, to: string) =>
+    transition.mock.calls.filter(call => (call[2] as { to?: string } | undefined)?.to === to)
+  const unavailable = (): RespondResult => ({ type: 'error', error: codexUnavailable() })
+  const toolCall = (id: string): RespondResult => ({
+    type: 'tool_calls',
+    calls: [{ id, name: 'read_file', arguments: {} }],
+  })
+
+  async function withRetryClock(check: (warn: Warning) => Promise<void>) {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+    })
+    vi.setSystemTime(0)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      await check(warn)
+    } finally {
+      warn.mockRestore()
+      vi.useRealTimers()
+    }
+  }
+
+  // Keep the worker's queueMicrotask replies real and stop advancing when the
+  // loop settles, so a store write cannot race its queue timeout.
+  async function driveLoop(pending: Promise<LoopResult>, limitMs = 150_000) {
+    let settledAt: number | undefined
+    void pending.then(
+      () => {
+        settledAt = Date.now()
+      },
+      () => {
+        settledAt = Date.now()
+      }
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    for (let elapsed = 0; settledAt === undefined && elapsed < limitMs; elapsed += 50) {
+      await vi.advanceTimersByTimeAsync(50)
+    }
+    expect(settledAt, 'the loop must settle within the bounded fake-time window').toBeDefined()
+    return { result: await pending, settledAt: settledAt! }
+  }
+
+  interface Attempt {
+    startedAt: number
+    signal: AbortSignal | undefined
+    abortedAt?: number
+  }
+
+  // Mirror ReasoningPort: an aborted request resolves with the wrapped,
+  // non-retryable ApiCallFailed instead of rejecting or reporting a 503.
+  function timedReasoning(outcomes: Array<{ afterMs: number; result: RespondResult }>) {
+    const attempts: Attempt[] = []
+    const reasoning: ReasoningPort = {
+      respondWithTools: vi.fn(async () => toolCall('tc_retry_first')),
+      continueWithToolResults: vi.fn((context: ReasoningContext) => {
+        const outcome = outcomes[attempts.length]
+        if (!outcome) throw new Error('unexpected model-step attempt')
+        const attempt: Attempt = { startedAt: Date.now(), signal: context.signal }
+        attempts.push(attempt)
+        if (outcome.afterMs === 0 && !context.signal?.aborted)
+          return Promise.resolve(outcome.result)
+        return new Promise<RespondResult>(resolve => {
+          const onAbort = () => {
+            clearTimeout(timer)
+            context.signal?.removeEventListener('abort', onAbort)
+            attempt.abortedAt = Date.now()
+            resolve({
+              type: 'error',
+              error: new LlmError(
+                'Continue with results failed: request aborted',
+                'test-model',
+                LlmErrorCode.ApiCallFailed,
+                false,
+                context.signal?.reason
+              ),
+            })
+          }
+          const timer = setTimeout(() => {
+            context.signal?.removeEventListener('abort', onAbort)
+            resolve(outcome.result)
+          }, outcome.afterMs)
+          if (context.signal?.aborted) onAbort()
+          else context.signal?.addEventListener('abort', onAbort, { once: true })
+        })
+      }),
+    }
+    return { reasoning, attempts }
+  }
+
+  function resumable(transition: Warning) {
+    expect(transitionsTo(transition, 'resumable')).toHaveLength(1)
+    expect(transitionsTo(transition, 'abandoned')).toHaveLength(0)
+  }
+
+  it('S2: three retries use the jitter source and wait 450, 1350 and 2700 ms', () =>
+    withRetryClock(async warn => {
+      const { recorder, store } = harness()
+      const transition = vi.spyOn(store, 'transition')
+      const tool = createMockTool('read_file')
+      const { reasoning, attempts } = timedReasoning(
+        Array.from({ length: 4 }, () => ({ afterMs: 0, result: unavailable() }))
+      )
+      const { result } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [tool], recorder, 4, {
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+          }),
+          [user]
+        )
+      )
+      const starts = attempts.map(attempt => attempt.startedAt)
+      expect(starts.slice(1).map((time, i) => time - starts[i]!)).toEqual([450, 1350, 2700])
+      expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+      expect(warnings(warn)).toEqual(
+        [450, 1350, 2700].map((delayMs, i) => expect.objectContaining({ delayMs, attempt: i + 1 }))
+      )
+      expect(warnings(warn, DEADLINE_WARNING)).toHaveLength(0)
+      expect(tool.execute).toHaveBeenCalledTimes(1)
+      resumable(transition)
+      expect(vi.getTimerCount()).toBe(0)
+    }))
+
+  it.each([1, 2, 3])('S3: a user abort 100 ms into wait %i stops the loop within one slice', wait =>
+    withRetryClock(async warn => {
+      const { recorder } = harness()
+      const controller = new AbortController()
+      const { reasoning, attempts } = timedReasoning(
+        Array.from({ length: 5 }, () => ({ afterMs: 0, result: unavailable() }))
+      )
+      const abortAt = [100, 550, 1900][wait - 1]!
+      setTimeout(() => controller.abort(new Error('user cancel during wait')), abortAt)
+      const { result, settledAt } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+            abortSignal: controller.signal,
+          }),
+          [user]
+        )
+      )
+      expect(result).toEqual({ type: 'cancelled', reason: 'signal_aborted' })
+      expect(attempts).toHaveLength(wait)
+      expect(warnings(warn)).toHaveLength(wait)
+      expect(settledAt).toBeGreaterThanOrEqual(abortAt)
+      expect(settledAt).toBeLessThanOrEqual(abortAt + 50)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(attempts).toHaveLength(wait)
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  )
+
+  it.each([
+    { retries: 3, calls: 4 },
+    { retries: 4, calls: 5 },
+    { retries: 5, calls: 6 },
+  ])(
+    'S4: $retries fast retries make $calls calls and leave one resumable checkpoint',
+    ({ retries, calls }) =>
+      withRetryClock(async warn => {
+        const { recorder, store } = harness()
+        const transition = vi.spyOn(store, 'transition')
+        const { reasoning, attempts } = timedReasoning(
+          Array.from({ length: calls }, () => ({ afterMs: 0, result: unavailable() }))
+        )
+        const { result, settledAt } = await driveLoop(
+          runToolUseLoop(
+            withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+              modelStepAutoRetries: retries,
+              modelStepRetryRandom: () => 0.5,
+            }),
+            [user]
+          )
+        )
+        expect(attempts).toHaveLength(calls)
+        expect(settledAt).toBe([4500, 9900, 20700][retries - 3])
+        expect(warnings(warn)).toHaveLength(retries)
+        expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+        expect(warnings(warn, DEADLINE_WARNING)).toHaveLength(0)
+        resumable(transition)
+        expect(vi.getTimerCount()).toBe(0)
+      })
+  )
+
+  it('S5: a wait that would reach the deadline starts no attempt and keeps the last provider error', () =>
+    withRetryClock(async warn => {
+      const { recorder, store } = harness()
+      const transition = vi.spyOn(store, 'transition')
+      const lastFailure = unavailable()
+      const { reasoning, attempts } = timedReasoning([
+        { afterMs: 0, result: unavailable() },
+        { afterMs: 28_000, result: unavailable() },
+        { afterMs: 28_000, result: lastFailure },
+        { afterMs: 28_000, result: unavailable() },
+      ])
+      const { result, settledAt } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+          }),
+          [user]
+        )
+      )
+      expect(attempts).toHaveLength(3)
+      expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+      if (result.type !== 'error' || lastFailure.type !== 'error')
+        throw new Error('expected provider error')
+      expect(result.error).toBe(lastFailure.error)
+      resumable(transition)
+      expect(warnings(warn)).toHaveLength(2)
+      expect(warnings(warn, DEADLINE_WARNING)).toEqual([
+        expect.objectContaining({
+          inFlight: false,
+          attempt: 2,
+          deadlineMs: 60_000,
+          checkpointId: 'cp-loop',
+        }),
+      ])
+      expect(settledAt).toBeGreaterThanOrEqual(57_800)
+      expect(settledAt).toBeLessThanOrEqual(57_850)
+      expect(vi.getTimerCount()).toBe(0)
+    }))
+
+  function cappedAttempt() {
+    const controller = new AbortController()
+    const lastFailure = unavailable()
+    const timed = timedReasoning([
+      { afterMs: 5_000, result: unavailable() },
+      { afterMs: 25_000, result: unavailable() },
+      { afterMs: 25_000, result: lastFailure },
+      { afterMs: 25_000, result: unavailable() },
+    ])
+    return { ...timed, controller, lastFailure }
+  }
+
+  it('S6: an in-flight retry is cut 60 s after the eligible failure with heartbeats and the same resumable error', () =>
+    withRetryClock(async warn => {
+      const { recorder, store } = harness()
+      const transition = vi.spyOn(store, 'transition')
+      const { reasoning, attempts, controller, lastFailure } = cappedAttempt()
+      const heartbeat = vi.fn((_event: LlmInProgressEvent) => {})
+      const reporter: ProgressReporter = {
+        reportToolStart: vi.fn(),
+        reportToolComplete: vi.fn(),
+        reportToolProgress: vi.fn(),
+        reportThinking: vi.fn(),
+        reportLlmInProgress: heartbeat,
+      }
+      const { result, settledAt } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+            abortSignal: controller.signal,
+            progressReporter: reporter,
+          }),
+          [user]
+        )
+      )
+      expect(attempts).toHaveLength(4)
+      expect(attempts[3]!.startedAt).toBe(59_500)
+      expect(attempts[3]!.abortedAt).toBe(65_000)
+      expect(attempts[3]!.signal!.aborted).toBe(true)
+      expect(attempts[3]!.signal!.reason.name).toBe('TimeoutError')
+      expect(controller.signal.aborted).toBe(false)
+      expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+      if (result.type !== 'error' || lastFailure.type !== 'error')
+        throw new Error('expected provider error')
+      expect(result.error).toBe(lastFailure.error)
+      resumable(transition)
+      expect(warnings(warn)).toEqual(
+        [450, 1350, 2700].map(delayMs => expect.objectContaining({ delayMs }))
+      )
+      expect(warnings(warn, DEADLINE_WARNING)).toEqual([
+        expect.objectContaining({
+          inFlight: true,
+          attempt: 3,
+          deadlineMs: 60_000,
+          checkpointId: 'cp-loop',
+        }),
+      ])
+      expect(settledAt).toBeGreaterThanOrEqual(65_000)
+      expect(settledAt).toBeLessThanOrEqual(65_050)
+      expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(6)
+      expect(
+        heartbeat.mock.calls.some(
+          ([event]) => event.elapsedMs >= 59_500 && event.elapsedMs < 65_000
+        )
+      ).toBe(true)
+      expect(heartbeat.mock.calls.every(([event]) => event.iteration === 1)).toBe(true)
+      const heartbeatCount = heartbeat.mock.calls.length
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(heartbeat).toHaveBeenCalledTimes(heartbeatCount)
+      expect(vi.getTimerCount()).toBe(0)
+    }))
+
+  it('S7: a user cancel during the capped attempt wins over the deadline', () =>
+    withRetryClock(async warn => {
+      const { recorder, store } = harness()
+      const transition = vi.spyOn(store, 'transition')
+      const { reasoning, attempts, controller } = cappedAttempt()
+      const reason = new Error('user cancel')
+      setTimeout(() => controller.abort(reason), 62_000)
+      const { result, settledAt } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+            abortSignal: controller.signal,
+          }),
+          [user]
+        )
+      )
+      expect(result).toEqual({ type: 'cancelled', reason: 'signal_aborted' })
+      expect(attempts).toHaveLength(4)
+      expect(attempts[3]!.abortedAt).toBe(62_000)
+      expect(attempts[3]!.signal!.reason).toBe(reason)
+      expect(warnings(warn)).toHaveLength(3)
+      expect(warnings(warn, DEADLINE_WARNING)).toHaveLength(0)
+      expect(transitionsTo(transition, 'resumable')).toHaveLength(0)
+      expect(transitionsTo(transition, 'abandoned')).toHaveLength(1)
+      expect(settledAt).toBeGreaterThanOrEqual(62_000)
+      expect(settledAt).toBeLessThanOrEqual(62_050)
+      expect(vi.getTimerCount()).toBe(0)
+    }))
+
+  it("S8': a 70 s transport retry stays uncapped and its eligible failure starts the model-step clock", () =>
+    withRetryClock(async warn => {
+      const { recorder, store } = harness()
+      const transition = vi.spyOn(store, 'transition')
+      const controller = new AbortController()
+      const lastFailure = unavailable()
+      const { reasoning, attempts } = timedReasoning([
+        {
+          afterMs: 0,
+          result: {
+            type: 'error',
+            error: new LlmError(
+              'connection failed',
+              'test-model',
+              LlmErrorCode.ApiCallFailed,
+              true
+            ),
+          },
+        },
+        { afterMs: 70_000, result: unavailable() },
+        { afterMs: 0, result: unavailable() },
+        { afterMs: 0, result: unavailable() },
+        { afterMs: 0, result: lastFailure },
+      ])
+      const { result, settledAt } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [createMockTool('read_file')], recorder, 4, {
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+            abortSignal: controller.signal,
+          }),
+          [user]
+        )
+      )
+      expect(attempts).toHaveLength(5)
+      expect(attempts.map(attempt => attempt.startedAt)).toEqual([0, 350, 70_800, 72_150, 74_850])
+      expect(attempts[1]!.signal).toBe(controller.signal)
+      expect(attempts[1]!.signal!.aborted).toBe(false)
+      expect(attempts[1]!.abortedAt).toBeUndefined()
+      expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+      if (result.type !== 'error' || lastFailure.type !== 'error')
+        throw new Error('expected provider error')
+      expect(result.error).toBe(lastFailure.error)
+      expect(warnings(warn, 'Retrying model transport failure')).toHaveLength(1)
+      expect(warnings(warn)).toHaveLength(3)
+      expect(warnings(warn, DEADLINE_WARNING)).toHaveLength(0)
+      resumable(transition)
+      expect(settledAt).toBe(74_850)
+      expect(vi.getTimerCount()).toBe(0)
+    }))
+
+  it('S9: the next model step gets a new deadline and all three retries', () =>
+    withRetryClock(async warn => {
+      const { recorder, store } = harness()
+      const transition = vi.spyOn(store, 'transition')
+      const tool = createMockTool('read_file')
+      const { reasoning, attempts } = timedReasoning([
+        { afterMs: 0, result: unavailable() },
+        { afterMs: 40_000, result: unavailable() },
+        { afterMs: 16_200, result: toolCall('tc_retry_second') },
+        { afterMs: 1_000, result: unavailable() },
+        { afterMs: 0, result: unavailable() },
+        { afterMs: 0, result: unavailable() },
+        { afterMs: 0, result: unavailable() },
+      ])
+      const { result } = await driveLoop(
+        runToolUseLoop(
+          withRecorder(reasoning, [tool], recorder, 5, {
+            modelStepAutoRetries: 3,
+            modelStepRetryRandom: () => 0.5,
+          }),
+          [user]
+        )
+      )
+      expect(attempts.map(attempt => attempt.startedAt)).toEqual([
+        0, 450, 41_800, 58_000, 59_450, 60_800, 63_500,
+      ])
+      expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+      expect(tool.execute).toHaveBeenCalledTimes(2)
+      expect(warnings(warn)).toEqual(
+        [1, 2, 1, 2, 3].map(attempt => expect.objectContaining({ attempt }))
+      )
+      expect(warnings(warn, DEADLINE_WARNING)).toHaveLength(0)
+      expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+      resumable(transition)
+      expect(vi.getTimerCount()).toBe(0)
+    }))
 })

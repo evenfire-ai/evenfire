@@ -6,6 +6,10 @@ import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
 import {
+  MODEL_STEP_AUTO_RETRIES_DEFAULT,
+  MODEL_STEP_AUTO_RETRIES_MAX,
+} from './core/orchestration/modelStepRetrySchedule'
+import {
   type CodexToolPresentation,
   type NativeToolPresentation,
   parseCodexToolDiscoveryBytes,
@@ -976,9 +980,14 @@ export const config: Config = {
   modelStepAttachmentTtlMs:
     getExecutionLimit('CLERUM_MODEL_STEP_ATTACHMENT_TTL_MINUTES', 60) * 60 * 1000, // 1 h
   // The automatic model-step retry shares the bounded-integer contract: absence
-  // keeps 1, `0` disables it, and anything outside 0–5 stops the Host at config
+  // keeps 3, `0` disables it, and anything outside 0–5 stops the Host at config
   // load instead of silently multiplying billed model calls.
-  modelStepAutoRetries: getExecutionLimit('CLERUM_MODEL_STEP_AUTO_RETRIES', 1, true, 5),
+  modelStepAutoRetries: getExecutionLimit(
+    'CLERUM_MODEL_STEP_AUTO_RETRIES',
+    MODEL_STEP_AUTO_RETRIES_DEFAULT,
+    true,
+    MODEL_STEP_AUTO_RETRIES_MAX
+  ),
 
   // Workflow step iteration limit — max LLM↔tool rounds per step before forced wrap-up.
   // Override per step via CRD spec.steps[].maxIterations. Default 50.
