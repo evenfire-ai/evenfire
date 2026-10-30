@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { type KeyObject, createHash, createSign, generateKeyPairSync } from 'node:crypto'
+import { type KeyObject, constants, createHash, createSign, generateKeyPairSync } from 'node:crypto'
 import type { DbClient } from '../src/db.js'
 import type { PinnedFetchOptions, PinnedTransport } from '../src/http/pinnedFetch.js'
 import { loadOidcProviderConfiguration } from '../src/oidc/configuration.js'
@@ -164,11 +164,28 @@ function signIdToken(
   const signer = createSign('RSA-SHA256')
   signer.update(input)
   signer.end()
-  return `${input}.${signer.sign(privateKey).toString('base64url')}`
+  const signature =
+    algorithm === 'PS256'
+      ? signer.sign({
+          key: privateKey,
+          padding: constants.RSA_PKCS1_PSS_PADDING,
+          saltLength: constants.RSA_PSS_SALTLEN_DIGEST,
+        })
+      : signer.sign(privateKey)
+  return `${input}.${signature.toString('base64url')}`
 }
 
-function jwk(publicKey: KeyObject, kid: string): Record<string, unknown> {
-  return { ...(publicKey.export({ format: 'jwk' }) as JsonWebKey), kid, use: 'sig', alg: 'RS256' }
+function jwk(
+  publicKey: KeyObject,
+  kid: string,
+  algorithm: string | null = 'RS256'
+): Record<string, unknown> {
+  return {
+    ...(publicKey.export({ format: 'jwk' }) as JsonWebKey),
+    kid,
+    use: 'sig',
+    ...(algorithm ? { alg: algorithm } : {}),
+  }
 }
 
 function fixture(
@@ -177,7 +194,10 @@ function fixture(
     authorizationEndpoint?: string
     discoveryStatus?: number
     discoveryRedirect?: string
+    jwksUri?: string
     jwksBody?: string
+    jwksKeyAlgorithm?: string | null
+    idTokenSigningAlgorithms?: string[]
     tokenAlgorithm?: string
     tamperSignature?: boolean
     responseTypesSupported?: unknown
@@ -201,7 +221,13 @@ function fixture(
     modulusLength: options.initialKeyBits ?? 2048,
   })
   let signingKey = { privateKey: initialKey.privateKey, kid: 'key-1' }
-  let publicKeys = [jwk(initialKey.publicKey, 'key-1')]
+  let publicKeys = [
+    jwk(
+      initialKey.publicKey,
+      'key-1',
+      options.jwksKeyAlgorithm === undefined ? 'RS256' : options.jwksKeyAlgorithm
+    ),
+  ]
   let nonce = ''
   let codeChallenge = ''
   let tokenRequests = 0
@@ -212,7 +238,10 @@ function fixture(
     issuer,
     authorization_endpoint: options.authorizationEndpoint ?? `${issuer}/authorize`,
     token_endpoint: `${issuer}/token`,
-    jwks_uri: `${issuer}/keys`,
+    jwks_uri: options.jwksUri ?? `${issuer}/keys`,
+    ...(options.idTokenSigningAlgorithms
+      ? { id_token_signing_alg_values_supported: options.idTokenSigningAlgorithms }
+      : {}),
     response_types_supported: options.responseTypesSupported ?? ['code'],
     ...(!options.omitOptionalCapabilities
       ? {
@@ -793,6 +822,53 @@ describe('generic OIDC protocol foundation', () => {
       expect(f.requestedUrls).toContain(`${GENERIC_ISSUER}/keys`)
     }
     expect([...f.db.rows.values()][0]?.status).toBe('failed')
+  })
+
+  it('accepts a real RS256 token from an alg-less JWK when PS256 is also advertised', async () => {
+    const f = fixture({
+      tokenAlgorithm: 'RS256',
+      jwksKeyAlgorithm: null,
+      idTokenSigningAlgorithms: ['RS256', 'PS256'],
+    })
+    const { params } = await begin(f)
+
+    const proof = await f.engine.completeIdentityProofAttempt({
+      state: params.get('state')!,
+      code: 'fixture-code',
+      issuer: GENERIC_ISSUER,
+    })
+
+    expect(isVerifiedOidcIdentityProof(proof)).toBe(true)
+    expect(f.jwksRequests()).toBe(1)
+  })
+
+  it('rejects a genuinely PS256-signed token when RS256 and PS256 are advertised', async () => {
+    const f = fixture({
+      tokenAlgorithm: 'PS256',
+      jwksKeyAlgorithm: null,
+      idTokenSigningAlgorithms: ['RS256', 'PS256'],
+    })
+    const { params } = await begin(f)
+
+    await expect(
+      f.engine.completeIdentityProofAttempt({
+        state: params.get('state')!,
+        code: 'fixture-code',
+        issuer: GENERIC_ISSUER,
+      })
+    ).rejects.toBeInstanceOf(OidcProviderIncompatibleError)
+
+    expect([...f.db.rows.values()][0]?.status).toBe('failed')
+  })
+
+  it('rejects a cross-site JWKS endpoint before fetching it', async () => {
+    const crossSiteJwks = 'https://keys.other.test/keys'
+    const f = fixture({ jwksUri: crossSiteJwks })
+
+    await expect(f.engine.validateProvider()).resolves.toMatchObject({ status: 'incompatible' })
+
+    expect(f.requestedUrls).not.toContain(crossSiteJwks)
+    expect(f.tokenRequests()).toBe(0)
   })
 
   it('rejects private key material and oversized key sets in JWKS', async () => {

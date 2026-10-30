@@ -172,6 +172,40 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
     expect(await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, expiredState, BINDING)).toBeNull()
   })
 
+  it('does not consume an attempt when only its configuration generation is stale', async () => {
+    const state = `state-${randomBytes(32).toString('base64url')}`
+    const created = await insertOidcProtocolAttempt(pool!, ENCRYPTION_KEY, {
+      ...BINDING,
+      state,
+      pkceVerifier: 'generation-bound-verifier',
+      nonce: 'generation-bound-nonce',
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+
+    expect(
+      await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, state, {
+        ...BINDING,
+        configurationGeneration: 'v1:generation-after-rotation',
+      })
+    ).toBeNull()
+    expect(
+      (
+        await pool!.query<{ status: string }>(
+          'SELECT status FROM oidc_protocol_attempts WHERE id = $1',
+          [created.id]
+        )
+      ).rows
+    ).toEqual([{ status: 'pending' }])
+
+    const original = await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, state, BINDING)
+    expect(original).toMatchObject({
+      id: created.id,
+      configurationGeneration: BINDING.configurationGeneration,
+      pkceVerifier: 'generation-bound-verifier',
+      nonce: 'generation-bound-nonce',
+    })
+  })
+
   it('adopts the original feature migration receipt without rerunning its schema', async () => {
     const migration = CONTROL_API_MIGRATIONS.find(
       candidate => candidate.version === '0131_oidc_protocol_attempts'

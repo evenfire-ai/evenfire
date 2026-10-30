@@ -60,6 +60,18 @@ describe('OIDC deployment configuration', () => {
     expect(trustRevision.configurationGeneration).not.toBe(first.configurationGeneration)
   })
 
+  it('keys the trust generation with the configured generation key', () => {
+    const first = loadOidcProviderConfiguration(OIDC_ENV, GENERATION_KEY)!
+    const rotatedKey = loadOidcProviderConfiguration(
+      OIDC_ENV,
+      'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100'
+    )!
+
+    expect(rotatedKey.configurationGeneration).not.toBe(first.configurationGeneration)
+    expect(first.configurationGeneration).not.toContain(SECRET)
+    expect(rotatedKey.configurationGeneration).not.toContain(SECRET)
+  })
+
   it('rejects incomplete and unknown OIDC settings without echoing the credential', () => {
     expect(() =>
       loadOidcProviderConfiguration(
