@@ -157,7 +157,9 @@ describe('WorkspaceTabStrip element measurement', () => {
     state = openAppTab(state, { id: 'later', appRef: 'example/app', title: 'Later' })
     view.rerender(<WorkspaceTabStrip {...props} tabs={state.tabs} />)
     expect(observers).toHaveLength(2)
-    expect(observers[0].disconnected).toBe(true)
+    const firstObserver = observers[0]
+    if (!firstObserver) throw new Error('Expected the first ResizeObserver to be recorded')
+    expect(firstObserver.disconnected).toBe(true)
     view.unmount()
     expect(observers.every(observer => observer.disconnected && observer.targets.size === 0)).toBe(
       true
