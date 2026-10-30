@@ -25,7 +25,9 @@ const input = {
   run,
   profile: 'owned-e2e',
   context: 'owned-e2e',
-  adminUsername: 'admin',
+  // The lane's sign-in identifier, not a `control_admin_users` column value:
+  // the Control UI login trims it and resolves username or email.
+  adminUsername: '  Admin@Example.test  ',
   userEmail: `${run}@example.test`,
   unauthorizedEmail: `${run}-unauthorized@example.test`,
   userPassword: 'fixture-only-member-password',
@@ -54,9 +56,10 @@ function harness() {
     commits: 0,
     publications: 0,
     transactionActive: false,
-    // The lane's Control Admin row the governed retirement resolves. `null`
-    // removes it to prove the fixture refuses an actorless retirement.
-    controlAdmin: '99999999-9999-4999-8999-999999999999',
+    // The lane's Control Admin rows the governed retirement resolves. The lane
+    // sends a sign-in identifier, so the fixture resolves it through the product
+    // login predicate; an empty list, a disabled row or two rows is refused.
+    controlAdmins: [{ id: '99999999-9999-4999-8999-999999999999', status: 'active' }],
     retirements: [],
     retirementOutcome: 'deleted',
   }
@@ -104,7 +107,7 @@ function harness() {
           if (state.failQuery?.(sql)) throw new Error('synthetic query failure')
           pending.push({ sql, values })
           if (sql.includes('FROM control_admin_users')) {
-            const rows = state.controlAdmin === null ? [] : [{ id: state.controlAdmin }]
+            const rows = state.controlAdmins
             return { rows, rowCount: rows.length }
           }
           if (state.respond) return state.respond(sql, values)
@@ -541,24 +544,43 @@ test('every transactional cleanup refusal names its phase and that phase ran las
   }
 })
 
-test('a missing control admin refuses the governed retirement before any deletion', async () => {
-  const { state, adapters } = harness()
-  const journal = await createFixtureIdentities(input, adapters)
-  state.calls = []
-  state.retirements = []
-  state.controlAdmin = null
-  state.respond = cleanupRows(journal)
-  const error = await refusal(cleanupFixtureIdentities(input, journal, adapters))
-  assert.equal(error.code, 'control_admin_missing')
-  assert.equal(error.phase, 'delete-users')
-  assert.equal(error.sqlstate, 'UNKNOWN')
-  assert.equal(journal.status, 'recovery-required')
-  assert.equal(state.commits, 1, 'only the fixture creation transaction committed')
-  assert.equal(state.retirements.length, 0, 'no actorless retirement may be attempted')
-  assert.ok(state.calls.every(call => !/DELETE FROM users/.test(call.sql)))
-  // Liveness: the lookup ran inside the cleanup transaction and named the input.
-  assert.match(state.calls.at(-1).sql, /FROM control_admin_users/)
-  assert.deepEqual(state.calls.at(-1).values, [input.adminUsername])
+test('an unresolvable control admin refuses the governed retirement before any deletion', async () => {
+  const active = { id: '99999999-9999-4999-8999-999999999999', status: 'active' }
+  // One row per refusal shape of the actor lookup. The lane's identifier is a
+  // sign-in identifier, so the fixture must resolve exactly one active admin.
+  const cases = [
+    ['an identifier no admin row matches', []],
+    ['an identifier whose only admin is disabled', [{ ...active, status: 'disabled' }]],
+    [
+      'an identifier two admin rows match',
+      [active, { id: '88888888-8888-4888-8888-888888888888', status: 'active' }],
+    ],
+    ['a whitespace-only identifier', [active], '   '],
+  ]
+  for (const [label, controlAdmins, adminUsername] of cases) {
+    const { state, adapters } = harness()
+    const journal = await createFixtureIdentities(input, adapters)
+    const cleanupInput = adminUsername === undefined ? input : { ...input, adminUsername }
+    state.calls = []
+    state.retirements = []
+    state.controlAdmins = controlAdmins
+    state.respond = cleanupRows(journal)
+    const error = await refusal(cleanupFixtureIdentities(cleanupInput, journal, adapters))
+    assert.equal(error.code, 'control_admin_missing', label)
+    assert.equal(error.phase, 'delete-users', label)
+    assert.equal(error.sqlstate, 'UNKNOWN', label)
+    assert.equal(journal.status, 'recovery-required', label)
+    assert.equal(state.commits, 1, 'only the fixture creation transaction committed')
+    assert.equal(state.retirements.length, 0, 'no actorless retirement may be attempted')
+    assert.ok(
+      state.calls.every(call => !/DELETE FROM users/.test(call.sql)),
+      label
+    )
+    // Liveness: the lookup ran inside the cleanup transaction and named the
+    // trimmed identifier for every refusal shape.
+    assert.match(state.calls.at(-1).sql, /FROM control_admin_users/, label)
+    assert.deepEqual(state.calls.at(-1).values, [cleanupInput.adminUsername.trim()], label)
+  }
 })
 
 test('cleanup refuses foreign ownership, memberships, grants, invitations and retained links before mutation', async () => {
@@ -918,16 +940,17 @@ test('cleanup retires every journal user through the governed adapter inside the
   for (const request of state.retirements) {
     assert.deepEqual(request.actor, {
       kind: 'control_admin',
-      controlAdminId: state.controlAdmin,
+      controlAdminId: state.controlAdmins[0].id,
     })
     assert.equal(request.reason, 'Approved tools E2E fixture identity cleanup')
     assert.equal(request.idempotencyKey, `approved-tools-cleanup:${run}:${request.userId}`)
     assert.equal(request.requestId, null)
   }
-  // The actor lookup names the injected username and admits only an active row.
+  // The actor lookup names the lane's sign-in identifier, trimmed, and mirrors
+  // the product login predicate (`findAdminByLogin`): username or email.
   const lookup = state.calls.find(call => call.sql.includes('FROM control_admin_users'))
-  assert.deepEqual(lookup.values, [input.adminUsername])
-  assert.match(lookup.sql, /status = 'active'/)
+  assert.deepEqual(lookup.values, [input.adminUsername.trim()])
+  assert.match(lookup.sql, /username = \$1\s+OR lower\(email\) = lower\(\$1\)/)
   // No raw user delete is issued by the fixture itself.
   assert.ok(state.calls.every(call => !/DELETE FROM users/.test(call.sql)))
   assert.ok(state.calls.some(call => /^DELETE FROM teams/.test(call.sql)))

@@ -258,6 +258,7 @@ run_node_group "approved-tools-fixtures-and-runner" \
   "scripts/e2e/approved-tools-control-api-lifecycle.test.mjs" \
   "scripts/e2e/approved-tools-connection-journal.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools-setup/identity-lifecycle.test.mjs" \
+  "tests/e2e/fixtures/codex-subscription/approved-tools-setup/seed.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools-oauth/provider.test.mjs" \
   "scripts/e2e/approved-tools-resource-cleanup.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs"

@@ -6,8 +6,10 @@ import {
   cleanupFixtureIdentities,
   createFixtureIdentities,
   createFixtureIdentityJournal,
+  describeIdentityFailure,
 } from '../../tests/e2e/fixtures/codex-subscription/approved-tools-setup/identity-lifecycle.mjs'
 import { initDb, withTransaction } from '../src/db.js'
+import { findAdminByLogin } from '../src/services/adminAuthService.js'
 import { passwordIdentifierKey } from '../src/services/auth/passwordAdmissionState.js'
 import { verifyUserPassword } from '../src/services/directory/login.js'
 import { retireDesktopUserInTransaction } from '../src/services/directory/users.js'
@@ -42,6 +44,11 @@ const realPg = adminUrl ? describe : describe.skip
 const run = `approved-tools-${randomBytes(6).toString('hex')}`
 const profile = 'owned-e2e'
 const adminUsername = `fixture-admin-${randomBytes(4).toString('hex')}`
+// The lane's `TEST_ADMIN_USERNAME` is a sign-in identifier, not a column value:
+// the profile is signed in by email, and the Control UI login trims the value
+// before resolving it (`control-api/src/routes/admin/auth.ts`).
+const adminEmail = `${adminUsername}@example.test`
+const loginIdentifier = `  ${adminEmail.toUpperCase()}  `
 const env = {
   NODE_ENV: 'test',
   EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE: '1',
@@ -57,7 +64,8 @@ function fixtureInput() {
     run,
     profile,
     context: profile,
-    adminUsername,
+    // What the lane actually sends: the sign-in identifier, mixed case and padded.
+    adminUsername: loginIdentifier,
     userEmail: `${run}@example.test`,
     unauthorizedEmail: `${run}-unauthorized@example.test`,
     userPassword: 'Synthetic-fixture-member-password',
@@ -171,18 +179,25 @@ realPg('approved-tools identity cleanup on real PostgreSQL', () => {
     expect(before.rows[0].user_id).toBe(member.id)
     expect(before.rows[0].failures).toBeGreaterThanOrEqual(1)
 
-    // The lane's Control Admin is the recorded retirement actor.
+    // The lane's Control Admin is the recorded retirement actor, seeded the way
+    // the lane signs in: a bare username plus the email identifier it sends.
     const adminId = (
       await owner.query(
         `INSERT INTO control_admin_users(username, password_hash, email, role, status)
-         VALUES ($1, $2, NULL, 'admin', 'active') RETURNING id::text AS id`,
-        [adminUsername, await bcrypt.hash('Synthetic-admin-password', 12)]
+         VALUES ($1, $2, $3, 'admin', 'active') RETURNING id::text AS id`,
+        [adminUsername, await bcrypt.hash('Synthetic-admin-password', 12), adminEmail]
       )
     ).rows[0].id as string
 
     // Green after: the user rows are gone, the identifier row and the
     // retirement operation remain as retained audit.
-    const result = await cleanupFixtureIdentities(input, journal, adapters)
+    const result = await cleanupFixtureIdentities(input, journal, adapters).catch(error => {
+      // Report a refusal with the producer's own coded triple: the token is the
+      // lane's contract and the plain message does not carry it.
+      throw new Error(`cleanup refused ${JSON.stringify(describeIdentityFailure(error))}`, {
+        cause: error,
+      })
+    })
     expect(result).toEqual({ outcome: 'deleted-with-audit-retained', auditRetention: 'preserved' })
     expect(journal.status).toBe('cleaned')
     expect(journal.cleanupOutcome).toBe('deleted-with-audit-retained')
@@ -218,6 +233,9 @@ realPg('approved-tools identity cleanup on real PostgreSQL', () => {
       outcome: 'deleted',
       reason: 'Approved tools E2E fixture identity cleanup',
     })
+    // Liveness of the identifier: the value the cleanup resolved is one the
+    // product login accepts, and both predicates pick the same admin row.
+    expect((await findAdminByLogin(input.adminUsername))?.id).toBe(adminId)
     // Liveness of the surrounding cleanup: the create and revoke audit events,
     // the durable journal and the runtime publication all ran, and no
     // connection adapter was needed.

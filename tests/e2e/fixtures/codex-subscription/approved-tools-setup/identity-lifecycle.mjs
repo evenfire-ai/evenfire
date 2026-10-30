@@ -13,9 +13,9 @@ function suiteIsSingle(suite) {
 // Closed set of reasons a fixture identity operation can fail for. One code per
 // refusal site; `db_error` and `step_failed` are the two generic classifications
 // for an unexpected error raised inside a step, `control_admin_missing` refuses
-// a governed retirement without the lane's recorded operator, and `unparseable`
-// is the host's label for a failure line it cannot classify. Nothing else may
-// leave this file.
+// a governed retirement whose lane sign-in identifier does not resolve to
+// exactly one active Control Admin, and `unparseable` is the host's label for a
+// failure line it cannot classify. Nothing else may leave this file.
 export const IDENTITY_ERROR_CODES = Object.freeze([
   'adapter_missing',
   'binding_env_mismatch',
@@ -677,19 +677,28 @@ async function appendFixturePermissions(db, journal, action, append, includeWork
 const retirementReason = 'Approved tools E2E fixture identity cleanup'
 const retirementKeyPrefix = 'approved-tools-cleanup:'
 
-// Resolve the retirement actor the lane names, inside the cleanup transaction.
-// The recorded operation then names a real Control Admin instead of a
-// fabricated UUID; an absent row is a named refusal, never an actorless write.
+// Resolve the retirement actor from the lane's sign-in identifier, inside the
+// cleanup transaction. The recorded operation then names a real Control Admin
+// instead of a fabricated UUID; an identifier that does not resolve to exactly
+// one active admin is a named refusal, never an actorless write.
+//
+// Same identifier semantics as the Control UI login (`findAdminByLogin` in
+// control-api/src/services/adminAuthService.ts): the lane's TEST_ADMIN_USERNAME
+// is a sign-in identifier, a username or an email. The predicate is mirrored
+// here, not called, so it runs on the cleanup transaction's handle and a
+// two-row match stays visible instead of being hidden by a `LIMIT 1`.
 async function resolveRetirementActor(db, input) {
+  const login = String(input.adminUsername ?? '').trim()
   const admins = (
     await db.query(
-      `SELECT id::text FROM control_admin_users WHERE username = $1 AND status = 'active'`,
-      [String(input.adminUsername ?? '')]
+      `SELECT id::text, status FROM control_admin_users
+        WHERE username = $1 OR lower(email) = lower($1)`,
+      [login]
     )
   ).rows
   requireValue(
-    admins.length === 1,
-    'The recorded control admin actor is missing',
+    login !== '' && admins.length === 1 && admins[0].status === 'active',
+    "The lane's Control Admin does not resolve to exactly one active admin",
     'control_admin_missing'
   )
   return { kind: 'control_admin', controlAdminId: admins[0].id }

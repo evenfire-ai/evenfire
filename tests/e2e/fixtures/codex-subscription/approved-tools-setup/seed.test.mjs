@@ -61,7 +61,7 @@ const rows = {
     recipe_namespace: state.grants.workflow.namespace,
     recipe_name: state.grants.workflow.name,
   }],
-  control_admin_users: [{ id: state.controlAdminId }],
+  control_admin_users: [{ id: state.controlAdminId, status: 'active' }],
 }
 export async function withTransaction(work) {
   const db = {
