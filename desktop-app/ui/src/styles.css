@@ -6726,8 +6726,6 @@ h3 {
   border-radius: var(--radius-sm);
   background: var(--surface-strong);
   color: var(--text-muted);
-  font: inherit;
-  font-size: var(--font-size-lg);
   cursor: pointer;
 }
 

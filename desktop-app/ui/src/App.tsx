@@ -24,6 +24,7 @@ import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
+import { IconClose } from '@components/SidebarNav/icons'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
@@ -364,7 +365,7 @@ function DesktopUpdatePanel({
             onClick={onClose}
             type="button"
           >
-            ×
+            <IconClose width={16} height={16} />
           </button>
         </div>
         <div className="desktop-update-dialog__body" id={descriptionId}>
