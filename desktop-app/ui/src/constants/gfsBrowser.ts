@@ -23,3 +23,6 @@ export const DRAG_COLD_CHECK_BUDGET = 8
 
 /** Concurrent cold-hover probe chains per gesture, shared across both surfaces. */
 export const DRAG_COLD_CHECK_MAX_CONCURRENCY = 2
+
+/** Label of the caller's own home wherever EvenDrive shows it as a root. */
+export const GFS_MY_HOME_LABEL = 'My home'

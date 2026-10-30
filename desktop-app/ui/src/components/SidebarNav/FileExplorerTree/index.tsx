@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
@@ -12,6 +12,7 @@ import {
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
+import { callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
@@ -102,6 +103,8 @@ function FileExplorerNode({
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
+  // The treeitem is named by its label alone, not by its toggle and children.
+  const labelId = useId()
   // Server-computed: the row is visible but the session cannot read it (a
   // folder grant without inheritance; a file whose parent does not inherit).
   // Mark it so it does not look actionable, and let the activate handlers
@@ -326,6 +329,7 @@ function FileExplorerNode({
   return (
     <div
       aria-expanded={isDirectory ? isExpanded : undefined}
+      aria-labelledby={labelId}
       aria-level={level}
       aria-selected={isSelected}
       className="da-file-explorer__item"
@@ -363,6 +367,7 @@ function FileExplorerNode({
           }`}
           color="neutral"
           draggable={canDrag}
+          id={labelId}
           onClick={handleRowClick}
           onDoubleClick={handleRowDoubleClick}
           onDragStart={canDrag ? handleDragStart : undefined}
@@ -549,7 +554,17 @@ export function FileExplorerTree({
     [dragSession]
   )
 
-  const roots = useMemo(() => sortTreeItems(ctrl.accessibleResources), [ctrl.accessibleResources])
+  // The caller's own ready home is shown once, as "My home"; "Shared with me"
+  // lists only the other roots the caller can reach.
+  const roots = useMemo(
+    () =>
+      sortTreeItems(ctrl.accessibleResources.filter(node => !isCallerHomeRoot(ctrl.home, node))),
+    [ctrl.accessibleResources, ctrl.home]
+  )
+  const homeRoot = useMemo(
+    () => callerHomeRootNode(ctrl.home, ctrl.accessibleResources),
+    [ctrl.accessibleResources, ctrl.home]
+  )
 
   /** Cached destination names for the numbered-name ladder and suggestion —
    * the same shared children cache the Files page seeds its commit from, keyed
@@ -981,7 +996,33 @@ export function FileExplorerTree({
     <div className="da-file-explorer">
       {ctrl.accessState === 'active' ? (
         <div role="tree" aria-label="File destinations">
-          {ctrl.home?.state !== 'retired' ? (
+          {homeRoot ? (
+            <FileExplorerNode
+              accessActive={ctrl.accessState === 'active'}
+              ancestorCrumbs={[]}
+              ancestorIds={[]}
+              dragSourceName={dragSourceName}
+              dropState={dropStatesByResourceId[homeRoot.resourceId]}
+              dropStatesByResourceId={dropStatesByResourceId}
+              expandedIds={expandedIds}
+              homeResourceId={homeRoot.resourceId}
+              level={1}
+              movingResourceId={movingResourceId}
+              node={homeRoot}
+              onActivateFile={handleActivateFile}
+              onActivateFolder={handleActivateFolder}
+              onAuthorityFailure={handleAuthorityFailure}
+              onNodeDragEnd={clearDragState}
+              onNodeDragLeave={handleNodeDragLeave}
+              onNodeDragOver={handleNodeDragOver}
+              onNodeDragStart={handleNodeDragStart}
+              onNodeDrop={handleNodeDrop}
+              onRequestMove={handleRequestMove}
+              onToggle={handleToggle}
+              scope={ctrl.sessionScope ?? 'anonymous'}
+              selectedId={selectedId}
+            />
+          ) : ctrl.home?.state !== 'retired' ? (
             <Button
               align="start"
               block
@@ -992,14 +1033,7 @@ export function FileExplorerTree({
               aria-label="My home"
               size="sm"
               variant="text"
-              disabled={ctrl.home?.state !== 'ready' || !ctrl.home.drive || !ctrl.home.resourceId}
-              onClick={() => {
-                if (ctrl.home?.drive && ctrl.home.resourceId) {
-                  onOpenFolder(
-                    `gfs://${ctrl.home.drive}/${ctrl.home.resourceId.replace(/-/g, '').toLowerCase()}`
-                  )
-                }
-              }}
+              disabled
             >
               My home
             </Button>

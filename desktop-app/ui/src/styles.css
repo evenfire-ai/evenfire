@@ -14782,6 +14782,21 @@ pre {
   align-content: stretch;
 }
 
+/* The caller's own home sits above the "Shared with me" card: it is not shared
+   with the caller, so it is not a row of that listing. */
+.da-gfs-layout:has(> .da-gfs-my-home) {
+  grid-template-rows: auto 1fr;
+}
+
+.da-gfs-my-home {
+  padding: var(--space-2) var(--space-3);
+}
+
+.da-gfs-my-home__open {
+  gap: var(--space-2);
+  font-weight: var(--font-weight-semibold);
+}
+
 .da-gfs-workspace-card {
   display: grid;
   min-width: 0;

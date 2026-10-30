@@ -7245,9 +7245,11 @@ describe('FilesPage', () => {
       name: 'Team folder',
       path: '/Team folder',
     }
+    // A READY home is never a row of the Shared with me listing (it has its own
+    // entry); a bound home in conflict still is, and stays governed.
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
-      home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+      home: { state: 'conflict', drive: 'main', resourceId: 'home-1' },
       accessibleResources: [homeRow, siblingRow],
     })
     renderFilesPage()
@@ -7321,6 +7323,82 @@ describe('FilesPage', () => {
     // Witness: the breadcrumb menu itself is rendered with its other actions.
     expect(crumbItems).toContain('Share')
     expect(crumbItems).toContain('Download as zip')
+  })
+
+  it('starts the trail at My home inside the caller home and at Shared with me elsewhere', () => {
+    const homeCrumb = {
+      resourceId: 'home-1',
+      gfsUri: 'gfs://main/home-1',
+      name: 'fixture',
+      kind: 'directory' as const,
+      version: 4,
+      bytes: 0,
+    }
+    const projects = { ...homeCrumb, resourceId: 'projects-1', name: 'Projects' }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+      current: projects,
+      crumbs: [homeCrumb, projects],
+    })
+    renderFilesPage()
+    const trail = screen.getByRole('navigation', { name: 'File location' })
+    expect(within(trail).getByRole('button', { name: 'My home' })).toBeTruthy()
+    expect(
+      within(trail).getByRole('button', { name: 'Projects' }).getAttribute('aria-current')
+    ).toBe('page')
+    expect(within(trail).queryByRole('button', { name: 'Shared with me' })).toBeNull()
+    expect(within(trail).queryByRole('button', { name: 'fixture' })).toBeNull()
+    cleanup()
+
+    // Outside the home (another user's folder shared with the caller), the
+    // trail keeps its Shared with me root and the folder's own name.
+    const teamCrumb = { ...homeCrumb, resourceId: 'team-1', name: 'Team folder' }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+      current: teamCrumb,
+      crumbs: [teamCrumb],
+    })
+    renderFilesPage()
+    const otherTrail = screen.getByRole('navigation', { name: 'File location' })
+    expect(within(otherTrail).getByRole('button', { name: 'Shared with me' })).toBeTruthy()
+    expect(within(otherTrail).getByRole('button', { name: 'Team folder' })).toBeTruthy()
+    expect(within(otherTrail).queryByRole('button', { name: 'My home' })).toBeNull()
+  })
+
+  it('keeps the caller home out of the Shared with me listing and opens it from its own entry', () => {
+    const row = (resourceId: string, name: string) => ({
+      resourceId,
+      rid: resourceId,
+      gfsUri: `gfs://main/${resourceId}`,
+      drive: 'main',
+      parentResourceId: null,
+      name,
+      kind: 'directory' as const,
+      path: `/${name}`,
+      version: 1,
+      bytes: 0,
+      permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+    })
+    const openResource = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+      accessibleResources: [row('alpha-1', 'Alpha shared'), row('home-1', 'fixture')],
+      openResource,
+    })
+    renderFilesPage()
+    const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
+    // Witness: what others share is listed under Shared with me.
+    expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
+    expect(within(shared).queryByText('My home')).toBeNull()
+    expect(within(shared).queryByText('fixture')).toBeNull()
+    const myHome = screen.getByRole('region', { name: 'My home' })
+    fireEvent.click(within(myHome).getByRole('button', { name: 'My home' }))
+    expect(openResource).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'home-1', name: 'My home' })
+    )
   })
 })
 

@@ -171,11 +171,10 @@ async function openHomeFolder(page: Page, home: { storageUsername: string | null
   const nav = new DesktopFilesNav(page)
   await nav.openFiles()
   await nav.openMyHome()
-  await expect(
-    page
-      .getByRole('navigation', { name: 'File location' })
-      .getByText(home.storageUsername ?? '', { exact: true })
-  ).toBeVisible()
+  const trail = page.getByRole('navigation', { name: 'File location' })
+  // The trail names the caller's home "My home", never its folder name.
+  await expect(trail.getByRole('button', { name: 'My home', exact: true })).toBeVisible()
+  await expect(trail.getByText(home.storageUsername ?? '', { exact: true })).toHaveCount(0)
   await humanRecordedPause([600, 1200])
 }
 
@@ -349,6 +348,9 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         const home = await fx.waitForHomeState(owner.id, 'ready')
         expect(home.drive).toBeTruthy()
         expect(home.storageUsername).toBe(owner.name)
+        const nav = new DesktopFilesNav(page)
+        await nav.openFiles()
+        await nav.expectHomeOutsideSharedWithMe(home.storageUsername!)
         await openHomeFolder(page, home)
         await new DesktopResourceView(page).expectWritable()
         const ownerGrant = fx.accessFor(home.resourceId!, 'user', owner.id)
@@ -394,7 +396,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         // Home root: the direct owner row is present and protected as well.
         await page
           .getByRole('navigation', { name: 'File location' })
-          .getByText(home.storageUsername!, { exact: true })
+          .getByRole('button', { name: 'My home', exact: true })
           .click()
         await new DesktopResourceView(page).openShare(home.storageUsername!)
         const ownerRow = page
@@ -792,7 +794,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await openHomeFolder(ownerS.page, home)
         await ownerS.page
           .getByRole('navigation', { name: 'File location' })
-          .getByText(home.storageUsername!, { exact: true })
+          .getByRole('button', { name: 'My home', exact: true })
           .click()
         await view.openShare(home.storageUsername!)
         await new DesktopShareDialog(ownerS.page).grant(b.name, 'Read', { includeContents: true })
@@ -931,7 +933,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expect(
           adminPage
             .getByRole('navigation', { name: 'File location' })
-            .getByRole('button', { name: home.storageUsername!, exact: true })
+            .getByRole('button', { name: 'My home', exact: true })
         ).toHaveAttribute('aria-current', 'page')
         await new DesktopResourceView(adminPage).expectWritable()
       })
@@ -1176,7 +1178,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expect(
           ownerS.page
             .getByRole('navigation', { name: 'File location' })
-            .getByRole('button', { name: home.storageUsername!, exact: true })
+            .getByRole('button', { name: 'My home', exact: true })
         ).toHaveAttribute('aria-current', 'page')
       })
       await test.step('logout closes Files and it cannot be reopened from cache', async () => {

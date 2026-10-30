@@ -13,13 +13,17 @@ export class DesktopFilesNav {
   }
 
   async openMyHome(): Promise<void> {
+    // Only the ready home is a folder row (it carries aria-expanded); a single
+    // click expands it, a double-click opens it in Files.
     const home = this.page.getByRole('treeitem', { name: 'My home' })
-    await expect(home).toBeEnabled({ timeout: 150_000 })
-    await home.click()
+    await expect(home).toHaveAttribute('aria-expanded', /^(true|false)$/, { timeout: 150_000 })
+    await home.getByRole('button', { name: 'My home', exact: true }).dblclick()
     await expect(this.page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
     await expect(
-      this.page.getByRole('navigation', { name: 'File location' }).locator('[aria-current="page"]')
-    ).toBeVisible()
+      this.page
+        .getByRole('navigation', { name: 'File location' })
+        .getByRole('button', { name: 'My home', exact: true })
+    ).toHaveAttribute('aria-current', 'page')
     await humanRecordedPause([600, 1200])
   }
 
@@ -35,12 +39,49 @@ export class DesktopFilesNav {
         this.page.getByText('Your home folder needs attention from an administrator')
       ).toBeVisible()
     } else if (state === 'ready') {
-      await expect(this.page.getByRole('treeitem', { name: 'My home' })).toBeEnabled()
+      await expect(this.page.getByRole('treeitem', { name: 'My home' })).toHaveAttribute(
+        'aria-expanded',
+        /^(true|false)$/
+      )
     } else {
       await expect(
         this.page.getByRole('tree', { name: 'File destinations' }).getByRole('alert')
       ).toBeVisible()
     }
+  }
+
+  /**
+   * The caller's own home is not shared with them: it is never a row of the
+   * "Shared with me" listing nor a root of the sidebar "Shared files" tree. It
+   * has its own "My home" entry on the Files page and in the sidebar.
+   */
+  async expectHomeOutsideSharedWithMe(homeFolderName: string): Promise<void> {
+    await this.openSharedWithMe()
+    const shared = this.page.getByRole('region', { name: 'EvenDrive browser' })
+    // Witness: the root view is the one being inspected.
+    await expect(
+      shared
+        .getByRole('navigation', { name: 'File location' })
+        .getByRole('button', { name: 'Shared with me' })
+    ).toBeVisible()
+    await expect(shared.getByText('My home', { exact: true })).toHaveCount(0)
+    await expect(shared.getByText(homeFolderName, { exact: true })).toHaveCount(0)
+    await expect(
+      this.page
+        .getByRole('region', { name: 'My home' })
+        .getByRole('button', { name: 'My home', exact: true })
+    ).toBeVisible()
+    await expect(
+      this.page.getByRole('tree', { name: 'File destinations' }).getByRole('treeitem', {
+        name: 'My home',
+      })
+    ).toBeVisible()
+    await expect(
+      this.page
+        .getByRole('tree', { name: 'Shared files' })
+        .getByRole('treeitem', { name: homeFolderName, exact: true })
+    ).toHaveCount(0)
+    await humanRecordedPause([600, 1200])
   }
 
   async openSharedWithMe(): Promise<void> {

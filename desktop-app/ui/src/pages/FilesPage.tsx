@@ -33,7 +33,7 @@ import {
   IconShare,
   IconUpload,
 } from '@components/SidebarNav/icons'
-import { GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
+import { GFS_MY_HOME_LABEL, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   GFS_UNAVAILABLE_LOCATION_MESSAGE,
@@ -65,6 +65,7 @@ import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
 import { GfsInheritedAccessDialog } from '@/gfs/GfsInheritedAccessDialog'
 import type { GfsInheritedAccessDialogRequest } from '@/gfs/GfsInheritedAccessDialog/types'
+import { callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
@@ -97,6 +98,16 @@ import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
+
+/** Folders first, then by name (drive as the fallback name). */
+function sortDriveResources(resources: GfsDriveResource[]): GfsDriveResource[] {
+  return [...resources].sort((left, right) => {
+    if (left.kind !== right.kind) {
+      return left.kind === 'directory' ? -1 : 1
+    }
+    return (left.name || left.drive).localeCompare(right.name || right.drive)
+  })
+}
 
 function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
@@ -685,6 +696,14 @@ export function FilesPage({
   const canManageCurrent = !accessRevoked && hasBit(affordances, 'manage_acl')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
+  // Inside the caller's own home the trail starts at "My home" instead of
+  // "Shared with me › <home folder>". The ancestor walk stops at the home, so
+  // only the first crumb can be the home root.
+  const homeTrail =
+    crumbs.length > 0 &&
+    isCallerHomeRoot(ctrl.home, { resourceId: crumbs[0]!.resourceId, drive: ctrl.drive })
+  const crumbLabel = (crumb: GfsCrumb, index: number) =>
+    homeTrail && index === 0 ? GFS_MY_HOME_LABEL : crumb.name
   // An incomplete inherited derivation becomes a quiet notice in the Share
   // dialog: an empty derived list alone would silently read as "no one else
   // has access" (R1-M3). R1-H3: rows folded before a walk stop are still
@@ -2049,14 +2068,19 @@ export function FilesPage({
   }
 
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
-    const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
-    return [...resources].sort((left, right) => {
-      if (left.kind !== right.kind) {
-        return left.kind === 'directory' ? -1 : 1
-      }
-      return (left.name || left.drive).localeCompare(right.name || right.drive)
-    })
-  }, [accessibleResources, currentIsFile, currentIsFolder, items])
+    if (current) {
+      return currentIsFolder ? sortDriveResources(items) : []
+    }
+    // Root view ("Shared with me"): only what others share with the caller.
+    // The caller's own home is not shared with them; it has its own entry.
+    return sortDriveResources(
+      accessibleResources.filter(resource => !isCallerHomeRoot(ctrl.home, resource))
+    )
+  }, [accessibleResources, ctrl.home, current, currentIsFolder, items])
+  const myHome = useMemo(
+    () => (current ? null : callerHomeRootNode(ctrl.home, accessibleResources)),
+    [accessibleResources, ctrl.home, current]
+  )
   // The controller owns current-view loading semantics, including the
   // page-wide authority gate and the distinction between initial and
   // background query activity.
@@ -2173,6 +2197,20 @@ export function FilesPage({
       </div>
 
       <div className="page-layout da-gfs-layout">
+        {myHome ? (
+          <section className="page-card da-gfs-my-home" aria-label="My home">
+            <Button
+              align="start"
+              className="da-gfs-my-home__open"
+              color="neutral"
+              onClick={() => ctrl.openResource(myHome)}
+              variant="text"
+            >
+              <IconContexts aria-hidden="true" width={16} height={16} />
+              {myHome.name}
+            </Button>
+          </section>
+        ) : null}
         <section
           className="page-card da-gfs-drive"
           aria-label="EvenDrive browser"
@@ -2185,22 +2223,24 @@ export function FilesPage({
           <div className="page-card__header da-gfs-drive__header">
             <div className="da-gfs-drive__title-row">
               <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
-                <Button
-                  className="da-gfs-drive__breadcrumb"
-                  color="neutral"
-                  disabled={!current}
-                  onClick={() => {
-                    manageReturnCrumbsRef.current = null
-                    setManageOpen(false)
-                    ctrl.reset()
-                  }}
-                  variant="text"
-                >
-                  Shared with me
-                </Button>
+                {homeTrail ? null : (
+                  <Button
+                    className="da-gfs-drive__breadcrumb"
+                    color="neutral"
+                    disabled={!current}
+                    onClick={() => {
+                      manageReturnCrumbsRef.current = null
+                      setManageOpen(false)
+                      ctrl.reset()
+                    }}
+                    variant="text"
+                  >
+                    Shared with me
+                  </Button>
+                )}
                 {crumbs.map((crumb, index) => (
                   <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
-                    <IconChevronRight aria-hidden="true" />
+                    {homeTrail && index === 0 ? null : <IconChevronRight aria-hidden="true" />}
                     {renameTarget?.resourceId === crumb.resourceId ? (
                       <GfsInlineRename
                         className="da-gfs-drive__inline-rename"
@@ -2228,7 +2268,7 @@ export function FilesPage({
                           gfsDropVerdictReason(dropStatesById[crumb.resourceId]) !== undefined
                             ? gfsDropVerdictLiveAnnouncement(
                                 dropStatesById[crumb.resourceId]!,
-                                crumb.name,
+                                crumbLabel(crumb, index),
                                 dragSourceName ?? undefined
                               )
                             : undefined
@@ -2244,7 +2284,7 @@ export function FilesPage({
                         onDrop={event =>
                           void handleFolderDrop(event, {
                             resourceId: crumb.resourceId,
-                            name: crumb.name,
+                            name: crumbLabel(crumb, index),
                             // A crumb is an ancestor of the open location, so it
                             // lives on the open location's own drive.
                             drive: ctrl.drive,
@@ -2253,7 +2293,7 @@ export function FilesPage({
                         }
                         variant="text"
                       >
-                        {crumb.name}
+                        {crumbLabel(crumb, index)}
                       </Button>
                     )}
                   </span>

@@ -4,12 +4,14 @@ import { Button, EmptyState, IconButton, StatusBanner } from '@components/Common
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
+import { GFS_MY_HOME_LABEL } from '@constants/gfsBrowser'
 import {
   type GfsDiscoveryFailure,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { describeGfsReadError, isRateLimited, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import { formatSharedFileSize } from '@lib/sharedFiles'
+import { callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
 import type { ComposerGlobalFileReference } from '@/uiTypes'
 import type { ComposerGlobalFileSelection, ComposerGlobalFilesModalProps } from './types'
 
@@ -58,7 +60,22 @@ export function ComposerGlobalFilesModal({
   )
 
   const selectedFiles = useMemo(() => Object.values(selected), [selected])
-  const entries = ctrl.current ? ctrl.items : ctrl.accessibleResources
+  // Root ("Shared files"): only what others share with the caller. The
+  // caller's own home is not shared with them; it has its own entry above.
+  const entries = useMemo(
+    () =>
+      ctrl.current
+        ? ctrl.items
+        : ctrl.accessibleResources.filter(resource => !isCallerHomeRoot(ctrl.home, resource)),
+    [ctrl.accessibleResources, ctrl.current, ctrl.home, ctrl.items]
+  )
+  const myHome = useMemo(
+    () => (ctrl.current ? null : callerHomeRootNode(ctrl.home, ctrl.accessibleResources)),
+    [ctrl.accessibleResources, ctrl.current, ctrl.home]
+  )
+  const homeTrail =
+    ctrl.crumbs.length > 0 &&
+    isCallerHomeRoot(ctrl.home, { resourceId: ctrl.crumbs[0]!.resourceId, drive: ctrl.drive })
   const loading = ctrl.current ? ctrl.loading : ctrl.loadingAccessible
   // Present the verdict, never the transport. Until discovery failures were
   // classified by signal, every rejection of the `gfs:listAccessible` channel
@@ -171,13 +188,32 @@ export function ComposerGlobalFilesModal({
                 size="xs"
                 variant="text"
               >
-                {crumb.name}
+                {homeTrail && index === 0 ? GFS_MY_HOME_LABEL : crumb.name}
               </Button>
             </span>
           ))}
         </nav>
 
         <div className="composer-global-files-browser">
+          {myHome ? (
+            <Button
+              align="start"
+              block
+              className="composer-global-files-row composer-global-files-row--folder"
+              color="neutral"
+              onClick={() => ctrl.openResource(myHome)}
+              variant="ghost"
+            >
+              <span className="composer-global-files-entry-icon" aria-hidden="true">
+                <IconContexts />
+              </span>
+              <span className="composer-global-files-entry-copy">
+                <strong>{myHome.name}</strong>
+                <small>Your home folder</small>
+              </span>
+              <IconChevronRight className="composer-global-files-row-chevron" />
+            </Button>
+          ) : null}
           {ctrl.accessibleNotice ? <StatusBanner tone="info" text={ctrl.accessibleNotice} /> : null}
           {/* The banner is the non-blocking half of the same failure the card
               takes over, so it stands down when the card is up rather than

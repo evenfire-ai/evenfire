@@ -110,15 +110,53 @@ afterEach(() => {
 })
 
 describe('My home', () => {
-  it('opens the server-provided non-main home and keeps Shared with me available', async () => {
-    installClerum({ getHome: async () => homeView({ drive: 'private' }) })
+  it('shows the server-provided non-main home as an expandable My home that opens on double-click', async () => {
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([childView('child-1', 'Projects', 'directory', { drive: 'private' })])
+    )
+    installClerum({ getHome: async () => homeView({ drive: 'private' }), listChildren })
     const { onOpenFolder } = renderTree()
-    const home = await screen.findByRole('treeitem', { name: 'My home' })
-    await waitFor(() => expect(home.hasAttribute('disabled')).toBe(false))
-    fireEvent.click(home)
+    // Until the home loads, My home is the disabled flat entry; once ready it
+    // is a collapsed folder row.
+    await waitFor(() =>
+      expect(screen.getByRole('treeitem', { name: 'My home' }).getAttribute('aria-expanded')).toBe(
+        'false'
+      )
+    )
+    const home = screen.getByRole('treeitem', { name: 'My home' })
+    fireEvent.click(within(home).getByRole('button', { name: 'Expand My home' }))
+    expect(await within(home).findByRole('treeitem', { name: 'Projects' })).toBeTruthy()
+    expect(listChildren).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'private',
+      undefined
+    )
+    fireEvent.doubleClick(within(home).getAllByRole('button', { name: 'My home' })[0]!)
     expect(onOpenFolder).toHaveBeenCalledWith('gfs://private/aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa')
     fireEvent.click(screen.getByRole('treeitem', { name: 'Shared with me' }))
     expect(onOpenFolder).toHaveBeenCalledWith(null)
+  })
+
+  it('lists the caller home only as My home, never under Shared with me', async () => {
+    installClerum({
+      getHome: async () => homeView(),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'fixture', 'directory'),
+          accessibleResource('team-1', 'Team folder', 'directory'),
+          accessibleResource('other-home', 'someone-else', 'directory'),
+        ])
+      ),
+    })
+    renderTree()
+    const shared = await screen.findByRole('tree', { name: 'Shared files' })
+    // Witnesses: what others share stays listed, including another user's home.
+    expect(await within(shared).findByRole('treeitem', { name: 'Team folder' })).toBeTruthy()
+    expect(within(shared).getByRole('treeitem', { name: 'someone-else' })).toBeTruthy()
+    expect(within(shared).queryByRole('treeitem', { name: 'fixture' })).toBeNull()
+    expect(within(shared).queryByRole('treeitem', { name: 'My home' })).toBeNull()
+    const destinations = screen.getByRole('tree', { name: 'File destinations' })
+    expect(within(destinations).getByRole('treeitem', { name: 'My home' })).toBeTruthy()
   })
 
   it('shows pending and refetches until ready', async () => {
@@ -2038,7 +2076,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    const homeRow = await screen.findByRole('button', { name: 'Home root' })
+    const homeRow = await screen.findByRole('button', { name: 'My home' })
     expect(homeRow.getAttribute('draggable')).toBe('false')
     expect(homeRow.getAttribute('title')).toBeNull()
 
