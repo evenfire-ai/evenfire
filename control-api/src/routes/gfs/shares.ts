@@ -11,7 +11,6 @@ import {
   type GfsSubjectType,
   UUID_RE,
   acquireStructureLock,
-  addHomeSubjectProfiles,
   appendGfsPermissionEvent,
   appendGfsPermissionEvents,
   assertMayGrant,
@@ -83,7 +82,7 @@ export async function handleShareRead(req: Request, res: Response): Promise<void
 async function queryShareItems(
   drive: string,
   resourceId: string
-): Promise<Array<Record<string, unknown> & { subject: { type: string; id?: string } }>> {
+): Promise<Record<string, unknown>[]> {
   const result = await pool.query(
     `SELECT id, drive, resource_id, subject_type, subject_id, permissions, include_descendants
        FROM gfs_shares
@@ -119,10 +118,7 @@ export async function handleShareListForCaller(req: Request, res: Response): Pro
         throw new GfsGrantError(403, 'manage_acl_required')
       }
     }
-    const items = await queryShareItems(drive, resourceId)
-    res
-      .status(200)
-      .json({ items: await addHomeSubjectProfiles(pool, caller, drive, resourceId, items) })
+    res.status(200).json({ items: await queryShareItems(drive, resourceId) })
   } catch (error) {
     if (error instanceof GfsGrantError) {
       sendGfsGrantError(res, error)
@@ -171,15 +167,13 @@ export async function writeGfsShareBatchInTransaction(
     const ids = params.subjects.map(subject => subject.id ?? '')
     await db.query(
       `INSERT INTO gfs_shares
-         (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by, introduced_by)
-       SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7, $7
+         (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by)
+       SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7
          FROM unnest($3::text[], $4::text[]) AS input(subject_type, subject_id)
        ON CONFLICT (drive, resource_id, subject_type, subject_id)
        DO UPDATE SET permissions = EXCLUDED.permissions,
                      include_descendants = EXCLUDED.include_descendants,
-                     created_by = EXCLUDED.created_by,
-                     introduced_by = COALESCE(gfs_shares.introduced_by, gfs_shares.created_by,
-                                              EXCLUDED.introduced_by)`,
+                     created_by = EXCLUDED.created_by`,
       [
         params.drive,
         params.resourceId,

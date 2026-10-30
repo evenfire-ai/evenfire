@@ -757,23 +757,11 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
     }
   })
 
-  it('shows profiles only to the home owner and records the owner lowering another manager share', async () => {
-    // W3: provisioning records the platform as the introducer of the owner grant.
-    expect(
-      (
-        await database.pool.query(
-          `SELECT granted_by, introduced_by FROM gfs_grants
-            WHERE drive = $1 AND resource_id = $2 AND subject_type = 'user' AND subject_id = $3`,
-          [drive, home, owner]
-        )
-      ).rows
-    ).toEqual([{ granted_by: 'platform:user-home', introduced_by: 'platform:user-home' }])
+  it('records the owner lowering a share a manager created in the home', async () => {
     const manager = await createUser(database.pool, 'Manager')
     const outsider = await createUser(database.pool, 'Outside Team')
     const team = randomUUID()
     await database.pool.query('INSERT INTO teams (id,name) VALUES ($1,$2)', [team, 'Visible team'])
-    // D20: the outsider is in the manager's team, not the owner's; the manager's
-    // shares below make the outsider and the team visible to the owner.
     for (const member of [manager, outsider]) {
       await database.pool.query(
         "INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,'member','active')",
@@ -812,96 +800,6 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
         includeDescendants: false,
       })
       .expect(200)
-    // W2: both rows record the manager as author and introducer at creation.
-    const createdShares = await database.pool.query<{
-      subject_id: string
-      created_by: string | null
-      introduced_by: string | null
-    }>(`SELECT subject_id, created_by, introduced_by FROM gfs_shares WHERE resource_id = $1`, [
-      folder,
-    ])
-    expect(createdShares.rows).toHaveLength(2)
-    expect(createdShares.rows.map(row => [row.created_by, row.introduced_by])).toEqual([
-      [`user:${manager}`, `user:${manager}`],
-      [`user:${manager}`, `user:${manager}`],
-    ])
-    // The owner row is profiled only through its `platform:` introducer; the
-    // manager's row has no author and no introducer, so it stays unprofiled.
-    const homeList = await request(app)
-      .get('/grants')
-      .set('x-user', owner)
-      .query({ drive, resourceId: home })
-      .expect(200)
-    expect(homeList.body.items).toHaveLength(2)
-    const ownerRow = homeList.body.items.find(
-      (item: { subject: { type: string; id: string } }) => item.subject.id === owner
-    )
-    expect(ownerRow.homeOwner).toBe(true)
-    expect(ownerRow.subjectProfile).toEqual({ name: 'Owner', email: `${owner}@example.test` })
-    const managerRow = homeList.body.items.find(
-      (item: { subject: { id: string } }) => item.subject.id === manager
-    )
-    expect(managerRow).toBeDefined()
-    expect(managerRow).not.toHaveProperty('subjectProfile')
-    for (const path of ['/grants', '/shares']) {
-      const visible = await request(app)
-        .get(path)
-        .set('x-user', owner)
-        .query({ drive, resourceId: folder })
-        .expect(200)
-      expect(visible.body.items.length).toBeGreaterThan(0)
-      const outside = visible.body.items.find(
-        (item: { subject: { id: string } }) => item.subject.id === outsider
-      )
-      expect(outside.subjectProfile).toEqual({
-        name: 'Outside Team',
-        email: `${outsider}@example.test`,
-      })
-      const teamRow = visible.body.items.find(
-        (item: { subject: { id: string } }) => item.subject.id === team
-      )
-      expect(teamRow.subjectProfile).toEqual({ name: 'Visible team' })
-      const other = await request(app)
-        .get(path)
-        .set('x-user', manager)
-        .query({ drive, resourceId: folder })
-        .expect(200)
-      expect(other.body.items.length).toBeGreaterThan(0)
-      expect(other.body.items.every((item: object) => !Object.hasOwn(item, 'subjectProfile'))).toBe(
-        true
-      )
-    }
-    const outsideFolder = (
-      await database.pool.query<{ resource_id: string }>(
-        `INSERT INTO gfs_resources (drive,parent_resource_id,name,kind,path_cache)
-         VALUES ($1,$2,'outside','directory','/outside') RETURNING resource_id::text`,
-        [drive, root]
-      )
-    ).rows[0]!.resource_id
-    await grant(outsideFolder, 'user', owner, ALL, false)
-    await grant(outsideFolder, 'user', outsider, ['read'], false)
-    await request(app)
-      .post('/shares')
-      .set('x-user', owner)
-      .send({
-        drive,
-        resourceId: outsideFolder,
-        subject: { type: 'user', id: outsider },
-        permissions: ['read'],
-        includeDescendants: false,
-      })
-      .expect(200)
-    for (const path of ['/grants', '/shares']) {
-      const outsideHome = await request(app)
-        .get(path)
-        .set('x-user', owner)
-        .query({ drive, resourceId: outsideFolder })
-        .expect(200)
-      expect(outsideHome.body.items.length).toBeGreaterThan(0)
-      expect(
-        outsideHome.body.items.every((item: object) => !Object.hasOwn(item, 'subjectProfile'))
-      ).toBe(true)
-    }
     const before = (
       await database.pool.query<{ sequence_no: string }>(
         'SELECT COALESCE(max(sequence_no),0)::text AS sequence_no FROM gfs_audit'
@@ -921,7 +819,7 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
     expect(
       (
         await database.pool.query(
-          `SELECT permissions, include_descendants, created_by, introduced_by FROM gfs_shares WHERE resource_id=$1 AND subject_id=$2`,
+          `SELECT permissions, include_descendants, created_by FROM gfs_shares WHERE resource_id=$1 AND subject_id=$2`,
           [folder, outsider]
         )
       ).rows
@@ -930,7 +828,6 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
         permissions: ['read', 'share'],
         include_descendants: true,
         created_by: `user:${owner}`,
-        introduced_by: `user:${manager}`,
       },
     ])
     expect(
@@ -941,668 +838,144 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
         )
       ).rows
     ).toEqual([{ outcome: 'allowed', desktop_user_id: owner, authority_source: 'user-session' }])
-    // A second rewrite must not move the introducer to the first rewriter.
-    await request(app)
-      .post('/shares')
-      .set('x-user', owner)
-      .send({
-        drive,
-        resourceId: folder,
-        subject: { type: 'user', id: outsider },
-        permissions: ['read'],
-        includeDescendants: false,
-      })
-      .expect(200)
-    expect(
-      (
-        await database.pool.query(
-          `SELECT permissions, include_descendants, created_by, introduced_by FROM gfs_shares WHERE resource_id=$1 AND subject_id=$2`,
-          [folder, outsider]
-        )
-      ).rows
-    ).toEqual([
-      {
-        permissions: ['read'],
-        include_descendants: false,
-        created_by: `user:${owner}`,
-        introduced_by: `user:${manager}`,
-      },
-    ])
-    // D26 keeps the outsider identified after both lowerings. On `/grants` the
-    // outsider row carries no author, so only the manager's share for the same
-    // subject on the same resource makes it visible.
-    for (const path of ['/grants', '/shares']) {
-      const lowered = await request(app)
-        .get(path)
-        .set('x-user', owner)
-        .query({ drive, resourceId: folder })
-        .expect(200)
-      expect(lowered.body.items.length).toBeGreaterThan(0)
-      const outsiderRow = lowered.body.items.find(
-        (item: { subject: { id: string } }) => item.subject.id === outsider
-      )
-      expect(outsiderRow.subjectProfile).toEqual({
-        name: 'Outside Team',
-        email: `${outsider}@example.test`,
-      })
-    }
   })
 
-  it('does not reveal a stranger the owner granted by UUID, and still profiles a teammate', async () => {
-    const teammate = await createUser(database.pool, 'Owner Teammate')
-    const exTeammate = await createUser(database.pool, 'Former Teammate')
-    const stranger = await createUser(database.pool, 'Stranger')
-    const vouched = await createUser(database.pool, 'Vouched Person')
+  it('lists home entries in the stored shape, without subject identities', async () => {
+    const teammateName = 'Owner Teammate'
+    const strangerName = 'Stranger'
+    const foreignTeamName = 'Foreign team'
+    const teammate = await createUser(database.pool, teammateName)
+    const stranger = await createUser(database.pool, strangerName)
     const ownerTeam = randomUUID()
-    const exOwnerTeam = randomUUID()
     const foreignTeam = randomUUID()
-    const vouchedTeam = randomUUID()
-    await database.pool.query(
-      'INSERT INTO teams (id,name) VALUES ($1,$2),($3,$4),($5,$6),($7,$8)',
-      [
-        ownerTeam,
-        'Owner team',
-        exOwnerTeam,
-        'Former owner team',
-        foreignTeam,
-        'Foreign team',
-        vouchedTeam,
-        'Vouched team',
-      ]
-    )
-    for (const [member, status] of [
-      [owner, 'active'],
-      [teammate, 'active'],
-      [exTeammate, 'deleted'],
-    ] as const) {
+    await database.pool.query('INSERT INTO teams (id,name) VALUES ($1,$2),($3,$4)', [
+      ownerTeam,
+      'Owner team',
+      foreignTeam,
+      foreignTeamName,
+    ])
+    for (const member of [owner, teammate]) {
       await database.pool.query(
-        'INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,$3,$4)',
-        [ownerTeam, member, 'member', status]
+        "INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,'member','active')",
+        [ownerTeam, member]
       )
     }
-    // The owner left this team, so it must not count as one of the caller's.
-    await database.pool.query(
-      "INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,'member','deleted')",
-      [exOwnerTeam, owner]
-    )
     await database.pool.query(
       "INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,'member','active')",
       [foreignTeam, stranger]
     )
-    // Caller-team branch: these rows carry no author and no introducer.
-    await grant(home, 'user', teammate, ['read'], false)
-    await grant(home, 'team', ownerTeam, ['read'], false)
-    await grant(home, 'user', exTeammate, ['read'], false)
-    await grant(home, 'team', exOwnerTeam, ['read'], false)
-    // The owner writes the stranger and foreign-team entries through the API
-    // with UUIDs the Desktop directory would never offer for them.
+    const folder = (
+      await database.pool.query<{ resource_id: string }>(
+        `INSERT INTO gfs_resources (drive,parent_resource_id,name,kind,path_cache)
+         VALUES ($1,$2,'shared-folder','directory','/shared-folder') RETURNING resource_id::text`,
+        [drive, home]
+      )
+    ).rows[0]!.resource_id
+    // The owner writes every entry through the API, including a stranger's UUID
+    // that the Desktop team directory would never offer for that subject.
     for (const subject of [
+      { type: 'user', id: teammate },
       { type: 'user', id: stranger },
       { type: 'team', id: foreignTeam },
     ]) {
       await request(app)
         .put('/grants')
         .set('x-user', owner)
-        .send({ drive, resourceId: home, subject, permissions: ['read'], inherit: false })
+        .send({ drive, resourceId: folder, subject, permissions: ['read'], inherit: false })
         .expect(200)
     }
-    // W1 INSERT: the owner is the author and the introducer at creation.
-    expect(
-      (
-        await database.pool.query(
-          `SELECT granted_by, introduced_by FROM gfs_grants
-            WHERE drive = $1 AND resource_id = $2 AND subject_id = $3`,
-          [drive, home, stranger]
-        )
-      ).rows
-    ).toEqual([{ granted_by: `user:${owner}`, introduced_by: `user:${owner}` }])
-    for (const subject of [
-      { type: 'user', id: vouched },
-      { type: 'team', id: vouchedTeam },
-    ]) {
-      await request(app)
-        .put('/grants')
-        .set('x-operator', 'yes')
-        .send({ drive, resourceId: home, subject, permissions: ['read'], inherit: false })
-        .expect(200)
-    }
-    expect(
-      (
-        await database.pool.query(
-          `SELECT subject_type, subject_id, introduced_by FROM gfs_grants
-            WHERE drive = $1 AND resource_id = $2 AND introduced_by = 'operator:'
-            ORDER BY subject_id`,
-          [drive, home]
-        )
-      ).rows
-    ).toHaveLength(2)
-    // The introducer set is scoped to the listed resource: a trusted entry for
-    // the stranger elsewhere on the drive must not identify it inside the home.
-    const outsideFolder = (
-      await database.pool.query<{ resource_id: string }>(
-        `INSERT INTO gfs_resources (drive,parent_resource_id,name,kind,path_cache)
-         VALUES ($1,$2,'outside-stranger','directory','/outside-stranger')
-         RETURNING resource_id::text`,
-        [drive, root]
-      )
-    ).rows[0]!.resource_id
     await request(app)
-      .put('/grants')
-      .set('x-operator', 'yes')
+      .post('/shares')
+      .set('x-user', owner)
       .send({
         drive,
-        resourceId: outsideFolder,
+        resourceId: folder,
         subject: { type: 'user', id: stranger },
         permissions: ['read'],
-        inherit: false,
+        includeDescendants: false,
       })
       .expect(200)
-    expect(
-      (
-        await database.pool.query(
-          `SELECT introduced_by FROM gfs_grants WHERE resource_id = $1 AND subject_id = $2`,
-          [outsideFolder, stranger]
-        )
-      ).rows
-    ).toEqual([{ introduced_by: 'operator:' }])
-    const listed = await request(app)
+    const grants = await request(app)
       .get('/grants')
       .set('x-user', owner)
-      .query({ drive, resourceId: home })
+      .query({ drive, resourceId: folder })
       .expect(200)
-    const row = (id: string) =>
-      listed.body.items.find((item: { subject: { id?: string } }) => item.subject.id === id)
-    expect(listed.body.items).toHaveLength(9)
-    expect(row(teammate).subjectProfile).toEqual({
-      name: 'Owner Teammate',
-      email: `${teammate}@example.test`,
-    })
-    expect(row(ownerTeam).subjectProfile).toEqual({ name: 'Owner team' })
-    expect(row(vouched).subjectProfile).toEqual({
-      name: 'Vouched Person',
-      email: `${vouched}@example.test`,
-    })
-    expect(row(vouchedTeam).subjectProfile).toEqual({ name: 'Vouched team' })
-    for (const hidden of [stranger, foreignTeam, exTeammate, exOwnerTeam]) {
-      expect(row(hidden)).toBeDefined()
-      expect(row(hidden)).not.toHaveProperty('subjectProfile')
-    }
-    // No laundering: an operator rewrite after the owner's rewrite keeps the
-    // owner as the introducer, so the stranger stays unidentified.
-    await request(app)
-      .put('/grants')
-      .set('x-user', owner)
-      .send({
-        drive,
-        resourceId: home,
-        subject: { type: 'user', id: stranger },
-        permissions: ['read', 'write'],
-        inherit: false,
-      })
-      .expect(200)
-    await request(app)
-      .put('/grants')
-      .set('x-operator', 'yes')
-      .send({
-        drive,
-        resourceId: home,
-        subject: { type: 'user', id: stranger },
-        permissions: ['read'],
-        inherit: false,
-      })
-      .expect(200)
-    expect(
-      (
-        await database.pool.query(
-          `SELECT granted_by, introduced_by FROM gfs_grants
-            WHERE drive = $1 AND resource_id = $2 AND subject_id = $3`,
-          [drive, home, stranger]
-        )
-      ).rows
-    ).toEqual([{ granted_by: 'operator:', introduced_by: `user:${owner}` }])
-    const afterLaundering = await request(app)
-      .get('/grants')
-      .set('x-user', owner)
-      .query({ drive, resourceId: home })
-      .expect(200)
-    const laundered = afterLaundering.body.items.find(
-      (item: { subject: { id?: string } }) => item.subject.id === stranger
-    )
-    expect(laundered).toBeDefined()
-    expect(laundered).not.toHaveProperty('subjectProfile')
-    // Witness: a trusted subject is still profiled in the same response.
-    expect(
-      afterLaundering.body.items.find(
-        (item: { subject: { id?: string } }) => item.subject.id === vouched
-      ).subjectProfile
-    ).toEqual({ name: 'Vouched Person', email: `${vouched}@example.test` })
-  })
-
-  it('does not reveal a stranger the owner shared a folder with by UUID, and still profiles a teammate', async () => {
-    const teammate = await createUser(database.pool, 'Share Teammate')
-    const stranger = await createUser(database.pool, 'Share Stranger')
-    const team = randomUUID()
-    await database.pool.query('INSERT INTO teams (id,name) VALUES ($1,$2)', [team, 'Share team'])
-    for (const member of [owner, teammate]) {
-      await database.pool.query(
-        "INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,'member','active')",
-        [team, member]
-      )
-    }
-    const folder = (
-      await database.pool.query<{ resource_id: string }>(
-        `INSERT INTO gfs_resources (drive,parent_resource_id,name,kind,path_cache)
-         VALUES ($1,$2,'share-folder','directory','/share-folder') RETURNING resource_id::text`,
-        [drive, home]
-      )
-    ).rows[0]!.resource_id
-    // The owner writes both shares by UUID. The stranger's share is the only
-    // entry for that subject on this resource, so no other entry can vouch for it.
-    for (const subject of [
-      { type: 'user', id: stranger },
-      { type: 'user', id: teammate },
-    ]) {
-      await request(app)
-        .post('/shares')
-        .set('x-user', owner)
-        .send({
+    // Witness: every entry is listed, including the teammate's and the stranger's.
+    expect(grants.body.items).toHaveLength(3)
+    expect(grants.body.items).toEqual(
+      expect.arrayContaining([
+        {
+          id: expect.any(String),
           drive,
           resourceId: folder,
-          subject,
+          subject: { type: 'user', id: teammate },
           permissions: ['read'],
-          includeDescendants: false,
-        })
-        .expect(200)
-    }
-    // W2 INSERT: the owner is the author and the introducer of both shares.
-    const createdShares = await database.pool.query<{
-      subject_id: string
-      created_by: string | null
-      introduced_by: string | null
-    }>(
-      `SELECT subject_id, created_by, introduced_by FROM gfs_shares WHERE drive = $1 AND resource_id = $2`,
-      [drive, folder]
+          inherit: false,
+        },
+        {
+          id: expect.any(String),
+          drive,
+          resourceId: folder,
+          subject: { type: 'user', id: stranger },
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: expect.any(String),
+          drive,
+          resourceId: folder,
+          subject: { type: 'team', id: foreignTeam },
+          permissions: ['read'],
+          inherit: false,
+        },
+      ])
     )
-    expect(createdShares.rows).toHaveLength(2)
-    expect(createdShares.rows.map(row => row.subject_id).sort()).toEqual(
-      [stranger, teammate].sort()
-    )
-    expect(createdShares.rows.map(row => [row.created_by, row.introduced_by])).toEqual([
-      [`user:${owner}`, `user:${owner}`],
-      [`user:${owner}`, `user:${owner}`],
-    ])
-    const listed = await request(app)
+    const shares = await request(app)
       .get('/shares')
       .set('x-user', owner)
       .query({ drive, resourceId: folder })
       .expect(200)
-    expect(listed.body.items).toHaveLength(2)
-    const row = (id: string) =>
-      listed.body.items.find((item: { subject: { id?: string } }) => item.subject.id === id)
-    // Positive witness in the same response: the teammate shares an active team
-    // with the owner, so the caller-team branch still identifies that subject.
-    expect(row(teammate).subjectProfile).toEqual({
-      name: 'Share Teammate',
-      email: `${teammate}@example.test`,
-    })
-    expect(row(stranger)).toBeDefined()
-    expect(row(stranger)).not.toHaveProperty('subjectProfile')
-  })
-
-  it('keeps the identity of a grant a co-manager introduced after the owner changes its role', async () => {
-    const manager = await createUser(database.pool, 'Manager')
-    const peer = await createUser(database.pool, 'Peer')
-    const peerTeam = randomUUID()
-    await database.pool.query('INSERT INTO teams (id,name) VALUES ($1,$2)', [peerTeam, 'Peer team'])
-    for (const member of [manager, peer]) {
-      await database.pool.query(
-        "INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,'member','active')",
-        [peerTeam, member]
-      )
-    }
-    await grant(home, 'user', manager, ALL, true)
-    await request(app)
-      .put('/grants')
-      .set('x-user', manager)
-      .send({
+    // Witness: the share exists and carries dev's shape, without a profile.
+    expect(shares.body.items).toEqual([
+      {
+        id: expect.any(String),
         drive,
-        resourceId: home,
-        subject: { type: 'user', id: peer },
+        resourceId: folder,
+        subject: { type: 'user', id: stranger },
         permissions: ['read'],
-        inherit: false,
-      })
-      .expect(200)
-    // W1 INSERT: the manager is the author and the introducer at creation.
-    expect(
-      (
-        await database.pool.query(
-          `SELECT granted_by, introduced_by FROM gfs_grants WHERE resource_id=$1 AND subject_id=$2`,
-          [home, peer]
-        )
-      ).rows
-    ).toEqual([{ granted_by: `user:${manager}`, introduced_by: `user:${manager}` }])
-    const listedPeer = async () => {
-      const listed = await request(app)
-        .get('/grants')
-        .set('x-user', owner)
-        .query({ drive, resourceId: home })
-        .expect(200)
-      const peerRow = listed.body.items.find(
-        (item: { subject: { id?: string } }) => item.subject.id === peer
-      )
-      expect(peerRow).toBeDefined()
-      return peerRow
-    }
-    expect((await listedPeer()).subjectProfile).toEqual({
-      name: 'Peer',
-      email: `${peer}@example.test`,
-    })
-    // C3: the owner changes the role. The author changes, the introducer does not.
-    await request(app)
-      .put('/grants')
-      .set('x-user', owner)
-      .send({
-        drive,
-        resourceId: home,
-        subject: { type: 'user', id: peer },
-        permissions: ['read', 'write'],
-        inherit: false,
-      })
-      .expect(200)
-    expect(
-      (
-        await database.pool.query(
-          `SELECT granted_by, introduced_by FROM gfs_grants WHERE resource_id=$1 AND subject_id=$2`,
-          [home, peer]
-        )
-      ).rows
-    ).toEqual([{ granted_by: `user:${owner}`, introduced_by: `user:${manager}` }])
-    expect((await listedPeer()).subjectProfile).toEqual({
-      name: 'Peer',
-      email: `${peer}@example.test`,
-    })
-    // A second rewrite must not move the introducer to the first rewriter.
-    await request(app)
-      .put('/grants')
-      .set('x-user', owner)
-      .send({
-        drive,
-        resourceId: home,
-        subject: { type: 'user', id: peer },
-        permissions: ['read'],
-        inherit: false,
-      })
-      .expect(200)
-    expect(
-      (
-        await database.pool.query(
-          `SELECT granted_by, introduced_by FROM gfs_grants WHERE resource_id=$1 AND subject_id=$2`,
-          [home, peer]
-        )
-      ).rows
-    ).toEqual([{ granted_by: `user:${owner}`, introduced_by: `user:${manager}` }])
-    expect((await listedPeer()).subjectProfile).toEqual({
-      name: 'Peer',
-      email: `${peer}@example.test`,
-    })
-  })
-
-  it('drops a profile when the introducing manager or the subject left the shared team', async () => {
-    const manager = await createUser(database.pool, 'Introducing Manager')
-    const keptPeer = await createUser(database.pool, 'Kept Peer')
-    const subjectLeft = await createUser(database.pool, 'Subject Left Team')
-    const introducerLeft = await createUser(database.pool, 'Introducer Left Team')
-    const keptTeam = randomUUID()
-    const subjectLeftTeam = randomUUID()
-    const introducerLeftTeam = randomUUID()
-    const keptTeamSubject = randomUUID()
-    const introducerLeftTeamSubject = randomUUID()
-    await database.pool.query(
-      `INSERT INTO teams (id,name) VALUES ($1,$2),($3,$4),($5,$6),($7,$8),($9,$10)`,
-      [
-        keptTeam,
-        'Kept peer team',
-        subjectLeftTeam,
-        'Subject left team',
-        introducerLeftTeam,
-        'Introducer left team',
-        keptTeamSubject,
-        'Kept subject team',
-        introducerLeftTeamSubject,
-        'Introducer left subject team',
-      ]
-    )
-    // The owner is in none of these teams. Each user pair shares exactly one
-    // team, so only the predicate named in each case can identify the subject.
-    for (const [team, member, status] of [
-      [keptTeam, manager, 'active'],
-      [keptTeam, keptPeer, 'active'],
-      [subjectLeftTeam, manager, 'active'],
-      [subjectLeftTeam, subjectLeft, 'deleted'],
-      [introducerLeftTeam, manager, 'deleted'],
-      [introducerLeftTeam, introducerLeft, 'active'],
-      [keptTeamSubject, manager, 'active'],
-      [introducerLeftTeamSubject, manager, 'deleted'],
-    ] as const) {
-      await database.pool.query(
-        'INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,$3,$4)',
-        [team, member, 'member', status]
-      )
-    }
-    // The manager manages the owner's home and introduces every subject below.
-    await grant(home, 'user', manager, ALL, true)
-    for (const subject of [
-      { type: 'user', id: keptPeer },
-      { type: 'user', id: subjectLeft },
-      { type: 'user', id: introducerLeft },
-      { type: 'team', id: keptTeamSubject },
-      { type: 'team', id: introducerLeftTeamSubject },
-    ]) {
-      await request(app)
-        .put('/grants')
-        .set('x-user', manager)
-        .send({ drive, resourceId: home, subject, permissions: ['read'], inherit: false })
-        .expect(200)
-    }
-    // W1 INSERT: the manager is the recorded introducer of all five entries.
-    const recorded = await database.pool.query<{
-      subject_id: string
-      granted_by: string
-      introduced_by: string
-    }>(
-      `SELECT subject_id, granted_by, introduced_by FROM gfs_grants
-        WHERE drive = $1 AND resource_id = $2 AND introduced_by = $3`,
-      [drive, home, `user:${manager}`]
-    )
-    expect(recorded.rows.map(row => row.subject_id).sort()).toEqual(
-      [keptPeer, subjectLeft, introducerLeft, keptTeamSubject, introducerLeftTeamSubject].sort()
-    )
-    expect(recorded.rows.every(row => row.granted_by === `user:${manager}`)).toBe(true)
-    const listed = await request(app)
+        includeDescendants: false,
+      },
+    ])
+    const homeRoot = await request(app)
       .get('/grants')
       .set('x-user', owner)
       .query({ drive, resourceId: home })
       .expect(200)
-    // positive owner row, the manager's own authorless row, and five entries above
-    expect(listed.body.items).toHaveLength(7)
-    const row = (id: string) =>
-      listed.body.items.find((item: { subject: { id?: string } }) => item.subject.id === id)
-    // Positive witnesses in the same response: the still-active common team keeps
-    // both the peer's profile and the team name.
-    expect(row(keptPeer).subjectProfile).toEqual({
-      name: 'Kept Peer',
-      email: `${keptPeer}@example.test`,
-    })
-    expect(row(keptTeamSubject).subjectProfile).toEqual({ name: 'Kept subject team' })
-    // Subject-side deletion, introducer-side deletion, and a deleted introducer
-    // on the team branch each hide only their own row.
-    for (const hidden of [subjectLeft, introducerLeft, introducerLeftTeamSubject]) {
-      expect(row(hidden)).toBeDefined()
-      expect(row(hidden)).not.toHaveProperty('subjectProfile')
-    }
-  })
-
-  it('treats an entry created before the introducer column as introduced by its recorded author and freezes it on the first rewrite', async () => {
-    const manager = await createUser(database.pool, 'Legacy Manager')
-    const legacyPeer = await createUser(database.pool, 'Legacy Peer')
-    const legacyGrantee = await createUser(database.pool, 'Legacy Grantee')
-    const legacyStranger = await createUser(database.pool, 'Legacy Stranger')
-    const legacyTeam = randomUUID()
-    await database.pool.query('INSERT INTO teams (id,name) VALUES ($1,$2)', [
-      legacyTeam,
-      'Legacy team',
+    // Witness: the owner row is still flagged, and it is the only row on the root.
+    expect(homeRoot.body.items).toEqual([
+      {
+        id: expect.any(String),
+        drive,
+        resourceId: home,
+        subject: { type: 'user', id: owner },
+        permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        inherit: true,
+        homeOwner: true,
+      },
     ])
-    for (const member of [manager, legacyPeer, legacyGrantee]) {
-      await database.pool.query(
-        "INSERT INTO team_members(team_id,user_id,role,status) VALUES ($1,$2,'member','active')",
-        [legacyTeam, member]
-      )
+    const serialized = JSON.stringify({
+      grants: grants.body,
+      shares: shares.body,
+      homeRoot: homeRoot.body,
+    })
+    for (const [name, id] of [
+      [teammateName, teammate],
+      [strangerName, stranger],
+    ] as const) {
+      expect(serialized).not.toContain(name)
+      expect(serialized).not.toContain(`${id}@example.test`)
     }
-    const folder = (
-      await database.pool.query<{ resource_id: string }>(
-        `INSERT INTO gfs_resources (drive,parent_resource_id,name,kind,path_cache)
-         VALUES ($1,$2,'legacy','directory','/legacy') RETURNING resource_id::text`,
-        [drive, home]
-      )
-    ).rows[0]!.resource_id
-    // Pre-0132 rows: no `introduced_by`, only the recorded author.
-    await database.pool.query(
-      `INSERT INTO gfs_shares (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by)
-       VALUES ($1,$2,'user',$3,$4::text[],false,$5),($1,$2,'user',$6,'{read}',false,$7)`,
-      [
-        drive,
-        folder,
-        legacyPeer,
-        ['read', 'write'],
-        `user:${manager}`,
-        legacyStranger,
-        `user:${owner}`,
-      ]
-    )
-    await database.pool.query(
-      `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
-       VALUES ($1,$2,'user',$3,$4::text[],false,$5)`,
-      [drive, folder, legacyGrantee, ['read'], `user:${manager}`]
-    )
-    const legacyRows = await database.pool.query<{ introduced_by: string | null }>(
-      `SELECT introduced_by FROM gfs_shares WHERE resource_id=$1
-        UNION ALL
-       SELECT introduced_by FROM gfs_grants WHERE resource_id=$1`,
-      [folder]
-    )
-    expect(legacyRows.rows).toHaveLength(3)
-    expect(legacyRows.rows.map(row => row.introduced_by)).toEqual([null, null, null])
-    // The recorded author is the introducer of a pre-0132 row.
-    const sharesBefore = await request(app)
-      .get('/shares')
-      .set('x-user', owner)
-      .query({ drive, resourceId: folder })
-      .expect(200)
-    expect(sharesBefore.body.items).toHaveLength(2)
-    expect(
-      sharesBefore.body.items.find(
-        (item: { subject: { id?: string } }) => item.subject.id === legacyPeer
-      ).subjectProfile
-    ).toEqual({ name: 'Legacy Peer', email: `${legacyPeer}@example.test` })
-    const hiddenBefore = sharesBefore.body.items.find(
-      (item: { subject: { id?: string } }) => item.subject.id === legacyStranger
-    )
-    expect(hiddenBefore).toBeDefined()
-    expect(hiddenBefore).not.toHaveProperty('subjectProfile')
-    const grantsBefore = await request(app)
-      .get('/grants')
-      .set('x-user', owner)
-      .query({ drive, resourceId: folder })
-      .expect(200)
-    expect(grantsBefore.body.items).toHaveLength(1)
-    expect(grantsBefore.body.items[0].subjectProfile).toEqual({
-      name: 'Legacy Grantee',
-      email: `${legacyGrantee}@example.test`,
-    })
-    // The first rewrite stores the author the row carried before it.
-    await request(app)
-      .post('/shares')
-      .set('x-user', owner)
-      .send({
-        drive,
-        resourceId: folder,
-        subject: { type: 'user', id: legacyPeer },
-        permissions: ['read'],
-        includeDescendants: false,
-      })
-      .expect(200)
-    await request(app)
-      .put('/grants')
-      .set('x-user', owner)
-      .send({
-        drive,
-        resourceId: folder,
-        subject: { type: 'user', id: legacyGrantee },
-        permissions: ['read', 'write'],
-        inherit: false,
-      })
-      .expect(200)
-    await request(app)
-      .post('/shares')
-      .set('x-operator', 'yes')
-      .send({
-        drive,
-        resourceId: folder,
-        subject: { type: 'user', id: legacyStranger },
-        permissions: ['read'],
-        includeDescendants: false,
-      })
-      .expect(200)
-    expect(
-      (
-        await database.pool.query(
-          `SELECT created_by, introduced_by FROM gfs_shares WHERE resource_id=$1 AND subject_id=$2`,
-          [folder, legacyPeer]
-        )
-      ).rows
-    ).toEqual([{ created_by: `user:${owner}`, introduced_by: `user:${manager}` }])
-    expect(
-      (
-        await database.pool.query(
-          `SELECT granted_by, introduced_by FROM gfs_grants WHERE resource_id=$1 AND subject_id=$2`,
-          [folder, legacyGrantee]
-        )
-      ).rows
-    ).toEqual([{ granted_by: `user:${owner}`, introduced_by: `user:${manager}` }])
-    expect(
-      (
-        await database.pool.query(
-          `SELECT created_by, introduced_by FROM gfs_shares WHERE resource_id=$1 AND subject_id=$2`,
-          [folder, legacyStranger]
-        )
-      ).rows
-    ).toEqual([{ created_by: 'operator:', introduced_by: `user:${owner}` }])
-    const sharesAfter = await request(app)
-      .get('/shares')
-      .set('x-user', owner)
-      .query({ drive, resourceId: folder })
-      .expect(200)
-    expect(sharesAfter.body.items).toHaveLength(2)
-    expect(
-      sharesAfter.body.items.find(
-        (item: { subject: { id?: string } }) => item.subject.id === legacyPeer
-      ).subjectProfile
-    ).toEqual({ name: 'Legacy Peer', email: `${legacyPeer}@example.test` })
-    const hiddenAfter = sharesAfter.body.items.find(
-      (item: { subject: { id?: string } }) => item.subject.id === legacyStranger
-    )
-    expect(hiddenAfter).toBeDefined()
-    expect(hiddenAfter).not.toHaveProperty('subjectProfile')
-    const grantsAfter = await request(app)
-      .get('/grants')
-      .set('x-user', owner)
-      .query({ drive, resourceId: folder })
-      .expect(200)
-    expect(grantsAfter.body.items).toHaveLength(1)
-    expect(grantsAfter.body.items[0].subjectProfile).toEqual({
-      name: 'Legacy Grantee',
-      email: `${legacyGrantee}@example.test`,
-    })
+    expect(serialized).not.toContain(foreignTeamName)
   })
 
   it('waits for the drive structure lock before deleting a share', async () => {

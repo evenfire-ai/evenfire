@@ -3278,19 +3278,6 @@ async function applyGfsUserHomesSchema(db: DbClient): Promise<void> {
   `)
 }
 
-async function applyGfsEntryIntroducerSchema(db: DbClient): Promise<void> {
-  // The actor that created each grant/share entry. Writers set it on INSERT and
-  // keep it on conflict, so a later rewrite (role change, lowering, re-share)
-  // does not change who introduced the subject. Rows created before this step
-  // keep NULL; readers use the row's recorded author for them. ADD COLUMN is
-  // covered by the existing table-level grants (control_api_runtime DML,
-  // gfs_controller SELECT); no column privilege is added.
-  await db.query(`
-    ALTER TABLE gfs_grants ADD COLUMN IF NOT EXISTS introduced_by TEXT NULL;
-    ALTER TABLE gfs_shares ADD COLUMN IF NOT EXISTS introduced_by TEXT NULL;
-  `)
-}
-
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6470,10 +6457,6 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0131_gfs_user_homes',
     legacyVersions: ['0130_gfs_user_homes'],
     apply: applyGfsUserHomesSchema,
-  },
-  {
-    version: '0132_gfs_entry_introducer',
-    apply: applyGfsEntryIntroducerSchema,
   },
 ]
 

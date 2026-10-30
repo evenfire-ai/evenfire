@@ -190,7 +190,7 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
     expect(response.status).toBe(200)
     expect(response.body.home).toMatchObject({ userId: fixture.userId, state: 'ready' })
     const rows = await fixturePool.query(
-      `SELECT subject_id, permissions, inherit, introduced_by FROM gfs_grants
+      `SELECT subject_id, permissions, inherit FROM gfs_grants
         WHERE drive = $1 AND resource_id = $2 AND subject_type = 'user'`,
       [fixture.drive, fixture.resourceId]
     )
@@ -199,8 +199,6 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
         subject_id: fixture.userId,
         permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
         inherit: true,
-        // W4: the restore route records the platform as the introducer.
-        introduced_by: 'platform:user-home',
       },
     ])
   })
@@ -209,21 +207,6 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
     'restores a %s owner grant atomically and rejects a second restore',
     async kind => {
       const fixture = await seedHome(kind)
-      // W4 conflict cases start from a pre-0132 row: the column is NULL, so the
-      // recorded author is the effective introducer before the rewrite.
-      const beforeRestore =
-        kind === 'missing'
-          ? undefined
-          : (
-              await fixturePool.query<{ granted_by: string; introduced_by: string | null }>(
-                `SELECT granted_by, introduced_by FROM gfs_grants
-                  WHERE drive = $1 AND resource_id = $2 AND subject_type = 'user' AND subject_id = $3`,
-                [fixture.drive, fixture.resourceId, fixture.userId]
-              )
-            ).rows[0]
-      if (kind !== 'missing') {
-        expect(beforeRestore).toEqual({ granted_by: 'operator', introduced_by: null })
-      }
       const detail = await request(app)
         .get(`/gfs/user-homes/${fixture.userId}`)
         .set('x-test-operator', 'yes')
@@ -251,7 +234,7 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
         conflictCode: null,
       })
       const grant = await fixturePool.query(
-        `SELECT permissions, inherit, granted_by, introduced_by FROM gfs_grants
+        `SELECT permissions, inherit, granted_by FROM gfs_grants
           WHERE drive = $1 AND resource_id = $2 AND subject_type = 'user' AND subject_id = $3`,
         [fixture.drive, fixture.resourceId, fixture.userId]
       )
@@ -263,15 +246,7 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
         'share',
         'write',
       ])
-      expect(grant.rows[0]).toMatchObject({
-        inherit: true,
-        granted_by: 'platform:user-home',
-        // W4 conflict freeze: a row that predates the column keeps the effective
-        // introducer it had before the rewrite (`operator`, its recorded author)
-        // instead of taking the `platform:user-home` value this route writes. The
-        // INSERT branch (missing row) records the platform.
-        introduced_by: kind === 'missing' ? 'platform:user-home' : 'operator',
-      })
+      expect(grant.rows[0]).toMatchObject({ inherit: true, granted_by: 'platform:user-home' })
       const persisted = await fixturePool.query(
         'SELECT state, conflict_code, conflict_detail FROM gfs_user_homes WHERE user_id = $1',
         [fixture.userId]

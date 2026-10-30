@@ -22,37 +22,22 @@ homes appear as ordinary folders under `/Users` in EvenDrive, where the existing
 ACL management applies, and each member's Contact tab shows the home folder with
 its recovery actions.
 
-The owner can see and manage entries throughout their own home tree, including
-entries created by another manager. Identity is decided per subject, not per
-entry: for each user or team subject on the listed resource, the server
-considers all grants and shares for that subject on that resource. User entries
-include the person's email and, when available, name, and team entries include
-the team name, only when the subject shares an active team with the owner, or
-when at least one of those entries was introduced by an operator, by the
-platform, or by a user who shares an active team with that subject (for a team
-subject: a user who is an active member of that team). Team membership is
-evaluated when the list is read, so deleting the only trusted entry, or losing
-the relevant active membership, hides the subject even when another entry for it
-survives: that entry stays listed and can still be changed or removed, but has
-no identity, and Desktop hides it behind the existing outside-directory notice.
-Outside the owner's home, the existing directory visibility rules remain in
-effect. Grant rows keep their existing role-change and remove actions. Share
-rows keep their remove action, and an Editor share can be lowered to Read in
-Desktop; lowering never adds a permission the share did not have, and a share is
-never raised. The home owner's own grant is shown as **Owner** without role or
-remove controls to every viewer; only an operator can change it.
-
-An entry keeps the introducer it was created with: changing a role, lowering a
-share, or re-sharing the same subject does not make the person who performs that
-change the introducer, so a trusted entry a manager created keeps identifying
-that subject for the owner. Because the rule is evaluated per subject, a hidden
-entry becomes identified again if a trusted entry for the same subject is
-created on the same resource, and an identified entry becomes hidden if that
-trusted entry is deleted or the membership that supported it ends. Moving an
-item into a home can therefore disclose the identities of its existing entries
-to the home owner, but only for subjects that satisfy the rule above; entries
-that do not satisfy it stay listed without identity. This is accepted: it is the
-same access the home already exposes for entries a manager created inside it.
+The owner manages entries throughout their own home tree for the people and
+teams in their teams and for their own agents. Access lists in a home follow
+the same rule as every other EvenDrive folder: grant and share lists return no
+names or email addresses, Desktop names subjects from the viewer's team
+directory and the viewer's own agents, and rows for people and teams outside the
+viewer's teams are not listed. One notice says that such members exist
+("Members outside your teams aren't listed here. Access can also follow from
+parent folders you cannot see."). To remove an entry for a person or team
+outside the owner's teams, an operator opens the folder in Control UI EvenDrive,
+where every entry is listed with Remove. Grant rows keep their role-change and
+remove actions. Share rows keep their remove action, and an Editor share can be
+lowered to Read in Desktop; lowering never adds a permission the share did not
+have, and a share is never raised. The home owner's own grant is shown as
+**Owner**, without role or remove controls, to the owner and to viewers whose
+teams include the owner; other viewers do not see it. Only an operator can
+change it.
 
 The `/Users` directory and bound home roots cannot be moved, renamed, or
 deleted; the guard is in `control-api/src/db.ts:3251`. Contents inside a home
@@ -93,28 +78,17 @@ parent of the homes.
    release.
 2. Use the existing deployment order: the migration job runs with the new
    Control API image, the overlay is applied, GFS runtime provisioning runs,
-   and the services restart. The migration adds the nullable `introduced_by`
-   column to `gfs_grants` and `gfs_shares`; entries created before it keep
-   `NULL` and are read as introduced by their recorded author. During the
-   migration, old binaries can continue serving; enrollment can create pending
-   rows, but the old Control API does not provision homes. The governed-root
-   guard is active after migration.
-3. The per-user homes feature and this identity rule ship together in one
-   release from `origin/dev`: the same release carries the home code, the
-   `0132` introducer columns, and the reader that filters identities with them.
-   The only builds that ran the home code without the rule were pre-release
-   branch builds. If an environment runs a home-enabled build that lacks this
-   reader, drain or stop every such instance before treating the mitigation as
-   active, and verify it cannot resume. This runbook does not assert that such
-   an environment exists.
-4. When the new Control API starts, it creates `/Users` as needed under the
+   and the services restart. During the migration, old binaries can continue
+   serving; enrollment can create pending rows, but the old Control API does
+   not provision homes. The governed-root guard is active after migration.
+3. When the new Control API starts, it creates `/Users` as needed under the
    drive structure lock, then enrolls and provisions homes. Do not add
    `/Users` to a GFS layout. Backfill and provisioning run automatically; a
    60-second tick is a scheduling interval, not a completion deadline. Each
    tick enrolls up to 200 existing users and provisions up to 50 pending homes
    (`control-api/src/services/gfsUserHomeReconciler.ts`), so 10,000 users take
    about 50 minutes to enroll and about 3.3 hours to provision.
-5. In each cluster, read the home inventory API (below) and watch the overall
+4. In each cluster, read the home inventory API (below) and watch the overall
    `pending` count fall to zero. Review all `conflict` entries separately.
    Production follows dev through the existing promotion.
 

@@ -913,15 +913,12 @@ export async function writeGfsGrantBatchInTransaction(
     const writeGrants = async () => {
       await db.query(
         `INSERT INTO gfs_grants
-           (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by, introduced_by)
-         SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7, $7
+           (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
+         SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7
            FROM unnest($3::text[], $4::text[]) AS input(subject_type, subject_id)
          ON CONFLICT (drive, resource_id, subject_type, subject_id)
          DO UPDATE SET permissions = EXCLUDED.permissions, inherit = EXCLUDED.inherit,
-                       granted_by = EXCLUDED.granted_by,
-                       introduced_by = COALESCE(gfs_grants.introduced_by, gfs_grants.granted_by,
-                                                EXCLUDED.introduced_by),
-                       updated_at = now()`,
+                       granted_by = EXCLUDED.granted_by, updated_at = now()`,
         [
           params.drive,
           params.resourceId,
@@ -1046,106 +1043,6 @@ export interface GfsGrantListItem {
   permissions: string[]
   inherit: boolean
   homeOwner?: true
-  subjectProfile?: { name: string | null; email: string } | { name: string }
-}
-
-/**
- * Identity details are available only to the owner of the containing home, and
- * only for subjects that owner could already identify: a subject in one of the
- * owner's active teams, or a subject whose grant or share on this resource was
- * introduced by an operator, by the platform, or by a user who shares an active
- * team with that subject (for a team subject: an active member of that team).
- * The introducer is the actor that created the entry (`introduced_by`); rewrites
- * keep it, and rows created before that column use their recorded author. Writes
- * accept any subject UUID, so without this rule an owner could grant a stranger's
- * UUID on their own home and read back the stranger's name and email.
- */
-export async function addHomeSubjectProfiles<
-  T extends {
-    subject: { type: string; id?: string }
-  },
->(db: GrantsDb, caller: GfsCaller, drive: string, resourceId: string, items: T[]): Promise<T[]> {
-  if (caller.isOperator || !caller.desktopUserId || items.length === 0) return items
-  const userIds = items
-    .filter(item => item.subject.type === 'user' && UUID_RE.test(item.subject.id ?? ''))
-    .map(item => item.subject.id!)
-  const teamIds = items
-    .filter(item => item.subject.type === 'team' && UUID_RE.test(item.subject.id ?? ''))
-    .map(item => item.subject.id!)
-  if (!userIds.length && !teamIds.length) return items
-  const result = await db.query(
-    `WITH RECURSIVE chain AS (
-       SELECT resource_id, parent_resource_id FROM gfs_resources
-        WHERE drive = $1 AND resource_id = $2::uuid AND deleted_at IS NULL
-       UNION ALL
-       SELECT r.resource_id, r.parent_resource_id FROM gfs_resources r
-        JOIN chain c ON r.resource_id = c.parent_resource_id
-        WHERE r.drive = $1 AND r.deleted_at IS NULL
-     ), owned_home AS (
-       SELECT 1 FROM gfs_user_homes h JOIN chain c ON c.resource_id = h.resource_id
-        WHERE h.user_id = $3::uuid AND h.drive = $1
-     ), caller_teams AS (
-       SELECT team_id FROM team_members WHERE user_id = $3::uuid AND status = 'active'
-     ), introducers AS (
-       SELECT subject_type, subject_id, COALESCE(introduced_by, granted_by) AS introducer
-         FROM gfs_grants WHERE drive = $1 AND resource_id = $2::uuid
-       UNION ALL
-       SELECT subject_type, subject_id, COALESCE(introduced_by, created_by)
-         FROM gfs_shares WHERE drive = $1 AND resource_id = $2::uuid
-     ), trusted_introducers AS (
-       SELECT subject_type, subject_id,
-              introducer LIKE 'user:%' AS by_user,
-              CASE WHEN introducer LIKE 'user:%' THEN substr(introducer, 6) END AS introducer_user_id
-         FROM introducers
-        WHERE introducer LIKE 'operator:%' OR introducer LIKE 'platform:%' OR introducer LIKE 'user:%'
-     )
-     SELECT 'user' AS subject_type, u.id::text AS subject_id, u.name, u.email
-       FROM users u
-      WHERE u.id = ANY($4::uuid[]) AND EXISTS (SELECT 1 FROM owned_home)
-        AND (
-          EXISTS (SELECT 1 FROM team_members m JOIN caller_teams ct ON ct.team_id = m.team_id
-                   WHERE m.user_id = u.id AND m.status = 'active')
-          OR EXISTS (
-            SELECT 1 FROM trusted_introducers i
-             WHERE i.subject_type = 'user' AND i.subject_id = u.id::text
-               AND (NOT i.by_user OR EXISTS (
-                 SELECT 1 FROM team_members im JOIN team_members sm ON sm.team_id = im.team_id
-                  WHERE im.user_id::text = i.introducer_user_id AND im.status = 'active'
-                    AND sm.user_id = u.id AND sm.status = 'active')))
-        )
-     UNION ALL
-     SELECT 'team', t.id::text, t.name, NULL::text
-       FROM teams t
-      WHERE t.id = ANY($5::uuid[]) AND EXISTS (SELECT 1 FROM owned_home)
-        AND (
-          t.id IN (SELECT team_id FROM caller_teams)
-          OR EXISTS (
-            SELECT 1 FROM trusted_introducers i
-             WHERE i.subject_type = 'team' AND i.subject_id = t.id::text
-               AND (NOT i.by_user OR EXISTS (
-                 SELECT 1 FROM team_members im
-                  WHERE im.user_id::text = i.introducer_user_id AND im.team_id = t.id
-                    AND im.status = 'active')))
-        )`,
-    [drive, resourceId, caller.desktopUserId, userIds, teamIds]
-  )
-  const profiles = new Map<string, { name: string | null; email: string } | { name: string }>()
-  for (const row of result.rows as Array<{
-    subject_type: string
-    subject_id: string
-    name: string | null
-    email: string | null
-  }>) {
-    if (row.subject_type === 'user' && row.email !== null) {
-      profiles.set(`user:${row.subject_id}`, { name: row.name, email: row.email })
-    } else if (row.subject_type === 'team' && row.name !== null) {
-      profiles.set(`team:${row.subject_id}`, { name: row.name })
-    }
-  }
-  return items.map(item => {
-    const profile = profiles.get(`${item.subject.type}:${item.subject.id}`)
-    return profile ? { ...item, subjectProfile: profile } : item
-  })
 }
 
 /** One resource's grant rows in the canonical list shape (`id` powers revoke). */
@@ -1219,10 +1116,7 @@ export async function handleGrantListForCaller(
         throw new GfsGrantError(403, 'manage_acl_required')
       }
     }
-    const items = await queryGrantItems(drive, resourceId)
-    res
-      .status(200)
-      .json({ items: await addHomeSubjectProfiles(pool, caller, drive, resourceId, items) })
+    res.status(200).json({ items: await queryGrantItems(drive, resourceId) })
   } catch (err) {
     if (err instanceof GfsGrantError) {
       sendGfsGrantError(res, err)
