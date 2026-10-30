@@ -9,9 +9,11 @@
  *  - Entry is a visible Desktop login of a per-test user, or the seeded
  *    initial admin in J5; homes and owner grants are never seeded — each
  *    journey consumes automatic provisioning.
- *  - Every grant/share under test is created, changed and removed through the
- *    Share dialog; SQL is used only for named preconditions and for reading
- *    business signals (gfs_user_homes, gfs_grants, gfs_shares, gfs_audit).
+ *  - Every grant/share under test is created and changed through the Share
+ *    dialog, except the named `seedShare` precondition and J1b's operator
+ *    removal in Control UI; SQL is used only for named preconditions and for
+ *    reading business signals (gfs_user_homes, gfs_grants, gfs_shares,
+ *    gfs_audit).
  *  - Each negative has a same-test positive on the same resource.
  *  - Agent denials are observed authorization refusals (no successful
  *    gfs_read, no sentinel leak), never timeouts.
@@ -61,11 +63,15 @@ import { humanRecordedPause } from './helpers/humanPause'
 import { awaitPasswordPace } from './helpers/passwordPace'
 import { ControlUiAccessPanel } from './pages/ControlUiAccessPanel'
 import { DesktopFilesNav } from './pages/DesktopFilesNav'
+import { DesktopMoveDialog } from './pages/DesktopMoveDialog'
 import { DesktopResourceView } from './pages/DesktopResourceView'
 import { DesktopShareDialog } from './pages/DesktopShareDialog'
 
 const MAIN_ENTRY = path.resolve(__dirname, '../../dist/main.js')
 const OWNER_BITS = ['delete', 'manage_acl', 'read', 'share', 'write']
+/** The team-directory filter's one notice (GfsGrantList HIDDEN_ACCESS_NOTICE). */
+const HIDDEN_MEMBERS_NOTICE =
+  'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim()
@@ -332,7 +338,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
   })
 
   test('J1 home appears without interaction and the owner shares it with an own agent', async ({}, testInfo) => {
-    test.setTimeout(6 * RESPONSE_TIMEOUT_MS + 10 * 60_000)
+    test.setTimeout(6 * RESPONSE_TIMEOUT_MS + 15 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const [agent] = discoverManagedGfsAgents()
     const owner = fx.createUser('j1-owner')
@@ -370,6 +376,95 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       })
       const folderId = fx.childId(home.resourceId!, folder)
       const fileUri = `gfs://${home.drive}/${ridOf(fx.childId(folderId, file))}`
+      const moved = `j1-moved-${fx.runTag}`
+      await test.step('J1-N1 move a folder into My home from a nested folder', async () => {
+        const view = new DesktopResourceView(page)
+        await openHomeFolder(page, home)
+        await enterFolder(page, folder)
+        await view.createFolder(moved)
+        const movedId = fx.childId(folderId, moved)
+        await view.openMove(moved)
+        const moveDialog = new DesktopMoveDialog(page)
+        await moveDialog.expectDestinations(home.storageUsername!)
+        await moveDialog.moveTo('My home')
+        // Business signal: the same resource, under its new parent.
+        expect(fx.childId(home.resourceId!, moved)).toBe(movedId)
+        await openHomeFolder(page, home)
+        await expect(page.getByRole('button', { name: `Open ${moved}` })).toBeVisible()
+      })
+      await test.step('J1-N2 the composer file picker shows My home apart from Shared files', async () => {
+        await openExactAgent(page, getManagedAgentDisplayName(agent))
+        await page.getByRole('button', { name: 'Add context' }).click()
+        // The picker's entry point is the "EvenDrive" composer item (renamed
+        // from "Global File System" in 6e587ff86); the flag that gates it kept
+        // its original name.
+        await expect(
+          page.getByRole('menuitem', { name: 'EvenDrive', exact: true }),
+          'The "Add context" menu has no "EvenDrive" item: the Desktop renderer was ' +
+            'built without VITE_SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM=true. Rebuild the renderer ' +
+            'with that flag (scripts/e2e/playwright-dev.sh exports it) and rerun.'
+        ).toBeVisible({ timeout: 5_000 })
+        await page.getByRole('menuitem', { name: 'EvenDrive', exact: true }).click()
+        const picker = page.getByRole('dialog', { name: 'Choose files for this message' })
+        await expect(picker).toBeVisible({ timeout: 10_000 })
+        // Root: the home is its own row, the shared listing settled empty, and
+        // the home is never listed under its storage folder name.
+        const homeRow = picker.getByRole('button', { name: /^My home/ })
+        await expect(homeRow).toBeVisible()
+        await expect(picker.getByText('No shared files yet', { exact: true })).toBeVisible()
+        await expect(picker.getByText(home.storageUsername!, { exact: true })).toHaveCount(0)
+        await homeRow.click()
+        const location = picker.getByRole('navigation', { name: 'Global file path' })
+        await expect(location.getByRole('button', { name: 'My home', exact: true })).toBeVisible()
+        await expect(location.getByText(home.storageUsername!, { exact: true })).toHaveCount(0)
+        const folderRow = picker
+          .locator('.composer-global-files-row--folder')
+          .filter({ hasText: folder })
+        await expect(folderRow).toBeVisible({ timeout: 20_000 })
+        await folderRow.click()
+        const fileRow = picker.locator('.composer-global-files-row--file').filter({ hasText: file })
+        await expect(fileRow).toBeVisible({ timeout: 20_000 })
+        await fileRow.getByRole('checkbox').check()
+        await picker.getByRole('button', { name: 'Attach 1' }).click()
+        await expect(picker).toHaveCount(0)
+        // Business signal: the attachment exists on the composer, then it is
+        // removed so the later agent turns run without it.
+        await expect(page.getByRole('button', { name: `Remove ${file}` })).toBeVisible()
+        await page.getByRole('button', { name: `Remove ${file}` }).click()
+        await expect(page.getByRole('button', { name: `Remove ${file}` })).toHaveCount(0)
+      })
+      await test.step('J1-N3 Shared with me keeps its view across workspace tabs; the home root tab reads My home', async () => {
+        await openHomeFolder(page, home)
+        const tabs = page.getByRole('toolbar', { name: 'Workspace tabs' })
+        // D-5: the Files tab at the home root is titled "My home", not the
+        // storage folder.
+        await expect(tabs.getByRole('button', { name: 'My home', exact: true })).toHaveAttribute(
+          'aria-pressed',
+          'true'
+        )
+        await new DesktopFilesNav(page).openSharedWithMe()
+        await expect(
+          tabs.getByRole('button', { name: 'Shared with me', exact: true })
+        ).toHaveAttribute('aria-pressed', 'true')
+        // Switch away to the agent: the Files tab keeps its shared location.
+        await openExactAgent(page, getManagedAgentDisplayName(agent))
+        await expect(page.getByRole('textbox', { name: 'Agent message composer' })).toBeVisible()
+        await expect(
+          tabs.getByRole('button', { name: 'Shared with me', exact: true })
+        ).toHaveAttribute('aria-pressed', 'false')
+        // Return: the Shared with me view is restored, not the overview.
+        await tabs.getByRole('button', { name: 'Shared with me', exact: true }).click()
+        const browser = page.getByRole('region', { name: 'EvenDrive browser' })
+        await expect(
+          browser
+            .getByRole('navigation', { name: 'File location' })
+            .getByRole('button', { name: 'Shared with me', exact: true })
+        ).toHaveAttribute('aria-current', 'page')
+        await expect(browser.getByText('No shared files yet', { exact: true })).toBeVisible()
+        // Secondary guard: the tab did not fall back to the overview, whose
+        // only content here would be the "My home" card.
+        await expect(page.getByRole('region', { name: 'My home' })).toHaveCount(0)
+      })
       await test.step('the owner row cannot be revoked; share Read with the own agent', async () => {
         await openHomeFolder(page, home)
         await new DesktopResourceView(page).openShare(folder)
@@ -453,19 +548,26 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     }
   })
 
-  test('J1b sharing with users follows the Unix model and the owner sees every entry', async ({}, testInfo) => {
-    test.setTimeout(15 * 60_000)
+  test("J1b sharing with users follows the Unix model; entries for people outside the owner's teams are hidden and an operator removes them", async ({
+    browser,
+  }, testInfo) => {
+    test.setTimeout(20 * 60_000)
+    const adminUser = requiredEnv('ADMIN_USER')
+    const adminPass = requiredEnv('ADMIN_PASS')
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const owner = fx.createUser('j1b-owner')
     const b = fx.createUser('j1b-b')
     const c = fx.createUser('j1b-c')
-    fx.createTeam('owner-b', [owner, b])
+    const d = fx.createUser('j1b-d')
+    fx.createTeam('owner-b', [owner, b, d])
     fx.createTeam('b-c', [b, c]) // C shares a team with B but not with the owner (A1)
     const outer = `j1b-outer-${fx.runTag}`
     const inner = `j1b-inner-${fx.runTag}`
     const sibling = `j1b-sibling-${fx.runTag}`
     const file = `j1b-file-${fx.runTag}.txt`
     const sessions: DesktopSession[] = []
+    const control = await newOperatorContext(browser)
+    let shareId: string | null = null
     try {
       const ownerS = await launchDesktopAs(testInfo, owner)
       sessions.push(ownerS)
@@ -481,6 +583,8 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await view.uploadFile(file, Buffer.from(`J1b ${fx.runTag}`))
       })
       const outerId = fx.childId(home.resourceId!, outer)
+      const dRows = () =>
+        fx.accessRows(outerId).filter(row => row.subjectType === 'user' && row.subjectId === d.id)
       await test.step('owner shares the outer folder with B as Editor', async () => {
         await openHomeFolder(ownerS.page, home)
         await view.openShare(outer)
@@ -520,6 +624,15 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       await enterFolder(cS.page, outer)
       await enterFolder(cS.page, inner)
       await expect(cS.page.getByRole('button', { name: `Open ${file}` })).toBeVisible()
+      await test.step("B's Editor share to D exists while B holds every bit (named precondition)", async () => {
+        // Named precondition: no UI writes share rows (see seedShare). One seed
+        // only — a second share row for D would hit the unique key (A-L1). The
+        // row is the one the API accepts from B while B holds every bit.
+        shareId = fx.seedShare(home.drive!, outerId, b, d, ['read', 'write', 'share'])
+        expect(dRows()).toEqual([
+          expect.objectContaining({ id: shareId, relation: 'share', inherit: true }),
+        ])
+      })
       await test.step('owner revokes B: B refused, B home still opens; C keeps access (no cascade)', async () => {
         await openHomeFolder(ownerS.page, home)
         await view.openShare(outer)
@@ -530,36 +643,77 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expectRefusedLinkAndClose(bS.page)
         await openHomeFolder(bS.page, await fx.waitForHomeState(b.id, 'ready'))
         expect(fx.accessFor(outerId, 'user', c.id)).not.toBeNull()
+        // Revoking B removed B's grant only: B's share to D survives.
+        expect(dRows()).toHaveLength(1)
       })
-      await test.step('owner sees C by name (outside the owner teams) and removes C', async () => {
+      await test.step("C's entry is hidden from the owner; an operator removes it in Control UI", async () => {
+        const cGrant = fx.accessFor(outerId, 'user', c.id)
+        if (!cGrant) throw new Error('J1b: C’s grant row is missing before the owner opens Share')
         await openHomeFolder(ownerS.page, home)
         await view.openShare(outer)
-        const dialog = new DesktopShareDialog(ownerS.page)
-        await dialog.expectRow(c.name, 'Read', false)
-        await dialog.revoke(c.name)
-        expect(fx.accessFor(outerId, 'user', c.id)).toBeNull()
+        const shareDialog = ownerS.page.getByRole('dialog', { name: `Share folder ${outer}` })
+        const access = ownerS.page.getByRole('list', { name: 'Resource access' })
+        // Witnesses inside the same list that hides C: the owner's own
+        // inherited row (labelled by name — the owner is in owner-b), D's share
+        // row with its role control, and the one notice that replaces the rows
+        // the team directory cannot name.
+        const ownerRow = access
+          .getByRole('listitem')
+          .filter({ has: ownerS.page.getByText('Owner', { exact: true }) })
+        await expect(ownerRow).toHaveCount(1)
+        await expect(ownerRow).toContainText(owner.name)
+        await expect(access.getByRole('button', { name: `Access role for ${d.name}` })).toHaveCount(
+          1
+        )
+        await expect(shareDialog.getByText(HIDDEN_MEMBERS_NOTICE, { exact: true })).toBeVisible()
+        // Negatives: C's grant row is absent by its own testid (a row rendered
+        // under any label fails this), and neither C's name nor email shows.
+        await expect(shareDialog.getByTestId(`gfs-access-row-grant-${cGrant.id}`)).toHaveCount(0)
+        await expect(shareDialog.getByText(c.name, { exact: true })).toHaveCount(0)
+        await expect(shareDialog.getByText(c.email, { exact: true })).toHaveCount(0)
         await ownerS.page.keyboard.press('Escape')
+
+        // An operator sees every row, including C's, and removes it.
+        const operatorPage = await control.newPage()
+        const operatorPanel = new ControlUiAccessPanel(operatorPage)
+        await operatorPanel.login(adminUser, adminPass)
+        await operatorPanel.openResource(`/Users/${home.storageUsername}/${outer}`)
+        await operatorPanel.revoke({ label: c.name })
+        expect(fx.accessFor(outerId, 'user', c.id)).toBeNull()
+
+        // C loses access; the owner still opens the file two levels down.
         await openEvenDriveLink(cS.page, `gfs://${home.drive}/${ridOf(outerId)}`)
         await expectRefusedLinkAndClose(cS.page)
         await openHomeFolder(ownerS.page, home)
         await enterFolder(ownerS.page, outer)
         await enterFolder(ownerS.page, inner)
         await expect(ownerS.page.getByRole('button', { name: `Open ${file}` })).toBeVisible()
+        // C is not used again: close the session now and stop tracking it.
+        const cIndex = sessions.indexOf(cS)
+        if (cIndex < 0) throw new Error('J1b: C’s Desktop session is not tracked')
+        sessions.splice(cIndex, 1)
+        await cS.close()
       })
-      await test.step('owner lowers an Editor share B made to C to Read (D26, D9)', async () => {
-        // Named precondition: no UI writes share rows (see seedShare).
-        const shareId = fx.seedShare(home.drive!, outerId, b, c, ['read', 'write', 'share'])
-        const cRows = () =>
-          fx.accessRows(outerId).filter(row => row.subjectType === 'user' && row.subjectId === c.id)
-        expect(cRows()).toEqual([
-          expect.objectContaining({ id: shareId, relation: 'share', inherit: true }),
+      await test.step('owner lowers the Editor share B made to D to Read (D26, D9)', async () => {
+        // The same share row seeded in step 5: no new seed here (A-L1).
+        const seededShareId = shareId
+        if (!seededShareId) throw new Error('J1b: the seeded share id from step 5 is missing')
+        expect(dRows()).toEqual([
+          expect.objectContaining({ id: seededShareId, relation: 'share', inherit: true }),
         ])
         const outerUri = `gfs://${home.drive}/${ridOf(outerId)}`
-        const innerRow = cS.page.getByRole('button', { name: `Open ${inner}` })
-        // C's effective bits on the folder, read through C's own authenticated
+        const dS = await launchDesktopAs(testInfo, d)
+        sessions.push(dS)
+        await new DesktopFilesNav(dS.page).openFiles()
+        await new DesktopFilesNav(dS.page).openSharedWithMe()
+        await enterFolder(dS.page, outer)
+        await enterFolder(dS.page, inner)
+        await expect(dS.page.getByRole('button', { name: `Open ${file}` })).toBeVisible()
+        const innerRow = dS.page.getByRole('button', { name: `Open ${inner}` })
+        // D's effective bits on the folder, read through D's own authenticated
         // Desktop session.
-        const cHeld = () =>
-          cS.page.evaluate(
+        const dHeld = () =>
+          dS.page.evaluate(
             async ([resourceId, drive]) =>
               (
                 await (
@@ -574,32 +728,33 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
               ).held,
             [outerId, home.drive!] as const
           )
-        await expect.poll(cHeld).toEqual(expect.arrayContaining(['read', 'write']))
-        // C reaches the folder through the share (positive).
-        await openEvenDriveLink(cS.page, outerUri)
+        await expect.poll(dHeld).toEqual(expect.arrayContaining(['read', 'write']))
+        // D reaches the folder through the share (positive).
+        await openEvenDriveLink(dS.page, outerUri)
         await expect(innerRow).toBeVisible()
         await openHomeFolder(ownerS.page, home)
         await view.openShare(outer)
-        await new DesktopShareDialog(ownerS.page).lowerShare(c.name)
-        expect(cRows()).toEqual([
+        await new DesktopShareDialog(ownerS.page).lowerShare(d.name)
+        expect(dRows()).toEqual([
           expect.objectContaining({
-            id: shareId,
+            id: seededShareId,
             relation: 'share',
             permissions: ['read', 'share'],
             inherit: true,
           }),
         ])
         await ownerS.page.keyboard.press('Escape')
-        // Lowering narrows the share without revoking it: C keeps read and
+        // Lowering narrows the share without revoking it: D keeps read and
         // loses write, and opens the folder again after leaving it.
-        await expect.poll(cHeld).not.toContain('write')
-        expect(await cHeld()).toContain('read')
-        await openHomeFolder(cS.page, await fx.waitForHomeState(c.id, 'ready'))
+        await expect.poll(dHeld).not.toContain('write')
+        expect(await dHeld()).toContain('read')
+        await openHomeFolder(dS.page, await fx.waitForHomeState(d.id, 'ready'))
         await expect(innerRow).toHaveCount(0)
-        await openEvenDriveLink(cS.page, outerUri)
+        await openEvenDriveLink(dS.page, outerUri)
         await expect(innerRow).toBeVisible()
       })
     } finally {
+      await control.close()
       for (const s of sessions.reverse()) await s.close()
       fx.cleanup()
     }
@@ -845,6 +1000,9 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
           .getByRole('listitem')
           .filter({ has: bS.page.getByText('Owner', { exact: true }) })
         await expect(ownerRow).toHaveCount(1)
+        // U1 keeps the in-team label: the owner is in B's team directory, so
+        // the row names them next to "Owner".
+        await expect(ownerRow).toContainText(owner.name)
         await expect(
           ownerRow.getByRole('button', { name: /^(Actions|Access role) for / })
         ).toHaveCount(0)

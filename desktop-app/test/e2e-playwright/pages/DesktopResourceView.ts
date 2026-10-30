@@ -53,6 +53,19 @@ export class DesktopResourceView {
     await humanRecordedPause([600, 1200])
   }
 
+  /** Open the row's Move dialog through its visible menu entry (Move to…). */
+  async openMove(name: string): Promise<void> {
+    await this.page.getByRole('button', { name: `Options for ${name}` }).click()
+    await this.page
+      .getByRole('menu', { name: `Actions for ${name}` })
+      .getByRole('menuitem', { name: 'Move to…' })
+      .click()
+    await expect(
+      this.page.getByRole('dialog', { name: new RegExp(`^Move (folder|file) `) })
+    ).toBeVisible()
+    await humanRecordedPause([600, 1200])
+  }
+
   /** The open folder accepts writes: its header offers New folder only with write access. */
   async expectWritable(): Promise<void> {
     const browser = this.page.getByRole('region', { name: 'EvenDrive browser' })
