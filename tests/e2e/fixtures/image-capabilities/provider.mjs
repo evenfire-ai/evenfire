@@ -577,13 +577,15 @@ function attachmentSaveDirective(messages) {
   return { folderName: match[1], drive: match[2] }
 }
 
-/** The gfsc accessible envelope the Host delivered for the discovery call. */
+/**
+ * The gfsc accessible envelope the Host delivered for the discovery call.
+ * Native GFS tools do not sanitize, so the Host sends their output raw, with no
+ * `<tool_output>` wrapper (mcp-host InternalToolAdapter.requiresSanitization).
+ */
 function parseAccessibleSaveResult(content) {
-  const wrapped = toolOutputPattern(GFS_ACCESSIBLE_TOOL).exec(content)
-  if (!wrapped) throw saveMalformed('the tool result is not a clerum__gfs_accessible wrapper')
   let envelope
   try {
-    envelope = JSON.parse(wrapped[1])
+    envelope = JSON.parse(content)
   } catch {
     throw saveMalformed('the clerum__gfs_accessible result is not JSON')
   }
@@ -634,11 +636,8 @@ function attachedSaveLineId(text) {
   return line[1]
 }
 
-/** The completed save or the exact `Error:` message the Host delivered. */
-function parseAttachmentSaveResult(content) {
-  const wrapped = toolOutputPattern(GFS_SAVE_ATTACHMENT_TOOL).exec(content)
-  if (!wrapped) throw saveMalformed('the tool result is not a clerum__gfs_save_attachment wrapper')
-  const payload = wrapped[1]
+/** The completed save or the exact raw `Error:` message the Host delivered. */
+function parseAttachmentSaveResult(payload) {
   if (payload.startsWith('Error: ')) {
     const message = payload.slice('Error: '.length)
     if (message) return { ok: false, message }
@@ -973,6 +972,18 @@ export function createImageFixtureFetch(
             .slice(userIndex + 1)
             .filter(message => message?.role === 'tool' && typeof message.content === 'string')
         : []
+    // Raw native results carry no tool name, so each result is matched to the
+    // assistant call it answers through its tool_call_id.
+    const callNames = new Map()
+    for (const message of userIndex >= 0 ? body.messages.slice(userIndex + 1) : []) {
+      if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) continue
+      for (const call of message.tool_calls) callNames.set(call?.id, call?.function?.name)
+    }
+    const resultOf = (message, toolName) => {
+      if (callNames.get(message.tool_call_id) !== toolName)
+        throw saveMalformed(`the tool result does not answer a ${toolName} call`)
+      return message.content
+    }
     const toolCallResponse = (toolName, args, responseKind) => {
       sequence += 1
       const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
@@ -999,7 +1010,7 @@ export function createImageFixtureFetch(
     }
 
     if (toolMessages.length === 1) {
-      const accessible = parseAccessibleSaveResult(toolMessages[0].content)
+      const accessible = parseAccessibleSaveResult(resultOf(toolMessages[0], GFS_ACCESSIBLE_TOOL))
       const folder = selectSaveFolder(accessible, directive.folderName)
       const attachmentId = attachedSaveLineId(turnText)
       return toolCallResponse(
@@ -1010,7 +1021,10 @@ export function createImageFixtureFetch(
     }
 
     if (toolMessages.length === 2) {
-      const saveResult = parseAttachmentSaveResult(toolMessages[1].content)
+      resultOf(toolMessages[0], GFS_ACCESSIBLE_TOOL)
+      const saveResult = parseAttachmentSaveResult(
+        resultOf(toolMessages[1], GFS_SAVE_ATTACHMENT_TOOL)
+      )
       const requestedAttachmentId = attachedSaveLineId(turnText)
       if (saveResult.ok) {
         if (saveResult.result.attachmentId !== requestedAttachmentId)

@@ -1173,24 +1173,23 @@ function accessibleDirectory(resourceId, name = SAVE_FOLDER_NAME) {
   return accessibleResource(resourceId, name, 'directory')
 }
 
+// Native GFS tools do not sanitize, so the Host forwards their output raw,
+// with no <tool_output> wrapper (mcp-host InternalToolAdapter).
 function accessibleToolResult({ items, nextCursor = null } = {}) {
-  return wrappedToolOutput({ ok: true, data: { items, nextCursor } }, { name: GFS_ACCESSIBLE_TOOL })
+  return JSON.stringify({ ok: true, data: { items, nextCursor } })
 }
 
 function saveToolSuccess(attachmentId = SAVE_FILE_ID) {
-  return wrappedToolOutput(
-    {
-      attachmentId,
-      name: 'blob.bin',
-      bytes: 4096,
-      resource: { ok: true, data: { resourceId: 'file-rid-1' } },
-    },
-    { name: GFS_SAVE_TOOL }
-  )
+  return JSON.stringify({
+    attachmentId,
+    name: 'blob.bin',
+    bytes: 4096,
+    resource: { ok: true, data: { resourceId: 'file-rid-1' } },
+  })
 }
 
 function saveToolError(message) {
-  return `<tool_output name="${GFS_SAVE_TOOL}" sanitized="false">\nError: ${message}\n</tool_output>`
+  return `Error: ${message}`
 }
 
 test('save discover: the directive in text parts wins over the image path', async () => {
@@ -1406,25 +1405,37 @@ test('save stage without any attached line is refused (N2 vacuity)', async () =>
 })
 
 test('save tool results with unexpected shapes are refused', async () => {
-  const wrongName = wrappedToolOutput({ ok: true, data: { items: [], nextCursor: null } })
-  const notJson = `<tool_output name="${GFS_ACCESSIBLE_TOOL}" sanitized="false">\nnot json\n</tool_output>`
-  const saveWithoutResource = wrappedToolOutput(
-    { attachmentId: SAVE_FILE_ID, name: 'blob.bin', bytes: 4096 },
-    { name: GFS_SAVE_TOOL }
-  )
-  const cases = [
-    ['accessible result under another tool name', [wrongName]],
-    ['accessible result that is not JSON', [notJson]],
-    [
-      'save result without a resource',
-      [accessibleToolResult({ items: [accessibleDirectory('folder-rid-1')] }), saveWithoutResource],
-    ],
+  const accessible = accessibleToolResult({ items: [accessibleDirectory('folder-rid-1')] })
+  const saveWithoutResource = JSON.stringify({
+    attachmentId: SAVE_FILE_ID,
+    name: 'blob.bin',
+    bytes: 4096,
+  })
+  const answeringAnotherCall = [
+    saveUserMessage(),
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call-other', type: 'function', function: { name: 'other__tool', arguments: '{}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call-other', content: accessible },
   ]
-  for (const [label, toolContents] of cases) {
+  const cases = [
+    ['accessible result answering another tool call', answeringAnotherCall],
+    ['accessible result that is not JSON', saveTurnMessages(['not json'])],
+    [
+      'accessible result in a <tool_output> wrapper the Host does not send for native tools',
+      saveTurnMessages([wrappedToolOutput(JSON.parse(accessible), { name: GFS_ACCESSIBLE_TOOL })]),
+    ],
+    ['save result without a resource', saveTurnMessages([accessible, saveWithoutResource])],
+  ]
+  for (const [label, messages] of cases) {
     const h = harness()
     const response = await call(
       h,
-      chatBody(VISUAL_MODEL, saveTurnMessages(toolContents), {
+      chatBody(VISUAL_MODEL, messages, {
         tools: [accessibleToolDefinition, saveToolDefinition],
       })
     )
