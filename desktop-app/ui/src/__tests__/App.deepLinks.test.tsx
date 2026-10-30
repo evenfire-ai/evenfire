@@ -163,7 +163,8 @@ vi.mock('@components/CommandPalette', () => ({
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({
-  Button: () => null,
+  Button: ({ children, onClick }: { children?: ReactNode; onClick?: () => void }) =>
+    desktopUpdateCheckHarness.renderButtons ? <button onClick={onClick}>{children}</button> : null,
   IconButton: () => null,
   ToastStack: () => null,
 }))
@@ -215,6 +216,10 @@ const settingsPageHarness = vi.hoisted(() => ({
 const desktopUpdateCheckHarness = vi.hoisted(() => ({
   onRequested: null as null | (() => void),
   getStatus: vi.fn<() => Promise<unknown>>(),
+  onDownloaded: null as null | ((update: { version: string; updaterCapable: boolean }) => void),
+  renderButtons: false,
+  download: vi.fn(),
+  install: vi.fn(),
 }))
 vi.mock('@pages/SettingsPage', () => ({
   SettingsPage: (props: NonNullable<typeof settingsPageHarness.props>) => {
@@ -412,13 +417,13 @@ function renderApp(ui: ReactElement) {
   })
 }
 
-async function createOutdatedDesktopReleaseStatus() {
+async function createOutdatedDesktopReleaseStatus(installedVersion = '0.10.0') {
   const electron = await import('../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')
   const fakeApp = electron.electronModule.app as unknown as Record<string, unknown>
   const previousIsPackaged = fakeApp.isPackaged
   const previousGetVersion = fakeApp.getVersion
   fakeApp.isPackaged = true
-  fakeApp.getVersion = () => '0.10.0'
+  fakeApp.getVersion = () => installedVersion
 
   try {
     const { AppService } = await import('../../../src/appService')
@@ -441,6 +446,34 @@ async function createOutdatedDesktopReleaseStatus() {
     else fakeApp.isPackaged = previousIsPackaged
     if (previousGetVersion === undefined) delete fakeApp.getVersion
     else fakeApp.getVersion = previousGetVersion
+  }
+}
+
+async function createPreUpdaterDownload(version: string) {
+  const { createPackage } = await import('@electron/asar')
+  const { mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const path = await import('node:path')
+  const { readPackagedAppManifest, getUpdaterCapability } =
+    await import('../../../src/desktopUpdateArtifacts')
+  const parent = process.env.EVENFIRE_TEST_TMPDIR ?? tmpdir()
+  await mkdir(parent, { recursive: true })
+  const root = await mkdtemp(path.join(parent, 'asar-producer-'))
+  try {
+    const source = path.join(root, 'source')
+    await mkdir(source)
+    await writeFile(
+      path.join(source, 'package.json'),
+      JSON.stringify({ name: 'evenfire', productName: 'Evenfire', version })
+    )
+    const archive = path.join(root, 'app.asar')
+    await createPackage(source, archive)
+    return {
+      version: readPackagedAppManifest(archive).version,
+      updaterCapable: getUpdaterCapability(archive),
+    }
+  } finally {
+    await rm(root, { recursive: true, force: false })
   }
 }
 
@@ -537,6 +570,55 @@ describe('App deep-link orchestration', () => {
     view.unmount()
   })
 
+  it('continues startup consent through a pre-updater download without another confirmation', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    const downloaded = await createPreUpdaterDownload(status.latestVersion)
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.download.mockImplementation(async () => {
+      desktopUpdateCheckHarness.onDownloaded?.(downloaded)
+      return { downloaded: true, ...downloaded }
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      desktopReleaseStatus: status,
+    })
+    const view = renderApp(<App />)
+
+    await userEvent.click(view.getByRole('button', { name: 'Update and restart' }))
+
+    await waitFor(() =>
+      expect(view.getByText('Restarting to install Desktop update')).not.toBeNull()
+    )
+    expect(desktopUpdateCheckHarness.download).toHaveBeenCalledWith('0.12.0', true)
+    expect(view.container.textContent).not.toContain('predates')
+    expect(view.queryByRole('button', { name: 'Install and restart' })).toBeNull()
+    expect(view.queryByRole('button', { name: 'Restart now' })).toBeNull()
+  })
+
+  it('keeps manual restart choices and installs a pre-updater target on the first restart action', async () => {
+    const status = await createOutdatedDesktopReleaseStatus('0.11.9')
+    const downloaded = await createPreUpdaterDownload(status.latestVersion)
+    desktopUpdateCheckHarness.renderButtons = true
+    desktopUpdateCheckHarness.getStatus.mockResolvedValue(status)
+    desktopUpdateCheckHarness.download.mockImplementation(async () => {
+      desktopUpdateCheckHarness.onDownloaded?.(downloaded)
+      return { downloaded: true, ...downloaded }
+    })
+    currentController = makeController({ initialExperienceLoading: false })
+    const view = renderApp(<App />)
+
+    await act(async () => {
+      desktopUpdateCheckHarness.onRequested?.()
+    })
+    await waitFor(() => expect(view.getByRole('button', { name: 'Restart now' })).not.toBeNull())
+    expect(view.getByRole('button', { name: 'Restart later' })).not.toBeNull()
+    expect(desktopUpdateCheckHarness.install).not.toHaveBeenCalled()
+    await userEvent.click(view.getByRole('button', { name: 'Restart now' }))
+    await waitFor(() => expect(desktopUpdateCheckHarness.install).toHaveBeenCalledWith('0.12.0'))
+    expect(view.container.textContent).not.toContain('predates')
+    expect(view.queryByRole('button', { name: 'Install and restart' })).toBeNull()
+  })
+
   it('shows safe populated failure details and keeps the update notice dismissible', async () => {
     const user = userEvent.setup()
     currentController = makeController({
@@ -627,6 +709,10 @@ describe('App deep-link orchestration', () => {
     settingsPageHarness.props = null
     desktopUpdateCheckHarness.onRequested = null
     desktopUpdateCheckHarness.getStatus = vi.fn().mockResolvedValue(null)
+    desktopUpdateCheckHarness.onDownloaded = null
+    desktopUpdateCheckHarness.renderButtons = false
+    desktopUpdateCheckHarness.download = vi.fn().mockResolvedValue(undefined)
+    desktopUpdateCheckHarness.install = vi.fn().mockResolvedValue({ installed: true })
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
@@ -643,6 +729,15 @@ describe('App deep-link orchestration', () => {
       value: {
         auth: {
           getDesktopReleaseStatus: () => desktopUpdateCheckHarness.getStatus(),
+          downloadDesktopUpdate: (...args: unknown[]) =>
+            desktopUpdateCheckHarness.download(...args),
+          installDesktopUpdate: (...args: unknown[]) => desktopUpdateCheckHarness.install(...args),
+          onDesktopUpdateDownloaded: (
+            callback: (update: { version: string; updaterCapable: boolean }) => void
+          ) => {
+            desktopUpdateCheckHarness.onDownloaded = callback
+            return vi.fn()
+          },
           onDesktopUpdateCheckRequested: (callback: () => void) => {
             desktopUpdateCheckHarness.onRequested = callback
             return vi.fn()

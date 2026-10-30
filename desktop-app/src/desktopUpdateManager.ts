@@ -273,7 +273,7 @@ export class DesktopUpdateManager {
         throw new Error('A different Desktop update is already being downloaded.')
       }
       const result = await this.activeDownload.promise
-      if (restartAfterDownload && result.updaterCapable) {
+      if (restartAfterDownload) {
         await this.installDownloadedUpdate(expectedVersion)
       }
       return result
@@ -285,7 +285,7 @@ export class DesktopUpdateManager {
     this.activeDownload = activeDownload
     try {
       const result = await operation
-      if (restartAfterDownload && result.updaterCapable) {
+      if (restartAfterDownload) {
         await this.installDownloadedUpdate(expectedVersion)
       }
       return result

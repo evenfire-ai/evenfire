@@ -145,8 +145,8 @@ uses the detected app bundle, Squirrel, native Linux package, or user-owned ZIP
 install. The app leaves the current installation intact when it cannot prove a
 safe install path or obtain required OS authorization. Releases before the
 updater was introduced (currently v0.8.0 through v0.12.0) do not contain the
-updater; installing one displays a warning that future in-app updates will not
-be available until a later updater-capable build is installed.
+updater. The external helper still installs and relaunches those targets after
+the normal update consent; future in-app updates require an updater-capable build.
 
 The backend policy and user flows are documented in
 [Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users)

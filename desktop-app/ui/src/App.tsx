@@ -224,14 +224,7 @@ function getInitialSidebarCollapsed(): boolean {
 
 type DesktopUpdateFlow = {
   mode: 'startup' | 'manual'
-  phase:
-    | 'checking'
-    | 'available'
-    | 'downloading'
-    | 'downloaded'
-    | 'legacy-confirmation'
-    | 'installing'
-    | 'error'
+  phase: 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'error'
   status: DesktopReleaseStatus | null
   progress: DesktopUpdateProgress
   updaterCapable?: boolean
@@ -294,14 +287,12 @@ function DesktopUpdatePanel({
   onClose,
   onDownload,
   onRestart,
-  onLegacyInstall,
 }: {
   flow: DesktopUpdateFlow
   backendOrigin?: string
   onClose: () => void
   onDownload: () => void
   onRestart: () => void
-  onLegacyInstall: () => void
 }) {
   const titleId = React.useId()
   const descriptionId = React.useId()
@@ -318,13 +309,11 @@ function DesktopUpdatePanel({
         ? 'Downloading Desktop update'
         : flow.phase === 'downloaded'
           ? 'Desktop update ready'
-          : flow.phase === 'legacy-confirmation'
-            ? 'Confirm update without in-app updates'
-            : flow.phase === 'installing'
-              ? 'Restarting to install Desktop update'
-              : flow.phase === 'error'
-                ? 'Desktop update check failed'
-                : 'Desktop update available'
+          : flow.phase === 'installing'
+            ? 'Restarting to install Desktop update'
+            : flow.phase === 'error'
+              ? 'Desktop update check failed'
+              : 'Desktop update available'
 
   return (
     <div className="desktop-update-dialog-backdrop" role="presentation">
@@ -376,19 +365,6 @@ function DesktopUpdatePanel({
               working and restart later.
             </p>
           ) : null}
-          {flow.phase === 'downloaded' && flow.updaterCapable === false ? (
-            <p role="alert">
-              This release predates the in-app updater. Installing it removes future in-app update
-              checks until a later updater-enabled release is installed.
-            </p>
-          ) : null}
-          {flow.phase === 'legacy-confirmation' && status ? (
-            <p role="alert">
-              Evenfire Desktop {status.latestVersion} predates the in-app updater. Installing it
-              removes future in-app update checks until a later updater-enabled release is
-              installed. Continue only if you accept that limitation.
-            </p>
-          ) : null}
           {flow.phase === 'installing' && status ? (
             <p>
               Evenfire Desktop {status.latestVersion} is downloaded. The app is restarting to
@@ -418,16 +394,6 @@ function DesktopUpdatePanel({
             </Button>
             <Button block color="neutral" onClick={onClose}>
               Restart later
-            </Button>
-          </div>
-        ) : null}
-        {flow.phase === 'legacy-confirmation' ? (
-          <div className="desktop-update-dialog__actions">
-            <Button block onClick={onLegacyInstall}>
-              Install and restart
-            </Button>
-            <Button block color="neutral" onClick={onClose}>
-              Keep working
             </Button>
           </div>
         ) : null}
@@ -567,12 +533,7 @@ export function App() {
               if (!current || current.status?.latestVersion !== version) return current
               return {
                 ...current,
-                phase:
-                  current.mode === 'startup'
-                    ? updaterCapable
-                      ? 'installing'
-                      : 'legacy-confirmation'
-                    : 'downloaded',
+                phase: current.mode === 'startup' ? 'installing' : 'downloaded',
                 updaterCapable,
                 progress: {
                   percent: 100,
@@ -644,20 +605,6 @@ export function App() {
   }, [desktopUpdateFlow])
 
   const restartDesktopUpdate = React.useCallback(() => {
-    const flow = desktopUpdateFlow
-    if (!flow?.status) return
-    if (flow.updaterCapable === false) {
-      setDesktopUpdateFlow({ ...flow, phase: 'legacy-confirmation' })
-      return
-    }
-    setDesktopUpdateFlow({ ...flow, phase: 'downloading', error: undefined })
-    void window.clerum.auth.installDesktopUpdate(flow.status.latestVersion).catch(error => {
-      setDesktopUpdateFlow(current =>
-        current ? { ...current, phase: 'error', error: errorMessage(error) } : current
-      )
-    })
-  }, [desktopUpdateFlow])
-  const confirmLegacyDesktopInstall = React.useCallback(() => {
     const flow = desktopUpdateFlow
     if (!flow?.status) return
     setDesktopUpdateFlow({ ...flow, phase: 'installing', error: undefined })
@@ -3256,7 +3203,6 @@ export function App() {
       onClose={dismissDesktopUpdateFlow}
       onDownload={beginDesktopUpdate}
       onRestart={restartDesktopUpdate}
-      onLegacyInstall={confirmLegacyDesktopInstall}
     />
   ) : null
 

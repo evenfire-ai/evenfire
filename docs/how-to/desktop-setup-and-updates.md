@@ -127,10 +127,11 @@ If the installed version is in the compatible set, the app remains usable and
 does not prompt at startup, even if the backend recommends a newer build. If it
 is outside the set, a dismissible notice offers **Update and restart**. Choosing
 that action downloads the backend's selected compatible build with visible
-progress and offers restart when ready. Dismissing the notice does not block
-app use. Before installing a release that predates the updater, the app warns
-that it will remove in-app update support until a later updater-capable build
-is installed.
+progress, then installs and restarts. Dismissing the notice does not block
+app use and does not persist an opt-out: an incompatible build is checked again
+on the next launch. The same consent applies when the target predates the updater;
+the external helper installs and relaunches it. Those targets still lack future
+in-app update functionality until an updater-capable build is installed.
 
 Choose **Evenfire → Check for Updates** on macOS, **Help → Check for Updates**
 on Windows/Linux, or **Settings → Information → Check for updates** to check

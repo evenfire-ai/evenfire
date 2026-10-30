@@ -566,14 +566,38 @@ describe('DesktopUpdateManager', () => {
     expect(mockApp.quit).toHaveBeenCalledOnce()
   })
 
-  it('installs immediately only for an explicitly requested startup flow', async () => {
-    dependencies = createDependencies({ updaterCapable: true })
-    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+  it.each([true, false])(
+    'installs a capability=%s target after explicit startup consent',
+    async updaterCapable => {
+      dependencies = createDependencies({ updaterCapable })
+      manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
 
-    await expect(manager.downloadDesktopUpdate(UPDATE_VERSION, true)).resolves.toMatchObject({
-      downloaded: true,
-      updaterCapable: true,
-    })
+      await expect(manager.downloadDesktopUpdate(UPDATE_VERSION, true)).resolves.toMatchObject({
+        downloaded: true,
+        updaterCapable,
+      })
+      expect(dependencies.launchInstallHelper).toHaveBeenCalledOnce()
+      expect(mockApp.quit).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('honors startup consent when joining an active manual download of a pre-updater target', async () => {
+    let finishDownload!: () => void
+    const downloadAsset: NonNullable<DesktopUpdateManagerDependencies['downloadAsset']> = vi.fn(
+      async (_asset, destination) => {
+        await new Promise<void>(resolve => {
+          finishDownload = resolve
+        })
+        await fs.writeFile(destination, 'zip-data')
+      }
+    )
+    dependencies = createDependencies({ updaterCapable: false, downloadAsset })
+    manager = new DesktopUpdateManager(service, event => events.push(event), dependencies)
+    const manual = manager.downloadDesktopUpdate(UPDATE_VERSION)
+    await vi.waitFor(() => expect(downloadAsset).toHaveBeenCalledOnce())
+    const startup = manager.downloadDesktopUpdate(UPDATE_VERSION, true)
+    finishDownload()
+    await Promise.all([manual, startup])
     expect(dependencies.launchInstallHelper).toHaveBeenCalledOnce()
     expect(mockApp.quit).toHaveBeenCalledOnce()
   })
