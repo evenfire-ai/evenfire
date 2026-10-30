@@ -2698,16 +2698,16 @@ export class AppService {
 
   /**
    * Resolve then download a gfs:// resource's bytes through the brokered proxy.
-   * `maxBytes` bounds the download for the preview path (rejected before an
-   * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
-   * reads the full body.
+   * `opts.maxBytes` bounds the download for the preview path (rejected before an
+   * oversized payload materializes); omitting it (save-to-disk) reads the full
+   * body. `opts.recordOpen` is required: the caller states whether this read is
+   * the user opening the file (recorded by the API) or not.
    */
-  async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
-    return this.gfsClient.download(
-      uri,
-      this.requireSessionToken(),
-      maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
-    )
+  async downloadGfsUri(
+    uri: string,
+    opts: { maxBytes?: number; signal?: AbortSignal; recordOpen: boolean }
+  ) {
+    return this.gfsClient.download(uri, this.requireSessionToken(), opts)
   }
 
   /**
@@ -2748,6 +2748,14 @@ export class AppService {
   /** List explicit gfs resources the current user can read through grants or shares. */
   async listAccessibleGfsResources(drive?: string, cursor?: string) {
     return this.gfsClient.listAccessible(this.requireSessionToken(), { drive, cursor })
+  }
+
+  /**
+   * List the current user's own recent EvenDrive files, newest first. The
+   * server has already filtered them by the caller's `read` authority.
+   */
+  async listRecentGfsFiles(drive?: string) {
+    return this.gfsClient.listRecent(this.requireSessionToken(), { drive })
   }
 
   /**

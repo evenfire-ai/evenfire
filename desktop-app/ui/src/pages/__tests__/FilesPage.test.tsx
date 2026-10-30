@@ -8,6 +8,7 @@ import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import { GFS_LISTING_GRID_COLUMNS } from '@lib/gfsListingGrid'
 import { childView, listChildrenPage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { Tone } from '@/uiTypes'
 import { GfsClient, type GfsTransport, parseSubjectKey } from '../../../../src/gfs/uriHandler.js'
@@ -44,6 +45,12 @@ function baseController() {
     loadingCurrentView: false,
     accessibleError: null,
     accessibleNotice: null,
+    recentFiles: [],
+    loadingRecentFiles: false,
+    fetchingRecentFiles: false,
+    recentFilesFailure: null,
+    retryRecentFiles: vi.fn(),
+    refreshRecentFiles: vi.fn(),
     error: null,
     openError: null,
     resolving: false,
@@ -4091,7 +4098,7 @@ describe('FilesPage', () => {
       await Promise.resolve()
     })
 
-    expect(download).toHaveBeenCalledWith('gfs://main/file-1')
+    expect(download).toHaveBeenCalledWith('gfs://main/file-1', { recordOpen: true })
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
     expect(click).toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith('Downloaded report.pdf', 'success')
@@ -4150,7 +4157,7 @@ describe('FilesPage', () => {
 
     // Witness: the download really ran and really rejected, so the copy
     // assertions below describe a handled failure.
-    expect(download).toHaveBeenCalledWith('gfs://main/file-1')
+    expect(download).toHaveBeenCalledWith('gfs://main/file-1', { recordOpen: true })
     expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
   })
 
@@ -6305,7 +6312,9 @@ describe('FilesPage', () => {
     renderFilesPage()
     fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
 
-    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/image-1'))
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith('gfs://main/image-1', { recordOpen: true })
+    )
     expect(anchorClick).toHaveBeenCalled()
   })
 
@@ -8237,5 +8246,174 @@ describe('FilesPage — folder drag-and-drop', () => {
       .closest('.da-grid__row') as HTMLElement
     expect(folderRow.getAttribute('draggable')).toBe('true')
     expect(folderRow.getAttribute('title')).toBe('Drag Projects into a folder to move it')
+  })
+})
+
+describe('FilesPage recent files card (D1, D17, D20)', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  function withRecent(over: Record<string, unknown> = {}) {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: {
+        state: 'ready',
+        drive: 'main',
+        resourceId: 'home-1',
+        path: '/Users/owner',
+        heldPermissions: ['read'],
+      },
+      accessibleResources: [
+        {
+          resourceId: 'shared-1',
+          rid: 'shared-1',
+          gfsUri: 'gfs://main/shared-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'shared.txt',
+          kind: 'file',
+          path: '/shared.txt',
+          version: 1,
+          bytes: 4,
+          updatedAt: '2026-10-30T10:00:00.000Z',
+          sources: ['share'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+      recentFiles: [
+        {
+          resourceId: 'recent-1',
+          gfsUri: 'gfs://main/recent-1',
+          drive: 'main',
+          name: 'recent-1.txt',
+          version: 1,
+          bytes: 4,
+          lastActivityAt: '2026-10-30T10:00:00.000Z',
+        },
+      ],
+      ...over,
+    })
+  }
+
+  it('renders the card before My home, with the listing grid template', () => {
+    withRecent()
+    renderFilesPage()
+
+    const recent = screen.getByRole('region', { name: 'Recent files' })
+    const home = screen.getByRole('region', { name: 'My home' })
+    expect(recent.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    const heading = within(recent).getByRole('heading', { name: 'Recent files' })
+    expect(heading.tagName).toBe('H3')
+
+    const recentGrid = recent.querySelector('.da-grid.da-gfs-drive__grid') as HTMLElement | null
+    const browserGrid = document
+      .querySelector('.da-gfs-page .da-gfs-drive')
+      ?.querySelector('.da-grid.da-gfs-drive__grid') as HTMLElement | null
+    expect(recentGrid).toBeTruthy()
+    expect(browserGrid).toBeTruthy()
+    expect(recentGrid!.style.getPropertyValue('--da-grid-cols')).toBe(GFS_LISTING_GRID_COLUMNS)
+    expect(browserGrid!.style.getPropertyValue('--da-grid-cols')).toBe(
+      recentGrid!.style.getPropertyValue('--da-grid-cols')
+    )
+  })
+
+  it('opens a previewable recent file through the preview surface', () => {
+    withRecent({
+      recentFiles: [
+        {
+          resourceId: 'recent-1',
+          gfsUri: 'gfs://main/recent-1',
+          drive: 'main',
+          name: 'diagram.png',
+          version: 1,
+          bytes: 4,
+          lastActivityAt: '2026-10-30T10:00:00.000Z',
+        },
+      ],
+    })
+    const onOpenPreview = vi.fn()
+    renderFilesPage(undefined, onOpenPreview)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open diagram.png' }))
+
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      expect.objectContaining({ gfsUri: 'gfs://main/recent-1' })
+    )
+  })
+
+  it('downloads a non-previewable recent file and refreshes the card', async () => {
+    const refreshRecentFiles = vi.fn()
+    withRecent({
+      refreshRecentFiles,
+      recentFiles: [
+        {
+          resourceId: 'recent-1',
+          gfsUri: 'gfs://main/recent-1',
+          drive: 'main',
+          name: 'archive.zip',
+          version: 1,
+          bytes: 4,
+          lastActivityAt: '2026-10-30T10:00:00.000Z',
+        },
+      ],
+    })
+    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(4) }))
+    Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs: { download } } })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:gfs-page'),
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    renderFilesPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open archive.zip' }))
+
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith('gfs://main/recent-1', { recordOpen: true })
+    )
+    await waitFor(() => expect(refreshRecentFiles).toHaveBeenCalled())
+  })
+
+  it('is absent outside the overview', () => {
+    // Shared with me: the card belongs to the overview only.
+    hookMock.useGfsBrowserController.mockReturnValue({ ...baseController() })
+    renderFilesPage()
+    const browser = document.querySelector('.da-gfs-page .da-gfs-drive') as HTMLElement
+    fireEvent.click(within(browser).getByRole('button', { name: 'Shared with me' }))
+    expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
+
+    cleanup()
+
+    // A folder view.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Folder',
+        kind: 'directory',
+        drive: 'main',
+      },
+    })
+    renderFilesPage()
+    expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
+
+    cleanup()
+
+    // Revoked access.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessState: 'revoked',
+    })
+    renderFilesPage()
+    expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
+    // Witness: the revoked view really rendered its own verdict.
+    expect(screen.getByText('File access is not authorized')).toBeTruthy()
   })
 })

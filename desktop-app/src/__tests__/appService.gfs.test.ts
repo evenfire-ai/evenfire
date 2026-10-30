@@ -1062,12 +1062,14 @@ describe('AppService GFS proxy read transport', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     try {
-      const error = await service.downloadGfsUri(`gfs://main/${RESOURCE_ID}`).then(
-        () => {
-          throw new Error('expected the rate-limited proxy download to reject')
-        },
-        (rejected: unknown) => rejected
-      )
+      const error = await service
+        .downloadGfsUri(`gfs://main/${RESOURCE_ID}`, { recordOpen: false })
+        .then(
+          () => {
+            throw new Error('expected the rate-limited proxy download to reject')
+          },
+          (rejected: unknown) => rejected
+        )
       const message = error instanceof Error ? error.message : String(error)
       expect(message).toContain('gfs download failed: 429')
       expect(message).toContain('retryAfterSeconds=7')
@@ -1172,12 +1174,14 @@ describe('AppService GFS proxy read transport', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     try {
-      const error = await service.downloadGfsUri(`gfs://main/${RESOURCE_ID}`).then(
-        () => {
-          throw new Error('expected the rate-limited proxy download to reject')
-        },
-        (rejected: unknown) => rejected
-      )
+      const error = await service
+        .downloadGfsUri(`gfs://main/${RESOURCE_ID}`, { recordOpen: false })
+        .then(
+          () => {
+            throw new Error('expected the rate-limited proxy download to reject')
+          },
+          (rejected: unknown) => rejected
+        )
       const message = error instanceof Error ? error.message : String(error)
       expect(message).toContain('gfs download failed: 429')
       expect(message).toContain('retryAfterSeconds=11')

@@ -37,3 +37,9 @@ export const GFS_SHARED_WITH_ME_LABEL = 'Shared with me'
  * so it is never resolved against the server.
  */
 export const GFS_SHARED_WITH_ME_LOCATION = 'evendrive:shared-with-me'
+
+/** Rows the "Recent files" card shows first (D20, option A). */
+export const GFS_RECENT_FILES_PAGE_SIZE = 10
+
+/** The overview card's heading and accessible region name (D11). */
+export const GFS_RECENT_FILES_LABEL = 'Recent files'

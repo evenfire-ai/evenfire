@@ -14802,8 +14802,30 @@ pre {
   grid-template-rows: auto 1fr;
 }
 
+/* Recent files is the first overview card, above My home; the browser card
+   stays the stretching row. Without the second rule the three-card overview
+   would hand My home the 1fr row. */
+.da-gfs-layout:has(> .da-gfs-recent) {
+  grid-template-rows: auto 1fr;
+}
+
+.da-gfs-layout:has(> .da-gfs-recent):has(> .da-gfs-my-home) {
+  grid-template-rows: auto auto 1fr;
+}
+
 .da-gfs-my-home {
   padding: var(--space-2) var(--space-3);
+}
+
+/* The card grows with its rows: no internal scroll and no height cap, like
+   every other overview card. The page scrolls. */
+.da-gfs-recent {
+  min-width: 0;
+}
+
+.da-gfs-recent__activity {
+  color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
 .da-gfs-my-home__open {

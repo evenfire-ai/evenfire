@@ -156,6 +156,11 @@ export interface GfsBrowserControllerOptions {
    * the only consumer, so the query runs only while it is open.
    */
   grantsListEnabled?: boolean
+  /**
+   * Enables the caller's recent-files list. Only the EvenDrive overview shows it,
+   * so the composer picker and the sidebar tree never spend a request on it.
+   */
+  recentFilesEnabled?: boolean
 }
 
 function toMessage(error: unknown): string {
@@ -273,7 +278,7 @@ const UNKNOWN_RATE_LIMIT_PAUSE_MS = 60_000
 export { isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 
 export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
-  const { grantsListEnabled = false } = options
+  const { grantsListEnabled = false, recentFilesEnabled = false } = options
   const queryClient = useQueryClient()
   const { isAuthenticated, me, runtimeConfigState } = useAuthContext()
   const [crumbs, setCrumbsState] = useState<GfsCrumb[]>([])
@@ -492,6 +497,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     accessibleQueryEnabled && !accessibleQuery.isError && accessibleQuery.data === undefined
   const childrenQueryEnabled =
     Boolean(sessionScope) && Boolean(current) && currentIsDirectory && accessState === 'active'
+
+  // The recent-files list is the overview's own surface: enabled only where the
+  // caller asked for it, at the root, with a live authority and a session.
+  const recentFilesQueryEnabled =
+    recentFilesEnabled && Boolean(sessionScope) && !current && accessState === 'active'
+  const recentFilesQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsRecentFiles(sessionScope ?? 'anonymous', discoveryCacheDrive),
+    // Preload and renderer ship together, so a missing method is a defect, not a
+    // capability probe: it surfaces as a query error the card reports.
+    queryFn: () => window.clerum.gfs.listRecent(discoveryCacheDrive || undefined),
+    enabled: recentFilesQueryEnabled,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: refetchOnFocusUnlessPaused,
+  })
 
   const childrenQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsChildren(
@@ -1001,6 +1021,32 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           : null,
     }
   }, [accessibleErrorMessage, accessibleErrorUpdatedAt, accessibleQuery.error])
+  const recentFilesFailure = useMemo<GfsDiscoveryFailure | null>(() => {
+    if (recentFilesQuery.error == null) return null
+    const message = toMessage(recentFilesQuery.error)
+    const kind = classifyDiscoveryFailure(message)
+    const retryAfterSeconds = parseRetryAfterSeconds(message)
+    return {
+      kind,
+      message: message || toPresentedMessage(recentFilesQuery.error),
+      retryAvailableAt:
+        kind === 'rate-limited' && retryAfterSeconds !== null
+          ? recentFilesQuery.errorUpdatedAt + retryAfterSeconds * 1000
+          : null,
+    }
+  }, [recentFilesQuery.error, recentFilesQuery.errorUpdatedAt])
+  // A 401 revokes the shared session exactly as discovery does; a 429 joins the
+  // same pause. Reading the verdict here (not inside an effect) keeps the
+  // decision on the render that produced it.
+  const recentFilesError = recentFilesQuery.error ? toMessage(recentFilesQuery.error) : null
+  useEffect(() => {
+    if (!recentFilesError) return
+    handleAuthorityFailure(recentFilesError, 'operation')
+  }, [recentFilesError, handleAuthorityFailure])
+  useEffect(() => {
+    const until = recentFilesFailure?.retryAvailableAt
+    if (until) pausedUntilRef.current = Math.max(pausedUntilRef.current, until)
+  }, [recentFilesFailure])
   const authorityWait = authorityPending && !discoveryFailure
   const childrenInitialRequestPending =
     childrenQueryEnabled && !childrenQuery.isError && childrenQuery.data === undefined
@@ -1497,6 +1543,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : accessibleErrorMessage || toPresentedMessage(accessibleQuery.error),
     accessibleNotice,
     discoveryFailure,
+    // Withheld while authority is being re-proved, exactly like discovery.
+    recentFiles: authorityPending ? [] : (recentFilesQuery.data?.items ?? []),
+    loadingRecentFiles:
+      recentFilesQueryEnabled && !recentFilesQuery.isError && recentFilesQuery.data === undefined,
+    fetchingRecentFiles: recentFilesQuery.isFetching,
+    recentFilesFailure,
+    retryRecentFiles: () => {
+      void recentFilesQuery.refetch()
+    },
+    refreshRecentFiles: () => {
+      void queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsRecentFiles(sessionScope ?? 'anonymous', discoveryCacheDrive),
+      })
+    },
     retryDiscovery,
     retryChildren,
     openError,

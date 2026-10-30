@@ -342,6 +342,30 @@ describe('FileExplorerTree — sanitizes externally-controlled GFS names in chro
     expect(screen.queryByRole('button', { name: `Re‮ports​` })).toBeNull()
   })
 
+  it('refreshes the overview recent card after a successful download', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('z', 'archive.zip', 'file')])
+      ),
+      download: vi.fn(async () => downloadResult(resolvedFile('z', 'archive.zip'))),
+    })
+    const { QueryClient } = await import('@tanstack/react-query')
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
+
+    const { pushToast } = renderTree()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'archive.zip' }))
+    // Witness: the save really completed, so the refresh below is a new step.
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
+    await waitFor(() =>
+      expect(
+        invalidate.mock.calls.some(
+          ([filters]) => Array.isArray(filters?.queryKey) && filters.queryKey.includes('recent')
+        )
+      ).toBe(true)
+    )
+  })
+
   it('shows the cleaned name in the download toast while the raw name stays for the on-disk file', async () => {
     installClerum({
       listAccessible: vi.fn(async () =>
@@ -544,7 +568,9 @@ describe('FileExplorerTree — file single-click activates', () => {
     const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
     fireEvent.click(fileButton)
 
-    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith('gfs://main/zip-1', { recordOpen: true })
+    )
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
     expect(onOpenPreview).not.toHaveBeenCalled()
   })
@@ -903,7 +929,9 @@ describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
     // surface, so the tree revokes and swaps in the unauthorized + retry surface
     // instead of surfacing the raw error as a toast.
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
-    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith('gfs://main/zip-1', { recordOpen: true })
+    )
     expect(onOpenPreview).not.toHaveBeenCalled()
     // The authority path pre-empts the error toast (the catch returns before it).
     expect(pushToast).not.toHaveBeenCalledWith('401 Unauthorized', 'error')

@@ -998,6 +998,9 @@ export function FileExplorerTree({
         try {
           // The raw name is the real on-disk filename; the toast shows the cleaned one.
           await saveGfsFileToDisk(node.gfsUri, node.name)
+          // The overview's recent card can be on screen while this tree saves:
+          // refresh it instead of waiting for the Files tab to remount.
+          ctrl.refreshRecentFiles()
           pushToast(`Downloaded ${displayName(node.name)}`, 'success')
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
@@ -1008,7 +1011,7 @@ export function FileExplorerTree({
         }
       })()
     },
-    [authorityFailure, onOpenPreview, pushToast]
+    [authorityFailure, ctrl, onOpenPreview, pushToast]
   )
 
   return (

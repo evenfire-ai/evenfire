@@ -163,7 +163,7 @@ export async function downloadResult(
   bytes: ArrayBuffer = new ArrayBuffer(4)
 ): Promise<DownloadResult> {
   const client = new GfsClient(stubTransport({ ok: true, data: resource }, bytes))
-  const out = await client.download(resource.gfsUri, SESSION_TOKEN)
+  const out = await client.download(resource.gfsUri, SESSION_TOKEN, { recordOpen: false })
   return structuredClone(out)
 }
 

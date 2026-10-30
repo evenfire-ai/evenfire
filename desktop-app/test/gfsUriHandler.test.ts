@@ -104,13 +104,72 @@ describe('GfsClient.resolveUri', () => {
 describe('GfsClient.download', () => {
   it('resolves then fetches the bytes through the brokered proxy', async () => {
     const t = transport()
-    const { resource, bytes } = await new GfsClient(t).download(`gfs://main/${RID}`, 'tok')
+    const { resource, bytes } = await new GfsClient(t).download(`gfs://main/${RID}`, 'tok', {
+      recordOpen: false,
+    })
     expect(resource).toEqual(RESOURCE)
     expect(new TextDecoder().decode(bytes)).toBe('hello')
     expect(t.fetchBytes).toHaveBeenCalledWith(
       `https://api.example/api/v1/me/gfs/proxy/${RID}?drive=main`,
       'tok'
     )
+  })
+
+  it('records an open when recordOpen is true', async () => {
+    const t = transport()
+    await new GfsClient(t).download(`gfs://main/${RID}`, 'tok', { recordOpen: true })
+    const [url] = (t.fetchBytes as ReturnType<typeof vi.fn>).mock.calls[0] as [string]
+    // Witness: `drive` is present, so this asserts the intent token, not a URL
+    // that failed to build.
+    expect(url).toContain('drive=main')
+    expect(url).toBe(`https://api.example/api/v1/me/gfs/proxy/${RID}?drive=main&intent=open`)
+  })
+
+  it('sends no intent when recordOpen is false', async () => {
+    const t = transport()
+    await new GfsClient(t).download(`gfs://main/${RID}`, 'tok', { recordOpen: false })
+    const [url] = (t.fetchBytes as ReturnType<typeof vi.fn>).mock.calls[0] as [string]
+    // Witness: `drive` is present in the same URL that carries no intent.
+    expect(url).toContain('drive=main')
+    expect(url).not.toContain('intent')
+  })
+
+  it('forwards the bound and carries no intent on a bounded preview read', async () => {
+    const t = transport()
+    await new GfsClient(t).download(`gfs://main/${RID}`, 'tok', {
+      maxBytes: 10,
+      recordOpen: false,
+    })
+    const [url, , opts] = (t.fetchBytes as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      string,
+      { maxBytes?: number },
+    ]
+    expect(url).toContain('drive=main')
+    expect(url).not.toContain('intent')
+    expect(opts).toEqual({ maxBytes: 10, signal: undefined })
+  })
+})
+
+describe('GfsClient.downloadInto', () => {
+  it('never sends an open intent (a ZIP export records nothing)', async () => {
+    const t = transport()
+    const chunks: string[] = []
+    const result = await new GfsClient(t).downloadInto(
+      `gfs://main/${RID}`,
+      'tok',
+      { maxBytes: 1024 },
+      async chunk => {
+        chunks.push(new TextDecoder().decode(chunk))
+      }
+    )
+
+    expect(result.bytes).toBe(5)
+    expect(chunks.join('')).toBe('hello')
+    const [url] = (t.fetchBytes as ReturnType<typeof vi.fn>).mock.calls[0] as [string]
+    // Witness: the download URL was built (drive present) and carries no intent.
+    expect(url).toContain('drive=main')
+    expect(url).not.toContain('intent')
   })
 })
 
@@ -256,6 +315,64 @@ describe('GfsClient.listAccessible', () => {
       rootResourceId,
       view: 'operator',
     })
+  })
+})
+
+describe('GfsClient.listRecent', () => {
+  const RECENT = {
+    resourceId: RID,
+    gfsUri: `gfs://main/${RID}`,
+    drive: 'main',
+    name: 'report.md',
+    version: 3,
+    bytes: 5,
+    lastActivityAt: '2026-10-30T10:00:00.000Z',
+  }
+
+  it("lists the caller's own recent files and unwraps the envelope", async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { items: [RECENT] },
+    })) as GfsTransport['requestJson']
+    const page = await new GfsClient(transport({ requestJson })).listRecent('tok', {
+      drive: 'main',
+    })
+
+    expect(page).toEqual({ items: [RECENT] })
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      'https://api.example/api/v1/me/gfs/recent?drive=main',
+      { token: 'tok' }
+    )
+  })
+
+  it('omits the drive query when none is given and still refuses an empty drive', async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { items: [] },
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
+
+    await expect(client.listRecent('tok')).resolves.toEqual({ items: [] })
+    const [, url] = (requestJson as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string]
+    expect(url).toBe('https://api.example/api/v1/me/gfs/recent')
+    expect(url).not.toContain('drive=')
+
+    // An explicitly empty drive is still a caller error, never "no drive".
+    await expect(client.listRecent('tok', { drive: '' })).rejects.toThrow('drive_required')
+    expect(requestJson).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces a revoked-session envelope as a GfsUriError', async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: false,
+      error: { code: 'forbidden', message: 'denied' },
+    })) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).listRecent('tok', { drive: 'main' })
+    ).rejects.toThrow(/forbidden/)
+    // Witness: the request went out, so the rejection is the envelope's verdict.
+    expect(requestJson).toHaveBeenCalledTimes(1)
   })
 })
 

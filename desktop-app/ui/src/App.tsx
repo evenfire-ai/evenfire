@@ -3165,6 +3165,9 @@ export function App() {
                                 mimeType={pluginGfsPreview.mimeType}
                                 unavailable={pluginGfsPreview.unavailable}
                                 onClose={closePluginGfsPreview}
+                                // D13: the overlay is an open, but only the
+                                // first load; a reload is the same open again.
+                                recordOpen={pluginGfsPreview.reloadVersion === 0}
                               />
                             ) : null}
                           </GfsDragSessionProvider>

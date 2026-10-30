@@ -80,6 +80,9 @@ function installGfsBridge(
       gfs: {
         resolve: vi.fn(),
         listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+        // The overview's recent card has its own list; an empty one keeps the
+        // page-level "Load more" assertions unambiguous.
+        listRecent: vi.fn(async () => ({ items: [] })),
         affordances: vi.fn(async () => ({
           held: [],
           canDelegate: false,
@@ -137,6 +140,7 @@ describe('FilesPage against the real GFS browser controller', () => {
           getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
+          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -191,6 +195,7 @@ describe('FilesPage against the real GFS browser controller', () => {
           getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
+          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -293,6 +298,7 @@ describe('FilesPage against the real GFS browser controller', () => {
         gfs: {
           listAccessible,
           resolve: vi.fn(),
+          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -358,6 +364,7 @@ describe('FilesPage against the real GFS browser controller', () => {
         gfs: {
           listAccessible,
           resolve: vi.fn(),
+          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -476,6 +483,7 @@ describe('FilesPage against the real GFS browser controller', () => {
         gfs: {
           listAccessible,
           resolve: vi.fn(),
+          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -555,6 +563,7 @@ describe('FilesPage against the real GFS browser controller', () => {
           listAccessible,
           listChildren,
           resolve: vi.fn(),
+          listRecent: vi.fn(async () => ({ items: [] })),
           affordances: vi.fn(async () => ({
             held: [],
             canDelegate: false,

@@ -141,7 +141,7 @@ declare global {
         }>
         download: (
           uri: string,
-          options?: { maxBytes?: number; signal?: AbortSignal }
+          options: { maxBytes?: number; signal?: AbortSignal; recordOpen: boolean }
         ) => Promise<{
           resource: {
             drive: string
@@ -161,7 +161,8 @@ declare global {
         }>
         downloadPreview: (
           uri: string,
-          maxBytes: number
+          maxBytes: number,
+          recordOpen: boolean
         ) => Promise<{
           resource: {
             drive: string
@@ -202,6 +203,17 @@ declare global {
           nextCursor: string | null
           rootResourceId?: string
           view?: 'operator'
+        }>
+        listRecent: (drive?: string) => Promise<{
+          items: Array<{
+            resourceId: string
+            gfsUri: string
+            drive: string
+            name: string
+            version: number
+            bytes: number
+            lastActivityAt: string
+          }>
         }>
         listChildren: (
           resourceId: string,

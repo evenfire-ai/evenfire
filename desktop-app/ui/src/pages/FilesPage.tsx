@@ -20,6 +20,7 @@ import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
+import { GfsRecentFilesCard } from '@components/GfsRecentFilesCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import {
   IconAttachFile,
@@ -63,6 +64,7 @@ import {
   isRateLimited,
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
+import { GFS_LISTING_GRID_COLUMNS } from '@lib/gfsListingGrid'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
@@ -450,7 +452,10 @@ export function FilesPage({
   const createFolderDescriptionId = useId()
   const createFolderInputId = useId()
   const queryClient = useQueryClient()
-  const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  // Only the overview renders the recent card, but the option is stable for the
+  // page's lifetime: the card mounts and unmounts with the view, the query does
+  // not re-subscribe on every view change.
+  const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen, recentFilesEnabled: true })
   const {
     current,
     crumbs,
@@ -1189,6 +1194,9 @@ export function FilesPage({
   const handleDownload = async (uri: string, name: string) => {
     try {
       await saveGfsFileToDisk(uri, name)
+      // A save is the user's activity, and the card may be on screen behind the
+      // tab that saved: refresh it rather than waiting for a remount.
+      ctrl.refreshRecentFiles()
       pushToast?.(`Downloaded ${name}`, 'success')
     } catch (downloadError) {
       if (failClosedOnAuthorizationError(downloadError)) return
@@ -2214,6 +2222,10 @@ export function FilesPage({
     void handleDownload(resource.gfsUri, resource.name)
   }
 
+  // The card belongs to the overview only (D1): not in a folder, not in Shared
+  // with me, and not while the session's authority is revoked.
+  const showRecentFiles = !current && rootView === 'overview' && !accessRevoked
+
   const currentIsBeingRenamed = renameTarget?.resourceId === current?.resourceId
   const currentIsInBreadcrumbs = Boolean(
     current && crumbs.some(crumb => crumb.resourceId === current.resourceId)
@@ -2233,6 +2245,19 @@ export function FilesPage({
       </div>
 
       <div className="page-layout da-gfs-layout">
+        {showRecentFiles ? (
+          <GfsRecentFilesCard
+            failure={ctrl.recentFilesFailure}
+            fetching={ctrl.fetchingRecentFiles}
+            files={ctrl.recentFiles}
+            loading={ctrl.loadingRecentFiles}
+            onOpen={file => {
+              if (openFilePreview(file)) return
+              void handleDownload(file.gfsUri, file.name)
+            }}
+            onRetry={ctrl.retryRecentFiles}
+          />
+        ) : null}
         {myHome ? (
           <section className="page-card da-gfs-my-home" aria-label="My home">
             <Button
@@ -2569,10 +2594,7 @@ export function FilesPage({
           ) : (
             <div
               className="da-grid da-gfs-drive__grid"
-              style={{
-                '--da-grid-cols':
-                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem',
-              }}
+              style={{ '--da-grid-cols': GFS_LISTING_GRID_COLUMNS }}
             >
               <div className="da-grid__head">
                 <span className="da-grid__col-header" aria-hidden="true" />

@@ -27,6 +27,7 @@ describe('GfsMarkdownPreviewBody', () => {
 
     const { container } = render(
       <GfsMarkdownPreviewBody
+        recordOpen={false}
         byteLength={markdown.length}
         fileName="README.md"
         gfsUri="gfs://main/markdown-1"
@@ -40,7 +41,8 @@ describe('GfsMarkdownPreviewBody', () => {
     expect(container.querySelector('script')).toBeNull()
     expect(downloadPreview).toHaveBeenCalledWith(
       'gfs://main/markdown-1',
-      GFS_MARKDOWN_PREVIEW_MAX_BYTES
+      GFS_MARKDOWN_PREVIEW_MAX_BYTES,
+      false
     )
     expect(screen.queryByRole('dialog')).toBeNull()
   })
@@ -48,7 +50,12 @@ describe('GfsMarkdownPreviewBody', () => {
   it('renders a .txt file as plain text', async () => {
     stubDownload('line one\nline two\twith tab')
     render(
-      <GfsMarkdownPreviewBody byteLength={26} fileName="notes.txt" gfsUri="gfs://main/text-1" />
+      <GfsMarkdownPreviewBody
+        recordOpen={false}
+        byteLength={26}
+        fileName="notes.txt"
+        gfsUri="gfs://main/text-1"
+      />
     )
     const pre = await screen.findByText(/line one/)
     expect(pre.tagName).toBe('PRE')
@@ -66,6 +73,7 @@ describe('GfsMarkdownPreviewBody', () => {
 
     render(
       <GfsMarkdownPreviewBody
+        recordOpen={false}
         byteLength={markdown.length}
         fileName="README.md"
         gfsUri="gfs://main/markdown-2"
@@ -82,6 +90,7 @@ describe('GfsMarkdownPreviewBody', () => {
     const downloadPreview = stubDownload('x')
     render(
       <GfsMarkdownPreviewBody
+        recordOpen={false}
         byteLength={GFS_MARKDOWN_PREVIEW_MAX_BYTES + 1}
         fileName="oversized.md"
         gfsUri="gfs://main/oversized"
@@ -102,6 +111,7 @@ describe('GfsMarkdownPreviewBody', () => {
     })
     render(
       <GfsMarkdownPreviewBody
+        recordOpen={false}
         byteLength={5}
         fileName="README.md"
         gfsUri="gfs://main/markdown-3"

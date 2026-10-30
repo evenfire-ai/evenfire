@@ -64,6 +64,7 @@ describe('GfsImagePreview layout', () => {
   it('centers in the workspace and follows sidebar expansion changes', async () => {
     render(
       <GfsImagePreview
+        recordOpen={false}
         byteLength={3}
         fileName="diagram.png"
         gfsUri="gfs://main/image-1"
@@ -106,6 +107,7 @@ describe('GfsImagePreview layout', () => {
     window.clerum.gfs.downloadPreview = downloadPreview
     render(
       <GfsImagePreview
+        recordOpen={false}
         byteLength={3}
         fileName="diagram.png"
         gfsUri="gfs://main/image-1"
@@ -126,6 +128,7 @@ describe('GfsImagePreview layout', () => {
     const downloadPreview = vi.mocked(window.clerum.gfs.downloadPreview)
     render(
       <GfsImagePreview
+        recordOpen={false}
         byteLength={3}
         fileName="diagram.png"
         gfsUri="gfs://main/image-1"

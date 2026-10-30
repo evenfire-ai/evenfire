@@ -22,6 +22,7 @@ export function GfsImagePreview({
   reloadVersion,
   unavailable = false,
   onDownloadError,
+  recordOpen,
 }: GfsImagePreviewProps) {
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -86,6 +87,7 @@ export function GfsImagePreview({
             dataBase64={dataBase64}
             mimeType={mimeType}
             onDownloadError={onDownloadError}
+            recordOpen={recordOpen}
             titleId={titleId}
             headerActions={closeButton}
           />

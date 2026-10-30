@@ -240,6 +240,16 @@ new Desktop has operator authority in Files again. An older Control API has no
 `/me/gfs/home`: the new Desktop shows My home as unavailable, while Shared with
 me and its row actions keep working with the drive each row reports.
 
+Recent files rolls back to "unavailable", never to wrong data: a Control API
+without `/me/gfs/recent` makes the Desktop card show **Recent files are not
+available**. An external-rest-api older than control-api drops `intent`, so
+Desktop opens are not recorded while it runs; an mcp-host older than gfsc sends
+no `gfs-attribution-run` header, so agent activity is not recorded; a gfsc older
+than mcp-host ignores the header. Runs bound before every control-api pod runs
+the release carry no Host namespace, so gfsc records nothing for them and logs
+`agent_activity_unattributed reason=binding_without_namespace`. None of these
+lose or corrupt a file or an existing activity row.
+
 After roll-forward, the planned startup repair runs once per Control API
 process start, before its first regular tick, in batches of 50. For ready or
 conflict rows, it cleans home entries for users retired or deleted during the

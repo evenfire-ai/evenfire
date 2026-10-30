@@ -34,6 +34,7 @@ describe('GfsImagePreviewBody', () => {
 
     render(
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={3}
         fileName="diagram.PNG"
         gfsUri="gfs://main/image-1"
@@ -46,7 +47,11 @@ describe('GfsImagePreviewBody', () => {
     expect(img.getAttribute('src')).toBe('blob:gfs-image-preview')
     // The preview download carries its per-kind ceiling so the main process can
     // bound the fetch (R1-H4 Part B).
-    expect(downloadPreview).toHaveBeenCalledWith('gfs://main/image-1', GFS_IMAGE_PREVIEW_MAX_BYTES)
+    expect(downloadPreview).toHaveBeenCalledWith(
+      'gfs://main/image-1',
+      GFS_IMAGE_PREVIEW_MAX_BYTES,
+      false
+    )
     // No portal/backdrop/dialog chrome — this is the de-modalized body.
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.queryByRole('presentation')).toBeNull()
@@ -63,6 +68,7 @@ describe('GfsImagePreviewBody', () => {
 
     render(
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={3}
         fileName="Screenshot 2026-09-21 at 13.32.30.png"
         dataBase64="AQID"
@@ -78,11 +84,19 @@ describe('GfsImagePreviewBody', () => {
   it('rejects missing and ambiguous sources before decoding or downloading', async () => {
     const downloadPreview = stubDownload(new Uint8Array([1]).buffer)
     const atobSpy = vi.spyOn(window, 'atob')
-    render(<GfsImagePreviewBody byteLength={1} fileName="image.png" mimeType="image/png" />)
+    render(
+      <GfsImagePreviewBody
+        recordOpen={false}
+        byteLength={1}
+        fileName="image.png"
+        mimeType="image/png"
+      />
+    )
     expect(await screen.findByText('Image preview requires exactly one source')).toBeTruthy()
     cleanup()
     render(
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={1}
         fileName="image.png"
         mimeType="image/png"
@@ -99,6 +113,7 @@ describe('GfsImagePreviewBody', () => {
     const atobSpy = vi.spyOn(window, 'atob')
     render(
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={1}
         fileName="image.png"
         mimeType="image/png"
@@ -113,6 +128,7 @@ describe('GfsImagePreviewBody', () => {
     stubDownload(new Uint8Array([1, 2, 3]).buffer)
     render(
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={3}
         fileName="diagram.PNG"
         gfsUri="gfs://main/image-1"
@@ -127,6 +143,7 @@ describe('GfsImagePreviewBody', () => {
     const downloadPreview = stubDownload(new Uint8Array([1]).buffer)
     render(
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={GFS_IMAGE_PREVIEW_MAX_BYTES + 1}
         fileName="oversized.png"
         gfsUri="gfs://main/oversized"
@@ -149,6 +166,7 @@ describe('GfsImagePreviewBody', () => {
 
     render(
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={3}
         fileName="secret.png"
         gfsUri="gfs://main/secret"
@@ -166,6 +184,7 @@ describe('GfsImagePreviewBody', () => {
     stubDownload(new Uint8Array([1, 2, 3]).buffer)
     render(
       <GfsImagePreviewBody
+        recordOpen={false}
         byteLength={3}
         fileName="diagram.PNG"
         gfsUri="gfs://main/image-1"

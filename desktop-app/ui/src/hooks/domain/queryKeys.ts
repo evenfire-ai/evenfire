@@ -26,6 +26,11 @@ export const desktopQueryKeys = {
   gfsAccessState: (sessionScope: string) => ['desktop-app', 'gfs-access', sessionScope] as const,
   gfsAccessible: (sessionScope: string, drive: string) =>
     ['desktop-app', 'gfs', sessionScope, 'accessible', drive] as const,
+  // The caller's own recent files. Scoped by session so one user's cached list
+  // is never read under another user's scope, and purged with `gfsRoot` on a
+  // revoke.
+  gfsRecentFiles: (sessionScope: string, drive: string) =>
+    ['desktop-app', 'gfs', sessionScope, 'recent', drive] as const,
   gfsChildren: (sessionScope: string, resourceId: string, drive: string) =>
     ['desktop-app', 'gfs', sessionScope, 'children', drive, resourceId] as const,
   gfsAffordances: (sessionScope: string, resourceId: string, drive: string) =>

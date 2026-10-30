@@ -23,6 +23,12 @@ export type GfsImagePreviewProps = {
   reloadVersion?: number
   unavailable?: boolean
   onDownloadError?: (error: unknown) => void
+  /**
+   * Whether fetching the body counts as the user opening the file. Only the
+   * caller knows why the body is mounted (an open vs a reload vs an inline
+   * attachment), so it is required rather than defaulted.
+   */
+  recordOpen: boolean
 } & GfsImagePreviewSource
 
 /**
@@ -37,6 +43,8 @@ export type GfsImagePreviewBodyProps = {
   fileName: string
   mimeType: string
   onDownloadError?: (error: unknown) => void
+  /** True only when this fetch is the user opening the file. */
+  recordOpen: boolean
   titleId?: string
   headerActions?: ReactNode
   headingLevel?: 2 | 3
