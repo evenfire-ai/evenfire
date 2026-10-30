@@ -1,6 +1,10 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { planMoveConvergence } from '@clerum/gfs-interaction-policy'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  desktopQueryKeys,
+  hasGfsSessionGeneration,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
 import { parseHttpStatus } from './gfsGrantErrors'
 import { publishGfsMoveRelocation } from './gfsOpenLocations'
 import { refreshPreviewTab } from './workspaceTabs'
@@ -66,6 +70,7 @@ export interface GfsMoveReceiptInput {
  * keeping the pre-move observation.
  */
 export interface GfsMoveConvergenceOptions {
+  sessionGeneration: number | null
   ancestryDependentResourceIds?: readonly string[]
 }
 
@@ -78,12 +83,15 @@ export interface GfsMoveConvergenceOptions {
 export function collectKnownChildParents(
   queryClient: QueryClient,
   scope: string,
-  drive: string
+  drive: string,
+  sessionGeneration: number | null
 ): Map<string, string | null> {
   const links = new Map<string, string | null>()
+  if (!isGfsSessionGeneration(sessionGeneration)) return links
   for (const query of queryClient.getQueryCache().getAll()) {
     const key = query.queryKey
-    if (!Array.isArray(key) || key.length !== 6) continue
+    if (!Array.isArray(key) || key.length !== 7 || !hasGfsSessionGeneration(key, sessionGeneration))
+      continue
     if (
       key[0] === 'desktop-app' &&
       key[1] === 'gfs' &&
@@ -121,9 +129,13 @@ export function applyMoveConvergence(
   scope: string,
   drive: string,
   receipt: GfsMoveReceiptInput,
-  options: GfsMoveConvergenceOptions = {}
+  options: GfsMoveConvergenceOptions
 ): void {
-  const known = { childParentByResourceId: collectKnownChildParents(queryClient, scope, drive) }
+  const { sessionGeneration } = options
+  if (!isGfsSessionGeneration(sessionGeneration)) return
+  const known = {
+    childParentByResourceId: collectKnownChildParents(queryClient, scope, drive, sessionGeneration),
+  }
   const plan = planMoveConvergence(receipt, known)
 
   // The published open-location chains are OBSERVED chains, so the move makes
@@ -137,29 +149,29 @@ export function applyMoveConvergence(
   for (const parentId of plan.refetchChildIds) {
     void queryClient.invalidateQueries({
       exact: true,
-      queryKey: desktopQueryKeys.gfsChildren(scope, parentId, drive),
+      queryKey: desktopQueryKeys.gfsChildren(scope, parentId, drive, sessionGeneration),
     })
   }
   void queryClient.invalidateQueries({
     exact: true,
-    queryKey: desktopQueryKeys.gfsAccessible(scope, drive),
+    queryKey: desktopQueryKeys.gfsAccessible(scope, drive, sessionGeneration),
   })
   for (const resourceId of plan.staleResourceIds) {
     // Stale-on-entry: inactive permission caches re-read when next observed,
     // not eagerly here (bounded feature traffic).
     void queryClient.invalidateQueries({
       exact: true,
-      queryKey: desktopQueryKeys.gfsAffordances(scope, resourceId, drive),
+      queryKey: desktopQueryKeys.gfsAffordances(scope, resourceId, drive, sessionGeneration),
       refetchType: 'none',
     })
     void queryClient.invalidateQueries({
       exact: true,
-      queryKey: desktopQueryKeys.gfsGrants(scope, resourceId, drive),
+      queryKey: desktopQueryKeys.gfsGrants(scope, resourceId, drive, sessionGeneration),
       refetchType: 'none',
     })
     void queryClient.invalidateQueries({
       exact: true,
-      queryKey: desktopQueryKeys.gfsShares(scope, resourceId, drive),
+      queryKey: desktopQueryKeys.gfsShares(scope, resourceId, drive, sessionGeneration),
       refetchType: 'none',
     })
   }
@@ -170,7 +182,7 @@ export function applyMoveConvergence(
   for (const resourceId of inheritedAccessResourceIds) {
     void queryClient.invalidateQueries({
       exact: true,
-      queryKey: desktopQueryKeys.gfsInheritedAccess(scope, resourceId, drive),
+      queryKey: desktopQueryKeys.gfsInheritedAccess(scope, resourceId, drive, sessionGeneration),
       refetchType: 'active',
     })
   }

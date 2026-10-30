@@ -14,6 +14,7 @@ export interface AuthContextValue {
   statusText: string
   statusTone: Tone
   isAuthenticated: boolean
+  sessionGeneration?: number | null
   me: SessionMe | null
   email: string
   password: string

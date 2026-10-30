@@ -55,7 +55,7 @@ export async function setupHarness(): Promise<void> {
   const { AppService } = await import('../../src/appService.js')
   const { registerIpcHandlers } = await import('../../src/ipc.js')
   service = new AppService()
-  registerIpcHandlers(service as never)
+  registerIpcHandlers(service as never, () => service!.logout())
 }
 
 export async function teardownHarness(): Promise<void> {

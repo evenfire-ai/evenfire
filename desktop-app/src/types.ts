@@ -19,6 +19,11 @@ export type RpcScope =
   | 'sandbox:ui:view'
 export type RpcAccessScope = 'team' | 'user'
 
+export type DeepLinkAcknowledgmentAuthority = {
+  sessionGeneration: number
+  userNavigationGeneration: number
+}
+
 export type SandboxUiApp = {
   appRef: string
   title?: string
@@ -31,6 +36,7 @@ export type SandboxUiApp = {
 }
 
 export type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
+export type { GfsResourceDeepLinkEnvelope } from '@clerum/desktop-app-links'
 
 /**
  * Why a sandbox-ui view died. `crashed` never carries a location: handing the
@@ -687,6 +693,8 @@ export type HostMessageResponse = {
 export type SessionState = {
   authenticated: boolean
   me: SessionMe | null
+  /** Main-process authentication epoch captured with this identity snapshot. */
+  sessionGeneration?: number
 }
 
 export type PasswordLoginResult = SessionState

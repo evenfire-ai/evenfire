@@ -8,12 +8,11 @@
 // inert; urlTransform restricts `src` to inline data:image URIs and links to
 // http(s):/mailto:/# fragments; code blocks render as plain `pre` > `code`.
 // Covered by the GfsMarkdownPreview and GfsMarkdownPreviewBody suites.
-import { useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Button, StatusBanner } from '@components/Common'
-import { IconCopy } from '@components/SidebarNav/icons'
+import { StatusBanner } from '@components/Common'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
@@ -87,7 +86,9 @@ export function GfsMarkdownPreviewBody({
   fileName,
   gfsUri,
   onDownloadError,
+  onCopyContentReady,
   titleId,
+  titleActions,
   headerActions,
   headingLevel = 3,
 }: GfsMarkdownPreviewBodyProps) {
@@ -95,8 +96,6 @@ export function GfsMarkdownPreviewBody({
   const headingId = titleId ?? generatedTitleId
   const [source, setSource] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
-  const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
   const onDownloadErrorRef = useRef(onDownloadError)
   const isPlainText = isPlainTextName(fileName)
@@ -110,7 +109,6 @@ export function GfsMarkdownPreviewBody({
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
     }
   }, [])
 
@@ -152,57 +150,35 @@ export function GfsMarkdownPreviewBody({
     }
   }, [byteLength, gfsUri])
 
-  function markCopyState(state: 'copied' | 'error'): boolean {
-    if (!mountedRef.current) return false
-    setCopyState(state)
-    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
-    copyResetTimeoutRef.current = setTimeout(() => {
-      if (mountedRef.current) setCopyState('idle')
-    }, 2000)
-    return true
-  }
-
-  async function copySourceToClipboard(): Promise<void> {
-    if (source === null || !mountedRef.current) return
+  const copySourceToClipboard = useCallback(async (): Promise<boolean> => {
+    if (source === null || !mountedRef.current || previewError) return false
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(source)
-        if (!mountedRef.current) return
-        markCopyState('copied')
+        return mountedRef.current
       } else {
-        markCopyState('error')
+        return false
       }
     } catch {
-      markCopyState('error')
+      return false
     }
-  }
+  }, [previewError, source])
+
+  useEffect(() => {
+    onCopyContentReady?.(source !== null && !previewError ? copySourceToClipboard : null)
+    return () => onCopyContentReady?.(null)
+  }, [copySourceToClipboard, onCopyContentReady, previewError, source])
 
   return (
     <>
       <header className="da-gfs-markdown-preview-dialog__header">
-        <HeadingTag className="da-gfs-preview-title" id={headingId}>
-          {fileName}
-        </HeadingTag>
-        <div className="da-gfs-markdown-preview-dialog__header-actions">
-          <Button
-            className="da-gfs-markdown-preview-dialog__copy"
-            aria-label={
-              copyState === 'copied'
-                ? 'Copied preview contents to clipboard'
-                : 'Copy preview contents to clipboard'
-            }
-            color="neutral"
-            disabled={source === null}
-            onClick={() => void copySourceToClipboard()}
-            variant="ghost"
-          >
-            <IconCopy width={18} height={18} />
-            <span className="da-gfs-preview-button__label">
-              {copyState === 'copied' ? 'Copied' : 'Copy'}
-            </span>
-          </Button>
-          {headerActions}
+        <div className="da-gfs-preview-title-row">
+          <HeadingTag className="da-gfs-preview-title" id={headingId}>
+            {fileName}
+          </HeadingTag>
+          {titleActions}
         </div>
+        <div className="da-gfs-markdown-preview-dialog__header-actions">{headerActions}</div>
       </header>
       <div className="da-gfs-markdown-preview-dialog__body">
         {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
