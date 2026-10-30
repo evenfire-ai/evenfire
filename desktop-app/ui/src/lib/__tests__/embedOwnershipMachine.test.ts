@@ -149,6 +149,36 @@ describe('embed ownership machine — IPC ordering', () => {
     expect(h.bridge.close).toHaveBeenCalledWith({ launchId: 'l-1' })
     expect(h.log).toEqual(['open:l-1', 'close:l-1'])
   })
+
+  it('sweeps an owner whose slot measurement is still pending during handoff', async () => {
+    let resolveMeasurement!: (bounds: Bounds | null) => void
+    const pendingMeasurement = new Promise<Bounds | null>(resolve => {
+      resolveMeasurement = resolve
+    })
+    const onHandoffReady = vi.fn()
+    const h = harness({ onHandoffReady })
+    h.machine.registerMeasurer(() => pendingMeasurement)
+    h.machine.projected(TAB_A)
+    const settled = h.machine.registerWhenSettled('l-1')
+    h.machine.intent(launch('l-1'))
+    await flush()
+    expect(h.machine.getSnapshot().views.get('l-1')?.phase).toBe('measuring')
+
+    h.machine.handoff(7)
+    await flush()
+
+    expect(onHandoffReady).toHaveBeenCalledWith(7)
+    expect(h.machine.getSnapshot().owner).toBeNull()
+    expect(h.machine.getSnapshot().views.has('l-1')).toBe(false)
+    await expect(settled).resolves.toBe('abandoned')
+    expect(h.bridge.open).not.toHaveBeenCalled()
+    expect(h.bridge.close).not.toHaveBeenCalled()
+
+    resolveMeasurement(BOUNDS)
+    await flush()
+    expect(h.bridge.open).not.toHaveBeenCalled()
+    expect(h.machine.getSnapshot().views.has('l-1')).toBe(false)
+  })
 })
 
 describe('embed ownership machine — open request', () => {
@@ -238,7 +268,7 @@ describe('embed ownership machine — open request', () => {
     })
   })
 
-  it('forgets a view whose close main rejected', async () => {
+  it('retains a view whose close main rejected', async () => {
     const h = harness()
     await mountedOwner(h, launch('l-1'))
     h.machine.backToApps()
@@ -247,7 +277,38 @@ describe('embed ownership machine — open request', () => {
     h.closes.get('l-1')!.reject(new Error('ipc down'))
     await flush()
 
-    expect(h.machine.getSnapshot().views.size).toBe(0)
+    expect(h.machine.getSnapshot().views.get('l-1')?.phase).toBe('closeFailed')
+    expect(h.machine.getSnapshot().owner).toBeNull()
+  })
+
+  it('retries a retained close failure before a later explicit relaunch', async () => {
+    const h = harness()
+    await mountedOwner(h, launch('l-1'))
+
+    h.machine.backToApps()
+    h.closes.get('l-1')!.reject(new Error('first close rejected'))
+    await flush()
+    expect(h.machine.getSnapshot().views.get('l-1')?.phase).toBe('closeFailed')
+
+    const replacement = h.machine.registerWhenSettled('l-2')
+    h.machine.relaunch(launch('l-2'))
+    await flush()
+
+    expect(h.bridge.close).toHaveBeenCalledTimes(2)
+    expect(h.machine.getSnapshot().views.get('l-1')?.phase).toBe('closeRequested')
+    h.closes.get('l-1')!.resolve()
+    h.machine.onReleased({
+      launchId: 'l-1',
+      reason: 'closed',
+      location: { routePath: '/r/l-1' },
+    })
+    await flush()
+    expect(h.bridge.open).toHaveBeenCalledWith(expect.objectContaining({ launchId: 'l-2' }))
+    h.opens.get('l-2')!.resolve()
+
+    await expect(replacement).resolves.toBe('mounted')
+    expect(h.machine.getSnapshot().owner).toBe('l-2')
+    expect(h.machine.getSnapshot().views.has('l-1')).toBe(false)
   })
 })
 
@@ -463,6 +524,22 @@ describe('embed ownership machine — notifications', () => {
     h.machine.onReleased({ launchId: 'l-1', reason: 'closed', location: null })
 
     expect(onHandoffReady).toHaveBeenCalledWith(7)
+  })
+
+  it('fails a handoff and retains the owner when its close is rejected', async () => {
+    const onHandoffReady = vi.fn()
+    const onHandoffFailed = vi.fn()
+    const h = harness({ onHandoffReady, onHandoffFailed })
+    await mountedOwner(h, launch('l-1'))
+
+    h.machine.handoff(8)
+    h.closes.get('l-1')!.reject(new Error('close rejected'))
+    await flush()
+
+    expect(onHandoffReady).not.toHaveBeenCalled()
+    expect(onHandoffFailed).toHaveBeenCalledWith(8)
+    expect(h.machine.getSnapshot().owner).toBe('l-1')
+    expect(h.machine.getSnapshot().views.get('l-1')?.phase).toBe('closeFailed')
   })
 
   it('resolves a launch that never got its tab as abandoned, in the same dispatch', async () => {

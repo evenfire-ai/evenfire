@@ -13,17 +13,20 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
+import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient, desktopQueryDefaults } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
+  createEmptyWorkspaceTabsState,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
   openFilesTab,
   openPreviewTab,
   openSettingsTab,
+  selectWorkspaceTab,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
@@ -31,6 +34,8 @@ import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
 import {
   openGfsResourcePayload,
   resolveDeniedMessage,
+  resolveResource,
+  resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { AppNotification } from '@/uiTypes'
@@ -81,6 +86,7 @@ function activateChatState(
 // is stubbed to null / prop-capture.
 const sidebarHarness = vi.hoisted(() => ({
   props: null as null | {
+    onNewChat?: () => void
     onOpenSandboxUiApp?: (app: { appRef: string; label: string; defaultPath: string }) => void
   },
 }))
@@ -144,15 +150,39 @@ vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 // than hand-written controller state.
 vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
+  const { useNavigationContext } = await import('@contexts/NavigationContext')
+  const { useComposerDraft } = await import('@hooks/useComposerDraft')
   return {
     ChatPage: () => {
-      const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
+      const { activeChatId, composerFocusRequestId, workspaceChatTabId } =
+        useChatComposerStateContext()
+      const { selectedAgent } = useNavigationContext()
+      const [draft, setDraft, ownerConflictTabId] = useComposerDraft(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceChatTabId
+      )
       return (
         <div
           data-testid="chat-page-surface"
           data-active-chat-id={activeChatId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
-        />
+          data-workspace-chat-tab-id={workspaceChatTabId ?? ''}
+          data-composer-draft={draft}
+        >
+          <textarea
+            aria-label="App drawer composer"
+            disabled={Boolean(ownerConflictTabId)}
+            onChange={event => setDraft(event.currentTarget.value)}
+            value={draft}
+          />
+          {ownerConflictTabId ? (
+            <div role="alert">Another workspace tab owns this draft.</div>
+          ) : null}
+          <button type="button" onClick={() => setDraft('failed-send recovery')}>
+            Write tabless recovery draft
+          </button>
+        </div>
       )
     },
   }
@@ -322,6 +352,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
@@ -338,6 +369,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showAppsPicker,
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
+    beginUserNavigationIntent: vi.fn(),
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
@@ -455,6 +487,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -467,6 +500,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   afterEach(() => {
     cleanup()
     delete (window as { clerum?: unknown }).clerum
+    resetComposerDraftStore()
   })
 
   it('reopening the drawer keeps the switched-to chat instead of re-seeding the origin', () => {
@@ -501,8 +535,13 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
 
     // Switch to chat-2 in the drawer switcher.
+    const beginUserNavigationIntent = currentController.beginUserNavigationIntent as ReturnType<
+      typeof vi.fn
+    >
+    const intentAdvancesBeforeSwitch = beginUserNavigationIntent.mock.calls.length
     act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chats' })))
     act(() => fireEvent.click(screen.getByRole('option', { name: 'Second chat' })))
+    expect(beginUserNavigationIntent).toHaveBeenCalledTimes(intentAdvancesBeforeSwitch + 1)
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
 
     // Close the drawer, then reopen it.
@@ -513,6 +552,36 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  it('binds a Files New Chat prefill to the exact chat tab created by the App', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    let workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), {
+      id: 'files-resource-tab',
+      path: folder.gfsUri,
+    })
+    workspaceTabs = openFilesTab(workspaceTabs, { id: 'files-empty-tab', path: null })
+    workspaceTabs = selectWorkspaceTab(workspaceTabs, 'files-resource-tab')
+    currentController = makeController({
+      selectedAgent: 'agent-a',
+      activeChatId: null,
+      workspaceTabs,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+
+    renderApp(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    act(() => sidebarHarness.props?.onNewChat?.())
+
+    const composer = await screen.findByTestId('chat-page-surface')
+    const destinationTabId = composer.getAttribute('data-workspace-chat-tab-id')
+    expect(destinationTabId).toBeTruthy()
+    await waitFor(() => expect(composer.getAttribute('data-composer-draft')).toBe(folder.gfsUri))
+    expect(getComposerDraft(null, 'agent-a', destinationTabId!)).toBe(folder.gfsUri)
+    expect(getComposerDraft(null, 'agent-a')).toBe('')
   })
 
   it('hides already-delivered notifications after a Host is revoked', () => {
@@ -658,6 +727,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -728,6 +798,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1100,6 +1171,7 @@ describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1181,6 +1253,7 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1289,6 +1362,7 @@ describe('App live GFS preview revalidation', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1334,8 +1408,8 @@ describe('App live GFS preview revalidation', () => {
     )
     Object.assign(window.clerum.gfs, { listChildren, listAccessible, affordances })
 
-    const childrenKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
-    const accessibleKey = desktopQueryKeys.gfsAccessible('session', 'main')
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder', 'main', 1)
+    const accessibleKey = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main', 1)
     desktopQueryClient.setQueryData(childrenKey, {
       pages: [firstPage, secondPage],
       pageParams: [undefined, 'page-2'],
@@ -1343,7 +1417,7 @@ describe('App live GFS preview revalidation', () => {
     desktopQueryClient.setQueryData(accessibleKey, { items: [], nextCursor: null })
     rows.forEach(row => {
       desktopQueryClient.setQueryData(
-        desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+        desktopQueryKeys.gfsAffordances(':user-a:team-a', row.resourceId, 'main', 1),
         { held: [] }
       )
     })
@@ -1358,7 +1432,7 @@ describe('App live GFS preview revalidation', () => {
       })
       useQueries({
         queries: rows.map(row => ({
-          queryKey: desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+          queryKey: desktopQueryKeys.gfsAffordances(':user-a:team-a', row.resourceId, 'main', 1),
           queryFn: () => window.clerum.gfs.affordances(row.resourceId, 'main'),
         })),
       })
@@ -1407,7 +1481,7 @@ describe('App live GFS preview revalidation', () => {
       })
     })
     Object.assign(window.clerum.gfs, { listChildren })
-    const queryKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
+    const queryKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'folder', 'main', 1)
     desktopQueryClient.setQueryData(queryKey, {
       pages: [
         { items: [{ name: 'first-old' }], nextCursor: 'page-2' },
@@ -1461,7 +1535,7 @@ describe('App live GFS preview revalidation', () => {
   })
 
   it('hard-resyncs active permission affordances as well as open previews', async () => {
-    const affordanceKey = desktopQueryKeys.gfsAffordances('session', 'folder', 'main')
+    const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'folder', 'main', 1)
     const affordances = vi.fn(async () => ({ held: ['read'] }))
     Object.assign(window.clerum.gfs, { affordances })
     desktopQueryClient.setQueryData(affordanceKey, { held: [] })
@@ -1529,12 +1603,12 @@ describe('App live GFS preview revalidation', () => {
     expect(queryFilter?.queryKey).toEqual(desktopQueryKeys.gfsRoot)
     expect(
       queryFilter?.predicate?.({
-        queryKey: desktopQueryKeys.gfsAffordances('session', 'resource-id', 'main'),
+        queryKey: desktopQueryKeys.gfsAffordances(':user-a:team-a', 'resource-id', 'main', 1),
       } as never)
     ).toBe(false)
     expect(
       queryFilter?.predicate?.({
-        queryKey: desktopQueryKeys.gfsChildren('session', 'resource-id', 'main'),
+        queryKey: desktopQueryKeys.gfsChildren(':user-a:team-a', 'resource-id', 'main', 1),
       } as never)
     ).toBe(true)
     expect(initial()).toEqual(before)
@@ -1721,6 +1795,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1814,6 +1889,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
@@ -1909,6 +1985,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
           listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
           clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
           onDeepLink: vi.fn(() => vi.fn()),
+          onSessionInvalidated: vi.fn(() => vi.fn()),
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
