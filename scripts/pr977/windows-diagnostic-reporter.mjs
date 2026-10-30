@@ -108,6 +108,7 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
       'exitStatus',
       'signal',
       'nativePhase',
+      'nativeOrdinal',
       'nativeErrorType',
       'hresult',
       'nativeOperation',
@@ -118,7 +119,10 @@ export default class WindowsDiagnosticReporter extends JsonReporter {
     for (const [key, item] of Object.entries(value)) {
       if (!allowed.has(key)) continue
       if (typeof item === 'string' && /^[A-Za-z0-9x-]{1,80}$/.test(item)) safe[key] = item
-      else if (
+      else if (key === 'nativeOrdinal' && Number.isSafeInteger(item) && item >= 1 && item <= 64) {
+        safe[key] = item
+      } else if (
+        key !== 'nativeOrdinal' &&
         typeof item === 'number' &&
         Number.isSafeInteger(item) &&
         item >= -1 &&

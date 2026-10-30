@@ -244,6 +244,7 @@ assert.doesNotMatch(
 const selectedReport = path.join(tempRoot, 'passing-output.json')
 const selectedManifest = path.join(tempRoot, 'selected-targets.txt')
 const selectedCaseManifest = path.join(tempRoot, 'selected-cases.json')
+const selectedProgress = path.join(tempRoot, 'selected-progress.jsonl')
 const selectedCases = [
   'verifies the real user-data, consent directory, and produced consent file',
   'rejects an unsafe existing consent file without reading or overwriting it',
@@ -255,6 +256,9 @@ const deselectedCases = [
   'rechecks a replaced consent directory before returning cached grants',
   'retains inherited effective access after an atomic consent replacement',
   'preserves consent corruption recovery as a verified inherited-DACL file',
+  'rejects an in-place DACL change without a filesystem identity change',
+  'rejects consent when the produced atomic replacement becomes unsafe',
+  'does not append after rotated audit verification rejects the destination',
   'does not append to an audit file with unauthorized effective access',
 ]
 const focusedSummary = {
@@ -284,6 +288,40 @@ writeFileSync(
   selectedCaseManifest,
   `${JSON.stringify({ selected: selectedCases, deselected: deselectedCases })}\n`
 )
+const cleanupProgress = []
+for (let cycle = 0; cycle < selectedCases.length; cycle += 1) {
+  for (const cleanupPhase of [
+    'cleanup-start',
+    'enumeration-start',
+    'enumeration-complete',
+    'entry-file-delete-start',
+    'entry-delete-complete',
+    'directory-remove-complete',
+    'cleanup-complete',
+  ]) {
+    cleanupProgress.push({
+      elapsedMs: cleanupProgress.length,
+      event: 'plugin-acl-cleanup-phase',
+      activeFile: 'pluginStorageWindowsAcl.native.test.ts',
+      activeCase: null,
+      activeHook: 'afterEach',
+      lastCompletedOperation: cleanupPhase,
+      filesStarted: 1,
+      filesCompleted: 0,
+      casesCompleted: 0,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+      cleanupPhase,
+      cleanupOrdinal: 0,
+      cleanupElapsedMs: 0,
+    })
+  }
+}
+writeFileSync(
+  selectedProgress,
+  `${cleanupProgress.map(event => JSON.stringify(event)).join('\n')}\n`
+)
 const selectedPass = spawnSync(
   process.execPath,
   [
@@ -291,10 +329,29 @@ const selectedPass = spawnSync(
     selectedReport,
     selectedManifest,
     selectedCaseManifest,
+    selectedProgress,
   ],
   { encoding: 'utf8' }
 )
 assert.equal(selectedPass.status, 0)
+const unsafeProgress = path.join(tempRoot, 'unsafe-progress.jsonl')
+writeFileSync(
+  unsafeProgress,
+  `${JSON.stringify({ ...cleanupProgress[0], path: 'C:\\\\private\\\\fixture' })}\n`
+)
+const unsafeProgressResult = spawnSync(
+  process.execPath,
+  [
+    path.join(here, 'verify-focused-windows-report.mjs'),
+    selectedReport,
+    selectedManifest,
+    selectedCaseManifest,
+    unsafeProgress,
+  ],
+  { encoding: 'utf8' }
+)
+assert.equal(unsafeProgressResult.status, 1, 'Path-bearing cleanup progress must be rejected')
+assert.match(unsafeProgressResult.stderr, /Cleanup progress contains an unsafe or malformed record/)
 const selectedFailure = structuredClone(focusedSummary)
 selectedFailure.testResults[0].assertionResults[0].status = 'failed'
 writeFileSync(selectedReport, `${JSON.stringify(selectedFailure)}\n`)
@@ -305,6 +362,7 @@ const selectedRejected = spawnSync(
     selectedReport,
     selectedManifest,
     selectedCaseManifest,
+    selectedProgress,
   ],
   { encoding: 'utf8' }
 )
@@ -319,6 +377,7 @@ const skippedRequired = spawnSync(
     selectedReport,
     selectedManifest,
     selectedCaseManifest,
+    selectedProgress,
   ],
   { encoding: 'utf8' }
 )
@@ -336,6 +395,7 @@ const unexpectedCaseResult = spawnSync(
     selectedReport,
     selectedManifest,
     selectedCaseManifest,
+    selectedProgress,
   ],
   { encoding: 'utf8' }
 )
@@ -348,6 +408,7 @@ const selectedMissing = spawnSync(
     selectedReport,
     selectedManifest,
     selectedCaseManifest,
+    selectedProgress,
   ],
   { encoding: 'utf8' }
 )

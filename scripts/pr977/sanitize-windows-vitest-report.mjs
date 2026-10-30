@@ -141,6 +141,16 @@ const pluginStoragePhases = new Set([
   'load-native-helper',
   'prepare-request',
   'verification',
+  'child-start',
+  'helper-load-start',
+  'helper-load-complete',
+  'request-prepare-start',
+  'request-prepare-complete',
+  'current-user-ready',
+  'inspect-start',
+  'inspect-complete',
+  'response-serialize-start',
+  'response-serialize-complete',
 ])
 const pluginStorageNativeReasons = new Set([
   'current-user-access-insufficient',
@@ -189,6 +199,12 @@ function sanitizePluginStorageError(error) {
   if (pluginStorageFailures.has(value.failure)) safe.failure = value.failure
   if (Number.isSafeInteger(value.elapsedMs) && value.elapsedMs >= 0 && value.elapsedMs <= 60_000)
     safe.elapsedMs = value.elapsedMs
+  if (
+    Number.isSafeInteger(value.nativeOrdinal) &&
+    value.nativeOrdinal >= 1 &&
+    value.nativeOrdinal <= 64
+  )
+    safe.nativeOrdinal = value.nativeOrdinal
   if (typeof value.processErrorCode === 'string' && errorCodes.includes(value.processErrorCode))
     safe.processErrorCode = value.processErrorCode
   if (

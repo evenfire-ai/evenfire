@@ -59,7 +59,9 @@ describe('producer-backed diagnostics', () => {
         elapsedMs: 15000,
         processErrorCode: 'ETIMEDOUT',
         exitStatus: null,
-        nativePhase: 'inspect-object',
+        nativePhase: 'inspect-start',
+        nativeOrdinal: 2,
+        ignoredOrdinal: 100,
         privatePath: 'C:\\\\Users\\\\private\\\\secret.txt',
       },
     })
@@ -72,7 +74,8 @@ describe('producer-backed diagnostics', () => {
         failure: 'helper-load-failed',
         elapsedMs: 4200,
         exitStatus: 2,
-        nativePhase: 'load-native-helper',
+        nativePhase: 'helper-load-start',
+        nativeOrdinal: 0,
         nativeErrorType: 'FileNotFoundException',
         hresult: '0x80070002',
         nativeReason: 'native-helper-path-missing',
@@ -88,7 +91,7 @@ describe('producer-backed diagnostics', () => {
         failure: 'request-setup-failed',
         elapsedMs: 1200,
         exitStatus: 2,
-        nativePhase: 'prepare-request',
+        nativePhase: 'request-prepare-start',
         nativeErrorType: 'FormatException',
         hresult: '0x80131537',
         nativeReason: 'private-token-value',
@@ -187,6 +190,41 @@ describe('Windows plugin storage DACL privacy', () => {
   const unexpectedManifest = path.join(directory, 'unexpected-target.txt')
   const unexpectedCases = path.join(directory, 'unexpected-cases.json')
   const unexpectedReport = path.join(directory, 'unexpected-report.json')
+  const cleanupProgressPath = path.join(directory, 'cleanup-progress.jsonl')
+  const cleanupProgress = []
+  for (let cycle = 0; cycle < caseManifest.selected.length; cycle += 1) {
+    for (const cleanupPhase of [
+      'cleanup-start',
+      'enumeration-start',
+      'enumeration-complete',
+      'entry-file-delete-start',
+      'entry-delete-complete',
+      'directory-remove-complete',
+      'cleanup-complete',
+    ]) {
+      cleanupProgress.push({
+        elapsedMs: cleanupProgress.length,
+        event: 'plugin-acl-cleanup-phase',
+        activeFile: 'pluginStorageWindowsAcl.native.test.ts',
+        activeCase: null,
+        activeHook: 'afterEach',
+        lastCompletedOperation: cleanupPhase,
+        filesStarted: 1,
+        filesCompleted: 0,
+        casesCompleted: 0,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        cleanupPhase,
+        cleanupOrdinal: 0,
+        cleanupElapsedMs: 0,
+      })
+    }
+  }
+  writeFileSync(
+    cleanupProgressPath,
+    `${cleanupProgress.map(event => JSON.stringify(event)).join('\n')}\n`
+  )
   writeFileSync(unexpectedManifest, 'src/__tests__/selection.test.ts\n')
   writeFileSync(
     unexpectedCases,
@@ -213,6 +251,7 @@ describe('Windows plugin storage DACL privacy', () => {
       unexpectedReport,
       unexpectedManifest,
       unexpectedCases,
+      cleanupProgressPath,
     ],
     { encoding: 'utf8' }
   )
@@ -307,7 +346,8 @@ describe('Windows plugin storage DACL privacy', () => {
     elapsedMs: 15000,
     processErrorCode: 'ETIMEDOUT',
     exitStatus: null,
-    nativePhase: 'inspect-object',
+    nativePhase: 'inspect-start',
+    nativeOrdinal: 2,
   })
   assert.equal(
     cases.get('plugin ACL helper-load diagnostic').failure.category,
@@ -317,7 +357,7 @@ describe('Windows plugin storage DACL privacy', () => {
     failure: 'helper-load-failed',
     elapsedMs: 4200,
     exitStatus: 2,
-    nativePhase: 'load-native-helper',
+    nativePhase: 'helper-load-start',
     nativeErrorType: 'FileNotFoundException',
     hresult: '0x80070002',
     nativeReason: 'native-helper-path-missing',
@@ -332,7 +372,7 @@ describe('Windows plugin storage DACL privacy', () => {
       failure: 'request-setup-failed',
       elapsedMs: 1200,
       exitStatus: 2,
-      nativePhase: 'prepare-request',
+      nativePhase: 'request-prepare-start',
       nativeErrorType: 'FormatException',
       hresult: '0x80131537',
     }
@@ -393,8 +433,11 @@ describe('Windows plugin storage DACL privacy', () => {
     path.join(here, '../../.github/workflows/pr977-exact-source-windows-full-sharded.yml'),
     'utf8'
   )
-  assert.match(focusedWorkflow, /timeout-minutes:\s*15/)
-  assert.match(focusedWorkflow, /--maximum-runtime-ms=480000/)
+  assert.match(focusedWorkflow, /timeout-minutes:\s*12/)
+  assert.match(focusedWorkflow, /--maximum-runtime-ms=360000/)
+  assert.match(focusedWorkflow, /--no-progress-ms=120000/)
+  assert.match(focusedWorkflow, /--retry=0/)
+  assert.match(focusedWorkflow, /Verify fixed native stderr phase capture/)
   assert.match(focusedWorkflow, /--no-progress-ms=120000/)
   assert.match(fullWorkflow, /desktop-windows-build:[\s\S]*?timeout-minutes:\s*20/)
   assert.match(fullWorkflow, /native-windows-authority:[\s\S]*?timeout-minutes:\s*20/)

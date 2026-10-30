@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 
-const [reportPath, targetPath, caseManifestPath] = process.argv.slice(2)
-if (!reportPath || !targetPath || !caseManifestPath)
-  throw new Error('Expected sanitized report, file manifest, and case manifest paths')
+const [reportPath, targetPath, caseManifestPath, progressPath] = process.argv.slice(2)
+if (!reportPath || !targetPath || !caseManifestPath || !progressPath)
+  throw new Error('Expected sanitized report, file manifest, case manifest, and progress paths')
 const report = JSON.parse(readFileSync(reportPath, 'utf8'))
 const targets = readFileSync(targetPath, 'utf8')
   .split(/\r?\n/)
@@ -75,6 +75,70 @@ if (
   report.numFailedTests !== 0
 )
   throw new Error('Focused Windows assertion counters do not match the selected case manifest')
+
+const progressLines = readFileSync(progressPath, 'utf8').split(/\r?\n/).filter(Boolean)
+const progress = progressLines.map(line => JSON.parse(line))
+const cleanup = progress.filter(value => value?.event === 'plugin-acl-cleanup-phase')
+const cleanupPhases = new Set([
+  'cleanup-start',
+  'enumeration-start',
+  'enumeration-complete',
+  'entry-file-delete-start',
+  'entry-directory-delete-start',
+  'entry-delete-complete',
+  'directory-remove-complete',
+  'cleanup-complete',
+  'cleanup-failed',
+])
+const cleanupErrorCodes = new Set(['EBUSY', 'EACCES', 'EPERM', 'ENOTEMPTY', 'ENOENT', 'UNKNOWN'])
+const cleanupKeys = new Set([
+  'elapsedMs',
+  'event',
+  'activeFile',
+  'activeCase',
+  'activeHook',
+  'lastCompletedOperation',
+  'filesStarted',
+  'filesCompleted',
+  'casesCompleted',
+  'passed',
+  'failed',
+  'skipped',
+  'cleanupPhase',
+  'cleanupOrdinal',
+  'cleanupElapsedMs',
+  'cleanupErrorCode',
+])
+if (
+  cleanup.some(
+    value =>
+      Object.keys(value).some(key => !cleanupKeys.has(key)) ||
+      !cleanupPhases.has(value.cleanupPhase) ||
+      !Number.isSafeInteger(value.elapsedMs) ||
+      value.elapsedMs < 0 ||
+      !Number.isSafeInteger(value.cleanupOrdinal) ||
+      value.cleanupOrdinal < 0 ||
+      value.cleanupOrdinal > 10_000 ||
+      !Number.isSafeInteger(value.cleanupElapsedMs) ||
+      value.cleanupElapsedMs < 0 ||
+      value.cleanupElapsedMs > 60_000 ||
+      (value.cleanupErrorCode !== undefined && !cleanupErrorCodes.has(value.cleanupErrorCode))
+  )
+)
+  throw new Error('Cleanup progress contains an unsafe or malformed record')
+const countCleanupPhase = phase => cleanup.filter(value => value.cleanupPhase === phase).length
+if (
+  cleanup.length === 0 ||
+  countCleanupPhase('cleanup-start') < selectedCases.length ||
+  countCleanupPhase('enumeration-start') < selectedCases.length ||
+  countCleanupPhase('enumeration-complete') < selectedCases.length ||
+  countCleanupPhase('entry-file-delete-start') < 2 ||
+  countCleanupPhase('entry-delete-complete') < 2 ||
+  countCleanupPhase('directory-remove-complete') < selectedCases.length ||
+  countCleanupPhase('cleanup-complete') < selectedCases.length ||
+  countCleanupPhase('cleanup-failed') !== 0
+)
+  throw new Error('Focused cleanup phases are incomplete or contain a fatal failure')
 process.stdout.write(
   `Focused Windows report verified: files=${files.size} selected=${selectedCases.length} ` +
     `passed=${report.numPassedTests} intentionally-deselected=${report.numPendingTests} failed=0\n`
