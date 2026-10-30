@@ -53,7 +53,8 @@ describe('PluginAuditLog', () => {
     expect(entries.map(item => item.capability)).toEqual(['org.read', 'identity.read'])
   })
 
-  it('writes the file 0600', async () => {
+  // Node only exposes the owner write flag on Windows; group/other mode bits are not meaningful.
+  it.skipIf(process.platform === 'win32')('writes the file with POSIX mode 0600', async () => {
     await log.append(ENV_KEY, entry())
     const stat = await fs.stat(path.join(tmpDir, `${ENV_KEY}.jsonl`))
     expect(stat.mode & 0o777).toBe(0o600)

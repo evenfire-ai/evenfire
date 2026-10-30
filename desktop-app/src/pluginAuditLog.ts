@@ -7,8 +7,8 @@
  * point is that a user can read this file to see that LeadForge got their email
  * without the file itself becoming a second copy of their email.
  *
- * One JSONL file per environment, mode 0600, rotated at 5 MB / 90 days with a
- * single `.1` generation kept.
+ * One JSONL file per environment, POSIX mode 0600 where mode bits are
+ * supported, rotated at 5 MB / 90 days with a single `.1` generation kept.
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
