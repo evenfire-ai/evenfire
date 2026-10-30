@@ -68,9 +68,10 @@ A = 18.154.48.13 18.154.48.20 18.154.48.43 18.154.48.50
 B = 18.172.153.11 18.172.153.14 18.172.153.41 18.172.153.115
 ```
 
-Each variable must list exactly four public IPv4 addresses; commas or spaces are
-accepted. Private, loopback, link-local, CGNAT, documentation and multicast
-addresses are rejected before anything is mutated.
+Each variable must list exactly four distinct public IPv4 addresses in dotted
+decimal without leading zeros; commas or spaces are accepted. Duplicates,
+private, loopback, link-local, CGNAT, documentation and multicast addresses are
+rejected before anything is mutated.
 
 ## Run
 

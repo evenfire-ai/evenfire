@@ -73,7 +73,7 @@
 # INPUTS
 #   KUBECONTEXT          required, branch-scoped (`clerum-…-<8 hex>`), equal to
 #                        MINIKUBE_PROFILE and CONTROL_API_REAL_PG_CONTEXT.
-#   CDN_SET_A, CDN_SET_B required, four public IPv4 each, disjoint.
+#   CDN_SET_A, CDN_SET_B required, four distinct public IPv4 each, disjoint.
 #   CDN_HOST             default mcp.airtable.com.
 #   E2E_CDN_MUTATION     empty (normal run) | control-uses-fixed-template |
 #                        branch-probe-reads-control.
@@ -222,7 +222,9 @@ exists() { kctl get "$@" >/dev/null 2>&1; }
 
 is_public_ipv4() {
   local ip=$1 a b c d
-  [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  # Canonical dotted decimal only: no leading zeros, so the token is also the
+  # form CoreDNS and nginx `resolve` report back in the live comparisons.
+  [[ "$ip" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] || return 1
   a=$((10#${BASH_REMATCH[1]}))
   b=$((10#${BASH_REMATCH[2]}))
   c=$((10#${BASH_REMATCH[3]}))
@@ -247,11 +249,12 @@ is_public_ipv4() {
   return 0
 }
 
-normalize_set() { # <raw> -> four public IPv4, space separated
+normalize_set() { # <raw> -> four distinct public IPv4 in canonical dotted decimal, space separated
   local raw=$1 ip out="" n=0
   # shellcheck disable=SC2086  # word splitting is the parser here
   for ip in ${raw//,/ }; do
     is_public_ipv4 "$ip" || return 1
+    case "${out} " in *" ${ip} "*) return 1 ;; esac
     out="${out} ${ip}"
     n=$((n + 1))
   done
@@ -741,11 +744,11 @@ phase0() {
     finish 2 usage
   fi
   normalized_a="$(normalize_set "$CDN_SET_A")" || {
-    fail "CDN_SET_A must list four public IPv4 addresses"
+    fail "CDN_SET_A must list four distinct public IPv4 addresses in dotted decimal without leading zeros"
     finish 2 usage
   }
   normalized_b="$(normalize_set "$CDN_SET_B")" || {
-    fail "CDN_SET_B must list four public IPv4 addresses"
+    fail "CDN_SET_B must list four distinct public IPv4 addresses in dotted decimal without leading zeros"
     finish 2 usage
   }
   read -r -a SET_A <<<"$normalized_a"
