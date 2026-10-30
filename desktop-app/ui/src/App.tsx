@@ -2505,8 +2505,8 @@ export function App() {
         const userNavigationGenerationAtActivation =
           window.clerum.gfs?.getUserNavigationGeneration?.()
         if (
+          typeof userNavigationGenerationAtActivation !== 'number' ||
           !Number.isSafeInteger(userNavigationGenerationAtActivation) ||
-          userNavigationGenerationAtActivation === undefined ||
           userNavigationGenerationAtActivation < 0
         ) {
           vm.pushToast(
