@@ -3,7 +3,7 @@ name: PR 977 exact-source Windows focused validation
 on:
   push:
     branches:
-      - test/pr977-windows-95d67a36-20261029-r24m4
+      - test/pr977-windows-41ed9e64-20261029-r24m6
     paths:
       - .validation/windows/focused-test-target.txt
       - .github/workflows/pr977-windows-focused.yml
@@ -13,11 +13,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr977-windows-focused-95d67a36
+  group: pr977-windows-focused-r24m7
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 0651f380e2fd88487063480b0cabf0b902e43019
+  PR977_SOURCE_SHA: cee0e58a586761459ab259cfb575901ef4bb77db
 
 jobs:
   focused-windows-test:
@@ -27,7 +27,7 @@ jobs:
       - name: Check out exact application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 0651f380e2fd88487063480b0cabf0b902e43019
+          ref: cee0e58a586761459ab259cfb575901ef4bb77db
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -81,23 +81,22 @@ jobs:
             throw 'The checked-out native helper was not produced'
           }
 
-      - name: Run exactly one focused source test file with a process watchdog
+      - name: Run the two focused source test files with a process watchdog
         shell: pwsh
         run: |
-          $target = (Get-Content validation/.validation/windows/focused-test-target.txt -Raw).Trim()
-          $allowedTargets = @(
-            'appService.passwordLoginRollback.regression.test.ts',
-            'appService.pendingExternalLogoutKeytarUnavailable.test.ts',
-            'appService.persistenceMutation.contract.test.ts',
-            'windowsSessionAuthorityAcl.native.test.ts',
-            'windowsSessionAuthorityDurableFileOps.native.test.ts'
+          $targets = @(
+            Get-Content validation/.validation/windows/focused-test-target.txt |
+              ForEach-Object { $_.Trim() } |
+              Where-Object { $_.Length -gt 0 }
           )
-          if ($target -notin $allowedTargets) { throw 'Focused Windows target is not allowlisted' }
-          if ($target -eq 'windowsSessionAuthorityAcl.native.test.ts') {
-            $env:EVENFIRE_REQUIRE_WINDOWS_ACL_TEST = '1'
-          }
-          if ($target -eq 'windowsSessionAuthorityDurableFileOps.native.test.ts') {
-            $env:EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST = '1'
+          $allowedTargets = @(
+            'tokenStore.markerOperationsDrain.test.ts',
+            'appService.acceptedPriorRecovery.regression.test.ts'
+          )
+          $selectedTargetKey = ($targets | Sort-Object) -join ','
+          $allowedTargetKey = ($allowedTargets | Sort-Object) -join ','
+          if ($targets.Count -ne 2 -or $selectedTargetKey -cne $allowedTargetKey) {
+            throw 'Focused Windows targets do not match the reviewed two-file selection'
           }
 
           $report = Join-Path $env:RUNNER_TEMP 'focused-report.json'
@@ -105,7 +104,7 @@ jobs:
           $phaseFile = Join-Path $env:RUNNER_TEMP 'focused-phases.txt'
           $node = (Get-Command node).Source
           $vitest = Join-Path $env:GITHUB_WORKSPACE 'source/desktop-app/node_modules/vitest/vitest.mjs'
-          $deadlineSeconds = if ($target -eq 'windowsSessionAuthorityAcl.native.test.ts') { 1800 } else { 150 }
+          $deadlineSeconds = 150
           $started = [DateTime]::UtcNow
           $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
           $startInfo.FileName = $node
@@ -115,52 +114,57 @@ jobs:
           $startInfo.RedirectStandardError = $true
           $sourceTestDirectory = Join-Path $startInfo.WorkingDirectory 'src'
           $sourceTestDirectory = Join-Path $sourceTestDirectory '__tests__'
-          $sourceTestPath = Join-Path $sourceTestDirectory $target
-          $sourceTestFileExists = Test-Path -LiteralPath $sourceTestPath -PathType Leaf
-          if (-not $sourceTestFileExists) {
-            [ordered]@{
-              exitCode = $null
-              watchdogExpired = $false
-              elapsedSeconds = 0
-              sourceCheckoutExists = Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'source') -PathType Container
-              desktopPackageExists = Test-Path -LiteralPath $startInfo.WorkingDirectory -PathType Container
-              testDirectoryExists = Test-Path -LiteralPath $sourceTestDirectory -PathType Container
-              sourceTestFileExists = $false
-              failureClass = 'source-test-not-found'
-            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
-            throw 'The selected source test file is absent'
+          $sourceTestPaths = @()
+          $sourceTestBlobs = @()
+          foreach ($target in $targets) {
+            $sourceTestPath = Join-Path $sourceTestDirectory $target
+            if (-not (Test-Path -LiteralPath $sourceTestPath -PathType Leaf)) {
+              [ordered]@{
+                exitCode = $null
+                watchdogExpired = $false
+                elapsedSeconds = 0
+                sourceCheckoutExists = Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'source') -PathType Container
+                desktopPackageExists = Test-Path -LiteralPath $startInfo.WorkingDirectory -PathType Container
+                testDirectoryExists = Test-Path -LiteralPath $sourceTestDirectory -PathType Container
+                sourceTestFileExists = $false
+                testFiles = $targets
+                failureClass = 'source-test-not-found'
+              } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
+              throw 'A selected source test file is absent'
+            }
+            $sourceTestPaths += $sourceTestPath
+            $sourceRelativePath = 'desktop-app/src/__tests__/' + $target
+            $expectedSourceTestBlob = (git -C source rev-parse ("{0}:{1}" -f $env:PR977_SOURCE_SHA, $sourceRelativePath)).Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'A pinned source test blob could not be resolved' }
+            $actualSourceTestBlob = (git -C source hash-object --path=$sourceRelativePath -- $sourceTestPath).Trim()
+            if ($LASTEXITCODE -ne 0 -or $actualSourceTestBlob -ne $expectedSourceTestBlob) {
+              [ordered]@{
+                exitCode = $null
+                watchdogExpired = $false
+                elapsedSeconds = 0
+                sourceTestFileExists = $true
+                sourceTestBlobMatchesPin = $false
+                testFiles = $targets
+                failureClass = 'source-test-mismatch'
+              } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
+              throw 'A selected source test does not match the pinned commit blob'
+            }
+            $sourceTestBlobs += [ordered]@{ file = $target; gitBlob = $expectedSourceTestBlob }
           }
           $sourceCheckoutPath = Join-Path $env:GITHUB_WORKSPACE 'source'
           $sourceSrcDirectory = Join-Path $startInfo.WorkingDirectory 'src'
-          $sourceItems = @($sourceCheckoutPath, $startInfo.WorkingDirectory, $sourceSrcDirectory, $sourceTestDirectory, $sourceTestPath)
+          $sourceItems = @($sourceCheckoutPath, $startInfo.WorkingDirectory, $sourceSrcDirectory, $sourceTestDirectory) + $sourceTestPaths
           foreach ($sourceItemPath in $sourceItems) {
             $sourceItem = Get-Item -LiteralPath $sourceItemPath -Force
             if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
               throw 'The pinned source test path contains a reparse point'
             }
           }
-          $sourceRelativePath = 'desktop-app/src/__tests__/' + $target
-          $sourceSpec = '{0}:{1}' -f $env:PR977_SOURCE_SHA, $sourceRelativePath
-          $expectedSourceTestBlob = (git -C source rev-parse $sourceSpec).Trim()
-          if ($LASTEXITCODE -ne 0) { throw 'The pinned source test blob could not be resolved' }
-          $actualSourceTestBlob = (git -C source hash-object --path=$sourceRelativePath -- $sourceTestPath).Trim()
-          if ($LASTEXITCODE -ne 0 -or $actualSourceTestBlob -ne $expectedSourceTestBlob) {
-            [ordered]@{
-              exitCode = $null
-              watchdogExpired = $false
-              elapsedSeconds = 0
-              sourceTestFileExists = $true
-              sourceTestBlobMatchesPin = $false
-              expectedSourceTestBlob = $expectedSourceTestBlob
-              actualSourceTestBlob = $actualSourceTestBlob
-              failureClass = 'source-test-mismatch'
-            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
-            throw 'The selected source test does not match the pinned commit blob'
-          }
           $testOverlay = 'none'
           $sourceTestSha256 = $null
           $overlayTestSha256 = $null
-          if ($target -eq 'appService.passwordLoginRollback.regression.test.ts') {
+          if ($targets.Count -eq 1 -and $targets[0] -eq 'appService.passwordLoginRollback.regression.test.ts') {
+            $target = $targets[0]
             Set-Content -LiteralPath $phaseFile -Value '' -Encoding ascii
             $overlayText = node validation/scripts/pr977/instrument-windows-password-test.mjs $sourceTestPath
             if ($LASTEXITCODE -ne 0) { throw 'Password test diagnostic instrumentation failed' }
@@ -175,12 +179,14 @@ jobs:
           }
           foreach ($argument in @(
             $vitest, 'run', '--maxWorkers=1', '--no-file-parallelism',
-            '--testTimeout=120000', '--hookTimeout=120000', '--reporter=json',
-            ('--outputFile.json=' + $report), $sourceTestPath
+            '--reporter=json', ('--outputFile.json=' + $report)
           )) {
             [void]$startInfo.ArgumentList.Add($argument)
           }
-          if ($target -eq 'appService.passwordLoginRollback.regression.test.ts') {
+          foreach ($sourceTestPath in $sourceTestPaths) {
+            [void]$startInfo.ArgumentList.Add($sourceTestPath)
+          }
+          if ($targets.Count -eq 1 -and $targets[0] -eq 'appService.passwordLoginRollback.regression.test.ts') {
             [void]$startInfo.ArgumentList.Add(
               '--testNamePattern=restores the accepted prior source when candidate preparation fails after publication'
             )
@@ -268,14 +274,17 @@ jobs:
             } else { 0 }
             stdoutBytes = [Text.Encoding]::UTF8.GetByteCount($stdoutText)
             stderrBytes = [Text.Encoding]::UTF8.GetByteCount($stderrText)
-            sourceTestFileExists = $sourceTestFileExists
+            sourceTestFileExists = $true
             sourceTestBlobMatchesPin = $true
-            sourceTestGitBlob = $expectedSourceTestBlob
+            sourceTestGitBlob = if ($sourceTestBlobs.Count -eq 1) { $sourceTestBlobs[0].gitBlob } else { $null }
+            sourceTestBlobs = @($sourceTestBlobs)
+            testFiles = @($targets)
             phaseMarkerCount = if (Test-Path -LiteralPath $phaseFile -PathType Leaf) {
               $phaseLines.Count
             } else { 0 }
             phaseMarkers = @($phaseLines)
-            diagnosticScope = if ($target -eq 'appService.passwordLoginRollback.regression.test.ts') {
+            diagnosticScope = if ($targets.Count -gt 1) { 'two-focused-files' }
+              elseif ($targets[0] -eq 'appService.passwordLoginRollback.regression.test.ts') {
               'password-login-test-1-only'
             } else { 'full-file' }
             completedTestCount = $completedTestCount
@@ -285,7 +294,7 @@ jobs:
             lastProgressMarker = $lastProgressMarker
             failureClass = $failureClass
           } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metaPath -Encoding utf8
-          $env:PR977_AUTH_TEST_FILE = $target
+          $env:PR977_AUTH_TEST_FILES = $targets -join ','
           node validation/scripts/pr977/sanitize-focused-windows-test.mjs $report $metaPath `
             (Join-Path $env:RUNNER_TEMP 'focused-result.safe.json')
           if ($LASTEXITCODE -ne 0) { throw 'The focused Windows source test did not pass its result contract' }

@@ -2,14 +2,26 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 const [reportPath, metaPath, outputPath] = process.argv.slice(2)
 const allowedTargets = new Set([
+  'tokenStore.markerOperationsDrain.test.ts',
+  'appService.acceptedPriorRecovery.regression.test.ts',
   'appService.passwordLoginRollback.regression.test.ts',
   'appService.pendingExternalLogoutKeytarUnavailable.test.ts',
   'appService.persistenceMutation.contract.test.ts',
   'windowsSessionAuthorityAcl.native.test.ts',
   'windowsSessionAuthorityDurableFileOps.native.test.ts',
 ])
-const target = process.env.PR977_AUTH_TEST_FILE ?? ''
-if (!reportPath || !metaPath || !outputPath || !allowedTargets.has(target)) {
+const targets = (process.env.PR977_AUTH_TEST_FILES ?? '')
+  .split(',')
+  .map(target => target.trim())
+  .filter(Boolean)
+if (
+  !reportPath ||
+  !metaPath ||
+  !outputPath ||
+  targets.length === 0 ||
+  new Set(targets).size !== targets.length ||
+  targets.some(candidate => !allowedTargets.has(candidate))
+) {
   throw new Error('Focused Windows result inputs are not allowlisted')
 }
 
@@ -63,7 +75,10 @@ if (
 }
 const suites = report?.testResults ?? []
 const matchingSuites = suites.filter(suite =>
-  String(suite.name).replaceAll('\\', '/').endsWith(target)
+  targets.some(candidate => String(suite.name).replaceAll('\\', '/').endsWith(candidate))
+)
+const suitesByTarget = targets.map(candidate =>
+  matchingSuites.filter(suite => String(suite.name).replaceAll('\\', '/').endsWith(candidate))
 )
 const assertions = matchingSuites.flatMap(suite => suite.assertionResults ?? [])
 const failed = assertions.filter(assertion => assertion.status === 'failed').length
@@ -71,31 +86,51 @@ const pending = assertions.filter(assertion => assertion.status === 'pending').l
 const skipped = assertions.filter(assertion => assertion.status === 'skipped').length
 const todo = assertions.filter(assertion => assertion.status === 'todo').length
 const passed = assertions.filter(assertion => assertion.status === 'passed').length
-const allowedPending =
-  target === 'appService.pendingExternalLogoutKeytarUnavailable.test.ts'
-    ? assertions.filter(
-        assertion =>
-          (assertion.status === 'pending' || assertion.status === 'skipped') &&
-          String(assertion.fullName ?? assertion.title ?? '').includes(
-            'uses memory-only mode when Linux safeStorage selects the basic_text backend'
-          )
-      ).length
-    : 0
+const allowedPending = targets.includes('appService.pendingExternalLogoutKeytarUnavailable.test.ts')
+  ? assertions.filter(
+      assertion =>
+        (assertion.status === 'pending' || assertion.status === 'skipped') &&
+        String(assertion.fullName ?? assertion.title ?? '').includes(
+          'uses memory-only mode when Linux safeStorage selects the basic_text backend'
+        )
+    ).length
+  : 0
 const skippedNames = assertions
   .filter(assertion => assertion.status === 'pending' || assertion.status === 'skipped')
   .map(assertion => String(assertion.fullName ?? assertion.title ?? ''))
 const unexpectedSkips = skippedNames.filter(
   name =>
     !(
-      target === 'appService.pendingExternalLogoutKeytarUnavailable.test.ts' &&
+      targets.includes('appService.pendingExternalLogoutKeytarUnavailable.test.ts') &&
       name.includes('uses memory-only mode when Linux safeStorage selects the basic_text backend')
     )
 )
-const expectedSkipCount =
-  target === 'appService.pendingExternalLogoutKeytarUnavailable.test.ts' ? 1 : 0
+const expectedSkipCount = targets.includes(
+  'appService.pendingExternalLogoutKeytarUnavailable.test.ts'
+)
+  ? 1
+  : 0
 const total = assertions.length
 const reportSuccess = report?.success === true
-const targetSuitePassed = matchingSuites[0]?.status === 'passed'
+const targetSuitesPassed =
+  suitesByTarget.length === targets.length &&
+  suitesByTarget.every(
+    matches =>
+      matches.length === 1 &&
+      matches[0].status === 'passed' &&
+      matches[0].assertionResults.length > 0 &&
+      matches[0].assertionResults.some(assertion => assertion.status === 'passed')
+  )
+const sourceBlobs = Array.isArray(meta.sourceTestBlobs) ? meta.sourceTestBlobs : []
+const sourceProvenanceMatches =
+  meta.sourceTestBlobMatchesPin === true &&
+  Array.isArray(meta.testFiles) &&
+  meta.testFiles.length === targets.length &&
+  meta.testFiles.every((file, index) => file === targets[index]) &&
+  sourceBlobs.length === targets.length &&
+  sourceBlobs.every(
+    (entry, index) => entry?.file === targets[index] && /^[a-f0-9]{40}$/.test(entry.gitBlob ?? '')
+  )
 const summaryMatchesResults = Boolean(
   report &&
   report.numTotalTests === total &&
@@ -130,22 +165,24 @@ const failureClass = meta.watchdogExpired
     ? 'missing-report'
     : invalidReport || !report
       ? 'invalid-report'
-      : suites.length !== 1 || matchingSuites.length !== 1
+      : suites.length !== targets.length || matchingSuites.length !== targets.length
         ? 'report-selection-mismatch'
-        : !summaryMatchesResults
-          ? 'invalid-report'
-          : (failed > 0 || !targetSuitePassed || report.numFailedTestSuites > 0) &&
-              /timed? ?out|timeout|exceeded.*time/i.test(failureDetails)
-            ? 'test-timeout'
-            : failed > 0
-              ? 'assertion-failure'
-              : !targetSuitePassed || report.numFailedTestSuites > 0
-                ? 'suite-failure'
-                : meta.failureClass && meta.failureClass !== 'none'
-                  ? allowedProcessFailureClasses.has(meta.failureClass)
-                    ? meta.failureClass
-                    : 'process-failure'
-                  : 'report-or-process-failure'
+        : !sourceProvenanceMatches
+          ? 'source-test-provenance-mismatch'
+          : !summaryMatchesResults
+            ? 'invalid-report'
+            : (failed > 0 || !targetSuitesPassed || report.numFailedTestSuites > 0) &&
+                /timed? ?out|timeout|exceeded.*time/i.test(failureDetails)
+              ? 'test-timeout'
+              : failed > 0
+                ? 'assertion-failure'
+                : !targetSuitesPassed || report.numFailedTestSuites > 0
+                  ? 'suite-failure'
+                  : meta.failureClass && meta.failureClass !== 'none'
+                    ? allowedProcessFailureClasses.has(meta.failureClass)
+                      ? meta.failureClass
+                      : 'process-failure'
+                    : 'report-or-process-failure'
 const allowedProgressMarkers = new Set([
   'none',
   'beforeEach-start',
@@ -220,8 +257,11 @@ const allowedProgressMarkers = new Set([
   'fileops-powershell-slow',
   'fileops-powershell-timeout',
 ])
+const hasPasswordRollbackTarget = targets.includes(
+  'appService.passwordLoginRollback.regression.test.ts'
+)
 const overlayValid =
-  target !== 'appService.passwordLoginRollback.regression.test.ts' ||
+  !hasPasswordRollbackTarget ||
   (meta.testOverlay === 'diagnostic-markers-only' &&
     /^[a-f0-9]{64}$/.test(meta.sourceTestSha256 ?? '') &&
     /^[a-f0-9]{64}$/.test(meta.overlayTestSha256 ?? ''))
@@ -233,7 +273,7 @@ const phaseMarkersValid =
   meta.phaseMarkers.length <= 128 &&
   meta.phaseMarkers.every(marker => allowedProgressMarkers.has(marker))
 const progressValid =
-  target !== 'appService.passwordLoginRollback.regression.test.ts' ||
+  !hasPasswordRollbackTarget ||
   (meta.sourceTestBlobMatchesPin === true &&
     /^[a-f0-9]{40}$/.test(meta.sourceTestGitBlob ?? '') &&
     Number.isInteger(meta.phaseMarkerCount) &&
@@ -248,9 +288,9 @@ const progressValid =
 const success = Boolean(
   meta.exitCode === 0 &&
   !meta.watchdogExpired &&
-  suites.length === 1 &&
-  matchingSuites.length === 1 &&
-  targetSuitePassed &&
+  suites.length === targets.length &&
+  matchingSuites.length === targets.length &&
+  targetSuitesPassed &&
   report.numFailedTestSuites === 0 &&
   total > 0 &&
   passed > 0 &&
@@ -263,6 +303,7 @@ const success = Boolean(
   pending + skipped === expectedSkipCount &&
   reportSuccess &&
   overlayValid &&
+  sourceProvenanceMatches &&
   progressMarker !== 'invalid-marker' &&
   progressValid
 )
@@ -275,6 +316,7 @@ const safe = {
   overlayTestSha256: meta.overlayTestSha256 ?? null,
   sourceTestBlobMatchesPin: meta.sourceTestBlobMatchesPin ?? null,
   sourceTestGitBlob: meta.sourceTestGitBlob ?? null,
+  sourceTestBlobs: sourceBlobs.map(entry => ({ file: entry.file, gitBlob: entry.gitBlob })),
   phaseMarkerCount: Number.isInteger(meta.phaseMarkerCount) ? meta.phaseMarkerCount : null,
   completedTestCount: Number.isInteger(meta.completedTestCount) ? meta.completedTestCount : null,
   lastProgressMarker: progressMarker,
@@ -282,9 +324,26 @@ const safe = {
   diagnosticScope:
     meta.diagnosticScope === 'password-login-test-1-only'
       ? 'password-login-test-1-only'
-      : 'full-file',
-  testFile: target,
+      : meta.diagnosticScope === 'two-focused-files'
+        ? 'two-focused-files'
+        : 'full-file',
+  testFiles: targets,
+  testFileResults: targets.map((file, index) => {
+    const suite = suitesByTarget[index]?.[0]
+    const results = suite?.assertionResults ?? []
+    return {
+      file,
+      suiteStatus: suite?.status ?? null,
+      total: results.length,
+      passed: results.filter(assertion => assertion.status === 'passed').length,
+      failed: results.filter(assertion => assertion.status === 'failed').length,
+      skipped: results.filter(
+        assertion => assertion.status === 'pending' || assertion.status === 'skipped'
+      ).length,
+    }
+  }),
   reportedSuiteCount: suites.length,
+  reportedNestedSuiteCount: report?.numTotalTestSuites ?? null,
   reportedTotalTests: report?.numTotalTests ?? null,
   reportSuccess,
   total,

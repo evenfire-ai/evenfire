@@ -11,11 +11,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr977-windows-full-sharded-41ed9e64-${{ github.ref }}
+  group: pr977-windows-full-sharded-cee0e58a-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  PR977_SOURCE_SHA: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+  PR977_SOURCE_SHA: cee0e58a586761459ab259cfb575901ef4bb77db
 
 jobs:
   desktop-windows-build:
@@ -25,7 +25,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+          ref: cee0e58a586761459ab259cfb575901ef4bb77db
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -95,7 +95,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+          ref: cee0e58a586761459ab259cfb575901ef4bb77db
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -204,7 +204,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+          ref: cee0e58a586761459ab259cfb575901ef4bb77db
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -306,7 +306,7 @@ jobs:
       - name: Check out exact PR application source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 41ed9e64ce70eb1fd99aa8544f7b1563e1e0db30
+          ref: cee0e58a586761459ab259cfb575901ef4bb77db
           path: source
           persist-credentials: false
           fetch-depth: 1
