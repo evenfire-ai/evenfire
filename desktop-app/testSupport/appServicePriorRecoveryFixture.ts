@@ -39,6 +39,19 @@ export function keyOf(service: string, account: string): string {
   return `${service}::${account}`
 }
 
+export function useAppServicePriorRecoveryEnvironmentUrls(): void {
+  process.env.EXTERNAL_REST_API_BASE_URL = 'http://rest.accepted-prior.test'
+  process.env.RPC_PROXY_BASE_URL = 'http://rpc.accepted-prior.test'
+}
+
+export function restoreAppServicePriorRecoveryEnvironmentUrls(): void {
+  const fixture = appServicePriorRecoveryFixture
+  if (fixture.previousRestUrl === undefined) delete process.env.EXTERNAL_REST_API_BASE_URL
+  else process.env.EXTERNAL_REST_API_BASE_URL = fixture.previousRestUrl
+  if (fixture.previousRpcUrl === undefined) delete process.env.RPC_PROXY_BASE_URL
+  else process.env.RPC_PROXY_BASE_URL = fixture.previousRpcUrl
+}
+
 export function userFor(token: string) {
   return token === freshToken
     ? freshMe
@@ -73,8 +86,7 @@ export async function resetAppServicePriorRecoveryFixture(): Promise<void> {
   fixture.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-prior-recovery-'))
   fixture.previousRestUrl = process.env.EXTERNAL_REST_API_BASE_URL
   fixture.previousRpcUrl = process.env.RPC_PROXY_BASE_URL
-  process.env.EXTERNAL_REST_API_BASE_URL = 'http://rest.accepted-prior.test'
-  process.env.RPC_PROXY_BASE_URL = 'http://rpc.accepted-prior.test'
+  useAppServicePriorRecoveryEnvironmentUrls()
   fixture.getPassword
     .mockReset()
     .mockImplementation(
@@ -100,10 +112,7 @@ export async function disposeAppServicePriorRecoveryFixture(): Promise<void> {
   vi.restoreAllMocks()
   await fs.rm(fixture.directory, { recursive: true, force: true })
   fixture.directory = ''
-  if (fixture.previousRestUrl === undefined) delete process.env.EXTERNAL_REST_API_BASE_URL
-  else process.env.EXTERNAL_REST_API_BASE_URL = fixture.previousRestUrl
-  if (fixture.previousRpcUrl === undefined) delete process.env.RPC_PROXY_BASE_URL
-  else process.env.RPC_PROXY_BASE_URL = fixture.previousRpcUrl
+  restoreAppServicePriorRecoveryEnvironmentUrls()
   fixture.keychain.clear()
   vi.resetModules()
 }
@@ -111,6 +120,8 @@ export async function disposeAppServicePriorRecoveryFixture(): Promise<void> {
 export async function createAppServicePriorRecoveryHarness(options?: {
   persistRuntimeConfig?: boolean
 }) {
+  if (options?.persistRuntimeConfig) restoreAppServicePriorRecoveryEnvironmentUrls()
+  else useAppServicePriorRecoveryEnvironmentUrls()
   const [{ AppService }, { TokenStore }, acceptance, config] = await Promise.all([
     import('../src/appService.js'),
     import('../src/tokenStore.js'),
