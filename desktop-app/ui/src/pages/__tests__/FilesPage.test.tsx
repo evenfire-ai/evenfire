@@ -7668,6 +7668,44 @@ describe('FilesPage', () => {
         'Shared with me'
       )
     })
+
+    it('titles the Files tab My home at the home root and the folder name inside it', () => {
+      const renderCurrent = (current: { resourceId: string; gfsUri: string; name: string }) => {
+        hookMock.useGfsBrowserController.mockReturnValue({
+          ...baseController(),
+          home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+          current: { ...current, kind: 'directory' as const },
+          crumbs: [{ ...current, kind: 'directory' as const, version: 1, bytes: 0 }],
+          accessibleResources: [sharedRow('home-1', 'fixture')],
+        })
+        const onLocationChange = vi.fn()
+        render(
+          <QueryClientProvider client={new QueryClient()}>
+            <FilesPage onLocationChange={onLocationChange} />
+          </QueryClientProvider>
+        )
+        return onLocationChange
+      }
+
+      // D-5: the home root is reported as "My home", never the storage folder
+      // name, and the tab path stays the home's gfs URI.
+      const atHome = renderCurrent({
+        resourceId: 'home-1',
+        gfsUri: 'gfs://main/home-1',
+        name: 'fixture',
+      })
+      expect(atHome).toHaveBeenLastCalledWith('gfs://main/home-1', 'My home')
+      cleanup()
+
+      // Witness: a folder inside the home keeps its own name, so the label
+      // above is not applied to every resource on the drive.
+      const insideHome = renderCurrent({
+        resourceId: 'projects-1',
+        gfsUri: 'gfs://main/projects-1',
+        name: 'Projects',
+      })
+      expect(insideHome).toHaveBeenLastCalledWith('gfs://main/projects-1', 'Projects')
+    })
   })
 })
 

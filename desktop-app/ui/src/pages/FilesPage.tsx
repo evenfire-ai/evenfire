@@ -1322,7 +1322,14 @@ export function FilesPage({
   // `null` is the virtual root. Deps track the primitive fields so a re-render
   // that leaves the location unchanged does not re-emit.
   const currentGfsUri = current?.gfsUri ?? null
-  const currentName = current?.name ?? null
+  // D-5: at the caller's own ready home root the Files tab reads "My home",
+  // not the storage folder name. `current` is the top of the breadcrumb stack;
+  // the effect below re-emits when the home becomes ready because the label,
+  // not the resource, is the reported name.
+  const currentName =
+    current && isCallerHomeRoot(ctrl.home, { resourceId: current.resourceId, drive: ctrl.drive })
+      ? GFS_MY_HOME_LABEL
+      : (current?.name ?? null)
   useEffect(() => {
     if (seedPendingRef.current) {
       // Seed still resolving: suppress the pre-seed root (null) that would clobber
