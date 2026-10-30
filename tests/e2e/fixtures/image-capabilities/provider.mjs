@@ -38,6 +38,13 @@
  * add a `reason` drawn from `FIXTURE_REJECTION_REASONS`, a closed set of fixed
  * strings that never carries request content.
  *
+ * EvenDrive save. A fixed `EVENDRIVE_SAVE` directive in the last user message
+ * selects a stateless discover -> save -> answer journey through the real
+ * `clerum__gfs_accessible` and `clerum__gfs_save_attachment` tools. The
+ * directive is recognised before the image scanner, so an attached image that
+ * asks to save makes tool calls instead of entering the color oracle. Without
+ * the directive the fixture behaves exactly as before.
+ *
  * Determinism and sanitation. Responses carry a synthetic completion id derived
  * from the run id, a fixed test usage block, and `finish_reason: 'stop'` (or
  * `'tool_calls'` for the document read). Both accepted models answer a text-only
@@ -160,6 +167,11 @@ export const FIXTURE_REJECTION_REASONS = Object.freeze([
   'document-tool-output-unreadable',
   'document-page-range-malformed',
   'document-stream-unsupported',
+  'save-attachment-line-missing',
+  'save-folder-beyond-first-page',
+  'save-folder-not-unique',
+  'save-tool-output-malformed',
+  'save-write-tools-missing',
 ])
 
 /** A refusal with a stable machine-readable reason code for the evidence tally. */
@@ -397,9 +409,11 @@ const ATTACHED_FILE_BYTES =
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/
 
 /** The wrapper the Host puts around a tool result (`BasicSafety.wrapForLlm`). */
-const ATTACHMENT_TOOL_OUTPUT = new RegExp(
-  `^<tool_output name="${ATTACHMENT_READ_TOOL}" sanitized="(?:true|false)">\\n([\\s\\S]*)\\n</tool_output>$`
-)
+const toolOutputPattern = name =>
+  new RegExp(
+    `^<tool_output name="${name}" sanitized="(?:true|false)">\\n([\\s\\S]*)\\n</tool_output>$`
+  )
+const ATTACHMENT_TOOL_OUTPUT = toolOutputPattern(ATTACHMENT_READ_TOOL)
 
 /** A document turn the fixture cannot read pixel-exactly gets a stable reason code. */
 class FixtureDocumentError extends Error {
@@ -513,6 +527,145 @@ function classifyDocumentTurn(body) {
 }
 
 const isByteCount = value => Number.isSafeInteger(value) && value >= 0
+
+/** The Host tools of the EvenDrive attachment-save journey. */
+const GFS_ACCESSIBLE_TOOL = 'clerum__gfs_accessible'
+const GFS_SAVE_ATTACHMENT_TOOL = 'clerum__gfs_save_attachment'
+const GFS_CREATE_FILE_TOOL = 'clerum__gfs_create_file'
+
+/** Rendered chat markers; no underscore, because the bubble renders Markdown. */
+export const ATTACHMENT_SAVE_ANSWER_MARKER = 'SAVE-ANSWER'
+export const ATTACHMENT_SAVE_TOOL_ABSENT_MARKER = 'SAVE-TOOL-ABSENT'
+
+/** The fixed lane directive: a user-visible folder name, never a resource id. */
+const ATTACHMENT_SAVE_DIRECTIVE = /EVENDRIVE_SAVE folder="([^"\n]+)" drive=([^\s"<>]+)/
+
+/** The first attachment line of the turn-context block, image or file. */
+const ATTACHED_SAVE_LINE = /^attached_(?:image|file): id="([^"\n]+)"/m
+
+/** A save turn the fixture cannot read exactly gets a stable reason code. */
+class FixtureAttachmentSaveError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'FixtureAttachmentSaveError'
+    this.code = code
+  }
+}
+
+const saveMalformed = message =>
+  new FixtureAttachmentSaveError('save-tool-output-malformed', message)
+
+/** Last-user-message text, whether the Host sent a string or content parts. */
+function messageText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter(
+      part =>
+        part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string'
+    )
+    .map(part => part.text)
+    .join('\n')
+}
+
+/** The save directive of the last user message, or null when absent. */
+function attachmentSaveDirective(messages) {
+  const userIndex = lastUserIndex(messages)
+  if (userIndex < 0) return null
+  const match = ATTACHMENT_SAVE_DIRECTIVE.exec(messageText(messages[userIndex].content))
+  if (!match) return null
+  return { folderName: match[1], drive: match[2] }
+}
+
+/** The gfsc accessible envelope the Host delivered for the discovery call. */
+function parseAccessibleSaveResult(content) {
+  const wrapped = toolOutputPattern(GFS_ACCESSIBLE_TOOL).exec(content)
+  if (!wrapped) throw saveMalformed('the tool result is not a clerum__gfs_accessible wrapper')
+  let envelope
+  try {
+    envelope = JSON.parse(wrapped[1])
+  } catch {
+    throw saveMalformed('the clerum__gfs_accessible result is not JSON')
+  }
+  const data = envelope?.data
+  if (
+    envelope?.ok !== true ||
+    !data ||
+    typeof data !== 'object' ||
+    Array.isArray(data) ||
+    !Array.isArray(data.items) ||
+    (data.nextCursor !== null && typeof data.nextCursor !== 'string')
+  )
+    throw saveMalformed('the clerum__gfs_accessible result does not carry a resource page')
+  return data
+}
+
+/** The one accessible directory with the user's folder name, or a fixed refusal. */
+function selectSaveFolder(data, folderName) {
+  const matches = data.items.filter(
+    item =>
+      item && typeof item === 'object' && item.name === folderName && item.kind === 'directory'
+  )
+  if (matches.length === 1) {
+    const folder = matches[0]
+    if (typeof folder.resourceId !== 'string' || folder.resourceId.length === 0)
+      throw saveMalformed('the accessible directory does not carry a resourceId')
+    return folder
+  }
+  if (matches.length === 0 && data.nextCursor !== null)
+    throw new FixtureAttachmentSaveError(
+      'save-folder-beyond-first-page',
+      'the named folder is not on the first accessible page'
+    )
+  throw new FixtureAttachmentSaveError(
+    'save-folder-not-unique',
+    'the destination folder name must match exactly one accessible directory'
+  )
+}
+
+/** The id of the first attached_file or attached_image context line. */
+function attachedSaveLineId(text) {
+  const line = ATTACHED_SAVE_LINE.exec(text)
+  if (!line)
+    throw new FixtureAttachmentSaveError(
+      'save-attachment-line-missing',
+      'the turn context has no attached_file or attached_image line'
+    )
+  return line[1]
+}
+
+/** The completed save or the exact `Error:` message the Host delivered. */
+function parseAttachmentSaveResult(content) {
+  const wrapped = toolOutputPattern(GFS_SAVE_ATTACHMENT_TOOL).exec(content)
+  if (!wrapped) throw saveMalformed('the tool result is not a clerum__gfs_save_attachment wrapper')
+  const payload = wrapped[1]
+  if (payload.startsWith('Error: ')) {
+    const message = payload.slice('Error: '.length)
+    if (message) return { ok: false, message }
+    throw saveMalformed('the save error does not carry a message')
+  }
+  let result
+  try {
+    result = JSON.parse(payload)
+  } catch {
+    throw saveMalformed('the clerum__gfs_save_attachment result is not JSON')
+  }
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    Array.isArray(result) ||
+    typeof result.attachmentId !== 'string' ||
+    result.attachmentId.length === 0 ||
+    typeof result.name !== 'string' ||
+    !Number.isSafeInteger(result.bytes) ||
+    result.bytes <= 0 ||
+    !result.resource ||
+    typeof result.resource !== 'object' ||
+    result.resource.ok !== true
+  )
+    throw saveMalformed('the clerum__gfs_save_attachment result does not carry a completed save')
+  return { ok: true, result }
+}
 
 const INTERNAL_HOST_SUFFIXES = [
   '.svc.cluster.local',
@@ -790,15 +943,92 @@ export function createImageFixtureFetch(
     model,
     content,
     responseKind,
-    { imageSha256 = null, document, stream = false } = {}
+    { imageSha256 = null, document, saveOutcome, stream = false } = {}
   ) => {
     sequence += 1
     const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
-    recordCall(model, imageSha256, responseKind, document)
+    recordCall(model, imageSha256, responseKind, {
+      ...document,
+      ...(saveOutcome === undefined ? {} : { saveOutcome }),
+    })
     publish()
     return stream
       ? streamResponse(completionId, model, content)
       : jsonResponse(completionBody(completionId, model, content))
+  }
+
+  /**
+   * One stateless EvenDrive save turn. The stage is the number of tool results
+   * after the last user message, so retries and replays classify identically.
+   */
+  const attachmentSaveTurn = (body, directive, model, stream) => {
+    const tools = Array.isArray(body.tools) ? body.tools : []
+    const offered = name => tools.some(tool => tool?.function?.name === name)
+    const userIndex = lastUserIndex(body.messages)
+    const user = userIndex >= 0 ? body.messages[userIndex] : undefined
+    const turnText = messageText(user?.content)
+    const toolMessages =
+      userIndex >= 0
+        ? body.messages
+            .slice(userIndex + 1)
+            .filter(message => message?.role === 'tool' && typeof message.content === 'string')
+        : []
+    const toolCallResponse = (toolName, args, responseKind) => {
+      sequence += 1
+      const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
+      recordCall(model, null, responseKind)
+      publish()
+      return jsonResponse(toolCallCompletionBody(completionId, model, toolName, args))
+    }
+
+    if (toolMessages.length === 0) {
+      if (offered(GFS_SAVE_ATTACHMENT_TOOL))
+        return toolCallResponse(
+          GFS_ACCESSIBLE_TOOL,
+          { drive: directive.drive },
+          'attachment-save-discovery-requested'
+        )
+      if (offered(GFS_CREATE_FILE_TOOL))
+        return answer(model, ATTACHMENT_SAVE_TOOL_ABSENT_MARKER, 'attachment-save-tool-absent', {
+          stream,
+        })
+      throw new FixtureAttachmentSaveError(
+        'save-write-tools-missing',
+        'the save directive ran without the gfs write tools'
+      )
+    }
+
+    if (toolMessages.length === 1) {
+      const accessible = parseAccessibleSaveResult(toolMessages[0].content)
+      const folder = selectSaveFolder(accessible, directive.folderName)
+      const attachmentId = attachedSaveLineId(turnText)
+      return toolCallResponse(
+        GFS_SAVE_ATTACHMENT_TOOL,
+        { drive: directive.drive, parentResourceId: folder.resourceId, attachmentId },
+        'attachment-save-requested'
+      )
+    }
+
+    if (toolMessages.length === 2) {
+      const saveResult = parseAttachmentSaveResult(toolMessages[1].content)
+      const requestedAttachmentId = attachedSaveLineId(turnText)
+      if (saveResult.ok) {
+        if (saveResult.result.attachmentId !== requestedAttachmentId)
+          throw saveMalformed('the save result answers a different attachment')
+        return answer(model, `${ATTACHMENT_SAVE_ANSWER_MARKER} success`, 'attachment-save-answer', {
+          saveOutcome: 'success',
+          stream,
+        })
+      }
+      return answer(model, `${ATTACHMENT_SAVE_ANSWER_MARKER} failure`, 'attachment-save-answer', {
+        saveOutcome: saveResult.message,
+        stream,
+      })
+    }
+
+    throw saveMalformed(
+      `the save journey supports at most two tool results, received ${toolMessages.length}`
+    )
   }
 
   const handleProviderRequest = (input, init, target) => {
@@ -839,6 +1069,20 @@ export function createImageFixtureFetch(
 
     const model = body.model
     const stream = body.stream === true
+
+    // The save directive is checked before the image scanner: an image turn
+    // that asks to save must make tool calls, not tile colors.
+    const saveDirective = attachmentSaveDirective(body.messages)
+    if (saveDirective) {
+      if (model !== UNSUPPORTED_MODEL && model !== SUPPORTED_MODEL)
+        return refuse(model, 'unsupported-model', { code: 'unsupported_model' })
+      try {
+        return attachmentSaveTurn(body, saveDirective, model, stream)
+      } catch (error) {
+        if (!(error instanceof FixtureAttachmentSaveError)) throw error
+        return refuse(model, error.code, { code: error.code })
+      }
+    }
 
     let imageBytes = null
     try {
