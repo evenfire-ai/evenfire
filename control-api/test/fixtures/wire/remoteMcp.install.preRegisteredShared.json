@@ -3,8 +3,6 @@
   "body": {
     "serverName": "linear-pre",
     "namespace": "mcp-server",
-    "contextRef": "research",
-    "contextUpdated": true,
     "clientMode": "confidential",
     "registrationMode": "pre-registered",
     "callbackVariant": "shared",

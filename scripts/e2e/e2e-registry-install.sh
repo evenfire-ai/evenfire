@@ -3,7 +3,7 @@
 # E2E — Registry Install Flow Tests
 # ═══════════════════════════════════════════════════════════════════════
 # Validates: registry health, catalog seeding, local/remote MCP install,
-#            recipe install, naming convention, labels, context allowlist,
+#            recipe install, naming convention, labels, no Context binding on install,
 #            and report-install quality promotion.
 #
 # Prerequisites:
@@ -74,6 +74,47 @@ cleanup_registry_resource() {
   fi
 }
 
+# Every Context name with its sorted allowlist; fails unless the API returned a list.
+contexts_snapshot() {
+  api GET "/api/v1/admin/contexts" | jq -cS '
+    if (.items | type) == "array" then
+      [.items[] | {name: .metadata.name, mcpServers: ((.spec.mcpServers // []) | sort)}]
+      | sort_by(.name)
+    else error("contexts listing unavailable") end'
+}
+
+# Installing an MCP server never ties it to a Context: no spec.contextRef, no
+# private Context, no allowlist entry. Enabling it is a separate Context edit.
+assert_install_left_contexts_untouched() {
+  local server_name=$1 contexts_before=$2 contexts_after server_json new_contexts
+  if [ -z "$contexts_before" ] || ! contexts_after=$(contexts_snapshot 2>/dev/null); then
+    fail "Could not list Contexts to verify the install of ${server_name}"
+    return
+  fi
+  # Other actors (WRC, operators) may delete or edit unrelated Contexts while the
+  # install runs, so only a Context that did not exist before counts against it.
+  if ! new_contexts=$(jq -rn --argjson before "$contexts_before" --argjson after "$contexts_after" \
+    '($before | map(.name)) as $old | [$after[].name | select(. as $n | $old | index($n) | not)] | join(", ")'); then
+    fail "Could not compare Contexts to verify the install of ${server_name}"
+  elif [ -z "$new_contexts" ]; then
+    ok "Install of ${server_name} created no Context"
+  else
+    fail "Install of ${server_name} created Context(s): ${new_contexts}"
+  fi
+  if jq -e --arg s "$server_name" 'any(.[]; .mcpServers | index($s) != null)' \
+    <<<"$contexts_after" >/dev/null; then
+    fail "${server_name} is in a Context allowlist right after install"
+  else
+    ok "${server_name} is in no Context allowlist after install"
+  fi
+  if server_json=$("${KC[@]}" get mcpserver "$server_name" -n "$MCP_NS" -o json 2>/dev/null) &&
+    jq -e '.spec | has("contextRef") | not' <<<"$server_json" >/dev/null; then
+    ok "${server_name} has no spec.contextRef"
+  else
+    fail "${server_name} is missing or carries spec.contextRef"
+  fi
+}
+
 if [[ "${E2E_REGISTRY_INSTALL_LIB_ONLY:-}" == "true" ]]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -125,13 +166,12 @@ if [ -z "$LOCAL_ENTRY" ]; then
   warn "No local MCP server in registry, skipping"
 else
   LOCAL_VERSION=$(curl -sf "${REGISTRY_API}/api/v1/entries/${LOCAL_ENTRY}" 2>/dev/null | jq -r '.version // "1.0.0"')
-  CONTEXT_EXISTS=$(api GET "/api/v1/admin/contexts" | jq -r '.items[0].metadata.name // empty')
+  CONTEXTS_BEFORE=$(contexts_snapshot 2>/dev/null || echo "")
 
-  if [ -z "$CONTEXT_EXISTS" ]; then
-    warn "No context found, skipping (create a context first)"
+  if [ -z "$CONTEXTS_BEFORE" ]; then
+    fail "Could not list Contexts before the local install"
   else
     INSTALL_RESULT=$(api POST "/api/v1/admin/registry/install" "{
-      \"contextRef\": \"${CONTEXT_EXISTS}\",
       \"registryEntryName\": \"${LOCAL_ENTRY}\",
       \"registryEntryVersion\": \"${LOCAL_VERSION}\"
     }")
@@ -158,9 +198,7 @@ else
       MODE=$(echo "$LABELS" | jq -r '.["clerum.io/server-mode"] // empty')
       [ "$MODE" = "local" ] && ok "Label clerum.io/server-mode=local" || fail "Wrong server-mode: $MODE"
 
-      # Verify context allowlist
-      CTX_SERVERS=$(api GET "/api/v1/admin/contexts" | jq -r --arg n "$CONTEXT_EXISTS" '.items[] | select(.metadata.name==$n) | .spec.mcpServers[]' 2>/dev/null || echo "")
-      echo "$CTX_SERVERS" | grep -q "$SERVER_NAME" && ok "Context allowlist includes $SERVER_NAME" || fail "Not in context allowlist"
+      assert_install_left_contexts_untouched "$SERVER_NAME" "$CONTEXTS_BEFORE"
 
       # Cleanup
       cleanup_registry_resource "$SERVER_NAME" "mcp-server"
@@ -177,15 +215,15 @@ if [ -z "$REMOTE_ENTRY" ]; then
   warn "No remote MCP server in registry, skipping"
 else
   REMOTE_VERSION=$(curl -sf "${REGISTRY_API}/api/v1/entries/${REMOTE_ENTRY}" 2>/dev/null | jq -r '.version // "1.0.0"')
-  CONTEXT_EXISTS=$(api GET "/api/v1/admin/contexts" | jq -r '.items[0].metadata.name // empty')
+  CONTEXTS_BEFORE=$(contexts_snapshot 2>/dev/null || echo "")
 
-  if [ -z "$CONTEXT_EXISTS" ]; then
-    warn "No context, skipping"
+  if [ -z "$CONTEXTS_BEFORE" ]; then
+    fail "Could not list Contexts before the remote install"
   else
     CRED_SCHEMA=$(curl -sf "${REGISTRY_API}/api/v1/entries/${REMOTE_ENTRY}/versions/${REMOTE_VERSION}/credential-schema" 2>/dev/null || echo "{}")
     CRED_REQUIRED=$(echo "$CRED_SCHEMA" | jq -r '.required // false')
 
-    INSTALL_BODY="{\"serverName\":\"e2e-remote-test\",\"contextRef\":\"${CONTEXT_EXISTS}\",\"registryEntryName\":\"${REMOTE_ENTRY}\",\"registryEntryVersion\":\"${REMOTE_VERSION}\"}"
+    INSTALL_BODY="{\"serverName\":\"e2e-remote-test\",\"registryEntryName\":\"${REMOTE_ENTRY}\",\"registryEntryVersion\":\"${REMOTE_VERSION}\"}"
     if [ "$CRED_REQUIRED" = "true" ]; then
       CREDS="{}"
       for key in $(echo "$CRED_SCHEMA" | jq -r '.keys[].name' 2>/dev/null); do
@@ -202,6 +240,8 @@ else
 
       MODE=$("${KC[@]}" get mcpserver "$RNAME" -n "$MCP_NS" -o jsonpath='{.metadata.labels.clerum\.io/server-mode}' 2>/dev/null || echo "")
       [ "$MODE" = "remote" ] && ok "Label server-mode=remote" || fail "Wrong mode: $MODE"
+
+      assert_install_left_contexts_untouched "$RNAME" "$CONTEXTS_BEFORE"
 
       # Cleanup
       cleanup_registry_resource "$RNAME" "mcp-server"

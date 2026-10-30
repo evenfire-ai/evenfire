@@ -82,7 +82,6 @@ function oauthUserServer(name = 'gh'): McpServerInfo {
 function oauthContextServer(name = 'ctx-gh'): McpServerInfo {
   return {
     name,
-    contextRef: 'ctx-1',
     transport: { type: 'streamableHttp', url: `http://${name}/mcp` },
     authKind: 'oauth-context',
     enabled: true,

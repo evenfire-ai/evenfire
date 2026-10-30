@@ -101,7 +101,7 @@ beforeEach(async () => {
   savedBaseUrl = config.oauthCallbackBaseUrl
   config.oauthCallbackBaseUrl = ORIGIN
   gateway = new MockGateway(NS)
-  await seedContext(gateway, NS, CONTEXT)
+  await seedContext(gateway, config.contextsNamespace, CONTEXT)
   db = makeInMemoryDynamicClientsDb().db
   logged.warns.length = 0
 })
@@ -126,7 +126,7 @@ async function installDcr(
     gateway,
     db,
     discovery,
-    body: { serverName: name, contextRef: CONTEXT, baseUrl, mode: 'dcr' },
+    body: { serverName: name, baseUrl, mode: 'dcr' },
   })
   if (res.status !== 201) throw new Error(`install failed: ${JSON.stringify(res.body)}`)
   const redirectUri = String(res.body.redirectUri)
@@ -140,7 +140,6 @@ async function installPreRegistered(name: string): Promise<Installed> {
     discovery: notion,
     body: {
       serverName: name,
-      contextRef: CONTEXT,
       baseUrl: PILOTS.notion.mcpUrl,
       mode: 'pre-registered',
       clientId: `client-${name}`,
@@ -207,7 +206,6 @@ function harness() {
       },
     },
     mcpServerReader: { read },
-    userContextsReader: async () => ({ contextIds: [CONTEXT] }),
     userServerAccessReader: async () => true,
     fetchFn: (async () => {
       throw new Error('the remote lane must not use fetchFn')

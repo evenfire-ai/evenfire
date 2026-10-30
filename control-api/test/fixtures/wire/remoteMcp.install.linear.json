@@ -3,8 +3,6 @@
   "body": {
     "serverName": "linear",
     "namespace": "mcp-server",
-    "contextRef": "research",
-    "contextUpdated": true,
     "clientMode": "public",
     "registrationMode": "cimd",
     "callbackVariant": "shared",

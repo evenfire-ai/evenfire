@@ -82,7 +82,6 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 function oauthUserServer(name = 'gh'): McpServerInfo {
   return {
     name,
-    contextRef: 'ctx-1',
     transport: { type: 'streamableHttp', url: `http://${name}/mcp` },
     // HCC v2 inventory shape: the seam dispatches on authKind, not auth/oauth.
     authKind: 'oauth-user',
@@ -94,7 +93,6 @@ function oauthUserServer(name = 'gh'): McpServerInfo {
 function oauthContextServer(name = 'ctx-gh'): McpServerInfo {
   return {
     name,
-    contextRef: 'ctx-1',
     transport: { type: 'streamableHttp', url: `http://${name}/mcp` },
     // Shared-identity oauth: the seam routes every caller to ONE SHARED partition.
     authKind: 'oauth-context',

@@ -17,7 +17,6 @@ function makeServer(overrides: Partial<McpServerCRD> = {}): McpServerCRD {
     annotations: { 'clerum.io/recipe': 'research' },
     labels: { 'clerum.io/workload': 'web-search' },
     spec: {
-      contextRef: 'default',
       image: 'clerum/web-search:test',
       transport: { type: 'streamableHttp', port: 3000 },
     },
@@ -135,7 +134,6 @@ describe('sameMcpServerDesiredRevision', () => {
   it('S4: rejects an egressBindings change', () => {
     const expected = makeServer({
       spec: {
-        contextRef: 'default',
         image: 'clerum/web-search:test',
         transport: { type: 'streamableHttp', port: 3000 },
         egressBindings: [{ cidr: '1.2.3.4/32', port: 443, protocol: 'TCP' }],
