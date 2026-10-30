@@ -153,6 +153,38 @@ function first<T>(items: T[], predicate: (item: T) => boolean, label: string): T
   return found
 }
 
+function byCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/**
+ * The order in which candidates take the auto-enable cap, written out here as
+ * the reference: newest `release_date` first (compared as text, by code
+ * units), undated last, then `model_id` ascending.
+ */
+function capOrder(models: DiscoveredModel[]): DiscoveredModel[] {
+  return [...models].sort((a, b) => {
+    const ra = a.release_date
+    const rb = b.release_date
+    if (ra === undefined && rb !== undefined) return 1
+    if (rb === undefined && ra !== undefined) return -1
+    if (ra !== undefined && rb !== undefined && ra !== rb) return -byCodeUnits(ra, rb)
+    return byCodeUnits(a.model_id, b.model_id)
+  })
+}
+
+const ids = (models: DiscoveredModel[]) => models.map(m => m.model_id)
+
+/** No lone surrogate: `encodeURIComponent` throws on exactly those. */
+function isWellFormedUtf16(s: string): boolean {
+  try {
+    encodeURIComponent(s)
+    return true
+  } catch {
+    return false
+  }
+}
+
 describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () => {
   const database = `control_api_auto_enable_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
@@ -258,7 +290,9 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
     opts: {
       source?: 'live' | 'vendored'
       implausible?: boolean
-      autoEnable?: boolean
+      maxPerProvider?: number
+      maxPerRun?: number
+      providerMinLive?: number
       connector?: SyncConnector
     } = {}
   ): Promise<CatalogSyncResult> {
@@ -267,7 +301,11 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
         materializer: new mod.Writer(cluster as never, 'mcp-host', 3, corePool),
         loadCatalog: loadStub(catalog, opts.source ?? 'live', LIVE_MODELS_DEV_CAPTURED_AT),
         minPlausibleLiveTotal: opts.implausible ? 1_000_000 : 1,
-        autoEnableEnabled: opts.autoEnable ?? true,
+        // The production caps are far above any single provider of the fixture;
+        // T-H24 passes small ones.
+        autoEnableMaxPerProviderPerRun: opts.maxPerProvider ?? 1_000,
+        autoEnableMaxPerRun: opts.maxPerRun ?? 10_000,
+        ...(opts.providerMinLive === undefined ? {} : { providerMinLive: opts.providerMinLive }),
       },
       opts.connector ?? (corePool as unknown as SyncConnector)
     )
@@ -425,9 +463,11 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
       expect(unpriced).toBeGreaterThan(0)
     })
 
-    it('with the flag off nothing is enabled, while prices and catalog status are still written', async () => {
+    it('with the providers OFF nothing is enabled, while prices and catalog status are still written', async () => {
+      await mod.setProviderAutoEnable('claude', false, 'test')
+      await mod.setProviderAutoEnable('openai', false, 'test')
       const catalog = wholeLiveProviders(['claude', 'openai'])
-      await sync(catalog, { autoEnable: false })
+      await sync(catalog)
       const db = await rows()
       expect([...db.values()].every(r => !r.enabled)).toBe(true)
       const deprecated = first(
@@ -566,6 +606,36 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
     expect(await pricesOf('claude', target.model_id)).toEqual([])
     const eligibleCount = discoveredOf(catalog, 'claude').filter(isAutoEnableEligible).length
     expect(result.providerCounts?.claude?.autoEnabled).toBe(eligibleCount - 1)
+  })
+
+  it('T-H1 (ineligible) · a pair the admin created first is not counted as an ineligible insert', async () => {
+    const catalog = wholeLiveProviders(['openai'])
+    const target = first(
+      discoveredOf(catalog, 'openai'),
+      m => autoEnableRejection(m) !== null,
+      'ineligible openai model'
+    )
+    let fired = false
+    const connector = intercepting(async (sql, params, run) => {
+      if (!fired && /INSERT INTO llm_allowed_models/.test(sql) && params[1] === target.model_id) {
+        fired = true
+        await mod.createAllowedModel(
+          { provider: 'openai', model: target.model_id, enabled: false },
+          'racing-admin'
+        )
+      }
+      return run()
+    })
+    const result = await sync(catalog, { connector })
+    expect(fired).toBe(true)
+    expect((await rowOf('openai', target.model_id))!.source).toBe('manual')
+
+    const rejections = { no_text_output: 0, no_tool_call: 0, status: 0, not_runnable: 0 }
+    for (const m of discoveredOf(catalog, 'openai')) {
+      const r = autoEnableRejection(m)
+      if (r && m.model_id !== target.model_id) rejections[r] += 1
+    }
+    expect(result.providerCounts?.openai?.ineligible).toEqual(rejections)
   })
 
   it('T-H1c · a row reclassified to discovery between the SELECT and its UPDATE is left alone', async () => {
@@ -898,6 +968,228 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
     })
   })
 
+  describe('T-H24 · per-run caps on auto-enabled inserts', () => {
+    async function enabledIds(provider: string): Promise<string[]> {
+      const res = await corePool.query<{ model: string }>(
+        'SELECT model FROM llm_allowed_models WHERE provider = $1 AND enabled',
+        [provider]
+      )
+      return res.rows.map(r => r.model).sort(byCodeUnits)
+    }
+
+    it('(1) a provider over its cap enables exactly N per run, newest first, and the rest do not exist until a later run', async () => {
+      const base = wholeLiveProviders(['openai'])
+      // The newest eligible entry, made undated: it must go from the first run
+      // to the last one.
+      const newest = capOrder(discoveredOf(base, 'openai').filter(isAutoEnableEligible))[0]
+      const catalog = withEntryField(base, 'openai', rawIdOf(base, 'openai', newest.model_id), {
+        release_date: undefined,
+      })
+      const discovered = discoveredOf(catalog, 'openai')
+      const order = capOrder(discovered.filter(isAutoEnableEligible))
+      const ineligible = discovered.filter(m => !isAutoEnableEligible(m))
+      const N = 10
+      const k = order.length
+      expect(k).toBeGreaterThan(3 * N)
+      expect(order.at(-1)!.model_id).toBe(newest.model_id)
+      // Guard: the first N by date are not simply the first N by id.
+      expect(ids(order.slice(0, N))).not.toEqual(ids(order).sort(byCodeUnits).slice(0, N))
+
+      const runs = Math.ceil(k / N)
+      for (let run = 1; run <= runs; run++) {
+        const result = await sync(catalog, { maxPerProvider: N })
+        const admitted = order.slice(0, Math.min(run * N, k))
+        expect(await enabledIds('openai'), `run ${run}`).toEqual(ids(admitted).sort(byCodeUnits))
+        for (const m of order.slice(admitted.length)) {
+          expect(await rowOf('openai', m.model_id), `run ${run} ${m.model_id}`).toBeUndefined()
+        }
+        // Outside the cap: every ineligible model went in on the first run, disabled.
+        for (const m of ineligible) {
+          expect((await rowOf('openai', m.model_id))?.enabled, m.model_id).toBe(false)
+        }
+        expect(result.providerCounts?.openai?.autoEnabled).toBe(admitted.length - (run - 1) * N)
+        expect(result.providerCounts?.openai?.deferredByCap ?? 0).toBe(k - admitted.length)
+      }
+      const cm = served()
+      for (const m of order) expect(cm.get('openai')?.has(m.model_id), m.model_id).toBe(true)
+
+      // Converged: one more run enables nothing new and defers nothing.
+      const after = await sync(catalog, { maxPerProvider: N })
+      expect(after.providerCounts?.openai).toBeUndefined()
+    })
+
+    it('(2) more candidates than the per-run cap across providers: the run enables exactly G, in PROVIDER_IDS order', async () => {
+      const catalog = wholeLiveProviders(['openai', 'claude', 'gemini'])
+      const order = (p: CatalogProvider) =>
+        capOrder(discoveredOf(catalog, p).filter(isAutoEnableEligible))
+      const N = 20
+      const G = 25
+      expect(order('openai').length).toBeGreaterThan(N)
+
+      const result = await sync(catalog, { maxPerProvider: N, maxPerRun: G })
+      const all = await rows()
+      expect([...all.values()].filter(r => r.enabled)).toHaveLength(G)
+      expect(await enabledIds('openai')).toEqual(ids(order('openai').slice(0, N)).sort(byCodeUnits))
+      expect(await enabledIds('claude')).toEqual(
+        ids(order('claude').slice(0, G - N)).sort(byCodeUnits)
+      )
+      expect(await enabledIds('gemini')).toEqual([])
+      expect(result.providerCounts?.openai?.deferredByCap).toBe(order('openai').length - N)
+      expect(result.providerCounts?.claude?.deferredByCap).toBe(order('claude').length - (G - N))
+      expect(result.providerCounts?.gemini?.deferredByCap).toBe(order('gemini').length)
+      // The global cap governs the inserts of eligible models only.
+      for (const m of discoveredOf(catalog, 'gemini').filter(m => !isAutoEnableEligible(m))) {
+        expect((await rowOf('gemini', m.model_id))?.enabled, m.model_id).toBe(false)
+      }
+    })
+
+    it('(3) a tombstoned candidate is inserted disabled and does not take a slot', async () => {
+      const catalog = wholeLiveProviders(['claude'])
+      const order = capOrder(discoveredOf(catalog, 'claude').filter(isAutoEnableEligible))
+      const removed = order[0]
+      // The tombstone comes from its real producer: an operator DELETE.
+      const created = await mod.createAllowedModel(
+        { provider: 'claude', model: removed.model_id, enabled: false },
+        'seed'
+      )
+      await request(app()).delete(`${MODELS_PATH}/${created.id}`).set('Cookie', COOKIE).expect(204)
+
+      const N = 3
+      const result = await sync(catalog, { maxPerProvider: N })
+      expect((await rowOf('claude', removed.model_id))?.enabled).toBe(false)
+      expect(await enabledIds('claude')).toEqual(ids(order.slice(1, 1 + N)).sort(byCodeUnits))
+      expect(result.providerCounts?.claude).toMatchObject({
+        inserted: N + 1,
+        autoEnabled: N,
+        dismissed: 1,
+        deferredByCap: order.length - N - 1,
+      })
+    })
+
+    it('(3b) a tombstoned candidate does not take a slot of the per-run cap either', async () => {
+      const catalog = wholeLiveProviders(['openai'])
+      const order = capOrder(discoveredOf(catalog, 'openai').filter(isAutoEnableEligible))
+      const removed = order[0]
+      const created = await mod.createAllowedModel(
+        { provider: 'openai', model: removed.model_id, enabled: false },
+        'seed'
+      )
+      await request(app()).delete(`${MODELS_PATH}/${created.id}`).set('Cookie', COOKIE).expect(204)
+
+      // Only the per-run cap binds here: the per-provider one is far above it.
+      const G = 5
+      const result = await sync(catalog, { maxPerProvider: 1_000, maxPerRun: G })
+      expect((await rowOf('openai', removed.model_id))?.enabled).toBe(false)
+      expect(await enabledIds('openai')).toEqual(ids(order.slice(1, 1 + G)).sort(byCodeUnits))
+      expect(result.providerCounts?.openai).toMatchObject({
+        autoEnabled: G,
+        dismissed: 1,
+        deferredByCap: order.length - G - 1,
+      })
+    })
+
+    it('(4) stale-marking and the per-provider floor see the whole catalog while the cap is exhausted', async () => {
+      const base = wholeLiveProviders(['claude'])
+      const order = capOrder(discoveredOf(base, 'claude').filter(isAutoEnableEligible))
+      await sync(base, { maxPerProvider: 5 })
+      const vanished = order[0]
+      const catalog = withoutEntries(base, 'claude', [rawIdOf(base, 'claude', vanished.model_id)])
+      const liveCount = discoveredOf(catalog, 'claude').length
+
+      // A floor equal to the catalog's size passes only if the deferred models
+      // are counted; the run itself inserts 2 of them.
+      const result = await sync(catalog, { maxPerProvider: 2, providerMinLive: liveCount })
+      expect(result.staled).toBe(1)
+      expect((await rowOf('claude', vanished.model_id))!.stale).toBe(true)
+      for (const m of order.slice(1, 5)) {
+        expect((await rowOf('claude', m.model_id))!.stale, m.model_id).toBe(false)
+      }
+      expect(result.providerCounts?.claude?.deferredByCap).toBe(order.length - 5 - 2)
+      expect(await enabledIds('claude')).toEqual(ids(order.slice(0, 7)).sort(byCodeUnits))
+    })
+
+    it('(5) a provider whose new models were all deferred still appears in provider_counts', async () => {
+      const catalog = wholeLiveProviders(['openai', 'claude'])
+      const openaiEligible = discoveredOf(catalog, 'openai').filter(isAutoEnableEligible).length
+      const claudeEligible = discoveredOf(catalog, 'claude').filter(isAutoEnableEligible).length
+      // Every claude entry is eligible, so with openai using up the run's cap
+      // claude has nothing but deferred models.
+      expect(claudeEligible).toBe(discoveredOf(catalog, 'claude').length)
+
+      const result = await sync(catalog, { maxPerProvider: 100, maxPerRun: openaiEligible })
+      expect((await rows('claude')).size).toBe(0)
+      const expected = {
+        inserted: 0,
+        autoEnabled: 0,
+        skippedUndecidable: 0,
+        deferredByCap: claudeEligible,
+        ineligible: { no_text_output: 0, no_tool_call: 0, status: 0, not_runnable: 0 },
+        dismissed: 0,
+        pricesLoaded: 0,
+      }
+      expect(result.providerCounts?.claude).toEqual(expected)
+      expect((await mod.getLastCatalogSyncRun())?.providerCounts?.claude).toEqual(expected)
+    })
+
+    it('(6) a 400-character multibyte display_name is stored within 256 bytes of UTF-8, cut between code points', async () => {
+      const base = wholeLiveProviders(['claude'])
+      const target = first(discoveredOf(base, 'claude'), isAutoEnableEligible, 'eligible model')
+      // 1 + 399 × 4 bytes, and a cut at 400 UTF-16 units would split a pair.
+      const longName = `a${'😀'.repeat(399)}`
+      expect([...longName]).toHaveLength(400)
+      const catalog = withEntryField(base, 'claude', rawIdOf(base, 'claude', target.model_id), {
+        name: longName,
+      })
+      await sync(catalog)
+
+      const row = (await rowOf('claude', target.model_id))! as DbRow & { display_name: string }
+      expect(row.enabled).toBe(true)
+      expect(Buffer.byteLength(row.display_name, 'utf8')).toBeLessThanOrEqual(256)
+      expect(isWellFormedUtf16(row.display_name)).toBe(true)
+      expect(longName.startsWith(row.display_name)).toBe(true)
+      expect(row.display_name.length).toBeGreaterThan(1)
+      const served = JSON.parse(cluster.data!.claude) as Array<{
+        model: string
+        displayName?: string
+      }>
+      expect(served.find(e => e.model === target.model_id)?.displayName).toBe(row.display_name)
+    })
+
+    it('(7) a served entry with a hostile display_name stays within 640 bytes of JSON', async () => {
+      const base = wholeLiveProviders(['claude'])
+      // The heaviest evidence the sync writes is a KNOWN state (it carries an
+      // expiry); the longest id is the closest the fixture gets to the worst case.
+      const target = discoveredOf(base, 'claude')
+        .filter(m => isAutoEnableEligible(m) && m.image_input_state === 'supported')
+        .sort((a, b) => b.model_id.length - a.model_id.length)[0]
+      expect(target).toBeDefined()
+      // Quotes and backslashes double when serialized; the emoji and the euro
+      // sign are 4 and 3 bytes.
+      const hostile = '"\\😀€'.repeat(100)
+      const catalog = withEntryField(base, 'claude', rawIdOf(base, 'claude', target.model_id), {
+        name: hostile,
+      })
+      await sync(catalog)
+      expect((await rowOf('claude', target.model_id))!.enabled).toBe(true)
+
+      // The entry exactly as the real writer published it.
+      const entries = JSON.parse(cluster.data!.claude) as Array<Record<string, unknown>>
+      const entry = entries.find(e => e.model === target.model_id)!
+      const displayName = String(entry.displayName)
+      expect(hostile.startsWith(displayName)).toBe(true)
+      expect(isWellFormedUtf16(displayName)).toBe(true)
+      expect(Buffer.byteLength(JSON.stringify(displayName)) - 2).toBeLessThanOrEqual(256)
+      expect(entry.imageInput).toMatchObject({ state: 'supported' })
+
+      const entryBytes = Buffer.byteLength(JSON.stringify(entry))
+      expect(entryBytes).toBeLessThanOrEqual(640)
+      // The id is the only other field an external catalog sizes, and the
+      // runtime rule bounds it to 128 ASCII bytes: swapping this id for one of
+      // that length must still fit.
+      expect(entryBytes - Buffer.byteLength(target.model_id) + 128).toBeLessThanOrEqual(640)
+    })
+  })
+
   it('T-C12 · the run row records the per-provider counts', async () => {
     const catalog = wholeLiveProviders(['claude', 'openai', 'groq'])
     const dismissedModel = first(discoveredOf(catalog, 'claude'), isAutoEnableEligible, 'eligible')
@@ -927,6 +1219,7 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
         inserted: discovered.length,
         autoEnabled: policyOn ? eligible - dismissedHere : 0,
         skippedUndecidable: 0,
+        deferredByCap: 0,
         ineligible: rejections,
         dismissed: dismissedHere,
         pricesLoaded: discovered.filter(m => m.cost !== null).length,
@@ -934,5 +1227,26 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
     }
     // The status endpoint's source reports them too.
     expect((await mod.getLastCatalogSyncRun())?.providerCounts).toEqual(counts)
+  })
+
+  it('T-C12 · a run recorded before deferredByCap existed reads it as 0', async () => {
+    const catalog = wholeLiveProviders(['claude', 'groq'])
+    await sync(catalog)
+    const current = (await mod.getLastCatalogSyncRun())!.providerCounts!
+    // The previous writer's shape is this one without the field.
+    await corePool.query(
+      `UPDATE llm_catalog_sync_runs
+          SET provider_counts = (
+            SELECT jsonb_object_agg(key, value - 'deferredByCap')
+              FROM jsonb_each(provider_counts)
+          )`
+    )
+    const stored = await corePool.query<{ provider_counts: Record<string, object> }>(
+      'SELECT provider_counts FROM llm_catalog_sync_runs'
+    )
+    expect(Object.values(stored.rows[0].provider_counts).some(c => 'deferredByCap' in c)).toBe(
+      false
+    )
+    expect((await mod.getLastCatalogSyncRun())?.providerCounts).toEqual(current)
   })
 })

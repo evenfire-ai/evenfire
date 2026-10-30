@@ -2559,9 +2559,8 @@ export type LlmDiscoveryStatus = {
 }
 
 // Runs the catalog sync. New rows start disabled; only eligible models from a
-// live catalog, for a provider whose auto-enable policy is on (and with the
-// deployment's auto-enable switch on), start enabled. Existing rows are never
-// re-evaluated.
+// live catalog, for a provider whose auto-enable policy is on, start enabled,
+// up to a per-run cap. Existing rows are never re-evaluated.
 export async function syncDiscovery() {
   return apiSend(
     'POST',

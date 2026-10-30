@@ -4,8 +4,8 @@
  * Periodically runs `syncDiscoveredModels()` — the SAME non-destructive
  * reconciliation the on-demand `POST /admin/llm-models/discovery/sync` endpoint
  * drives. No HTTP hop, no new auth: the tick calls the service directly. New
- * models land as `source='discovery'`, disabled unless the auto-enable flag and
- * the provider's policy allow enabling them on insert (see the header of
+ * models land as `source='discovery'`, disabled unless the provider's policy
+ * and the per-run caps allow enabling them on insert (see the header of
  * llmCatalogSync.ts); vanished models are only ever flagged `stale=true` (never
  * deleted, never disabled), and only when the §4.5 sanity guards agree the live
  * catalog is trustworthy.

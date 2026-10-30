@@ -28,20 +28,30 @@
  *     served, only flagged stale for an operator decision.
  *
  * Enabled on insert. A new row starts enabled only when ALL of these hold: the
- * auto-enable flag is on, the run is live and plausible, the provider's policy
- * (read once, after the sync lock) is on, the model passes the eligibility rules
- * (`autoEnableRejection`), and no operator removed the pair before (a row in
- * `llm_catalog_dismissed`). The tombstone is read INSIDE the INSERT statement,
- * never from an earlier read: a DELETE that commits after this run started must
- * still be seen. A tombstoned pair is still inserted, only disabled. Rows that
- * already exist never change `enabled` — whatever an operator decided stands,
- * and so does a model inserted disabled that models.dev later fixes.
+ * run is live and plausible, the provider's policy (read once, after the sync
+ * lock) is on, the model passes the eligibility rules (`autoEnableRejection`),
+ * and no operator removed the pair before (a row in `llm_catalog_dismissed`).
+ * The tombstone is read INSIDE the INSERT statement, never from an earlier
+ * read: a DELETE that commits after this run started must still be seen. A
+ * tombstoned pair is still inserted, only disabled. Rows that already exist
+ * never change `enabled` — whatever an operator decided stands, and so does a
+ * model inserted disabled that models.dev later fixes.
  *
- * With the flag on, a run that cannot decide (vendored, or a live catalog that
- * fails the plausibility floor) does NOT insert models of providers whose policy
- * is on. Inserting them disabled would be final, because the next live run sees
- * an existing row and never enables it. Providers whose policy is off insert
- * disabled rows as before.
+ * A run that cannot decide (vendored, or a live catalog that fails the
+ * plausibility floor) does NOT insert models of providers whose policy is on.
+ * Inserting them disabled would be final, because the next live run sees an
+ * existing row and never enables it. Providers whose policy is off insert
+ * disabled rows.
+ *
+ * Each run enables at most a fixed number of new models per provider and in
+ * total (`autoEnableMaxPerProviderPerRun` / `autoEnableMaxPerRun`): every one
+ * lands in the allowlist ConfigMap, and a catalog that suddenly lists thousands
+ * of eligible ids must not push it past its size limit in one run. Candidates
+ * are taken newest release first; those over the cap are NOT inserted, for the
+ * same reason as above, and a later run picks them up. Only rows actually
+ * inserted enabled count, so a tombstoned candidate (inserted disabled) costs
+ * nothing. The cap governs nothing else: stale-marking and the per-provider
+ * floor still see the whole catalog.
  *
  * A row this run inserted also gets its catalog price, in the same transaction,
  * unless the pair already has ANY price row (enabled or not): an operator's
@@ -179,12 +189,17 @@ export interface CatalogSyncProviderCount {
   inserted: number
   /** Of those, rows inserted enabled. */
   autoEnabled: number
-  /** New models not inserted: auto-enable on, policy on, run could not decide. */
+  /** New models not inserted: policy on, run could not decide. */
   skippedUndecidable: number
   /**
+   * New models not inserted because this run already enabled as many as the
+   * per-provider or the per-run cap allows; a later run decides them.
+   */
+  deferredByCap: number
+  /**
    * Inserted rows that failed an eligibility rule, by the first rule failed.
-   * Counted only where the run could have enabled them (flag on, live and
-   * plausible, policy on): elsewhere eligibility decides nothing.
+   * Counted only where the run could have enabled them (live and plausible,
+   * policy on): elsewhere eligibility decides nothing.
    */
   ineligible: Record<AutoEnableRejection, number>
   /** Inserted rows whose pair an operator had removed before (inserted disabled). */
@@ -261,6 +276,7 @@ function emptyProviderCount(): CatalogSyncProviderCount {
     inserted: 0,
     autoEnabled: 0,
     skippedUndecidable: 0,
+    deferredByCap: 0,
     ineligible: { no_text_output: 0, no_tool_call: 0, status: 0, not_runnable: 0 },
     dismissed: 0,
     pricesLoaded: 0,
@@ -271,22 +287,21 @@ function isEmptyProviderCount(c: CatalogSyncProviderCount): boolean {
   return (
     c.inserted === 0 &&
     c.skippedUndecidable === 0 &&
+    c.deferredByCap === 0 &&
     c.pricesLoaded === 0 &&
     Object.values(c.ineligible).every(n => n === 0)
   )
 }
 
-/**
- * What the run may do with NEW models. `policy` is null when the auto-enable
- * flag is off: then nothing is enabled and nothing is skipped, exactly as
- * before the flag existed.
- */
+/** What the run may do with NEW models. */
 interface InsertDecisionContext {
-  policy: Record<CatalogPolicyProviderId, boolean> | null
+  policy: Record<CatalogPolicyProviderId, boolean>
   /** Live and plausible: the catalog is trustworthy enough to enable from. */
   canDecide: boolean
   /** Whether this run refreshes `catalog_status` on existing discovery rows. */
   live: boolean
+  maxPerProvider: number
+  maxPerRun: number
 }
 
 interface RunCounters {
@@ -294,7 +309,29 @@ interface RunCounters {
   updated: number
   staled: number
   enabledImageInputChanged: number
+  /** Rows inserted enabled so far in this run, across providers (the per-run cap). */
+  autoEnabled: number
   byProvider: CatalogSyncProviderCounts
+}
+
+/**
+ * The order in which a provider's candidates take the cap: newest release
+ * first, undated last, then by id. Compared by UTF-16 code units, never
+ * `localeCompare`: which models a run enables must not depend on the replica's
+ * locale. Release dates are bounded text, not validated dates, so `YYYY-MM`
+ * sorts after the `YYYY-MM-DD` days of its month and a future or nonsense date
+ * that passes the shape goes first; both are accepted.
+ */
+function compareCapOrder(a: DiscoveredModel, b: DiscoveredModel): number {
+  const ra = a.release_date
+  const rb = b.release_date
+  if (ra !== rb) {
+    if (ra === undefined) return 1
+    if (rb === undefined) return -1
+    return ra > rb ? -1 : 1
+  }
+  if (a.model_id === b.model_id) return 0
+  return a.model_id < b.model_id ? -1 : 1
 }
 
 async function insertCatalogPrice(
@@ -319,6 +356,63 @@ async function insertCatalogPrice(
     [provider, model.model_id, cost.input, cost.output, cost.cache_read, cost.cache_write]
   )
   return (res.rowCount ?? 0) > 0
+}
+
+/**
+ * What one INSERT of a new discovered row did, as Postgres reports it. `enable`
+ * is only the run's decision: the tombstone check inside the statement can
+ * still turn it off, and a concurrent insert can take the pair first.
+ */
+type InsertOutcome = 'not_inserted' | 'inserted_disabled' | 'inserted_enabled'
+
+/** INSERT one new discovered row and, if it went in, its catalog price. */
+async function insertDiscoveredModel(
+  client: SyncTxClient,
+  provider: LlmProviderId,
+  model: DiscoveredModel,
+  imageInputJson: string,
+  enable: boolean,
+  counters: RunCounters,
+  providerCount: CatalogSyncProviderCount
+): Promise<InsertOutcome> {
+  // ON CONFLICT DO NOTHING guards only a concurrent manual insert (never DO
+  // UPDATE → never clobbers manual), and then RETURNING yields no row, so
+  // nothing below runs for a pair this run did not create.
+  const ins = await client.query(
+    `INSERT INTO llm_allowed_models
+       (provider, model, enabled, source, discovered_at, last_seen_at, stale,
+        context_window_tokens, display_name, image_input, catalog_status)
+     VALUES ($1, $2,
+             $6::boolean AND NOT EXISTS (
+               SELECT 1 FROM llm_catalog_dismissed d
+                WHERE d.provider = $1 AND d.model = $2
+             ),
+             'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7)
+     ON CONFLICT (provider, model) DO NOTHING
+     RETURNING enabled,
+               EXISTS (
+                 SELECT 1 FROM llm_catalog_dismissed d
+                  WHERE d.provider = $1 AND d.model = $2
+               ) AS dismissed`,
+    [
+      provider,
+      model.model_id,
+      usableContext(model.context_window_tokens),
+      model.display_name ?? null,
+      imageInputJson,
+      enable,
+      model.catalog_status,
+    ]
+  )
+  counters.added += ins.rowCount ?? 0
+  const inserted = ins.rows[0] as { enabled?: unknown; dismissed?: unknown } | undefined
+  if (!inserted) return 'not_inserted'
+  providerCount.inserted += 1
+  const enabled = inserted.enabled === true
+  if (enabled) providerCount.autoEnabled += 1
+  if (inserted.dismissed === true) providerCount.dismissed += 1
+  if (await insertCatalogPrice(client, provider, model)) providerCount.pricesLoaded += 1
+  return enabled ? 'inserted_enabled' : 'inserted_disabled'
 }
 
 async function reconcileProvider(
@@ -357,7 +451,7 @@ async function reconcileProviderRows(
   counters: RunCounters,
   providerCount: CatalogSyncProviderCount
 ): Promise<void> {
-  const policyOn = decision.policy?.[provider as CatalogPolicyProviderId] === true
+  const policyOn = decision.policy[provider as CatalogPolicyProviderId] === true
 
   const existingRes = await client.query(
     `SELECT id, model, source FROM llm_allowed_models WHERE provider = $1`,
@@ -376,6 +470,9 @@ async function reconcileProviderRows(
   }
 
   const discoveredIds: string[] = []
+  // Models this run would insert enabled. They go through the cap after the
+  // loop, in cap order; everything else keeps the catalog order.
+  const candidates: Array<{ model: DiscoveredModel; imageInputJson: string }> = []
   for (const model of discovered) {
     discoveredIds.push(model.model_id)
     const existing = existingByModel.get(model.model_id)
@@ -392,38 +489,22 @@ async function reconcileProviderRows(
         continue
       }
       const rejection = autoEnableRejection(model)
-      const enable = policyOn && decision.canDecide && rejection === null
-      // ON CONFLICT DO NOTHING guards only a concurrent manual insert (never DO
-      // UPDATE → never clobbers manual), and then RETURNING yields no row, so
-      // nothing below runs for a pair this run did not create.
-      const ins = await client.query(
-        `INSERT INTO llm_allowed_models
-           (provider, model, enabled, source, discovered_at, last_seen_at, stale,
-            context_window_tokens, display_name, image_input, catalog_status)
-         VALUES ($1, $2,
-                 $6::boolean AND NOT EXISTS (
-                   SELECT 1 FROM llm_catalog_dismissed d
-                    WHERE d.provider = $1 AND d.model = $2
-                 ),
-                 'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7)
-         ON CONFLICT (provider, model) DO NOTHING
-         RETURNING enabled,
-                   EXISTS (
-                     SELECT 1 FROM llm_catalog_dismissed d
-                      WHERE d.provider = $1 AND d.model = $2
-                   ) AS dismissed`,
-        [provider, model.model_id, ctx, display, imageInputJson, enable, model.catalog_status]
+      if (policyOn && decision.canDecide && rejection === null) {
+        candidates.push({ model, imageInputJson })
+        continue
+      }
+      const outcome = await insertDiscoveredModel(
+        client,
+        provider,
+        model,
+        imageInputJson,
+        false,
+        counters,
+        providerCount
       )
-      counters.added += ins.rowCount ?? 0
-      const inserted = ins.rows[0] as { enabled?: unknown; dismissed?: unknown } | undefined
-      if (!inserted) continue
-      providerCount.inserted += 1
-      if (inserted.enabled === true) providerCount.autoEnabled += 1
-      if (inserted.dismissed === true) providerCount.dismissed += 1
-      if (policyOn && decision.canDecide && rejection !== null) {
+      if (outcome !== 'not_inserted' && policyOn && decision.canDecide && rejection !== null) {
         providerCount.ineligible[rejection] += 1
       }
-      if (await insertCatalogPrice(client, provider, model)) providerCount.pricesLoaded += 1
       continue
     }
 
@@ -531,6 +612,42 @@ async function reconcileProviderRows(
     countEnabledEvidenceChange(upd.rows, counters)
   }
 
+  candidates.sort((a, b) => compareCapOrder(a.model, b.model))
+  for (const { model, imageInputJson } of candidates) {
+    if (
+      providerCount.autoEnabled >= decision.maxPerProvider ||
+      counters.autoEnabled >= decision.maxPerRun
+    ) {
+      providerCount.deferredByCap += 1
+      continue
+    }
+    // Only a row Postgres reports enabled takes the cap: a tombstoned pair is
+    // inserted disabled and never reaches the ConfigMap.
+    const outcome = await insertDiscoveredModel(
+      client,
+      provider,
+      model,
+      imageInputJson,
+      true,
+      counters,
+      providerCount
+    )
+    if (outcome === 'inserted_enabled') counters.autoEnabled += 1
+  }
+  if (providerCount.deferredByCap > 0) {
+    log.warn(
+      {
+        event: 'llm_catalog_sync_auto_enable_deferred',
+        provider,
+        deferredByCap: providerCount.deferredByCap,
+        autoEnabled: providerCount.autoEnabled,
+        maxPerProvider: decision.maxPerProvider,
+        maxPerRun: decision.maxPerRun,
+      },
+      'auto-enable cap reached: the remaining new models of this provider are not inserted and will be enabled by the next runs; switching the provider to OFF now would insert them disabled for good'
+    )
+  }
+
   // VANISHED discovery rows → flag stale (never delete, never disable). Only
   // from an authoritative (live) catalog — see the `markStale` doc above. Newly
   // inserted rows are in `discoveredIds`, so they are excluded.
@@ -598,8 +715,10 @@ export async function syncDiscoveredModels(
     publishRetry?: AllowlistPublishRetry
     /** Image-evidence validity window (default from config). */
     imageEvidenceTtlMs?: number
-    /** Whether new models may start enabled (default from config). */
-    autoEnableEnabled?: boolean
+    /** Most models one run may insert enabled for one provider (default from config). */
+    autoEnableMaxPerProviderPerRun?: number
+    /** Most models one run may insert enabled across providers (default from config). */
+    autoEnableMaxPerRun?: number
   },
   connector: SyncConnector = pool
 ): Promise<CatalogSyncResult> {
@@ -607,7 +726,9 @@ export async function syncDiscoveredModels(
   const minPlausibleLiveTotal = opts.minPlausibleLiveTotal ?? config.modelsDevMinPlausibleLiveTotal
   const providerMinLive = opts.providerMinLive ?? config.llmCatalogSyncProviderMinLive
   const imageEvidenceTtlMs = opts.imageEvidenceTtlMs ?? config.llmCatalogImageEvidenceTtlMs
-  const autoEnableEnabled = opts.autoEnableEnabled ?? config.llmCatalogAutoEnableEnabled
+  const maxPerProvider =
+    opts.autoEnableMaxPerProviderPerRun ?? config.llmCatalogAutoEnableMaxPerProviderPerRun
+  const maxPerRun = opts.autoEnableMaxPerRun ?? config.llmCatalogAutoEnableMaxPerRun
   const { source, fetchedAt, capturedAt, catalog } = await load({ fetchImpl: opts.fetchImpl })
   const byProvider = mapCatalogToProviders(catalog)
   // Stamped with the SOURCE capture time (see discoveryImageInput); the payload
@@ -620,12 +741,11 @@ export async function syncDiscoveredModels(
   // count is implausibly small, we suppress the vanished→stale inference for the
   // WHOLE run — a flappy/truncated external catalog must not mass-stale the
   // allowlist. "Abort" here means skip the stale UPDATEs, and also mark the run
-  // unable to decide auto-enable: with the auto-enable flag on, new models of
-  // providers whose policy is on are not inserted at all; every other new model
-  // is inserted disabled, as with the flag off (see the module header). The
-  // stale part does not affect a cold start (empty DB): the stale UPDATE's
-  // universe (source='discovery' AND stale=false) is empty, so it marks 0 rows
-  // with or without this guard.
+  // unable to decide auto-enable: new models of providers whose policy is on are
+  // not inserted at all; every other new model is inserted disabled (see the
+  // module header). The stale part does not affect a cold start (empty DB): the
+  // stale UPDATE's universe (source='discovery' AND stale=false) is empty, so it
+  // marks 0 rows with or without this guard.
   const totalLive = PROVIDER_IDS.reduce((n, p) => n + (byProvider[p]?.length ?? 0), 0)
   const sourceIsLive = source === 'live'
   const globallyImplausible = sourceIsLive && totalLive < minPlausibleLiveTotal
@@ -646,8 +766,9 @@ export async function syncDiscoveredModels(
     providerMinLive,
     imageEvidence,
     source,
-    autoEnableEnabled,
     canDecide: sourceIsLive && !globallyImplausible,
+    maxPerProvider,
+    maxPerRun,
   })
   const { counters } = committed
 
@@ -655,7 +776,6 @@ export async function syncDiscoveredModels(
     {
       event: 'llm_catalog_sync_run',
       source,
-      autoEnableEnabled,
       globallyImplausible,
       added: counters.added,
       updated: counters.updated,
@@ -720,8 +840,9 @@ async function reconcileCatalogInTransaction(
     providerMinLive: number
     imageEvidence: { capturedAt: string; ttlMs: number }
     source: 'live' | 'vendored'
-    autoEnableEnabled: boolean
     canDecide: boolean
+    maxPerProvider: number
+    maxPerRun: number
   }
 ): Promise<{ ranAt: string; counters: RunCounters }> {
   const client = await connector.connect()
@@ -739,15 +860,18 @@ async function reconcileCatalogInTransaction(
     // Read under the lock: the policy toggle takes the same lock, so this run
     // sees a toggle entirely or not at all.
     const decision: InsertDecisionContext = {
-      policy: run.autoEnableEnabled ? await readEffectiveAutoEnablePolicy(client) : null,
+      policy: await readEffectiveAutoEnablePolicy(client),
       canDecide: run.canDecide,
       live: run.source === 'live',
+      maxPerProvider: run.maxPerProvider,
+      maxPerRun: run.maxPerRun,
     }
     const counters: RunCounters = {
       added: 0,
       updated: 0,
       staled: 0,
       enabledImageInputChanged: 0,
+      autoEnabled: 0,
       byProvider: {},
     }
     for (const provider of PROVIDER_IDS) {
@@ -821,7 +945,24 @@ export async function getLastCatalogSyncRun(
   }
   const providerCounts = row.provider_counts
   if (providerCounts && typeof providerCounts === 'object' && !Array.isArray(providerCounts)) {
-    run.providerCounts = providerCounts as CatalogSyncProviderCounts
+    run.providerCounts = withDeferredByCap(providerCounts as StoredProviderCounts)
   }
   return run
+}
+
+/** A stored breakdown: runs recorded before the per-run cap carry no `deferredByCap`. */
+type StoredProviderCounts = Partial<
+  Record<
+    LlmProviderId,
+    Omit<CatalogSyncProviderCount, 'deferredByCap'> & { deferredByCap?: number }
+  >
+>
+
+function withDeferredByCap(stored: StoredProviderCounts): CatalogSyncProviderCounts {
+  const out: CatalogSyncProviderCounts = {}
+  for (const [provider, count] of Object.entries(stored)) {
+    if (!count || typeof count !== 'object') continue
+    out[provider as LlmProviderId] = { ...count, deferredByCap: count.deferredByCap ?? 0 }
+  }
+  return out
 }

@@ -115,7 +115,7 @@ export function LlmCatalogAutoEnableDialog({ open, onDismiss }: LlmCatalogAutoEn
       open={open}
       onDismiss={() => onDismiss()}
       title="Auto-enable new models"
-      description="Choose, per provider, whether eligible new models that a live catalog sync finds start enabled (text output, tool calling, stable release, runnable model id), when auto-enable is turned on for this deployment. Models already in the catalog keep their current state, and this setting never disables a model."
+      description="Choose, per provider, whether eligible new models (text output, tool calling, stable release, runnable model id) start enabled. It applies from the next live catalog sync: models already in the catalog keep their current state, and this setting never disables a model. Each sync enables a limited number of models, so a large catalog can take several syncs."
       error={saveError || undefined}
       busy={busy}
       size="large"

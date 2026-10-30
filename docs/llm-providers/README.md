@@ -267,10 +267,21 @@ lives in the control-api Postgres table `llm_allowed_models`, is managed at
 `/llm-models`, is fully audited (`llm_allowed_models_audit`), and is materialized
 to the `clerum-llm-allowed-models` ConfigMap for the runtime.
 
-In short: it is **fail-closed** (a model needs an enabled row), catalog sync
-only proposes disabled rows, models already deployed are never interrupted,
-and a missing ConfigMap degrades to "only the configured model". Operator
-details (propagation, metrics, degraded mode, discovery review) are in the
+In short: it is **fail-closed** (a model needs an enabled row), models already
+deployed are never interrupted, and a missing ConfigMap degrades to "only the
+configured model". The catalog sync inserts new models and enables them when
+the provider's catalog policy is ON (direct vendors by default), the model is
+eligible (text output, `tool_call`, not `deprecated`/`alpha`/`beta`, an id the
+runtime can execute) and the run fetched models.dev live; at most
+`LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` per provider and
+`LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` in total per run (newest releases first
+within a provider; the total is handed out in the fixed order of
+`PROVIDER_IDS`, so later providers wait for earlier ones), and a large catalog
+completes over several runs. It also loads the catalog price of each model it
+inserts. It never changes `enabled` on an existing row. Without egress
+(`vendored` runs) providers whose policy is ON get no discovered rows. Operator
+details (policy, caps, offline installations, emergency brake, propagation,
+metrics, degraded mode) are in the
 [operator guide](../deploy/llm-providers.md#5-the-model-allowlist).
 
 ### Image input capability (`image_input`)
@@ -302,8 +313,10 @@ family, or an "OpenAI-compatible" request shape.
   pair), and editing capability never changes `enabled`.
 - A capability change re-materializes the ConfigMap `imageInput` field, so
   running Hosts pick it up without a redeploy. The sync re-materializes
-  `clerum-llm-allowed-models` when it changed `image_input` on an enabled row; it
-  still never enables, disables or edits any other served column.
+  `clerum-llm-allowed-models` whenever its content differs from Postgres (an
+  `image_input` change on an enabled row, a model it enabled on insert); it
+  never enables or disables an existing row, nor edits any other served column
+  of one.
 
 #### Rollout and refresh cadence
 
@@ -323,7 +336,11 @@ family, or an "OpenAI-compatible" request shape.
 - With `LLM_CATALOG_SYNC_CRON_ENABLED=true` (code default off; set to `true` in
   `deploy/base/control-plane/configmaps.yaml`) the refresh is automatic: one
   sync shortly after start, then one every `LLM_CATALOG_SYNC_INTERVAL_MS`; the config refuses a TTL shorter than twice
-  `LLM_CATALOG_SYNC_INTERVAL_MS`. Without the cron, run
+  `LLM_CATALOG_SYNC_INTERVAL_MS`. Each run enables at most
+  `LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` (default 100) new models
+  per provider and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` (default 300) in total;
+  both accept 1–1000 and the rest wait for the next run, the providers further
+  down `PROVIDER_IDS` after the ones ahead of them. Without the cron, run
   `POST /admin/llm-models/discovery/sync` at least once per TTL (monthly at the
   default; every two weeks leaves margin). The endpoint runs the same code path
   as the cron.

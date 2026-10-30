@@ -551,7 +551,7 @@ export async function loadModelsDevCatalog(
   }
 }
 
-// Mirror the manual admin path's zod caps (createLlmAllowedModelSchema:
+// Stay within the manual admin path's zod caps (createLlmAllowedModelSchema:
 // `model` .max(400), `display_name` .max(400)) so NO external-source (models.dev)
 // field can be stored larger than what the operator API itself accepts. The
 // target columns are unbounded TEXT and the operator "enable" flow
@@ -561,10 +561,33 @@ export async function loadModelsDevCatalog(
 // push the CM past etcd's ~1MB limit and 503 every subsequent materialization
 // (allowlist DoS seeded from external data). Clamp/skip here at ingest.
 const MAX_MODEL_ID_LEN = 400
-const MAX_DISPLAY_NAME_LEN = 400
+// Tighter than the operator API's 400 characters, and in bytes of the JSON the
+// ConfigMap stores: 400 BMP characters can weigh 1200 bytes of UTF-8, and a run
+// may auto-enable hundreds of discovered models at once, each serialized into
+// the same ConfigMap.
+const MAX_DISPLAY_NAME_BYTES = 256
 // A model id with a control/newline char is never valid; reject rather than
 // truncate (a truncated id is a different, wrong id).
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
+
+/**
+ * The longest prefix of `s` whose JSON string literal (without its quotes) fits
+ * in `maxBytes` of UTF-8, cut between code points so a multibyte character or a
+ * surrogate pair is never split. The bound is on the serialized form because
+ * that is what the allowlist ConfigMap stores: `"` and `\` take 2 bytes there,
+ * and a lone surrogate the 6 of its `\uXXXX` escape.
+ */
+export function truncateSerializedUtf8(s: string, maxBytes: number): string {
+  let bytes = 0
+  let end = 0
+  for (const ch of s) {
+    const size = Buffer.byteLength(JSON.stringify(ch), 'utf8') - 2
+    if (bytes + size > maxBytes) break
+    bytes += size
+    end += ch.length
+  }
+  return s.slice(0, end)
+}
 
 /**
  * Normalize a catalog model id to what our runtime addresses. models.dev keys a
@@ -623,14 +646,14 @@ export function mapCatalogToProviders(
       if (typeof ctx === 'number' && Number.isInteger(ctx) && ctx > 0) {
         discovered.context_window_tokens = ctx
       }
-      // display_name is non-load-bearing metadata → clamp (truncate) to the
-      // operator-API cap rather than skip the whole model over a long label.
-      // A label with a control char is dropped instead: Postgres rejects
-      // `\u0000` in TEXT, which would fail the whole sync transaction.
-      const displayName = (typeof m?.name === 'string' ? m.name.trim() : '').slice(
-        0,
-        MAX_DISPLAY_NAME_LEN
-      )
+      // display_name is non-load-bearing metadata → clamp (truncate) rather
+      // than skip the whole model over a long label. A label with a control
+      // char is dropped instead: Postgres rejects `\u0000` in TEXT, which would
+      // fail the whole sync transaction.
+      const displayName = truncateSerializedUtf8(
+        typeof m?.name === 'string' ? m.name.trim() : '',
+        MAX_DISPLAY_NAME_BYTES
+      ).trimEnd()
       if (displayName && !CONTROL_CHARS.test(displayName)) {
         discovered.display_name = displayName
       }

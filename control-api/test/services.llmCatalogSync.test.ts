@@ -83,6 +83,15 @@ function catalogWith(
   return { anthropic: { name: 'Anthropic', models } }
 }
 
+/**
+ * The same, under groq: a provider whose auto-enable policy is OFF by default,
+ * so a vendored run still inserts its new models (disabled). Under claude (ON
+ * by default) such a run skips them, because it cannot decide.
+ */
+function groqCatalogWith(models: Parameters<typeof catalogWith>[0]): RawModelsDevCatalog {
+  return { groq: { name: 'Groq', models } }
+}
+
 function loadStub(
   catalog: RawModelsDevCatalog,
   source: 'live' | 'vendored' = 'vendored',
@@ -134,8 +143,8 @@ function discoveryProvenance(capturedAt: string): string {
 describe('syncDiscoveredModels — source-guarded reconciliation', () => {
   it('INSERTs a new discovered model as disabled discovery (enabled=false, ON CONFLICT DO NOTHING)', async () => {
     const { connector, calls } = makeConnector({}) // no existing rows anywhere
-    const catalog = catalogWith({
-      'claude-opus-4-5': { id: 'claude-opus-4-5', name: 'Opus', limit: { context: 200000 } },
+    const catalog = groqCatalogWith({
+      'llama-3.3-70b': { id: 'llama-3.3-70b', name: 'Llama', limit: { context: 200000 } },
     })
     const res = await syncDiscoveredModels(
       { materializer, loadCatalog: loadStub(catalog) },
@@ -149,12 +158,12 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(inserts[0].sql).toMatch(/false/)
     expect(inserts[0].sql).toMatch(/ON CONFLICT \(provider, model\) DO NOTHING/)
     // params: provider, model, ctx, display, image_input, enable decision,
-    // catalog_status. The decision is false: the auto-enable flag is off.
+    // catalog_status. The decision is false: groq's policy is off by default.
     expect(inserts[0].params).toEqual([
-      'claude',
-      'claude-opus-4-5',
+      'groq',
+      'llama-3.3-70b',
       200000,
-      'Opus',
+      'Llama',
       discoveryProvenance('2026-07-10T00:00:00.000Z'),
       false,
       null,
@@ -165,12 +174,12 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
 
   it('#654 stamps discovery provenance with the SOURCE capture time, never `fetchedAt`', async () => {
     const { connector, calls } = makeConnector({})
-    const catalog = catalogWith({
+    const catalog = groqCatalogWith({
       // Says nothing about modalities …
-      'claude-opus-4-5': { id: 'claude-opus-4-5' },
+      'llama-3.3-70b': { id: 'llama-3.3-70b' },
       // … and one that does, so the KNOWN-state payload is covered too.
-      'claude-sonnet-4-5': {
-        id: 'claude-sonnet-4-5',
+      'llama-4-scout': {
+        id: 'llama-4-scout',
         modalities: { input: ['text', 'image'] },
       },
     })
@@ -186,7 +195,7 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
 
     const inserts = CALL_FOR(calls, /INSERT INTO llm_allowed_models/)
     const byModel = new Map(inserts.map(c => [String(c.params[1]), c]))
-    const opus = byModel.get('claude-opus-4-5')!
+    const opus = byModel.get('llama-3.3-70b')!
     const persisted = JSON.parse(String(opus.params[4]))
     expect(persisted).toEqual({
       state: 'unknown',
@@ -205,7 +214,7 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     // A KNOWN state must carry an expiry, and it is derived from the CAPTURE
     // time: a vendored snapshot may only claim support for as long as it is
     // fresh (capturedAt + 30d, NOT fetchedAt + 30d).
-    const sonnet = JSON.parse(String(byModel.get('claude-sonnet-4-5')!.params[4]))
+    const sonnet = JSON.parse(String(byModel.get('llama-4-scout')!.params[4]))
     expect(sonnet).toEqual({
       state: 'supported',
       evidence: {
@@ -514,19 +523,27 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
   })
 
   it('rolls back and releases on a mid-transaction failure', async () => {
-    const existing = { claude: [] as Array<{ id: string; model: string; source: string }> }
+    const existing = { groq: [] as Array<{ id: string; model: string; source: string }> }
     const { connector, query, release } = makeConnector(existing)
+    const statements: string[] = []
     // Make the run-summary INSERT explode after the reconciliation writes.
     query.mockImplementation(async (sql: string) => {
+      statements.push(sql)
       if (/INSERT INTO llm_catalog_sync_runs/.test(sql)) throw new Error('boom')
       if (/SELECT id, model, source/.test(sql)) return { rows: [], rowCount: 0 }
       return { rows: [], rowCount: 0 }
     })
-    const catalog = catalogWith({ 'claude-opus-4-5': { id: 'claude-opus-4-5' } })
+    // groq's policy is OFF by default, so this vendored run still writes the
+    // new model before the failure; under claude it would write nothing.
+    const catalog = groqCatalogWith({ 'llama-3.3-70b': { id: 'llama-3.3-70b' } })
     await expect(
       syncDiscoveredModels({ materializer, loadCatalog: loadStub(catalog) }, connector)
     ).rejects.toThrow('boom')
-    expect(query).toHaveBeenCalledWith('ROLLBACK')
+    const insertAt = statements.findIndex(sql => /INSERT INTO llm_allowed_models/.test(sql))
+    const failAt = statements.findIndex(sql => /INSERT INTO llm_catalog_sync_runs/.test(sql))
+    expect(insertAt).toBeGreaterThan(-1)
+    expect(insertAt).toBeLessThan(failAt)
+    expect(statements.indexOf('ROLLBACK')).toBeGreaterThan(failAt)
     expect(release).toHaveBeenCalledTimes(1)
   })
 })

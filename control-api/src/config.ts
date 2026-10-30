@@ -129,12 +129,13 @@ type Config = {
   // seconds after start and then one every llmCatalogSyncIntervalMs (default
   // 24h), cross-replica-deduped by a session advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
-  // Default OFF. When on, a model the catalog sync inserts starts enabled if a
-  // LIVE, plausible run finds its provider's auto-enable policy on and the model
-  // eligible, and no operator removed the pair before. Ships dark so the code
-  // can be deployed before the behaviour is validated; existing rows are never
-  // touched either way.
-  llmCatalogAutoEnableEnabled: boolean
+  // How many models one catalog sync run may insert enabled, per provider and
+  // in total. They bound what a single run adds to the allowlist ConfigMap,
+  // whose 1 MiB limit makes every later publication fail once crossed. Models
+  // over the cap are not inserted at all, so a later run can still enable them;
+  // a large legitimate catalog completes over several runs.
+  llmCatalogAutoEnableMaxPerProviderPerRun: number
+  llmCatalogAutoEnableMaxPerRun: number
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
   codexSubscriptionEnabled: boolean
@@ -166,9 +167,9 @@ type Config = {
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
   // (a flappy/truncated external catalog must not mass-stale the allowlist)
-  // and cannot enable anything on insert; with LLM_CATALOG_AUTO_ENABLE_ENABLED
-  // on it also skips new models of providers whose auto-enable policy is on
-  // (llmCatalogSync.ts header). Calibrated off the vendored
+  // and cannot enable anything on insert, so it also skips new models of
+  // providers whose auto-enable policy is on (llmCatalogSync.ts header).
+  // Calibrated off the vendored
   // snapshot (~1058 mapped models across 22 providers) — a conservative <10%
   // floor catches a catastrophic collapse without tripping on normal variation.
   modelsDevMinPlausibleLiveTotal: number
@@ -526,6 +527,9 @@ const DEFAULT_MCP_HOST_JWT_MAX_HOST_REF_LENGTH = 63 + 1 + 253
 const REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS = 10_000
 // A 24h-default cron should never be dialed below a minute — refuse a hot loop.
 const LLM_CATALOG_SYNC_MIN_INTERVAL_MS = 60_000
+// Ceiling for both auto-enable caps. At most ~640 bytes per auto-enabled entry,
+// 1000 new entries stay below the ConfigMap's 1 MiB in a single run.
+const LLM_CATALOG_AUTO_ENABLE_MAX_CAP = 1000
 // Image-input evidence written by a sync expires this long after the capture it
 // came from. The floor is two sync intervals: anything shorter would expire the
 // evidence before the cron could possibly renew it.
@@ -908,8 +912,6 @@ export const config: Config = {
   // idiom used by the other crons. This one stays dark until an operator turns
   // it on deliberately.
   llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
-  // Default OFF, same exact-token idiom as the discovery cron.
-  llmCatalogAutoEnableEnabled: process.env.LLM_CATALOG_AUTO_ENABLE_ENABLED === 'true',
   // Default OFF. Absent or any value other than the exact token `true` keeps
   // Codex subscription management and admission dark.
   codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
@@ -941,6 +943,16 @@ export const config: Config = {
     100
   ),
   llmCatalogSyncProviderMinLive: nonNegativeIntegerFromEnv('LLM_CATALOG_SYNC_PROVIDER_MIN_LIVE', 0),
+  llmCatalogAutoEnableMaxPerProviderPerRun: boundedIntegerFromEnv(
+    'LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN',
+    100,
+    LLM_CATALOG_AUTO_ENABLE_MAX_CAP
+  ),
+  llmCatalogAutoEnableMaxPerRun: boundedIntegerFromEnv(
+    'LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN',
+    300,
+    LLM_CATALOG_AUTO_ENABLE_MAX_CAP
+  ),
   // How often to re-assert the platform image-pull credential. This is a standing
   // invariant, not a fast path: a WorkflowRecipe created by `kubectl apply` or the WRC
   // `deploy_recipe` tool never touches control-api, so the credential has to be there
