@@ -19,7 +19,7 @@ import {
   normalizeImageInputCapability,
   parseImageInputCapability,
 } from '@clerum/llm-providers'
-import type { DbClient } from '../db.js'
+import type { DbClient, DbTransactionClient } from '../db.js'
 import { pool } from '../db.js'
 
 /** Catalog provenance (spec 09 §2.2). 'manual' = operator/seed; 'discovery' =
@@ -350,16 +350,38 @@ export async function createAllowedModel(
   }
 }
 
+type ModelPair = { provider: string; model: string }
+
+// The pair is recorded in the same transaction as the DELETE or rename that
+// removed it: committed apart, a catalog sync landing between both statements
+// (or a crash) would leave the pair free to be re-inserted enabled.
+async function dismissCatalogPair(db: DbTransactionClient, pair: ModelPair): Promise<void> {
+  await db.query(
+    `INSERT INTO llm_catalog_dismissed (provider, model)
+     VALUES ($1, $2)
+     ON CONFLICT (provider, model) DO NOTHING`,
+    [pair.provider, pair.model]
+  )
+}
+
+// Requires a transaction: the rename decision and the tombstone of the old pair
+// must come from the row as locked here, not from a read a concurrent rename
+// can overtake.
 export async function updateAllowedModel(
   id: string,
   input: UpdateLlmAllowedModelInput,
   actor: string,
-  db: DbClient = pool
+  db: DbTransactionClient
 ): Promise<LlmAllowedModel | null> {
-  // Read the existing row first: we need its (provider, model) for the audit
-  // row and its `enabled` to classify a disable vs a plain update.
-  const existing = await getAllowedModel(id, db)
-  if (!existing) return null
+  // Its (provider, model) feeds the rename decision and the audit row, and its
+  // `enabled` classifies a disable vs a plain update.
+  const lockedResult = await db.query(
+    `SELECT ${MODEL_COLUMNS} FROM llm_allowed_models WHERE id = $1 FOR UPDATE`,
+    [id]
+  )
+  const lockedRow = lockedResult.rows[0] as Record<string, unknown> | undefined
+  if (!lockedRow) return null
+  const existing = rowToModel(lockedRow)
 
   // Build the SET list dynamically from whichever fields were provided. Keys
   // come from the zod-validated, `.strict()` schema — never raw request input —
@@ -417,6 +439,9 @@ export async function updateAllowedModel(
     throw error
   }
   if (!updated) return null
+  if (renamed) {
+    await dismissCatalogPair(db, { provider: existing.provider, model: existing.model })
+  }
 
   const action: LlmAllowedModelAuditAction =
     input.enabled === false && existing.enabled ? 'disable' : 'update'
@@ -430,27 +455,29 @@ export async function updateAllowedModel(
   return updated
 }
 
+// Requires a transaction so the removal and its tombstone commit together. The
+// pair comes from the DELETE itself: a pre-read could be overtaken by a
+// concurrent rename and tombstone a pair that was never removed.
 export async function deleteAllowedModel(
   id: string,
   actor: string,
-  db: DbClient = pool
+  db: DbTransactionClient
 ): Promise<boolean> {
-  // Read the (provider, model) first so the audit row records what was removed;
-  // a missing row is a no-op (route 404s).
-  const existing = await getAllowedModel(id, db)
-  if (!existing) return false
-  const result = await db.query(`DELETE FROM llm_allowed_models WHERE id = $1`, [id])
-  const deleted = (result.rowCount ?? 0) > 0
-  if (deleted) {
-    await writeAudit(db, {
-      actor,
-      action: 'delete',
-      provider: existing.provider,
-      model: existing.model,
-      detail: { id },
-    })
-  }
-  return deleted
+  const result = await db.query(
+    `DELETE FROM llm_allowed_models WHERE id = $1 RETURNING provider, model`,
+    [id]
+  )
+  const removed = result.rows[0] as ModelPair | undefined
+  if (!removed) return false
+  await dismissCatalogPair(db, removed)
+  await writeAudit(db, {
+    actor,
+    action: 'delete',
+    provider: removed.provider,
+    model: removed.model,
+    detail: { id },
+  })
+  return true
 }
 
 /**

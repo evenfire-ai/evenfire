@@ -6407,6 +6407,28 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       `)
     },
   },
+  {
+    version: '0132_llm_catalog_dismissed',
+    apply: async db => {
+      // Pairs an operator removed from the allowlist (DELETE or rename), so the
+      // catalog sync never re-enables them on its own. Append-only for the
+      // runtime: a later CREATE of the same pair deliberately leaves the row,
+      // because it only gates automatic enabling, never an operator's choice.
+      // No FK to llm_allowed_models: the row this records is already gone.
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS llm_catalog_dismissed (
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          dismissed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (provider, model)
+        );
+
+        REVOKE ALL ON TABLE llm_catalog_dismissed
+          FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+        GRANT SELECT, INSERT ON TABLE llm_catalog_dismissed TO control_api_runtime;
+      `)
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {

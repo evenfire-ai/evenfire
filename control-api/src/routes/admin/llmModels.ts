@@ -2,7 +2,7 @@ import { type Request, type Response, Router } from 'express'
 import { z } from 'zod'
 import { config } from '../../config.js'
 import {
-  type DbClient,
+  type DbTransactionClient,
   advisoryLockModelName,
   boundCarrierTransactionIdleTimeout,
   withTransaction,
@@ -153,7 +153,7 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   async function gatedReduce<T>(
     provider: string,
     model: string,
-    mutate: (db: DbClient) => Promise<T>
+    mutate: (db: DbTransactionClient) => Promise<T>
   ): Promise<T> {
     return withTransaction(async db => {
       // Bound the idle-in-transaction tenancy first: the lock is held across a
@@ -320,16 +320,18 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
       const oldPairLeavesConfigMap = existing.enabled === true && (disables || renamed)
       // Serialize the mutation only when the gate actually runs: the OLD pair
       // leaves the ConfigMap AND this is not a `?force` override. A metadata edit
-      // that keeps the pair in the ConfigMap strands nothing, so it takes no lock
-      // and runs on the pool exactly as before (mini-spec §7, item 3).
+      // that keeps the pair in the ConfigMap strands nothing, so it takes no
+      // advisory lock. It still runs in its own transaction: the row read above
+      // is unlocked, so whether this write renames (and must tombstone the old
+      // pair atomically) is only known against the row the service locks.
       const runGate = oldPairLeavesConfigMap && !isForced(req)
+      const mutate = (db: DbTransactionClient) =>
+        updateAllowedModel(req.params.id, parsed.data, actorOf(req), db)
       let model
       try {
         model = runGate
-          ? await gatedReduce(existing.provider, existing.model, db =>
-              updateAllowedModel(req.params.id, parsed.data, actorOf(req), db)
-            )
-          : await updateAllowedModel(req.params.id, parsed.data, actorOf(req))
+          ? await gatedReduce(existing.provider, existing.model, mutate)
+          : await withTransaction(mutate)
       } catch (error) {
         if (sentModelInUse(res, error)) return
         if (handleServiceError(res, error)) return
@@ -363,15 +365,16 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
       }
       // A DELETE always removes the pair, so the gate runs unconditionally unless
       // `?force`. When it runs, the impact read + the delete are serialized under
-      // the per-model-name advisory lock (INV-1); `?force` deletes on the pool
-      // without the lock (renounces INV-1, mini-spec §6).
+      // the per-model-name advisory lock (INV-1); `?force` deletes without the
+      // lock (renounces INV-1, mini-spec §6) but still in a transaction, so the
+      // delete and its catalog tombstone commit together.
+      const mutate = (db: DbTransactionClient) =>
+        deleteAllowedModel(req.params.id, actorOf(req), db)
       let deleted
       try {
         deleted = isForced(req)
-          ? await deleteAllowedModel(req.params.id, actorOf(req))
-          : await gatedReduce(existing.provider, existing.model, db =>
-              deleteAllowedModel(req.params.id, actorOf(req), db)
-            )
+          ? await withTransaction(mutate)
+          : await gatedReduce(existing.provider, existing.model, mutate)
       } catch (error) {
         if (sentModelInUse(res, error)) return
         if (handleServiceError(res, error)) return

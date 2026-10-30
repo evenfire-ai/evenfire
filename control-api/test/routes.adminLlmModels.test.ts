@@ -296,7 +296,7 @@ describe('admin llm-models routes', () => {
 
   it('PUT /admin/llm-models/:id clears evidence on an explicit null (#654)', async () => {
     // A metadata edit that keeps the pair enabled takes no gate/lock: route read,
-    // service read, UPDATE, audit.
+    // service locked read, UPDATE, audit.
     mockPoolQuery
       .mockResolvedValueOnce({
         rows: [{ ...MODEL_ROW, image_input: { state: 'unknown' } }],
@@ -349,7 +349,7 @@ describe('admin llm-models routes', () => {
     mockPoolQuery
       .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // gate getAllowedModel
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // grant-impact query → none
-      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // updateAllowedModel read
+      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // updateAllowedModel locked read
       .mockResolvedValueOnce({ rows: [{ ...MODEL_ROW, enabled: false }], rowCount: 1 }) // UPDATE
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
     const res = await authed('put', `/api/v1/admin/llm-models/${MODEL_ROW.id}`)
@@ -376,14 +376,20 @@ describe('admin llm-models routes', () => {
 
   it('DELETE /admin/llm-models/:id returns 204 on success', async () => {
     // A DELETE always runs the impact gate first: gate read + grant-impact query,
-    // then the delete's own read/DELETE/audit. Empty MockGateway → no impact.
+    // then DELETE … RETURNING, the catalog tombstone and the audit. Empty
+    // MockGateway → no impact.
+    const removed = { provider: MODEL_ROW.provider, model: MODEL_ROW.model }
     mockPoolQuery
       .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // gate getAllowedModel
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // grant-impact query → none
-      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // deleteAllowedModel read
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // DELETE
+      .mockResolvedValueOnce({ rows: [removed], rowCount: 1 }) // DELETE … RETURNING
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // tombstone
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
     await authed('delete', `/api/v1/admin/llm-models/${MODEL_ROW.id}`).expect(204)
+    const tombstone = mockPoolQuery.mock.calls.find(c =>
+      /INSERT INTO llm_catalog_dismissed/.test(String(c[0]))
+    )
+    expect(tombstone![1]).toEqual([removed.provider, removed.model])
   })
 
   it('DELETE /admin/llm-models/:id returns 404 when the row is missing', async () => {
