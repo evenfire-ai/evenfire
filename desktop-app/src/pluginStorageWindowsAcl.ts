@@ -9,6 +9,40 @@ import { createWindowsSessionAuthorityPowerShellEnvironment } from './windowsSes
 
 const REQUEST_ENV = 'EVENFIRE_PLUGIN_STORAGE_ACL_REQUEST'
 const LAUNCHER = '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
+const NATIVE_PHASE_VALUES = [
+  'inspect-object',
+  'load-native-helper',
+  'prepare-request',
+  'verification',
+] as const
+const NATIVE_ERROR_TYPE_VALUES = [
+  'ArgumentException',
+  'FileNotFoundException',
+  'FormatException',
+  'IOException',
+  'InvalidDataException',
+  'InvalidOperationException',
+  'PlatformNotSupportedException',
+  'ReflectionTypeLoadException',
+  'RuntimeException',
+  'SecurityException',
+  'TypeLoadException',
+  'TypeInitializationException',
+  'UnauthorizedAccessException',
+  'Win32Exception',
+] as const
+const NATIVE_REASON_VALUES = [
+  'current-user-access-insufficient',
+  'inspection-failed',
+  'native-helper-path-missing',
+  'object-identity-or-owner-invalid',
+  'request-missing',
+  'unauthorized-principal-access',
+  'unsupported-ace',
+  'user-access-not-inherited',
+] as const
+type NativeErrorType = (typeof NATIVE_ERROR_TYPE_VALUES)[number]
+type NativeReason = (typeof NATIVE_REASON_VALUES)[number]
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -17,6 +51,7 @@ try {
   $assemblyPath = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_NATIVE_ASSEMBLY')
   if (-not $assemblyPath) { throw 'native-helper-path-missing' }
   Add-Type -Path $assemblyPath -ErrorAction Stop
+  $phase = 'prepare-request'
   $payload = [Environment]::GetEnvironmentVariable('EVENFIRE_PLUGIN_STORAGE_ACL_REQUEST')
   if (-not $payload) { throw 'request-missing' }
   $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
@@ -70,12 +105,24 @@ try {
       allowedPrincipalsOnly = $true
     }
   }
+  $phase = 'verification'
   [ordered]@{ ok = $true; items = $results } | ConvertTo-Json -Compress -Depth 5
   exit 0
 } catch {
   $operation = $_.Exception.Data['sessionAuthorityOperation']
   $safeOperation = if ($operation -is [string] -and $operation -match '^[a-z-]{1,40}$') { $operation } else { $null }
   $win32 = if ($_.Exception -is [ComponentModel.Win32Exception]) { $_.Exception.NativeErrorCode } else { $null }
+  $safeReasons = @(
+    'current-user-access-insufficient',
+    'inspection-failed',
+    'native-helper-path-missing',
+    'object-identity-or-owner-invalid',
+    'request-missing',
+    'unauthorized-principal-access',
+    'unsupported-ace',
+    'user-access-not-inherited'
+  )
+  $reason = if ($safeReasons -contains $_.Exception.Message) { $_.Exception.Message } else { 'inspection-failed' }
   [ordered]@{
     ok = $false
     phase = if ($phase -match '^[a-z-]{1,40}$') { $phase } else { 'verification' }
@@ -83,7 +130,7 @@ try {
     hresult = ('0x{0:X8}' -f $_.Exception.HResult)
     nativeOperation = $safeOperation
     win32Error = $win32
-    reason = if ($_.Exception.Message -match '^[a-z-]{1,60}$') { $_.Exception.Message } else { 'inspection-failed' }
+    reason = $reason
   } | ConvertTo-Json -Compress
   exit 2
 }
@@ -108,6 +155,7 @@ export type PluginStorageNativeDiagnostic = {
     | 'process-exit-failed'
     | 'response-missing'
     | 'response-malformed'
+    | 'request-setup-failed'
     | 'helper-load-failed'
     | 'response-rejected'
     | 'verifier-rejected'
@@ -128,21 +176,12 @@ export type PluginStorageNativeDiagnostic = {
     | 'ETIMEDOUT'
   exitStatus?: number | null
   signal?: 'SIGABRT' | 'SIGBREAK' | 'SIGINT' | 'SIGKILL' | 'SIGTERM'
-  nativePhase?: 'inspect-object' | 'load-native-helper' | 'verification'
-  nativeErrorType?:
-    | 'ArgumentException'
-    | 'FileNotFoundException'
-    | 'InvalidOperationException'
-    | 'PlatformNotSupportedException'
-    | 'ReflectionTypeLoadException'
-    | 'RuntimeException'
-    | 'UnauthorizedAccessException'
-    | 'TypeInitializationException'
-    | 'Win32Exception'
+  nativePhase?: (typeof NATIVE_PHASE_VALUES)[number]
+  nativeErrorType?: NativeErrorType
   hresult?: string
   nativeOperation?: string
   win32Error?: number
-  nativeReason?: string
+  nativeReason?: NativeReason
 }
 
 export class PluginStoragePrivacyError extends Error {
@@ -213,23 +252,9 @@ const PROCESS_ERROR_CODES = new Set([
   'ETIMEDOUT',
 ])
 const PROCESS_SIGNALS = new Set(['SIGABRT', 'SIGBREAK', 'SIGINT', 'SIGKILL', 'SIGTERM'])
-const NATIVE_PHASES = new Set(['inspect-object', 'load-native-helper', 'verification'])
-const NATIVE_ERROR_TYPES = new Set([
-  'ArgumentException',
-  'FileNotFoundException',
-  'FormatException',
-  'IOException',
-  'InvalidDataException',
-  'InvalidOperationException',
-  'PlatformNotSupportedException',
-  'ReflectionTypeLoadException',
-  'RuntimeException',
-  'SecurityException',
-  'TypeLoadException',
-  'TypeInitializationException',
-  'UnauthorizedAccessException',
-  'Win32Exception',
-])
+const NATIVE_PHASES = new Set<string>(NATIVE_PHASE_VALUES)
+const NATIVE_ERROR_TYPES = new Set<string>(NATIVE_ERROR_TYPE_VALUES)
+const NATIVE_REASONS = new Set<string>(NATIVE_REASON_VALUES)
 
 function boundedElapsedMs(elapsedMs: number): number {
   return Math.max(0, Math.min(60_000, Math.round(elapsedMs)))
@@ -263,8 +288,7 @@ function nativeDiagnostic(
       diagnostic.nativePhase = fields.phase as PluginStorageNativeDiagnostic['nativePhase']
     }
     if (typeof fields.errorType === 'string' && NATIVE_ERROR_TYPES.has(fields.errorType)) {
-      diagnostic.nativeErrorType =
-        fields.errorType as PluginStorageNativeDiagnostic['nativeErrorType']
+      diagnostic.nativeErrorType = fields.errorType as NativeErrorType
     }
     if (typeof fields.hresult === 'string' && /^0x[0-9A-F]{8}$/i.test(fields.hresult)) {
       diagnostic.hresult = `0x${fields.hresult.slice(2).toUpperCase()}`
@@ -283,8 +307,8 @@ function nativeDiagnostic(
     ) {
       diagnostic.win32Error = fields.win32Error
     }
-    if (typeof fields.reason === 'string' && /^[a-z-]{1,60}$/.test(fields.reason)) {
-      diagnostic.nativeReason = fields.reason
+    if (typeof fields.reason === 'string' && NATIVE_REASONS.has(fields.reason)) {
+      diagnostic.nativeReason = fields.reason as NativeReason
     }
   }
   return diagnostic
@@ -338,19 +362,24 @@ function sanitizedResult(result: SpawnSyncReturns<string>, elapsedMs: number): N
     const response = parsed as Record<string, unknown>
     const nativePhase = typeof response.phase === 'string' ? response.phase : undefined
     const helperLoadFailed = nativePhase === 'load-native-helper'
-    const verifierRejected = nativePhase === 'inspect-object' || nativePhase === 'verification'
+    const requestSetupFailed = nativePhase === 'prepare-request'
+    const verifierRejected = nativePhase === 'inspect-object'
     throw new PluginStoragePrivacyError(
       helperLoadFailed
         ? 'native-inspection-helper-load-failed'
-        : verifierRejected
-          ? 'native-verifier-rejected'
-          : 'native-inspection-response-rejected',
+        : requestSetupFailed
+          ? 'native-inspection-request-setup-failed'
+          : verifierRejected
+            ? 'native-verifier-rejected'
+            : 'native-inspection-response-rejected',
       nativeDiagnostic(
         helperLoadFailed
           ? 'helper-load-failed'
-          : verifierRejected
-            ? 'verifier-rejected'
-            : 'response-rejected',
+          : requestSetupFailed
+            ? 'request-setup-failed'
+            : verifierRejected
+              ? 'verifier-rejected'
+              : 'response-rejected',
         result,
         elapsedMs,
         parsed
