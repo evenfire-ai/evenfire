@@ -902,4 +902,48 @@ describeRealPostgres('context-scope grant purge (real Postgres)', () => {
 
     expect(await expectServed('h1')).toBe('AT-1')
   })
+
+  // The sweep judges a row by the allowlists it lists, never by the history
+  // that produced it: once the server is enabled again, a revived row is
+  // indistinguishable from a live consent and no later tick removes it.
+  describe('characterization: a revived row survives a later successful sweep (accepted residual)', () => {
+    it('re-enabled before any sweep after a late consent', async () => {
+      const u1 = await seedActiveMember(db, { contexts: ['c1'] })
+      const { pending } = await parkedConsent(u1, 'c1')
+      await adminSetAllowlist('c1', [])
+      idp.parked.shift()?.()
+      expect((await pending).status).toBe(200)
+      await adminSetAllowlist('c1', [SERVER])
+
+      await sweep()
+
+      expect(await rowContexts()).toEqual(['c1'])
+      expect(await expectServed('h1')).toBe('AT-1')
+    })
+
+    it('deleted and recreated outside control-api before any sweep', async () => {
+      const u1 = await seedActiveMember(db, { contexts: ['c1'] })
+      await connect(u1, 'c1')
+      await externalDeleteContext('c1')
+      await externalCreateContext('c1', [SERVER])
+
+      await sweep()
+
+      expect(await rowContexts()).toEqual(['c1'])
+      expect(await expectServed('h1')).toBe('AT-1')
+    })
+
+    it('the removing PUT hook fails and the server is re-enabled before any sweep', async () => {
+      const u1 = await seedActiveMember(db, { contexts: ['c1'] })
+      await connect(u1, 'c1')
+      testDb.failPurges = 1
+      await adminSetAllowlist('c1', [])
+      await adminSetAllowlist('c1', [SERVER])
+
+      await sweep()
+
+      expect(await rowContexts()).toEqual(['c1'])
+      expect(await expectServed('h1')).toBe('AT-1')
+    })
+  })
 })

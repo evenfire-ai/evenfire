@@ -7,9 +7,13 @@
  * that failed, and the rows that predate the hooks.
  *
  * The broker already refuses such a row on every read, because it re-reads the
- * allowlist. What the purge prevents is the row coming back to life without a
- * new consent when the server is enabled again, or a Context is recreated under
- * the same name.
+ * allowlist. The purge narrows, but does not close, the window in which the row
+ * comes back to life without a new consent when the server is enabled again or
+ * a Context is recreated under the same name. A tick judges each row only by the
+ * allowlists it lists: if the server is enabled again before a tick sees it
+ * disabled, a revived row is indistinguishable from a live consent and every
+ * later tick keeps it. Cleanup is best-effort; a member's disconnect is what
+ * forces a new consent.
  *
  * Safety rules, each one load-bearing:
  *   - The clock is Postgres' own `now()`, read before listing, so it is the same

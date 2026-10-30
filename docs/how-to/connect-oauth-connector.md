@@ -84,8 +84,19 @@ Who may authorize depends on the Contexts that enable the server in their
   while that Context enables the server in its allowlist, and only if they
   reach that Context (directly, or through an agent assigned to them). The
   token belongs to the Context, not to the user who authorized it: it keeps
-  working after that user loses access, and it is removed when the Context
-  stops enabling the server or is deleted.
+  working after that user loses access.
+
+  Removing the grant when the Context stops enabling the server, or is
+  deleted, is best-effort. control-api removes it when the change goes
+  through its admin routes, and a periodic sweep removes what other writers
+  leave behind. If the server is enabled again, or the Context is recreated
+  under the same name, before that cleanup removes the grant, the previous
+  grant is served again without a new consent, and later sweeps keep it.
+  This happens when a change made outside control-api (kubectl, GitOps) is
+  undone before the next sweep, when the server is disabled and re-enabled
+  before a sweep sees the disabled state after a failed cleanup, or when a
+  consent completes while the server is being removed. To force a new
+  consent, disconnect the shared grant.
 
 Membership through a team does not count as reaching a Context for either
 scope.
