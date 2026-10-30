@@ -541,3 +541,30 @@ test('postcommit publication failure keeps recovery journal and absent-ID retry 
   assert.equal(state.publications, 2)
   assert.equal(journal.status, 'cleaned')
 })
+
+test('Grok identity setup grants one agent and context, no workflow or connection ownership', async () => {
+  const grok = { ...input, provider: 'grok', scenarios: input.scenarios.slice(0, 1) }
+  const { state, adapters } = harness()
+  const journal = await createFixtureIdentities(grok, adapters)
+  assert.equal(journal.status, 'created')
+  assert.deepEqual(journal.grants, {
+    agents: [input.scenarios[0].agentName],
+    contexts: [input.scenarios[0].contextName],
+  })
+  assert.deepEqual(journal.connections, [])
+  assert.equal(state.calls.filter(row => row.sql.startsWith('INSERT INTO user_agents')).length, 1)
+  assert.equal(
+    state.calls.some(row =>
+      /INSERT INTO user_workflow_triggers|subscription_connections/.test(row.sql)
+    ),
+    false
+  )
+  await cleanupFixtureIdentities(grok, journal, adapters)
+  assert.equal(journal.status, 'cleaned')
+  assert.equal(
+    state.calls.some(row => /subscription_connections/.test(row.sql)),
+    false
+  )
+  const broken = { ...grok, scenarios: input.scenarios }
+  assert.throws(() => createFixtureIdentityJournal(broken, { env }), /one Grok scenario/)
+})

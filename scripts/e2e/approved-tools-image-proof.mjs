@@ -159,7 +159,20 @@ function indexRecordedRevisions(revisions) {
 // Certify the fixture images this profile holds against the commit under
 // review. Returns the record the caller stores with the fixture run state:
 // { profile, sourceHead, images, sourceRevisions, derivedFrom }.
-export function buildApprovedToolsImageProof({ profile, sourceHead, manifest, images } = {}) {
+export function buildApprovedToolsImageProof({ profile, sourceHead, manifest, images, provider = 'codex' } = {}) {
+  if (!['codex', 'grok'].includes(provider)) throw new Error('Invalid approved-tools provider')
+  const acquireCommand = provider === 'codex' ? ACQUIRE_COMMAND : 'make minikube-build-grok-model-step-fixtures'
+  const expectedImages = provider === 'codex' ? EXPECTED_IMAGES : [
+    localImageRef('codex-approved-tools-mcp-e2e'),
+    localImageRef('grok-approved-tools-proxy-e2e'),
+    localImageRef('codex-approved-tools-control-api-e2e'),
+    localImageRef('grok-llm-proxy'),
+    localImageRef('control-api'),
+  ]
+  const derivedFixtures = provider === 'codex' ? DERIVED_FIXTURES : [
+    { ref: localImageRef('grok-approved-tools-proxy-e2e'), base: localImageRef('grok-llm-proxy') },
+    { ref: localImageRef('codex-approved-tools-control-api-e2e'), base: localImageRef('control-api') },
+  ]
   if (typeof profile !== 'string' || !PROFILE_PATTERN.test(profile))
     throw new Error(
       `IMAGE_PROOF_PROFILE_MISMATCH: '${profile ?? ''}' is not a usable Minikube profile`
@@ -170,15 +183,15 @@ export function buildApprovedToolsImageProof({ profile, sourceHead, manifest, im
     )
   if (!isRecord(manifest))
     throw new Error(
-      `IMAGE_PROOF_MANIFEST_INVALID: deploy/minikube/.image-manifest.json is absent or unreadable; acquire the fixtures with: ${ACQUIRE_COMMAND}`
+      `IMAGE_PROOF_MANIFEST_INVALID: deploy/minikube/.image-manifest.json is absent or unreadable; acquire the fixtures with: ${acquireCommand}`
     )
   if (manifest.profile !== profile)
     throw new Error(
-      `IMAGE_PROOF_PROFILE_MISMATCH: the manifest records profile '${manifest.profile ?? ''}', this run mutates '${profile}'; re-acquire the fixtures with: ${ACQUIRE_COMMAND}`
+      `IMAGE_PROOF_PROFILE_MISMATCH: the manifest records profile '${manifest.profile ?? ''}', this run mutates '${profile}'; re-acquire the fixtures with: ${acquireCommand}`
     )
   if (!isRecord(manifest.images))
     throw new Error(
-      `IMAGE_PROOF_MANIFEST_INVALID: the manifest has no images map; acquire the fixtures with: ${ACQUIRE_COMMAND}`
+      `IMAGE_PROOF_MANIFEST_INVALID: the manifest has no images map; acquire the fixtures with: ${acquireCommand}`
     )
   const revisions = isRecord(manifest.sourceRevisions) ? manifest.sourceRevisions : {}
   const derived = isRecord(manifest.derivedFrom) ? manifest.derivedFrom : {}
@@ -188,36 +201,36 @@ export function buildApprovedToolsImageProof({ profile, sourceHead, manifest, im
 
   const proofImages = {}
   const proofRevisions = {}
-  for (const ref of EXPECTED_IMAGES) {
+  for (const ref of expectedImages) {
     const record = recorded.get(canonicalImageRef(ref))
     if (!record)
       throw new Error(
-        `IMAGE_PROOF_IMAGE_MISSING: the manifest records no image digest for ${ref}; acquire the fixtures with: ${ACQUIRE_COMMAND}`
+        `IMAGE_PROOF_IMAGE_MISSING: the manifest records no image digest for ${ref}; acquire the fixtures with: ${acquireCommand}`
       )
     const observedEntry = observed.get(canonicalImageRef(ref))
     if (!observedEntry)
       throw new Error(
-        `IMAGE_PROOF_IMAGE_MISSING: profile '${profile}' holds no image tagged ${ref}; acquire the fixtures with: ${ACQUIRE_COMMAND}`
+        `IMAGE_PROOF_IMAGE_MISSING: profile '${profile}' holds no image tagged ${ref}; acquire the fixtures with: ${acquireCommand}`
       )
     if (observedEntry.id !== record.id)
       throw new Error(
-        `IMAGE_PROOF_IMAGE_MISMATCH: profile '${profile}' resolves ${observedEntry.ref} to ${observedEntry.id}, the manifest recorded ${record.ref} as ${record.id}; re-acquire the fixtures with: ${ACQUIRE_COMMAND}`
+        `IMAGE_PROOF_IMAGE_MISMATCH: profile '${profile}' resolves ${observedEntry.ref} to ${observedEntry.id}, the manifest recorded ${record.ref} as ${record.id}; re-acquire the fixtures with: ${acquireCommand}`
       )
     const revision = recordedRevisions.get(canonicalImageRef(ref))
     if (typeof revision !== 'string' || !HEAD_PATTERN.test(revision))
       throw new Error(
-        `IMAGE_PROOF_HEAD_MISSING: the manifest records no source revision for ${ref}; re-acquire the fixtures with: ${ACQUIRE_COMMAND}`
+        `IMAGE_PROOF_HEAD_MISSING: the manifest records no source revision for ${ref}; re-acquire the fixtures with: ${acquireCommand}`
       )
     if (revision !== sourceHead)
       throw new Error(
-        `IMAGE_PROOF_HEAD_MISMATCH: ${ref} was built at ${revision}, the commit under review is ${sourceHead}; re-acquire the fixtures with: ${ACQUIRE_COMMAND}`
+        `IMAGE_PROOF_HEAD_MISMATCH: ${ref} was built at ${revision}, the commit under review is ${sourceHead}; re-acquire the fixtures with: ${acquireCommand}`
       )
     proofImages[ref] = record.id
     proofRevisions[ref] = revision
   }
 
   const proofDerived = {}
-  for (const { ref, base } of DERIVED_FIXTURES) {
+  for (const { ref, base } of derivedFixtures) {
     const binding = derived[ref]
     if (
       !isRecord(binding) ||
@@ -225,12 +238,12 @@ export function buildApprovedToolsImageProof({ profile, sourceHead, manifest, im
       !normalizeDigest(binding.id)
     )
       throw new Error(
-        `IMAGE_PROOF_BASE_BINDING_MISSING: the manifest does not record ${ref} as built from ${base}; re-acquire the fixtures with: ${ACQUIRE_COMMAND}`
+        `IMAGE_PROOF_BASE_BINDING_MISSING: the manifest does not record ${ref} as built from ${base}; re-acquire the fixtures with: ${acquireCommand}`
       )
     const bindingId = normalizeDigest(binding.id)
     if (bindingId !== proofImages[base])
       throw new Error(
-        `IMAGE_PROOF_BASE_MISMATCH: ${ref} was built from ${base} at ${bindingId}, profile '${profile}' now holds ${proofImages[base]}; re-acquire the fixtures with: ${ACQUIRE_COMMAND}`
+        `IMAGE_PROOF_BASE_MISMATCH: ${ref} was built from ${base} at ${bindingId}, profile '${profile}' now holds ${proofImages[base]}; re-acquire the fixtures with: ${acquireCommand}`
       )
     proofDerived[ref] = { ref: base, id: bindingId }
   }

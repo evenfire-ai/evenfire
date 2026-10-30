@@ -306,3 +306,19 @@ test('keeps the OAuth fixture out of publication, pulls and default runtime veri
   assert.ok(!minikubeVerifyRefs({ mode: 'local' }).includes(ref))
   assert.ok(!minikubeVerifyRefs({ mode: 'ghcr', tag: HEAD, includeE2eFixtures: true }).includes(ref))
 })
+
+
+test('Grok proves only its own proxy pair, shared MCP and Control API pair at the reviewed head', () => {
+  const refs = ['clerum/grok-llm-proxy:test', 'clerum/grok-approved-tools-proxy-e2e:test', 'clerum/codex-approved-tools-mcp-e2e:test', 'clerum/control-api:test', 'clerum/codex-approved-tools-control-api-e2e:test']
+  const images = Object.fromEntries(refs.map(ref => [ref, digest(ref)]))
+  const manifest = { profile: PROFILE, images, sourceRevisions: Object.fromEntries(refs.map(ref => [ref, HEAD])), derivedFrom: {
+    [refs[1]]: { ref: refs[0], id: images[refs[0]] },
+    [refs[4]]: { ref: refs[3], id: images[refs[3]] },
+  } }
+  const options = { profile: PROFILE, sourceHead: HEAD, provider: 'grok', manifest, images: observedEntries(images) }
+  assert.deepEqual(Object.keys(buildApprovedToolsImageProof(options).images).sort(), refs.sort())
+  const stale = structuredClone(options)
+  stale.manifest.derivedFrom['clerum/grok-approved-tools-proxy-e2e:test'].id = digest('stale')
+  assert.throws(() => buildApprovedToolsImageProof(stale), /IMAGE_PROOF_BASE_MISMATCH/)
+  assert.throws(() => buildApprovedToolsImageProof({ ...options, provider: 'other' }), /provider/)
+})

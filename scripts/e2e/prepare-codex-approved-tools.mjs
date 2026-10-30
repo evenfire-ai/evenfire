@@ -45,6 +45,112 @@ const proxyFlags = [
 ]
 const hybridProxyFlags = [...proxyFlags, 'APPROVED_TOOLS_UPSTREAM_MODE', 'CODEX_REAL_UPSTREAM_CONFIRM']
 
+export function validateProvider(provider) {
+  if (!['codex', 'grok'].includes(provider)) throw new Error('Invalid approved-tools provider')
+  return provider
+}
+
+function proxyPreset(provider) {
+  validateProvider(provider)
+  return provider === 'grok'
+    ? { name: 'grok-llm-proxy', image: 'clerum/grok-approved-tools-proxy-e2e:test',
+        flags: ['GROK_APPROVED_TOOLS_TEST_ONLY', 'GROK_APPROVED_TOOLS_MINIKUBE_PROFILE', 'NODE_ENV'] }
+    : { name: 'codex-llm-proxy', image: proxyImage, flags: proxyFlags }
+}
+
+export function requireGrokConnectionName(value) {
+  const name = value?.trim()
+  if (!name || name.length > 200 || /[\u0000-\u001f\u007f]/.test(name))
+    throw new Error('GROK_CONNECTION_REQUIRED: set APPROVED_TOOLS_GROK_CONNECTION_NAME to the user-authorized Control UI connection')
+  return name
+}
+
+// Only this one nonsecret setting belongs to the mutation. An absent original
+// is recorded as null so JSON merge patch deletes it on restore.
+export function captureHostConfig(config) {
+  const metadata = config?.metadata
+  const value = config?.data?.CODEX_TOOL_PRESENTATION ?? null
+  if (!/^[a-zA-Z0-9-]{1,128}$/.test(metadata?.uid ?? '') ||
+      !/^[0-9]{1,32}$/.test(metadata?.resourceVersion ?? '') ||
+      metadata.annotations?.[proxyRunAnnotation] !== undefined ||
+      ![null, 'direct', 'discovery', 'auto'].includes(value))
+    throw new Error('Host ConfigMap ownership or presentation is invalid')
+  return { metadata: { uid: metadata.uid, resourceVersion: metadata.resourceVersion }, value }
+}
+
+function hostConfigPatch(metadata, value, run) {
+  return {
+    metadata: { uid: metadata.uid, resourceVersion: metadata.resourceVersion,
+      annotations: { [proxyRunAnnotation]: run } },
+    data: { CODEX_TOOL_PRESENTATION: value },
+  }
+}
+
+function validateHostConfigPatch(patch) {
+  const metadata = patch?.metadata
+  const run = metadata?.annotations?.[proxyRunAnnotation]
+  const value = patch?.data?.CODEX_TOOL_PRESENTATION
+  if (!/^[a-zA-Z0-9-]{1,128}$/.test(metadata?.uid ?? '') ||
+      !/^[0-9]{1,32}$/.test(metadata?.resourceVersion ?? '') ||
+      !(run === null || /^approved-tools-[a-f0-9]{12}$/.test(run ?? '')) ||
+      ![null, 'direct', 'discovery', 'auto'].includes(value) ||
+      (run !== null && value !== 'auto') ||
+      JSON.stringify(patch) !== JSON.stringify(hostConfigPatch(metadata, value, run)))
+    throw new Error('Invalid Host ConfigMap patch')
+}
+
+export async function applyHostConfig({ state, get, patch }) {
+  const live = await get()
+  if (JSON.stringify(captureHostConfig(live)) !== JSON.stringify(state.hostConfig))
+    throw new Error('Host ConfigMap ownership changed before patch')
+  await patch(hostConfigPatch(live.metadata, 'auto', state.run))
+  const applied = await get()
+  if (applied.metadata?.uid !== state.hostConfig.metadata.uid ||
+      applied.data?.CODEX_TOOL_PRESENTATION !== 'auto' ||
+      applied.metadata.annotations?.[proxyRunAnnotation] !== state.run ||
+      !/^[0-9]{1,32}$/.test(applied.metadata.resourceVersion ?? '') ||
+      applied.metadata.resourceVersion === live.metadata.resourceVersion)
+    throw new Error('Host ConfigMap patch witness missing')
+  state.hostConfig.appliedResourceVersion = applied.metadata.resourceVersion
+}
+
+export async function restoreHostConfig({ state, get, patch }) {
+  const captured = state.hostConfig
+  const live = await get()
+  if (live.metadata?.uid !== captured.metadata.uid) throw new Error('Host ConfigMap ownership changed')
+  const run = live.metadata.annotations?.[proxyRunAnnotation]
+  if (run === undefined && (live.data?.CODEX_TOOL_PRESENTATION ?? null) === captured.value) return
+  if (run !== state.run || live.data?.CODEX_TOOL_PRESENTATION !== 'auto')
+    throw new Error('Host ConfigMap ownership changed')
+  await patch(hostConfigPatch(live.metadata, captured.value, null))
+  const restored = await get()
+  if (restored.metadata?.uid !== captured.metadata.uid ||
+      restored.metadata.annotations?.[proxyRunAnnotation] !== undefined ||
+      (restored.data?.CODEX_TOOL_PRESENTATION ?? null) !== captured.value)
+    throw new Error('Host ConfigMap restoration witness missing')
+}
+
+// Read-only running-image proof, separate from the profile's tag inventory.
+export function observeGrokProxyPods(pods, state) {
+  const expected = state.imageProof.images['clerum/grok-approved-tools-proxy-e2e:test']
+  if (!/^sha256:[a-f0-9]{64}$/.test(expected ?? '') || !Array.isArray(pods?.items))
+    throw new Error('Grok proxy pod image proof is missing')
+  const active = pods.items.filter(pod => !pod.metadata?.deletionTimestamp)
+  if (active.length === 0) throw new Error('Grok proxy pod image proof has no active pods')
+  return active.map(pod => {
+    const container = pod.spec?.containers?.find(entry => entry.name === 'grok-llm-proxy')
+    const status = pod.status?.containerStatuses?.find(entry => entry.name === 'grok-llm-proxy')
+    const imageID = status?.imageID?.match(/(?:^|:\/\/|@)(sha256:[a-f0-9]{64})$/)?.[1]
+    if (pod.metadata?.namespace !== 'control-plane' || pod.metadata.labels?.app !== 'grok-llm-proxy' ||
+        !/^[a-zA-Z0-9-]{1,128}$/.test(pod.metadata.uid ?? '') ||
+        !/^[0-9]{1,32}$/.test(pod.metadata.resourceVersion ?? '') ||
+        container?.image !== 'clerum/grok-approved-tools-proxy-e2e:test' ||
+        pod.status?.phase !== 'Running' || status?.ready !== true || imageID !== expected)
+      throw new Error('Grok proxy pod image or readiness witness mismatch')
+    return { uid: pod.metadata.uid, resourceVersion: pod.metadata.resourceVersion, imageID }
+  })
+}
+
 // Shared deadline budget: the outer prepare runner wraps Electron
 // verification, the static audit, and the inner Playwright run (including its
 // spawn grace). The outer deadline derives from those phases plus
@@ -79,30 +185,34 @@ export function runnerPhaseBudgetMs() {
   }
 }
 
-export function makeScenarios(run, ports, probePort) {
+export function makeScenarios(run, ports, probePort, provider = 'codex', connectionName) {
+  validateProvider(provider)
+  if (provider === 'grok') requireGrokConnectionName(connectionName)
+  const selectedSizes = provider === 'grok' ? [83] : sizes
   if (!/^approved-tools-[a-f0-9]{12}$/.test(run)) throw new Error('Invalid fixture run identity')
   if (
-    ports.length !== 3 ||
-    new Set([...ports, probePort]).size !== 4 ||
+    ports.length !== selectedSizes.length ||
+    new Set([...ports, probePort]).size !== selectedSizes.length + 1 ||
     [...ports, probePort].some(p => !Number.isInteger(p) || p < 1024 || p > 65535)
   )
     throw new Error('Invalid fixture ports')
-  return sizes.map((catalogSize, index) =>
-    scenarioMetadata(run, String(catalogSize), catalogSize, ports[index], probePort)
+  return selectedSizes.map((catalogSize, index) =>
+    scenarioMetadata(run, String(catalogSize), catalogSize, ports[index], probePort, provider, connectionName)
   )
 }
 
-function scenarioMetadata(run, label, catalogSize, port, probePort) {
+function scenarioMetadata(run, label, catalogSize, port, probePort, provider = 'codex', connectionName) {
   return {
+    ...(provider === 'grok' ? { provider } : {}),
     catalogSize,
     runId: `${run}-${label}`,
     agentName: `${run}-agent-${label}`,
-    agentDisplayName: `Codex tools ${label} ${run}`,
+    agentDisplayName: `${provider === 'grok' ? 'Grok' : 'Codex'} tools ${label} ${run}`,
     contextName: `${run}-context-${label}`,
     connectorName: `${run}-mcp-${label}`,
-    subscriptionName: `Codex fixture ${label} ${run}`,
+    subscriptionName: provider === 'grok' ? requireGrokConnectionName(connectionName) : `Codex fixture ${label} ${run}`,
     connectionKey: `${run}-grant-${label}`,
-    modelName: 'gpt-5.3-codex',
+    modelName: provider === 'grok' ? 'grok-4.6' : 'gpt-5.3-codex',
     fixtureUrl: `http://127.0.0.1:${port}`,
     upstreamEvidenceUrl: `http://127.0.0.1:${probePort}`,
   }
@@ -231,7 +341,7 @@ export function makeResources(scenarios) {
         spec: {
           host: s.agentDisplayName,
           contextRef: s.contextName,
-          model: { provider: 'codex-subscription', name: s.modelName, connectionRef: 'unassigned' },
+          model: { provider: s.provider === 'grok' ? 'grok-subscription' : 'codex-subscription', name: s.modelName, connectionRef: 'unassigned' },
           channels: [],
           ...(s.workflowName
             ? {
@@ -437,7 +547,7 @@ export function validateOwnerArgs(args, recording, profile, pidDirectory) {
     context !== profile ||
     worktree !== repo ||
     !['control-plane', 'mcp-server'].includes(namespace) ||
-    !/^(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow))$/.test(service)
+    !/^((codex|grok)-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow))$/.test(service)
   )
     throw new Error('Invalid owner binding')
   if (
@@ -449,21 +559,23 @@ export function validateOwnerArgs(args, recording, profile, pidDirectory) {
     throw new Error('Invalid owner port')
   if (
     path.dirname(record) !== pidDirectory ||
-    !/^approved-tools-[a-f0-9]{12}-(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow))\.pid$/.test(
+    !/^approved-tools-[a-f0-9]{12}-((codex|grok)-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow))\.pid$/.test(
       path.basename(record)
     )
   )
     throw new Error('Invalid owner record path')
+  if (!path.basename(record).endsWith(`-${service}.pid`) ||
+      (namespace === 'control-plane') !== /^(codex|grok)-llm-proxy$/.test(service))
+    throw new Error('Invalid owner service binding')
   return args
 }
 
-export function validateProxyImage(image, imagePullPolicy) {
-  if (
-    !/^(clerum\/codex-(llm-proxy|approved-tools-proxy-e2e)|ghcr\.io\/evenfire-ai\/codex-llm-proxy)(:[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$/.test(
-      image
-    ) ||
-    !['Always', 'IfNotPresent', 'Never'].includes(imagePullPolicy)
-  )
+export function validateProxyImage(image, imagePullPolicy, provider = 'codex') {
+  validateProvider(provider)
+  const allowed = provider === 'grok'
+    ? /^(clerum\/grok-(llm-proxy|approved-tools-proxy-e2e)|ghcr\.io\/evenfire-ai\/grok-llm-proxy)(:[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$/
+    : /^(clerum\/codex-(llm-proxy|approved-tools-proxy-e2e)|ghcr\.io\/evenfire-ai\/codex-llm-proxy)(:[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$/
+  if (!allowed.test(image) || !['Always', 'IfNotPresent', 'Never'].includes(imagePullPolicy))
     throw new Error('Invalid proxy image')
 }
 
@@ -496,7 +608,7 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
     operation[4] === '-o' &&
     operation[5] === 'json' &&
     ((namespace === 'control-plane' &&
-      ['deployment/codex-llm-proxy', 'service/codex-llm-proxy', 'deployment/control-api'].includes(
+      ['deployment/codex-llm-proxy', 'service/codex-llm-proxy', 'deployment/grok-llm-proxy', 'service/grok-llm-proxy', 'deployment/control-api'].includes(
         resource
       )) ||
       (namespace === 'mcp-host' && resource === 'configmap/mcp-host-config'))
@@ -508,11 +620,18 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
     ((verb === 'rollout' && resource === 'status') ||
       (verb === 'wait' && resource === '--for=create')) &&
     ((namespace === 'control-plane' &&
-      ['deployment/codex-llm-proxy', 'deployment/control-api'].includes(operation[4])) ||
+      ['deployment/codex-llm-proxy', 'deployment/grok-llm-proxy', 'deployment/control-api'].includes(operation[4])) ||
       (namespace === 'mcp-server' &&
         /^deployment\/approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow)$/.test(operation[4])))
   )
     return args
+  if (exact(['-n', 'control-plane', 'get', 'pods', '-l', 'app=grok-llm-proxy', '-o', 'json']))
+    return args
+  if (namespace === 'mcp-host' && verb === 'patch' && resource === 'configmap/mcp-host-config' &&
+      operation.length === 7 && operation[4] === '--type=merge' && operation[5] === '-p') {
+    validateHostConfigPatch(JSON.parse(operation[6]))
+    return args
+  }
   if (
     namespace === 'control-plane' &&
     verb === 'patch' &&
@@ -527,11 +646,15 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
   if (
     namespace === 'control-plane' &&
     verb === 'patch' &&
-    resource === 'deployment/codex-llm-proxy' &&
+    ['deployment/codex-llm-proxy', 'deployment/grok-llm-proxy'].includes(resource) &&
     operation.length === 7 &&
     operation[4] === '--type=strategic' &&
     operation[5] === '-p'
   ) {
+    const provider = resource === 'deployment/grok-llm-proxy' ? 'grok' : 'codex'
+    const proxy = proxyPreset(provider)
+    const flags = proxy.flags
+    const allowedFlags = provider === 'codex' ? hybridProxyFlags : flags
     const patch = JSON.parse(operation[6])
     if (
       patch.metadata !== undefined &&
@@ -553,24 +676,24 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
     const entries = patch?.spec?.template?.spec?.containers
     if (!Array.isArray(entries) || entries.length !== 1) throw new Error('Invalid proxy patch')
     const c = entries[0]
-    if (c.name !== 'codex-llm-proxy') throw new Error('Invalid proxy image')
-    validateProxyImage(c.image, c.imagePullPolicy)
+    if (c.name !== proxy.name) throw new Error('Invalid proxy image')
+    validateProxyImage(c.image, c.imagePullPolicy, provider)
     if (
       !Array.isArray(c.env) ||
-      ![3, 5].includes(c.env.length) ||
+      !(provider === 'grok' ? [3] : [3, 5]).includes(c.env.length) ||
       new Set(c.env.map(e => e.name)).size !== c.env.length ||
       (c.env.length === 5 && hybridProxyFlags.some(name => !c.env.some(e => e.name === name))) ||
-      (c.env.length === 3 && proxyFlags.some(name => !c.env.some(e => e.name === name))) ||
+      (c.env.length === 3 && flags.some(name => !c.env.some(e => e.name === name))) ||
       c.env.some(
         e =>
-          !hybridProxyFlags.includes(e.name) ||
+          !allowedFlags.includes(e.name) ||
           Object.keys(e).length !== 2 ||
           (e.$patch !== 'delete' &&
             !(e.name === 'NODE_ENV'
               ? ['production', 'development', 'test'].includes(e.value)
-              : e.name === 'CODEX_APPROVED_TOOLS_TEST_ONLY'
+              : e.name === flags[0]
                 ? e.value === '1'
-                : e.name === 'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE'
+                : e.name === flags[1]
                   ? e.value === profile
                   : e.name === 'APPROVED_TOOLS_UPSTREAM_MODE'
                     ? e.value === 'real-hybrid'
@@ -618,9 +741,14 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
       const keys =
         resource === 'deployment/control-api'
           ? ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED']
-          : resource === 'deployment/codex-llm-proxy'
+          : resource === 'deployment/grok-llm-proxy'
+            ? ['GROK_LLM_PROXY_EXECUTION_ENABLED']
+            : resource === 'deployment/codex-llm-proxy'
             ? ['CODEX_LLM_PROXY_EXECUTION_ENABLED']
             : null
+      if (resource === 'deployment/control-api' && operation[7] ===
+          `process.stdout.write(JSON.stringify(${JSON.stringify(['CONTROL_API_GROK_SUBSCRIPTION_ENABLED', 'GROK_LLM_PROXY_EXECUTION_ENABLED'])}.every(key => process.env[key] === 'true')))`)
+        return args
       if (
         keys &&
         operation[7] ===
@@ -824,6 +952,7 @@ export function parseIdentityJournal(output, expected, status) {
     'team',
     'grants',
     'connections',
+    ...(expected.provider === 'grok' ? ['provider'] : []),
   ]
   if (
     !result ||
@@ -836,6 +965,10 @@ export function parseIdentityJournal(output, expected, status) {
 }
 
 export function ingestFixtureConnections(state, read, save) {
+  if (state.provider === 'grok') {
+    if (state.identityJournal.connections.length !== 0) throw new Error('Grok connection is user-owned')
+    return
+  }
   const input = {
     mode: 'deterministic',
     run: state.run,
@@ -880,9 +1013,12 @@ export async function restoreOwnedFixture({
   cleanupResources,
   cleanupIdentities,
   restoreApi,
+  restoreHostConfig: restoreConfig,
 }) {
   if (!state || state.profile !== profile || state.worktree !== worktree)
     throw new Error('Fixture ownership mismatch')
+  const provider = validateProvider(state.provider ?? 'codex') // Existing state files predate provider selection.
+  const proxy = proxyPreset(provider)
   state.restored = false
   if (state.head !== head) {
     state.headAudit = { createdHead: state.head, restoredAtHead: head }
@@ -891,17 +1027,17 @@ export async function restoreOwnedFixture({
   try {
     const deployment = await getDeployment()
     const container = deployment?.spec?.template?.spec?.containers?.find(
-      c => c.name === 'codex-llm-proxy'
+      c => c.name === proxy.name
     )
     if (deployment?.metadata?.uid !== state.proxyUid || !container)
       throw new Error('Proxy deployment ownership changed')
     const runBinding = deployment.spec.template.metadata?.annotations?.[proxyRunAnnotation]
     if (runBinding !== undefined && runBinding !== state.run)
       throw new Error('Proxy belongs to another fixture run')
-    if (container.image === proxyImage) {
+    if (container.image === proxy.image) {
       if (!/^approved-tools-[a-f0-9]{12}$/.test(state.run ?? '') || runBinding !== state.run)
         throw new Error('Proxy fixture run binding is missing')
-      const env = (state.mode === 'real-hybrid' ? hybridProxyFlags : proxyFlags)
+      const env = (state.mode === 'real-hybrid' ? hybridProxyFlags : proxy.flags)
         .map(name => ({ name, $patch: 'delete' }))
       if (state.originalNodeEnv) env[2] = state.originalNodeEnv
       await patchProxy({
@@ -950,6 +1086,14 @@ export async function restoreOwnedFixture({
       cleanupErrors.push(error)
     }
   }
+  if (state.hostConfig) {
+    try {
+      if (!restoreConfig) throw new Error('Host ConfigMap restore adapter is required')
+      await restoreConfig()
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+  }
   if (state.controlApi) {
     try {
       if (!restoreApi) throw new Error('Control API restore adapter is required')
@@ -981,6 +1125,13 @@ async function main() {
   const action = process.argv[2] ?? 'prepare'
   if (!['prepare', 'run', 'restore'].includes(action))
     throw new Error('Expected prepare, run, or restore')
+  const provider = validateProvider(required('APPROVED_TOOLS_PROVIDER'))
+  const proxy = proxyPreset(provider)
+  if (provider === 'grok' && action !== 'restore') {
+    requireGrokConnectionName(process.env.APPROVED_TOOLS_GROK_CONNECTION_NAME)
+    if (required('APPROVED_TOOLS_UPSTREAM_MODE') !== 'deterministic')
+      throw new Error('Grok model-step lane requires deterministic upstream')
+  }
   const profile = required('MINIKUBE_PROFILE')
   if (
     profile !== required('CONTROL_API_REAL_PG_CONTEXT') ||
@@ -1096,6 +1247,8 @@ async function main() {
     }).trim()
     return output === '' ? null : JSON.parse(output)
   }
+  const getHostConfig = () => JSON.parse(kubectl(['-n', 'mcp-host', 'get', 'configmap/mcp-host-config', '-o', 'json']))
+  const patchHostConfig = patch => kubectl(['-n', 'mcp-host', 'patch', 'configmap/mcp-host-config', '--type=merge', '-p', JSON.stringify(patch)])
   const getApi = () =>
     JSON.parse(kubectl(['-n', 'control-plane', 'get', 'deployment/control-api', '-o', 'json']))
   const patchApi = patch =>
@@ -1122,14 +1275,14 @@ async function main() {
         head,
         getDeployment: () =>
           JSON.parse(
-            kubectl(['-n', 'control-plane', 'get', 'deployment/codex-llm-proxy', '-o', 'json'])
+            kubectl(['-n', 'control-plane', 'get', `deployment/${proxy.name}`, '-o', 'json'])
           ),
         patchProxy: ({ metadata, image, imagePullPolicy, env, annotations }) =>
           kubectl([
             '-n',
             'control-plane',
             'patch',
-            'deployment/codex-llm-proxy',
+            `deployment/${proxy.name}`,
             '--type=strategic',
             '-p',
             JSON.stringify({
@@ -1138,7 +1291,7 @@ async function main() {
                 template: {
                   metadata: { annotations },
                   spec: {
-                    containers: [{ name: 'codex-llm-proxy', image, imagePullPolicy, env }],
+                    containers: [{ name: proxy.name, image, imagePullPolicy, env }],
                   },
                 },
               },
@@ -1151,7 +1304,7 @@ async function main() {
               'control-plane',
               'rollout',
               'status',
-              'deployment/codex-llm-proxy',
+              `deployment/${proxy.name}`,
               '--timeout=180s',
             ],
             { timeout: 190_000 }
@@ -1167,6 +1320,7 @@ async function main() {
             String(binding.localPort),
             String(binding.remotePort),
           ]),
+        restoreHostConfig: () => restoreHostConfig({ state, get: getHostConfig, patch: patchHostConfig }),
         restoreApi: () =>
           restoreControlApi({ state, profile, get: getApi, patch: patchApi, wait: waitApi }),
         cleanupIdentities: async () => {
@@ -1205,7 +1359,8 @@ async function main() {
             run: state.run,
             profile,
             context: profile,
-            scenarios: [...state.scenarios, state.workflowScenario],
+            provider,
+      scenarios: state.workflowScenario ? [...state.scenarios, state.workflowScenario] : state.scenarios,
             initialJournal: state.identityJournal,
           })
         },
@@ -1284,6 +1439,7 @@ async function main() {
     stateFile = openOwnedFile(evidence, 'fixture-state.json', { writable: true })
     try {
       state = JSON.parse(readOwnedDescriptor(stateFile))
+      if ((state.provider ?? 'codex') !== provider) throw new Error('Fixture provider ownership mismatch')
       await restore()
     } finally {
       fs.closeSync(stateFile.fd)
@@ -1325,19 +1481,20 @@ async function main() {
     })
     const imageProof = buildApprovedToolsImageProof({
       profile,
+      provider,
       sourceHead: head,
       manifest: imageManifest,
       images: observedImages,
     })
     const deployment = JSON.parse(
-      kubectl(['-n', 'control-plane', 'get', 'deployment/codex-llm-proxy', '-o', 'json'])
+      kubectl(['-n', 'control-plane', 'get', `deployment/${proxy.name}`, '-o', 'json'])
     )
-    const container = deployment.spec.template.spec.containers.find(c => c.name === 'codex-llm-proxy')
-    if (!container || container.image === proxyImage ||
+    const container = deployment.spec.template.spec.containers.find(c => c.name === proxy.name)
+    if (!container || container.image === proxy.image ||
         deployment.spec.template.metadata?.annotations?.[proxyRunAnnotation] !== undefined ||
-        (container.env ?? []).some(e => hybridProxyFlags.filter(name => name !== 'NODE_ENV').includes(e.name)))
+        (container.env ?? []).some(e => (provider === 'codex' ? hybridProxyFlags : proxy.flags).filter(name => name !== 'NODE_ENV').includes(e.name)))
       throw new Error('Proxy already has test ownership')
-    validateProxyImage(container.image, container.imagePullPolicy)
+    validateProxyImage(container.image, container.imagePullPolicy, provider)
     const originalNodeEnv = container.env?.find(e => e.name === 'NODE_ENV')
     if (originalNodeEnv && !['production', 'development', 'test'].includes(originalNodeEnv.value))
       throw new Error('Unsupported explicit NODE_ENV binding')
@@ -1346,30 +1503,33 @@ async function main() {
     const upstreamEvidenceUrl = `http://127.0.0.1:${port}`
     const hybridScenarios = scenarios.map(row => ({ ...row, upstreamEvidenceUrl }))
     state = {
-      mode: 'real-hybrid', profile, worktree: repo, head, run, imageProof,
+      mode: 'real-hybrid', provider, profile, worktree: repo, head, run, imageProof,
       forwards: [], resources: [], identitySeedStarted: false,
       originalProxyImage: container.image,
       originalImagePullPolicy: container.imagePullPolicy,
       originalNodeEnv,
       proxyUid: deployment.metadata.uid,
+      hostConfig: captureHostConfig(getHostConfig()),
       restored: false,
     }
     stateFile = openOwnedFile(evidence, 'fixture-state.json', { create: true })
     save()
     const removeSignals = installSignalRestore()
     try {
+      await applyHostConfig({ state, get: getHostConfig, patch: patchHostConfig })
+      save()
       kubectl([
-        '-n', 'control-plane', 'patch', 'deployment/codex-llm-proxy', '--type=strategic', '-p',
+        '-n', 'control-plane', 'patch', `deployment/${proxy.name}`, '--type=strategic', '-p',
         JSON.stringify({
           metadata: { uid: deployment.metadata.uid, resourceVersion: deployment.metadata.resourceVersion },
           spec: { template: {
             metadata: { annotations: { [proxyRunAnnotation]: run } },
             spec: { containers: [{
-              name: 'codex-llm-proxy', image: proxyImage, imagePullPolicy: 'Never',
+              name: proxy.name, image: proxy.image, imagePullPolicy: 'Never',
               env: [
                 { name: 'NODE_ENV', value: 'test' },
-                { name: 'CODEX_APPROVED_TOOLS_TEST_ONLY', value: '1' },
-                { name: 'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE', value: profile },
+                { name: proxy.flags[0], value: '1' },
+                { name: proxy.flags[1], value: profile },
                 { name: 'APPROVED_TOOLS_UPSTREAM_MODE', value: 'real-hybrid' },
                 { name: 'CODEX_REAL_UPSTREAM_CONFIRM', value: '1' },
               ],
@@ -1378,12 +1538,12 @@ async function main() {
         }),
       ])
       kubectl(
-        ['-n', 'control-plane', 'rollout', 'status', 'deployment/codex-llm-proxy', '--timeout=180s'],
+        ['-n', 'control-plane', 'rollout', 'status', `deployment/${proxy.name}`, '--timeout=180s'],
         { timeout: 190_000 }
       )
       const record = path.join(profilePidDirectory, `${run}-codex-llm-proxy.pid`)
       validateOwnerArgs(
-        [record, profile, profile, repo, 'control-plane', 'codex-llm-proxy', String(port), '9090'],
+        [record, profile, profile, repo, 'control-plane', proxy.name, String(port), '9090'],
         false, profile, profilePidDirectory
       )
       const log = fs.openSync(path.join(evidence, 'pf-codex-llm-proxy.log'), 'wx', 0o600)
@@ -1406,12 +1566,12 @@ async function main() {
       child.unref()
       try {
         owner('pf_owner_record_process', [record, String(child.pid), profile, profile, repo,
-          'control-plane', 'codex-llm-proxy', String(port), '9090'])
+          'control-plane', proxy.name, String(port), '9090'])
       } catch (error) {
         child.kill('SIGTERM')
         throw error
       }
-      state.forwards.push({ record, namespace: 'control-plane', service: 'codex-llm-proxy',
+      state.forwards.push({ record, namespace: 'control-plane', service: proxy.name,
         localPort: port, remotePort: 9090 })
       save()
       pendingForwardChildren.delete(child)
@@ -1419,7 +1579,7 @@ async function main() {
         value.injected503 === 0 && Number.isSafeInteger(value.forwarded))
       assertActive()
       owner('pf_owner_record_process_matches', [record, profile, profile, repo,
-        'control-plane', 'codex-llm-proxy', String(port), '9090'])
+        'control-plane', proxy.name, String(port), '9090'])
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(hybridScenarios)
       try {
         await command('runner', [], {
@@ -1474,9 +1634,9 @@ async function main() {
   for (const [deploymentName, keys] of [
     [
       'control-api',
-      ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED'],
+      provider === 'grok' ? ['CONTROL_API_GROK_SUBSCRIPTION_ENABLED', 'GROK_LLM_PROXY_EXECUTION_ENABLED'] : ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED'],
     ],
-    ['codex-llm-proxy', ['CODEX_LLM_PROXY_EXECUTION_ENABLED']],
+    [proxy.name, [provider === 'grok' ? 'GROK_LLM_PROXY_EXECUTION_ENABLED' : 'CODEX_LLM_PROXY_EXECUTION_ENABLED']],
   ]) {
     const check = `process.stdout.write(JSON.stringify(${JSON.stringify(keys)}.every(key => process.env[key] === 'true')))`
     if (
@@ -1491,14 +1651,14 @@ async function main() {
         check,
       ]).trim() !== 'true'
     )
-      throw new Error('Codex Minikube feature gates are not enabled in the running workload')
+      throw new Error('Selected subscription Minikube feature gates are not enabled in the running workload')
   }
   const hostFlags = JSON.parse(
     kubectl(['-n', 'mcp-host', 'get', 'configmap/mcp-host-config', '-o', 'json'])
   )
-  if (hostFlags.data?.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true')
+  if (provider === 'codex' && hostFlags.data?.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true')
     throw new Error('Host Codex feature gate is not enabled by the Minikube overlay')
-  if (
+  if (provider === 'codex' &&
     kubectl([
       '-n',
       'control-plane',
@@ -1527,6 +1687,7 @@ async function main() {
   })
   const imageProof = buildApprovedToolsImageProof({
     profile,
+    provider,
     sourceHead: head,
     manifest: imageManifest,
     images: observedImages,
@@ -1536,14 +1697,15 @@ async function main() {
   process.env.TEST_USER_EMAIL = `${run}@example.test`
   process.env.APPROVED_TOOLS_UNAUTHORIZED_EMAIL = `${run}-unauthorized@example.test`
   const ports = []
-  while (ports.length < 5) {
+  while (ports.length < (provider === 'grok' ? 2 : 5)) {
     const port = await freePort()
     if (!ports.includes(port)) ports.push(port)
   }
-  const scenarios = makeScenarios(run, ports.slice(0, 3), ports[4])
-  const workflowScenario = makeWorkflowScenario(run, ports[3], ports[4])
-  const allScenarios = [...scenarios, workflowScenario]
-  const resources = [...makeResources(allScenarios), ...makeWorkflowResources(workflowScenario)]
+  const probePort = ports.at(-1)
+  const scenarios = makeScenarios(run, ports.slice(0, -1).slice(0, provider === 'grok' ? 1 : 3), probePort, provider, process.env.APPROVED_TOOLS_GROK_CONNECTION_NAME)
+  const workflowScenario = provider === 'codex' ? makeWorkflowScenario(run, ports[3], probePort) : undefined
+  const allScenarios = workflowScenario ? [...scenarios, workflowScenario] : scenarios
+  const resources = [...makeResources(allScenarios), ...(workflowScenario ? makeWorkflowResources(workflowScenario) : [])]
   const proposed = { apiVersion: 'v1', kind: 'List', items: resources }
   const validated = parseDryRunItems(
     kubectl(['create', '--dry-run=server', '-f', '-', '-o', 'json'], {
@@ -1552,29 +1714,30 @@ async function main() {
   )
   assertResourceRoundTrip(resources, validated)
   const proxyService = JSON.parse(
-    kubectl(['-n', 'control-plane', 'get', 'service/codex-llm-proxy', '-o', 'json'])
+    kubectl(['-n', 'control-plane', 'get', `service/${proxy.name}`, '-o', 'json'])
   )
   if (!proxyService.spec.ports.some(p => p.port === 9090))
     throw new Error('Proxy probe Service port is missing')
   const deployment = JSON.parse(
-    kubectl(['-n', 'control-plane', 'get', 'deployment/codex-llm-proxy', '-o', 'json'])
+    kubectl(['-n', 'control-plane', 'get', `deployment/${proxy.name}`, '-o', 'json'])
   )
-  const container = deployment.spec.template.spec.containers.find(c => c.name === 'codex-llm-proxy')
+  const container = deployment.spec.template.spec.containers.find(c => c.name === proxy.name)
   if (
     !container ||
-    container.image === proxyImage ||
+    container.image === proxy.image ||
     deployment.spec.template.metadata?.annotations?.[proxyRunAnnotation] !== undefined ||
-    (container.env ?? []).some(e => hybridProxyFlags.filter(name => name !== 'NODE_ENV').includes(e.name))
+    (container.env ?? []).some(e => (provider === 'codex' ? hybridProxyFlags : proxy.flags).filter(name => name !== 'NODE_ENV').includes(e.name))
   )
     throw new Error('Proxy already has test ownership')
   const originalNodeEnv = container.env?.find(e => e.name === 'NODE_ENV')
   if (originalNodeEnv && !['production', 'development', 'test'].includes(originalNodeEnv.value))
     throw new Error('Unsupported explicit NODE_ENV binding')
   // Refuse an unsupported original image before any fixture resource is created.
-  validateProxyImage(container.image, container.imagePullPolicy)
+  validateProxyImage(container.image, container.imagePullPolicy, provider)
   const controlApi = captureControlApi(getApi(), profile)
   const identityBinding = {
     mode: 'deterministic',
+    provider,
     run,
     profile,
     context: profile,
@@ -1590,6 +1753,7 @@ async function main() {
     },
   })
   state = {
+    provider,
     profile,
     worktree: repo,
     head,
@@ -1602,6 +1766,7 @@ async function main() {
     identityJournal,
     identitySeedStarted: false,
     controlApi,
+    hostConfig: captureHostConfig(hostFlags),
     originalProxyImage: container.image,
     originalImagePullPolicy: container.imagePullPolicy,
     originalNodeEnv,
@@ -1669,6 +1834,8 @@ async function main() {
     validateForward(binding)
   }
   try {
+    await applyHostConfig({ state, get: getHostConfig, patch: patchHostConfig })
+    save()
     patchApi(
       controlApiPatch({
         metadata: controlApi.metadata,
@@ -1698,7 +1865,7 @@ async function main() {
       '-n',
       'control-plane',
       'patch',
-      'deployment/codex-llm-proxy',
+      `deployment/${proxy.name}`,
       '--type=strategic',
       '-p',
       JSON.stringify({
@@ -1712,13 +1879,13 @@ async function main() {
             spec: {
               containers: [
                 {
-                  name: 'codex-llm-proxy',
-                  image: proxyImage,
+                  name: proxy.name,
+                  image: proxy.image,
                   imagePullPolicy: 'Never',
                   env: [
                     { name: 'NODE_ENV', value: 'test' },
-                    { name: 'CODEX_APPROVED_TOOLS_TEST_ONLY', value: '1' },
-                    { name: 'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE', value: profile },
+                    { name: proxy.flags[0], value: '1' },
+                    { name: proxy.flags[1], value: profile },
                   ],
                 },
               ],
@@ -1728,13 +1895,19 @@ async function main() {
       }),
     ])
     kubectl(
-      ['-n', 'control-plane', 'rollout', 'status', 'deployment/codex-llm-proxy', '--timeout=180s'],
+      ['-n', 'control-plane', 'rollout', 'status', `deployment/${proxy.name}`, '--timeout=180s'],
       { timeout: 190_000 }
     )
+    if (provider === 'grok') {
+      state.proxyPods = observeGrokProxyPods(JSON.parse(kubectl([
+        '-n', 'control-plane', 'get', 'pods', '-l', 'app=grok-llm-proxy', '-o', 'json',
+      ])), state)
+      save()
+    }
     await startForward(
       'control-plane',
-      'codex-llm-proxy',
-      ports[4],
+      proxy.name,
+      probePort,
       9090,
       `${scenarios[0].upstreamEvidenceUrl}/approved-tools/evidence`,
       value => Array.isArray(value.requests)
@@ -1799,7 +1972,7 @@ async function main() {
       JSON.stringify(scenarios, null, 2) + '\n',
       { flag: 'wx', mode: 0o600 }
     )
-    fs.writeFileSync(
+    if (workflowScenario) fs.writeFileSync(
       path.join(evidence, 'workflow-scenario.json'),
       JSON.stringify(workflowScenario, null, 2) + '\n',
       { flag: 'wx', mode: 0o600 }
@@ -1809,7 +1982,7 @@ async function main() {
     if (action === 'run') {
       process.env.APPROVED_TOOLS_FIXTURE_USER_ID = state.identityJournal.users[0].id
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(scenarios)
-      process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO = JSON.stringify(workflowScenario)
+      if (workflowScenario) process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO = JSON.stringify(workflowScenario)
       try {
         await command('runner', [], {
           timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
@@ -1841,7 +2014,8 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(() => {
+  main().catch(error => {
+    if (error.message.startsWith('GROK_CONNECTION_REQUIRED:')) process.stderr.write(error.message + '\n')
     process.stderr.write(
       'Approved tools preparation failed; review bounded sanitized fixture evidence\n'
     )

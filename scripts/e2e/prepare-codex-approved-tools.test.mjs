@@ -476,3 +476,133 @@ test('fixed ownership CLI rejects invalid operations and bindings without touchi
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+// Addendum 20 contracts: these tests run before the provider/config changes.
+test('Grok prepares exactly one unbound 83-tool agent and rejects other provider presets', () => {
+  const rows = makeScenarios('approved-tools-a1b2c3d4e5f6', [43101], 43104, 'grok', 'Manual Grok')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].catalogSize, 83)
+  assert.equal(rows[0].modelName, 'grok-4.6')
+  assert.equal(rows[0].subscriptionName, 'Manual Grok')
+  const resources = makeResources(rows)
+  assert.equal(resources.length, 3)
+  assert.deepEqual(resources.find(row => row.kind === 'Host').spec.model, {
+    provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'unassigned',
+  })
+  assert.deepEqual(resources.find(row => row.kind === 'Context').spec.mcpServers, [])
+  assert.throws(() => makeScenarios('approved-tools-a1b2c3d4e5f6', [43101], 43104, 'other'), /provider/)
+  assert.throws(() => makeScenarios('approved-tools-a1b2c3d4e5f6', [43101], 43104, 'grok', ''), /GROK_CONNECTION_REQUIRED/)
+})
+
+test('Host ConfigMap merge patch admits only presentation, UID, resourceVersion and run annotation', () => {
+  const profile = 'clerum-fix-tools-1234abcd'
+  const prefix = [`--context=${profile}`, '--request-timeout=30s']
+  const patch = {
+    metadata: { uid: 'owned-config', resourceVersion: '12',
+      annotations: { 'evenfire.ai/codex-tools-fixture-run': 'approved-tools-a1b2c3d4e5f6' } },
+    data: { CODEX_TOOL_PRESENTATION: 'auto' },
+  }
+  const args = body => [...prefix, '-n', 'mcp-host', 'patch', 'configmap/mcp-host-config', '--type=merge', '-p', JSON.stringify(body)]
+  assert.doesNotThrow(() => validateKubectlArgs(args(patch), profile))
+  const restored = structuredClone(patch)
+  restored.metadata.annotations['evenfire.ai/codex-tools-fixture-run'] = null
+  restored.data.CODEX_TOOL_PRESENTATION = null
+  assert.doesNotThrow(() => validateKubectlArgs(args(restored), profile))
+  for (const mutate of [
+    body => { body.data.CLERUM_MODEL_STEP_AUTO_RETRIES = '1' },
+    body => { body.data.CODEX_TOOL_PRESENTATION = 'invalid' },
+    body => { delete body.metadata.resourceVersion },
+    body => { body.metadata.annotations.extra = 'unowned' },
+    body => { body.spec = {} },
+  ]) {
+    const invalid = structuredClone(patch)
+    mutate(invalid)
+    assert.throws(() => validateKubectlArgs(args(invalid), profile), /Host ConfigMap/)
+  }
+  assert.throws(() => validateKubectlArgs(args(patch).map(v => v === '--type=merge' ? '--type=strategic' : v), profile))
+})
+
+test('Grok kubectl and forward admission stays bound to its exact proxy and probe selector', () => {
+  const profile = 'clerum-fix-tools-1234abcd'
+  const prefix = [`--context=${profile}`, '--request-timeout=30s']
+  for (const suffix of [
+    ['-n', 'control-plane', 'get', 'deployment/grok-llm-proxy', '-o', 'json'],
+    ['-n', 'control-plane', 'get', 'service/grok-llm-proxy', '-o', 'json'],
+    ['-n', 'control-plane', 'get', 'pods', '-l', 'app=grok-llm-proxy', '-o', 'json'],
+    ['-n', 'control-plane', 'rollout', 'status', 'deployment/grok-llm-proxy', '--timeout=180s'],
+  ]) assert.doesNotThrow(() => validateKubectlArgs([...prefix, ...suffix], profile))
+  for (const selector of ['app=other', 'app=grok-llm-proxy,extra=true'])
+    assert.throws(() => validateKubectlArgs([...prefix, '-n', 'control-plane', 'get', 'pods', '-l', selector, '-o', 'json'], profile))
+  assert.doesNotThrow(() => validateProxyImage('clerum/grok-llm-proxy:test', 'IfNotPresent', 'grok'))
+  assert.throws(() => validateProxyImage('clerum/codex-llm-proxy:test', 'Never', 'grok'))
+  const worktree = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..')
+  const directory = '/tmp/owned-profile/pids'
+  const args = [`${directory}/approved-tools-a1b2c3d4e5f6-grok-llm-proxy.pid`, profile, profile, worktree, 'control-plane', 'grok-llm-proxy', '43101', '9090']
+  assert.doesNotThrow(() => validateOwnerArgs(args, false, profile, directory))
+  assert.throws(() => validateOwnerArgs([...args.slice(0, 5), 'codex-llm-proxy', ...args.slice(6)], false, profile, directory))
+})
+
+test('Grok forward ownership CLI admits its exact probe service without touching other records', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-owner-cli-'))
+  const profile = 'clerum-fixture-owner-1234abcd'
+  const worktree = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..')
+  try {
+    const pids = path.join(root, profile, 'pids')
+    fs.mkdirSync(pids, { recursive: true })
+    const record = path.join(fs.realpathSync(pids), 'approved-tools-a1b2c3d4e5f6-grok-llm-proxy.pid')
+    const args = [record, profile, profile, worktree, 'control-plane', 'grok-llm-proxy', '43101', '9090']
+    const run = values => spawnSync('bash', ['scripts/e2e/codex-approved-tools-pf-owner.sh', 'cleanup', ...values], {
+      cwd: worktree, env: { PATH: process.env.PATH, MINIKUBE_PROFILE: profile, CONTROL_API_REAL_PG_CONTEXT: profile, T2_PROFILE_ROOT: root }, encoding: 'utf8', timeout: 5000,
+    })
+    assert.equal(run(args).status, 0)
+    assert.equal(run([...args.slice(0, 7), '8080']).status, 2)
+    assert.deepEqual(fs.readdirSync(pids), [])
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Grok scenario helper accepts one prepared agent without weakening Codex isolation', async () => {
+  const { scenarios: read } = await import('../../tests/e2e/playwright/helpers/approved-tools-scenarios.ts')
+  const previous = { ...process.env }
+  try {
+    const row = { ...scenarios[0], provider: 'grok', modelName: 'grok-4.6', subscriptionName: 'Manual Grok' }
+    process.env.APPROVED_TOOLS_UPSTREAM_MODE = 'deterministic'
+    process.env.APPROVED_TOOLS_PROVIDER = 'grok'
+    process.env.APPROVED_TOOLS_GROK_CONNECTION_NAME = 'Manual Grok'
+    process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify([row])
+    assert.equal(read().length, 1)
+    process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify([row, row])
+    assert.throws(read, /one.*Grok/i)
+    process.env.APPROVED_TOOLS_PROVIDER = 'codex'
+    process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify([row])
+    assert.throws(read, /three/)
+    process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(scenarios)
+    assert.equal(read().length, 3)
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key]
+    Object.assign(process.env, previous)
+  }
+})
+
+
+test('Grok running-image witness requires ready owned pods, resourceVersion and the acquired image ID', async () => {
+  const { observeGrokProxyPods } = await import('./prepare-codex-approved-tools.mjs')
+  const id = `sha256:${'a'.repeat(64)}`
+  const state = { imageProof: { images: { 'clerum/grok-approved-tools-proxy-e2e:test': id } } }
+  const live = { items: [{
+    metadata: { uid: 'owned-pod', resourceVersion: '42', namespace: 'control-plane', labels: { app: 'grok-llm-proxy' } },
+    spec: { containers: [{ name: 'grok-llm-proxy', image: 'clerum/grok-approved-tools-proxy-e2e:test' }] },
+    status: { phase: 'Running', containerStatuses: [{ name: 'grok-llm-proxy', ready: true, imageID: `docker://${id}` }] },
+  }] }
+  assert.deepEqual(observeGrokProxyPods(live, state), [{ uid: 'owned-pod', resourceVersion: '42', imageID: id }])
+  for (const mutate of [
+    value => { value.items = [] },
+    value => { value.items[0].status.containerStatuses[0].imageID = `docker://sha256:${'b'.repeat(64)}` },
+    value => { value.items[0].status.containerStatuses[0].ready = false },
+    value => { delete value.items[0].metadata.resourceVersion },
+    value => { value.items[0].metadata.labels.app = 'other-proxy' },
+  ]) {
+    const invalid = structuredClone(live)
+    mutate(invalid)
+    assert.throws(() => observeGrokProxyPods(invalid, state), /Grok proxy pod/)
+  }
+})

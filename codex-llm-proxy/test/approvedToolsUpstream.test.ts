@@ -1171,3 +1171,62 @@ describe('physical receipt before the model-step outage', () => {
     })
   })
 })
+
+
+describe('Grok approved-tools recovery boundary', () => {
+  const grokUrl = 'https://cli-chat-proxy.grok.com/v1/responses'
+  const factory = createApprovedToolsUpstream as (provider: 'grok') => ReturnType<typeof createApprovedToolsUpstream>
+  const payload = (history: Entry[]) => ({ method: 'POST', body: JSON.stringify({ model: 'grok-4.6', stream: true, store: false, input: history, tools }) })
+  async function grokRequest(simulator: ReturnType<typeof factory>, history: Entry[]) {
+    const response = await simulator.fetchFn(grokUrl, payload(history))
+    const body = await response.text()
+    return { response, body, event: response.ok ? JSON.parse(body.split('\n')[0]!.slice(6)) : null }
+  }
+  it('accepts only the frozen Grok URLs and catalog, denying Codex and unrelated turns', async () => {
+    const simulator = factory('grok')
+    const catalog = await simulator.fetchFn('https://cli-chat-proxy.grok.com/v1/models')
+    expect(catalog.status).toBe(200)
+    expect(await catalog.json()).toEqual({ models: [{ slug: 'grok-4.6', displayName: 'Grok isolated tool test' }] })
+    expect((await grokRequest(simulator, [{ role: 'user', content: 'model step retry zero grok-origin-1234' }])).response.status).toBe(503)
+    for (const url of [URL, 'https://cli-chat-proxy.grok.com/v1/responses?other=1', 'https://auth.x.ai/oauth2/token'])
+      expect((await simulator.fetchFn(url, payload([]))).status).toBe(422)
+    expect((await grokRequest(simulator, [{ role: 'user', content: 'verification receipt' }])).response.status).toBe(422)
+  })
+  it.each(['receipt', 'zero', 'absorbed'] as const)('preserves the exact %s outage schedule and rejects an automatic replay', async kind => {
+    const simulator = factory('grok')
+    const marker = `grok-${kind}-1234`
+    const user = { role: 'user', content: `model step retry ${kind} ${marker}` }
+    const history: Entry[] = [user]
+    if (kind !== 'zero') {
+      const first = await grokRequest(simulator, history)
+      expect(first.response.status).toBe(200)
+      history.push(first.event.item, { type: 'function_call_output', call_id: first.event.item.call_id, output: JSON.stringify({ found: 0, returned: 0, results: [] }) })
+    }
+    if (kind === 'receipt') {
+      const outputs = [
+        { found: 1, returned: 1, results: [{ name: target, server: 'fixture' }] },
+        { found: true, name: target, parameters: { type: 'object', properties: {} } },
+        { content: [{ type: 'text', text: JSON.stringify({ runId: 'grok-fixture', tool: 'workitem_read_receipt', callId: 'physical-1', businessId: 'grok-receipt-1' }) }] },
+      ]
+      for (const [index, output] of outputs.entries()) {
+        const step = await grokRequest(simulator, history)
+        expect(step.response.status).toBe(200)
+        expect(step.event.item.name).toBe(bridges[index])
+        history.push(step.event.item, { type: 'function_call_output', call_id: step.event.item.call_id, output: JSON.stringify(output) })
+      }
+    }
+    const outages = kind === 'receipt' ? 2 : 1
+    for (let index = 0; index < outages; index++) expect((await grokRequest(simulator, history)).response.status).toBe(503)
+    if (kind === 'zero') {
+      expect((await grokRequest(simulator, history)).response.status).toBe(422)
+      expect(simulator.evidence().modelStepRetry.unexpectedRetries).toBe(1)
+      history.push(user)
+    }
+    const answered = await grokRequest(simulator, history)
+    expect(answered.response.status).toBe(200)
+    expect(answered.event.delta).toBe(kind === 'zero' ? `resent ${marker} answered` : `${kind === 'receipt' ? 'continued' : 'absorbed'} ${marker} toolResults=1`)
+    expect(simulator.evidence().modelStepRetry.unavailableResponses).toBe(outages)
+    expect((await grokRequest(simulator, history)).response.status).toBe(422)
+    expect(simulator.evidence().modelStepRetry.unexpectedRetries).toBeGreaterThan(0)
+  })
+})

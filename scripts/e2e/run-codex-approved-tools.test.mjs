@@ -19,8 +19,8 @@ import {
 } from './run-codex-approved-tools.mjs'
 
 // Synthetic reporter records exercise false-green rejection, not product data.
-function greenReport(mode = 'deterministic') {
-  const titles = expectedTitles(mode)
+function greenReport(mode = 'deterministic', provider = 'codex') {
+  const titles = expectedTitles(mode, provider)
   return {
     errors: [],
     stats: { expected: titles.length, unexpected: 0, skipped: 0, flaky: 0 },
@@ -296,5 +296,30 @@ test('R2 evidence rejects missing, reset and unexpected distinct tool result del
       () => validateHybridEvidence(before, { ...after, r2DistinctToolResults: value }),
       /r2DistinctToolResults/
     )
+  }
+})
+
+
+test('Grok requires precisely C1 C2 C11 in their physical spec, without a Codex fallback', () => {
+  const titles = [modelStepRetryTitles[0], modelStepRetryTitles[1], modelStepRetryTitles[10]]
+  assert.deepEqual(expectedTitles('deterministic', 'grok'), titles)
+  const valid = greenReport('deterministic', 'grok')
+  assert.deepEqual(validateReport(valid, 'deterministic', 'grok'), { tests: 3, skipped: 0, failed: 0 })
+  assert.throws(() => validateReport(greenReport(), 'deterministic', 'grok'))
+  for (const corrupt of [
+    report => report.suites[0].specs.pop(),
+    report => { report.suites[0].specs[0].file = 'desktop/codex-subscription-approved-tools.spec.ts' },
+    report => { report.suites[0].specs[0].tests[0].results.push({ status: 'passed' }) },
+  ]) { const report = structuredClone(valid); corrupt(report); assert.throws(() => validateReport(report, 'deterministic', 'grok')) }
+  assert.throws(() => expectedTitles('real', 'grok'), /deterministic/)
+  assert.throws(() => expectedTitles('deterministic', 'unknown'), /provider/)
+})
+
+test('Grok evidence requires all thirteen exact counters for the three recovery cases', () => {
+  const expected = { turns: 3, markerSearches: 2, unavailableResponses: 4, zeroToolUnavailable: 1, continuationUnavailable: 0, continuations: 1, toolResults: 1, resends: 1, followUps: 0, unexpectedRetries: 0, approvalRequests: 0, approvalFinals: 0, absorbed: 1 }
+  const before = modelStepEvidence(zeroCounts)
+  assert.deepEqual(validateModelStepEvidence(before, modelStepEvidence(expected), 'grok'), expected)
+  for (const field of Object.keys(expected)) {
+    assert.throws(() => validateModelStepEvidence(before, modelStepEvidence({ ...expected, [field]: expected[field] + 1 }), 'grok'), new RegExp(field))
   }
 })

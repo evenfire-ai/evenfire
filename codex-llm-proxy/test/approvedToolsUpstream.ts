@@ -358,7 +358,12 @@ function stream(...events: Row[]): Response {
   )
 }
 
-export function createApprovedToolsUpstream() {
+// The default preserves existing Codex fixture callers; Grok selects its frozen
+// external boundary explicitly. Neither provider delegates unmatched requests.
+export function createApprovedToolsUpstream(provider: 'codex' | 'grok' = 'codex') {
+  if (provider !== 'codex' && provider !== 'grok') throw new Error('invalid_fixture_provider')
+  const completions = provider === 'grok' ? 'https://cli-chat-proxy.grok.com/v1/responses' : COMPLETIONS
+  const catalog = provider === 'grok' ? 'https://cli-chat-proxy.grok.com/v1/models' : CATALOG
   const evidence = {
     catalogRequests: 0,
     rejected: 0,
@@ -442,13 +447,15 @@ export function createApprovedToolsUpstream() {
   const fetchFn: typeof fetch = async (input, init) => {
     try {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-      if (url === CATALOG && (!init?.method || init.method === 'GET')) {
+      if (url === catalog && (!init?.method || init.method === 'GET')) {
         evidence.catalogRequests++
         return Response.json({
-          models: [{ slug: 'gpt-5.3-codex', display_name: 'Codex isolated tool test' }],
+          models: [provider === 'grok'
+            ? { slug: 'grok-4.6', displayName: 'Grok isolated tool test' }
+            : { slug: 'gpt-5.3-codex', display_name: 'Codex isolated tool test' }],
         })
       }
-      if (url !== COMPLETIONS || init?.method !== 'POST') throw new Error('operation_denied')
+      if (url !== completions || init?.method !== 'POST') throw new Error('operation_denied')
       const payload = parse(init.body)
       if (payload.stream !== true || payload.store !== false)
         throw new Error('invalid_stream_contract')
@@ -465,6 +472,11 @@ export function createApprovedToolsUpstream() {
       const user = history[lastUser]
       if (!user || typeof user.content !== 'string' || !user.content.trim())
         throw new Error('missing_user_request')
+      if (provider === 'grok') {
+        const turn = MODEL_STEP_TURN.exec(user.content.toLowerCase())
+        if (payload.model !== 'grok-4.6' || !turn || !['receipt', 'zero', 'absorbed'].includes(turn[1]!))
+          throw new Error('unsupported_grok_recovery_turn')
+      }
       if (user.content.toLowerCase().includes(LIMIT_BOUNDARY)) {
         if (evidence.requests.length >= 512) throw new Error('evidence_capacity_exceeded')
         evidence.limitBoundary.completions++

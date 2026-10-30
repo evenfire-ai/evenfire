@@ -25,6 +25,8 @@ export function browserApiPath(path: string): string {
   return `${CONTROL_UI_API_PREFIX}${path}`
 }
 export type Scenario = {
+  /** Present only on the single Grok recovery scenario; Codex rows omit it. */
+  provider?: 'grok'
   catalogSize: number
   runId: string
   agentName: string
@@ -108,9 +110,21 @@ export function localUrl(value: string): string {
   }
   return url.origin
 }
+/** The provider the prepared lane runs against; set by every Make target. */
+export function approvedToolsProvider(): 'codex' | 'grok' {
+  const value = required('APPROVED_TOOLS_PROVIDER')
+  if (value !== 'codex' && value !== 'grok')
+    throw new Error('APPROVED_TOOLS_PROVIDER must be codex or grok')
+  return value
+}
 export function scenarios(): Scenario[] {
   const parsed: unknown = JSON.parse(required('APPROVED_TOOLS_SCENARIOS'))
-  if (!Array.isArray(parsed) || parsed.length !== 3)
+  const grok = approvedToolsProvider() === 'grok'
+  // The Grok lane prepares exactly one 83-tool agent bound to the connection the
+  // user created by hand in the Control UI (C1, C2, C11 share it).
+  if (grok && (!Array.isArray(parsed) || parsed.length !== 1))
+    throw new Error('Exactly one Grok approved-tools scenario required')
+  if (!grok && (!Array.isArray(parsed) || parsed.length !== 3))
     throw new Error('Exactly three approved-tools scenarios required')
   const fields = [
     'runId',
@@ -135,6 +149,16 @@ export function scenarios(): Scenario[] {
     if (process.env.APPROVED_TOOLS_UPSTREAM_MODE === 'deterministic')
       localUrl(row.upstreamEvidenceUrl)
   }
+  if (grok) {
+    const [row] = rows
+    if (row.provider !== 'grok' || row.catalogSize !== 83)
+      throw new Error('The Grok scenario must be the 83-tool Grok agent')
+    if (row.subscriptionName !== required('APPROVED_TOOLS_GROK_CONNECTION_NAME'))
+      throw new Error('The Grok scenario must use the user-created connection')
+    return rows
+  }
+  if (rows.some(row => row.provider !== undefined))
+    throw new Error('Codex scenarios must not carry a provider')
   if (catalogSizes.some(size => rows.filter(row => row.catalogSize === size).length !== 1))
     throw new Error('Scenarios must cover 83, 150, 250 exactly once')
   for (const key of ['runId', 'agentName', 'contextName', 'connectorName', 'fixtureUrl'] as const) {

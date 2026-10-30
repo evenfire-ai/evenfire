@@ -1,16 +1,19 @@
 /**
- * Contract (#1043/#1044): a Codex turn whose model step meets provider_unavailable
- * after a confirmed tool is kept by the Host as a resumable checkpoint, and the
- * Desktop offers **Retry model step** for it instead of Resend. Every case here
- * checks both sides: the deterministic upstream's evidence (what the Host sent
- * to the model, plus C1’s physical receipt execution counter) and what the user
- * sees and can do next (the message, which recovery button is offered, and that
- * the chat never ends in a dead end).
+ * Contract (#1043/#1044): a Codex or Grok subscription turn whose model step meets
+ * provider_unavailable after a confirmed tool is kept by the Host as a resumable
+ * checkpoint, and the Desktop offers **Retry model step** for it instead of
+ * Resend. Every case here checks both sides: the deterministic upstream's
+ * evidence (what the Host sent to the model, plus C1’s physical receipt execution
+ * counter) and what the user sees and can do next (the message, which recovery
+ * button is offered, and that the chat never ends in a dead end).
  *
- * Runs after `codex-subscription-approved-tools.spec.ts` (a Playwright project
- * dependency), which binds the 83-tool scenario's agent to the subscription
- * model. Deterministic upstream only: a real provider cannot be made to fail on
- * a chosen model step.
+ * Codex (`APPROVED_TOOLS_PROVIDER=codex`): runs after
+ * `codex-subscription-approved-tools.spec.ts` (a Playwright project dependency),
+ * which binds the 83-tool scenario's agent to the subscription model. Grok
+ * (`APPROVED_TOOLS_PROVIDER=grok`): runs C1, C2 and C11 only, and binds its single
+ * agent visibly in `beforeAll` to the connection the user created by hand.
+ * Deterministic upstream only: a real provider cannot be made to fail on a chosen
+ * model step.
  *
  * E2E_GUARDIAN_STRICT_NETWORK: no request is intercepted or fulfilled; the 503
  * comes from the isolated upstream behind the real proxy.
@@ -32,7 +35,9 @@ import {
 import {
   type ModelStepRetryEvidence,
   type Scenario,
+  approvedToolsProvider,
   browserApiPath,
+  localUrl,
   modelStepRetryFields,
   readEvidence,
   readUpstreamEvidence,
@@ -42,12 +47,17 @@ import {
 import { signOutDesktop } from '../helpers/desktop-session'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
-import { AgentListPage, ControlUiShell } from '../pages/codex-subscription'
+import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
 
 function scenario(): Scenario {
   return scenarios()[0]!
 }
-const FAILURE_LABEL = 'Provider Unavailable · CODEX-SUBSCRIPTION'
+/** The bubble label of the provider failure; the suffix names the provider. */
+function failureLabel(): string {
+  return `Provider Unavailable · ${
+    approvedToolsProvider() === 'grok' ? 'GROK-SUBSCRIPTION' : 'CODEX-SUBSCRIPTION'
+  }`
+}
 // Every journey that ends on the resumable notice fails its model step twice:
 // the Host's default CLERUM_MODEL_STEP_AUTO_RETRIES=1 retries that step once by
 // itself, so the first 503 is absorbed and the second one stands. C2 injects a
@@ -162,7 +172,7 @@ async function expectIdle(desktop: Page) {
 async function sendUntilUnavailable(desktop: Page, prompt: string) {
   const responses = await newAgentResponses(desktop)
   await send(desktop, prompt)
-  await expect(responses.filter({ hasText: FAILURE_LABEL })).toHaveCount(1, {
+  await expect(responses.filter({ hasText: failureLabel() })).toHaveCount(1, {
     timeout: TURN_TIMEOUT,
   })
 }
@@ -228,7 +238,55 @@ async function withDesktopChat(run: (desktop: Page) => Promise<void>) {
   }
 }
 
-/** The prerequisite journey ends by revoking this connector; restore it visibly. */
+// #1044 Grok lane: preparation creates the agent unbound (`connectionRef:
+// 'unassigned'`) and without connectors, and the Grok project has no dependency on
+// the Codex approved-tools journey. Bind the agent visibly to the subscription
+// connection the user created by hand in the Control UI; C1 then attaches the
+// receipt connector through restoreReceiptConnector, as it does for Codex. The
+// Host save and the connector save each start their own rollout, so each is
+// awaited against its own generation baseline.
+test.beforeAll(async ({ browser }, testInfo) => {
+  if (approvedToolsProvider() !== 'grok') return
+  testInfo.setTimeout(300_000)
+  const active = scenario()
+  const context = await browser.newContext({ baseURL: localUrl(required('CONTROL_UI_URL')) })
+  try {
+    const page = await context.newPage()
+    // E2E_GUARDIAN_ENTRY_POINT: Control UI root starts the visible admin journey.
+    await page.goto('/')
+    await loginControlUiVisible(page)
+    await new ControlUiShell(page).openAgents()
+    await new AgentListPage(page).openNamed(active.agentName)
+    await expect(
+      page.getByRole('heading', { name: `Agent: ${active.agentDisplayName}`, exact: true })
+    ).toBeVisible()
+    const generation = readAgentDeploymentGeneration(active.agentName)
+    const model = new AgentModelPage(page)
+    await model.openEditor()
+    await model.chooseSubscription(active.subscriptionName)
+    await page.getByLabel('Current model', { exact: true }).click()
+    await page.getByRole('option', { name: active.modelName, exact: true }).click()
+    const host = await model.saveHost(active.agentName)
+    const savedPolicy = (host.spec as { llmPolicy?: { fallbacks: unknown[] } } | undefined)
+      ?.llmPolicy
+    expect(savedPolicy?.fallbacks ?? [], 'the Grok agent must not fall back').toEqual([])
+    expect(host.spec?.model).toMatchObject({
+      provider: 'grok-subscription',
+      name: active.modelName,
+    })
+    // The connection key belongs to the user's connection, so only its binding is checked.
+    expect(host.spec?.model?.connectionRef).toBeTruthy()
+    expect(host.spec?.model?.connectionRef).not.toBe('unassigned')
+    await waitForAgentRollout(active.agentName, generation)
+  } finally {
+    await context.close()
+  }
+})
+
+/**
+ * Attaches the receipt connector visibly. For Codex the prerequisite journey ends
+ * by revoking it; for Grok the prepared agent starts without connectors.
+ */
 async function restoreReceiptConnector(page: Page) {
   const active = scenario()
   // E2E_GUARDIAN_ENTRY_POINT: Control UI root starts the visible admin journey.
@@ -260,6 +318,10 @@ async function restoreReceiptConnector(page: Page) {
   await waitForAgentRollout(active.agentName, generation)
 }
 
+// Vacuity mutations (Codex and Grok): drop the provider's `provider_unavailable`
+// classification (Grok: `mcp-host/src/llm/grokSubscription.ts:357-365`) → no
+// resumable checkpoint, no notice; or run with CLERUM_MODEL_STEP_AUTO_RETRIES=0 →
+// one injected 503 instead of two, so `unavailableResponses: 2` fails.
 test('model step retry C1: a 503 after a confirmed tool continues once without re-running the tool', async ({
   page,
 }) => {
@@ -281,7 +343,7 @@ test('model step retry C1: a 503 after a confirmed tool continues once without r
         toolExecutions(physicalBefore, 'workitem_read_receipt')
       )
       await pending.getByTestId('approval-approve-btn').click()
-      await expect(responses.filter({ hasText: FAILURE_LABEL })).toHaveCount(1, {
+      await expect(responses.filter({ hasText: failureLabel() })).toHaveCount(1, {
         timeout: TURN_TIMEOUT,
       })
       await expectResumable(desktop, 4)
@@ -335,17 +397,28 @@ test('model step retry C1: a 503 after a confirmed tool continues once without r
   })
 })
 
+// Vacuity mutation: drop both `this.currentFence !== null` and
+// `this.confirmedResults > 0` from `canResume`
+// (`mcp-host/src/core/orchestration/modelStepCheckpointRecorder.ts:319-325`) → the
+// Host retries the zero-tool step, the upstream answers `unexpected_retry`, red.
+// Dropping only the second term is not enough: a zero-tool turn never opens the
+// fence. Disabling the automatic retry leaves this case green by design.
 test('model step retry C2: a 503 before any tool offers only Resend, which answers the turn', async () => {
   await withDesktopChat(async desktop => {
     const value = marker('c2')
     const prompt = `model step retry zero ${value}`
     const start = await snapshot()
+    let failedRead: SessionRead | undefined
     await test.step('The first model step meets a 503 before any tool runs', async () => {
       await sendUntilUnavailable(desktop, prompt)
       await expect(resendButton(desktop)).toBeEnabled()
       // Witness for the absence: Resend above is offered for this same turn.
       await expect(notice(desktop)).toHaveCount(0)
       await expect(desktop.getByTestId('model-step-retry-btn')).toHaveCount(0)
+      // The Host kept no checkpoint either; the session read carries the
+      // failed turn (readCurrentSession asserts it), which is the witness.
+      failedRead = await readCurrentSession(desktop, prompt)
+      expect(failedRead.modelStepCheckpoint).toBeUndefined()
     })
     const failed = await expectDelta(
       start,
@@ -361,16 +434,28 @@ test('model step retry C2: a 503 before any tool offers only Resend, which answe
       await expect(resendButton(desktop)).toHaveCount(0)
       await expectIdle(desktop)
     })
+    const answered = await readCurrentSession(desktop, prompt)
+    expect(answered.chatId).toBe(failedRead?.chatId)
+    expect(answered.modelStepCheckpoint).toBeUndefined()
     await expectDelta(failed, { resends: 1 }, ['model_step_resent'])
   })
 })
 
+// Vacuity mutation: stop retiring live checkpoints when a new message is admitted
+// (`mcp-host/src/core/conversation/persistence/sqliteConversationStore.ts:791` →
+// `retireLiveModelStepCheckpoints`, `mcp-host/src/db/worker/dispatcher.ts:775`) → the
+// session still serves the checkpoint after the follow-up, red.
 test('model step retry C3: a new message instead of the retry abandons the checkpoint', async () => {
   await withDesktopChat(async desktop => {
     const value = marker('c3')
+    const probe = `model step retry probe ${value}`
+    const followup = `model step retry followup ${value}`
     const start = await snapshot()
-    await sendUntilUnavailable(desktop, `model step retry probe ${value}`)
+    await sendUntilUnavailable(desktop, probe)
     await expectResumable(desktop)
+    // Positive witness for the absence asserted after the follow-up.
+    const kept = await readCurrentSession(desktop, probe)
+    expect(kept.modelStepCheckpoint).toMatchObject({ status: 'resumable', retryAvailable: true })
     const failed = await expectDelta(
       start,
       { turns: 1, markerSearches: 1, unavailableResponses: 2 },
@@ -378,7 +463,7 @@ test('model step retry C3: a new message instead of the retry abandons the check
     )
     await test.step('The follow-up is answered and Retry model step is gone', async () => {
       const responses = await newAgentResponses(desktop)
-      await send(desktop, `model step retry followup ${value}`)
+      await send(desktop, followup)
       await expect(responses.filter({ hasText: `followup ${value} answered` })).toHaveCount(1, {
         timeout: TURN_TIMEOUT,
       })
@@ -389,6 +474,11 @@ test('model step retry C3: a new message instead of the retry abandons the check
       // The abandoned turn falls back to the ordinary failed-send state.
       await expect(resendButton(desktop)).toBeEnabled()
     })
+    // The Host retired the checkpoint: the session serves none, not a claimed or
+    // blocked one (`docs/contracts/model-step-checkpoint.md:81-82`).
+    const after = await readCurrentSession(desktop, followup)
+    expect(after.chatId).toBe(kept.chatId)
+    expect(after.modelStepCheckpoint).toBeUndefined()
     await expectDelta(failed, { followUps: 1 }, ['model_step_followup'])
   })
 })
@@ -439,7 +529,7 @@ test('model step retry C5: a continuation that meets a 503 again is offered for 
       await notice(desktop).getByTestId('model-step-retry-btn').click()
       // The continuation's own error reply is the witness that the notice
       // below is the Host's new view, not the one shown before the click.
-      await expect(responses.filter({ hasText: FAILURE_LABEL })).toHaveCount(1, {
+      await expect(responses.filter({ hasText: failureLabel() })).toHaveCount(1, {
         timeout: TURN_TIMEOUT,
       })
       await expectResumable(desktop)
@@ -696,6 +786,9 @@ test('model step retry C8: the checkpoint survives a Host restart between the 50
   })
 })
 
+// Vacuity mutations (Codex and Grok): drop the provider's `provider_unavailable`
+// classification, or run with CLERUM_MODEL_STEP_AUTO_RETRIES=0 → the single 503
+// reaches the user as a failure and the absorbed answer never arrives, red.
 test('model step retry C11: one 503 after a confirmed search is absorbed by the automatic retry', async () => {
   await withDesktopChat(async desktop => {
     const value = marker('c11')
@@ -708,7 +801,7 @@ test('model step retry C11: one 503 after a confirmed search is absorbed by the 
     await expect(responses.filter({ hasText: `absorbed ${value} toolResults=1` })).toHaveCount(1, {
       timeout: TURN_TIMEOUT,
     })
-    await expect(responses.filter({ hasText: FAILURE_LABEL })).toHaveCount(0)
+    await expect(responses.filter({ hasText: failureLabel() })).toHaveCount(0)
     await expect(notice(desktop)).toHaveCount(0)
     // Neither recovery action is offered: the turn never stopped.
     await expect(resendButton(desktop)).toHaveCount(0)

@@ -380,6 +380,10 @@ if [ "$ONLY_SVC" = codex-approved-tools-proxy-e2e ]; then
   ALL_IMAGES+=("clerum/codex-approved-tools-proxy-e2e:test")
   KNOWN_BUILD_NAMES+=(codex-approved-tools-proxy-e2e)
 fi
+if [ "$ONLY_SVC" = grok-approved-tools-proxy-e2e ]; then
+  ALL_IMAGES+=("clerum/grok-approved-tools-proxy-e2e:test")
+  KNOWN_BUILD_NAMES+=(grok-approved-tools-proxy-e2e)
+fi
 if [ "$ONLY_SVC" = codex-approved-tools-workflow-e2e ]; then
   ALL_IMAGES+=("clerum/workflow-custom-sdk-e2e:approved-tools-test")
   KNOWN_BUILD_NAMES+=(codex-approved-tools-workflow-e2e)
@@ -1030,6 +1034,10 @@ build_image() {
     docker_args+=(--build-arg CODEX_PROXY_IMAGE=clerum/codex-llm-proxy:test)
     derived_base="clerum/codex-llm-proxy:test"
   fi
+  if [ "$name" = grok-approved-tools-proxy-e2e ]; then
+    docker_args+=(--build-arg GROK_PROXY_IMAGE=clerum/grok-llm-proxy:test)
+    derived_base="clerum/grok-llm-proxy:test"
+  fi
   if [ "$name" = codex-approved-tools-workflow-e2e ]; then
     docker_args+=(--build-arg WORKFLOW_CUSTOM_SDK_IMAGE=clerum/workflow-custom-sdk-e2e:test)
     derived_base="clerum/workflow-custom-sdk-e2e:test"
@@ -1265,6 +1273,11 @@ if [ "$ONLY_SVC" = codex-approved-tools-proxy-e2e ]; then
   build_image codex-approved-tools-proxy-e2e "${PROJECT_DIR}" \
     clerum/codex-approved-tools-proxy-e2e:test \
     "${PROJECT_DIR}/tests/e2e/fixtures/codex-subscription/approved-tools-proxy/Dockerfile"
+fi
+if [ "$ONLY_SVC" = grok-approved-tools-proxy-e2e ]; then
+  build_image grok-approved-tools-proxy-e2e "${PROJECT_DIR}" \
+    clerum/grok-approved-tools-proxy-e2e:test \
+    "${PROJECT_DIR}/tests/e2e/fixtures/grok-subscription/approved-tools-proxy/Dockerfile"
 fi
 if [ "$ONLY_SVC" = codex-approved-tools-workflow-e2e ]; then
   build_image codex-approved-tools-workflow-e2e "${PROJECT_DIR}" \

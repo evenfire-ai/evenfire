@@ -8,6 +8,10 @@ function requireValue(condition, message) {
 }
 
 function binding(input, env) {
+  requireValue(
+    input.provider === undefined || ['codex', 'grok'].includes(input.provider),
+    'Invalid fixture provider'
+  )
   requireValue(/^approved-tools-[a-f0-9]{12}$/.test(input?.run ?? ''), 'Invalid fixture run')
   requireValue(
     input.mode === 'deterministic' &&
@@ -20,7 +24,13 @@ function binding(input, env) {
       env.CONTROL_API_REAL_PG_CONTEXT === input.context,
     'Fixture environment binding mismatch'
   )
-  return { mode: input.mode, run: input.run, profile: input.profile, context: input.context }
+  return {
+    mode: input.mode,
+    run: input.run,
+    profile: input.profile,
+    context: input.context,
+    ...(input.provider === 'grok' ? { provider: 'grok' } : {}),
+  }
 }
 
 function identities(run) {
@@ -28,11 +38,12 @@ function identities(run) {
 }
 
 function scenarioGrants(input) {
+  const grok = input.provider === 'grok'
   requireValue(
-    Array.isArray(input.scenarios) && input.scenarios.length === 4,
-    'Expected four scenarios'
+    Array.isArray(input.scenarios) && input.scenarios.length === (grok ? 1 : 4),
+    grok ? 'Expected one Grok scenario' : 'Expected four scenarios'
   )
-  const expected = labels.map(label => ({
+  const expected = (grok ? ['83'] : labels).map(label => ({
     runId: `${input.run}-${label}`,
     agentName: `${input.run}-agent-${label}`,
     contextName: `${input.run}-context-${label}`,
@@ -46,7 +57,7 @@ function scenarioGrants(input) {
   return {
     agents: expected.map(value => value.agentName),
     contexts: expected.map(value => value.contextName),
-    workflow: { namespace: 'sandbox-recipes', name: `${input.run}-recipe` },
+    ...(grok ? {} : { workflow: { namespace: 'sandbox-recipes', name: `${input.run}-recipe` } }),
   }
 }
 
@@ -57,6 +68,7 @@ function validateJournal(journal, input, env) {
       Object.keys(journal).every(key =>
         [
           'version',
+          'provider',
           'mode',
           'run',
           'profile',
@@ -95,6 +107,10 @@ function validateJournal(journal, input, env) {
   const grants = scenarioGrants(input)
   requireValue(JSON.stringify(journal.grants) === JSON.stringify(grants), 'Journal grant mismatch')
   validateConnectionEvidence(journal)
+  requireValue(
+    input.provider !== 'grok' || journal.connections.length === 0,
+    'Grok connection is user-owned'
+  )
   requireValue(
     ['creation-pending', 'created', 'recovery-required', 'cleanup-pending', 'cleaned'].includes(
       journal.status
@@ -176,6 +192,11 @@ export function recordFixtureConnection(input, journal, { env }, evidence) {
 }
 
 async function revokeRecordedConnections(db, journal, revoke, rebuild) {
+  // The Grok connection was created by the user and is never cleanup authority.
+  if (journal.provider === 'grok') {
+    requireValue(journal.connections.length === 0, 'Grok connection is user-owned')
+    return
+  }
   const expectedNames = labels.map(label => `Codex fixture ${label} ${journal.run}`)
   // This bounded name query detects unjournaled POST outcomes only. Names never
   // supply deletion/revocation authority; every returned row needs recorded ID.
@@ -312,12 +333,19 @@ export async function createFixtureIdentities(
         ])
       // Current schema consolidates recipe discovery/approval eligibility into
       // user_workflow_triggers; the legacy allowed-users table was dropped.
-      await db.query(
-        `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+      if (grants.workflow)
+        await db.query(
+          `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
         VALUES ($1::uuid, $2, $3)`,
-        [userId, grants.workflow.namespace, grants.workflow.name]
+          [userId, grants.workflow.namespace, grants.workflow.name]
+        )
+      await appendFixturePermissions(
+        db,
+        journal,
+        'grant',
+        appendPermissionEvents,
+        Boolean(grants.workflow)
       )
-      await appendFixturePermissions(db, journal, 'grant', appendPermissionEvents, true)
     })
     journal.status = 'created'
     await persist(saveJournal, journal)
@@ -539,12 +567,12 @@ export async function cleanupFixtureIdentities(
         )
       ).rows
       requireValue(
-        workflowRows.length <= 1 &&
+        workflowRows.length <= (grants.workflow ? 1 : 0) &&
           workflowRows.every(
             row =>
               row.user_id === ids[0] &&
-              row.recipe_namespace === grants.workflow.namespace &&
-              row.recipe_name === grants.workflow.name
+              row.recipe_namespace === grants.workflow?.namespace &&
+              row.recipe_name === grants.workflow?.name
           ),
         'Unrelated or changed workflow grants'
       )
