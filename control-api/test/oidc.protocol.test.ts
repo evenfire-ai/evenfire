@@ -56,7 +56,12 @@ class MemoryAttemptDb {
   readonly client: Pick<DbClient, 'query'> = {
     query: async (sql: string, values: unknown[] = []) => {
       this.statements.push(sql)
-      if (sql.startsWith('DELETE FROM oidc_protocol_attempts')) return { rows: [], rowCount: 0 }
+      if (
+        sql.startsWith('DELETE FROM oidc_protocol_attempts') ||
+        sql.startsWith('WITH expired_attempts AS')
+      ) {
+        return { rows: [], rowCount: 0 }
+      }
       if (sql.includes('INSERT INTO oidc_protocol_attempts')) {
         const row: StoredAttempt = {
           id: String(values[0]),

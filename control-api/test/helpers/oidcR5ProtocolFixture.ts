@@ -34,7 +34,12 @@ export class OidcR5MemoryAttemptDb {
   readonly rows = new Map<string, StoredAttempt>()
   readonly client: Pick<DbClient, 'query'> = {
     query: async (sql: string, values: unknown[] = []) => {
-      if (sql.startsWith('DELETE FROM oidc_protocol_attempts')) return { rows: [], rowCount: 0 }
+      if (
+        sql.startsWith('DELETE FROM oidc_protocol_attempts') ||
+        sql.startsWith('WITH expired_attempts AS')
+      ) {
+        return { rows: [], rowCount: 0 }
+      }
       if (sql.includes('INSERT INTO oidc_protocol_attempts')) {
         const row: StoredAttempt = {
           id: String(values[0]),
