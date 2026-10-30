@@ -8,6 +8,7 @@
  * its CAS are the production ones.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { Request, Response } from 'express'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -30,11 +31,14 @@ import type {
 import { logger } from '../../logger'
 import type { ModelStepContinuationRef, ModelStepContinuationVerdict } from '../../queue/types'
 import type { IncomingMessage } from '../../server'
+import { makeHandlers } from '../../server/__tests__/testHelpers'
+import { handleMessageRoute, handleModelStepContinuationRoute } from '../../server/routes'
 import {
   MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS,
   type ModelStepContinuationRequest,
   ModelStepContinuationService,
 } from '../modelStepContinuation'
+import { sourceMessageForResume } from '../sourceMessageForResume'
 import type { ModelStepCheckpointSupport } from '../types'
 
 /** The same vectors the Desktop suite (#1044) loads. */
@@ -231,6 +235,84 @@ function createHarness(
   })
   return { handle, checkpoints, service, enqueue, captured }
 }
+
+describe('ModelStepContinuationService — RPC ingress (#1043)', () => {
+  it('MS-C assigns the receive timestamp before checkpointing and continues through the route', async () => {
+    const { handle, checkpoints, service, enqueue, captured } = createHarness({
+      verdict: { kind: 'started' },
+    })
+    const runtimeCaller = { caller: 'rpc-proxy', hostRef: AGENT, userId: USER_ID }
+    const traceContext = {
+      version: 1,
+      runId: 'rpc-ingress-run',
+      sessionId: CHAT_ID,
+      origin: 'direct_chat',
+      correlationRefs: [],
+    }
+    // The rpc-proxy wire key set has no timestamp; the Host owns receive time.
+    const rpcBody = {
+      content: 'summarize the repository',
+      channelType: 'rpc',
+      channelId: AGENT,
+      hostRef: AGENT,
+      sender: USER_ID,
+      messageId: 'message-rpc-without-timestamp',
+      metadata: {},
+      threadId: CHAT_ID,
+      traceContext,
+    }
+    expect(rpcBody).not.toHaveProperty('timestamp')
+    const messageHandler = vi.fn().mockResolvedValue({ success: true, status: 'completed' })
+    const ingressResponse = { writeHead: vi.fn(), end: vi.fn() }
+    await handleMessageRoute(
+      { runtimeCaller, body: rpcBody, query: {} } as unknown as Request,
+      ingressResponse as unknown as Response,
+      makeHandlers({ messageHandler })
+    )
+    expect(ingressResponse.writeHead).toHaveBeenCalledWith(200, {
+      'Content-Type': 'application/json',
+    })
+    expect(messageHandler).toHaveBeenCalledTimes(1)
+    const received = messageHandler.mock.calls[0][0] as IncomingMessage
+    // Keep both ingress and HTTP continuation failures observable in a RED run.
+    expect.soft(typeof received.timestamp).toBe('string')
+    expect.soft(Number.isFinite(Date.parse(received.timestamp))).toBe(true)
+
+    const { version } = await openResumable(checkpoints, {
+      sourceMessage: JSON.stringify(sourceMessageForResume(received)),
+    })
+    expect(
+      JSON.parse(checkpointRow(handle, CHECKPOINT_ID).source_message as string).timestamp
+    ).toBe(received.timestamp)
+    const continuationResponse = { writeHead: vi.fn(), end: vi.fn() }
+    await handleModelStepContinuationRoute(
+      {
+        runtimeCaller,
+        params: { agent: AGENT, chatId: CHAT_ID, checkpointId: CHECKPOINT_ID },
+        body: { version },
+        headers: {
+          'x-clerum-edge-trace-context': encodeURIComponent(JSON.stringify(traceContext)),
+        },
+      } as unknown as Request,
+      continuationResponse as unknown as Response,
+      makeHandlers({ modelStepContinuationHandler: request => service.continue(request) })
+    )
+    expect.soft(continuationResponse.writeHead).toHaveBeenCalledWith(202, {
+      'Content-Type': 'application/json',
+    })
+    const body = JSON.parse(continuationResponse.end.mock.calls[0][0]) as ModelStepContinueClaimed
+    expect.soft(body).toEqual({
+      status: 'claimed',
+      replayed: false,
+      checkpointId: CHECKPOINT_ID,
+      taskId: expect.any(String),
+    })
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    const call = await captured
+    expect(call.taskId).toBe(body.taskId)
+    expect(call.message.timestamp).toBe(received.timestamp)
+  })
+})
 
 describe('ModelStepContinuationService — status-first claim precedence (#1043)', () => {
   it('R2-L5 rejects the admission wait on an operational transition failure', async () => {
